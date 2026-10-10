@@ -75,6 +75,7 @@ add_executable(hgs-tray
     src/TrayMenu.cpp
     src/TrayAgent.cpp
     src/AttentionTracker.cpp
+    src/DesktopPresence.cpp
     src/AttentionNotifier.h
     # Декоратор над иконкой трея (см. QuietTrayIcon.h). Платформенного в нём ничего нет,
     # собирается везде; надевается на иконку только на маке -- см. makeTrayIcon() в

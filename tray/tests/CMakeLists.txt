@@ -316,3 +316,8 @@ target_include_directories(test_relaysettings PRIVATE ../src)
 target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets)
 add_test(NAME relaysettings COMMAND test_relaysettings)
 set_tests_properties(relaysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_desktoppresence test_desktoppresence.cpp ../src/DesktopPresence.cpp)
+target_include_directories(test_desktoppresence PRIVATE ../src)
+target_link_libraries(test_desktoppresence PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME desktoppresence COMMAND test_desktoppresence)

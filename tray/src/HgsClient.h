@@ -118,6 +118,9 @@ public:
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
+    // `hgs presence set --json`. At most one write runs; while it does, only the
+    // newest sample waits, so a slow CLI never builds a queue of stale samples.
+    void setPresence(double idleSeconds, bool locked);
     void setupMachine(const QString &alias, const QString &source = {});
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
@@ -207,6 +210,7 @@ signals:
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
     void swarmFailed(quint64 request, const QString &error);
+    void presenceFinished(const QString &error); // Empty on success.
     void machineSetupOutput(const QString &text);
     void machineSetupFinished(bool ok, const QString &error);
     void questionAnswered(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
@@ -290,5 +294,7 @@ private:
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
     quint64 m_readRequest = 0;
+    bool m_presenceInFlight = false, m_presencePending = false;
+    QPair<double, bool> m_pendingPresence;
     QSet<QString> m_answersInFlight;
 };

@@ -3,7 +3,9 @@
 #include <QFileDevice>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QThread>
 #include <atomic>
 #include <csignal>
@@ -37,6 +39,7 @@ private slots:
     void missingBinaryEmitsFailed();
     void duplicatePeerRequestIsIgnoredWhileInFlight();
     void localPollingReportsStartAndRecoversFromFailure();
+    void presenceWritesAreCoalescedAndReportFailures();
     void sessionCommands();
     void inspectionCursorAndFailures();
     void remoteFoldersAndProjects();
@@ -1276,5 +1279,36 @@ print(json.dumps({'ok':True,'applied':{'reply_id':True,'attention_signature':Fal
 // настоящий QProcess и ждёт сигнал через QSignalSpy::wait() — для этого нужен реально
 // работающий диспетчер событий. GUILESS даёт QCoreApplication без дисплея (тест
 // по-прежнему должен работать по ssh без X/Wayland).
+void TestHgsClient::presenceWritesAreCoalescedAndReportFailures()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString path = dir.filePath("hgs");
+    QFile script(path); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+payload = json.load(sys.stdin)
+with (root / 'calls').open('a') as file: file.write(json.dumps([sys.argv[1:], payload]) + '\n')
+time.sleep(0.2)
+if (root / 'fail').exists(): print('presence unavailable', file=sys.stderr); sys.exit(1)
+print('{"ok":true}')
+)");
+    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    HgsClient client(path); QSignalSpy finished(&client, &HgsClient::presenceFinished);
+    client.setPresence(1, false); client.setPresence(2, false); client.setPresence(-3, true);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+    QFile calls(dir.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto lines = calls.readAll().trimmed().split('\n'); QCOMPARE(lines.size(), 2);
+    const auto first = QJsonDocument::fromJson(lines[0]).array(), last = QJsonDocument::fromJson(lines[1]).array();
+    QCOMPARE(first[0].toArray(), (QJsonArray{"presence", "set", "--json"}));
+    QCOMPARE(first[1].toObject(), (QJsonObject{{"idle_seconds", 1}, {"locked", false}}));
+    QCOMPARE(last[1].toObject(), (QJsonObject{{"idle_seconds", 0}, {"locked", true}})); // newest only, clamped
+    QVERIFY(finished[0][0].toString().isEmpty()); QVERIFY(finished[1][0].toString().isEmpty());
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.close();
+    client.setPresence(5, false);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 3, 10000);
+    QVERIFY(finished[2][0].toString().contains("presence unavailable"));
+}
+
 QTEST_GUILESS_MAIN(TestHgsClient)
 #include "test_hgsclient.moc"

@@ -375,6 +375,21 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+void HgsClient::setPresence(double idleSeconds, bool locked)
+{
+    if (m_presenceInFlight) { m_pendingPresence = qMakePair(idleSeconds, locked); m_presencePending = true; return; }
+    m_presenceInFlight = true;
+    const auto input = QJsonDocument(QJsonObject{{"idle_seconds", qMax(0.0, idleSeconds)}, {"locked", locked}}).toJson(QJsonDocument::Compact);
+    const auto finished = [this](const QString &error) {
+        m_presenceInFlight = false;
+        emit presenceFinished(error);
+        if (std::exchange(m_presencePending, false)) setPresence(m_pendingPresence.first, m_pendingPresence.second);
+    };
+    runHgs(m_hgs, {QStringLiteral("presence"), QStringLiteral("set"), QStringLiteral("--json")}, 5000, this,
+        [finished](const QByteArray &) { finished({}); },
+        [finished](const QString &, const QString &detail) { finished(detail); }, input);
+}
+
 void HgsClient::setupMachine(const QString &alias, const QString &source)
 {
     if (m_machineSetupInFlight) return;
