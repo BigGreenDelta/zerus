@@ -19,11 +19,14 @@ ReadMarkSync::ReadMarkSync(HgsClient *client, QObject *parent)
 
 void ReadMarkSync::setPending(const QJsonObject &pending)
 {
-    // One write per ReadMark::key(): entries that share it collapse to the latest.
+    // Pending is normally keyed by ReadMark::key() already; this only guards
+    // malformed input by merging entries that share a key, never overwriting.
     m_pending = {};
     for (auto it = pending.constBegin(); it != pending.constEnd(); ++it) {
-        const auto entry = it.value().toObject();
-        m_pending[ReadMark::fromJson(entry).key()] = entry;
+        const auto mark = ReadMark::fromJson(it.value().toObject());
+        const auto key = mark.key();
+        const auto existing = m_pending.value(key).toObject();
+        m_pending[key] = existing.isEmpty() ? mark.toJson() : ReadMark::merged(ReadMark::fromJson(existing), mark).toJson();
     }
     for (auto it = m_attempts.begin(); it != m_attempts.end();)
         if (!m_pending.contains(it.key()) && !it->inFlight) it = m_attempts.erase(it); else ++it;
@@ -49,6 +52,11 @@ void ReadMarkSync::finished(quint64 request, bool delivered, const QJsonObject &
 {
     const auto key = m_requests.take(request);
     if (key.isEmpty()) return;
+    if (!m_pending.contains(key)) {
+        m_attempts.remove(key);
+        pump();
+        return;
+    }
     auto &attempt = m_attempts[key];
     attempt.inFlight = false;
     const qint64 now = m_clock();

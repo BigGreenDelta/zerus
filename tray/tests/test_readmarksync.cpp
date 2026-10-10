@@ -13,7 +13,9 @@ private slots:
     void sendsExactPayloadToEachSessionHost();
     void unreachableHostBacksOffAndConfirmedMarksWaitForSnapshots();
     void limitsConcurrentHostWrites();
-    void duplicateEntriesForOneKeyIssueOneWrite();
+    void keyedPendingPassesThroughOneWritePerKey();
+    void duplicateKeysMergeFieldsWhateverTheObjectKeyOrder_data();
+    void duplicateKeysMergeFieldsWhateverTheObjectKeyOrder();
 private:
     QList<QJsonObject> calls() const;
     void touch(const char *name) const {
@@ -110,19 +112,40 @@ void TestReadMarkSync::limitsConcurrentHostWrites()
     QCOMPARE(calls().size(), 6);
 }
 
-void TestReadMarkSync::duplicateEntriesForOneKeyIssueOneWrite()
+void TestReadMarkSync::keyedPendingPassesThroughOneWritePerKey()
 {
+    HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    const ReadMark one{"mac", "codex/project/a", "run-1", "conversation-1", "7:100.5", {}};
+    const ReadMark two{"mac", "codex/project/b", "run-2", "conversation-2", "8:1.5", {}};
+    sync.setPending({{one.key(), one.toJson()}, {two.key(), two.toJson()}});
+    QTRY_COMPARE(done.size(), 2);
+    QTest::qWait(300);
+    QCOMPARE(calls().size(), 2);
+}
+
+void TestReadMarkSync::duplicateKeysMergeFieldsWhateverTheObjectKeyOrder_data()
+{
+    QTest::addColumn<QString>("replyKey"); QTest::addColumn<QString>("signatureKey");
+    QTest::newRow("reply first") << "a" << "b";
+    QTest::newRow("signature first") << "b" << "a";
+}
+
+void TestReadMarkSync::duplicateKeysMergeFieldsWhateverTheObjectKeyOrder()
+{
+    QFETCH(QString, replyKey); QFETCH(QString, signatureKey);
     touch("slow");
     HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
-    const ReadMark mark{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", {}};
-    auto older = mark; older.replyId = "6:90.5";
-    // The same mark under two object keys, plus an older one: the latest entry wins.
-    sync.setPending({{"a", older.toJson()}, {"b", mark.toJson()}, {"c", mark.toJson()}});
+    const ReadMark reply{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", {}};
+    const ReadMark signature{"mac", "codex/project/review", "run-1", "conversation-1", {}, QString(64, 'a')};
+    QJsonObject pending; pending[replyKey] = reply.toJson(); pending[signatureKey] = signature.toJson();
+    sync.setPending(pending);
     QCOMPARE(sync.inFlight(), 1);
     QTRY_COMPARE(done.size(), 1);
     QTest::qWait(300);
     QCOMPARE(calls().size(), 1);
-    QCOMPARE(calls().first().value("payload").toObject().value("reply_id").toString(), QString("7:100.5"));
+    const auto payload = calls().first().value("payload").toObject();
+    QCOMPARE(payload.value("reply_id").toString(), QString("7:100.5"));
+    QCOMPARE(payload.value("attention_signature").toString(), QString(64, 'a'));
 }
 
 QTEST_GUILESS_MAIN(TestReadMarkSync)
