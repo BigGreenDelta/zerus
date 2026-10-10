@@ -612,7 +612,7 @@ void QuestionCard::sizeToContent()
         ? qMax(editor->minimumHeight(), editor->sizeHint().height()) + page->layout()->spacing() : 0;
     layout()->activate();
     const int chrome = layout()->totalHeightForWidth(width()) - m_pages->height();
-    const int limit = parentWidget() ? qMin(360, parentWidget()->height() * 45 / 100) : 360;
+    const int limit = parentWidget() ? qMin(600, parentWidget()->height() * 60 / 100) : 600;
     const int bodyHeight = qMin(contentHeight + editorHeight, qMax(editorHeight + 40, limit - chrome));
     if (m_pages->height() != bodyHeight) {
         m_pages->setFixedHeight(bodyHeight);

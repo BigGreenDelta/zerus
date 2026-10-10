@@ -420,6 +420,12 @@ Unsent freeform answers, choices and the current question page are also saved
 locally. They restore only for the same machine/session, run, conversation and
 question hash. Interrupted submissions remain locked until reviewed; confirmed
 queued answers keep their submitted state after a GUI restart.
+
+Question cards fit the current question's content, up to 600 px or 60% of the
+Activity area's height, whichever is smaller. Longer prompts and options scroll
+inside the card; freeform answer fields and actions stay visible. Short questions
+remain compact, and resizing preserves answers and space to read Activity.
+
 Explicit **Submit** on a supported Claude question replaces its native Other
 draft with the form answer, including clearing it for a preset-only answer.
 Polling and inspection never edit native drafts. The exact form payload and

@@ -613,8 +613,8 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     data["questions"] = QJsonArray{question}; card->setQuestion("fixture", data);
     editor = text(*card, "free"); scroll = card->findChild<QScrollArea *>("questionContent");
     QTRY_VERIFY(scroll->verticalScrollBar()->maximum() > 0);
-    QTRY_COMPARE(card->height(), activity.height() * 45 / 100);
-    QTRY_VERIFY(card->height() <= activity.height() * 45 / 100);
+    QTRY_COMPARE(card->height(), activity.height() * 60 / 100);
+    QTRY_VERIFY(history->height() >= activity.height() * 40 / 100);
     QVERIFY(editor->isVisible()); QVERIFY(!scroll->isAncestorOf(editor));
     QCOMPARE(editor->text(), QString("Keep this draft"));
     QVERIFY(card->rect().contains(submit(*card)->geometry()));
@@ -624,8 +624,8 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     const int tallHeight = card->height();
     activity.resize(480, 460);
     QTRY_VERIFY(card->height() < tallHeight);
-    QTRY_VERIFY(card->height() <= activity.height() / 2);
-    QVERIFY(history->height() >= activity.height() / 2);
+    QTRY_COMPARE(card->height(), activity.height() * 60 / 100);
+    QVERIFY(history->height() >= activity.height() * 40 / 100);
     QVERIFY(editor->isVisible()); QCOMPARE(editor->text(), QString("Keep this draft"));
     QVERIFY(card->rect().contains(submit(*card)->geometry()));
     const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
@@ -639,7 +639,7 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
 
 void TestQuestionCard::currentQuestionAndOtherAnswerResizeTheForm()
 {
-    QWidget activity; activity.resize(700, 800);
+    QWidget activity; activity.resize(700, 1100);
     auto *layout = new QVBoxLayout(&activity); layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(new QTextBrowser, 1);
     auto *card = new QuestionCard; layout->addWidget(card);
@@ -651,14 +651,14 @@ void TestQuestionCard::currentQuestionAndOtherAnswerResizeTheForm()
     auto *tabs = card->findChild<QTabBar *>("questionTabs");
     auto *pages = card->findChild<QStackedWidget *>("questionPages");
     QTRY_VERIFY(pages->currentWidget()->findChild<QScrollArea *>("questionContent")->verticalScrollBar()->maximum() > 0);
-    QTRY_COMPARE(card->height(), 360);
+    QTRY_COMPARE(card->height(), 600);
     const int longHeight = card->height();
     tabs->setCurrentIndex(1);
     QTRY_VERIFY(card->height() < longHeight);
     QVERIFY(text(*card, "q_1")->isVisible());
     tabs->setCurrentIndex(0); other(*card, "q_0")->click();
     QTRY_VERIFY(text(*card, "q_0")->isVisible());
-    QTRY_VERIFY(card->height() <= 360);
+    QTRY_VERIFY(card->height() <= 600);
     QVERIFY(card->rect().contains(QRect(text(*card,"q_0")->mapTo(card,QPoint()),text(*card,"q_0")->size())));
 }
 
