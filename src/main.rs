@@ -7,6 +7,7 @@ mod metrics;
 mod mobile_peers;
 mod native_ui;
 mod platform;
+mod presence;
 mod state;
 mod swarm;
 

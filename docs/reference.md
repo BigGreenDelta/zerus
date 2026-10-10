@@ -1155,6 +1155,15 @@ Tracked live sessions add resumability and activity. Saved sessions use
 Archives add `archive_id` and `archived_at`; missing state remains compatible with
 older live-session snapshots. `ok: false` indicates an unavailable host.
 
+A running Zerus desktop records input idle time and screen lock with
+`hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every
+30 seconds and when the screen locks, unlocks or the owner returns. The listing then
+adds `desktop_presence: {idle_seconds, locked, locked_seconds}`, aged to the moment
+of listing. It is omitted when the record is more than two minutes old (Zerus
+closed, crashed or the machine slept) or written by a clock that has since moved
+back. The record is `desktop-presence.json` in the hgs state directory and holds
+no other desktop information.
+
 Every session also has `attention_signature` and `read`, either of which may be
 `null`. `attention_signature` is a lowercase hex SHA-256 of what currently needs
 the owner: run, conversation, the phase when it is `approval`, `input` or

@@ -70,6 +70,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs machine resolve <alias>          effective SSH settings (no connection)
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
        hgs swarm assign-launch --json   assign an exact launch to its selected project
+       hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
@@ -327,6 +328,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             args.get(2).map(String::as_str).unwrap_or(""),
         ),
         "machine" => crate::machines::dispatch(&config, args, dry),
+        "presence" => crate::presence::dispatch(&config, args, dry),
         "swarm" => crate::swarm::dispatch(&config, args, dry),
         "account" => crate::accounts::dispatch(&config, args, dry),
         "project" => project(&config, args, dry),
@@ -630,7 +632,11 @@ fn local_json(config: &Config) -> Result<Value> {
         let ttys: Vec<&str> = clients.lines().filter_map(|line| line.split_once('\t')).filter_map(|(session, tty)| if session == name { Some(tty) } else { None }).collect();
         json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":attached,"clients":ttys,"created":created,"launch_id":launch_id})
     }).collect();
-    let raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
+    let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
+    // Phone alerts wait while the owner is active here; see src/presence.rs.
+    if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
+        raw["desktop_presence"] = presence;
+    }
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {
