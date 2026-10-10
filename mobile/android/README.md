@@ -169,6 +169,11 @@ partial evidence marks only loaded replies, and unknown, unavailable or offline
 rows without loaded evidence are skipped. Its result reports marked conversations, partial marks and skipped
 rows. Reminders without usable reply evidence remain. New replies arriving
 after the captured evidence remain unread; reading anchors and drafts stay put.
+When the computer advertises `mark_read`, reaching the newest reply (a fresh
+complete head read through on this phone), Mark read and Read all also send the
+exact run, conversation, reply and attention signature to the session's
+computer, which shares them with every desktop and phone. A reply or request read
+elsewhere is shown as read here. Review later stays on this phone.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not

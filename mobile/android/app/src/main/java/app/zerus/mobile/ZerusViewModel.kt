@@ -102,6 +102,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var readPositionReady by mutableStateOf(false);private set
     var firstUnreadEventId by mutableStateOf("");private set
     private var unreadBoundaryCaptured=false
+    // Marks submitted by this process; a failed submission is forgotten so the next view retries.
+    private val sharedReadsSent=mutableSetOf<String>()
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
         if(selected?.target != target || activeFrame?.target != target || conversationEvents.none { it.id == eventId }) return
@@ -122,7 +124,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target != target || activeFrame?.target != target) return
         val incoming=conversationEvents.filter { it.id in eventIds && ConversationReadPolicies.incoming(it) }
         if(incoming.isEmpty()) return
-        readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention()
+        readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention();shareRead(target)
     }
     fun loadedUnreadCount(target:Target):Int? {
         val record=readState.record(target)
@@ -301,6 +303,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         else if(page.indexing) historyIndexing=true
                     }
                     historySnapshotHints[ConversationReadPolicies.key(target)]=candidates.first { it.first==target }.second
+                    adoptSharedReads();if(selected?.target==target) shareRead(target)
                 }
                 historyHeadScheduler.result(target,android.os.SystemClock.elapsedRealtime(),result.isSuccess)
             }
@@ -329,7 +332,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun markRead(target:Target,evidence:ReadAttentionEvidence) {
         if(evidence.target!=target || !readTrackingReady || captureReadAttention(target)!=evidence) { error="The displayed reply evidence changed. Review it before marking read.";return }
-        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();flushDrafts()
+        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();shareRead(target);flushDrafts()
     }
     private fun readAllEvidence(target:Target):ReadAttentionEvidence? {
         if(!readTrackingReady || readWriter==null || demo || target.run.isBlank() || target.conversation.isBlank() ||
@@ -353,6 +356,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         var result=ReadAllResult(skipped=distinct.size)
         readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,current).also { result=it.result }.state }
         refreshReadAttention();writer.flushAsync()
+        distinct.forEach { shareRead(it) }
         return result
     }
     fun reviewLater(target:Target,evidence:ReadAttentionEvidence) {
@@ -362,10 +366,40 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshReadAttention() {
         sessions=sessions.map { row ->
             val later=reviewLater(row.target)
-            val unread=(unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
-            if(row.raw.optBoolean("mobile_review_later")==later && row.raw.optBoolean("mobile_unread_reply")==unread) row
-            else row.copy(raw=JSONObject(row.raw.toString()).put("mobile_review_later",later).put("mobile_unread_reply",unread))
+            // A reply or request read on another device is read here too.
+            val unread=!SharedReadPolicies.replyRead(row) && (unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
+            val acknowledged=SharedReadPolicies.attentionAcknowledged(row)
+            if(row.raw.optBoolean("mobile_review_later")==later && row.raw.optBoolean("mobile_unread_reply")==unread &&
+                row.raw.optBoolean("attention_acknowledged")==acknowledged) row
+            else row.copy(raw=JSONObject(row.raw.toString()).put("mobile_review_later",later).put("mobile_unread_reply",unread)
+                .put("attention_acknowledged",acknowledged))
         }
+    }
+    /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
+    private fun shareRead(target:Target) {
+        if(demo || !readTrackingReady) return
+        val row=sessions.find { it.target==target } ?: return
+        if("mark_read" !in relayOperations[target.connectionId].orEmpty() ||
+            "mark_read" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return
+        val payload=SharedReadPolicies.payload(row,readAllEvidence(target)?.authoritative==true,unreadCount(target)) ?: return
+        val connection=connections.find { it.id==target.connectionId } ?: return
+        val key=target.key+"\n"+payload
+        if(!sharedReadsSent.add(key)) return
+        viewModelScope.launch {
+            val completed=try { api.markRead(connection,target,payload).string("state")=="completed" }
+                catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(key);throw e };false }
+            if(!completed) sharedReadsSent.remove(key)
+        }
+    }
+    /** A reply read on another device advances this phone's watermark, using only a fresh exact head. */
+    private fun adoptSharedReads() {
+        val writer=readWriter ?: return
+        if(demo || !readTrackingReady) return
+        val captured=sessions.filter { SharedReadPolicies.replyRead(it) && (unreadCount(it.target) ?: 0)>0 }
+            .mapNotNull { row -> readAllEvidence(row.target)?.takeIf { it.authoritative }?.let { ReadAllCapture(row.target,it) } }
+        if(captured.isEmpty()) return
+        readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,captured).state }
+        refreshReadAttention()
     }
     private var preparingTargets by mutableStateOf<Set<String>>(emptySet())
     var attachmentPreparing by mutableStateOf(false); private set
@@ -1405,7 +1439,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             newProjects += projects.filter { it.key.connectionId in unavailable }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
-            refreshReadAttention()
+            refreshReadAttention();adoptSharedReads()
             val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }
             projects = newProjects; projectWarnings = warnings

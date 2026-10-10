@@ -111,6 +111,12 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History is not available yet. Try again." } }
         return withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
     }
+    /** Shared read mark; the computer applies only current values, so each attempt has its own request ID. */
+    suspend fun markRead(connection: Connection, target: Target, payload: JSONObject): JSONObject {
+        require(target.archiveId.isBlank() && target.agentId.isBlank()) { "Read marks belong to the live parent conversation." }
+        val id = UUID.randomUUID().toString()
+        return await(connection, submit(connection, target, "mark_read", payload, id))
+    }
     suspend fun events(connection: Connection, after: Long, wait: Int = 25) = call(connection.url, connection.token, "/v1/events?after=$after&wait=$wait")
 }
 
