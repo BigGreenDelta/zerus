@@ -119,6 +119,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     : QObject(parent)
     , m_cfg(cfg)
     , m_client(cfg.hgsPath)
+    , m_readSync(&m_client)
     , m_terminal(makeTerminal(cfg))
     // Набор режимов для подменю «Open in» спрашивается У AppConfig, а не строится
     // внутри меню: второго списка режимов в проекте нет и заводиться не должно (см.
@@ -325,9 +326,11 @@ void TrayAgent::onLocalReady(const BoxState &box)
     m_localReadError = box.ok ? QString() : (box.error.isEmpty() ? tr("Could not read local sessions") : box.error);
     m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
     m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
+    m_state.setPendingReads(ReadMarkStore::load());
     m_lastError.clear();
     const auto previousPeers = m_state.peerNames();
     m_state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    migrateReadMarks({}); publishReadMarks();
     for (const auto &peer : previousPeers) if (!m_state.peerNames().contains(peer)) {
         BoxState removed; removed.host = peer; removed.ok = true; observeAttention(peer, removed);
     }
@@ -351,9 +354,11 @@ void TrayAgent::onPeerReady(const BoxState &box)
     if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_pollingHosts);
     m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
     m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
+    m_state.setPendingReads(ReadMarkStore::load());
     if (m_state.local().peersKnown && !m_state.local().peers.contains(box.host)) return;
     m_lastError.clear();
     m_state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
+    migrateReadMarks(box.host); publishReadMarks();
     observeAttention(box.host, *m_state.peer(box.host));
     if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
     refreshIcon();
@@ -421,6 +426,33 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
         const auto target = AttentionTracker::target(m_pendingAttention);
         resolveAttentionClick(box.ok && target.value("host").toString() == host);
     }
+}
+
+void TrayAgent::migrateReadMarks(const QString &host)
+{
+    // Once per host: marks this GUI kept in QSettings move to the host when it
+    // first reports shared read state. The old keys stay for older hosts.
+    if (ReadMarkStore::migrated(host) || !m_state.supportsSharedRead(host)) return;
+    ReadMarkStore::add(m_state.legacyReadMarks(host));
+    ReadMarkStore::setMigrated(host);
+}
+
+void TrayAgent::publishReadMarks()
+{
+    ReadMarkStore::add(m_state.takeNewReadMarks());
+    if (m_state.local().peersKnown) {
+        // Marks for machines removed from the configuration can never be written.
+        QList<ReadMark> orphaned;
+        const auto peers = m_state.peerNames();
+        for (const auto &value : ReadMarkStore::load()) {
+            const auto mark = ReadMark::fromJson(value.toObject());
+            if (!mark.host.isEmpty() && !peers.contains(mark.host)) orphaned << mark;
+        }
+        ReadMarkStore::remove(orphaned);
+    }
+    m_state.setPendingReads(ReadMarkStore::load());
+    ReadMarkStore::remove(m_state.takeSettledReadMarks());
+    m_readSync.setPending(ReadMarkStore::load());
 }
 
 void TrayAgent::resolveAttentionClick(bool final)
@@ -524,6 +556,7 @@ void TrayAgent::showSessions()
         m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
         const auto publishReadState = [this]() {
             QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
+            publishReadMarks();
             m_sessionsWindow->setFleet(m_state); refreshIcon();
             if (!m_menu.isOpen()) rebuildMenu();
         };

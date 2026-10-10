@@ -228,6 +228,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
             changed += action == SelectionAction::MarkRead ? m_fleet.markSessionRead(entry.host, entry.session)
                 : m_fleet.setReviewLater(entry.host, entry.session, true);
         }
+        ReadMarkStore::add(m_fleet.takeNewReadMarks());
         const auto marks = m_fleet.attentionMarks(), read = m_fleet.readReplies();
         QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
         QSettings().setValue("attention/readReplies", QJsonDocument(read).toJson(QJsonDocument::Compact));

@@ -43,7 +43,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         changes.raised.append({token, reply ? QObject::tr("hgs zerus — New reply") : QObject::tr("hgs zerus — Needs attention"), body});
     };
     for (const auto &s : box.sessions) {
-        if (s.needsAction()) {
+        // Acknowledged here or on another device: the existing clear path withdraws it.
+        if (s.needsAction() && !s.attentionAcknowledged) {
             const QString reason = s.phase == "approval" ? QObject::tr("Approval needed")
                 : s.phase == "input" ? QObject::tr("Input needed")
                 : !s.recovery.value("reason").toString().isEmpty() ? concise(s.recovery.value("reason").toString(), 240)
@@ -57,7 +58,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             if (!s.needsAction()) notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
             else if (previous.value(key).toObject().value("request") == s.replyId) current[key] = previous.value(key);
         }
-        if (s.state != "running" || s.processState == "exited" || s.activity == "unknown"
+        if (s.attentionAcknowledged || s.state != "running" || s.processState == "exited" || s.activity == "unknown"
             || (s.conversationState == "ended" && s.activity != "idle") || s.subagentSource == "hook_profiles") continue;
         for (auto it = s.subagents.begin(); it != s.subagents.end(); ++it) {
             const auto child = it.value().toObject();

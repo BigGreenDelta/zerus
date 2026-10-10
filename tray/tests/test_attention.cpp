@@ -15,6 +15,7 @@ private slots:
     void unreadRepliesNotifyOnceAcrossResumeAndRead();
     void onlyExplicitChildRequestsNotify();
     void failedDeliveryRetriesAfterBackoff();
+    void acknowledgedAttentionWithdrawsItsNotification();
 };
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
@@ -225,6 +226,22 @@ void TestAttention::batchReadIncludesOfflineAndPreservesNewerRepliesAndActions()
     FleetState secondDevice; secondDevice.setLocal(local, 3); QCOMPARE(secondDevice.unreadReplies().size(), 4);
     remote.sessions[0].replyId = "12:102"; restarted.setPeer(remote, 4);
     QCOMPARE(restarted.unreadReplies().size(), 1); QVERIFY(restarted.peer("mac")->sessions[0].unreadReply);
+}
+
+void TestAttention::acknowledgedAttentionWithdrawsItsNotification()
+{
+    SessionInfo s; s.name="codex/project/session"; s.cmd="codex"; s.runId="run"; s.conversationId="conversation";
+    s.phase="input"; s.activity="busy"; s.attentionId="question-1"; s.sharedRead=true; s.attentionSignature=QString(64,'a');
+    BoxState box; box.ok=true; box.host="mac"; box.sessions={s};
+    FleetState fleet; fleet.setPeer(box,0); AttentionTracker tracker;
+    QCOMPARE(tracker.observe("mac",*fleet.peer("mac")).raised.size(),1);
+    // Another device acknowledged exactly this request: the banner goes away.
+    box.sessions[0].readAttentionSignature=s.attentionSignature; fleet.setPeer(box,1);
+    QVERIFY(fleet.peer("mac")->sessions[0].attentionAcknowledged);
+    QCOMPARE(tracker.observe("mac",*fleet.peer("mac")).cleared.size(),1);
+    // A new request has a new signature and notifies again.
+    box.sessions[0].attentionId="question-2"; box.sessions[0].attentionSignature=QString(64,'b'); fleet.setPeer(box,2);
+    QCOMPARE(tracker.observe("mac",*fleet.peer("mac")).raised.size(),1);
 }
 
 QTEST_APPLESS_MAIN(TestAttention)

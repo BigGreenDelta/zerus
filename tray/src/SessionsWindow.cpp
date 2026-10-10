@@ -1679,7 +1679,7 @@ void SessionsWindow::showWorkspaceSettings()
 void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setPeers(fleet.peerNames());
-    m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
+    m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.session.launchId==m_nativeLaunchToOpen) {
@@ -2342,6 +2342,7 @@ void SessionsWindow::markAllRepliesRead()
     if (const auto *entry = selected(); entry && entry->session.unreadReply) m_readSelectionKey = entry->key;
     m_readCandidate.clear();
     const int count = m_fleet.markRepliesRead(replies);
+    ReadMarkStore::add(m_fleet.takeNewReadMarks());
     if (!count) return;
     rebuild(); updateDashboard(); emit repliesMarkedRead(replies);
     showNotice(count == 1 ? tr("1 reply marked as read on this device.") : tr("%1 replies marked as read on this device.").arg(count));
@@ -2372,6 +2373,7 @@ void SessionsWindow::checkViewedReply()
     // Acknowledging it must not replace the conversation under their eyes.
     m_readSelectionKey = entry->key; m_readCandidate.clear();
     if (m_fleet.markReplyRead(host, name, conversation, reply)) {
+        ReadMarkStore::add(m_fleet.takeNewReadMarks());
         rebuild(); updateDashboard(); emit replyViewed(host, name, conversation, reply);
     }
 }
@@ -3600,6 +3602,7 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
                 : tr("This session is no longer available. Open its actions again."), true);
             return;
         }
+        ReadMarkStore::add(m_fleet.takeNewReadMarks());
         const auto marks = m_fleet.attentionMarks(), read = m_fleet.readReplies();
         QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
         QSettings().setValue("attention/readReplies", QJsonDocument(read).toJson(QJsonDocument::Compact));

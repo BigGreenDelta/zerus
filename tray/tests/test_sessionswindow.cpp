@@ -100,6 +100,7 @@ private slots:
     void windowLayerControlsKeepFocusAndLayout();
     void unreadRepliesNeedAnActiveVisibleResult();
     void markAllReadIgnoresFiltersAndKeepsCurrentDraft();
+    void sharedReadsQueueOnTheSessionHost();
     void unsentDraftBecomesARowStatus();
     void compactWorkspaceGeometry();
     void worktreeFilterKeepsConversationDraftAndSearchScope();
@@ -1152,6 +1153,28 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     QVERIFY(action->isEnabled()); QVERIFY(action->text().contains("(1)")); // Even when that session is hidden by search.
     action->trigger(); QCOMPARE(seen.size(), 2); QCOMPARE(seen[1][0].toJsonObject().size(), 1); QVERIFY(!action->isEnabled());
     QSettings().remove("attention/readReplies");
+}
+
+void TestSessionsWindow::sharedReadsQueueOnTheSessionHost()
+{
+    QSettings().remove("attention/pendingReads");
+    auto state = fleet(); auto box = state.local();
+    box.sessions[0].runId = "run-local"; box.sessions[0].conversationId = "shared-local";
+    box.sessions[0].replyId = "10:100"; box.sessions[0].sharedRead = true;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto remote = *state.peer("mac");
+    remote.sessions[0].runId = "run-remote"; remote.sessions[0].conversationId = "shared-remote";
+    remote.sessions[0].replyId = "20:200"; remote.sessions[0].sharedRead = true;
+    state.setPeer(remote, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
+    action->trigger();
+    const auto pending = ReadMarkStore::load();
+    const auto local = ReadMark::fromJson(pending.value(ReadMark{{}, box.sessions[0].name, {}, "shared-local", {}, {}}.key()).toObject());
+    QCOMPARE(local.runId, QString("run-local")); QCOMPARE(local.replyId, QString("10:100"));
+    const auto peer = ReadMark::fromJson(pending.value(ReadMark{"mac", remote.sessions[0].name, {}, "shared-remote", {}, {}}.key()).toObject());
+    QCOMPARE(peer.runId, QString("run-remote")); QCOMPARE(peer.replyId, QString("20:200"));
+    QSettings().remove("attention/pendingReads");
 }
 
 void TestSessionsWindow::compactWorkspaceGeometry()

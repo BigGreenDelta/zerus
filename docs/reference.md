@@ -296,9 +296,12 @@ reasoning and system instructions are excluded.
 
 **New reply** stays unread until its latest result is visible in an active window
 or an attached Terminal at the bottom. Background windows and old search results
-do not clear it. Read state survives rename and resume on this device. Viewing
-never answers an approval. **Mark as read** clears the current reminder without
-answering the agent; **Mark needs attention** creates a local review reminder.
+do not clear it. Read state is kept on the session's host: a reply or request
+read on any desktop or phone is read everywhere after the next poll and its
+notification is withdrawn; it survives rename and resume. Hosts with an older
+`hgs` keep read state on each device. Viewing never answers an approval. **Mark
+as read** clears the current reminder without answering the agent; **Mark needs
+attention** creates a local review reminder.
 Opening the conversation does not clear an explicit review reminder.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation

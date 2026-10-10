@@ -12,6 +12,7 @@
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "IconFactory.h"
+#include "ReadMarkSync.h"
 #include "TerminalBackend.h"
 #include "TrayIcon.h"
 #include "TrayMenu.h"
@@ -46,6 +47,8 @@ private slots:
 private:
     void refreshIcon();
     void observeAttention(const QString &host, const BoxState &box);
+    void migrateReadMarks(const QString &host);
+    void publishReadMarks();
     void resolveAttentionClick(bool final = false);
     // Одна строка, но своё имя: аргументы у TrayMenu::rebuild() одни и те же во всех
     // шести местах, откуда меню перестраивается, и перечислять их каждый раз -- шум.
@@ -78,6 +81,7 @@ private:
     AppConfig m_cfg;
     HgsClient m_client;
     FleetState m_state;
+    ReadMarkSync m_readSync;
     IconFactory m_icons;
     // Терминал прячется за интерфейсом целиком: в TrayAgent нет ни строчки D-Bus, и
     // замена Konsole на что угодно другое не трогает меню.
