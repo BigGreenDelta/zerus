@@ -3,7 +3,9 @@
 #include <QStringList>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QSet>
 #include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -62,12 +64,21 @@ QString attentionFingerprint(const SessionInfo &s) {
         s.needsAction() && s.attentionId.isEmpty() ? QJsonValue(s.lastEventAt) : QJsonValue(), children})
         .toJson(QJsonDocument::Compact));
 }
+
+// A queued mark is finished once the host shows it, or once none of its values
+// is current any more: the host would report every field stale.
+bool settled(const ReadMark &mark, const SessionInfo &s) {
+    if (mark.runId != s.runId || mark.conversationId != s.conversationId) return true;
+    const bool reply = mark.replyId.isEmpty() || mark.replyId != s.replyId || s.readReplyId == mark.replyId;
+    const bool attention = mark.attentionSignature.isEmpty() || mark.attentionSignature != s.attentionSignature
+        || s.readAttentionSignature == mark.attentionSignature;
+    return reply && attention;
+}
 }
 void FleetState::updateUnread(const QString &host, BoxState &box)
 {
+    QSet<QString> listed;
     for (auto &s : box.sessions) {
-        s.unreadReply = s.state != "archived" && !s.conversationId.isEmpty() && !s.replyId.isEmpty()
-            && m_readReplies.value(replyKey(host, s)).toString() != s.replyId;
         const auto key = attentionKey(host, s), fallback = attentionFallbackKey(host, s);
         if (key != fallback && m_attentionMarks.contains(fallback)) {
             if (!m_attentionMarks.contains(key)) m_attentionMarks[key] = m_attentionMarks.value(fallback);
@@ -75,7 +86,33 @@ void FleetState::updateUnread(const QString &host, BoxState &box)
         }
         const auto mark = m_attentionMarks.value(key).toObject();
         s.reviewLater = s.state != "archived" && mark.value("review").toBool();
-        s.attentionAcknowledged = mark.value("acknowledged").toString() == attentionFingerprint(s);
+        const bool localAcknowledged = mark.value("acknowledged").toString() == attentionFingerprint(s);
+        if (!s.sharedRead) {
+            // Hosts with an older hgs keep this device's own read state.
+            s.unreadReply = s.state != "archived" && !s.conversationId.isEmpty() && !s.replyId.isEmpty()
+                && m_readReplies.value(replyKey(host, s)).toString() != s.replyId;
+            s.attentionAcknowledged = localAcknowledged;
+            continue;
+        }
+        const auto readKey = ReadMark{host, s.name, {}, s.conversationId, {}, {}}.key();
+        listed.insert(readKey);
+        auto queued = ReadMark::fromJson(m_pendingReads.value(readKey).toObject());
+        if (m_pendingReads.contains(readKey) && settled(queued, s)) {
+            m_settledReads << queued; m_pendingReads.remove(readKey); queued = {};
+        }
+        const bool sameRun = !queued.runId.isEmpty() && queued.runId == s.runId && queued.conversationId == s.conversationId;
+        const bool replyRead = s.readReplyId == s.replyId || (sameRun && queued.replyId == s.replyId);
+        s.unreadReply = s.state != "archived" && !s.conversationId.isEmpty() && !s.replyId.isEmpty() && !replyRead;
+        // Recovery-only attention has no host signature and stays a local choice.
+        s.attentionAcknowledged = s.attentionSignature.isEmpty() ? localAcknowledged
+            : s.attentionSignature == s.readAttentionSignature || (sameRun && queued.attentionSignature == s.attentionSignature);
+    }
+    if (!box.ok) return;
+    // Marks for sessions this host no longer lists can never apply.
+    for (auto it = m_pendingReads.begin(); it != m_pendingReads.end();) {
+        const auto queued = ReadMark::fromJson(it.value().toObject());
+        if (queued.host == host && !listed.contains(it.key())) { m_settledReads << queued; it = m_pendingReads.erase(it); }
+        else ++it;
     }
 }
 void FleetState::setAttentionMarks(const QJsonObject &marks)
@@ -102,7 +139,9 @@ bool FleetState::setReviewLater(const QString &host, const SessionInfo &expected
 bool FleetState::markSessionRead(const QString &host, const SessionInfo &expected)
 {
     auto *s = matchingSession(host, expected);
-    if (!s || s->replyId != expected.replyId || attentionFingerprint(*s) != attentionFingerprint(expected)) return false;
+    if (!s || s->replyId != expected.replyId || attentionFingerprint(*s) != attentionFingerprint(expected)
+        || s->attentionSignature != expected.attentionSignature) return false;
+    queueRead(host, *s, true, true);
     markReplyRead(host, s->name, s->conversationId, s->replyId);
     const auto key = attentionKey(host, *s);
     auto mark = m_attentionMarks.value(key).toObject();
@@ -134,8 +173,9 @@ int FleetState::markRepliesRead(const QJsonObject &replies)
             const auto key = replyKey(host, s);
             // A newer poll may have arrived since the UI took its snapshot.
             // Acknowledging old replies must never acknowledge the next answer.
-            if (replies.value(key).toString() != s.replyId || m_readReplies.value(key).toString() == s.replyId) continue;
-            m_readReplies[key] = s.replyId; ++marked;
+            if (replies.value(key).toString() != s.replyId) continue;
+            if (!s.sharedRead && m_readReplies.value(key).toString() == s.replyId) continue;
+            m_readReplies[key] = s.replyId; queueRead(host, s, true, false); ++marked;
         }
         updateUnread(host, box);
     };
@@ -150,7 +190,7 @@ bool FleetState::markReplyRead(const QString &host, const QString &name, const Q
     if (!box) return false;
     for (auto &s : box->sessions) {
         if (s.state == "archived" || s.name != name || s.conversationId != conversation || s.replyId != reply || !s.unreadReply) continue;
-        m_readReplies[replyKey(host, s)] = reply;
+        m_readReplies[replyKey(host, s)] = reply; queueRead(host, s, true, false);
         updateUnread(host, *box); return true;
     }
     return false;
@@ -301,4 +341,46 @@ qint64 FleetState::peerPolledAt(const QString &alias) const
     if (it == m_peers.constEnd())
         return 0;
     return it->polledAt;
+}
+
+void FleetState::queueRead(const QString &host, const SessionInfo &s, bool reply, bool attention)
+{
+    if (!s.sharedRead || s.state == "archived" || s.runId.isEmpty() || s.conversationId.isEmpty()) return;
+    ReadMark mark{host, s.name, s.runId, s.conversationId,
+        reply && s.readReplyId != s.replyId ? s.replyId : QString(),
+        attention && s.readAttentionSignature != s.attentionSignature ? s.attentionSignature : QString()};
+    if (mark.isEmpty()) return;
+    mark = ReadMark::merged(ReadMark::fromJson(m_pendingReads.value(mark.key()).toObject()), mark);
+    m_pendingReads[mark.key()] = mark.toJson(); m_newReads << mark;
+}
+void FleetState::setPendingReads(const QJsonObject &pending)
+{
+    m_pendingReads = pending; updateUnread({}, m_local);
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) updateUnread(it.key(), it->box);
+}
+QList<ReadMark> FleetState::takeNewReadMarks() { return std::exchange(m_newReads, {}); }
+QList<ReadMark> FleetState::takeSettledReadMarks() { return std::exchange(m_settledReads, {}); }
+bool FleetState::supportsSharedRead(const QString &host) const
+{
+    const BoxState *box = host.isEmpty() ? &m_local : peer(host);
+    return box && box->ok && std::any_of(box->sessions.cbegin(), box->sessions.cend(),
+        [](const SessionInfo &s) { return s.sharedRead; });
+}
+QList<ReadMark> FleetState::legacyReadMarks(const QString &host) const
+{
+    QList<ReadMark> marks;
+    const BoxState *box = host.isEmpty() ? &m_local : peer(host);
+    if (!box || !box->ok) return marks;
+    for (const auto &s : box->sessions) {
+        if (!s.sharedRead || s.state == "archived" || s.runId.isEmpty() || s.conversationId.isEmpty()) continue;
+        // Only marks for the current values can still apply on the host.
+        ReadMark mark{host, s.name, s.runId, s.conversationId, {}, {}};
+        if (!s.replyId.isEmpty() && s.readReplyId != s.replyId && m_readReplies.value(replyKey(host, s)).toString() == s.replyId)
+            mark.replyId = s.replyId;
+        if (!s.attentionSignature.isEmpty() && s.readAttentionSignature != s.attentionSignature
+            && m_attentionMarks.value(attentionKey(host, s)).toObject().value("acknowledged").toString() == attentionFingerprint(s))
+            mark.attentionSignature = s.attentionSignature;
+        if (!mark.isEmpty()) marks << mark;
+    }
+    return marks;
 }
