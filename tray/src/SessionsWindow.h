@@ -21,6 +21,7 @@ class QAction;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QPushButton;
 class QTextBrowser;
 class QStackedWidget;
@@ -142,6 +143,7 @@ private:
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
     void showNotice(const QString &message, bool error = false);
+    void jumpToLatestActivity(QListWidgetItem *item);
     void openSession();
     void changeSession();
     void terminateSession();

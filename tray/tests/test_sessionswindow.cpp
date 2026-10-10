@@ -2927,19 +2927,37 @@ elif sys.argv[1]=='answer':
 
 void TestSessionsWindow::activityEscapingAndActions()
 {
-    SessionsWindow window(script()); window.setFleet(fleet()); window.show(); QTest::qWait(50);
+    SessionsWindow window(script()); window.setFleet(fleet()); window.setClipboardMode(true); window.show(); QTest::qWait(50);
     auto *list = window.findChild<QListWidget *>("sessionList"); list->setCurrentRow(0);
     auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     QJsonObject data{{"tracked", true}, {"conversation_id", "conversation-one"}, {"phase", "idle"}, {"activity", "idle"},
-        {"cwd", "/workspace/zerus"}, {"prompt", "<b>literal request</b>"}, {"cursor", 4},
-        {"events", QJsonArray{QJsonObject{{"seq", 4}, {"at", 1790928000}, {"type", "PostToolUse"}, {"tool", "Bash"}, {"detail", "<img src='file:///not-loaded'>"}}}}};
+        {"cwd", "/workspace/zerus"}, {"prompt", "<b>literal request</b>"}, {"cursor", 5},
+        {"events", QJsonArray{QJsonObject{{"seq", 4}, {"at", 1790928000}, {"type", "PostToolUse"}, {"tool", "Bash"}, {"detail", "<img src='file:///not-loaded'>"}},
+            QJsonObject{{"seq", 5}, {"at", 1790928001}, {"type", "Stop"}, {"detail", QString("A response paragraph.\n\n").repeated(60)}}}}};
     client->inspectionReady({}, "codex/hgs/dashboard", data);
     auto *activity = window.findChild<QTextBrowser *>("activity");
     QVERIFY(activity->toPlainText().contains("<b>literal request</b>"));
     QVERIFY(activity->toPlainText().contains("<img src='file:///not-loaded'>"));
     QVERIFY(window.findChild<QPushButton *>("pauseAction")->isEnabled());
     QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
-    QTest::keyClick(list, Qt::Key_Return); QCOMPARE(opened.size(), 1);
+    QSignalSpy copied(&window, &SessionsWindow::copySessionCommandRequested);
+    auto *view = window.findChild<ActivityView *>("mainActivity");
+    auto *scroll = activity->verticalScrollBar(); QTRY_VERIFY(scroll->maximum() > 0);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); composer->editor()->setPlainText("Keep my draft");
+    scroll->setValue(0);
+    auto cursor = activity->textCursor(); cursor.movePosition(QTextCursor::Start); cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
+    activity->setTextCursor(cursor);
+    const auto point = list->visualItemRect(list->currentItem()).center();
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, point);
+    QCOMPARE(scroll->value(), 0); QVERIFY(activity->textCursor().hasSelection());
+    QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, point);
+    QTRY_COMPARE(scroll->value(), scroll->maximum()); QVERIFY(!activity->textCursor().hasSelection()); QVERIFY(view->jumpButton()->isHidden());
+    QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); tabs->setCurrentIndex(1);
+    scroll->setValue(0); QTest::keyClick(list, Qt::Key_Return);
+    QCOMPARE(tabs->currentIndex(), 0); QTRY_COMPARE(scroll->value(), scroll->maximum());
+    QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
+    window.findChild<QPushButton *>("openSessionAction")->click(); QCOMPARE(opened.size(), 1);
     QCOMPARE(opened[0][1].toString(), QStringLiteral("codex/hgs/dashboard"));
     QSignalSpy completed(client, &HgsClient::writeDone);
     auto *pause = window.findChild<QPushButton *>("pauseAction"); pause->click();

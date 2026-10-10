@@ -328,7 +328,10 @@ copies the visible text. Claude's recorded thinking appears in
 full as a quieter **Thinking** card: the same Markdown at the same size, without
 the card fill and with dimmer text. Adjacent tool events collapse into groups.
 Reading older history preserves scroll and selection; **Jump to latest** returns
-to live events without resizing the timeline. Claude hands finished
+to live events without resizing the timeline. Double-clicking a session or
+subagent row, or pressing Enter on it, opens Activity and performs the same jump.
+Connect commands remain available through **Copy connect command** in the session
+menu. Claude hands finished
 background work and other sessions' messages back as a new turn. Activity never
 shows them as your message: a background task becomes a violet **Background
 task** notice, a subagent's final report a **Subagent report** with one summary

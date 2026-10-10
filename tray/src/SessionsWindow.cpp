@@ -460,9 +460,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_sessions, &SessionList::dragFinished, this, &SessionsWindow::rebuild);
     connect(m_sessions, &QListWidget::currentRowChanged, this, [this]() { if (!m_rebuilding) selectSession(); });
-    connect(m_sessions, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
-        if (item->data(SessionRoles::LaunchId).toString().isEmpty() && m_subagentId.isEmpty()) openSession();
-    });
+    connect(m_sessions, &QListWidget::itemActivated, this, &SessionsWindow::jumpToLatestActivity);
 
     m_detailStack = new QStackedWidget; m_detailStack->setObjectName("detail");
     auto *empty = new QWidget; auto *emptyLayout = new QVBoxLayout(empty); emptyLayout->addStretch();
@@ -3656,6 +3654,13 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     }
 }
 
+void SessionsWindow::jumpToLatestActivity(QListWidgetItem *item)
+{
+    if (!item || item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::LaunchId).toString().isEmpty()) return;
+    m_detailTabs->setCurrentIndex(0);
+    (m_subagentId.isEmpty() ? m_activityView : m_subagentView)->jumpToLatest();
+}
+
 void SessionsWindow::openSession()
 {
     const auto *e = selected(); if (!e || !e->online || !m_open->isEnabled() || e->session.state == "archived") return;
@@ -3850,7 +3855,7 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
-            openSession(); return true;
+            jumpToLatestActivity(m_sessions->currentItem()); return true;
         }
     }
     return QWidget::eventFilter(watched, event);
