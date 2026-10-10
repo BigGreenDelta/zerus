@@ -1,5 +1,8 @@
 package app.zerus.mobile
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -31,6 +34,27 @@ class SharedReadTest {
         val partial=SharedReadPolicies.payload(row(mark("7:100.5",null)),true,0)!!
         assertTrue(partial.isNull("reply_id"));assertEquals(signature,partial.getString("attention_signature"))
         assertFalse(SharedReadPolicies.replyRead(row(mark("7:100.5",signature,"other-conversation"))))
+    }
+    @Test fun readAllSharesRepliesButNeverAcknowledgesAttention() {
+        val payload=SharedReadPolicies.payload(row(),true,0,acknowledge=false)!!
+        assertEquals("7:100.5",payload.getString("reply_id"));assertTrue(payload.isNull("attention_signature"))
+        // Only a request is pending: Read all leaves it for the person to view.
+        assertNull(SharedReadPolicies.payload(row(mark("7:100.5",null)),true,0,acknowledge=false))
+    }
+    @Test fun readAllSendsOneMarkAtATimeAndSkipsTargetsThatNoLongerQualify() = runBlocking {
+        val qualifying=mutableSetOf("a","b","c")
+        val prepared=mutableListOf<String>();val sent=mutableListOf<String>()
+        var inFlight=0;var most=0
+        SharedReadPolicies.inOrder(listOf("a","b","c"),{ target -> prepared+=target;target.takeIf { it in qualifying } }) { target ->
+            inFlight++;most=maxOf(most,inFlight)
+            // A newer reply arrives for "b" while the first mark is in flight.
+            if(target=="a") qualifying-="b"
+            yield();delay(5);inFlight--
+            sent+=target
+        }
+        assertEquals(1,most)
+        assertEquals(listOf("a","b","c"),prepared)
+        assertEquals(listOf("a","c"),sent)
     }
     @Test fun childArchivedOrChangedRowsAreNeverMarked() {
         assertNull(SharedReadPolicies.payload(row(t=target.copy(agentId="child",parentConversation="conversation")),true,0))

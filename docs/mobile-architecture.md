@@ -456,9 +456,14 @@ time. Retry now and Cancel retry pin its UUID and exact current session identity
 Retry now changes the native schedule; it does not claim that a provider request
 has already been sent. The existing native worker retains its delivery checks.
 
-Review later is private phone state. Mark read and automatic read progress also send `mark_read` when the computer advertises it, so the session's host marks the exact reply and request read for every device. Both capture the displayed
-message evidence and never answer a question or authorize a native action. With
-partial history, Mark loaded replies read acknowledges only that loaded subset.
+Review later is private phone state. Mark read and automatic read progress also
+send `mark_read` when the computer advertises it, so the session's host marks the
+exact reply and request read for every device. Read all marks replies only, one
+`mark_read` at a time: like the desktop's Mark all read, it leaves pending
+approvals, questions and errors highlighted until the session is viewed. Every
+mark captures the displayed message evidence and never answers a question or
+authorizes a native action. With partial history, Mark loaded replies read
+acknowledges only that loaded subset.
 
 ### Read-only Accounts
 

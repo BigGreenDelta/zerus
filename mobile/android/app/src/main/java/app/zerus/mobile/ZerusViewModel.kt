@@ -104,6 +104,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var unreadBoundaryCaptured=false
     // Marks submitted by this process; a failed submission is forgotten so the next view retries.
     private val sharedReadsSent=mutableSetOf<String>()
+    private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
         if(selected?.target != target || activeFrame?.target != target || conversationEvents.none { it.id == eventId }) return
@@ -356,7 +357,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         var result=ReadAllResult(skipped=distinct.size)
         readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,current).also { result=it.result }.state }
         refreshReadAttention();writer.flushAsync()
-        distinct.forEach { shareRead(it) }
+        // One mark_read at a time, after any earlier Read all, so a large scope never floods the
+        // relay or the computer's queue ahead of the person's own requests.
+        val previous=readAllShares
+        readAllShares=viewModelScope.launch {
+            previous?.join()
+            SharedReadPolicies.inOrder(distinct,{ target -> sharedReadRequest(target,false)?.takeIf { sharedReadsSent.add(it.key) } }) { sendSharedRead(it) }
+        }
         return result
     }
     fun reviewLater(target:Target,evidence:ReadAttentionEvidence) {
@@ -375,21 +382,27 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 .put("attention_acknowledged",acknowledged))
         }
     }
+    private class SharedReadRequest(val connection:Connection,val target:Target,val payload:JSONObject,val key:String)
+    /** The C4 `mark_read` this phone may send now; [acknowledge] also covers the current request. */
+    private fun sharedReadRequest(target:Target,acknowledge:Boolean):SharedReadRequest? {
+        if(demo || !readTrackingReady) return null
+        val row=sessions.find { it.target==target } ?: return null
+        if("mark_read" !in relayOperations[target.connectionId].orEmpty() ||
+            "mark_read" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return null
+        val payload=SharedReadPolicies.payload(row,readAllEvidence(target)?.authoritative==true,unreadCount(target),acknowledge) ?: return null
+        val connection=connections.find { it.id==target.connectionId } ?: return null
+        return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
+    }
+    private suspend fun sendSharedRead(request:SharedReadRequest) {
+        val completed=try { api.markRead(request.connection,request.target,request.payload).string("state")=="completed" }
+            catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(request.key);throw e };false }
+        if(!completed) sharedReadsSent.remove(request.key)
+    }
     /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
     private fun shareRead(target:Target) {
-        if(demo || !readTrackingReady) return
-        val row=sessions.find { it.target==target } ?: return
-        if("mark_read" !in relayOperations[target.connectionId].orEmpty() ||
-            "mark_read" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return
-        val payload=SharedReadPolicies.payload(row,readAllEvidence(target)?.authoritative==true,unreadCount(target)) ?: return
-        val connection=connections.find { it.id==target.connectionId } ?: return
-        val key=target.key+"\n"+payload
-        if(!sharedReadsSent.add(key)) return
-        viewModelScope.launch {
-            val completed=try { api.markRead(connection,target,payload).string("state")=="completed" }
-                catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(key);throw e };false }
-            if(!completed) sharedReadsSent.remove(key)
-        }
+        val request=sharedReadRequest(target,true) ?: return
+        if(!sharedReadsSent.add(request.key)) return
+        viewModelScope.launch { sendSharedRead(request) }
     }
     /** A reply read on another device advances this phone's watermark, using only a fresh exact head. */
     private fun adoptSharedReads() {
