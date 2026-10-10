@@ -1127,6 +1127,9 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = list->currentItem()->data(SessionRoles::Key);
     auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
     QVERIFY(action->text().contains("(5)"));
+    // Marks are shared through each session's host, not kept on this device.
+    QCOMPARE(action->toolTip(), QString("Mark current replies across all machines as read, including hidden sessions. "
+                                        "Pending approvals, questions and errors stay highlighted."));
     auto *context = window.findChild<QMenu *>("sessionProjectsMenu"); QVERIFY(context); QVERIFY(context->actions().contains(action));
     auto *batch = window.findChild<QPushButton *>("batchActions")->menu(); QMetaObject::invokeMethod(batch, "aboutToShow");
     QVERIFY(batch->actions().contains(action));
@@ -1139,6 +1142,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
         window.setFleet(state);
     });
     action->trigger(); QCOMPARE(seen.size(), 1); QCOMPARE(seen[0][0].toJsonObject().size(), 5);
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("5 replies marked as read."));
     QVERIFY(!action->isEnabled()); QVERIFY(state.unreadReplies().isEmpty()); QCOMPARE(writes.size(), 0);
     QCOMPARE(list->currentItem()->data(SessionRoles::Key), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
     // Overview renders when shown.
@@ -1152,6 +1156,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     box.sessions[0].replyId = "11:101"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QVERIFY(action->isEnabled()); QVERIFY(action->text().contains("(1)")); // Even when that session is hidden by search.
     action->trigger(); QCOMPARE(seen.size(), 2); QCOMPARE(seen[1][0].toJsonObject().size(), 1); QVERIFY(!action->isEnabled());
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("1 reply marked as read."));
     QSettings().remove("attention/readReplies");
 }
 

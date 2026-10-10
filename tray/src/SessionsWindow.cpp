@@ -329,7 +329,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         saveOrganization(); rebuild();
     });
     m_markAllReadAction = new QAction(tr("Mark all as read"), this); m_markAllReadAction->setObjectName("markAllSessionsRead");
-    m_markAllReadAction->setToolTip(tr("Mark current replies across all machines as read on this device, including hidden sessions. Pending approvals, questions and errors stay highlighted."));
+    m_markAllReadAction->setToolTip(tr("Mark current replies across all machines as read, including hidden sessions. Pending approvals, questions and errors stay highlighted."));
     m_markAllReadAction->setEnabled(false);
     connect(m_markAllReadAction, &QAction::triggered, this, &SessionsWindow::markAllRepliesRead);
     groupsMenu->addSeparator(); groupsMenu->addAction(m_markAllReadAction); groupsMenu->setToolTipsVisible(true);
@@ -2345,7 +2345,7 @@ void SessionsWindow::markAllRepliesRead()
     ReadMarkStore::add(m_fleet.takeNewReadMarks());
     if (!count) return;
     rebuild(); updateDashboard(); emit repliesMarkedRead(replies);
-    showNotice(count == 1 ? tr("1 reply marked as read on this device.") : tr("%1 replies marked as read on this device.").arg(count));
+    showNotice(count == 1 ? tr("1 reply marked as read.") : tr("%1 replies marked as read.").arg(count));
 }
 
 void SessionsWindow::checkViewedReply()
