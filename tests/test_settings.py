@@ -157,6 +157,10 @@ class SessionSettings(test_effort.EffortTransport):
 
     def test_paused_recipe_has_overrides_without_launching(self):
         self.tmux('kill-server')
+        # tmux acknowledges before its pane process has finished exiting.
+        # Wait for this owned fixture's PID before asserting saved-run behavior.
+        self.wait_for(lambda: not subprocess.run(['ps','-p',str(self.record['pid']),'-o','lstart='],
+            capture_output=True,text=True,timeout=5).stdout.strip())
         transcript=self.root/('rollout-'+self.conversation_id+'.jsonl')
         transcript.write_text(json.dumps(dict(type='session_meta',payload=dict(id=self.conversation_id)))+'\n')
         self.record.update(paused=True,base=['codex','--model','old','-c','model_reasoning_effort="high"'],launch_dir=str(self.root),transcript=str(transcript),shell='/bin/bash')

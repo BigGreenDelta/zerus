@@ -325,6 +325,22 @@ void HgsClient::requestVersion()
         },[this](const QString &,const QString &){m_versionInFlight=false;emit versionReady({});});
 }
 
+void HgsClient::requestSessionReference(const QString &host, const QString &name, const QString &run,
+                                       const QString &conversation, const QString &archive, const QString &agent)
+{
+    QStringList args{"reference", name, "--json", "--run", run, "--conversation", conversation};
+    if (!host.isEmpty()) args.prepend('@' + host);
+    if (!archive.isEmpty()) args << "--archive" << archive;
+    if (!agent.isEmpty()) args << "--agent" << agent;
+    runHgs(m_hgs,args,host.isEmpty()?15000:25000,this,[this](const QByteArray &out){
+        QJsonParseError error;const auto data=QJsonDocument::fromJson(out,&error);
+        const auto uri=data.object().value("uri").toString();
+        if(error.error!=QJsonParseError::NoError || !data.isObject() || !uri.startsWith("zerus://session?") || uri.size()>8192)
+            emit sessionReferenceFailed(tr("Could not read a session reference. Update hgs on this computer."));
+        else emit sessionReferenceReady(uri);
+    },[this](const QString &,const QString &error){emit sessionReferenceFailed(error);});
+}
+
 quint64 HgsClient::requestAccounts(const QString &host, const QStringList &arguments, const QByteArray &input)
 {
     const quint64 request = ++m_accountRequest;

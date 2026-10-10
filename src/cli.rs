@@ -47,6 +47,8 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] ls                 sessions here and on peers
        hgs ls --json --local          this box as JSON (for the tray; no ssh)
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
+       hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
+       hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
@@ -256,6 +258,29 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         _ => {}
     }
+    if args.first().is_some_and(|value| value.starts_with("zerus://")) {
+        let local_only = args.len() == 2 && args[1] == "--local";
+        if command != "inspect" || (args.len() != 1 && !local_only) || dry {
+            return Err(Error::new(1, "Use hgs inspect '<session reference>' for read-only session references"));
+        }
+        let reference = crate::session_reference::Reference::parse(&args[0])?;
+        let local_id = crate::swarm::local_node_id(&config).map_err(|e| Error::new(1,e.to_string()))?;
+        if local_only && local_id != reference.machine {
+            return Err(Error::new(1,"Session reference belongs to another computer; the selected SSH alias does not match"));
+        }
+        if target.is_empty() && local_id != reference.machine {
+            if config.peers.contains(&reference.host) && !config.is_self(&reference.host) {
+                return remote(&config, &reference.host, command, args, false);
+            }
+            return Err(Error::new(1, "The referenced computer is not configured here; choose its configured @host"));
+        }
+        if !target.is_empty() && !config.is_self(&target) {
+            if local_only { return Err(Error::new(1,"A local session reference cannot route to another computer")); }
+            return remote(&config,&target,command,args,false);
+        }
+        println!("{}", crate::session_reference::inspect(&config,&reference)?);
+        return Ok(0);
+    }
     if command == "native-ui" {
         let name = require(args, 0, "usage: hgs native-ui <session> [--json]")?;
         if args.get(1).is_some_and(|v| v == "--json") && !dry {
@@ -287,6 +312,10 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "reference" => {
+            if dry { return Err(Error::new(1,"Session references do not support --dry-run")); }
+            crate::session_reference::create(&config,args)
+        }
         "a" => attach_command(&config, args, &client, dry),
         "kill" => kill(&config, args, dry),
         "rename" => rename(&config, args, dry),
@@ -495,6 +524,9 @@ fn remote(
         return Err(Error::new(1, "invalid SSH host alias"));
     }
     let mut args = args.to_vec();
+    if command == "inspect" && args.first().is_some_and(|arg| arg.starts_with("zerus://session?")) && args.len()==1 {
+        args.push("--local".into());
+    }
     if global_dry {
         args.push("--dry-run".into());
     }
@@ -524,7 +556,7 @@ fn remote(
             all.extend(args.clone());
             all
         }
-        "kill" | "terminate" | "pause" | "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
+        "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" => {
             flags = vec![
                 "-o".into(),

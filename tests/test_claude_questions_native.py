@@ -37,16 +37,17 @@ class NativeClaudeQuestions(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory(prefix='hgs-claude-native-');self.addCleanup(self.temp.cleanup)
   self.root=Path(self.temp.name).resolve();self.bin=self.root/'.local/bin';self.bin.mkdir(parents=True);self.state=self.root/'state';self.state.mkdir()
   work=self.root/'work';work.mkdir();(self.root/'.claude').mkdir()
-  self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=getattr(self,'tool_input',None);self.approval_fixture=self.tool_name!='AskUserQuestion'
+  self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
   self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
-  (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':'default' if self.approval_fixture else 'bypassPermissions'}}))
-  fixture=self
+  (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':'default' if self.approval_fixture or self.message_fixture else 'bypassPermissions'}}))
+  fixture=self;self.native_requests=[]
   class Server(BaseHTTPRequestHandler):
    def log_message(self,*args):pass
    def do_POST(self):
     body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or '{}')
-    asks=any(t.get('name')==fixture.tool_name for t in body.get('tools',[]))
+    fixture.native_requests.append(body)
+    asks=not fixture.message_fixture and any(t.get('name')==fixture.tool_name for t in body.get('tools',[]))
     answered=any(isinstance(m.get('content'),list) and any(b.get('type')=='tool_result' for b in m['content']) for m in body.get('messages',[]))
     blocks=[dict(type='tool_use',id='toolu_native_fixture',name=fixture.tool_name,input=fixture.tool_input or dict(questions=fixture.items))] if asks and not answered else [dict(type='text',text='Fixture complete.')]
     message=dict(id='msg_fixture',type='message',role='assistant',model=body.get('model','claude-sonnet-4-6'),content=blocks,stop_reason='tool_use' if asks and not answered else 'end_turn',stop_sequence=None,usage=dict(input_tokens=100,output_tokens=30))
@@ -71,15 +72,17 @@ class NativeClaudeQuestions(unittest.TestCase):
   # Claude can flush files after kill-server returns; remove HOME only after
   # its owned process has exited. This also runs when native startup fails.
   self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
-  self.tmux('new-session','-d','-s',self.name,'-x','120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*([] if self.approval_fixture else ['--dangerously-skip-permissions']),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  self.tmux('new-session','-d','-s',self.name,'-x','120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*([] if self.approval_fixture or self.message_fixture else ['--dangerously-skip-permissions']),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
-  self.wait_for(lambda:(getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Which release should we prepare?') in self.screen())
+  self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Which release should we prepare?') in self.screen())
   transcript=next((self.root/'.claude/projects').glob('*/*.jsonl'));self.conversation_id=transcript.stem
   pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
   start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
   self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
   self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
   self.record=dict(version=1,name=self.name,agent='claude',run_id=self.run_id,conversation_id=self.conversation_id,pane=self.pane,pid=pid,process_start=start,activity='busy',phase='input',active_tools={},subagents={},last_event_at=time.time(),created=time.time(),transcript=str(transcript))
+  if self.message_fixture:
+   self.record.update(activity='idle',phase='idle');self.write_record();return
   self.write_record();self.hook(dict(hook_event_name='PreToolUse',tool_name=self.tool_name,tool_use_id='toolu_native_fixture',tool_input=self.tool_input or dict(questions=self.items)))
   if self.approval_fixture:
    # Claude's real PermissionRequest carries no tool_use_id.

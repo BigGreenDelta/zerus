@@ -7,6 +7,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Search
@@ -40,6 +41,8 @@ import org.json.JSONObject
     var search by remember(target.key) { mutableStateOf(false) }
     var readEvidence by remember(target.key) { mutableStateOf<ReadAttentionEvidence?>(null) }
     val clipboard = LocalClipboardManager.current
+    val nativeMachineName = model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.nativeName.orEmpty()
+    val sessionReference = remember(target,nativeMachineName) { SessionReference.create(target,nativeMachineName) }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else details = true }, modifier = Modifier.weight(1f)) {
@@ -49,6 +52,9 @@ import org.json.JSONObject
         IconButton(onClick = { search = true }) { Icon(Icons.Default.Search,"Search loaded messages") }
         IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal") }
         IconButton(onClick = { details = true }) { Icon(Icons.Default.Info, "Session details") }
+        IconButton(onClick = { sessionReference?.let { clipboard.setText(AnnotatedString(it)) } },enabled = sessionReference != null) {
+            Icon(Icons.Default.ContentCopy,"Copy session reference")
+        }
         if (target.agentId.isBlank()) Box {
             IconButton(onClick = { readEvidence = model.captureReadAttention(target);menu = true }) { Icon(Icons.Default.MoreVert, "Session actions") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
@@ -60,6 +66,8 @@ import org.json.JSONObject
                     HorizontalDivider()
                 }
                 DropdownMenuItem(text = { Text("Copy session name") },onClick = { menu = false;clipboard.setText(AnnotatedString(target.session)) })
+                DropdownMenuItem(text = { Text("Copy session reference") },enabled = sessionReference != null,
+                    onClick = { menu = false;sessionReference?.let { clipboard.setText(AnnotatedString(it)) } })
                 val folder = model.activity?.string("cwd").orEmpty()
                 if(folder.isNotBlank()) DropdownMenuItem(text = { Text("Copy folder") },onClick = { menu = false;clipboard.setText(AnnotatedString(folder)) })
                 HorizontalDivider()

@@ -100,6 +100,8 @@ public:
     QString executable() const { return m_hgs; }
     // Read the configured executable, including older CLIs without snapshot metadata.
     void requestVersion();
+    void requestSessionReference(const QString &host, const QString &name, const QString &run,
+                                 const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 requestRecovery(const QString &host, const QString &operation, const QJsonObject &payload = {});
 
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
@@ -183,6 +185,8 @@ public:
 
 signals:
     void versionReady(const QString &version); // Empty when unavailable or unrecognized.
+    void sessionReferenceReady(const QString &uri);
+    void sessionReferenceFailed(const QString &reason);
     void sessionActionFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void recoveryFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);

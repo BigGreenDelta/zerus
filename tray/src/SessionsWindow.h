@@ -183,7 +183,8 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
-    enum class SessionMenuAction { OpenTerminal, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh };
+    enum class SessionMenuAction { OpenTerminal, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh };
+    void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
     void clearContext();
     // A stopped session's draft waits for an explicit resume or fresh start.
@@ -291,6 +292,7 @@ private:
     QList<QPushButton *> m_filters;
     QLineEdit *m_search;
     QLabel *m_heading, *m_count, *m_title, *m_meta, *m_badge, *m_model, *m_hint, *m_notice;
+    QPushButton *m_copyReference = nullptr;
     QString m_modelElision;
     QLabel *m_connectionStatus;
     QPushButton *m_connectionRetry;

@@ -33,6 +33,13 @@ Repository documentation owns specifications; Beads owns tasks and blockers.
 
 ## Compatibility and operation
 
+Treat pasted `zerus://session?...` URIs as references to another Zerus conversation.
+Read them with `hgs inspect '<reference>'`; use
+`hgs @configured-alias inspect '<reference>'` when its local SSH alias differs.
+The CLI verifies computer and conversation identities and follows session renames.
+Use the resolved name and IDs for any separately authorized operation. See the
+session references section in `docs/reference.md`.
+
 Keep the `hgs` CLI, `HGS_*` variables, state/config paths and existing application
 and service identifiers compatible. A repository rename must not reset accounts,
 project catalogs, native agent processes or saved conversations.

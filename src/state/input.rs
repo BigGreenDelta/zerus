@@ -672,6 +672,14 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         );
     }
     let text = attachments::terminal_text(request.text.trim(), &paths);
+    // Claude treats a trailing backslash plus the next Enter as line continuation.
+    // Paste a final newline with the literal text so our single Enter submits it;
+    // never retry Enter, which could answer a subsequently opened dialog.
+    let pasted = if string(&record, "agent") == "claude" && text.ends_with('\\') {
+        format!("{text}\n")
+    } else {
+        text.clone()
+    };
     let buffer = format!("hgs-input-{request_id}");
     let mut loader = Command::new("tmux")
         .args(["load-buffer", "-b", &buffer, "-"])
@@ -684,7 +692,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         .stdin
         .take()
         .ok_or("missing buffer input")?
-        .write_all(text.as_bytes());
+        .write_all(pasted.as_bytes());
     let loaded = loader.wait_with_output().map_err(|e| e.to_string())?;
     if written.is_err() || !loaded.status.success() {
         return Err("could not stage terminal input; nothing was submitted".into());

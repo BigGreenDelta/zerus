@@ -472,6 +472,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *badges = new QHBoxLayout; badges->setSpacing(4);
     m_title = label({}, "detailTitle"); m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_title->setMinimumWidth(70);
     badges->addWidget(m_title, 1);
+    m_copyReference = iconButton("copy", tr("Copy session reference"), "copySessionReferenceAction");
+    connect(m_copyReference, &QPushButton::clicked, this, [this]{ if(const auto *entry=selected()) copySessionReference(*entry,m_subagentId); });
+    badges->addWidget(m_copyReference);
+    connect(&m_client,&HgsClient::sessionReferenceReady,this,[this](const QString &uri){emit copyTextRequested(uri);showNotice(tr("Session reference copied"));});
+    connect(&m_client,&HgsClient::sessionReferenceFailed,this,[this](const QString &error){showNotice(error,true);});
     m_badge = label({}, "badge"); m_badge->setFixedHeight(24);
     badges->addWidget(m_badge, 0, Qt::AlignVCenter); badges->addSpacing(6);
     m_model = label({}, "sessionModel", details); m_model->setMaximumWidth(260);
@@ -485,7 +490,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_pause, &QPushButton::clicked, this, &SessionsWindow::changeSession);
     badges->addWidget(m_fileManager); badges->addWidget(m_shell); badges->addWidget(m_open); badges->addWidget(m_pause);
     m_more = iconButton("more", tr("Session actions"), "more");
-    for (auto *button : {m_fileManager, m_shell, m_open, m_pause, m_more}) {
+    for (auto *button : {m_copyReference, m_fileManager, m_shell, m_open, m_pause, m_more}) {
         button->setProperty("sessionHeaderAction", true);
         configureWorkspaceIconButton(button, button->property("glyph").toString(), button->toolTip(), m_dark);
     }
@@ -2562,11 +2567,13 @@ void SessionsWindow::renderDetails()
     if (!m_subagentId.isEmpty() && (!entry || (m_subagentConversation != m_details.value("conversation_id").toString(entry->session.conversationId))
         || !childRoster(*entry).contains(m_subagentId))) closeSubagent();
     if (!entry) {
+        m_copyReference->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     auto s = entry->session;
+    m_copyReference->setEnabled(entry->online && !s.runId.isEmpty());
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
         s.phase = m_details.value("phase").toString(s.phase); s.activity = m_details.value("activity").toString(s.activity);
@@ -3580,11 +3587,20 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     connect(groups->addAction(tr("New project…")), &QAction::triggered, this, [this, identity = original.identity]() { createGroup(identity); });
     m_sessionMenu->addSeparator();
     add(tr("Copy session name"), "contextCopyName", SessionMenuAction::CopyName, true);
+    add(tr("Copy session reference"), "contextCopyReference", SessionMenuAction::CopyReference, original.online && !target.runId.isEmpty());
     add(tr("Copy folder path"), "contextCopyFolder", SessionMenuAction::CopyFolder, !directory.isEmpty());
     m_sessionMenu->addSeparator();
     add(archived ? tr("Forget archived session…") : original.session.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"),
         "contextTerminateSession", SessionMenuAction::Terminate, available && (!archived || !target.archiveId.isEmpty()));
     m_sessionMenu->popup(position);
+}
+
+void SessionsWindow::copySessionReference(const Entry &entry, const QString &agent)
+{
+    const bool selectedTarget=entry.key==m_selectedKey;
+    const auto run=selectedTarget?m_details.value("run_id").toString(entry.session.runId):entry.session.runId;
+    const auto conversation=selectedTarget?m_details.value("conversation_id").toString(entry.session.conversationId):entry.session.conversationId;
+    m_client.requestSessionReference(entry.host,entry.session.name,run,conversation,entry.session.archiveId,agent);
 }
 
 void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuAction action)
@@ -3618,6 +3634,7 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     case SessionMenuAction::FolderShell:
         if (current.online && directory.startsWith('/')) emit folderShellRequested(current.host, directory); return;
     case SessionMenuAction::CopyName: emit copyTextRequested(current.session.name); return;
+    case SessionMenuAction::CopyReference: copySessionReference(current); return;
     case SessionMenuAction::CopyFolder: if (!directory.isEmpty()) emit copyTextRequested(directory); return;
     case SessionMenuAction::CopyCommand:
         if (current.session.state != "archived" || !current.session.archiveId.isEmpty())

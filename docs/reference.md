@@ -30,6 +30,27 @@ fresh session name; `--new -n review` uses your label and rejects an occupied na
 Arguments after `--` go to the agent or project wrapper. Arbitrary terminal commands
 can run through `hgs`; native lifecycle and Activity functions require an adapter.
 
+### Session references
+
+**Copy session reference** beside the desktop session title and in its context
+menu copies a `zerus://session?...` URI. Android offers the same action in the
+session toolbar and menu. It contains the stable computer UUID, a native machine
+name for routing, the session name and exact conversation identity; child and
+archive references include their explicit identities. It contains no credentials.
+
+Paste the reference into another conversation to identify its source. An agent
+can run `hgs inspect '<reference>'` to read its Activity and recorded messages.
+The CLI verifies the computer UUID, follows a renamed session by its conversation
+ID, and rejects cleared, forgotten or ambiguous bindings. A conversation reference
+survives resume into a new run; an unconfirmed first-message reference requires
+the original run. A configured peer matching the machine name routes through SSH;
+use `hgs @configured-alias inspect '<reference>'` when its alias differs. A URI
+alone never launches a session or sends input.
+
+`hgs [@host] reference <session> --json [--archive ID] [--agent ID]` returns the
+same URI and readable identity fields. Optional `--run ID --conversation ID`
+guards ensure a copy action still addresses the selected conversation.
+
 <a id="recovery"></a>
 
 ## Pause, resume and reboot
@@ -386,6 +407,10 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
+For Claude messages ending in a literal backslash, the paste includes a final
+newline so the single Enter submits the unchanged message instead of activating
+Claude's backslash-Enter line continuation. This is verified against native
+history; no second Enter is sent as an automatic retry.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue

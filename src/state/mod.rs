@@ -378,6 +378,45 @@ pub fn fork_session(
     )
 }
 
+pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Result<Value> {
+    if dsh::exists(name) {
+        if !archive.is_empty() { return Err("DeepSeek archives are unavailable".into()); }
+        return dsh::inspect(name, if agent.is_empty() { None } else { Some(agent) });
+    }
+    let archive = if archive.is_empty() { None } else { Some(archive) };
+    if agent.is_empty() { journal::inspection(name, 0, archive, false) }
+    else { subagents::inspection(name, agent, archive) }
+}
+
+pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+    let matches_reference = |record: &Value| {
+        string(record, "name").split('/').next() == reference.name.split('/').next()
+            && string(record, "archive_id") == reference.archive
+            && if reference.conversation.is_empty() {
+                string(record, "run_id") == reference.run && string(record, "conversation_id").is_empty()
+            } else { string(record, "conversation_id") == reference.conversation }
+    };
+    let name = {
+        let _guard = lock(None)?;
+        let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
+        if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); }
+        let mut matching = candidates.iter().filter(|record| matches_reference(record));
+        let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
+        if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
+        string(first, "name").to_owned()
+    };
+    let parent = reference_details(&name, &reference.archive, "")?;
+    if !matches_reference(&parent) { return Err("Session identity changed while resolving its reference".into()); }
+    let mut output = if reference.agent.is_empty() { parent }
+        else { reference_details(&name, &reference.archive, &reference.agent)? };
+    if !reference.agent.is_empty() && output["parent_conversation_id"].as_str() != Some(reference.conversation.as_str()) {
+        return Err("Parent conversation changed while resolving its child reference".into());
+    }
+    output["session_reference"] = json!({"machine_id":reference.machine,"host":reference.host,"original_name":reference.name,
+        "name":name,"conversation_id":reference.conversation,"agent_id":reference.agent});
+    Ok(output)
+}
+
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
     let Some((command, args)) = args.split_first() else {

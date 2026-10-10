@@ -6,6 +6,7 @@ mod macos_session;
 mod metrics;
 mod mobile_peers;
 mod native_ui;
+mod session_reference;
 mod platform;
 mod state;
 mod swarm;

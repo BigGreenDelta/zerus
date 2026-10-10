@@ -85,6 +85,7 @@ class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void copySessionReferencePreservesSelectionAndDraft();
     void updatesEntryOpensExactSettingsPage();
     void init() { QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
@@ -3050,6 +3051,25 @@ void TestSessionsWindow::sessionContextMenuSignalsAndKeyboard()
     QVERIFY(!action("contextTerminateSession")->isEnabled()); QVERIFY(action("contextCopyCommand")->isEnabled());
     action("contextCopyCommand")->trigger(); QCOMPARE(commands.size(), 2); QCOMPARE(commands[1][0].toString(), QString("mac"));
     QVERIFY(!action("contextCopyFolder")->isEnabled()); // Missing path is not guessed from a project label.
+}
+
+void TestSessionsWindow::copySessionReferencePreservesSelectionAndDraft()
+{
+    QTemporaryDir fixture;QVERIFY(fixture.isValid());const auto program=fixture.filePath("hgs");
+    QFile file(program);QVERIFY(file.open(QIODevice::WriteOnly));
+    const auto uri=QStringLiteral("zerus://session?machine=11111111-1111-4111-8111-111111111111&host=fixture&name=codex%2Fhgs%2Fdashboard&conversation=conversation-one&run=run");
+    file.write("#!/bin/sh\nif [ \"$1\" = reference ]; then printf '%s\\n' \"$@\" > \"$0.args\"; cat \"$0.reference\"; else exec '");
+    file.write(script().toUtf8());file.write("' \"$@\"; fi\n");file.close();
+    QVERIFY(file.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+    QFile response(program+".reference");QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(QJsonObject{{"uri",uri}}).toJson());response.close();
+    auto state=fleet();auto box=state.local();box.sessions[0].runId="run";box.sessions[0].conversationId="conversation-one";state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program);window.setFleet(state);window.show();window.showSession({},box.sessions[0].name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");composer->editor()->setPlainText("Keep this draft");
+    QSignalSpy copied(&window,&SessionsWindow::copyTextRequested),activated(&window,&SessionsWindow::sessionActivated);
+    auto *button=window.findChild<QPushButton *>("copySessionReferenceAction");QVERIFY(button);QVERIFY(button->isEnabled());button->click();
+    QTRY_COMPARE(copied.size(),1);QCOMPARE(copied[0][0].toString(),uri);QCOMPARE(activated.size(),0);QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
+    QFile args(program+".args");QVERIFY(args.open(QIODevice::ReadOnly));QCOMPARE(args.readAll(),QByteArray("reference\ncodex/hgs/dashboard\n--json\n--run\nrun\n--conversation\nconversation-one\n"));
+    box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(!button->isEnabled());
 }
 
 void TestSessionsWindow::activityMarkReadKeepsReadingPosition_data()
