@@ -19,7 +19,7 @@ from aiohttp import web
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_send
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle
+from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
 from .launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from .routes import RouteError, MAX_PEERS
 from .store import Store, digest
@@ -293,6 +293,9 @@ def validate_request(value):
             archive_id = text(payload["archive_id"], 36)
             if str(uuid.UUID(archive_id)) != archive_id:
                 raise web.HTTPBadRequest()
+        return
+    if op == "mark_read":
+        validate_mark_read(payload)
         return
     if op == "recovery_action":
         validate_recovery(payload,request_id)

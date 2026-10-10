@@ -13,6 +13,7 @@ import uuid
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from zerus_mobile.context import OPERATIONS
 from zerus_mobile.server import Config, PUSH_WORKER, create_app
 from zerus_mobile.store import Store, digest
 
@@ -308,6 +309,23 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await worker.deliver("fcm", "example-token", {"event_id": 1, "kind": "wake"}), (False, True))
         finally:
             worker.fcm = None
+
+    async def test_mark_read_is_exact_and_capability_gated(self):
+        value = self.command("mark_read")
+        value["payload"] = {"run_id": "example-run", "conversation_id": "example-conversation",
+                            "reply_id": "7:100.5", "attention_signature": "a" * 64}
+        await self.call("POST", "/v1/requests", value, expected=409)
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["mark_read"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        self.assertEqual((await self.call("POST", "/v1/requests", value, expected=202))["state"], "queued")
+        for change in ({"reply_id": 7}, {"attention_signature": "A" * 64}, {"attention_signature": "a" * 63},
+                       {"run_id": ""}, {"request_id": value["request_id"]}):
+            invalid = self.command("mark_read")
+            invalid["payload"] = {**value["payload"], **change}
+            await self.call("POST", "/v1/requests", invalid, expected=400)
+        delivered = await self.call("GET", "/v1/node/requests", node=True)
+        self.assertEqual(delivered["requests"][0]["payload"], value["payload"])
+        self.assertEqual(set((await self.call("GET", "/v1/capabilities"))["operations"]), OPERATIONS)
 
 
 class FilesystemTests(unittest.TestCase):

@@ -30,7 +30,7 @@ from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_send
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle
+from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read
 from .launch import catalog as project_catalog, validate as validate_launch
 from .launch import projects as launch_projects, project_choice
 from . import worktrees
@@ -293,6 +293,7 @@ class Connector:
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
+        self.read_supported = False
         self.capabilities_next_poll = 0.0
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
                                      errors=(ConnectorError, ValueError, RuntimeError, UnicodeError))
@@ -306,7 +307,8 @@ class Connector:
         return context
 
     async def native(self, argv: list[str], payload: dict | None = None,
-                     *, timeout: float | None = None, json_output: bool = True) -> object:
+                     *, timeout: float | None = None, json_output: bool = True,
+                     failure_json: bool = False) -> object:
         machine_id = LOCAL_MACHINE_GUARD.get()
         if machine_id is not None:
             payload = {"schema": 1, "target_machine_id": machine_id,
@@ -314,11 +316,12 @@ class Connector:
             argv = ["swarm", "__mobile-peer-local", "--json"]
         if argv and argv[0] == "worktrees":
             argv = ["__state", *argv]
-        return await self._native(argv, payload, timeout=timeout, json_output=json_output)
+        return await self._native(argv, payload, timeout=timeout, json_output=json_output,
+                                  failure_json=failure_json)
 
     async def _native(self, argv: list[str], payload: dict | None = None,
                       *, timeout: float | None = None, json_output: bool = True,
-                      max_output_bytes: int | None = None) -> object:
+                      max_output_bytes: int | None = None, failure_json: bool = False) -> object:
         stdin = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         if stdin is not None and len(stdin) > MAX_PAYLOAD + (4096 if argv[:2] in (["swarm", "mobile-peer"], ["swarm", "__mobile-peer-local"]) else 0):
             raise ConnectorError("native request exceeds size limit")
@@ -375,7 +378,8 @@ class Connector:
             if cancelled_during_spawn: raise asyncio.CancelledError()
             stdout, _, _, code = await asyncio.wait_for(asyncio.shield(joined) if mobile_create else joined, self.timeout if timeout is None else timeout)
             if oversized: raise ConnectorError("native output exceeds size limit")
-            if code != 0:
+            # `hgs read` answers an unknown session with JSON and exit status 1.
+            if code != 0 and not (failure_json and stdout.strip()):
                 raise ConnectorError("native command failed")
             if not json_output:
                 return stdout.decode("utf-8", errors="strict")
@@ -445,7 +449,7 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"})
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"})
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -464,6 +468,7 @@ class Connector:
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
+        self.read_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -476,6 +481,7 @@ class Connector:
             self.launch_supported = isinstance(help_text,str) and "--launch-id" in help_text
             self.project_launch_supported = isinstance(help_text,str) and "swarm assign-launch --json" in help_text
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
+            self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -572,6 +578,14 @@ class Connector:
             raise ConnectorError("session must match an exact local snapshot entry")
         if "archive_id" in request:
             raise ConnectorError("archive identity belongs only in inspect payload")
+        if operation == "mark_read":
+            if session not in self.sessions:
+                raise ConnectorError("session must match an exact nonarchived snapshot entry")
+            try:
+                validate_mark_read(request.get("payload"))
+            except ValueError as error:
+                raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
         if operation == "inspect":
             payload = request.get("payload", {})
             try:
@@ -748,6 +762,8 @@ class Connector:
                 raise ConnectorError("native exact launch-ID ABI is unavailable")
             if operation in worktrees.OPERATIONS and not self.worktree_supported:
                 raise ConnectorError("native mobile worktree ABI is unavailable")
+            if operation == "mark_read" and not self.read_supported:
+                raise ConnectorError("native shared read ABI is unavailable")
             if operation == "worktree_create":
                 from pathlib import PurePosixPath
                 destination = PurePosixPath(payload["destination"])
@@ -973,6 +989,10 @@ class Connector:
                     self.sessions.add(target["name"])
                     if operation == "rename" and target["name"] != session:
                         self.sessions.discard(session)
+            elif operation == "mark_read":
+                result = await self.native(["read", session, "--json"], payload, failure_json=True)
+                if not mark_read_result(result, payload):
+                    raise ConnectorError("native read acknowledgement did not match")
             elif operation in {"process_output", "process_stop"}:
                 argv = ["processes", session, "--output" if operation == "process_output" else "--stop", payload["process_id"],
                         "--run", payload["expected_run_id"], "--conversation", payload["expected_conversation_id"]]

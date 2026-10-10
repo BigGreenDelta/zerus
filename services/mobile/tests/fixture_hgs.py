@@ -250,7 +250,7 @@ def main():
     args = sys.argv[1:]
     if args[:2] == ["__state", "worktrees"]: args=args[1:]
     if args == ["--help"]:
-        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1")
+        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read")
         return
     if args == ["ls", "--json", "--local"]:
         summaries = [{key: value for key, value in row.items()
@@ -533,6 +533,23 @@ def main():
         persist(path, record)
         result = {"request_id": payload["request_id"], "status": "submitted", "run_id": record["run_id"],
                   "conversation_id": record["conversation_id"], "submitted_at": at if args[0] == "send" else time.time(), "text": payload.get("text", "")}
+    elif len(args) == 3 and args[0] == "read" and args[2] == "--json":
+        payload = json.load(sys.stdin)
+        row = next((row for row in [record, *states] if row["name"] == args[1] and row.get("state") != "archived"), None)
+        if row is None or fixture_config.get("read_not_found"):
+            print(json.dumps({"ok": False, "error": "not_found"}))
+            raise SystemExit(1)
+        current = {**row, **fixture_config.get("read_current", {})}
+        same = payload["run_id"] == row["run_id"] and payload["conversation_id"] == row["conversation_id"]
+        applied = {field: same and payload[field] is not None and payload[field] == current.get(field)
+                   for field in ("reply_id", "attention_signature")}
+        with (root / "mutations.jsonl").open("a") as output:
+            output.write(json.dumps({"operation": "read", "name": args[1], "payload": payload}) + "\n")
+        result = {"ok": True, "applied": applied, "read": {
+            "conversation_id": row["conversation_id"],
+            "reply_id": payload["reply_id"] if applied["reply_id"] else None,
+            "attention_signature": payload["attention_signature"] if applied["attention_signature"] else None,
+            "at": time.time()} if any(applied.values()) else None}
     else:
         raise SystemExit("unsupported fixture operation")
     if args and args[0] == "inspect":

@@ -329,3 +329,16 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('machine_id', calls[0])
         self.assertEqual(set(calls[1]), {'snapshot'})
         self.assertNotIn('gateway_one_hop', calls[1]['snapshot']['mobile_capabilities']['features'])
+
+    async def test_mark_read_reaches_only_the_selected_machine(self):
+        for peer in (True, False):
+            run = 'peer-run' if peer else 'local-run'
+            request = self.request('mark_read', peer=peer)
+            request['payload'] = {'run_id': run, 'conversation_id': 'peer-conversation' if peer else 'local-conversation',
+                                  'reply_id': 'reply-' + run, 'attention_signature': None}
+            result = await self.connector.execute(request)
+            self.assertEqual(result['state'], 'completed', result)
+            self.assertTrue(result['result']['applied']['reply_id'])
+        effects = [json.loads(row) for row in (self.root / 'native_effects.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['argv'], row['machine']) for row in effects if row['argv'][0] == 'read'],
+                         [(['read', 'codex/example', '--json'], PEER), (['read', 'codex/example', '--json'], LOCAL)])

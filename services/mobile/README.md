@@ -579,6 +579,16 @@ now preserves `not_before`; `scheduled` means the job was rescheduled, not that
 input was delivered. Durable UUID receipts prevent replay. Global recovery
 policies, archived targets and child recovery controls are excluded.
 
+`mark_read` targets one exact session and carries only `run_id`,
+`conversation_id`, `reply_id` and `attention_signature` (`null` for a field that
+is not being marked; the signature is lowercase hex SHA-256). The connector
+advertises it only when native help lists `read <session> --json` and runs
+`hgs read <session> --json` on the owning computer, locally or through the
+guarded peer route. The result is the native answer: `{"ok": true, "applied":
+…, "read": …}` or `{"ok": false, "error": "not_found"}`. Marks are idempotent
+and forward-only on the host, so a phone may send a newer mark under a new
+request ID; an existing request ID is never replayed.
+
 Synthetic paging QA uses `history_count` up to 5,000 for history pages while
 ordinary inspect remains capped at 500 fixture rows. Set `history_indexing:true`
 for a stable incomplete head, `history_gap:true` for permanent partial source

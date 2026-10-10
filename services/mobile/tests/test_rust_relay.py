@@ -96,5 +96,6 @@ for name in (
     'old_read_history_does_not_consume_mutation_tombstones', 'long_poll_rechecks_revocation',
     'heartbeat_events_baseline_transition_and_privacy', 'body_cap_nonfinite_and_poll_bounds',
     'async_question_fingerprints_add_change_remove', 'push_retired_unifiedpush_and_unavailable_fcm',
+    'mark_read_is_exact_and_capability_gated',
 ):
     setattr(RustHttpContracts, 'test_' + name, getattr(test_relay.RelayTests, 'test_' + name))
