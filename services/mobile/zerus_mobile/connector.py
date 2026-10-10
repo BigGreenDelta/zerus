@@ -384,9 +384,13 @@ class Connector:
             if not json_output:
                 return stdout.decode("utf-8", errors="strict")
             try:
-                return json.loads(stdout)
+                result = json.loads(stdout)
             except (ValueError, UnicodeError):
                 raise ConnectorError("native command returned invalid JSON") from None
+            # A failing exit carries only a failure answer, never a success receipt.
+            if code != 0 and not (isinstance(result, dict) and result.get("ok") is False):
+                raise ConnectorError("native command failed")
+            return result
         except asyncio.TimeoutError:
             raise ConnectorError("native command timed out") from None
         except OSError:

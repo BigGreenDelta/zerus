@@ -155,6 +155,12 @@ class MarkReadFixture(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((missing["state"], missing["result"]), ("completed", {"ok": False, "error": "not_found"}))
         self.assertEqual(len(self.writes()), 2)
 
+    async def test_success_receipt_requires_exit_status_zero(self):
+        self.config(read_current={"reply_id": "7:100.5"}, read_success_exit=1)
+        failed = await self.connector.execute(command(mark(attention_signature=None)))
+        self.assertEqual((failed["state"], failed["result"]), ("failed", None))
+        self.assertEqual(len(self.writes()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

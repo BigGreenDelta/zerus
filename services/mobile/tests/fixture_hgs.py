@@ -550,6 +550,10 @@ def main():
             "reply_id": payload["reply_id"] if applied["reply_id"] else None,
             "attention_signature": payload["attention_signature"] if applied["attention_signature"] else None,
             "at": time.time()} if any(applied.values()) else None}
+        if fixture_config.get("read_success_exit"):
+            # A broken native that prints a success receipt but fails.
+            print(json.dumps(result))
+            raise SystemExit(fixture_config["read_success_exit"])
     else:
         raise SystemExit("unsupported fixture operation")
     if args and args[0] == "inspect":
