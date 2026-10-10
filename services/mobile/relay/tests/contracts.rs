@@ -141,6 +141,45 @@ async fn claims_and_receipts_never_replay() {
     f.close().await;
 }
 #[tokio::test]
+async fn mark_read_is_read_class_and_pruned_like_reads() {
+    assert!(protocol::READS.contains(&"mark_read"));
+    assert!(protocol::READ_SQL.contains("'mark_read'"));
+    let f = Fixture::new().await;
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["mark_read"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut b = f.command("mark_read");
+    b["payload"] = json!({"run_id":"run","conversation_id":"conversation","reply_id":"7:100.5","attention_signature":null});
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let result = json!({"state":"completed","result":{"ok":true},"error":null});
+    let e = canonical(&result["result"]).unwrap();
+    f.store
+        .result(&f.node, s(&b, "request_id"), &result, Some(&e))
+        .await
+        .unwrap();
+    f.check_accounting().await;
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 3601.0, &b["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    // A pruned read identity is new again; a mutation would return its completed receipt.
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
 async fn expired_claims_and_revocation_are_terminal() {
     let f = Fixture::new().await;
     let b = f.command("send");
