@@ -44,6 +44,10 @@ public:
                           const QString &pendingEffort = {}, const QString &applyWhen = {});
     void setSettingsTerminalAvailable(bool available);
     bool setSending(const QString &key, bool preserveDraft = false);
+    // A later send awaits startup/compaction. Keep its payload visible and
+    // selectable, while locking edits. A restart restores an ordinary draft.
+    bool setWaitingToSend(const QString &key, const QString &reason);
+    bool isWaitingToSend(const QString &key) const { return m_waitingSends.contains(key); }
     bool draftMatches(const QString &key, const QString &text, const QList<MessageAttachment> &attachments) const;
     void deliveryFinished(const QString &key, bool ok, const QString &detail = {}, bool uncertain = false);
     void renameDraft(const QString &oldKey, const QString &newKey);
@@ -52,7 +56,7 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key); }
+    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key) && !isWaitingToSend(m_key); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -101,6 +105,7 @@ private:
 
     QHash<QString, Draft> m_drafts;
     QHash<QString, Draft> m_preservedDrafts;
+    QHash<QString, QString> m_waitingSends;
     QSet<QString> m_unsent;   // keys whose last reported hasDraft() was true
     ComposerDraftStore m_draftStore;
     QSet<QString> m_failedSaves;

@@ -453,6 +453,13 @@ output remains unsupported.
 Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
 abbreviations that match the verified launch directory. It remains answerable
 after the initial conversation is bound, until a turn starts.
+Claude's **Resume this conversation?** chooser also appears in Activity when a
+long conversation has gone cold, including between turns in a resident session.
+The card preserves the inactivity, context size and five-hour usage warning.
+**Resume** and **Start a new conversation** require an explicit choice; Zerus
+never dismisses this warning automatically. If the native unsent draft has focus,
+pick a row in Terminal first. Replies verify the exact run, conversation and full
+panel before each key, and uncertain delivery is never replayed.
 For Codex hooks, **Review hooks** opens the native browser in Terminal;
 **Trust all and continue** and **Continue without trusting** are explicit choices.
 Review input with an uncertain result is never retried automatically.
@@ -511,11 +518,16 @@ unconfirmed command does not reset counters.
 A stopped session offers **Start fresh…** instead, with the same confirmation, and
 keeps **Send** available: it asks whether to **Resume and send** with the full saved
 context or **Start fresh and send**, then delivers the unchanged draft once the new
-run accepts input. Editing the draft, switching sessions, a failed start, an
+run accepts input. Switching sessions, a failed start, an
 unexpected conversation or three minutes without readiness cancel that send and
 keep the draft.
 **Compact and continue** sends only after confirmed successful compaction with the same
 unedited draft; errors, cancellation or identity/draft changes cancel submission.
+While awaiting startup or compaction, **Waiting to send…** keeps the accepted text
+and attachments visible and locks edits. The field still supports selection and
+copy. **Cancel send** restores editing and keeps the complete draft; it cancels
+the automatic message, while startup or compaction continues. **Stop** interrupts
+the agent. A GUI restart keeps the draft without resuming automatic submission.
 Context metrics use native telemetry, without guessing a capacity from a model name.
 
 **Tasks & agents**, **Details** and **Worktrees** occupy the resizable inspector.

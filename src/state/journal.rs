@@ -362,6 +362,12 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     resume_input::enrich(record, &mut output, live_pane);
     provider_errors::enrich(record, &mut output, live_pane);
     if live_pane {
+        if let Some(question) = claude_resume::current(record) {
+            output["activity"] = json!("busy");
+            output["phase"] = json!("approval");
+            output["attention_id"] = question["question_id"].clone();
+            output["status_detail"] = json!("Claude is waiting for your conversation resume choice");
+        }
         if let Some(question) = claude_permission::current(record) {
             output["activity"] = json!("busy");
             output["phase"] = json!("approval");

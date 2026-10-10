@@ -89,6 +89,7 @@ private slots:
     void submittedCallbacksAndMetadataKeepExactIdentity();
     void submissionRecognitionKeepsUnconfirmedAnswers();
     void hookTrustRequiresAnExplicitChoice();
+    void claudeResumePreservesQuotaWarningAndExplicitChoice();
     void contentScaleEnlargesQuestionTextOnly();
     void preview();
 private:
@@ -230,6 +231,29 @@ void TestQuestionCard::submissionRecognitionKeepsUnconfirmedAnswers()
     unsupported=question;unsupported["source"]="other";QVERIFY(!fresh.hasSubmittedAnswer("local",unsupported));
     question.remove("answer_delivery");QVERIFY(fresh.hasSubmittedAnswer("local",question));
 
+}
+
+void TestQuestionCard::claudeResumePreservesQuotaWarningAndExplicitChoice()
+{
+    QuestionCard card; auto question = request("claude-resume:exact", "exact");
+    question["source"] = "claude_resume"; question["answer_transport"] = "claude_tui";
+    const QString warning = "This conversation has been inactive for 1h 25m and is 293.6k tokens long. Resuming it will use about 5% of your 5-hour usage limit.";
+    question["questions"] = QJsonArray{QJsonObject{{"id", "resume"}, {"question", "Resume this conversation?"},
+        {"body", warning}, {"allow_other", false}, {"options", QJsonArray{
+            QJsonObject{{"id", "resume"}, {"label", "Resume"}},
+            QJsonObject{{"id", "new_conversation"}, {"label", "Start a new conversation"},
+                {"description", "Claude can look this one up if you refer to it later"}}}}}};
+    card.setQuestion("claude/session", question); card.resize(700, 350); card.show();
+    QVERIFY(!submit(card)->isEnabled());
+    QVERIFY(!option(card, "resume")->isChecked()); QVERIFY(!option(card, "new_conversation")->isChecked());
+    QVERIFY(card.findChildren<QLineEdit *>("questionFreeText").isEmpty());
+    bool visibleWarning = false;
+    for (auto *label : card.findChildren<QLabel *>()) visibleWarning |= label->text().contains(warning);
+    QVERIFY(visibleWarning);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    option(card, "new_conversation")->click(); QVERIFY(submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    submit(card)->click(); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject()["selected_option_ids"].toArray(), QJsonArray{"new_conversation"});
 }
 
 void TestQuestionCard::hookTrustRequiresAnExplicitChoice()

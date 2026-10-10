@@ -3,6 +3,7 @@
 #include "ComposerToolbar.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QBuffer>
 #include <QEnterEvent>
 #include <QComboBox>
@@ -16,6 +17,7 @@
 #include <QFontInfo>
 #include <QFrame>
 #include <QImage>
+#include <QKeySequence>
 #include <QInputMethodEvent>
 #include <QLabel>
 #include <QListWidget>
@@ -114,6 +116,8 @@ private slots:
     void textLimitCountsUtf8Bytes();
     void failureAndUncertaintyPreserveDraft();
     void sendingHidesPayloadAndRestoresFailedBackgroundDelivery();
+    void waitingPayloadLocksEditsAndPreservesFocusAndSelection();
+    void waitingIntentRestoresAsAnEditableDraftAfterRestart();
     void backgroundSuccessDoesNotClearVisibleDraft();
     void renamePreservesDraft();
     void retryOfAnotherMessagePreservesDraftAndUncertainty();
@@ -223,6 +227,8 @@ void TestMessageComposer::storageFailureKeepsDraftAndBlocksDispatch()
     MessageComposer composer; composer.setSessionKey("one"); composer.setAvailability(true);
     composer.editor()->setPlainText("Still editable");
     QVERIFY(status(composer)->text().contains("not saved"));
+    QVERIFY(!composer.setWaitingToSend("one", "Waiting for compaction."));
+    QVERIFY(!composer.isWaitingToSend("one")); QVERIFY(!composer.editor()->isReadOnly());
     QVERIFY(!composer.setSending("one")); QVERIFY(!composer.editor()->isReadOnly());
     QCOMPARE(composer.editor()->toPlainText(), "Still editable");
     QVERIFY(blocker.remove()); composer.editor()->insertPlainText("X");
@@ -778,6 +784,59 @@ void TestMessageComposer::sendingHidesPayloadAndRestoresFailedBackgroundDelivery
     QVERIFY(composer.editor()->toPlainText().isEmpty());
     composer.deliveryFinished("arch/one", true);
     QVERIFY(composer.editor()->toPlainText().isEmpty());
+}
+
+void TestMessageComposer::waitingPayloadLocksEditsAndPreservesFocusAndSelection()
+{
+    Window window("arch/waiting"); auto &composer = *window.composer;
+    QList<Submission> submissions; observe(composer, submissions);
+    composer.editor()->setPlainText("Exact accepted message");
+    QVERIFY(composer.addAttachment("notes.txt", "text/plain", "original bytes"));
+    const auto accepted = composer.editor()->toPlainText();
+    auto *editor = composer.editor(); window.widget.activateWindow(); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    const QString reason = "Waiting for compaction. This exact message will be sent automatically. Cancel send to edit.";
+    QVERIFY(composer.setWaitingToSend("arch/waiting", reason));
+    QCOMPARE(QApplication::focusWidget(), editor); QVERIFY(editor->isEnabled()); QVERIFY(editor->isReadOnly());
+    QCOMPARE(editor->toPlainText(), accepted); QVERIFY(!composer.isSending("arch/waiting"));
+    QCOMPARE(sendButton(composer)->text(), QString("Waiting to send…")); QVERIFY(!sendButton(composer)->isEnabled());
+    QVERIFY(status(composer)->text().contains("exact message")); QVERIFY(!composer.canAttachFiles());
+    QVERIFY(!composer.addAttachment("extra.txt", "text/plain", "extra bytes"));
+    auto *remove = composer.findChild<QPushButton *>("removeAttachment"); QVERIFY(remove); QVERIFY(!remove->isEnabled());
+    QTest::keyClicks(editor, "accidental edit"); QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), accepted); QCOMPARE(submissions.size(), 0);
+    editor->selectAll(); QTest::keySequence(editor, QKeySequence(QKeySequence::Copy));
+    QCOMPARE(QApplication::clipboard()->text(), accepted);
+    QApplication::clipboard()->setText("replacement"); QTest::keySequence(editor, QKeySequence(QKeySequence::Paste));
+    QCOMPARE(editor->toPlainText(), accepted);
+    composer.setSessionKey("mac/other"); QVERIFY(!editor->isReadOnly()); editor->setPlainText("Separate draft");
+    composer.setSessionKey("arch/waiting"); QVERIFY(editor->isReadOnly()); QCOMPARE(editor->toPlainText(), accepted);
+    QTimer::singleShot(0, &composer, [&] {
+        auto *dialog = composer.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
+        QVERIFY(!dialog->findChild<QPushButton *>("restoreSavedDraft")->isEnabled()); dialog->reject();
+    });
+    composer.showSavedDrafts(); QCOMPARE(editor->toPlainText(), accepted);
+    composer.deliveryFinished("arch/waiting", false, "Pending send cancelled. Your draft is unchanged.");
+    QVERIFY(!editor->isReadOnly()); QVERIFY(composer.canAttachFiles()); QCOMPARE(sendButton(composer)->text(), QString("Send"));
+    QCOMPARE(editor->toPlainText(), accepted);
+    auto cursor = editor->textCursor(); cursor.movePosition(QTextCursor::End); editor->setTextCursor(cursor);
+    QTest::keyClicks(editor, " updated"); sendButton(composer)->click(); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(submissions[0].text, accepted + " updated"); QCOMPARE(submissions[0].attachments[0].data, QByteArray("original bytes"));
+}
+
+void TestMessageComposer::waitingIntentRestoresAsAnEditableDraftAfterRestart()
+{
+    {
+        MessageComposer composer; composer.setSessionKey("arch/pending");
+        composer.editor()->setPlainText("Recover after restart");
+        QVERIFY(composer.addAttachment("keep.txt", "text/plain", "accepted bytes"));
+        QVERIFY(composer.setWaitingToSend("arch/pending", "Waiting for the session to start."));
+    }
+    MessageComposer restored; restored.setSessionKey("arch/pending"); restored.setAvailability(true);
+    QCOMPARE(restored.editor()->toPlainText(), QString("[File #1] Recover after restart"));
+    QVERIFY(!restored.editor()->isReadOnly()); QVERIFY(!restored.isWaitingToSend("arch/pending"));
+    QCOMPARE(sendButton(restored)->text(), QString("Send"));
+    QList<Submission> submissions; observe(restored, submissions); sendButton(restored)->click();
+    QCOMPARE(submissions.size(), 1); QCOMPARE(submissions[0].attachments[0].data, QByteArray("accepted bytes"));
 }
 
 void TestMessageComposer::backgroundSuccessDoesNotClearVisibleDraft()

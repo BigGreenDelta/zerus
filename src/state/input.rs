@@ -213,6 +213,9 @@ fn checked_input(
     if !matches(&record, live()?.get(name)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
+    if claude_resume::current(&record).is_some() {
+        return Err("Claude is waiting for a conversation resume choice. Choose an option in Activity or Terminal before sending a message.".into());
+    }
     if claude_permission::current(&record).is_some() {
         return Err("Claude is waiting for a permission mode choice. Choose an option in Activity or Terminal before sending a message.".into());
     }

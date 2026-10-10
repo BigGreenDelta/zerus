@@ -1636,7 +1636,8 @@ else:print('{}')
     // A resume that reports another conversation never receives the draft.
     choose("resumeAndSend");send->click();QTRY_COMPARE(writes.size(),2);
     QCOMPARE(resumes().last(),QString(R"(["resume", "codex/website/navigation", "-d"])"));
-    QVERIFY(!send->isEnabled());QVERIFY(status->text().contains("Starting the session"));
+    QVERIFY(!send->isEnabled());QVERIFY(status->text().contains("Waiting for the session to start"));
+    QCOMPARE(send->text(), QString("Waiting to send…")); QVERIFY(composer->editor()->isReadOnly());
     QVERIFY(window.findChild<QPushButton *>("cancelCompactSend")->isVisible());
     setState("running","run-resumed","conversation-other");window.setFleet(state);
     details=QJsonObject{{"tracked",true},{"run_id","run-resumed"},{"conversation_id","conversation-other"},{"runtime_state","live"},
@@ -1689,6 +1690,11 @@ else:print('{}')
     QVERIFY(composer->findChild<QPushButton *>("sendMessage")->isEnabled());
     composer->findChild<QPushButton *>("sendMessage")->click();QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
+    QVERIFY(composer->editor()->isReadOnly()); QVERIFY(!composer->canAttachFiles());
+    QCOMPARE(composer->findChild<QPushButton *>("sendMessage")->text(), QString("Waiting to send…"));
+    QVERIFY(composer->findChild<QLabel *>("messageStatus")->text().contains("This exact message"));
+    QTest::keyClicks(composer->editor(), "should not change the accepted message");
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep until compacted"));
     QFile request(temp.filePath("compact-context.json"));QVERIFY(request.open(QIODevice::ReadOnly));const auto payload=QJsonDocument::fromJson(request.readAll()).object();
     const auto id=payload.value("request_id").toString();
     details["compact_context_request"]=QJsonObject{{"request_id",id},{"status","compacting"}};details["activity"]="busy";details["phase"]="compacting";apply();
@@ -1696,13 +1702,19 @@ else:print('{}')
     if(!qEnvironmentVariable("HGS_COMPACT_PREVIEW").isEmpty())QVERIFY(window.grab().save(qEnvironmentVariable("HGS_COMPACT_PREVIEW")));
     if(outcome=="draft")composer->editor()->setPlainText("Edited draft");
     if(outcome=="identity")details["conversation_id"]="another";
-    if(outcome=="cancel")window.findChild<QPushButton *>("cancelCompactSend")->click();
+    if(outcome=="cancel") {
+        window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
+        window.findChild<QPushButton *>("cancelCompactSend")->click();
+        QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(composer->canAttachFiles());
+        QCOMPARE(QApplication::focusWidget(), composer->editor());
+    }
     details["compact_context_request"]=QJsonObject{{"request_id",id},{"status",outcome=="draft"||outcome=="identity"||outcome=="cancel"?"completed":outcome}};
     details["activity"]="idle";details["phase"]="idle";apply();
     if(outcome=="completed") {
         QTRY_VERIFY(QFileInfo::exists(temp.filePath("send.json")));QFile sent(temp.filePath("send.json"));QVERIFY(sent.open(QIODevice::ReadOnly));
         const auto message=QJsonDocument::fromJson(sent.readAll()).object();QCOMPARE(message["text"].toString(),QString("Keep until compacted"));QCOMPARE(message["expected_compaction_id"].toString(),id);
-    } else {QTest::qWait(100);QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));QCOMPARE(composer->editor()->toPlainText(),outcome=="draft"?QString("Edited draft"):QString("Keep until compacted"));}
+    } else {QTest::qWait(100);QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));QCOMPARE(composer->editor()->toPlainText(),outcome=="draft"?QString("Edited draft"):QString("Keep until compacted"));
+        QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(!composer->isWaitingToSend(composer->sessionKey()));}
 }
 
 void TestSessionsWindow::sharedRecoverySyncCatchesUpOfflinePeer()

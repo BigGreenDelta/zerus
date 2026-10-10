@@ -5,6 +5,7 @@
 mod archive;
 mod claude_trust;
 mod claude_permission;
+mod claude_resume;
 mod claude_question;
 mod attachments;
 mod interrupt;

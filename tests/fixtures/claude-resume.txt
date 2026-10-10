@@ -1,0 +1,12 @@
+Earlier native conversation output
+
+────────────────────────────────────────
+ Resume this conversation?
+
+ This conversation has been inactive for 1h 25m and is 293.6k tokens long. Resuming it will
+ use about 5% of your 5-hour usage limit.
+
+ ❯ 1. Resume
+   2. Start a new conversation  Claude can look this one up if you refer to it later
+
+ Enter to confirm · Esc to resume

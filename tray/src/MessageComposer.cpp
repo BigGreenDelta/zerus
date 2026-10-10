@@ -345,7 +345,7 @@ void MessageComposer::setSuggestion(const QString &key, const QString &text, dou
     if (key == m_key) updatePlaceholder();
 }
 
-QString MessageComposer::suggestion() const { return m_suggestions.value(m_key).text; }
+QString MessageComposer::suggestion() const { return isWaitingToSend(m_key) ? QString() : m_suggestions.value(m_key).text; }
 
 void MessageComposer::updatePlaceholder()
 {
@@ -361,7 +361,7 @@ bool MessageComposer::requestInterrupt()
 
 bool MessageComposer::offerDraft(const QString &key, const QString &text)
 {
-    if (key.isEmpty() || text.trimmed().isEmpty()) return false;
+    if (key.isEmpty() || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
@@ -411,8 +411,22 @@ bool MessageComposer::saveDraft(const QString &key)
     return saved;
 }
 
+bool MessageComposer::setWaitingToSend(const QString &key, const QString &reason)
+{
+    if (key.isEmpty()) return false;
+    if (reason.isEmpty()) m_waitingSends.remove(key);
+    else {
+        if (isSending(key) || m_drafts.value(key).uncertain) return false;
+        if (!saveDraft(key)) { if (key == m_key) updateControls(); return false; }
+        m_waitingSends.insert(key, reason);
+    }
+    if (key == m_key) { if (!reason.isEmpty()) m_settingsPopup->hide(); updateControls(); updatePlaceholder(); }
+    return true;
+}
+
 bool MessageComposer::setSending(const QString &key, bool preserveDraft)
 {
+    m_waitingSends.remove(key);
     if(preserveDraft)m_preservedDrafts.insert(key,m_drafts.value(key));
     auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Sending…");
     if (!saveDraft(key)) {
@@ -433,6 +447,7 @@ bool MessageComposer::setSending(const QString &key, bool preserveDraft)
 
 void MessageComposer::deliveryFinished(const QString &key, bool ok, const QString &detail, bool uncertain)
 {
+    m_waitingSends.remove(key);
     if(m_preservedDrafts.contains(key)) {
         m_drafts[key]=m_preservedDrafts.take(key);
         saveDraft(key);
@@ -515,7 +530,7 @@ void MessageComposer::attachFile(const QString &path)
 
 bool MessageComposer::addAttachment(const QString &name, const QString &mime, const QByteArray &data)
 {
-    if (m_key.isEmpty() || isSending(m_key)) return false;
+    if (!canAttachFiles()) return false;
     auto &draft = m_drafts[m_key]; qsizetype total = data.size();
     for (const auto &attachment : draft.attachments) total += attachment.data.size();
     if (draft.attachments.size() >= MaxAttachments) { showError(tr("Attach up to 8 files per message.")); return false; }
@@ -582,7 +597,7 @@ void MessageComposer::rebuildAttachments()
 
 void MessageComposer::removeAttachment(int index)
 {
-    auto &current = m_drafts[m_key]; if (current.sending || index < 0 || index >= current.attachments.size()) return;
+    auto &current = m_drafts[m_key]; if (current.sending || isWaitingToSend(m_key) || index < 0 || index >= current.attachments.size()) return;
     QWidget *focus = QApplication::focusWidget();
     const bool keepFocus = focus && focus->objectName() == "removeAttachment" && m_attachmentList->isAncestorOf(focus);
     const auto reference = current.attachments.takeAt(index).reference;
@@ -667,23 +682,28 @@ void MessageComposer::updateControls()
     const auto draft = m_drafts.value(m_key);
     const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
     const bool tooLong = draft.text.toUtf8().size() > MaxTextBytes;
+    const bool waiting = isWaitingToSend(m_key);
+    const bool locked = draft.sending || waiting;
     // Disabling a focused editor makes Qt focus another action (often Stop).
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
-    m_editor->setReadOnly(draft.sending);
-    m_attach->setEnabled(!m_key.isEmpty() && !draft.sending);
-    for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!draft.sending);
-    m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && !tooLong && !draft.sending && !draft.uncertain);
-    m_send->setText(draft.sending ? tr("Sending…") : tr("Send"));
-    m_retry->setVisible(draft.uncertain && !draft.sending);
-    m_settings->setEnabled(!m_key.isEmpty() && !draft.sending);
+    m_editor->setReadOnly(locked);
+    m_editor->setToolTip(waiting ? m_waitingSends.value(m_key) : QString());
+    m_editor->setAccessibleDescription(waiting ? m_waitingSends.value(m_key) : QString());
+    m_attach->setEnabled(!m_key.isEmpty() && !locked);
+    for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
+    m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && !tooLong && !locked && !draft.uncertain);
+    m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
+    m_retry->setVisible(draft.uncertain && !locked);
+    m_settings->setEnabled(!m_key.isEmpty() && !locked);
     if (m_settingsPopup->isVisible()) updateSettingsApply();
-    QString status = draft.storageError.isEmpty() ? draft.notice : draft.storageError;
+    QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
     // An available composer may still explain what Send will do first.
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_available || !m_unavailableReason.isEmpty() ? m_unavailableReason
         : hasContent ? tr("Draft saved locally. Enter to send; Shift+Enter for a new line") : tr("Enter to send; Shift+Enter for a new line");
     m_status->setText(status); m_status->setToolTip(status);
-    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(draft.error || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
+    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
 }
 
 void MessageComposer::showSavedDrafts()
@@ -723,12 +743,12 @@ void MessageComposer::showSavedDrafts()
         preview->setPlainText(selected.text);
         detail->setText(selected.storageError.isEmpty() ? tr("%1 attachment(s). %2").arg(selected.attachments.size()).arg(selected.notice) : selected.storageError);
         copy->setEnabled(item && !selected.text.isEmpty());
-        restore->setEnabled(item && !target.isEmpty() && !isSending(target) && selected.storageError.isEmpty());
+        restore->setEnabled(item && !target.isEmpty() && !isSending(target) && !isWaitingToSend(target) && selected.storageError.isEmpty());
     });
     connect(copy, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(selected.text); });
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
-        if (m_key != target || target.isEmpty() || isSending(target)) return;
+        if (m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target)) return;
         const auto current = m_drafts.value(target);
         if ((!current.text.isEmpty() || !current.attachments.isEmpty())
             && list->currentItem()->data(Qt::UserRole).toString() != target) {
@@ -736,7 +756,7 @@ void MessageComposer::showSavedDrafts()
                 tr("Replace the unsent draft in %1 with the selected saved draft?").arg(QString(target).replace('\n', " / ")),
                 QMessageBox::Ok | QMessageBox::Cancel, &dialog);
             confirm.setObjectName("replaceDraftConfirm"); confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::Cancel);
-            if (confirm.exec() != QMessageBox::Ok || m_key != target || isSending(target)) return;
+            if (confirm.exec() != QMessageBox::Ok || m_key != target || isSending(target) || isWaitingToSend(target)) return;
         }
         selected.label.clear(); selected.formState = {};
         m_drafts[target] = selected; saveDraft(target);

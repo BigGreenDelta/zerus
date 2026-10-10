@@ -656,13 +656,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     auto *toolbar=m_composer->toolbar();
     m_compactCancel = new QPushButton(tr("Cancel send")); m_compactCancel->setObjectName("cancelCompactSend");
-    m_compactCancel->setToolTip(tr("Keep the draft without sending it automatically. Use Stop to interrupt the agent."));
+    m_compactCancel->setToolTip(tr("Cancel the pending send and unlock the message for editing. Compaction or startup continues; use Stop to interrupt the agent."));
     m_compactCancel->setAutoDefault(false); m_compactCancel->setFixedHeight(20);
     m_compactCancel->setStyleSheet(QStringLiteral("QPushButton { min-height: 20px; max-height: 20px; padding: 0 6px; margin: 0; border: none; background: transparent; } QPushButton:hover { text-decoration: underline; }"));
     m_compactCancel->hide();
     connect(m_compactCancel,&QPushButton::clicked,this,[this] {
         cancelCompactContinuation(tr("Pending send cancelled. Your draft is unchanged."));
-        cancelStartContinuation(tr("Pending send cancelled. Your draft is unchanged.")); renderDetails();
+        cancelStartContinuation(tr("Pending send cancelled. Your draft is unchanged."));
+        if (m_composer->isInputVisible()) m_composer->editor()->setFocus(Qt::OtherFocusReason);
+        renderDetails();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
         if (!m_compact.request || id != m_compact.request) return;
@@ -2942,8 +2944,8 @@ void SessionsWindow::applyQueuedModelSettings()
 
 QString SessionsWindow::messageBlockReason(const Entry &entry) const
 {
-    if (entry.key == m_startSend.key) return tr("Starting the session. Your message is sent when the agent is ready; editing it cancels the send.");
-    if (entry.key == m_compact.key) return tr("Compacting context before sending. Your draft stays here; you can cancel the pending send.");
+    if (entry.key == m_startSend.key) return tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit.");
+    if (entry.key == m_compact.key) return tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit.");
     if (entry.key == m_clearKey && m_clearRequest) return tr("Wait for the context reset to finish. Your draft stays here.");
     if (isTerminating(entry)) return tr("The session is terminating. Your draft stays here.");
     if (entry.key == m_settingsKey && m_settingsRequest) return tr("Wait for the model settings change to finish.");
@@ -3046,6 +3048,7 @@ void SessionsWindow::continueAfterCompact()
     }
     if (status!="completed" || m_details.value("phase")!="idle" || m_details.value("activity")!="idle") return;
     const auto pending=m_compact; m_compact={};
+    m_composer->setWaitingToSend(pending.key, {});
     sendMessage(pending.key,pending.text,pending.attachments,pending.retryId,pending.commandId);
 }
 
@@ -3134,6 +3137,7 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
         showNotice(tr("The session changed. Your draft was kept without sending."), true); return;
     }
     if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
+    if (!m_composer->setWaitingToSend(key, tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."))) return;
     m_startSend = {key, entry->host, entry->session.name, entry->session.runId, entry->session.conversationId,
         text, attachments, startFresh, QDateTime::currentMSecsSinceEpoch()};
     m_pending = true; m_restoreKey.clear();
@@ -3169,6 +3173,7 @@ void SessionsWindow::continueAfterStart()
     }
     const auto pending = m_startSend; m_startSend = {};
     if (!messageBlockReason(*entry).isEmpty()) { m_startSend = pending; return; }
+    m_composer->setWaitingToSend(pending.key, {});
     sendMessage(pending.key, pending.text, pending.attachments, {}, {}, true);
 }
 
@@ -3198,11 +3203,13 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=runId||m_details.value("conversation_id")!=conversationId)return;
         if(dialog.clickedButton()==clear){clearContext();return;}
         if(dialog.clickedButton()==compact) {
+            if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
+            if (!m_composer->setWaitingToSend(key, tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."))) return;
             m_compact = {}; m_compact.key=key; m_compact.run=runId; m_compact.conversation=conversationId;
             m_compact.text=text; m_compact.attachments=attachments; m_compact.retryId=retryId;
             m_compact.started=QDateTime::currentMSecsSinceEpoch();
             m_compact.request=m_client.requestCompactContext(host,name,runId,conversationId);
-            showNotice(tr("Compacting context before sending. Your draft stays here.")); renderDetails(); return;
+            renderDetails(); return;
         }
         const auto currentProblem=messageBlockReason(*entry);if(!currentProblem.isEmpty()){showNotice(currentProblem,true);return;}
     }
