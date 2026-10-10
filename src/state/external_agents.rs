@@ -11,7 +11,8 @@ struct Caller {
 
 fn native_caller(argv: &[String]) -> Option<Caller> {
     let executable = Path::new(argv.first()?).file_name()?.to_str()?;
-    let offset = if executable == "node" || executable.starts_with("python") { 1 } else { 0 };
+    // macOS framework builds run python3 scripts as .../Python.app/Contents/MacOS/Python.
+    let offset = if executable == "node" || executable.to_ascii_lowercase().starts_with("python") { 1 } else { 0 };
     let name = Path::new(argv.get(offset)?).file_name()?.to_str()?;
     let provider = match name {
         "codex" | "codex.exe" | "codex.js" => "codex",
@@ -228,6 +229,14 @@ mod tests {
         ] {
             assert_eq!(native_caller(&argv.into_iter().map(str::to_owned).collect::<Vec<_>>()).unwrap().headless, headless);
         }
+    }
+
+    #[test]
+    fn macos_framework_python_hosts_agents() {
+        // macOS ps reports a python3 shebang script under the framework executable.
+        let argv = ["/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python",
+            "/opt/bin/claude"].map(str::to_owned);
+        assert_eq!(native_caller(&argv).unwrap().provider, "claude");
     }
 
     #[test]
