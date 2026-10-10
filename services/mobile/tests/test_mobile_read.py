@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
 
-from zerus_mobile.connector import Connector
-from zerus_mobile.context import OPERATIONS, mark_read_result, validate_mark_read
+from zerus_mobile.connector import MUTATIONS, Connector
+from zerus_mobile.context import OPERATIONS, READ_OPERATIONS, READ_SQL, mark_read_result, validate_mark_read
 from zerus_mobile.server import validate_request
 
 NAME = "codex/example/mobile"
@@ -105,6 +105,19 @@ class MarkReadConnector(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.connector, "native", AsyncMock(return_value=help_text)):
                 await self.connector.probe_capabilities()
             self.assertIs(self.connector.read_supported, supported)
+
+    async def test_old_native_snapshot_omits_mark_read(self):
+        old_help = "hgs session-action <session> --json scoped native lifecycle action"
+        async def native(argv, *args, **kwargs):
+            return old_help if argv == ["--help"] else {"sessions": []}
+        with patch.object(self.connector, "native", AsyncMock(side_effect=native)):
+            snapshot = await self.connector.snapshot()
+        self.assertNotIn("mark_read", snapshot["mobile_capabilities"]["operations"])
+
+    def test_mark_read_is_read_class(self):
+        self.assertIn("mark_read", READ_OPERATIONS)
+        self.assertNotIn("mark_read", MUTATIONS)
+        self.assertIn("'mark_read'", READ_SQL)
 
 
 class MarkReadFixture(unittest.IsolatedAsyncioTestCase):

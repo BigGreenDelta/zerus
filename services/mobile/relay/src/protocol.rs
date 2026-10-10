@@ -17,9 +17,10 @@ pub const READS: &[&str] = &[
     "catalog",
     "dirs",
     "worktrees",
+    "mark_read",
 ];
 pub const READ_SQL: &str =
-    "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees')";
+    "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
 pub const OPERATIONS: &[&str] = &[
     "answer",

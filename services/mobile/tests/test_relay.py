@@ -190,6 +190,20 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         # Repeating an expired inspect is safe: it cannot mutate native agents.
         await self.call("POST", "/v1/requests", command, expected=202)
 
+    async def test_mark_read_is_read_class_and_pruned_like_reads(self):
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["mark_read"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        command = self.command("mark_read")
+        command["payload"] = {"run_id": "example-run", "conversation_id": "example-conversation",
+                              "reply_id": "7:100.5", "attention_signature": None}
+        await self.call("POST", "/v1/requests", command, expected=202)
+        with self.store.db:
+            self.store.db.execute("UPDATE requests SET state='completed',updated=? WHERE id=?", (time.time() - 3601, command["request_id"]))
+        self.store.maintain()
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (command["request_id"],)).fetchone())
+        # Marks are idempotent and forward-only, so a pruned identity may be repeated.
+        await self.call("POST", "/v1/requests", command, expected=202)
+
     async def test_long_poll_rechecks_revocation(self):
         task = asyncio.create_task(self.client.get("/v1/node/requests?wait=1", headers=self.headers(node=True)))
         await asyncio.sleep(0.05)

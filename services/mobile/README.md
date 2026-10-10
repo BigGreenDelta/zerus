@@ -587,7 +587,9 @@ advertises it only when native help lists `read <session> --json` and runs
 guarded peer route. The result is the native answer: `{"ok": true, "applied":
 …, "read": …}` or `{"ok": false, "error": "not_found"}`. Marks are idempotent
 and forward-only on the host, so a phone may send a newer mark under a new
-request ID; an existing request ID is never replayed.
+request ID; an existing request ID is never resubmitted or executed again
+(the journal replays its receipt). The operation is read-class, so the relay
+prunes it within the read retention window like `inspect`.
 
 Synthetic paging QA uses `history_count` up to 5,000 for history pages while
 ordinary inspect remains capped at 500 fixture rows. Set `history_indexing:true`
