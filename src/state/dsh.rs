@@ -570,6 +570,18 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
         "prompt":outline.map(|v|v["prompt"].clone()),"activity_detail":outline.map(|v|v["response"].clone()),
         "reply_id":reply.map(|v|format!("dsh-turn-{}",v["seq"].as_u64().unwrap_or(0))),"reply_at":if reply.is_some(){row["updatedAt"].as_f64().unwrap_or(0.0)/1000.0}else{0.0},
         "native_ui_available":true,"settings_change_supported":alive,"send_available":alive && !auth_required && record["permissions_pending"] != true});
+    if pending {
+        // Native question IDs distinguish one request from the next for read
+        // marks and notifications; their generation-bound hashes do not.
+        let ids: Vec<&str> = inspected["pendingQuestions"]
+            .as_array()
+            .or(row["pendingQuestions"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|q| q["id"].as_str())
+            .collect();
+        value["attention_id"] = json!(format!("dsh_question:{}", ids.join("\n")));
+    }
     if record["permissions_pending"] == true {
         value["phase"] = json!("error");
         value["activity"] = json!("attention");
@@ -1248,5 +1260,21 @@ mod provider_failure_tests {
         assert_eq!(native_events(&records).last().unwrap()["type"], "Stop");
         records[1]["event"]["data"]["reason"] = json!({"kind":"max-tokens"});
         assert_eq!(latest_failure(&records)["error_kind"], "context_limit");
+    }
+}
+
+#[cfg(test)]
+mod question_identity_tests {
+    use super::*;
+    #[test]
+    fn pending_native_questions_have_an_exact_attention_identity() {
+        let record = json!({"name":"dsh/test/session","conversation_id":"session-one","run_id":"run"});
+        let row = json!({"agentAvailable":true,"running":false});
+        let first = normalize(&record, &row, &json!({"pendingQuestions":[{"id":"question-1"}]}));
+        assert_eq!(first["phase"], "input");
+        assert_eq!(first["attention_id"], "dsh_question:question-1");
+        let next = normalize(&record, &row, &json!({"pendingQuestions":[{"id":"question-2"}]}));
+        assert_ne!(next["attention_id"], first["attention_id"]);
+        assert!(normalize(&record, &row, &json!({}))["attention_id"].is_null());
     }
 }
