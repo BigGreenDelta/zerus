@@ -657,7 +657,15 @@ are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 `compact_context`, `clear_context`, `send_now`, `settings`, `process_output`
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
 `terminal_input`, `history`, `catalog`, `dirs`, `launch`, `worktrees`,
-`worktree_create`, `recovery_action` and `mark_read`.
+`worktree_create`, `recovery_action`, `mark_read` and `set_mobile_delivery`.
+
+`set_mobile_delivery` is computer-scoped: an empty session and payload
+`{value}` with `immediate`, `away`, `away_5`, `away_10`, `away_15` or `away_30`.
+The gateway connector runs `hgs swarm preference set mobile_delivery VALUE --json`
+and returns its `{ok, mobile_delivery}` object. Only a gateway whose hgs lists that
+command advertises the operation; direct peers never do. Snapshots report the
+current value as `preferences.mobile_delivery`, and each machine's desktop activity
+as `desktop_presence`.
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 

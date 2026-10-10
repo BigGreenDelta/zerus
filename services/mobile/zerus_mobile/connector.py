@@ -30,7 +30,7 @@ from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_send
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read
+from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
 from .launch import catalog as project_catalog, validate as validate_launch
 from .launch import projects as launch_projects, project_choice
 from . import worktrees
@@ -294,6 +294,7 @@ class Connector:
         self.project_launch_supported = False
         self.worktree_supported = False
         self.read_supported = False
+        self.preference_supported = False
         self.capabilities_next_poll = 0.0
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
                                      errors=(ConnectorError, ValueError, RuntimeError, UnicodeError))
@@ -453,7 +454,7 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"})
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -473,6 +474,7 @@ class Connector:
         self.project_launch_supported = False
         self.worktree_supported = False
         self.read_supported = False
+        self.preference_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -486,6 +488,7 @@ class Connector:
             self.project_launch_supported = isinstance(help_text,str) and "swarm assign-launch --json" in help_text
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
+            self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -576,6 +579,11 @@ class Connector:
             try: validate_launch(operation,request.get("payload"),request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
             return operation,session,request["payload"]
+        if operation in COMPUTER_OPERATIONS:
+            if session != "": raise ConnectorError("the delivery setting uses no session target")
+            try: validate_mobile_delivery(request.get("payload"))
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
         if (not isinstance(session, str) or not session or len(session) > 512
                 or session.startswith(("-", "@")) or "@" in session
                 or any(ord(c) < 32 or ord(c) == 127 for c in session)):
@@ -764,6 +772,8 @@ class Connector:
                         raise ConnectorError("terminal input expired before native delivery")
             if operation in LAUNCH_OPERATIONS and not self.launch_supported:
                 raise ConnectorError("native exact launch-ID ABI is unavailable")
+            if operation in COMPUTER_OPERATIONS and (not self.preference_supported or getattr(self, "fleet", None) is None):
+                raise ConnectorError("the shared delivery setting is changed on the gateway computer with a current hgs")
             if operation in worktrees.OPERATIONS and not self.worktree_supported:
                 raise ConnectorError("native mobile worktree ABI is unavailable")
             if operation == "mark_read" and not self.read_supported:
@@ -993,6 +1003,10 @@ class Connector:
                     self.sessions.add(target["name"])
                     if operation == "rename" and target["name"] != session:
                         self.sessions.discard(session)
+            elif operation == "set_mobile_delivery":
+                result = await self.native(["swarm", "preference", "set", "mobile_delivery", payload["value"], "--json"], timeout=10)
+                if not isinstance(result, dict) or result.get("ok") is not True or result.get("mobile_delivery") != payload["value"]:
+                    raise ConnectorError("native delivery setting acknowledgement did not match")
             elif operation == "mark_read":
                 result = await self.native(["read", session, "--json"], payload, failure_json=True)
                 if not mark_read_result(result, payload):

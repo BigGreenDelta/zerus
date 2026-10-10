@@ -991,3 +991,37 @@ async fn mark_read_payload_is_exact_and_capability_gated() {
         .any(|v| v == "mark_read"));
     f.close().await;
 }
+
+#[tokio::test]
+async fn mobile_delivery_is_computer_scoped_and_capability_gated() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let b = json!({"request_id":id,"computer_id":f.node.id,"operation":"set_mobile_delivery","session":"","payload":{"value":"away_10"}});
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["set_mobile_delivery"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    assert!(protocol::OPERATIONS.contains(&"set_mobile_delivery"));
+    for (field, value) in [
+        ("session", json!("codex/example/tag")),
+        ("payload", json!({"value":"later"})),
+        ("payload", json!({})),
+        ("payload", json!({"value":"away","request_id":id})),
+    ] {
+        let mut invalid = b.clone();
+        invalid["request_id"] = json!(Uuid::new_v4().to_string());
+        invalid[field] = value;
+        assert!(matches!(
+            zerus_relay::store::Submission::new(invalid),
+            Err(e) if e.0.as_u16() == 400
+        ));
+    }
+    f.close().await;
+}

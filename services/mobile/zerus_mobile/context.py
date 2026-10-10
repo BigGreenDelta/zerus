@@ -6,12 +6,20 @@ CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clea
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
 TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
 LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktree_create"})
-OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
+MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
+OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
 READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read"})
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"
 CAPABILITY_OPERATIONS = OPERATIONS - {"inspect", "send", "answer", "interrupt"}
 IDENTITY_FIELDS = frozenset({"request_id", "expected_run_id", "expected_conversation_id"})
+
+
+def validate_mobile_delivery(payload):
+    """The shared delivery choice targets the gateway computer and carries only its value."""
+    if not isinstance(payload, dict) or set(payload) != {"value"} or payload["value"] not in MOBILE_DELIVERY:
+        raise ValueError("invalid phone notification timing")
 
 
 def validate_context(payload, request_id):

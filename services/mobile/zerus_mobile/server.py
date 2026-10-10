@@ -19,7 +19,7 @@ from aiohttp import web
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_send
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
+from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
 from .launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from .routes import RouteError, MAX_PEERS
 from .store import Store, digest
@@ -279,13 +279,17 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise web.HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] in LAUNCH_OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
     if op in LAUNCH_OPERATIONS:
         if value["session"] != "": raise ValueError("catalog/launch use no existing session target")
         validate_launch(op,payload,request_id)
+        return
+    if op in COMPUTER_OPERATIONS:
+        if value["session"] != "": raise ValueError("the delivery setting uses no session target")
+        validate_mobile_delivery(payload)
         return
     if op == "inspect":
         validate_inspect(payload)

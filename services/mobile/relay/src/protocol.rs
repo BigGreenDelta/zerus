@@ -22,6 +22,16 @@ pub const READS: &[&str] = &[
 pub const READ_SQL: &str =
     "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
+/// Computer-scoped: no session, delivered to the gateway computer itself.
+pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
+pub const MOBILE_DELIVERY: &[&str] = &[
+    "immediate",
+    "away",
+    "away_5",
+    "away_10",
+    "away_15",
+    "away_30",
+];
 pub const OPERATIONS: &[&str] = &[
     "answer",
     "archive",
@@ -45,6 +55,7 @@ pub const OPERATIONS: &[&str] = &[
     "resume",
     "send",
     "send_now",
+    "set_mobile_delivery",
     "settings",
     "terminal_input",
     "terminal_snapshot",
@@ -145,12 +156,21 @@ pub fn request(v: &Value) -> Result<()> {
     if !p.is_object() {
         return Err(Error::BAD);
     }
-    text(&v["session"], 1024, LAUNCH.contains(&op))?;
+    text(
+        &v["session"],
+        1024,
+        LAUNCH.contains(&op) || COMPUTER.contains(&op),
+    )?;
     if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
         launch(op, p, id)?;
+    } else if COMPUTER.contains(&op) {
+        fields(p, &["value"], &[])?;
+        if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
+            return Err(Error::BAD);
+        }
     } else if op == "inspect" {
         fields(
             p,

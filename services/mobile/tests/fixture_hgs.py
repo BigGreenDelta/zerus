@@ -250,12 +250,13 @@ def main():
     args = sys.argv[1:]
     if args[:2] == ["__state", "worktrees"]: args=args[1:]
     if args == ["--help"]:
-        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read")
+        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read\nhgs swarm preference set mobile_delivery VALUE --json")
         return
     if args == ["ls", "--json", "--local"]:
         summaries = [{key: value for key, value in row.items()
                       if key not in ("events", "provider_messages", "pending_questions", "attachment_messages")} for row in [record, *states] if not row.get("fixture_forgotten")]
-        result = {"host": "Integration fixture", "ok": True, "projects": {}, "sessions": summaries}
+        result = {"host": "Integration fixture", "ok": True, "projects": {}, "sessions": summaries,
+                  "preferences": json.loads((root / "preferences.json").read_text()) if (root / "preferences.json").exists() else {"mobile_delivery": "away"}}
     elif args == ["swarm", "get"]:
         node_id = "11111111-1111-4111-8111-111111111111"
         result = {"schema": 1, "initialized": True, "node_id": node_id,
@@ -284,6 +285,10 @@ def main():
                     if not any(folder["id"] == placement["folder_id"] for folder in group["folders"]):
                         group["folders"].append({"id": placement["folder_id"], "machine_id": node_id,
                             "machine_name": "Integration fixture", "name": "Added folder", "path": placement["directory"]})
+    elif args[:4] == ["swarm", "preference", "set", "mobile_delivery"] and len(args) == 6 and args[5] == "--json":
+        assert args[4] in ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
+        (root / "preferences.json").write_text(json.dumps({"mobile_delivery": args[4]}))
+        result = {"ok": True, "mobile_delivery": args[4]}
     elif args == ["swarm", "assign-launch", "--json"]:
         payload = json.load(sys.stdin)
         created = next(row for row in [record, *states] if row["name"] == payload["name"])

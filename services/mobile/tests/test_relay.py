@@ -341,6 +341,21 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered["requests"][0]["payload"], value["payload"])
         self.assertEqual(set((await self.call("GET", "/v1/capabilities"))["operations"]), OPERATIONS)
 
+    async def test_set_mobile_delivery_request_validation(self):
+        value = {"request_id": str(uuid.uuid4()), "computer_id": self.node["node_id"],
+                 "operation": "set_mobile_delivery", "session": "", "payload": {"value": "away_10"}}
+        self.assertIn("set_mobile_delivery", (await self.call("GET", "/v1/capabilities"))["operations"])
+        await self.call("POST", "/v1/requests", value, expected=409)
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["set_mobile_delivery"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        self.assertEqual((await self.call("POST", "/v1/requests", value, expected=202))["state"], "queued")
+        delivered = (await self.call("GET", "/v1/node/requests", node=True))["requests"][0]
+        self.assertEqual((delivered["operation"], delivered["session"], delivered["payload"]),
+                         ("set_mobile_delivery", "", {"value": "away_10"}))
+        for change in ({"session": "codex/project/deep/tag"}, {"payload": {"value": "later"}}, {"payload": {}},
+                       {"payload": {"value": "away", "request_id": value["request_id"]}}):
+            await self.call("POST", "/v1/requests", {**value, "request_id": str(uuid.uuid4()), **change}, expected=400)
+
 
 class FilesystemTests(unittest.TestCase):
     def test_private_database_and_no_parent_chmod(self):
