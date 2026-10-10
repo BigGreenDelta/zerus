@@ -1,0 +1,3 @@
+/* Dock, Finder, Spotlight, System Settings and the application menu. */
+"CFBundleDisplayName" = "Zerus";
+"CFBundleName" = "Zerus";

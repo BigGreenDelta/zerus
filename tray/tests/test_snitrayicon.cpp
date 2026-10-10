@@ -14,8 +14,9 @@ void TestSniTrayIcon::primaryClickOpensManager()
 {
     QCoreApplication::setApplicationName("hgs-tray");
     SniTrayIcon icon;
-    QGuiApplication::setApplicationDisplayName("hgs zerus");
+    QGuiApplication::setApplicationDisplayName("Zerus");
     QCOMPARE(icon.item().id(), QString("hgs-tray"));
+    QCOMPARE(icon.item().title(), QString("Zerus"));
     QVERIFY(!icon.item().isMenu());
     int activations = 0;
     icon.setActivationHandler([&]() { ++activations; });

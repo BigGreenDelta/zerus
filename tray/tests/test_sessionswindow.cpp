@@ -3952,7 +3952,7 @@ void TestSessionsWindow::subagentGroupsAndUnavailableActivity()
 void TestSessionsWindow::batchActionsAndReturnToSessions()
 {
     SessionsWindow window(script()); auto state = fleet(); window.setFleet(state); window.show();
-    QCOMPARE(window.windowTitle(), QString("hgs zerus"));
+    QCOMPARE(window.windowTitle(), QString("Zerus"));
     auto *button = window.findChild<QPushButton *>("batchActions"); QVERIFY(button);
     auto *menu = button->menu(); QVERIFY(menu);
     auto refreshMenu = [&]() { QMetaObject::invokeMethod(menu, "aboutToShow"); };

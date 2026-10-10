@@ -30,7 +30,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="zerus-package-test-") as home:
         env = {key: value for key, value in os.environ.items() if not key.startswith("HGS_")}
         env.update(HOME=home, HGS_STATE_DIR=home+"/state", HGS_CONFIG_DIR=home+"/config")
-        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "hgs zerus " + manifest["version"]}
+        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + manifest["version"]}
         for name, version in expected.items():
             result = subprocess.run([str(root / "usr/bin" / name), "--version"], env=env,
                                     capture_output=True, text=True, timeout=20, check=True)

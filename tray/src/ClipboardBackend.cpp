@@ -226,7 +226,7 @@ QString ClipboardBackend::advisoryTitle() const
 {
     // Дефолтный заголовок канала ("session opened, but not the way you asked") здесь был бы
     // прямой ложью: ничего не открылось и не должно было.
-    return QStringLiteral("hgs-tray: copied to the clipboard");
+    return QStringLiteral("Zerus: copied to the clipboard");
 }
 
 QString ClipboardBackend::takeAdvisory()

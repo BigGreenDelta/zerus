@@ -92,7 +92,7 @@ public:
         auto *processHint=new QLabel(tr("Off by default. When disabled, the tab is hidden and processes are not polled. Enable it to inspect running shells and background commands, read recorded output and stop selected processes. Only the selected session is inspected; opening Processes refreshes immediately. Output is read only while the tab is visible. Timings apply to this Zerus. Background refresh also controls session inspection while Terminal or Native UI is open; session overview and account limits refresh separately."));processHint->setWordWrap(true);processes->addWidget(processHint);processes->addStretch();
         auto *updates=makePage(tr("Updates"));updates->addWidget(new UpdatesWidget);updates->addStretch();
         auto *mobile=new RelaySettings::Panel;mobile->setMaximumWidth(850);addPage(mobile);
-        auto *about=makePage(tr("About"));about->addWidget(new QLabel(tr("hgs zerus %1").arg(QCoreApplication::applicationVersion())));
+        auto *about=makePage(tr("About"));about->addWidget(new QLabel(tr("Zerus %1").arg(QCoreApplication::applicationVersion())));
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");
         cliVersion->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);about->addWidget(cliVersion);
         versionClient=new HgsClient(executable,this);

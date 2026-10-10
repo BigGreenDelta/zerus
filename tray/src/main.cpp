@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
     if (!AppConfig::load(args, &cfg, &parseError)) {
         if (parseError == QLatin1String("__help__")) { out << AppConfig::usage(); return 0; }
         if (parseError == QLatin1String("__version__")) {
-            out << QStringLiteral("hgs zerus %1\n").arg(QLatin1String(HGS_TRAY_VERSION));
+            out << QStringLiteral("Zerus %1\n").arg(QLatin1String(HGS_TRAY_VERSION));
             return 0;
         }
         errOut << QStringLiteral("hgs-tray: %1\n\n").arg(parseError) << AppConfig::usage();
@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_MACOS
     MacAppVisibility appVisibility(app);
 #endif
-    QApplication::setApplicationDisplayName(QStringLiteral("hgs zerus"));
+    QApplication::setApplicationDisplayName(QStringLiteral("Zerus"));
     // ПОСЛЕ agent: разрушается раньше него, поток сторожа остановлен до разбора трея.
     // abort(), а не exit(): нужен именно крэш -- его перезапускает launchd (KeepAlive
     // Crashed) и systemd (Restart=on-failure), и он оставляет крэш-репорт со стеком

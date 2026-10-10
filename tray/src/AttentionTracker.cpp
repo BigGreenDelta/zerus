@@ -40,7 +40,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         current[key] = QJsonObject{{"phase", phase}, {"request", request}, {"token", token}};
         const QString body = concise(s.name, 120) + " / " + concise(host.isEmpty() ? box.host : host, 40)
             + '\n' + reason;
-        changes.raised.append({token, reply ? QObject::tr("hgs zerus — New reply") : QObject::tr("hgs zerus — Needs attention"), body});
+        changes.raised.append({token, reply ? QObject::tr("Zerus — New reply") : QObject::tr("Zerus — Needs attention"), body});
     };
     for (const auto &s : box.sessions) {
         if (s.needsAction()) {

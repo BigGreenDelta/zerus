@@ -47,7 +47,7 @@ void LinuxAttentionNotifier::post(const QString &token, const QString &title, co
     auto message = call("Notify");
     const QVariantMap hints{{"desktop-entry", "hgs-tray"}, {"urgency", QVariant::fromValue(uchar(1))},
         {"category", "im.received"}};
-    message.setArguments({"hgs zerus", uint(0), "hgs-zerus-swarm-symbolic", title,
+    message.setArguments({"Zerus", uint(0), "hgs-zerus-swarm-symbolic", title,
         body.toHtmlEscaped(), QStringList{"default", tr("Open session"), "open-session", tr("Open session")}, hints, -1});
     auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(message, 5000), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, token](QDBusPendingCallWatcher *watcher) {

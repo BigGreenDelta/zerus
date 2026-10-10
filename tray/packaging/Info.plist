@@ -2,7 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>              <string>hgs zerus</string>
+    <key>CFBundleName</key>              <string>Zerus</string>
+    <!-- Launch Services shows en.lproj's Zerus only while this unlocalized name
+         equals the bundle folder; the hgs-tray.app path stays for compatibility. -->
+    <key>CFBundleDisplayName</key>       <string>hgs-tray</string>
+    <key>LSHasLocalizedDisplayName</key> <true/>
+    <key>CFBundleDevelopmentRegion</key> <string>en</string>
+    <key>CFBundleExecutable</key>        <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>        <string>com.hgdev.hgs-tray</string>
     <key>CFBundleIconFile</key>          <string>${MACOSX_BUNDLE_ICON_FILE}</string>
     <key>CFBundleIconName</key>          <string>hgs-zerus-swarm</string>

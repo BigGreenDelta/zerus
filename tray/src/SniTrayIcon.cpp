@@ -6,7 +6,7 @@
 SniTrayIcon::SniTrayIcon()
 {
     // main.cpp sets the display name after construction, keeping the ID hgs-tray.
-    m_item.setTitle(QStringLiteral("hgs zerus"));
+    m_item.setTitle(QStringLiteral("Zerus"));
     // Без setStatus(Active) панель прячет иконку в «скрытые»: умолчание KSNI -- Passive.
     // Без setStandardActionsEnabled(false) KSNI при первом открытии дописывает в конец
     // меню свой Quit -- у TrayMenu он уже есть.

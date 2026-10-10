@@ -1442,7 +1442,7 @@ fn launch(
         )
         .map_err(|e| Error::new(1, e))?;
         if !options.dry {
-            println!("DeepSeek session ready: {name}\nOpen this session in hgs zerus.");
+            println!("DeepSeek session ready: {name}\nOpen this session in Zerus.");
         }
         return Ok(0);
     }

@@ -165,7 +165,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
     });
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
-        qWarning().noquote() << "hgs zerus: notification:" << detail;
+        qWarning().noquote() << "Zerus: notification:" << detail;
         if(UpdateController::isUpdateToken(token))return;
         m_attention.deliveryFailed(token);
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
@@ -401,7 +401,7 @@ void TrayAgent::refreshIcon()
     m_badge->setCount(m_lastError.isEmpty() ? attention : 0);
     if (!m_lastError.isEmpty()) {
         m_tray->setIcon(m_icons.forError());
-        m_tray->setToolTip(QStringLiteral("hgs-tray: %1").arg(m_lastError));
+        m_tray->setToolTip(QStringLiteral("Zerus: %1").arg(m_lastError));
         return;
     }
     m_tray->setIcon(m_icons.forCounts(m_state.totalSessions(), attention, m_state.isStale(now)));
@@ -484,7 +484,7 @@ void TrayAgent::activateSessionWith(TerminalBackend &backend, const QString &pee
 
     // Автоматически сделать больше нечего, поэтому в тексте -- ровно та команда,
     // которую трей пытался выполнить: её можно скопировать в любой терминал.
-    notify(QStringLiteral("hgs-tray: the terminal did not open"),
+    notify(QStringLiteral("Zerus: the terminal did not open"),
            QStringLiteral("%1\n\nCommand: %2\nRun it in a terminal by hand.")
                .arg(error, command),
            QSystemTrayIcon::Warning, 15000);
@@ -495,7 +495,7 @@ void TrayAgent::copyText(const QString &text)
     ClipboardBackend clipboard;
     QString error;
     if (clipboard.open(text, &error)) reportAdvisory(clipboard);
-    else notify(tr("hgs zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
+    else notify(tr("Zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
 }
 
 void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId)
@@ -512,7 +512,7 @@ void TrayAgent::launchSession(const QString &host, const QString &cmd, const QSt
     QString error;
     if (!terminal.open(command, &error)) {
         if (m_sessionsWindow) m_sessionsWindow->newSessionLaunchFailed(launchId, error);
-        notify(tr("hgs-tray: the terminal did not open"), error + QStringLiteral("\n\n") + command,
+        notify(tr("Zerus: the terminal did not open"), error + QStringLiteral("\n\n") + command,
                QSystemTrayIcon::Warning, 8000);
     }
     else reportAdvisory(terminal);
@@ -674,7 +674,7 @@ void TrayAgent::setOpenMode(const QString &mode)
     if (!AppConfig::writeConfigValue(QStringLiteral("open-mode"), mode, &err)) {
         // Режим УЖЕ применён -- об этом и сообщаем: не потерялся выбор, потерялась только
         // его запись на диск, и пережить перезапуск трея он не сможет.
-        notify(tr("hgs-tray: mode applied, but not saved"),
+        notify(tr("Zerus: mode applied, but not saved"),
                tr("New sessions already open the new way, but the choice could "
                   "not be written to %1: %2")
                    .arg(AppConfig::configPath(), err),

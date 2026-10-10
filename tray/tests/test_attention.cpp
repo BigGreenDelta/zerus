@@ -40,7 +40,7 @@ void TestAttention::unreadRepliesNotifyOnceAcrossResumeAndRead()
     BoxState box; box.ok=true; box.host="arch"; box.sessions={s};
     FleetState fleet; fleet.setLocal(box,0); AttentionTracker tracker;
     auto changes=tracker.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
-    QVERIFY(changes.raised[0].title.contains("New reply"));
+    QCOMPARE(changes.raised[0].title, QString("Zerus — New reply"));
     const auto target=AttentionTracker::target(changes.raised[0].token);
     AttentionTracker restarted(tracker.state()); QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
     box.sessions[0].runId="resumed"; box.sessions[0].name="renamed"; fleet.setLocal(box,1);

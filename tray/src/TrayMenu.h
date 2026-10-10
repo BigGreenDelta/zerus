@@ -7,7 +7,7 @@
 
 class FleetState;
 
-// Quick access only. Session and project management live in hgs zerus.
+// Quick access only. Session and project management live in Zerus.
 class TrayMenu : public QObject {
     Q_OBJECT
 public:

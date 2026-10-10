@@ -186,8 +186,10 @@ required environment is already available. Never put private keys in wrappers.
 The tray's **Open Zerus**, a left click or `hgs-tray --sessions` opens the workspace.
 On macOS, use `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray --sessions`.
 Repeated launch raises the existing window. Closing it leaves the tray and agents
-running. The installed application and service names remain `hgs-tray` for
-compatibility; the title is `hgs zerus`.
+running. The executable, bundle path, bundle ID and service names remain `hgs-tray`
+for compatibility. Windows, notifications, the tray, `--version` and the Linux launcher
+show Zerus. On macOS, a localized display name shows Zerus in the Dock, Finder,
+Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
 The tray has two counters: all sessions and **Needs attention**. Attention includes
 input, approvals, errors and unread main-agent replies. An offline host retains

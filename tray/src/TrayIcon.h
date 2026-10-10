@@ -9,7 +9,7 @@
 class QIcon;
 class QMenu;
 
-// Platform tray adapter: primary click opens hgs zerus; the context menu stays
+// Platform tray adapter: primary click opens Zerus; the context menu stays
 // native to the desktop. SniTrayIcon owns its QMenu, QtTrayIcon does not.
 class TrayIcon {
 public:

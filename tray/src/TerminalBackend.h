@@ -32,6 +32,6 @@ public:
     // не знает, какой бэкенд у него внутри (см. m_terminal в TrayAgent.h).
     virtual QString advisoryTitle() const
     {
-        return QStringLiteral("hgs-tray: session opened, but not the way you asked");
+        return QStringLiteral("Zerus: session opened, but not the way you asked");
     }
 };

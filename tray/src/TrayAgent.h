@@ -30,7 +30,7 @@ class TrayAgent : public QObject {
     Q_OBJECT
 public:
     explicit TrayAgent(const AppConfig &cfg, QObject *parent = nullptr);
-    // hgs zerus has no parent widget and is deleted explicitly. Само меню удаляет TrayMenu или иконка трея -- кто из них,
+    // Zerus has no parent widget and is deleted explicitly. Само меню удаляет TrayMenu или иконка трея -- кто из них,
     // см. ~TrayMenu и порядок m_menu/m_tray ниже.
     ~TrayAgent() override;
 

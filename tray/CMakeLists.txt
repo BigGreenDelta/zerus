@@ -89,6 +89,10 @@ if(APPLE)
     set_source_files_properties(resources/icons/hgs-zerus-swarm.icns resources/icons/macos/Assets.car PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
     target_sources(hgs-tray PRIVATE resources/icons/hgs-zerus-swarm.icns resources/icons/macos/Assets.car)
+    # Localized display name: macOS shows Zerus for the compatible hgs-tray.app path.
+    set_source_files_properties(packaging/en.lproj/InfoPlist.strings PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources/en.lproj)
+    target_sources(hgs-tray PRIVATE packaging/en.lproj/InfoPlist.strings)
     set_target_properties(hgs-tray PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"

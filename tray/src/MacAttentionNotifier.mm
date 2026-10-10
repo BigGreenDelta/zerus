@@ -87,7 +87,7 @@ private:
         if (!granted) {
             for (const auto &token : pending.keys()) {
                 m_desired.remove(token);
-                emit failed(token, error.isEmpty() ? tr("Allow hgs zerus notifications in System Settings → Notifications.") : error);
+                emit failed(token, error.isEmpty() ? tr("Allow Zerus notifications in System Settings → Notifications.") : error);
             }
             return;
         }

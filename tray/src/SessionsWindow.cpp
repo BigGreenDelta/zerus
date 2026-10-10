@@ -248,7 +248,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
 {
     WorkspaceFocus::install();
     const QString version = QCoreApplication::applicationVersion();
-    setObjectName("sessionsWindow"); setWindowTitle(QStringLiteral("hgs zerus"));
+    setObjectName("sessionsWindow"); setWindowTitle(QStringLiteral("Zerus"));
     resize(1200, 790); setMinimumSize(840, 560);
     QSettings settings;
     const auto expanded = settings.value("workspace/expandedSessions").toStringList();
@@ -269,7 +269,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         button->setIconSize(QSize(20, 20)); button->setFixedSize(34, 32); return button;
     };
     m_brand = new SwarmButton; m_brand->setObjectName("brandMark");
-    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setToolTip(tr("Home — hgs zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
+    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setToolTip(tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
     connect(m_brand,&QPushButton::clicked,this,[this] { m_pages->setCurrentIndex(3); m_brand->setChecked(true); emit refreshRequested(); });
     side->addWidget(m_brand); side->addSpacing(8);
     auto *create = iconButton("add", tr("New session"), "newSession");
@@ -546,7 +546,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
         QUrl desktopTarget;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
-        dialog.setWindowTitle(tr("File reference — hgs zerus")); dialog.resize(560, 210);
+        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(560, 210);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
         auto *source = new QLabel(local ? tr("File on this machine") : tr("File on %1").arg(machine));
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
