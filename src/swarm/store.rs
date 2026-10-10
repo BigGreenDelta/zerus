@@ -26,6 +26,10 @@ pub struct Peer {
     pub last_sync: u64,
     #[serde(default)]
     pub error: String,
+    /// The member runs an hgs without shared preferences; it keeps syncing
+    /// projects and folders but does not receive the delivery choice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub catalog_outdated: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

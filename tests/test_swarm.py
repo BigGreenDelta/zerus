@@ -12,7 +12,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = '''#!/usr/bin/env python3
-import os, pathlib, shlex, sys
+import json, os, pathlib, shlex, subprocess, sys
 root = pathlib.Path(os.environ['SWARM_TEST_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():
@@ -20,7 +20,21 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
-os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
+if not (root / ('old-' + alias)).exists():
+    os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
+# A member from before shared preferences: it rejects unknown fields and key
+# kinds and never advertises the kinds it accepts.
+request = sys.stdin.read()
+if args[1:] == ['exchange']:
+    data = json.loads(request)
+    if 'kinds' in data or any(op['key']['kind'] not in ('project', 'folder', 'session', 'machine') for op in data['operations']):
+        print('unknown field or variant from a newer member', file=sys.stderr); sys.exit(1)
+result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+sys.stderr.write(result.stderr)
+if result.returncode: sys.exit(result.returncode)
+output = json.loads(result.stdout)
+output.pop('kinds', None)
+print(json.dumps(output))
 '''
 
 
@@ -193,6 +207,36 @@ class Swarm(unittest.TestCase):
         self.call('c', 'preference', 'set', 'mobile_delivery', 'away_30', '--json')
         self.join('c', 'b')
         self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'immediate'})
+
+    def test_older_members_keep_project_sync_without_the_delivery_choice(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        (self.root / 'old-c').touch()  # c now answers b like a release without shared preferences
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_10', '--json')
+        for node in ('a', 'b', 'b'):
+            self.assertTrue(all(row['ok'] for row in self.call(node, 'sync').values()), node)
+        self.assertEqual(self.call('b', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away'})
+        before = self.call('b', 'get')
+        desired = copy.deepcopy(before['organization'])
+        next(p for p in desired['projects'] if p['id'] == 'b')['name'] = 'Renamed after the preference'
+        self.patch('b', before, desired)
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        projects = self.call('c', 'get')['organization']['projects']
+        self.assertEqual(next(p for p in projects if p['id'] == 'b')['name'], 'Renamed after the preference')
+        peers = self.call('b', 'get')['peers']
+        self.assertTrue(peers['c']['catalog_outdated'])
+        self.assertNotIn('catalog_outdated', peers['a'])
+        # A legacy requester omits accepted kinds and receives only legacy kinds.
+        inventory = self.call('b', 'inventory')
+        response = self.call('b', 'exchange', data={'swarm_id': inventory['swarm_id'], 'known': [], 'operations': []})
+        self.assertTrue(response['operations'])
+        self.assertNotIn('preference', {op['key']['kind'] for op in response['operations']})
+        # After the update the member receives the choice and the notice clears.
+        (self.root / 'old-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertNotIn('catalog_outdated', self.call('b', 'get')['peers']['c'])
 
 
 if __name__ == '__main__':

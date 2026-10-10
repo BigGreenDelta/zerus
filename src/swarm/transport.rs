@@ -1,5 +1,5 @@
 use super::{
-    catalog::{Catalog, Key, Operation},
+    catalog::{self, Catalog, Key, Operation},
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -28,6 +28,10 @@ pub struct Exchange {
     pub swarm_id: String,
     pub known: BTreeSet<String>,
     pub operations: Vec<Operation>,
+    /// Key kinds the requester parses. Older members neither send nor accept
+    /// this field; responses to them contain only legacy kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<BTreeSet<String>>,
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
@@ -122,7 +126,7 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
 pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     let mut store = LockedStore::load(config)?;
     store.save()?;
-    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported});
+    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::kinds()});
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
@@ -140,7 +144,9 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
         .catalog
         .operations
         .values()
-        .filter(|op| !request.known.contains(&op.id))
+        .filter(|op| {
+            !request.known.contains(&op.id) && catalog::accepted(request.kinds.as_ref(), &op.key)
+        })
         .cloned()
         .collect();
     store.save()?;
@@ -168,6 +174,15 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     local
         .data
         .bind(alias, identity["node_id"].as_str().unwrap())?;
+    // Older members reject unknown catalog kinds. They keep receiving the kinds
+    // they parse; Settings names them until they are updated.
+    let peer_kinds: Option<BTreeSet<String>> =
+        serde_json::from_value(identity["kinds"].clone()).ok();
+    if let Some(peer) = local.data.peers.get_mut(alias) {
+        peer.catalog_outdated = !peer_kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains("preference"));
+    }
     local.save()?;
     if identity["digest"] != local.data.catalog.digest() {
         drop(local);
@@ -192,9 +207,12 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
                 .catalog
                 .operations
                 .values()
-                .filter(|op| !known.contains(&op.id))
+                .filter(|op| {
+                    !known.contains(&op.id) && catalog::accepted(peer_kinds.as_ref(), &op.key)
+                })
                 .cloned()
                 .collect(),
+            kinds: peer_kinds.as_ref().map(|_| catalog::kinds()),
         };
         let node = peer.node.clone();
         drop(local);
