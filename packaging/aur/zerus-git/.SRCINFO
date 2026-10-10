@@ -14,6 +14,7 @@ pkgbase = zerus-git
 	depends = qt6-svg
 	depends = kstatusnotifieritem
 	depends = kwindowsystem
+	depends = kidletime
 	depends = tmux>=3.7
 	depends = openssh
 	depends = python

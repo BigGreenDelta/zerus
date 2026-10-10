@@ -335,7 +335,7 @@ Generate `.SRCINFO` with `makepkg --printsrcinfo`; never edit it manually.
 
 | Class | Packages | Reason |
 | --- | --- | --- |
-| Desktop runtime | `qt6-base`, `qt6-webengine`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `hicolor-icon-theme` | Widgets, embedded web UI, SVG plugin, tray/window integration and icons |
+| Desktop runtime | `qt6-base`, `qt6-webengine`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `kidletime`, `hicolor-icon-theme` | Widgets, embedded web UI, SVG plugin, tray/window integration, idle detection and icons |
 | CLI/runtime tools | `tmux>=3.7`, `openssh`, `python`, `curl`, `procps-ng`, `bash`, `tar` | Persistent sessions, remote access, compatibility helper, account HTTP, process inspection, installers and remote source transfer |
 | Native library runtime | `glibc`, `libgcc`, `libstdc++` | Dynamically linked CLI/desktop binaries |
 | Source build only | `rust`, `cmake`, `ninja`; additionally `git` for `zerus-git` | Locked Rust and production Qt builds; Git source/version discovery |

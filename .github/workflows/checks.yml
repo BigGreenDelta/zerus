@@ -207,7 +207,7 @@ jobs:
           fetch-depth: 0
       - name: Arch dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem tmux openssh python ccache dbus namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus namcap desktop-file-utils
           useradd -m user
           chown -R user:user "$GITHUB_WORKSPACE"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

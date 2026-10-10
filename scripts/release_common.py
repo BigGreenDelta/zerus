@@ -10,7 +10,7 @@ import tarfile
 REPOSITORY = "ufna/zerus"
 PACKAGES = ("zerus", "zerus-ade-bin", "zerus-git")
 BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-svg", "kstatusnotifieritem",
-                   "kwindowsystem", "libgcc", "libstdc++", "glibc")
+                   "kwindowsystem", "kidletime", "libgcc", "libstdc++", "glibc")
 MAINTAINER = "# Maintainer: Vladimir Alyamkin <ufna@ufna.dev>"
 DESCRIPTION_UPDATES = (
     ("An agent development environment for persistent local and remote tmux sessions",

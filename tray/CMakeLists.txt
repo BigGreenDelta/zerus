@@ -29,6 +29,8 @@ if(LINUX)
     # Native StatusNotifier activation and a panel-hosted DBusMenu on Wayland.
     find_package(KF6StatusNotifierItem REQUIRED)
     find_package(KF6WindowSystem REQUIRED)
+    # Input idle time where org.freedesktop.ScreenSaver has none (Plasma on Wayland).
+    find_package(KF6IdleTime REQUIRED)
 endif()
 
 add_library(hgs-window-layer STATIC src/WindowLayer.cpp)
@@ -110,6 +112,7 @@ if(LINUX)
     target_sources(hgs-tray PRIVATE src/SniTrayIcon.cpp)
     target_sources(hgs-tray PRIVATE src/LinuxAttentionNotifier.cpp)
     target_sources(hgs-tray PRIVATE src/LinuxApplicationBadge.cpp)
+    target_sources(hgs-tray PRIVATE src/LinuxPresenceSource.cpp)
 else()
     target_sources(hgs-tray PRIVATE src/QtTrayIcon.cpp)
 endif()
@@ -131,7 +134,7 @@ target_compile_definitions(hgs-tray PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}
 # QtWidgets — the plan's dependency list missed this; noted in the Task 1 report.
 target_link_libraries(hgs-tray PRIVATE Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
 if(LINUX)
-    target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem)
+    target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
 target_link_libraries(hgs-tray PRIVATE hgs-updates)

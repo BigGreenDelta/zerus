@@ -20,9 +20,9 @@ native agents as part of a Zerus GUI/package update.
 [Official tmux releases](https://github.com/tmux/tmux/releases).
 
 For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets and WebEngine.
-Linux also needs KDE Frameworks 6 KStatusNotifierItem and KWindowSystem, a system
-tray and user systemd for the standard autostart setup. On macOS, the installer
-uses Qt from Homebrew.
+Linux also needs KDE Frameworks 6 KStatusNotifierItem, KWindowSystem and KIdleTime,
+a system tray and user systemd for the standard autostart setup. On macOS, the
+installer uses Qt from Homebrew.
 
 ## Local installation
 
@@ -40,7 +40,7 @@ brew install rust python tmux cmake qt qtwebengine
 ```
 
 On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-webengine`, `qt6-svg`,
-`kstatusnotifieritem`, `kwindowsystem` and C++ build tools.
+`kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools.
 
 Add `~/.local/bin` to `PATH`. The CLI installs to `~/.local/bin/hgs`; SSH calls
 use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or
