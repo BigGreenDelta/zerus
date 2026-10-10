@@ -17,7 +17,7 @@ HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 TMUX = shutil.which("tmux")
 
 FAKE_AGENT = r'''
-import json, os, pathlib, signal, sys, termios, time, tty
+import json, os, pathlib, signal, subprocess, sys, termios, time, tty
 root = pathlib.Path(os.environ['INPUT_FIXTURE'])
 fd = sys.stdin.fileno()
 original = termios.tcgetattr(fd)
@@ -26,6 +26,13 @@ os.write(1, b'\x1b[?2004h\x1b[2J\x1b[H' + '\u203a '.encode())
 def screen(*args):
     os.write(1, (root / 'screen').read_bytes())
 signal.signal(signal.SIGUSR1, screen)
+children = []
+def launch(*args):
+    request = json.loads((root / 'nested-launch.json').read_text())
+    with (root / 'nested.log').open('ab') as log:
+        children.append(subprocess.Popen(request['argv'], env=request['env'],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log))
+signal.signal(signal.SIGUSR2, launch)
 (root / 'agent-pid').write_text(str(os.getpid()))
 try:
     while True:
@@ -40,6 +47,9 @@ try:
         if queue and value.hex() == queue[0][0]:
             os.write(1, queue.pop(0)[1].encode()); replies.write_text(json.dumps(queue))
 finally:
+    for child in children:
+        if child.poll() is None: child.terminate()
+        child.wait(timeout=5)
     termios.tcsetattr(fd, termios.TCSANOW, original)
 '''
 
@@ -450,6 +460,59 @@ int main(int argc,char **argv) {
             child_view=json.loads(result.stdout);self.assertEqual(child_view['provider'],provider)
             self.assertTrue(child_view['read_only']);self.assertTrue(any(e.get('detail')=='Only child response' for e in child_view['events']))
             self.assertTrue(all(not e.get('agent_id') for e in child_view['events']))
+
+    def test_ephemeral_codex_hooks_use_verified_caller_and_preserve_parent(self):
+        import signal
+        self.script('codex', '''#!/usr/bin/env python3
+import json, os, pathlib, subprocess
+root = pathlib.Path(os.environ['INPUT_FIXTURE'])
+for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd']:
+    event = dict(hook_event_name=kind, session_id=os.environ['CHILD_CONVERSATION'],
+        cwd=str(root), model='child-model', tool_name='Bash',
+        tool_use_id='child-tool', last_assistant_message='Child review result')
+    if kind == 'UserPromptSubmit': event['prompt'] = 'Child review request'
+    subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
+(root / 'nested-done').write_text('done')
+''')
+        for parent in ('claude', 'codex'):
+            with self.subTest(parent=parent):
+                sid = str(uuid.uuid4())
+                self.record.update(agent=parent, model='parent-model', transcript='parent-history',
+                    cwd=str(self.root), prompt='Parent request', main_done=False,
+                    active_tools={'parent-tool': {'name':'Bash'}}, subagents={})
+                self.write_record()
+                env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id,
+                           CHILD_CONVERSATION=sid, CODEX_HOME=str(self.root / '.codex'))
+                (self.root / 'nested-done').unlink(missing_ok=True)
+                (self.root / 'nested-launch.json').write_text(json.dumps(dict(
+                    argv=[str(self.bin / 'codex'), 'exec', '--ephemeral'], env=env)))
+                os.kill(self.record['pid'], signal.SIGUSR2)
+                self.wait_for(lambda: (self.root / 'nested-done').exists())
+                raw = json.loads(self.record_path.read_text())
+                for key in ('conversation_id', 'run_id', 'pid', 'process_start', 'model',
+                            'transcript', 'cwd', 'prompt', 'main_done', 'active_tools'):
+                    self.assertEqual(raw[key], self.record[key], key)
+                child_id, child = next(iter(raw['subagents'].items()))
+                self.assertEqual(child['conversation_id'], sid)
+                self.assertEqual(child['provider'], 'codex')
+                self.assertEqual(child['state'], 'finished')
+                result = subprocess.run([str(HGS), 'inspect', self.name, '--agent', child_id],
+                    env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                view = json.loads(result.stdout)
+                self.assertTrue(view['read_only'])
+                self.assertTrue(any(e.get('type') == 'UserPromptSubmit' and
+                    e.get('detail') == 'Child review request' for e in view['events']))
+                self.assertTrue(any(e.get('detail') == 'Child review result' for e in view['events']))
+                self.assertEqual(self.received(), b'')
+
+    def test_unknown_foreign_session_start_cannot_rebind_parent(self):
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        event = dict(hook_event_name='SessionStart', session_id=str(uuid.uuid4()), model='foreign-model')
+        result = subprocess.run([str(HGS), '__state', 'hook'], env=env,
+            input=json.dumps(event), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.record_path.read_text()), self.record)
 
     def test_login_delay_cannot_receive_first_prompt_until_native_composer(self):
         self.fresh_unconfirmed()

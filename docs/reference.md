@@ -354,9 +354,13 @@ tray keeps its background polling when the workspace is closed.
 Kimi replies and intermediate public messages come from the exact conversation's
 `agents/main/wire.jsonl` when Stop lacks text. Transcript reads are bounded to an
 8 MiB tail, 50 replies and 32,000 characters per reply. Late copies do not duplicate
-cards. Nested `codex exec` runs with verified `source: exec` register as children
-instead of changing the parent conversation. `/new` and `/clear` still change the
-main native conversation.
+cards. Nested `codex exec` reviews register as separate children, including
+`--ephemeral` runs without a transcript. Detection uses the rollout's `source:
+exec` or the native caller's ancestry to the verified live parent process.
+Child events preserve the parent's conversation, model and history; ephemeral
+children show their recorded request, tools and result. Unknown inherited
+SessionStart events cannot replace an established parent. `/new` and `/clear`
+still change the main native conversation.
 
 ### Sending and attachments
 

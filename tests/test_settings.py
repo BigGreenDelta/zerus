@@ -226,7 +226,8 @@ class SessionSettings(test_effort.EffortTransport):
         self.record.update(activity='busy',phase='working');self.write_record()
         self.settings(self.payload('low'))
         self.conversation_id=str(uuid.uuid4())
-        event=dict(session_id=self.conversation_id,hook_event_name='SessionStart')
+        event=dict(session_id=self.conversation_id,hook_event_name='SessionStart',
+                   transcript_path=str(self.root / '.codex' / ('rollout-'+self.conversation_id+'.jsonl')))
         env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id)
         hook=subprocess.run([str(test_input.HGS),'__state','hook'],env=env,input=json.dumps(event),text=True,capture_output=True,timeout=10)
         self.assertEqual(hook.returncode,0,hook.stderr)

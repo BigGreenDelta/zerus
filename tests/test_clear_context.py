@@ -96,7 +96,7 @@ class ClearContext(unittest.TestCase):
   self.hook(dict(hook_event_name='UserPromptSubmit',session_id=old,prompt='Earlier request'))
   self.hook(dict(hook_event_name='Stop',session_id=old,last_assistant_message='Earlier answer'))
   cursor=self.inspect()['cursor']
-  self.hook(dict(hook_event_name='SessionStart',session_id=new,source='clear'))
+  self.hook(dict(hook_event_name='SessionStart',session_id=new,source='clear',transcript_path=self.usage_history(new,25,5)))
   self.hook(dict(hook_event_name='UserPromptSubmit',session_id=new,prompt='Fresh request'))
   fresh=self.inspect();self.assertEqual(fresh['conversation_id'],new);self.assertEqual(fresh['cleared_conversations'],[old])
   timeline=[e['detail'] or e['type'] for e in fresh['events'] if e['type'] in ('UserPromptSubmit','Stop','SessionCleared')]
@@ -106,7 +106,7 @@ class ClearContext(unittest.TestCase):
   later=self.inspect('--after',str(cursor))
   self.assertEqual([e['detail'] or e['type'] for e in later['events'] if e['type']!='SessionStart'],['SessionCleared','Fresh request'])
   # Another conversation starts its own timeline.
-  other=str(uuid.uuid4());self.hook(dict(hook_event_name='SessionStart',session_id=other,source='resume'))
+  other=str(uuid.uuid4());self.hook(dict(hook_event_name='SessionStart',session_id=other,source='resume',transcript_path=self.usage_history(other,25,5)))
   resumed=self.inspect();self.assertEqual(resumed['cleared_conversations'],[])
   self.assertFalse(any(e['detail'] in ('Earlier request','Fresh request') for e in resumed['events']))
  def test_unconfirmed_clear_keeps_reported_usage_and_has_no_success_notice(self):

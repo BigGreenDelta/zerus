@@ -288,6 +288,10 @@ pub(super) fn hook() -> Result<i32> {
         write(&mut record)?;
         return Ok(0);
     }
+    if kind == "SessionStart" && string(&event, "agent_id").is_empty()
+        && !external_agents::main_start(&record, &event) {
+        return Ok(0);
+    }
     if !events(string(&record, "agent")).contains(&kind) {
         return Ok(0);
     }

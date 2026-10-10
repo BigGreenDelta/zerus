@@ -3,6 +3,79 @@
 use super::*;
 use std::io::{BufRead, BufReader};
 
+#[derive(Clone, Copy)]
+struct Caller {
+    provider: &'static str,
+    headless: bool,
+}
+
+fn native_caller(argv: &[String]) -> Option<Caller> {
+    let executable = Path::new(argv.first()?).file_name()?.to_str()?;
+    let offset = if executable == "node" || executable.starts_with("python") { 1 } else { 0 };
+    let name = Path::new(argv.get(offset)?).file_name()?.to_str()?;
+    let provider = match name {
+        "codex" | "codex.exe" | "codex.js" => "codex",
+        "claude" | "claude.exe" => "claude",
+        "kimi" => "kimi",
+        _ => return None,
+    };
+    let mut args = argv.iter().skip(offset + 1);
+    let headless = provider == "codex" && loop {
+        let Some(arg) = args.next() else { break false; };
+        if arg == "--" { break false; }
+        if ["-c", "--config", "-C", "--cd", "-m", "--model", "-p", "--profile",
+            "-s", "--sandbox", "-a", "--ask-for-approval", "--enable", "--disable",
+            "--add-dir", "--local-provider"].contains(&arg.as_str()) {
+            args.next();
+        } else if arg.starts_with('-') {
+            // Known switches and --option=value cannot consume the next word.
+            if !arg.contains('=') && !["--no-daemon", "--no-alt-screen", "--oss", "--search",
+                "--dangerously-bypass-hook-trust", "--dangerously-bypass-approvals-and-sandbox",
+                "--full-auto"].contains(&arg.as_str()) { break false; }
+        } else { break ["exec", "e", "review", "app-server"].contains(&arg.as_str()); }
+    };
+    Some(Caller { provider, headless })
+}
+
+#[cfg(target_os = "linux")]
+fn process(pid: u32) -> Option<(u32, Vec<String>)> {
+    let path = PathBuf::from(format!("/proc/{pid}"));
+    let stat = std::fs::read_to_string(path.join("stat")).ok()?;
+    let parent = stat[stat.rfind(')')? + 2..].split_whitespace().nth(1)?.parse().ok()?;
+    let bytes = std::fs::read(path.join("cmdline")).ok()?;
+    let argv = bytes.split(|byte| *byte == 0).filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
+    Some((parent, argv))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process(pid: u32) -> Option<(u32, Vec<String>)> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "command="])
+        .env("LC_ALL", "C").output().ok()?;
+    if !output.status.success() { return None; }
+    let line = String::from_utf8_lossy(&output.stdout);
+    let (parent, command) = line.trim().split_once(char::is_whitespace)?;
+    Some((parent.parse().ok()?, shell_words::split(command.trim()).ok()?))
+}
+
+fn ancestry(root: u32, mut pid: u32, mut read: impl FnMut(u32) -> Option<(u32, Vec<String>)>) -> Option<Caller> {
+    let mut caller = None;
+    for _ in 0..64 {
+        let (parent, argv) = read(pid)?;
+        if caller.is_none() { caller = native_caller(&argv); }
+        if pid == root { return caller; }
+        if parent == pid || parent <= 1 { return None; }
+        pid = parent;
+    }
+    None
+}
+
+fn caller(record: &Value) -> Option<Caller> {
+    if !process_alive(record) { return None; }
+    ancestry(record["pid"].as_u64()? as u32, unsafe { libc::getppid() } as u32, process)
+}
+
 // An inherited HGS token is not proof that a new same-provider conversation
 // belongs to the interactive parent. Codex records its headless entry point in
 // the rollout header; /new and /clear still use the interactive source.
@@ -41,6 +114,16 @@ fn provider(event: &Value) -> Option<&'static str> {
     None
 }
 
+/// An unidentified inherited SessionStart cannot replace an established parent.
+/// Keep legacy startup hooks and verified interactive /new and /clear events.
+pub(super) fn main_start(record: &Value, event: &Value) -> bool {
+    if event["session_id"] == record["conversation_id"] { return true; }
+    match provider(event).or_else(|| caller(record).map(|source| source.provider)) {
+        Some(provider) => provider == string(record, "agent"),
+        None => string(record, "conversation_id").is_empty(),
+    }
+}
+
 /// Return a child-scoped event, without touching parent identity, model, or
 /// native transcript. Unknown foreign conversations cannot claim a child.
 pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
@@ -66,8 +149,11 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
         if string(event, "hook_event_name") != "SessionStart" {
             return None;
         }
-        let agent = provider(event)?;
-        if agent == string(record, "agent") && !(agent == "codex" && codex_exec(event)) {
+        let source = caller(record);
+        let agent = provider(event).or_else(|| source.map(|source| source.provider))?;
+        let headless = agent == "codex" && (codex_exec(event)
+            || source.is_some_and(|source| source.provider == "codex" && source.headless));
+        if agent == string(record, "agent") && !headless {
             return None;
         }
         let id = format!("external:{agent}:{sid}");
@@ -113,6 +199,46 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caller_requires_ancestry_to_the_owned_parent() {
+        let rows = [
+            (50, (40, vec!["sh", "-c", "hgs __state hook"])),
+            (40, (30, vec!["/opt/codex", "exec", "--ephemeral"])),
+            (30, (20, vec!["bash", "-c", "review"])),
+            (20, (1, vec!["/opt/claude"])),
+        ];
+        let read = |pid| rows.iter().find(|(id, _)| *id == pid).map(|(_, (parent, argv))|
+            (*parent, argv.iter().map(|arg| arg.to_string()).collect()));
+        let child = ancestry(20, 50, read).unwrap();
+        assert_eq!(child.provider, "codex");
+        assert!(child.headless);
+        assert!(ancestry(21, 50, read).is_none());
+        assert!(ancestry(20, 51, read).is_none());
+        let parent = ancestry(20, 20, read).unwrap();
+        assert_eq!(parent.provider, "claude");
+        assert!(!parent.headless);
+        let wrapper = |pid| Some((if pid == 20 { 1 } else { 20 },
+            vec!["node".into(), "/opt/bin/codex.js".into(), "--".into(), "exec".into()]));
+        assert!(!ancestry(20, 30, wrapper).unwrap().headless);
+        assert!(ancestry(20, 30, |pid| Some((pid, vec![]))).is_none());
+        for (argv, headless) in [
+            (vec!["codex", "-m", "exec"], false),
+            (vec!["codex", "--no-daemon", "-c", "model=fixture", "exec", "--ephemeral"], true),
+            (vec!["node", "/opt/codex.js", "resume", "exec"], false),
+        ] {
+            assert_eq!(native_caller(&argv.into_iter().map(str::to_owned).collect::<Vec<_>>()).unwrap().headless, headless);
+        }
+    }
+
+    #[test]
+    fn unidentified_start_preserves_established_parent_but_allows_legacy_bootstrap() {
+        let parent = json!({"agent":"claude","conversation_id":"parent"});
+        let unknown = json!({"session_id":"foreign"});
+        assert!(!main_start(&parent, &unknown));
+        assert!(main_start(&json!({"agent":"claude"}), &unknown));
+        assert!(main_start(&parent, &json!({"session_id":"parent"})));
+        assert!(!main_start(&parent, &json!({"session_id":"foreign", "transcript_path":"/tmp/rollout-foreign.jsonl"})));
+    }
     #[test]
     fn nested_codex_exec_cannot_replace_the_interactive_conversation() {
         let dir = tempfile::tempdir().unwrap();

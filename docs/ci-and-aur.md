@@ -187,7 +187,10 @@ identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
 rejection. A separate fixture caches a newer version for the startup update
 picker and verifies its Activity identity, **Skip** and **Skip until next
-version**; it never selects **Update now**. Every fixture owns a private home
+version**; it never selects **Update now**. Nested real `codex exec --ephemeral`
+reviews verify separate child Activity under Claude and Codex parents, preserved
+parent identity/model/history and the child's recorded result without a rollout.
+Every fixture owns a private home
 and tmux socket and uses only a localhost provider. No authenticated inference
 or existing session is involved.
 Fixture shutdown waits for its owned panes to exit before deleting the private
