@@ -84,6 +84,20 @@ class Presence(unittest.TestCase):
         self.hgs('--dry-run', 'presence', 'set', '--json', data={'idle_seconds': 1, 'locked': False}, ok=False)
         self.assertEqual(self.file.read_bytes(), original)
 
+    def test_shared_delivery_preference_defaults_validates_and_lists(self):
+        self.assertEqual(self.listing()['preferences'], {'mobile_delivery': 'away'})
+        self.assertEqual(self.hgs('swarm', 'preference', 'get', '--json'), {'mobile_delivery': 'away'})
+        self.assertEqual(self.hgs('swarm', 'preference', 'set', 'mobile_delivery', 'away_10', '--json'),
+                         {'ok': True, 'mobile_delivery': 'away_10'})
+        self.assertEqual(self.hgs('swarm', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertEqual(self.listing()['preferences'], {'mobile_delivery': 'away_10'})
+        for args in (('set', 'mobile_delivery', 'later'), ('set', 'theme', 'away'), ('set', 'mobile_delivery'), ('unset',)):
+            self.hgs('swarm', 'preference', *args, '--json', ok=False)
+        self.assertEqual(self.hgs('swarm', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        # A listing never fails because of the catalog; damage reads as the default.
+        (self.root / 'config/swarm/catalog.json').write_text('{"damaged":')
+        self.assertEqual(self.listing()['preferences'], {'mobile_delivery': 'away'})
+
 
 if __name__ == '__main__':
     unittest.main()

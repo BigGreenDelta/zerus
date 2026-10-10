@@ -258,6 +258,15 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 );
                 // The local native ABI validates project/swarm/folder identity,
                 // exact launch UUID and its durable metadata receipt as one action.
+            } else if rest.len() == 5
+                && rest[0] == "preference"
+                && rest[1] == "set"
+                && rest[2] == "mobile_delivery"
+                && crate::swarm::MOBILE_DELIVERY.contains(&rest[3].as_str())
+                && rest[4] == "--json"
+            {
+                // The gateway connector changes the swarm-wide delivery choice.
+                no_payload()?;
             } else {
                 ensure!(
                     rest.len() == 1 && matches!(rest[0].as_str(), "get" | "hello"),
@@ -1059,6 +1068,21 @@ mod tests {
         ))
         .is_ok());
         assert!(validate(&request(&["swarm", "assign-launch", "--json"], None)).is_err());
+    }
+
+    #[test]
+    fn shared_delivery_setting_accepts_only_exact_known_values() {
+        let set = ["swarm", "preference", "set", "mobile_delivery", "away_10", "--json"];
+        assert!(validate(&request(&set, None)).is_ok());
+        assert!(validate(&request(&set, Some(json!({})))).is_err());
+        for argv in [
+            vec!["swarm", "preference", "set", "mobile_delivery", "later", "--json"],
+            vec!["swarm", "preference", "set", "theme", "away", "--json"],
+            vec!["swarm", "preference", "set", "mobile_delivery", "away"],
+            vec!["swarm", "preference", "get", "--json"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
     }
 
     #[test]

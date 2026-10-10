@@ -346,6 +346,10 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
+            // The swarm's delivery choice wins over the joining machine's own.
+            if matches!(key, Key::Preference { .. }) && existing.contains_key(&key) {
+                continue;
+            }
             if request.prefer_peer_memberships
                 && matches!(key, Key::Session { .. })
                 && existing.get(&key).is_some_and(|v| !v.is_null())

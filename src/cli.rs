@@ -71,6 +71,8 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
        hgs swarm assign-launch --json   assign an exact launch to its selected project
        hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
+       hgs swarm preference get --json   shared phone notification timing
+       hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
@@ -637,6 +639,7 @@ fn local_json(config: &Config) -> Result<Value> {
     if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
         raw["desktop_presence"] = presence;
     }
+    raw["preferences"] = crate::swarm::preferences(config);
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {

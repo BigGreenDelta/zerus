@@ -168,6 +168,32 @@ class Swarm(unittest.TestCase):
         owner = next(p['id'] for p in result['organization']['projects'] if 'b\ncodex/shared/session' in p['sessions'])
         self.assertEqual(owner, 'b')
 
+    def test_concurrent_delivery_choices_converge_without_conflict_review(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+        self.call('c', 'preference', 'set', 'mobile_delivery', 'immediate', '--json')
+        snapshots = self.converge()
+        values = {self.call(node, 'preference', 'get', '--json')['mobile_delivery'] for node in 'abc'}
+        self.assertEqual(len(values), 1)
+        self.assertIn(values.pop(), {'away_5', 'immediate'})
+        for snapshot in snapshots:
+            self.assertEqual(snapshot['conflicts'], [])
+            self.assertEqual(snapshot['preferences'], snapshots[0]['preferences'])
+        self.call('b', 'preference', 'set', 'mobile_delivery', 'away_30', '--json')
+        self.converge()
+        self.assertEqual({self.call(node, 'preference', 'get', '--json')['mobile_delivery'] for node in 'abc'}, {'away_30'})
+
+    def test_joining_keeps_the_swarm_delivery_choice(self):
+        self.call('b', 'preference', 'set', 'mobile_delivery', 'immediate', '--json')
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+        self.join('a', 'b')
+        self.assertEqual(self.call('a', 'preference', 'get', '--json'), {'mobile_delivery': 'immediate'})
+        self.assertEqual(self.call('a', 'get')['conflicts'], [])
+        self.call('c', 'preference', 'set', 'mobile_delivery', 'away_30', '--json')
+        self.join('c', 'b')
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'immediate'})
+
 
 if __name__ == '__main__':
     unittest.main()

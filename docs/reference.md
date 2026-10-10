@@ -611,11 +611,12 @@ changes. One configured SSH connection is enough for exchange in both directions
 the other side needs no reverse SSH connection. Learning a machine ID through the
 catalog does not create local transport access to it.
 
-Shared fields are machine IDs/names, project IDs/names/colors, folder locations and
-session membership. SSH hosts, users, ports, keys, proxies, credentials, transport
-bindings, local order, filters, collapse/appearance and the default project stay
-local. File contents and agent history are not copied. Offline hosts do not hide
-projects with locally configured access.
+Shared fields are machine IDs/names, project IDs/names/colors, folder locations,
+session membership and the phone notification timing. SSH hosts, users, ports,
+keys, proxies, credentials, transport bindings, local order, filters,
+collapse/appearance and the default project stay local. File contents and agent
+history are not copied. Offline hosts do not hide projects with locally configured
+access.
 
 The catalog and local bindings live in `~/.config/hgs/swarm/catalog.json`; do not
 copy that complete file between machines because it contains node identity and
@@ -653,6 +654,16 @@ Disconnect stops outbound exchange through that connection while retaining the
 catalog and session access. It does not deny inbound exchange from an existing
 member; SSH controls transport access. `HGS_SWARM_SERVICE=0 ./install.sh` skips
 worker installation.
+
+### Phone notification timing
+
+`hgs swarm preference get --json` prints `{"mobile_delivery": "away"}`;
+`hgs swarm preference set mobile_delivery away_10 --json` changes it for every
+member. Values are `immediate`, `away` (default), `away_5`, `away_10`, `away_15`
+and `away_30`. Concurrent changes settle on one value without a review; the next
+change from any computer or the phone replaces them. A machine joining a swarm
+adopts the swarm's existing choice. Without a swarm the local catalog keeps it the
+same way.
 
 ### Legacy CLI folder aliases
 
@@ -1162,7 +1173,9 @@ adds `desktop_presence: {idle_seconds, locked, locked_seconds}`, aged to the mom
 of listing. It is omitted when the record is more than two minutes old (Zerus
 closed, crashed or the machine slept) or written by a clock that has since moved
 back. The record is `desktop-presence.json` in the hgs state directory and holds
-no other desktop information.
+no other desktop information. The listing also includes
+`preferences: {mobile_delivery}` from the shared catalog, or the default when the
+catalog is missing or unreadable.
 
 Every session also has `attention_signature` and `read`, either of which may be
 `null`. `attention_signature` is a lowercase hex SHA-256 of what currently needs
