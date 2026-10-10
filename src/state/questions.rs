@@ -281,6 +281,16 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
 
 /// Current normalized identities without availability checks (adapter guard API).
 pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
+    Ok(collect(record, None)?.unwrap_or_default())
+}
+
+/// Like `current`, but None when the Codex question index cannot be brought up
+/// to date by `deadline`; its progress is kept for the next call.
+pub(super) fn current_until(record: &Value, deadline: std::time::Instant) -> Result<Option<Vec<Value>>> {
+    collect(record, Some(deadline))
+}
+
+fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Option<Vec<Value>>> {
     let mut by_tool = BTreeMap::new();
     if let Some(pending) = record["pending_questions"].as_object() {
         for card in pending.values() {
@@ -307,7 +317,13 @@ pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
         by_tool.insert(string(&card, "tool_call_id").into(), card);
     }
     let mut cards: Vec<_> = by_tool.into_values().collect();
-    cards.extend(codex_questions::current(record)?);
+    match deadline {
+        None => cards.extend(codex_questions::current(record)?),
+        Some(deadline) => match codex_questions::current_until(record, deadline)? {
+            Some(codex) => cards.extend(codex),
+            None => return Ok(None),
+        },
+    }
     if let Some(approval)=claude_approval::current(record){cards.push(approval);}
     if let Some(mode) = claude_permission::current(record) {
         cards.push(mode);
@@ -330,7 +346,7 @@ pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
             .unwrap_or(0.0)
             .total_cmp(&b["created_at"].as_f64().unwrap_or(0.0))
     });
-    Ok(cards)
+    Ok(Some(cards))
 }
 
 pub(super) fn wire_response(record: &Value, question_id: &str) -> Result<Option<Value>> {

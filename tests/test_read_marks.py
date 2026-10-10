@@ -1,8 +1,11 @@
 """Shared read marks on the session's host: `hgs ls --json` fields and `hgs read`."""
+import fcntl
+import hashlib
 import json
 import re
 import sqlite3
 import subprocess
+import time
 import unittest
 import uuid
 
@@ -176,6 +179,41 @@ class ReadMarks(unittest.TestCase):
         self.assertIsNone(self.listing()['attention_signature'])
         self.hook('PermissionRequest', session_id=child, tool_name='Shell')
         self.assertFalse(self.acknowledged())
+
+    def codex_question(self):
+        """A Codex rollout with one accepted optional question that is still unanswered."""
+        rollout = self.root / '.codex/sessions' / f'rollout-2026-10-11T00-00-00-{self.conversation_id}.jsonl'
+        rollout.parent.mkdir(parents=True)
+        call = dict(type='function_call', name='request_user_input_async', call_id='call-question',
+                    arguments=json.dumps({'questions': [{'title': 'Keep the fixture?', 'options': ['Yes', 'No']}]}))
+        accepted = dict(type='function_call_output', call_id='call-question', output=json.dumps({'accepted': True}))
+        lines = [dict(type='session_meta', payload=dict(id=self.conversation_id)),
+                 dict(type='response_item', timestamp='2026-10-11T00:00:01Z', payload=call),
+                 dict(type='response_item', timestamp='2026-10-11T00:00:02Z', payload=accepted)]
+        rollout.write_text(''.join(json.dumps(line) + '\n' for line in lines))
+        self.record.update(transcript=str(rollout), phase='working', activity='busy')
+        self.write_record()
+
+    def test_unindexed_questions_are_never_acknowledged(self):
+        self.codex_question()
+        known = self.listing()['attention_signature']
+        self.assertRegex(known, HEX)  # The pending question needs attention.
+        self.assertTrue(self.mark(attention_signature=known)['applied']['attention_signature'])
+        # Another process holds the question index for longer than a listing's budget.
+        digest = hashlib.sha256(json.dumps([None, self.conversation_id], separators=(',', ':')).encode()).hexdigest()
+        lock = (self.state / 'codex_questions' / f'{digest}.lock').open('a')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        started = time.monotonic()
+        row = self.listing()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertRegex(row['attention_signature'], HEX)
+        self.assertNotIn(row['attention_signature'], (known, row['read']['attention_signature']))
+        # `hgs read` cannot index it either and never acknowledges an unknown state.
+        self.assertFalse(self.mark(attention_signature=row['attention_signature'])['applied']['attention_signature'])
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        row = self.listing()
+        self.assertEqual((row['attention_signature'], row['read']['attention_signature']), (known, known))
 
     def test_unknown_session_reports_not_found(self):
         result = self.read(name='codex/missing-session', reply_id='1:1.0')

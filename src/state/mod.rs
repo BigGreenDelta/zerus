@@ -209,6 +209,8 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
             .ok_or("invalid session")?
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
+    // Bounds question indexing for the whole listing.
+    let budget = read_marks::question_budget();
     for record in records()? {
         if archive::equivalent(&record, &archived) {
             continue;
@@ -226,8 +228,8 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                     .as_object_mut()
                     .ok_or("invalid session")?
                     .extend(summary.as_object().ok_or("invalid summary")?.clone());
-                let questions = read_marks::pending_questions(&record, session, true);
-                read_marks::enrich(session, &marks, journal::journal_name(&record), &questions);
+                let questions = read_marks::pending_questions(&record, session, true, budget);
+                read_marks::enrich(session, &marks, journal::journal_name(&record), questions.as_deref());
             }
             continue;
         }
@@ -250,7 +252,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), &[]);
+        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
         sessions.push(session);
     }
     for record in archived {
@@ -266,7 +268,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), &[]);
+        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
@@ -274,7 +276,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
-            read_marks::enrich(session, &marks, &owner, &[]);
+            read_marks::enrich(session, &marks, &owner, Some(&[]));
         }
     }
 

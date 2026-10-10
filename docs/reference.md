@@ -1164,7 +1164,14 @@ requests. An approval or input request also contributes `attention_started`, the
 time it began, so requests without a native ID (a permission prompt without a
 tool call, a tool known only by name) stay distinct; each external child approval
 carries its own `attention_id`. It is `null` when nothing needs attention and
-does not change on status-only updates. `read` is the host's mark for the current conversation:
+does not change on status-only updates. A listing indexes Codex question
+transcripts within a shared one-second budget (and a short slice per session),
+saving its progress so the next listing resumes; it never scans a long
+transcript unbounded. While that index is incomplete, or held by another
+process, the signature includes an explicit "questions unknown" component: it is
+non-null, never equals an acknowledged signature, and `hgs read` does not
+acknowledge it, so an unknown state never hides a question. `read` is the
+host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.

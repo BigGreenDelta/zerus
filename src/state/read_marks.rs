@@ -4,8 +4,17 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::time::{Duration, Instant};
 
 const ACTIONABLE: &[&str] = &["approval", "input", "error"];
+// Question indexing shares this budget across one listing (or one `hgs read`);
+// each session still gets a short slice to catch up with appended lines.
+const QUESTION_BUDGET: Duration = Duration::from_secs(1);
+const QUESTION_SLICE: Duration = Duration::from_millis(50);
+
+pub(super) fn question_budget() -> Instant {
+    Instant::now() + QUESTION_BUDGET
+}
 
 pub(super) fn path() -> PathBuf {
     root().join("read-marks.json")
@@ -33,7 +42,9 @@ pub(super) fn record<'a>(marks: &'a Value, owner: &str, conversation: &str) -> &
 /// Canonical identity of what needs the owner now, or None. Status-only
 /// changes (activity text, timestamps, tool progress, finished children)
 /// never change it; a new request, question or failed turn always does.
-pub(super) fn signature(session: &Value, questions: &[Value]) -> Option<String> {
+/// `questions` is None when they could not be indexed in time: the result then
+/// differs from every signature `hgs read` can acknowledge.
+pub(super) fn signature(session: &Value, questions: Option<&[Value]>) -> Option<String> {
     let running = ["", "running"].contains(&string(session, "state"))
         && string(session, "process_state") != "exited";
     if !running {
@@ -53,13 +64,19 @@ pub(super) fn signature(session: &Value, questions: &[Value]) -> Option<String> 
         json!(["turn", session["turn_started"]])
     };
     // The same identities the mobile connector publishes as `mobile_attention`.
-    let mut asked: Vec<Value> = questions
-        .iter()
-        .filter(|card| card["answer_delivery"]["status"] != "submitted")
-        .map(|card| json!([card["question_id"], card["question_hash"]]))
-        .collect();
-    asked.sort_by_key(Value::to_string);
-    asked.dedup();
+    let asked = questions.map_or_else(
+        || json!("unknown"),
+        |questions| {
+            let mut asked: Vec<Value> = questions
+                .iter()
+                .filter(|card| card["answer_delivery"]["status"] != "submitted")
+                .map(|card| json!([card["question_id"], card["question_hash"]]))
+                .collect();
+            asked.sort_by_key(Value::to_string);
+            asked.dedup();
+            json!(asked)
+        },
+    );
     let mut children = Vec::new();
     if string(session, "subagent_source") != "hook_profiles" {
         for (id, child) in session["subagents"].as_object().into_iter().flatten() {
@@ -77,7 +94,7 @@ pub(super) fn signature(session: &Value, questions: &[Value]) -> Option<String> 
         }
     }
     children.sort_by_key(Value::to_string);
-    if !actionable && asked.is_empty() && children.is_empty() {
+    if !actionable && asked.as_array().is_some_and(Vec::is_empty) && children.is_empty() {
         return None;
     }
     let canonical = json!([1, session["run_id"], session["conversation_id"],
@@ -87,19 +104,22 @@ pub(super) fn signature(session: &Value, questions: &[Value]) -> Option<String> 
 
 /// Pending native question identities of a live tracked session. Only Codex
 /// asks without changing phase; other providers are read only while waiting.
+/// None when the Codex question index cannot catch up within `budget` (or a
+/// short slice of its own): a listing never runs an unbounded transcript scan.
 /// Errors contribute nothing: a listing never fails on optional indexes.
-pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool) -> Vec<Value> {
+pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool, budget: Instant) -> Option<Vec<Value>> {
     if !live_pane
         || (string(record, "agent") != "codex" && !ACTIONABLE.contains(&string(session, "phase")))
         || !process_alive(record)
     {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    questions::current(record).unwrap_or_default()
+    let deadline = budget.max(Instant::now() + QUESTION_SLICE);
+    questions::current_until(record, deadline).unwrap_or(Some(Vec::new()))
 }
 
 /// Add the C1 fields to one `hgs ls --json` session object.
-pub(super) fn enrich(session: &mut Value, marks: &Value, owner: &str, questions: &[Value]) {
+pub(super) fn enrich(session: &mut Value, marks: &Value, owner: &str, questions: Option<&[Value]>) {
     let mark = record(marks, owner, string(session, "conversation_id")).clone();
     let digest = signature(session, questions);
     session["attention_signature"] = json!(digest);
@@ -149,12 +169,16 @@ fn parse(value: &Value) -> Result<Request> {
 
 /// Each requested field moves only to the session's current value, in the
 /// same run and conversation. Stale fields leave the stored mark unchanged.
-fn apply(current: &Value, questions: &[Value], request: &Request, existing: &Value, at: f64) -> (bool, bool, Value) {
+/// Attention whose questions could not be indexed is never acknowledged.
+fn apply(current: &Value, questions: Option<&[Value]>, request: &Request, existing: &Value, at: f64) -> (bool, bool, Value) {
     let same = string(current, "run_id") == request.run
         && string(current, "conversation_id") == request.conversation;
     let reply = same
         && request.reply.as_deref().is_some_and(|reply| current["reply_id"].as_str() == Some(reply));
-    let attention = same && request.signature.is_some() && request.signature == signature(current, questions);
+    let attention = same
+        && questions.is_some()
+        && request.signature.is_some()
+        && request.signature == signature(current, questions);
     if !reply && !attention {
         return (false, false, existing.clone());
     }
@@ -188,13 +212,14 @@ fn bounded(conversations: &mut serde_json::Map<String, Value>) {
 }
 
 /// The session as `hgs ls --json` shows it, its mark owner and its pending
-/// questions; None when the name has no current tracked or native session.
-fn current(name: &str) -> Result<Option<(Value, String, Vec<Value>)>> {
+/// questions (None when not indexed in time); None when the name has no
+/// current tracked or native session.
+fn current(name: &str) -> Result<Option<(Value, String, Option<Vec<Value>>)>> {
     if dsh::exists(name) {
         return Ok(dsh::snapshots()?
             .into_iter()
             .find(|session| string(session, "name") == name)
-            .map(|session| (session, name.to_owned(), Vec::new())));
+            .map(|session| (session, name.to_owned(), Some(Vec::new()))));
     }
     archive::reconcile()?;
     let guard = lock(None)?;
@@ -221,7 +246,7 @@ fn current(name: &str) -> Result<Option<(Value, String, Vec<Value>)>> {
         view["state"] = json!(if record["paused"].as_bool().unwrap_or(false) { "paused" } else { "stopped" });
     }
     drop(guard);
-    let questions = pending_questions(&record, &view, live_pane);
+    let questions = pending_questions(&record, &view, live_pane, question_budget());
     Ok(Some((view, journal::journal_name(&record).to_owned(), questions)))
 }
 
@@ -242,7 +267,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let _guard = lock(Some(&root().join("read-marks.lock")))?;
     let mut sessions = load();
     let existing = record(&sessions, &owner, &request.conversation).clone();
-    let (reply, attention, next) = apply(&view, &questions, &request, &existing, now());
+    let (reply, attention, next) = apply(&view, questions.as_deref(), &request, &existing, now());
     if reply || attention {
         let owners: std::collections::BTreeSet<String> = records()?
             .iter()
@@ -280,7 +305,7 @@ mod tests {
 
     #[test]
     fn signature_ignores_status_only_updates() {
-        let first = signature(&waiting(), &[]).unwrap();
+        let first = signature(&waiting(), Some(&[])).unwrap();
         assert!(hex(&first));
         let mut status = waiting();
         status["activity_summary"] = json!("Still waiting");
@@ -288,24 +313,24 @@ mod tests {
         status["current_tool"] = json!("Bash");
         status["prompt"] = json!("Another preview");
         status["subagents"] = json!({"worker":{"state":"working","display_state":null,"updated":99.0}});
-        assert_eq!(signature(&status, &[]), Some(first));
+        assert_eq!(signature(&status, Some(&[])), Some(first));
     }
 
     #[test]
     fn signature_changes_for_each_new_request() {
-        let first = signature(&waiting(), &[]).unwrap();
+        let first = signature(&waiting(), Some(&[])).unwrap();
         let mut next = waiting();
         next["attention_id"] = json!("call-2");
-        assert_ne!(signature(&next, &[]).unwrap(), first);
+        assert_ne!(signature(&next, Some(&[])).unwrap(), first);
         let question = json!({"question_id":"q-1","question_hash":"h-1"});
-        assert_ne!(signature(&waiting(), &[question.clone()]).unwrap(), first);
+        assert_ne!(signature(&waiting(), Some(&[question.clone()])).unwrap(), first);
         let mut child = waiting();
         child["subagents"] = json!({"helper":{"state":"working","display_state":"approval"}});
-        assert_ne!(signature(&child, &[]).unwrap(), first);
+        assert_ne!(signature(&child, Some(&[])).unwrap(), first);
         for (key, value) in [("run_id", "run-2"), ("conversation_id", "conversation-2"), ("phase", "approval")] {
             let mut changed = waiting();
             changed[key] = json!(value);
-            assert_ne!(signature(&changed, &[]).unwrap(), first, "{key}");
+            assert_ne!(signature(&changed, Some(&[])).unwrap(), first, "{key}");
         }
     }
 
@@ -313,17 +338,17 @@ mod tests {
     fn nothing_actionable_or_not_running_has_no_signature() {
         let mut working = waiting();
         working["phase"] = json!("working");
-        assert_eq!(signature(&working, &[]), None);
+        assert_eq!(signature(&working, Some(&[])), None);
         for (key, value) in [("state", "paused"), ("state", "stopped"), ("state", "archived"), ("process_state", "exited")] {
             let mut stopped = waiting();
             stopped[key] = json!(value);
-            assert_eq!(signature(&stopped, &[]), None, "{key}={value}");
+            assert_eq!(signature(&stopped, Some(&[])), None, "{key}={value}");
         }
         // Kimi profile groups carry no per-child request identity.
         let mut profiles = working.clone();
         profiles["subagent_source"] = json!("hook_profiles");
         profiles["subagents"] = json!({"helper":{"state":"input"}});
-        assert_eq!(signature(&profiles, &[]), None);
+        assert_eq!(signature(&profiles, Some(&[])), None);
     }
 
     #[test]
@@ -331,10 +356,10 @@ mod tests {
         let mut working = waiting();
         working["phase"] = json!("working");
         let question = json!({"question_id":"q-1","question_hash":"h-1"});
-        assert!(signature(&working, &[question.clone()]).is_some());
+        assert!(signature(&working, Some(&[question.clone()])).is_some());
         let mut submitted = question;
         submitted["answer_delivery"] = json!({"status":"submitted"});
-        assert_eq!(signature(&working, &[submitted]), None);
+        assert_eq!(signature(&working, Some(&[submitted])), None);
     }
 
     #[test]
@@ -342,11 +367,11 @@ mod tests {
         let mut failed = waiting();
         failed["phase"] = json!("error");
         failed["attention_id"] = json!("");
-        let first = signature(&failed, &[]).unwrap();
+        let first = signature(&failed, Some(&[])).unwrap();
         failed["last_event_at"] = json!(500.0);
-        assert_eq!(signature(&failed, &[]).unwrap(), first);
+        assert_eq!(signature(&failed, Some(&[])).unwrap(), first);
         failed["turn_started"] = json!(6.0);
-        assert_ne!(signature(&failed, &[]).unwrap(), first);
+        assert_ne!(signature(&failed, Some(&[])).unwrap(), first);
     }
 
     #[test]
@@ -358,23 +383,44 @@ mod tests {
                 asked["phase"] = json!(phase);
                 asked["attention_id"] = json!(id);
                 asked["attention_started"] = json!(20.0);
-                let first = signature(&asked, &[]).unwrap();
+                let first = signature(&asked, Some(&[])).unwrap();
                 asked["last_event_at"] = json!(500.0);
                 asked["activity_summary"] = json!("Still waiting");
-                assert_eq!(signature(&asked, &[]).unwrap(), first, "{phase} {id:?}");
+                assert_eq!(signature(&asked, Some(&[])).unwrap(), first, "{phase} {id:?}");
                 asked["attention_started"] = json!(30.0);
-                assert_ne!(signature(&asked, &[]).unwrap(), first, "{phase} {id:?}");
+                assert_ne!(signature(&asked, Some(&[])).unwrap(), first, "{phase} {id:?}");
             }
         }
         let mut child = waiting();
         child["phase"] = json!("working");
         child["subagents"] = json!({"external:kimi:session_child":{"state":"working","display_state":"approval",
             "attention_id":"request:20.0","updated":20.0}});
-        let first = signature(&child, &[]).unwrap();
+        let first = signature(&child, Some(&[])).unwrap();
         child["subagents"]["external:kimi:session_child"]["updated"] = json!(25.0);
-        assert_eq!(signature(&child, &[]).unwrap(), first);
+        assert_eq!(signature(&child, Some(&[])).unwrap(), first);
         child["subagents"]["external:kimi:session_child"]["attention_id"] = json!("request:30.0");
-        assert_ne!(signature(&child, &[]).unwrap(), first);
+        assert_ne!(signature(&child, Some(&[])).unwrap(), first);
+    }
+
+    #[test]
+    fn unindexed_questions_are_never_acknowledged() {
+        let known = signature(&waiting(), Some(&[])).unwrap();
+        let unknown = signature(&waiting(), None).unwrap();
+        assert!(hex(&unknown));
+        assert_ne!(unknown, known);
+        // Unknown questions may be pending even while the agent works.
+        let mut working = waiting();
+        working["phase"] = json!("working");
+        assert_eq!(signature(&working, Some(&[])), None);
+        assert!(signature(&working, None).is_some());
+        // `hgs read` that could not index them acknowledges neither value.
+        for digest in [&known, &unknown] {
+            let (_, attention, kept) = apply(&waiting(), None, &request(None, Some(digest.as_str())), &Value::Null, 1.0);
+            assert!(!attention);
+            assert!(kept.is_null());
+        }
+        let (_, attention, _) = apply(&waiting(), Some(&[]), &request(None, Some(known.as_str())), &Value::Null, 1.0);
+        assert!(attention);
     }
 
     #[test]
@@ -385,10 +431,10 @@ mod tests {
         assert!(record(&marks, "codex/project/original", "conversation-2").is_null());
         assert!(record(&marks, "codex/project/original", "").is_null());
         let mut session = waiting();
-        enrich(&mut session, &marks, "codex/project/original", &[]);
+        enrich(&mut session, &marks, "codex/project/original", Some(&[]));
         assert_eq!(session["read"]["reply_id"], "7:100.5");
         assert!(hex(session["attention_signature"].as_str().unwrap()));
-        enrich(&mut session, &marks, "codex/project/other-owner", &[]);
+        enrich(&mut session, &marks, "codex/project/other-owner", Some(&[]));
         assert!(session["read"].is_null());
     }
 
@@ -420,22 +466,22 @@ mod tests {
     fn marks_move_only_to_current_values() {
         let mut current = waiting();
         current["reply_id"] = json!("7:100.5");
-        let digest = signature(&current, &[]).unwrap();
-        let (reply, attention, mark) = apply(&current, &[], &request(Some("7:100.5"), Some(digest.as_str())), &Value::Null, 50.0);
+        let digest = signature(&current, Some(&[])).unwrap();
+        let (reply, attention, mark) = apply(&current, Some(&[]), &request(Some("7:100.5"), Some(digest.as_str())), &Value::Null, 50.0);
         assert!(reply && attention);
         assert_eq!(mark, json!({"conversation_id":"conversation-1","reply_id":"7:100.5","attention_signature":digest,"at":50.0}));
         // Older values are stale and keep the stored mark.
         let older_request = request(Some("6:90.5"), Some("b".repeat(64).as_str()));
-        let (reply, attention, kept) = apply(&current, &[], &older_request, &mark, 60.0);
+        let (reply, attention, kept) = apply(&current, Some(&[]), &older_request, &mark, 60.0);
         assert!(!reply && !attention);
         assert_eq!(kept, mark);
         // Another run or conversation makes every field stale.
         let mut other = request(Some("7:100.5"), Some(digest.as_str()));
         other.run = "run-0".into();
-        assert_eq!(apply(&current, &[], &other, &Value::Null, 70.0), (false, false, Value::Null));
+        assert_eq!(apply(&current, Some(&[]), &other, &Value::Null, 70.0), (false, false, Value::Null));
         // A partial mark keeps the other field.
         let older = json!({"conversation_id":"conversation-1","reply_id":"6:90.5","attention_signature":null,"at":1.0});
-        let (reply, attention, partial) = apply(&current, &[], &request(None, Some(digest.as_str())), &older, 80.0);
+        let (reply, attention, partial) = apply(&current, Some(&[]), &request(None, Some(digest.as_str())), &older, 80.0);
         assert!(!reply && attention);
         assert_eq!((partial["reply_id"].clone(), partial["at"].clone()), (json!("6:90.5"), json!(80.0)));
     }
