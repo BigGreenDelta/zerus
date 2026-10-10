@@ -269,6 +269,12 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
+The **Active** filter combines sessions currently working with those in
+**Needs attention**, counting each session once. It replaces the Working filter
+and also applies to content search. Explicit review-later reminders remain
+active offline; stale work alone does not. Archives stay in Archive. The
+Dashboard's Active counter opens this same filter.
+
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project
 band and session row keeps its height, so each session
@@ -278,7 +284,7 @@ edge, a tile's frame takes the color of its state (working, needing an answer,
 error, paused, draft or a new reply) with a faint glow inward. Each band shows
 the project name and its most urgent counter. Above the tiles and as wide as
 them, the strip keeps a search button and two filters: the active one and the
-most urgent other one (sessions needing an answer, otherwise working sessions,
+most urgent other one (sessions needing an answer, otherwise active sessions,
 otherwise all). Rows open on click and name their session in a tooltip;
 tiles do not open a session's subagents. Expanding grows the same rows back
 into cards. The strip's search button opens the full list over the conversation

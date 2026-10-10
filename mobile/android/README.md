@@ -118,8 +118,9 @@ An unavailable gateway leaves the connection intact.
 ## Sessions and projects
 
 Sessions is the initial view. Its compact filters use the desktop glyphs and
-native semantics: All sessions, Needs attention, Working, Saved sessions, and
-Archive. Working requires a reachable computer and a current running agent;
+native semantics: All sessions, Needs attention, Active, Saved sessions, and
+Archive. Active combines working sessions and sessions needing attention,
+counting each session once. Work requires a reachable computer and a current running agent;
 input, approval, non-recovering errors, and blocked recovery require attention.
 Optional native questions and explicit child requests also count as attention.
 Routine child failures and legacy hook-profile observations do not. Saved

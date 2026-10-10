@@ -35,7 +35,7 @@ private:
     void arrangeAccounts();
     FleetState m_fleet;
     QLabel *m_inactive, *m_empty;
-    QPushButton *m_working, *m_attention, *m_connected, *m_sessions;
+    QPushButton *m_active, *m_attention, *m_connected, *m_sessions;
     QGridLayout *m_machineGrid;
     QGridLayout *m_sessionGrid;
     QGridLayout *m_accountGrid;

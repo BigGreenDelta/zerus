@@ -291,8 +291,11 @@ stale instead of discarding it. Android scopes project identity to the paired
 workspace, native swarm and project ID, and retains projects with no sessions.
 
 Sessions is the initial Android view. Its desktop-derived filters select all
-nonarchived sessions, sessions needing attention, working sessions, saved
+nonarchived sessions, sessions needing attention, active sessions, saved
 sessions, or archives. Machine selection includes the workspace identity.
+Active replaces Working and combines current work with sessions needing
+attention, counting each session once. Explicit review-later reminders remain
+active offline; cached work and input states alone do not.
 Filtering and search produce project groups containing only matching sessions;
 the separate Projects catalog includes empty canonical projects. Directory
 fallback groups remain confined to the session list. Provider badges and filter

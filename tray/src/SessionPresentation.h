@@ -145,6 +145,23 @@ inline bool currentActivity(const SessionInfo &s, bool online = true)
         && s.activity != "unknown" && !(s.conversationState == "ended" && s.activity != "idle");
 }
 
+inline bool working(const SessionInfo &s, bool online = true)
+{
+    return currentActivity(s, online) && s.activity == "busy" && !s.needsAction();
+}
+
+inline bool needsAttention(const SessionInfo &s, bool online = true)
+{
+    if (s.state == "archived") return false;
+    if (s.reviewLater || (online && s.needsAttention())) return true;
+    if (!currentActivity(s, online) || s.attentionAcknowledged || s.subagentSource == "hook_profiles") return false;
+    for (const auto &value : s.subagents) {
+        const auto state = childState(value.toObject());
+        if (state == "approval" || state == "input" || state == "attention") return true;
+    }
+    return false;
+}
+
 inline QString promptPreview(const QString &text)
 {
     const auto replies = QuestionReply::parse(text);

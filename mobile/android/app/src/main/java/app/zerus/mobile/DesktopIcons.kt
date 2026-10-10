@@ -96,7 +96,7 @@ object DesktopIcons {
     fun forName(name: String): ImageVector = when (name.lowercase(Locale.ROOT)) {
         "all", "sessions" -> All
         "attention" -> Attention
-        "working" -> Working
+        "working", "active" -> Working
         "paused", "pause", "saved" -> Paused
         "archive", "archived" -> Archived
         "machine", "machines" -> Machines

@@ -28,6 +28,7 @@
 #include <QPushButton>
 #include <QPlainTextEdit>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QStandardItemModel>
 #include <QUuid>
 #include <algorithm>
@@ -120,6 +121,7 @@ private slots:
     void dashboardActivityRowsStayReadable_data();
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
+    void activeFilterCombinesWorkAndAttentionOnce();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
     void processPollingFollowsVisibilityAndSettings();
@@ -1902,6 +1904,47 @@ void TestSessionsWindow::filtersSelectionAndOffline()
     window.close(); // Closing a dashboard never invokes a session command.
 }
 
+void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
+{
+    auto state = fleet(); auto box = state.local();
+    auto &working = box.sessions[0];
+    auto &idle = box.sessions[1]; idle.conversationId = "idle-conversation"; idle.replyId = "idle-reply";
+    auto overlap = working; overlap.name = "codex/hgs/overlap";
+    overlap.conversationId = "overlap-conversation"; overlap.replyId = "overlap-reply";
+    auto child = idle; child.name = "codex/hgs/child-request"; child.replyId.clear();
+    child.subagentSource = "hooks"; child.subagents = {{"child", QJsonObject{{"display_state", "input"}}}};
+    auto reminder = box.sessions[2]; reminder.name = "codex/hgs/reminder"; reminder.reviewLater = true;
+    auto exited = working; exited.name = "codex/hgs/exited"; exited.processState = "exited";
+    auto ended = working; ended.name = "codex/hgs/ended"; ended.conversationState = "ended";
+    auto unknown = working; unknown.name = "codex/hgs/unknown"; unknown.activity = "unknown";
+    auto archived = overlap; archived.name = "codex/hgs/archive"; archived.state = "archived"; archived.archiveId = "archive-one";
+    box.sessions.append({overlap, child, reminder, exited, ended, unknown, archived});
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    QVERIFY(state.setReviewLater({}, reminder, true));
+    const auto previousMarks = QSettings().value("attention/sessionMarks");
+    const auto restoreMarks = qScopeGuard([previousMarks] { QSettings().setValue("attention/sessionMarks", previousMarks); });
+    QSettings().setValue("attention/sessionMarks", QJsonDocument(state.attentionMarks()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    QPushButton *active = nullptr, *attention = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>()) {
+        if (button->property("filter") == "active") active = button;
+        if (button->property("filter") == "attention") attention = button;
+        QVERIFY(button->property("filter") != "working");
+    }
+    QVERIFY(active); QVERIFY(attention); QCOMPARE(active->accessibleName(), QString("Active"));
+    QCOMPARE(active->property("count").toInt(), 6); QCOMPARE(attention->property("count").toInt(), 5);
+    auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 6);
+    QSet<QString> keys;
+    for (int i = 0; i < list->count(); ++i) keys.insert(list->item(i)->data(Qt::UserRole).toString());
+    QCOMPARE(keys.size(), 6); QVERIFY(keys.contains("\ncodex/hgs/dashboard"));
+    QVERIFY(keys.contains("\nkimi/docs/research")); QVERIFY(keys.contains("mac\nclaude/infra/review"));
+    QVERIFY(keys.contains("\ncodex/hgs/child-request")); QVERIFY(keys.contains("\ncodex/hgs/reminder"));
+    box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto peer = *state.peer("mac"); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state); QCOMPARE(active->property("count").toInt(), 1); QCOMPARE(list->count(), 1);
+    QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
+}
+
 void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts_data()
 {
     QTest::addColumn<QString>("promptEvent");
@@ -3628,7 +3671,7 @@ void TestSessionsWindow::compactMetadataAndSubagentRoster()
     box.sessions[0].processState = "exited"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QVERIFY(list->item(0)->data(Qt::UserRole + 7).toString().isEmpty());
     QCOMPARE(list->item(0)->data(Qt::UserRole + 4).toString(), QString("Agent exited"));
-    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "working") QVERIFY(button->text().endsWith("0"));
+    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "active") QCOMPARE(button->property("count").toInt(), 1);
     client->inspectionReady({}, session.name, details); QVERIFY(roster->toPlainText().contains("Last recorded"));
     QVERIFY(!roster->toPlainText().contains("2 active /"));
 }
@@ -3923,7 +3966,7 @@ void TestSessionsWindow::sessionsRailResetsFiltersAndShowsAttention()
     QVERIFY(brand->property("attentionCount").toInt()>0);
     QVERIFY(window.findChild<QLabel *>("railAttentionBadge")->isVisible());
     auto *search=window.findChild<QLineEdit *>("search");search->setText("no matching sessions");
-    for (auto *button:window.findChildren<QPushButton *>()) if (button->property("filter")=="working") button->click();
+    for (auto *button:window.findChildren<QPushButton *>()) if (button->property("filter")=="active") button->click();
     sessions->click();QVERIFY(search->text().isEmpty());
     for (auto *button:window.findChildren<QPushButton *>()) if (button->property("filter")=="all") QVERIFY(button->isChecked());
     auto box=state.local();for(auto &session:box.sessions){session.phase="idle";session.activity="idle";session.unreadReply=false;}
@@ -4495,9 +4538,9 @@ void TestSessionsWindow::sessionListCollapsesIntoWorkingStrip()
         QVERIFY(!near(strip.pixelColor(card.x() + 4, card.center().y()), IdentityBadges::attentionColor(dark, status.kind == SessionStatusBadge::Error)));
     }
     QVERIFY(framed >= 3);
-    // Taking the urgent filter offers the next one: working sessions.
+    // Taking the urgent filter offers the next one: active sessions.
     filterButton("attention")->click();
-    QTRY_COMPARE(shownFilters(), QStringList({"attention", "working"}));
+    QTRY_COMPARE(shownFilters(), QStringList({"attention", "active"}));
     filterButton("all")->click(); QTRY_COMPARE(shownFilters(), QStringList({"all", "attention"}));
 
     // The collapsed state survives a restart and keeps the docked width for later.

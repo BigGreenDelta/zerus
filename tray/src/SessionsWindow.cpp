@@ -360,7 +360,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_search, &QLineEdit::textEdited, this, [this]() { m_restoreKey.clear(); m_renameKey.clear(); });
     auto *filterRow = m_filterRow = new QHBoxLayout; filterRow->setSpacing(3);
     const QList<QPair<QString, QString>> filters{{"all", tr("All sessions")}, {"attention", tr("Needs attention")},
-        {"working", tr("Working")}, {"paused", tr("Saved sessions")}, {"archived", tr("Archive")}};
+        {"active", tr("Active")}, {"paused", tr("Saved sessions")}, {"archived", tr("Archive")}};
     for (const auto &pair : filters) {
         auto *button = new QPushButton; button->setObjectName("sessionFilter"); button->setProperty("glyph", pair.first);
         button->setProperty("filter", pair.first); button->setProperty("caption", pair.second); button->setIconSize(QSize(16, 16));
@@ -1469,9 +1469,9 @@ void SessionsWindow::applySessionStrip()
     m_search->setVisible(!strip); m_stripSearch->setVisible(strip);
     m_stripSpacer->setFixedHeight(m_stripReserve); m_stripSpacer->setVisible(strip && m_stripReserve > 0);
     // Narrow filters keep the active one and the most urgent beside it: sessions
-    // that need attention, otherwise working ones, otherwise all of them.
+    // that need attention, otherwise active ones, otherwise all of them.
     QString urgent;
-    for (const char *id : {"attention", "working", "all"}) {
+    for (const char *id : {"attention", "active", "all"}) {
         const auto found = std::find_if(m_filters.cbegin(), m_filters.cend(), [id](auto *button) { return button->property("filter").toString() == id; });
         if (found == m_filters.cend() || (*found)->isChecked() || (QString(id) != "all" && (*found)->property("count").toInt() == 0)) continue;
         urgent = id; break;
@@ -2024,7 +2024,7 @@ void SessionsWindow::rebuild()
     for (const auto *item : m_sessions->selectedItems()) selectedKeys.insert(item->data(KeyRole).toString());
     m_rebuilding = true;
     QString requestedSelection = m_selectedKey;
-    m_entries.clear(); int online = 0, working = 0, attention = 0, saved = 0, archived = 0, active = 0;
+    m_entries.clear(); int online = 0, attention = 0, saved = 0, archived = 0, total = 0, active = 0;
     const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
     auto append = [&](const QString &host, const BoxState &box) {
         if (box.host.isEmpty()) return;
@@ -2039,9 +2039,10 @@ void SessionsWindow::rebuild()
             m_entries.append({host, host.isEmpty() ? box.host : host, key, {}, s, reachable});
             if (!selectedHost) continue;
             if (s.state == "archived") { ++archived; continue; }
-            ++active;
-            if (currentActivity(s, reachable) && s.activity == "busy" && !s.needsAction()) ++working;
-            if (entryNeedsAttention(m_entries.last())) ++attention;
+            ++total;
+            const bool needsAttention = entryNeedsAttention(m_entries.last());
+            if (needsAttention) ++attention;
+            if (needsAttention || SessionPresentation::working(s, reachable)) ++active;
             if (s.state != "running") ++saved;
         }
     };
@@ -2091,7 +2092,7 @@ void SessionsWindow::rebuild()
     m_markAllReadAction->setEnabled(unreadCount > 0);
     m_markAllReadAction->setText(unreadCount ? tr("Mark all as read (%1)").arg(unreadCount) : tr("Mark all as read"));
     m_markAllReadAction->setIcon(workspaceIcon("read-all", QColor(m_muted)));
-    const QMap<QString, int> counts{{"all", active}, {"working", working}, {"attention", attention}, {"paused", saved}, {"archived", archived}};
+    const QMap<QString, int> counts{{"all", total}, {"active", active}, {"attention", attention}, {"paused", saved}, {"archived", archived}};
     for (auto *button : m_filters) {
         const auto id = button->property("filter").toString(); button->setChecked(m_pages->currentIndex() == 0 && id == m_filter);
         button->setText(QString::number(counts.value(id))); button->setProperty("count", counts.value(id));
@@ -2111,7 +2112,8 @@ void SessionsWindow::rebuild()
         if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(e.host.isEmpty() ? "@local" : e.host)) continue;
         if (m_filter == "attention" && !entryNeedsAttention(e)
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
-        if (m_filter == "working" && (!currentActivity(s, e.online) || s.activity != "busy" || s.needsAction())) continue;
+        if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::working(s, e.online)
+            && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
         if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd)!=m_folderFilterPath))continue;

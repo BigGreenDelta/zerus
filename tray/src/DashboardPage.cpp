@@ -40,12 +40,6 @@ QString age(double timestamp)
     if (seconds < 3600) return DashboardPage::tr("Sampled %1m ago").arg(seconds / 60);
     return DashboardPage::tr("Last sample %1").arg(QDateTime::fromSecsSinceEpoch(qint64(timestamp)).toString("d MMM HH:mm"));
 }
-bool working(const SessionInfo &session)
-{
-    return session.state == QLatin1String("running") && session.processState != QLatin1String("exited")
-        && !session.needsAction() && session.activity == QLatin1String("busy")
-        && session.conversationState != QLatin1String("ended");
-}
 QLabel *label(const QString &text, const QString &name, QWidget *parent = nullptr)
 {
     auto *result = new QLabel(text, parent); result->setObjectName(name); result->setTextFormat(Qt::PlainText);
@@ -159,7 +153,7 @@ public:
         m_model.appendRow(new QStandardItem);
     }
     void setTheme(bool dark) { if (property("hgsDark") != QVariant(dark)) { setProperty("hgsDark", dark); QWidget::update(); } }
-    void update(const SessionInfo &session, const QString &alias, bool includeCompleted)
+    void update(const SessionInfo &session, const QString &alias, bool includeCompleted, bool online)
     {
         using namespace SessionPresentation;
         auto *item = m_model.item(0); bool changed = false;
@@ -168,26 +162,26 @@ public:
         set(SessionRoles::Meta, branchContext(session));
         set(SessionRoles::BranchIcon, !branchContext(session).isEmpty());
         set(SessionRoles::GitStatus, session.gitStatus);
-        set(SessionRoles::Status, status(session));
+        set(SessionRoles::Status, status(session, online));
         set(SessionRoles::Failure, session.phase=="error");
-        set(SessionRoles::Detail, currentAction(session).simplified());
+        set(SessionRoles::Detail, currentAction(session, online).simplified());
         set(SessionRoles::Agent, session.cmd);
         set(SessionRoles::Host, alias);
         set(SessionRoles::MachineName, alias);
         set(SessionRoles::MachineColor, MachineAppearance::color(alias));
         set(SessionRoles::Model, session.model.isEmpty() ? (session.cmd == "sh" ? QString() : tr("Model unknown")) : session.model);
         set(SessionRoles::Effort, session.effort);
-        set(SessionRoles::Attention, session.reviewLater || (!session.attentionAcknowledged && session.needsAction()));
+        set(SessionRoles::Attention, session.reviewLater || (online && !session.attentionAcknowledged && session.needsAction()));
         set(SessionRoles::ReviewLater, session.reviewLater);
         set(SessionRoles::Unread, session.unreadReply);
-        set(SessionRoles::Working, working(session));
+        set(SessionRoles::Working, working(session, online));
         set(SessionRoles::WorkingSince, session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
-        set(SessionRoles::Children, childCount(session, false, true, includeCompleted));
+        set(SessionRoles::Children, childCount(session, false, online, includeCompleted));
         // Overview cards navigate to a session; the roster opens in its list.
         set(SessionRoles::HasChildren, false);
-        const QStringList description{displayTitle(session), alias, session.cmd, status(session),
+        const QStringList description{displayTitle(session), alias, session.cmd, status(session, online),
             projectContext(session), item->data(SessionRoles::Detail).toString(), session.model, session.effort,
-            childCount(session, true, true, includeCompleted)};
+            childCount(session, true, online, includeCompleted)};
         const auto git = GitStatusBadge::tooltip(session.gitStatus);
         const auto name = description.join(" / "), tip = description.join("\n") + (session.gitStatus.isEmpty() ? QString() : "\n\n" + git);
         if (accessibleName() != name) setAccessibleName(name);
@@ -274,13 +268,13 @@ DashboardPage::DashboardPage(QWidget *parent) : QWidget(parent)
     outer->addLayout(header); outer->addWidget(scroll);
     auto *summary = new QHBoxLayout; summary->setSpacing(12);
     m_attention = new QPushButton; m_attention->setObjectName("dashboardAttention");
-    m_working = new QPushButton; m_working->setObjectName("dashboardWorking");
+    m_active = new QPushButton; m_active->setObjectName("dashboardActive");
     m_connected = new QPushButton; m_connected->setObjectName("dashboardConnected");
     m_sessions=new QPushButton;m_sessions->setObjectName("dashboardSessions");
     connect(m_sessions,&QPushButton::clicked,this,[this]{emit filterRequested("@all","all");});
-    for (auto *button : {m_attention, m_working, m_connected, m_sessions}) { button->setMinimumHeight(72); summary->addWidget(button, 1); }
+    for (auto *button : {m_attention, m_active, m_connected, m_sessions}) { button->setMinimumHeight(72); summary->addWidget(button, 1); }
     connect(m_attention, &QPushButton::clicked, this, [this] { emit filterRequested("@all", "attention"); });
-    connect(m_working, &QPushButton::clicked, this, [this] { emit filterRequested("@all", "working"); });
+    connect(m_active, &QPushButton::clicked, this, [this] { emit filterRequested("@all", "active"); });
     connect(m_connected, &QPushButton::clicked, this, [this] { emit machinesRequested({}); }); layout->addLayout(summary);
     layout->addWidget(label(tr("Machines"), "dashboardSection"));
     m_machineGrid = new QGridLayout; m_machineGrid->setSpacing(14); layout->addLayout(m_machineGrid);
@@ -382,21 +376,21 @@ void DashboardPage::render()
         const auto *box = m_fleet.peer(host); if (!box) continue;
         machines.append({host, host, host, *box, box->ok && now - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs});
     }
-    struct Active { QString key, host, alias; SessionInfo session; };
+    struct Active { QString key, host, alias; SessionInfo session; bool online; };
     QList<Active> active;
     QStringList keys;
-    int attentionCount = 0, workingCount = 0, connectedCount = 0, offlineSessions = 0, knownSessions = 0;
+    int attentionCount = 0, connectedCount = 0, offlineSessions = 0, knownSessions = 0;
     for (const auto &machine : machines) {
         keys << machine.key;
         if (machine.fresh) ++connectedCount;
         for (const auto &session : machine.box.sessions) {
             if (session.state == "archived") continue;
             ++knownSessions;
-            if (!machine.fresh) { ++offlineSessions; continue; }
-            if (session.needsAttention()) ++attentionCount;
-            if (working(session)) ++workingCount;
-            if (!session.needsAttention() && !working(session)) continue;
-            active.append({machine.key + QChar(0x1f) + session.name, machine.host, machine.alias, session});
+            if (!machine.fresh) ++offlineSessions;
+            const bool needsAttention = SessionPresentation::needsAttention(session, machine.fresh);
+            if (needsAttention) ++attentionCount;
+            if (!needsAttention && !SessionPresentation::working(session, machine.fresh)) continue;
+            active.append({machine.key + QChar(0x1f) + session.name, machine.host, machine.alias, session, machine.fresh});
         }
         auto *card = m_machineCards.value(machine.key);
         if (!card) {
@@ -414,7 +408,8 @@ void DashboardPage::render()
     if (keys != m_machineOrder) { m_machineOrder = keys; m_columns = 0; } arrangeMachines();
     m_attention->setText(tr("%1\nNeeds attention").arg(attentionCount)); m_attention->setAccessibleName(tr("%1 sessions need attention").arg(attentionCount));
     setStyleProperty(m_attention, "active", attentionCount > 0);
-    m_working->setText(tr("%1\nWorking").arg(workingCount)); m_connected->setText(tr("%1 / %2\nMachines online").arg(connectedCount).arg(machines.size()));
+    m_active->setText(tr("%1\nActive").arg(active.size())); m_active->setAccessibleName(tr("%1 active sessions").arg(active.size()));
+    m_connected->setText(tr("%1 / %2\nMachines online").arg(connectedCount).arg(machines.size()));
     m_sessions->setText(tr("%1\nSessions").arg(knownSessions));m_sessions->setAccessibleName(tr("%1 sessions").arg(knownSessions));
     m_inactive->setText(offlineSessions ? tr("%1 sessions are on offline or stale machines. Their last known status is shown on the machine cards.").arg(offlineSessions) : QString());
     m_inactive->setVisible(offlineSessions > 0);
@@ -431,7 +426,7 @@ void DashboardPage::render()
             row = new DashboardSessionRow(this); m_rows.insert(item.key, row);
             connect(row, &QPushButton::clicked, this, [this, host = item.host, name = item.session.name] { emit sessionRequested(host, name); });
         }
-        row->setTheme(m_dark); row->update(item.session, item.alias, includeCompleted);
+        row->setTheme(m_dark); row->update(item.session, item.alias, includeCompleted, item.online);
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {
         if (!rowKeys.contains(it.key())) { delete it.value(); it = m_rows.erase(it); } else ++it;
@@ -456,7 +451,7 @@ void DashboardPage::setTheme(bool dark)
         "QFrame#dashboardMachineCard{background:%2;border:1px solid %3;border-radius:12px;}"
         "QPushButton{background:%2;border:1px solid %3;border-radius:7px;color:%4;padding:7px 12px;}"
         "QPushButton:hover{background:%6;border-color:#639b8d;} QPushButton:focus[keyboardFocus=\"true\"]{border-color:#79cdb5;}"
-        "QPushButton#dashboardAttention,QPushButton#dashboardWorking,QPushButton#dashboardConnected,QPushButton#dashboardSessions{text-align:left;font-size:16px;padding:12px 12px;min-height:46px;border-radius:10px;}"
+        "QPushButton#dashboardAttention,QPushButton#dashboardActive,QPushButton#dashboardConnected,QPushButton#dashboardSessions{text-align:left;font-size:16px;padding:12px 12px;min-height:46px;border-radius:10px;}"
         "QPushButton#dashboardAttention[active=true]{color:%7;background:%8;border-color:%9;}"
         // Keep shared card geometry under the application button stylesheet.
         "QPushButton#dashboardSessionRow{padding:0;min-height:104px;border:0;background:transparent;}"

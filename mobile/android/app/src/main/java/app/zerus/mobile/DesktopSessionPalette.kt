@@ -11,7 +11,7 @@ object DesktopSessionPalette {
         val state = SessionFilters.status(session, online)
         val attention = raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later") || online && !raw.optBoolean("attention_acknowledged") &&
             (SessionFilters.needsAction(session) || childAttention(session, online))
-        val working = SessionFilters.matches(session, SessionFilter.Working, online)
+        val working = SessionFilters.working(session, online)
         val unread = raw.optBoolean("unread_reply") || raw.optBoolean("mobile_unread_reply")
         val kind = when {
             attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention

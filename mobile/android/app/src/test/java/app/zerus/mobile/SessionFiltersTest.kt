@@ -12,25 +12,45 @@ class SessionFiltersTest {
     @Test fun omittedLifecycleDefaultsRunningAsDesktopDoes() {
         val item = session("""{"activity":"busy","phase":"tool","process_state":"running"}""")
         assertEquals("running", SessionFilters.state(item))
-        assertTrue(SessionFilters.matches(item, SessionFilter.Working, true))
+        assertTrue(SessionFilters.matches(item, SessionFilter.Active, true))
         assertFalse(SessionFilters.matches(item, SessionFilter.Saved, true))
     }
-    @Test fun workingRequiresReachableCurrentProcessAndNeverDisplayString() {
+    @Test fun activeWorkRequiresReachableCurrentProcessAndNeverDisplayString() {
         val item = session("""{"activity":"busy","phase":"working","state":"running"}""")
-        assertTrue(SessionFilters.matches(item, SessionFilter.Working, true))
-        assertFalse(SessionFilters.matches(item, SessionFilter.Working, false))
+        assertTrue(SessionFilters.matches(item, SessionFilter.Active, true))
+        assertFalse(SessionFilters.matches(item, SessionFilter.Active, false))
         listOf("""{"activity":"busy","process_state":"exited"}""", """{"activity":"busy","state":"paused"}""",
             """{"activity":"busy","conversation_state":"ended"}""", """{"activity":"unknown"}""", """{"activity":"idle"}""").forEach {
-            assertFalse(SessionFilters.matches(session(it), SessionFilter.Working, true))
+            assertFalse(SessionFilters.matches(session(it), SessionFilter.Active, true))
         }
     }
-    @Test fun attentionOverridesBusyForInputApprovalAndNonRecoveringError() {
+    @Test fun activeIncludesAttentionForInputApprovalAndNonRecoveringError() {
         listOf("input", "approval", "error").forEach { phase ->
             val item = session(JSONObject().put("activity", "busy").put("phase", phase).toString())
             assertTrue(SessionFilters.matches(item, SessionFilter.Attention, true))
-            assertFalse(SessionFilters.matches(item, SessionFilter.Working, true))
+            assertTrue(SessionFilters.matches(item, SessionFilter.Active, true))
             assertFalse(SessionFilters.matches(item, SessionFilter.Attention, false))
+            assertFalse(SessionFilters.matches(item, SessionFilter.Active, false))
         }
+    }
+    @Test fun activeCountsUnionOnceAndPreservesExplicitAttentionOffline() {
+        val working = session("""{"activity":"busy","phase":"tool"}""", name = "codex/project/working")
+        val attention = session("""{"activity":"idle","phase":"input"}""", name = "codex/project/input")
+        val overlap = session("""{"activity":"busy"}""", pending = 1, name = "codex/project/optional-question")
+        val child = session("""{"activity":"idle","subagents":{"child":{"display_state":"input"}}}""", name = "codex/project/child")
+        val reminder = session("""{"state":"paused","review_later":true}""", connection = "b", name = "codex/project/reminder")
+        val archived = session("""{"activity":"busy","phase":"input","review_later":true}""", archive = "archive-one")
+        val saved = session("""{"state":"paused","activity":"busy"}""")
+        val items = listOf(working, attention, overlap, child, reminder, archived, saved)
+        val counts = SessionFilters.counts(items, machines)
+        assertEquals(5, counts.getValue(SessionFilter.Active))
+        assertEquals(4, counts.getValue(SessionFilter.Attention))
+        assertEquals(listOf(working, attention, overlap, child, reminder), items.filter {
+            SessionFilters.matches(it, SessionFilter.Active, SessionFilters.online(it, machines))
+        })
+        assertTrue(SessionFilters.matches(reminder, SessionFilter.Active, false))
+        assertFalse(SessionFilters.matches(attention, SessionFilter.Active, false))
+        assertFalse(SessionFilters.matches(session("""{"phase":"approval","attention_acknowledged":true}"""), SessionFilter.Active, true))
     }
     @Test fun scheduledRecoveryErrorDoesNotRequestAttentionButBlockedRecoveryDoes() {
         listOf("waiting", "dispatching", "retrying").forEach { recovery ->
@@ -69,7 +89,7 @@ class SessionFiltersTest {
         val scoped = SessionFilters.scoped(listOf(a, b), machines, setOf(MachineKey("a", "same")), "")
         assertEquals(listOf(a), scoped)
         assertNotEquals(MachineKey("a", "same").key, MachineKey("b", "same").key)
-        assertEquals(1, SessionFilters.counts(scoped, machines).getValue(SessionFilter.Working))
+        assertEquals(1, SessionFilters.counts(scoped, machines).getValue(SessionFilter.Active))
     }
     @Test fun searchAndProjectScopeApplyBeforeEveryCounterAndCards() {
         val key = ProjectKey("a", "swarm", "project")
@@ -78,7 +98,7 @@ class SessionFiltersTest {
         val scoped = SessionFilters.scoped(listOf(a, b), machines, emptySet(), "synthetic", key)
         assertEquals(listOf(a), scoped)
         assertEquals(1, SessionFilters.counts(scoped, machines).getValue(SessionFilter.All))
-        assertEquals(1, SessionFilters.counts(scoped, machines).getValue(SessionFilter.Working))
+        assertEquals(1, SessionFilters.counts(scoped, machines).getValue(SessionFilter.Active))
         assertTrue(SessionFilters.scoped(listOf(a), machines, emptySet(), "computer a").isNotEmpty())
     }
     @Test fun groupOrderUsesCatalogAndNeverShowsEmptyGroupsOrMergesNames() {

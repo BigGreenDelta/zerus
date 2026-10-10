@@ -91,7 +91,7 @@ private slots:
     {
         DashboardPage page; page.setFleet(fixture()); page.resize(1120, 900); page.show();
         QCOMPARE(page.findChild<QPushButton *>("dashboardAttention")->text(), QString("1\nNeeds attention"));
-        QCOMPARE(page.findChild<QPushButton *>("dashboardWorking")->text(), QString("1\nWorking"));
+        QCOMPARE(page.findChild<QPushButton *>("dashboardActive")->text(), QString("2\nActive"));
         QCOMPARE(page.findChild<QPushButton *>("dashboardConnected")->text(), QString("2 / 3\nMachines online"));
         QCOMPARE(page.findChild<QPushButton *>("dashboardSessions")->text(),QString("5\nSessions"));
         QCOMPARE(page.findChildren<QPushButton *>("dashboardSessionRow").size(), 2);
@@ -100,12 +100,28 @@ private slots:
         QCOMPARE(statuses.count("Offline"), 1); QCOMPARE(statuses.count("Connected"), 2);
         QVERIFY(page.findChildren<QLabel *>("dashboardMuted").size() > 5);
     }
+    void reviewLaterStaysActiveOnOfflineMachine()
+    {
+        auto state = fixture(); auto box = *state.peer("studio"); box.sessions[0].reviewLater = true;
+        state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
+        QVERIFY(state.setReviewLater("studio", box.sessions[0], true));
+        DashboardPage page; page.setFleet(state);
+        QCOMPARE(page.findChild<QPushButton *>("dashboardActive")->text(), QString("3\nActive"));
+        QCOMPARE(page.findChild<QPushButton *>("dashboardAttention")->text(), QString("2\nNeeds attention"));
+        const auto rows = page.findChildren<QPushButton *>("dashboardSessionRow"); QCOMPARE(rows.size(), 3);
+        const auto reminder = std::find_if(rows.cbegin(), rows.cend(), [](const QPushButton *row) {
+            return row->accessibleName().contains("studio");
+        });
+        QVERIFY(reminder != rows.cend()); QVERIFY((*reminder)->accessibleName().contains("Offline"));
+    }
     void navigationAndPollsKeepFocusedRow()
     {
         DashboardPage page; page.setFleet(fixture()); page.resize(1000, 850); page.show();
         QSignalSpy filters(&page, &DashboardPage::filterRequested), sessions(&page, &DashboardPage::sessionRequested), machines(&page, &DashboardPage::machinesRequested);
         page.findChild<QPushButton *>("dashboardAttention")->click();
         QCOMPARE(filters.takeFirst(), QVariantList({QString("@all"), QString("attention")}));
+        page.findChild<QPushButton *>("dashboardActive")->click();
+        QCOMPARE(filters.takeFirst(), QVariantList({QString("@all"), QString("active")}));
         page.findChild<QPushButton *>("dashboardConnected")->click(); QCOMPARE(machines.count(), 1);
         const auto rows = page.findChildren<QPushButton *>("dashboardSessionRow");
         auto *row = *std::find_if(rows.cbegin(), rows.cend(), [](const QPushButton *button) {return button->accessibleName().contains("docs / research");});
@@ -125,7 +141,7 @@ private slots:
             if (row->accessibleName().contains("docs / research")) { attention = row; row->installEventFilter(&counter); }
         for (auto *card : page.findChildren<QPushButton *>("dashboardAccountCard")) card->installEventFilter(&counter);
         for (auto *card : page.findChildren<QFrame *>("dashboardMachineCard")) card->installEventFilter(&counter);
-        for (const auto &name : {"dashboardAttention", "dashboardWorking", "dashboardConnected", "dashboardSessions"})
+        for (const auto &name : {"dashboardAttention", "dashboardActive", "dashboardConnected", "dashboardSessions"})
             page.findChild<QPushButton *>(name)->installEventFilter(&counter);
         QVERIFY(attention);
         page.setFleet(fleet); page.setAccounts(rows); QTest::qWait(60);
@@ -158,7 +174,7 @@ private slots:
         auto *layout = new QVBoxLayout(&parent); auto *page = new DashboardPage;
         layout->addWidget(page); page->setFleet(fixture()); parent.resize(840,600); parent.show();
         QTest::qWait(20);
-        for (const auto &name : {"dashboardAttention", "dashboardWorking", "dashboardConnected", "dashboardSessions"}) {
+        for (const auto &name : {"dashboardAttention", "dashboardActive", "dashboardConnected", "dashboardSessions"}) {
             const auto *button = page->findChild<QPushButton *>(name);
             QVERIFY(button); QVERIFY2(button->height() >= 70, name);
             QVERIFY(button->text().contains('\n'));

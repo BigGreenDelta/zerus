@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QDateTime>
 #include <QFile>
 #include <QDir>
 #include <QJsonArray>
@@ -15,6 +16,7 @@ class TestSessionSearch : public QObject {
 private slots:
     void init();
     void resultsKeepArchivesRunsAndRemoteIdentities();
+    void activeScopeIncludesChildRequestsAndOfflineReminders();
     void staleQueriesCannotReplaceCurrentResults();
     void multipleMachinesScopeSearch();
     void selectionSurvivesFleetPollsAndExplicitRefresh();
@@ -81,8 +83,9 @@ FleetState TestSessionSearch::fleet(bool remoteOnline) const
     SessionInfo remote; remote.name = "kimi/remote"; remote.project = "remote"; remote.cmd = "kimi"; remote.runId = "remote-run";
     remote.state = "running"; remote.tracked = true; remote.phase = "input"; remote.activity = "busy";
     BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions = {remote};
-    FleetState state; state.setLocal(local, 0); state.setPeer(mac, 1);
-    if (!remoteOnline) { mac.ok = false; state.setPeer(mac, 2); }
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    FleetState state; state.setLocal(local, now); state.setPeer(mac, now);
+    if (!remoteOnline) { mac.ok = false; state.setPeer(mac, now); }
     return state;
 }
 QJsonArray TestSessionSearch::calls() const
@@ -114,10 +117,31 @@ void TestSessionSearch::resultsKeepArchivesRunsAndRemoteIdentities()
     QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Archive"));
     search.setScope(state, "paused", "@local"); QCOMPARE(list(search)->count(), 1);
     QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("saved body"));
-    search.setScope(state, "working", "@local"); QCOMPARE(list(search)->count(), 1);
+    search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 1);
+    search.setScope(state, "active", {}); QCOMPARE(list(search)->count(), 2);
     search.setScope(state, "all", "mac"); QCOMPARE(list(search)->count(), 1);
     search.setQuery({}); QVERIFY(!search.active()); QCOMPARE(list(search)->count(), 0);
 }
+void TestSessionSearch::activeScopeIncludesChildRequestsAndOfflineReminders()
+{
+    auto state = fleet(); auto box = state.local();
+    auto &live = box.sessions[0]; live.activity = "idle"; live.phase = "idle";
+    live.subagentSource = "hooks"; live.subagents = {{"child", QJsonObject{{"display_state", "input"}}}};
+    auto &saved = box.sessions[1]; saved.reviewLater = true;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    QVERIFY(state.setReviewLater({}, saved, true));
+    SessionSearch search(script()); search.setScope(state, "active", {}); search.setQuery("needle");
+    QTRY_COMPARE(list(search)->count(), 3);
+    search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 2);
+    box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 1);
+    QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("saved body"));
+    QVERIFY(state.setReviewLater({}, saved, false));
+    box.ok = true; box.sessions[0].subagentSource = "hook_profiles";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); search.setScope(state, "active", "@local");
+    QCOMPARE(list(search)->count(), 0);
+}
+
 void TestSessionSearch::multipleMachinesScopeSearch()
 {
     auto state=fleet(); BoxState third; third.host="build"; third.ok=true;

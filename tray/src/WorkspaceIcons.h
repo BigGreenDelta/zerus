@@ -86,7 +86,7 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "attention") {
             QPainterPath path; path.moveTo(6, 10); path.cubicTo(6, 3, 18, 3, 18, 10); path.lineTo(18, 15); path.lineTo(20, 18); path.lineTo(4, 18); path.lineTo(6, 15); path.closeSubpath();
             p.drawPath(path); p.drawArc(QRectF(10, 18, 4, 4), 180*16, 180*16);
-        } else if (name == "working") {
+        } else if (name == "working" || name == "active") {
             QPainterPath path; path.moveTo(13, 3); path.lineTo(5, 13); path.lineTo(11, 13); path.lineTo(10, 21); path.lineTo(19, 10); path.lineTo(13, 10); path.closeSubpath(); p.drawPath(path);
         } else if (name == "paused" || name == "pause") {
             p.drawLine(8, 5, 8, 19); p.drawLine(16, 5, 16, 19);

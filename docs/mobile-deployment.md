@@ -201,7 +201,7 @@ prefill these fields, but the app still requires explicit confirmation. Treat
 such a link as a credential until it is consumed or expires.
 
 The app opens on Sessions, grouped by projects containing matching sessions.
-Use the desktop-style All sessions, Needs attention, Working, Saved sessions,
+Use the desktop-style All sessions, Needs attention, Active, Saved sessions,
 and Archive filters, or select one or more computers. Projects shows the logical
 project catalog, including empty projects; project details offer a View sessions
 action. Open a session to read messages, send a message or answer a supported

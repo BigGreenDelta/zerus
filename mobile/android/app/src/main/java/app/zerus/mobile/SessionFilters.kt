@@ -11,7 +11,7 @@ data class MachineKey(val connectionId: String, val computerId: String) {
     val key: String get() = JSONArray(listOf(connectionId, computerId)).toString()
 }
 enum class SessionFilter(val id: String, val caption: String) {
-    All("all", "All sessions"), Attention("attention", "Needs attention"), Working("working", "Working"),
+    All("all", "All sessions"), Attention("attention", "Needs attention"), Active("active", "Active"),
     Saved("paused", "Saved sessions"), Archive("archived", "Archive")
 }
 data class SessionGroup(val key: ProjectKey, val name: String, val color: String, val sessions: List<Session>)
@@ -33,6 +33,8 @@ object SessionFilters {
             (phase in listOf("approval", "input") || phase == "error" && recovery !in listOf("waiting", "dispatching", "retrying") ||
                 recovery in listOf("uncertain", "blocked", "exhausted"))
     }
+    fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
+        session.raw.string("activity") == "busy" && !needsAction(session)
     fun needsAttention(session: Session, online: Boolean): Boolean {
         if (archived(session)) return false
         if (session.raw.optBoolean("review_later") || session.raw.optBoolean("mobile_review_later")) return true
@@ -47,7 +49,7 @@ object SessionFilters {
     fun matches(session: Session, filter: SessionFilter, online: Boolean): Boolean = when (filter) {
         SessionFilter.All -> !archived(session)
         SessionFilter.Attention -> needsAttention(session, online)
-        SessionFilter.Working -> !archived(session) && currentActivity(session, online) && session.raw.string("activity") == "busy" && !needsAction(session)
+        SessionFilter.Active -> needsAttention(session, online) || working(session, online)
         SessionFilter.Saved -> !archived(session) && state(session) != "running"
         SessionFilter.Archive -> archived(session)
     }

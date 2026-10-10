@@ -1,4 +1,5 @@
 #include "SessionSearch.h"
+#include "SessionPresentation.h"
 #include "IdentityBadge.h"
 #include "WorkspaceList.h"
 #include "WorkspaceIcons.h"
@@ -161,8 +162,9 @@ bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool onli
     if (m_filter == "archived") return s.state == "archived";
     // Global text search includes saved and archived conversations. Other state
     // filters still narrow it explicitly, with archive labels on every hit.
-    if (m_filter == "attention") return online && s.needsAttention();
-    if (m_filter == "working") return online && s.state == "running" && s.processState != "exited" && s.conversationState != "ended" && s.activity == "busy" && !s.needsAction();
+    if (m_filter == "attention") return SessionPresentation::needsAttention(s, online);
+    if (m_filter == "active") return s.state != "archived" &&
+        (SessionPresentation::needsAttention(s, online) || SessionPresentation::working(s, online));
     if (m_filter == "paused") return s.state == "paused" || s.state == "stopped";
     return true;
 }
