@@ -670,9 +670,13 @@ do not receive this choice; Settings → Mobile connection names them until they
 updated. An older machine cannot preview or join a swarm whose catalog already
 contains the choice; update it first.
 
-Downgrading is not supported once a machine's swarm catalog holds the choice or
-names an outdated member: an older hgs on that machine cannot read the catalog,
-and leaves it untouched, until hgs is updated again.
+An older member does not relay the choice either: a machine that synchronizes only
+through it receives the choice after that member is updated. Each synchronization
+with an older member exchanges the full inventory, because its catalog never
+matches a catalog that holds the choice.
+
+Once a delivery choice exists, an older hgs on the same machine cannot read the
+swarm catalog, and leaves it untouched, until hgs is updated again.
 
 ### Legacy CLI folder aliases
 

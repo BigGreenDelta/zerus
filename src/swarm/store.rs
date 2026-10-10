@@ -3,14 +3,18 @@ use crate::config::Config;
 use anyhow::{ensure, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
+
+/// Members whose hgs predates shared preferences. Kept beside catalog.json,
+/// which an older hgs on this machine must still be able to read.
+const OUTDATED: &str = "outdated-peers.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,10 +30,6 @@ pub struct Peer {
     pub last_sync: u64,
     #[serde(default)]
     pub error: String,
-    /// The member runs an hgs without shared preferences; it keeps syncing
-    /// projects and folders but does not receive the delivery choice.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub catalog_outdated: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,9 +46,13 @@ pub struct Store {
 
 pub struct LockedStore {
     pub data: Store,
+    /// Alias -> node of members that keep syncing projects and folders but do
+    /// not receive the delivery choice. A missing or damaged file means none.
+    pub outdated: BTreeMap<String, String>,
     pub path: PathBuf,
     _lock: File,
     original: Vec<u8>,
+    outdated_original: Vec<u8>,
 }
 
 impl LockedStore {
@@ -83,11 +87,14 @@ impl LockedStore {
                 .context("read swarm catalog; the original file was left untouched")?
         };
         data.catalog.validate()?;
+        let outdated_original = fs::read(dir.join(OUTDATED)).unwrap_or_default();
         let mut loaded = Self {
             data,
+            outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
             path,
             _lock: lock,
             original,
+            outdated_original,
         };
         let node = loaded.data.node_id.clone();
         for alias in &config.selves {
@@ -108,20 +115,41 @@ impl LockedStore {
     pub fn save(&mut self) -> Result<()> {
         self.data.catalog.validate()?;
         let bytes = serde_json::to_vec(&self.data)?;
-        if bytes == self.original {
-            return Ok(());
+        if bytes != self.original {
+            replace(&self.path, &bytes)?;
+            self.original = bytes;
         }
-        let dir = self.path.parent().unwrap();
-        let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-        temporary.write_all(&bytes)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(&self.path)?;
-        File::open(dir)?.sync_all()?;
-        self.original = bytes;
+        let peers = &self.data.peers;
+        self.outdated
+            .retain(|alias, node| peers.get(alias).is_some_and(|p| &p.node == node));
+        let outdated = if self.outdated.is_empty() {
+            vec![]
+        } else {
+            serde_json::to_vec(&self.outdated)?
+        };
+        if outdated != self.outdated_original {
+            let path = self.path.with_file_name(OUTDATED);
+            if outdated.is_empty() {
+                match fs::remove_file(path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+            } else {
+                replace(&path, &outdated)?;
+            }
+            self.outdated_original = outdated;
+        }
         Ok(())
+    }
+    /// The catalog snapshot, naming members that need an hgs update.
+    pub fn snapshot(&self, config: &Config) -> Value {
+        let mut snapshot = self.data.snapshot(config);
+        for (alias, peer) in &self.data.peers {
+            if self.outdated.get(alias) == Some(&peer.node) {
+                snapshot["peers"][alias]["catalog_outdated"] = json!(true);
+            }
+        }
+        snapshot
     }
     pub fn backup(&self, reason: &str) -> Result<PathBuf> {
         let path = self
@@ -136,6 +164,19 @@ impl LockedStore {
         file.sync_all()?;
         Ok(path)
     }
+}
+
+fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().unwrap();
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path)?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 impl Store {
@@ -180,5 +221,69 @@ impl Store {
             },
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn outdated_members_stay_out_of_the_catalog_older_hgs_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec!["older".into(), "newer".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let (older, newer) = (new_id(), new_id());
+        let mut store = LockedStore::load(&config).unwrap();
+        for (alias, node) in [("older", &older), ("newer", &newer)] {
+            store.data.peers.insert(
+                alias.into(),
+                Peer {
+                    node: node.clone(),
+                    ..Peer::default()
+                },
+            );
+        }
+        store.outdated.insert("older".into(), older.clone());
+        store.save().unwrap();
+        drop(store);
+        // The released Store and Peer definitions reject unknown fields.
+        let stored: Value =
+            serde_json::from_slice(&fs::read(config.dir.join("swarm/catalog.json")).unwrap())
+                .unwrap();
+        for peer in stored["peers"].as_object().unwrap().values() {
+            let fields: Vec<_> = peer.as_object().unwrap().keys().cloned().collect();
+            assert_eq!(fields, ["error", "last_sync", "node"]);
+        }
+        let store = LockedStore::load(&config).unwrap();
+        let peers = &store.snapshot(&config)["peers"];
+        assert_eq!(peers["older"]["catalog_outdated"], true);
+        assert!(peers["newer"].get("catalog_outdated").is_none());
+        drop(store);
+        // A damaged file means no outdated member and is removed on save.
+        let side = config.dir.join("swarm/outdated-peers.json");
+        fs::write(&side, b"{damaged").unwrap();
+        let mut store = LockedStore::load(&config).unwrap();
+        assert!(store.snapshot(&config)["peers"]["older"]
+            .get("catalog_outdated")
+            .is_none());
+        store.save().unwrap();
+        assert!(!side.exists());
+        // Entries for removed or replaced members are dropped.
+        store.outdated.insert("older".into(), older);
+        store.outdated.insert("newer".into(), new_id());
+        store.data.peers.remove("older");
+        store.save().unwrap();
+        assert!(store.outdated.is_empty());
+        assert!(!side.exists());
     }
 }

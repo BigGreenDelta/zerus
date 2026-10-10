@@ -178,10 +178,14 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     // they parse; Settings names them until they are updated.
     let peer_kinds: Option<BTreeSet<String>> =
         serde_json::from_value(identity["kinds"].clone()).ok();
-    if let Some(peer) = local.data.peers.get_mut(alias) {
-        peer.catalog_outdated = !peer_kinds
-            .as_ref()
-            .is_some_and(|kinds| kinds.contains("preference"));
+    if peer_kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains("preference"))
+    {
+        local.outdated.remove(alias);
+    } else {
+        let node = identity["node_id"].as_str().unwrap().to_owned();
+        local.outdated.insert(alias.into(), node);
     }
     local.save()?;
     if identity["digest"] != local.data.catalog.digest() {
@@ -294,7 +298,7 @@ pub fn bind(config: &Config, alias: &str) -> Result<Value> {
         .data
         .bind(alias, identity["node_id"].as_str().unwrap_or_default())?;
     local.save()?;
-    Ok(local.data.snapshot(config))
+    Ok(local.snapshot(config))
 }
 
 pub fn preview(config: &Config, alias: &str) -> Result<Value> {
@@ -422,7 +426,7 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
     // worker retries it; do not misleadingly report the join as rolled back.
     let exchange = sync(config)?;
     let local = LockedStore::load(config)?;
-    Ok(json!({"joined":true,"sync":exchange,"snapshot":local.data.snapshot(config)}))
+    Ok(json!({"joined":true,"sync":exchange,"snapshot":local.snapshot(config)}))
 }
 
 pub fn worker() -> Result<()> {

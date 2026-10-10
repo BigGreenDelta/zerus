@@ -227,6 +227,9 @@ class Swarm(unittest.TestCase):
         peers = self.call('b', 'get')['peers']
         self.assertTrue(peers['c']['catalog_outdated'])
         self.assertNotIn('catalog_outdated', peers['a'])
+        # An older hgs on b itself still reads b's catalog: peers keep their released fields.
+        stored = json.loads((self.root / 'b/swarm/catalog.json').read_text())
+        self.assertEqual({field for peer in stored['peers'].values() for field in peer}, {'node', 'last_sync', 'error'})
         # A legacy requester omits accepted kinds and receives only legacy kinds.
         inventory = self.call('b', 'inventory')
         response = self.call('b', 'exchange', data={'swarm_id': inventory['swarm_id'], 'known': [], 'operations': []})

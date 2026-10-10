@@ -130,7 +130,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             }
             store.save()?;
             if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
-            let mut snapshot = store.data.snapshot(config);
+            let mut snapshot = store.snapshot(config);
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {
                 written.entry(store.data.catalog.canonical_key(&op.key).token()).or_default().push(op.id.clone());
