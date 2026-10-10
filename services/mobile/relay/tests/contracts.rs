@@ -899,3 +899,56 @@ async fn http_rejects_bad_content_before_mutation_and_recovers_from_disconnect()
     server.await.unwrap().unwrap();
     f.close().await;
 }
+
+#[tokio::test]
+async fn mark_read_payload_is_exact_and_capability_gated() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let payload = json!({"run_id":"run","conversation_id":"conversation","reply_id":"7:100.5","attention_signature":"a".repeat(64)});
+    let body = json!({"request_id":id,"computer_id":f.node.id,"operation":"mark_read","session":"codex/example/tag","payload":payload});
+    // A computer that does not advertise the operation keeps rejecting it.
+    assert_eq!(f.submit(&body).await.unwrap_err().0.as_u16(), 409);
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["mark_read"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.submit(&body).await.unwrap()["state"], "queued");
+    let changes = [
+        json!({"reply_id":7}),
+        json!({"attention_signature":"A".repeat(64)}),
+        json!({"attention_signature":"a".repeat(63)}),
+        json!({"run_id":""}),
+        json!({"reply_id":"bad\u{7}"}),
+        json!({"request_id":id}),
+    ];
+    for change in changes {
+        let mut invalid = body.clone();
+        invalid["request_id"] = json!(Uuid::new_v4().to_string());
+        for (key, value) in change.as_object().unwrap() {
+            invalid["payload"][key] = value.clone();
+        }
+        assert!(zerus_relay::store::Submission::new(invalid).is_err());
+    }
+    let mut missing = body.clone();
+    missing["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reply_id");
+    assert!(zerus_relay::store::Submission::new(missing).is_err());
+    let mut nulls = body.clone();
+    nulls["request_id"] = json!(Uuid::new_v4().to_string());
+    nulls["payload"]["reply_id"] = Value::Null;
+    nulls["payload"]["attention_signature"] = Value::Null;
+    assert!(zerus_relay::store::Submission::new(nulls).is_ok());
+    assert!(protocol::capabilities(vec![])["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "mark_read"));
+    f.close().await;
+}

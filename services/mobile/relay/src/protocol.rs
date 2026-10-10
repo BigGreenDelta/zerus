@@ -34,6 +34,7 @@ pub const OPERATIONS: &[&str] = &[
     "inspect",
     "interrupt",
     "launch",
+    "mark_read",
     "pause",
     "process_output",
     "process_stop",
@@ -186,6 +187,26 @@ pub fn request(v: &Value) -> Result<()> {
         }
         if p.get("archive_id").is_some() {
             uuid(&p["archive_id"], false)?;
+        }
+    } else if op == "mark_read" {
+        // C4: exact host read-mark identity; the host decides what is current.
+        fields(
+            p,
+            &[
+                "run_id",
+                "conversation_id",
+                "reply_id",
+                "attention_signature",
+            ],
+            &[],
+        )?;
+        text(&p["run_id"], 128, false)?;
+        text(&p["conversation_id"], 256, false)?;
+        if !p["reply_id"].is_null() {
+            text(&p["reply_id"], 256, false)?;
+        }
+        if !p["attention_signature"].is_null() {
+            hex(&p["attention_signature"])?;
         }
     } else {
         let extras: &[&str] = match op {
