@@ -1160,8 +1160,11 @@ Every session also has `attention_signature` and `read`, either of which may be
 the owner: run, conversation, the phase when it is `approval`, `input` or
 `error`, the attention identity, pending question identities (the IDs and hashes
 the mobile connector publishes as `mobile_attention`) and actionable subagent
-requests. It is `null` when nothing needs attention and does not change on
-status-only updates. `read` is the host's mark for the current conversation:
+requests. An approval or input request also contributes `attention_started`, the
+time it began, so requests without a native ID (a permission prompt without a
+tool call, a tool known only by name) stay distinct; each external child approval
+carries its own `attention_id`. It is `null` when nothing needs attention and
+does not change on status-only updates. `read` is the host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.

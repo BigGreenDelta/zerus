@@ -43,13 +43,14 @@ pub(super) fn signature(session: &Value, questions: &[Value]) -> Option<String> 
     let actionable = ACTIONABLE.contains(&phase);
     let attention = if !actionable {
         Value::Null
+    } else if phase != "error" {
+        // The start time tells apart requests without a native identity.
+        json!([session["attention_id"], session["attention_started"]])
     } else if !string(session, "attention_id").is_empty() {
         session["attention_id"].clone()
-    } else if phase == "error" {
+    } else {
         // A failed turn without a native error identity is still a new event.
         json!(["turn", session["turn_started"]])
-    } else {
-        json!("")
     };
     // The same identities the mobile connector publishes as `mobile_attention`.
     let mut asked: Vec<Value> = questions
@@ -346,6 +347,34 @@ mod tests {
         assert_eq!(signature(&failed, &[]).unwrap(), first);
         failed["turn_started"] = json!(6.0);
         assert_ne!(signature(&failed, &[]).unwrap(), first);
+    }
+
+    #[test]
+    fn identity_less_requests_are_distinct_per_request() {
+        for phase in ["approval", "input"] {
+            // A permission prompt without a tool call, or a tool keyed by its name.
+            for id in ["", "request_user_input"] {
+                let mut asked = waiting();
+                asked["phase"] = json!(phase);
+                asked["attention_id"] = json!(id);
+                asked["attention_started"] = json!(20.0);
+                let first = signature(&asked, &[]).unwrap();
+                asked["last_event_at"] = json!(500.0);
+                asked["activity_summary"] = json!("Still waiting");
+                assert_eq!(signature(&asked, &[]).unwrap(), first, "{phase} {id:?}");
+                asked["attention_started"] = json!(30.0);
+                assert_ne!(signature(&asked, &[]).unwrap(), first, "{phase} {id:?}");
+            }
+        }
+        let mut child = waiting();
+        child["phase"] = json!("working");
+        child["subagents"] = json!({"external:kimi:session_child":{"state":"working","display_state":"approval",
+            "attention_id":"request:20.0","updated":20.0}});
+        let first = signature(&child, &[]).unwrap();
+        child["subagents"]["external:kimi:session_child"]["updated"] = json!(25.0);
+        assert_eq!(signature(&child, &[]).unwrap(), first);
+        child["subagents"]["external:kimi:session_child"]["attention_id"] = json!("request:30.0");
+        assert_ne!(signature(&child, &[]).unwrap(), first);
     }
 
     #[test]

@@ -4,6 +4,7 @@ import re
 import sqlite3
 import subprocess
 import unittest
+import uuid
 
 import test_input as fixtures
 
@@ -123,6 +124,58 @@ class ReadMarks(unittest.TestCase):
         self.write_record()
         row = self.listing()
         self.assertNotEqual(row['attention_signature'], row['read']['attention_signature'])
+
+    def hook(self, kind, session_id=None, **fields):
+        event = dict(session_id=session_id or self.conversation_id, hook_event_name=kind, **fields)
+        result = subprocess.run([str(HGS), '__state', 'hook'], input=json.dumps(event), text=True, capture_output=True,
+                                env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id), timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def acknowledged(self):
+        row = self.listing()
+        self.assertRegex(row['attention_signature'], HEX)
+        return row['attention_signature'] == (row['read'] or {}).get('attention_signature')
+
+    def acknowledge(self):
+        self.assertTrue(self.mark(attention_signature=self.listing()['attention_signature'])['applied']['attention_signature'])
+        self.assertTrue(self.acknowledged())
+
+    def test_second_identity_less_approval_is_unacknowledged(self):
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.acknowledge()
+        # A child's progress is a status-only update for the pending request.
+        self.hook('SubagentStart', agent_id='worker', agent_type='helper')
+        self.assertTrue(self.acknowledged())
+        self.hook('PostToolUse', tool_name='Bash')
+        self.assertIsNone(self.listing()['attention_signature'])
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.assertFalse(self.acknowledged())
+        # Also when the next prompt follows without a working state in between.
+        self.acknowledge()
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.assertFalse(self.acknowledged())
+
+    def test_second_input_of_a_tool_keyed_by_name_is_unacknowledged(self):
+        self.hook('PreToolUse', tool_name='request_user_input')
+        self.assertEqual(self.listing()['attention_id'], 'request_user_input')
+        self.acknowledge()
+        self.hook('PostToolUse', tool_name='request_user_input')
+        self.hook('PreToolUse', tool_name='request_user_input')
+        row = self.listing()
+        self.assertEqual((row['phase'], row['attention_id']), ('input', 'request_user_input'))
+        self.assertFalse(self.acknowledged())
+
+    def test_second_child_approval_is_unacknowledged(self):
+        child = 'session_' + str(uuid.uuid4())
+        self.hook('SessionStart', session_id=child)
+        self.hook('PermissionRequest', session_id=child, tool_name='Shell')
+        children = self.listing()['subagents']
+        self.assertEqual([c['display_state'] for c in children.values()], ['approval'])
+        self.acknowledge()
+        self.hook('PostToolUse', session_id=child, tool_name='Shell')
+        self.assertIsNone(self.listing()['attention_signature'])
+        self.hook('PermissionRequest', session_id=child, tool_name='Shell')
+        self.assertFalse(self.acknowledged())
 
     def test_unknown_session_reports_not_found(self):
         result = self.read(name='codex/missing-session', reply_id='1:1.0')

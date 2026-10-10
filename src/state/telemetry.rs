@@ -117,7 +117,7 @@ fn children(record: &Value) -> Value {
                 continue;
             }
             roster.insert(id.clone(), json!({"name":string(child,"name"),
-                "state":string(child,"state"),"display_state":child["display_state"],
+                "state":string(child,"state"),"display_state":child["display_state"],"attention_id":child["attention_id"],
                 "provider":child.get("provider").unwrap_or(&record["agent"]),"external":child["external"],"model":child["model"],"reply_id":child["reply_id"],
                 "detail":journal::clipped(&child["detail"],240),
                 "current_tool":string(child,"current_tool"),"updated":child["updated"]}));

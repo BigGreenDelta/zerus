@@ -282,7 +282,15 @@ pub(super) fn hook() -> Result<i32> {
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
         if kind == "PermissionRequest" {
-            record["subagents"][string(&scoped, "agent_id")]["display_state"] = json!("approval");
+            let child = &mut record["subagents"][string(&scoped, "agent_id")];
+            child["display_state"] = json!("approval");
+            // Each request has its own identity, so acknowledging one never hides the next.
+            let tool = ["tool_use_id", "tool_call_id"]
+                .iter()
+                .map(|key| string(&scoped, key))
+                .find(|id| !id.is_empty());
+            child["attention_id"] =
+                json!(tool.map_or_else(|| format!("request:{}", child["updated"]), str::to_owned));
         }
         journal::log_event(&record, &scoped)?;
         write(&mut record)?;

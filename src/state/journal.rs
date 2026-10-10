@@ -358,6 +358,9 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
             .as_object()
             .map(|tools| tools.keys().cloned().collect::<Vec<_>>().join("\n"))
             .unwrap_or_default());
+        if output["phase"] != "error" {
+            output["attention_started"] = record.get("attention_started").cloned().unwrap_or(json!(0));
+        }
     }
     resume_input::enrich(record, &mut output, live_pane);
     provider_errors::enrich(record, &mut output, live_pane);
@@ -707,6 +710,8 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         } else {
             info.as_object_mut().unwrap().remove("display_state");
         }
+        // Any newer child event ends its pending request (hooks.rs sets a new one).
+        info.as_object_mut().unwrap().remove("attention_id");
         if kind == "PreToolUse" {
             info["current_tool"] = json!(clipped(&event["tool_name"], 120));
         } else if [
@@ -795,6 +800,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             record["effort"] = json!(value);
         }
     }
+    let previous_phase = string(record, "phase").to_owned();
     let mut tools = record["active_tools"]
         .as_object()
         .cloned()
@@ -992,6 +998,17 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             }
         }
         _ => {}
+    }
+    // A request without a native identity (a permission prompt without a tool
+    // call, a tool keyed by its name) is identified by when it started. Repeated
+    // prompt notifications keep it; every new prompt or question tool starts one.
+    let phase = string(record, "phase");
+    if ["approval", "input"].contains(&phase)
+        && (phase != previous_phase
+            || (kind == "PermissionRequest" && phase == "approval")
+            || (kind == "PreToolUse" && phase == "input"))
+    {
+        record["attention_started"] = json!(timestamp);
     }
     record["active_tools"] = json!(tools);
 }
@@ -1315,6 +1332,41 @@ mod attention_regressions {
             update_activity(&mut record, &event);
             assert_eq!(record["phase"], "input", "{event}");
         }
+    }
+    #[test]
+    fn each_pending_request_has_its_own_start() {
+        let start = |record: &Value| record["attention_started"].as_f64().unwrap_or(0.0);
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut record = json!({"agent":"codex","activity":"busy","phase":"working","active_tools":{},"subagents":{}});
+        // A permission prompt without a tool call has no native request identity.
+        update_activity(&mut record, &json!({"hook_event_name":"PermissionRequest","tool_name":"Bash"}));
+        assert_eq!(record["phase"], "approval");
+        let first = start(&record);
+        assert!(first > 0.0);
+        pause();
+        // A repeated prompt notification and a child's progress keep the request.
+        for event in [json!({"hook_event_name":"Notification","notification_type":"permission_prompt"}),
+            json!({"hook_event_name":"SubagentStart","agent_id":"worker","agent_type":"helper"})] {
+            update_activity(&mut record, &event);
+            assert_eq!((record["phase"].clone(), start(&record)), (json!("approval"), first), "{event}");
+        }
+        // The next prompt is a new request, also without a working state in between.
+        update_activity(&mut record, &json!({"hook_event_name":"PermissionRequest","tool_name":"Bash"}));
+        let second = start(&record);
+        assert!(second > first);
+        pause();
+        update_activity(&mut record, &json!({"hook_event_name":"PostToolUse","tool_name":"Bash"}));
+        update_activity(&mut record, &json!({"hook_event_name":"Notification","notification_type":"agent_needs_input"}));
+        assert_eq!(record["phase"], "input");
+        assert!(start(&record) > second);
+        // A question tool and its permission prompt are one request.
+        let mut claude = json!({"agent":"claude","activity":"busy","phase":"working","active_tools":{},"subagents":{}});
+        update_activity(&mut claude, &json!({"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"ask"}));
+        let asked = start(&claude);
+        pause();
+        update_activity(&mut claude, &json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion"}));
+        update_activity(&mut claude, &json!({"hook_event_name":"Notification","notification_type":"permission_prompt"}));
+        assert_eq!((claude["phase"].clone(), start(&claude)), (json!("input"), asked));
     }
     #[test]
     fn real_children_and_approval_survive_repair() {
