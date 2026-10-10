@@ -30,6 +30,10 @@ struct SessionInfo {
     double replyAt = 0;
     bool unreadReply = false;
     bool reviewLater = false, attentionAcknowledged = false;
+    // Shared read state from the session's host. sharedRead is false for hosts
+    // whose hgs predates `hgs read`; those keep this device's own marks.
+    bool sharedRead = false;
+    QString attentionSignature, readReplyId, readAttentionSignature;
     double archivedAt = 0;
     bool resumable = false;
     QString activity;
@@ -155,6 +159,9 @@ public:
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
                                   const QJsonObject &question, const QJsonArray &answers);
+    // `hgs [@host] read <session> --json`: the host applies each field only while
+    // it is current. A JSON answer, including not_found, is delivered.
+    quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
     static BoxState parseBox(const QByteArray &json, QString *error);
@@ -206,6 +213,7 @@ signals:
     void questionAnswerSubmitted(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void questionAnswerFailed(quint64 request, const QString &host, const QString &name,
                               const QString &detail, bool deliveryUncertain);
+    void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
@@ -281,5 +289,6 @@ private:
     quint64 m_sessionActionRequest = 0;
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
+    quint64 m_readRequest = 0;
     QSet<QString> m_answersInFlight;
 };

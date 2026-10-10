@@ -85,6 +85,13 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
+    s.sharedRead = obj.contains(QStringLiteral("attention_signature"));
+    s.attentionSignature = obj.value(QStringLiteral("attention_signature")).toString();
+    const auto read = obj.value(QStringLiteral("read")).toObject();
+    if (!s.conversationId.isEmpty() && read.value("conversation_id").toString() == s.conversationId) {
+        s.readReplyId = read.value("reply_id").toString();
+        s.readAttentionSignature = read.value("attention_signature").toString();
+    }
     s.state = obj.value(QStringLiteral("state")).toString(QStringLiteral("running"));
     s.archiveId = s.state == QLatin1String("archived") ? obj.value(QStringLiteral("archive_id")).toString() : QString();
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
@@ -1431,4 +1438,45 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
+}
+
+quint64 HgsClient::requestRead(const QString &host, const QString &name, const QJsonObject &payload)
+{
+    const auto request = ++m_readRequest;
+    QStringList args{"read", name, "--json"}; if (!host.isEmpty()) args.prepend('@' + host);
+    const auto input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    auto *process = new QProcess(this); configureProcess(process, m_hgs, args);
+    auto *timer = new QTimer(process); timer->setSingleShot(true);
+    auto reported = std::make_shared<bool>(false);
+    const auto fail = [this, request, reported](const QString &error) {
+        if (*reported) return; *reported = true; emit readFinished(request, false, {}, error);
+    };
+    connect(process, &QProcess::started, process, [process, input, fail] {
+        if (process->write(input) != input.size()) { fail(tr("Read state transfer failed.")); process->kill(); }
+        process->closeWriteChannel();
+    });
+    connect(timer, &QTimer::timeout, process, [process, fail] { fail(tr("Saving read state timed out.")); process->kill(); });
+    connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
+    });
+    connect(process, &QProcess::finished, process, [this, process, timer, fail, reported, request, payload](int code, QProcess::ExitStatus status) {
+        timer->stop();
+        if (!*reported) {
+            QJsonParseError parse; const auto result = QJsonDocument::fromJson(process->readAllStandardOutput(), &parse).object();
+            const auto applied = result.value("applied").toObject();
+            const bool notFound = code == 1 && result == QJsonObject{{"ok", false}, {"error", "not_found"}};
+            const bool answered = code == 0 && result.value("ok") == true && applied.value("reply_id").isBool()
+                && applied.value("attention_signature").isBool()
+                && (result.value("read").isNull()
+                    || result.value("read").toObject().value("conversation_id") == payload.value("conversation_id"));
+            if (status == QProcess::NormalExit && parse.error == QJsonParseError::NoError && (notFound || answered)) {
+                *reported = true; emit readFinished(request, true, result, {});
+            } else {
+                const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().left(2000);
+                fail(error.isEmpty() ? tr("Could not save read state on that machine.") : error);
+            }
+        }
+        process->deleteLater();
+    });
+    timer->start(host.isEmpty() ? 15000 : 35000); process->start(); return request;
 }
