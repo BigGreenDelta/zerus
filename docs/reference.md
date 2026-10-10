@@ -1152,6 +1152,30 @@ Tracked live sessions add resumability and activity. Saved sessions use
 Archives add `archive_id` and `archived_at`; missing state remains compatible with
 older live-session snapshots. `ok: false` indicates an unavailable host.
 
+Every session also has `attention_signature` and `read`, either of which may be
+`null`. `attention_signature` is a lowercase hex SHA-256 of what currently needs
+the owner: run, conversation, the phase when it is `approval`, `input` or
+`error`, the attention identity, pending question identities (the IDs and hashes
+the mobile connector publishes as `mobile_attention`) and actionable subagent
+requests. It is `null` when nothing needs attention and does not change on
+status-only updates. `read` is the host's mark for the current conversation:
+`{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
+`reply_id` differs from `read.reply_id`; attention is unacknowledged while a
+non-null signature differs from `read.attention_signature`.
+
+```sh
+printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |
+  hgs @mac read codex/sample-project/review --json
+```
+
+`hgs [@host] read` applies each non-null field only while it equals the session's
+current value in the same run and conversation; other fields are reported as not
+applied and the mark does not change. It prints `{"ok": true, "applied":
+{"reply_id": …, "attention_signature": …}, "read": …}`; an unknown session prints
+`{"ok": false, "error": "not_found"}` and exits with status 1. Marks live in
+`read-marks.json` in the hgs state directory, at most eight conversations per
+session, and follow `hgs rename`.
+
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances
 the cursor. Reset it when conversation ID changes. `history_truncated` discloses

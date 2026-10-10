@@ -427,6 +427,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "recovery" {
         return recovery::dispatch(args);
     }
+    if command == "read" { return read_marks::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
     if command == "session-action" { return session_action::dispatch(args); }

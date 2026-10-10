@@ -105,6 +105,163 @@ pub(super) fn enrich(session: &mut Value, marks: &Value, owner: &str, questions:
     session["read"] = mark;
 }
 
+const MAX_CONVERSATIONS: usize = 8;
+const USAGE: &str = "usage: hgs read <session> --json   (JSON stdin: run_id, conversation_id, reply_id, attention_signature)";
+
+#[derive(Debug, PartialEq)]
+struct Request {
+    run: String,
+    conversation: String,
+    reply: Option<String>,
+    signature: Option<String>,
+}
+
+fn parse(value: &Value) -> Result<Request> {
+    const KEYS: [&str; 4] = ["run_id", "conversation_id", "reply_id", "attention_signature"];
+    let object = value.as_object().ok_or("read mark must be a JSON object")?;
+    if object.len() != KEYS.len() || KEYS.iter().any(|key| !object.contains_key(*key)) {
+        return Err("read mark needs exactly run_id, conversation_id, reply_id and attention_signature".into());
+    }
+    let text = |key: &str| -> Result<String> {
+        value[key]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("invalid {key}"))
+    };
+    let optional = |key: &str| -> Result<Option<String>> {
+        if value[key].is_null() { Ok(None) } else { text(key).map(Some) }
+    };
+    let signature = optional("attention_signature")?;
+    if signature.as_deref().is_some_and(|s| {
+        s.len() != 64 || !s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    }) {
+        return Err("attention_signature must be a lowercase hex SHA-256".into());
+    }
+    Ok(Request {
+        run: text("run_id")?,
+        conversation: text("conversation_id")?,
+        reply: optional("reply_id")?,
+        signature,
+    })
+}
+
+/// Each requested field moves only to the session's current value, in the
+/// same run and conversation. Stale fields leave the stored mark unchanged.
+fn apply(current: &Value, questions: &[Value], request: &Request, existing: &Value, at: f64) -> (bool, bool, Value) {
+    let same = string(current, "run_id") == request.run
+        && string(current, "conversation_id") == request.conversation;
+    let reply = same
+        && request.reply.as_deref().is_some_and(|reply| current["reply_id"].as_str() == Some(reply));
+    let attention = same && request.signature.is_some() && request.signature == signature(current, questions);
+    if !reply && !attention {
+        return (false, false, existing.clone());
+    }
+    let mut next = if existing.is_object() {
+        existing.clone()
+    } else {
+        json!({"conversation_id": request.conversation, "reply_id": null, "attention_signature": null})
+    };
+    if reply {
+        next["reply_id"] = json!(request.reply);
+    }
+    if attention {
+        next["attention_signature"] = json!(request.signature);
+    }
+    next["at"] = json!(at);
+    (reply, attention, next)
+}
+
+/// Keep the newest conversations of one session.
+fn bounded(conversations: &mut serde_json::Map<String, Value>) {
+    while conversations.len() > MAX_CONVERSATIONS {
+        let Some(oldest) = conversations
+            .iter()
+            .min_by(|a, b| a.1["at"].as_f64().unwrap_or(0.0).total_cmp(&b.1["at"].as_f64().unwrap_or(0.0)))
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        conversations.remove(&oldest);
+    }
+}
+
+/// The session as `hgs ls --json` shows it, its mark owner and its pending
+/// questions; None when the name has no current tracked or native session.
+fn current(name: &str) -> Result<Option<(Value, String, Vec<Value>)>> {
+    if dsh::exists(name) {
+        return Ok(dsh::snapshots()?
+            .into_iter()
+            .find(|session| string(session, "name") == name)
+            .map(|session| (session, name.to_owned(), Vec::new())));
+    }
+    archive::reconcile()?;
+    let guard = lock(None)?;
+    if !record_path(name).exists() {
+        return Ok(None);
+    }
+    let record = read(name)?;
+    if archive::equivalent(&record, &archive::records()?) {
+        return Ok(None);
+    }
+    let snapshot = live()?;
+    let panes = snapshot.get(name);
+    // A name reused by another pane is not this session.
+    if panes.is_some() && !matches(&record, panes) {
+        return Ok(None);
+    }
+    let live_pane = panes.is_some();
+    if !live_pane && string(&record, "conversation_id").is_empty() {
+        return Ok(None);
+    }
+    let mut view = journal::summary(&record, live_pane);
+    view["name"] = json!(name);
+    if !live_pane {
+        view["state"] = json!(if record["paused"].as_bool().unwrap_or(false) { "paused" } else { "stopped" });
+    }
+    drop(guard);
+    let questions = pending_questions(&record, &view, live_pane);
+    Ok(Some((view, journal::journal_name(&record).to_owned(), questions)))
+}
+
+/// `hgs read <session> --json`. An unknown session is a JSON answer with exit
+/// status 1, so desktops and the mobile connector can tell it from a failure.
+pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    let [name, flag] = args else {
+        return Err(USAGE.into());
+    };
+    if flag != "--json" || name.is_empty() || name.starts_with(['-', '@']) {
+        return Err(USAGE.into());
+    }
+    let request = parse(&stdin_json()?)?;
+    let Some((view, owner, questions)) = current(name)? else {
+        println!("{}", json!({"ok": false, "error": "not_found"}));
+        return Ok(1);
+    };
+    let _guard = lock(Some(&root().join("read-marks.lock")))?;
+    let mut sessions = load();
+    let existing = record(&sessions, &owner, &request.conversation).clone();
+    let (reply, attention, next) = apply(&view, &questions, &request, &existing, now());
+    if reply || attention {
+        let owners: std::collections::BTreeSet<String> = records()?
+            .iter()
+            .map(|record| journal::journal_name(record).to_owned())
+            .collect();
+        let map = sessions.as_object_mut().ok_or("invalid read marks")?;
+        map.retain(|key, _| key == &owner || owners.contains(key) || dsh::exists(key));
+        let conversations = map.entry(owner.clone()).or_insert_with(|| json!({}));
+        if !conversations.is_object() {
+            *conversations = json!({});
+        }
+        let conversations = conversations.as_object_mut().ok_or("invalid read marks")?;
+        conversations.insert(request.conversation.clone(), next.clone());
+        bounded(conversations);
+        atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))?;
+    }
+    println!("{}", json!({"ok": true, "applied": {"reply_id": reply, "attention_signature": attention}, "read": next}));
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +361,65 @@ mod tests {
         assert!(hex(session["attention_signature"].as_str().unwrap()));
         enrich(&mut session, &marks, "codex/project/other-owner", &[]);
         assert!(session["read"].is_null());
+    }
+
+    fn request(reply: Option<&str>, signature: Option<&str>) -> Request {
+        Request { run: "run-1".into(), conversation: "conversation-1".into(),
+            reply: reply.map(Into::into), signature: signature.map(Into::into) }
+    }
+
+    #[test]
+    fn requests_are_exact() {
+        let valid = json!({"run_id":"run-1","conversation_id":"conversation-1","reply_id":null,
+            "attention_signature":"a".repeat(64)});
+        assert_eq!(parse(&valid).unwrap(), request(None, Some("a".repeat(64).as_str())));
+        for (key, value) in [("run_id", json!("")), ("conversation_id", json!(3)), ("reply_id", json!("x\ny")),
+            ("attention_signature", json!("A".repeat(64))), ("attention_signature", json!("a".repeat(63)))] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(parse(&invalid).is_err(), "{key}");
+        }
+        let mut extra = valid.clone();
+        extra["request_id"] = json!("fixture");
+        assert!(parse(&extra).is_err());
+        let mut missing = valid;
+        missing.as_object_mut().unwrap().remove("reply_id");
+        assert!(parse(&missing).is_err());
+    }
+
+    #[test]
+    fn marks_move_only_to_current_values() {
+        let mut current = waiting();
+        current["reply_id"] = json!("7:100.5");
+        let digest = signature(&current, &[]).unwrap();
+        let (reply, attention, mark) = apply(&current, &[], &request(Some("7:100.5"), Some(digest.as_str())), &Value::Null, 50.0);
+        assert!(reply && attention);
+        assert_eq!(mark, json!({"conversation_id":"conversation-1","reply_id":"7:100.5","attention_signature":digest,"at":50.0}));
+        // Older values are stale and keep the stored mark.
+        let older_request = request(Some("6:90.5"), Some("b".repeat(64).as_str()));
+        let (reply, attention, kept) = apply(&current, &[], &older_request, &mark, 60.0);
+        assert!(!reply && !attention);
+        assert_eq!(kept, mark);
+        // Another run or conversation makes every field stale.
+        let mut other = request(Some("7:100.5"), Some(digest.as_str()));
+        other.run = "run-0".into();
+        assert_eq!(apply(&current, &[], &other, &Value::Null, 70.0), (false, false, Value::Null));
+        // A partial mark keeps the other field.
+        let older = json!({"conversation_id":"conversation-1","reply_id":"6:90.5","attention_signature":null,"at":1.0});
+        let (reply, attention, partial) = apply(&current, &[], &request(None, Some(digest.as_str())), &older, 80.0);
+        assert!(!reply && attention);
+        assert_eq!((partial["reply_id"].clone(), partial["at"].clone()), (json!("6:90.5"), json!(80.0)));
+    }
+
+    #[test]
+    fn storage_keeps_the_newest_conversations_of_each_session() {
+        let mut conversations = serde_json::Map::new();
+        for index in 0..10 {
+            conversations.insert(format!("conversation-{index}"), json!({"at": index as f64}));
+        }
+        bounded(&mut conversations);
+        assert_eq!(conversations.len(), MAX_CONVERSATIONS);
+        assert!(!conversations.contains_key("conversation-0") && !conversations.contains_key("conversation-1"));
+        assert!(conversations.contains_key("conversation-9"));
     }
 }

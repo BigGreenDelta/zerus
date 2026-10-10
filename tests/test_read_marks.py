@@ -75,6 +75,113 @@ class ReadMarks(unittest.TestCase):
         self.assertRegex(second, HEX)
         self.assertNotEqual(second, first)
 
+    def read(self, name=None, remote=False, **fields):
+        payload = {'run_id': self.run_id, 'conversation_id': self.conversation_id,
+                   'reply_id': None, 'attention_signature': None, **fields}
+        return subprocess.run([str(HGS), *(['@remote'] if remote else []), 'read', name or self.name, '--json'],
+                              input=json.dumps(payload), env=self.env, text=True, capture_output=True, timeout=10)
+
+    def mark(self, **fields):
+        result = self.read(**fields)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_mark_applies_only_current_values_and_old_marks_stay_stale(self):
+        first = self.reply(100.5)
+        result = self.mark(reply_id=first)
+        self.assertEqual(result['ok'], True)
+        self.assertEqual(result['applied'], {'reply_id': True, 'attention_signature': False})
+        self.assertEqual(set(result['read']), {'conversation_id', 'reply_id', 'attention_signature', 'at'})
+        self.assertEqual(self.listing()['read']['reply_id'], first)
+        second = self.reply(200.5)
+        self.assertEqual(self.mark(reply_id=first)['applied'], {'reply_id': False, 'attention_signature': False})
+        row = self.listing()
+        self.assertEqual((row['reply_id'], row['read']['reply_id']), (second, first))
+        self.assertFalse(self.mark(reply_id=second, run_id='another-run')['applied']['reply_id'])
+        self.assertFalse(self.mark(reply_id=second, conversation_id='another-conversation')['applied']['reply_id'])
+        self.assertEqual(self.listing()['read']['reply_id'], first)
+
+    def test_attention_mark_holds_across_status_updates_until_a_new_request(self):
+        self.waiting()
+        signature = self.listing()['attention_signature']
+        self.assertTrue(self.mark(attention_signature=signature)['applied']['attention_signature'])
+        self.record.update(last_event_at=self.record['last_event_at'] + 10)
+        self.write_record()
+        row = self.listing()
+        self.assertEqual(row['read']['attention_signature'], row['attention_signature'])
+        self.waiting('call-2')
+        row = self.listing()
+        self.assertNotEqual(row['read']['attention_signature'], row['attention_signature'])
+
+    def test_second_identity_less_error_is_unacknowledged(self):
+        self.record.update(phase='error', activity='attention', active_tools={}, turn_started=100.0)
+        self.write_record()
+        self.mark(attention_signature=self.listing()['attention_signature'])
+        self.record.update(phase='working', activity='busy', turn_started=200.0)
+        self.write_record()
+        self.record.update(phase='error', activity='attention')
+        self.write_record()
+        row = self.listing()
+        self.assertNotEqual(row['attention_signature'], row['read']['attention_signature'])
+
+    def test_unknown_session_reports_not_found(self):
+        result = self.read(name='codex/missing-session', reply_id='1:1.0')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'not_found'})
+
+    def test_malformed_marks_change_nothing(self):
+        reply = self.reply(100.5)
+        for fields in (dict(run_id=''), dict(reply_id=7), dict(attention_signature='A' * 64),
+                       dict(attention_signature='a' * 63), dict(request_id='fixture')):
+            result = self.read(**{'reply_id': reply, **fields})
+            self.assertEqual(result.returncode, 1, fields)
+            self.assertEqual(result.stdout, '', fields)
+        self.assertIsNone(self.listing()['read'])
+        self.assertFalse((self.state / 'read-marks.json').exists())
+
+    def test_concurrent_writers_keep_both_fields(self):
+        reply = self.reply(100.5)
+        self.waiting()
+        signature = self.listing()['attention_signature']
+        base = {'run_id': self.run_id, 'conversation_id': self.conversation_id, 'reply_id': None, 'attention_signature': None}
+        writers = []
+        for fields in (dict(reply_id=reply), dict(attention_signature=signature)):
+            process = subprocess.Popen([str(HGS), 'read', self.name, '--json'], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, text=True)
+            writers.append((process, json.dumps({**base, **fields})))
+        for process, payload in writers:
+            _, error = process.communicate(payload, timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+        read = self.listing()['read']
+        self.assertEqual((read['reply_id'], read['attention_signature']), (reply, signature))
+
+    def test_marks_follow_a_renamed_session(self):
+        reply = self.reply(100.5)
+        self.mark(reply_id=reply)
+        subprocess.run([str(HGS), 'rename', self.name, 'codex/input-test/renamed'], env=self.env,
+                       text=True, capture_output=True, check=True, timeout=10)
+        self.name = 'codex/input-test/renamed'
+        row = self.listing()
+        self.assertEqual((row['reply_id'], row['read']['reply_id']), (reply, reply))
+
+    def test_remote_mark_forwards_stdin_without_a_terminal(self):
+        self.script('ssh', """#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['INPUT_FIXTURE'], 'ssh-args').write_text(json.dumps(sys.argv[1:]))
+os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
+""")
+        reply = self.reply(100.5)
+        result = self.read(remote=True, reply_id=reply)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)['applied']['reply_id'])
+        args = json.loads((self.root / 'ssh-args').read_text())
+        self.assertNotIn('-t', args)
+        self.assertIn('BatchMode=yes', args)
+        self.assertEqual(args[-1], '~/.local/bin/hgs read codex/input-test --json')
+        missing = self.read(remote=True, name='codex/missing-session', reply_id=reply)
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(json.loads(missing.stdout), {'ok': False, 'error': 'not_found'})
+
 
 if __name__ == '__main__':
     unittest.main()
