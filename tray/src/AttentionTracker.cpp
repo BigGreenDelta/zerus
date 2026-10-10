@@ -24,8 +24,15 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
     const auto previous = m_hosts.value(host).toObject();
     QJsonObject current;
     const auto notice = [&](const SessionInfo &s, const QString &key, const QString &phase,
-                            const QString &request, const QString &reason, bool reply = false) {
+                            const QString &request, const QString &reason, bool reply = false, bool acknowledged = false) {
         const auto old = previous.value(key).toObject();
+        if (acknowledged) {
+            // Withdraw the banner but remember the request without a token: if the
+            // acknowledgement lapses (an older host, a recovery-only identity), the
+            // same request must not be announced again.
+            current[key] = QJsonObject{{"phase", phase}, {"request", request}};
+            return;
+        }
         const auto retry = old.value("retry_at").toInteger();
         if (old.value("phase").toString() == phase && old.value("request").toString() == request
             && (!retry || retry > now)) {
@@ -44,12 +51,12 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
     };
     for (const auto &s : box.sessions) {
         // Acknowledged here or on another device: the existing clear path withdraws it.
-        if (s.needsAction() && !s.attentionAcknowledged) {
+        if (s.needsAction()) {
             const QString reason = s.phase == "approval" ? QObject::tr("Approval needed")
                 : s.phase == "input" ? QObject::tr("Input needed")
                 : !s.recovery.value("reason").toString().isEmpty() ? concise(s.recovery.value("reason").toString(), 240)
                 : !s.activityDetail.isEmpty() ? concise(s.activityDetail, 240) : QObject::tr("Agent needs attention");
-            notice(s, identity(s), s.phase, s.attentionId, reason);
+            notice(s, identity(s), s.phase, s.attentionId, reason, false, s.attentionAcknowledged);
         }
         // Read state comes from FleetState, not the raw CLI snapshot. Replies
         // belong to conversations so a rename/resume does not repeat a banner.
@@ -58,7 +65,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             if (!s.needsAction()) notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
             else if (previous.value(key).toObject().value("request") == s.replyId) current[key] = previous.value(key);
         }
-        if (s.attentionAcknowledged || s.state != "running" || s.processState == "exited" || s.activity == "unknown"
+        if (s.state != "running" || s.processState == "exited" || s.activity == "unknown"
             || (s.conversationState == "ended" && s.activity != "idle") || s.subagentSource == "hook_profiles") continue;
         for (auto it = s.subagents.begin(); it != s.subagents.end(); ++it) {
             const auto child = it.value().toObject();
@@ -67,7 +74,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             const auto request = child.value("attention_id").toString(child.value("question_id").toString());
             const auto label = child.value("label").toString(child.value("name").toString(it.key()));
             notice(s, "child:" + identity(s) + ':' + it.key(), phase, request,
-                QObject::tr("Subagent %1: %2").arg(concise(label, 100), phase == "approval" ? QObject::tr("Approval needed") : QObject::tr("Input needed")));
+                QObject::tr("Subagent %1: %2").arg(concise(label, 100), phase == "approval" ? QObject::tr("Approval needed") : QObject::tr("Input needed")),
+                false, s.attentionAcknowledged);
         }
     }
     for (auto it = previous.begin(); it != previous.end(); ++it) {

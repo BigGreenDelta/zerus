@@ -16,6 +16,7 @@ private slots:
     void onlyExplicitChildRequestsNotify();
     void failedDeliveryRetriesAfterBackoff();
     void acknowledgedAttentionWithdrawsItsNotification();
+    void lapsedAcknowledgementDoesNotAnnounceTheSameRequestAgain();
 };
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
@@ -242,6 +243,28 @@ void TestAttention::acknowledgedAttentionWithdrawsItsNotification()
     // A new request has a new signature and notifies again.
     box.sessions[0].attentionId="question-2"; box.sessions[0].attentionSignature=QString(64,'b'); fleet.setPeer(box,2);
     QCOMPARE(tracker.observe("mac",*fleet.peer("mac")).raised.size(),1);
+}
+
+void TestAttention::lapsedAcknowledgementDoesNotAnnounceTheSameRequestAgain()
+{
+    SessionInfo s; s.name="codex/project/session"; s.runId="run"; s.phase="approval"; s.activity="busy";
+    s.attentionId="call-1"; s.subagentSource="hooks";
+    s.subagents={{"worker",QJsonObject{{"name","Reviewer"},{"state","working"},{"display_state","approval"},{"attention_id","child-1"}}}};
+    BoxState box; box.ok=true; box.host="mac"; box.sessions={s}; AttentionTracker tracker;
+    QCOMPARE(tracker.observe("mac",box).raised.size(),2);
+    box.sessions[0].attentionAcknowledged=true;
+    auto changes=tracker.observe("mac",box);
+    QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),2);
+    // The acknowledgement lapses (an older host, a recovery-only identity) for
+    // the very same requests: nothing is announced again, also after a restart.
+    box.sessions[0].attentionAcknowledged=false;
+    changes=tracker.observe("mac",box); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    AttentionTracker restarted(tracker.state());
+    QVERIFY(restarted.observe("mac",box).raised.isEmpty());
+    // New requests still notify.
+    box.sessions[0].attentionId="call-2";
+    auto child=box.sessions[0].subagents["worker"].toObject(); child["attention_id"]="child-2"; box.sessions[0].subagents["worker"]=child;
+    QCOMPARE(restarted.observe("mac",box).raised.size(),2);
 }
 
 QTEST_APPLESS_MAIN(TestAttention)
