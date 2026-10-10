@@ -50,6 +50,7 @@ add_executable(hgs-tray
     src/HgsClient.cpp
     src/ProcessRunner.cpp
     src/FleetState.cpp
+    src/ReadMarkSync.cpp
     src/IconFactory.cpp
     src/CommandBackend.cpp
     # Буфер обмена есть везде -- в отличие от Konsole и Terminal.app, этот бэкенд не

@@ -31,6 +31,11 @@ target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME hgsclient COMMAND test_hgsclient)
 
+add_executable(test_readmarksync test_readmarksync.cpp ../src/ReadMarkSync.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
+target_include_directories(test_readmarksync PRIVATE ../src)
+target_link_libraries(test_readmarksync PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME readmarksync COMMAND test_readmarksync)
+
 add_executable(test_processrunner test_processrunner.cpp ../src/ProcessRunner.cpp)
 target_include_directories(test_processrunner PRIVATE ../src)
 target_link_libraries(test_processrunner PRIVATE Qt6::Test Qt6::Core)
