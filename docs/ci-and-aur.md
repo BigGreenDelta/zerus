@@ -757,3 +757,37 @@ was connected for installation. The existing Android signer and Firebase inputs
 are now provisioned in the protected release environment. Continuous main-build
 Dev activation still requires the Actions-aware mirror and its read credential;
 the same-app channel selector alone does not activate that pipeline.
+
+### Stable release 0.42.0 and Android 0.1.30
+
+On **2026-10-11**, the owner requested releases for all platforms and updates to the
+installed clients. The [release candidate](https://github.com/ufna/zerus/actions/runs/38166908970)
+pins `dfc63abd15ae71d90378ec1d962ebd8dbd8dc2a9` and passed the complete
+Linux/Arch/macOS matrix and both stable package rebuilds. Review verified the
+artifact checksums, the manifest source commit and the source archive file by
+file against `git archive` of that commit.
+
+The first two [publisher](https://github.com/ufna/zerus/actions/runs/38168633520)
+runs failed before any public write: GitHub answered `403 Resource not accessible
+by integration` when the job token created the draft, although it had
+`contents: write` (zerus-ktg3). Their AUR step was only the `--dry-run` preflight.
+The owner token then created the `v0.42.0` tag at the candidate commit and a draft
+holding exactly the candidate assets, with every size and digest verified. The
+[third publisher run](https://github.com/ufna/zerus/actions/runs/38168967736)
+verified that draft, published [v0.42.0](https://github.com/ufna/zerus/releases/tag/v0.42.0)
+as the latest stable release, checked every asset anonymously and synchronized
+`zerus` and `zerus-ade-bin`; their AUR Git recipes name `0.42.0-1` and the v0.42.0
+assets.
+
+[Android 0.1.30](https://github.com/ufna/zerus/releases/tag/android-dev-0.1.30)
+(version code **31**) was built locally from the exact archived source with the
+existing signer and Firebase inputs. Debug and Release unit suites each passed 598
+tests and release lint passed. The signing certificate matches 0.1.29, the source
+archive passed Gitleaks 8.30.1, and the published assets match the sealed candidate
+anonymously; the R8 mapping stays private. The public v1 Android dev feed serves
+the same APK digest, and the v1 desktop stable feed serves the v0.42.0 package and
+archive digests. No Android device was connected.
+
+Existing Linux and macOS source installations run **Zerus 0.42.0 / hgs 1.51.0**
+from that commit. Native agent and tmux processes were unchanged; only the GUI and
+hgs helper services restarted.
