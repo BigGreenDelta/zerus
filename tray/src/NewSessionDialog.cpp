@@ -4,15 +4,18 @@
 #include "WorktreePanel.h"
 #include "NewWorktreeDialog.h"
 #include "SessionTag.h"
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -33,8 +36,12 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *heading=plainLabel(tr("New session"));heading->setObjectName("heading");layout->addWidget(heading);
     auto *form=new QFormLayout;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_project=new QComboBox;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
-    m_manage=new QToolButton;m_manage->setText(tr("Folders…"));m_manage->setObjectName("manageLaunchProject");
-    m_manage->setAutoRaise(true);m_manage->setToolTip(tr("Manage this project's folders"));
+    const bool dark=palette().color(QPalette::Window).lightness()<128;
+    const QColor iconColor(dark?"#a1adbb":"#647386");
+    m_generatedBranch="work-"+QUuid::createUuid().toString(QUuid::Id128).left(8);
+    m_manage=new QToolButton;m_manage->setObjectName("manageLaunchProject");
+    m_manage->setAutoRaise(true);m_manage->setIcon(workspaceIcon("settings",iconColor));m_manage->setIconSize(QSize(18,18));m_manage->setFixedSize(34,34);
+    m_manage->setToolTip(tr("Manage this project's folders"));m_manage->setAccessibleName(m_manage->toolTip());
     auto *projectRow=new QHBoxLayout;projectRow->setSpacing(8);projectRow->addWidget(m_project,1);projectRow->addWidget(m_manage);
     form->addRow(tr("Project"),projectRow);
     m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));form->addRow(tr("Computer"),m_machine);
@@ -48,31 +55,52 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_projectPath->setWordWrap(false);
     m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);folderField->addWidget(m_projectPath);
     m_preview=plainLabel();m_preview->setObjectName("muted");folderField->addWidget(m_preview);
-    auto *worktreeActions=new QHBoxLayout;worktreeActions->setSpacing(8);
-    m_worktrees=new QPushButton(tr("Other worktrees…"));m_worktrees->setObjectName("chooseLaunchWorktree");m_worktrees->setAutoDefault(false);m_worktrees->hide();worktreeActions->addWidget(m_worktrees);
-    m_newWorktree=new QPushButton(tr("New worktree…"));m_newWorktree->setObjectName("newLaunchWorktree");m_newWorktree->setAutoDefault(false);m_newWorktree->hide();worktreeActions->addWidget(m_newWorktree);
-    // Keep the Agent/Account rows in place while folder details and asynchronous
-    // worktree discovery change. Hidden actions still reserve their row.
-    for(auto *widget:QList<QWidget *>{m_projectPath,m_worktrees,m_newWorktree}) {
+    // Keep the form stable as paths and repository discovery change.
+    for(auto *widget:QList<QWidget *>{m_projectPath}) {
         auto policy=widget->sizePolicy();policy.setRetainSizeWhenHidden(true);widget->setSizePolicy(policy);
     }
-    worktreeActions->addStretch();folderField->addLayout(worktreeActions);
-    connect(m_worktrees,&QPushButton::clicked,this,&NewSessionDialog::chooseWorktree);
-    connect(m_newWorktree,&QPushButton::clicked,this,&NewSessionDialog::createWorktree);
     form->addRow(tr("Working folder"),folderField);
+    auto *worktreeField=new QVBoxLayout;worktreeField->setSpacing(6);
+    auto *worktreeRow=new QHBoxLayout;worktreeRow->setSpacing(8);
+    m_autoWorktree=new QPushButton(workspaceIcon("git-branch",iconColor),tr("Auto"));m_autoWorktree->setObjectName("automaticLaunchWorktree");
+    m_plainFolder=new QPushButton(workspaceIcon("folder",iconColor),tr("None"));m_plainFolder->setObjectName("launchWithoutWorktree");
+    auto *modes=new QButtonGroup(this);
+    for(auto *button:{m_autoWorktree,m_plainFolder}){
+        button->setCheckable(true);button->setAutoDefault(false);modes->addButton(button);worktreeRow->addWidget(button);
+        button->setStyleSheet(QString("QPushButton:checked { border-color:%1; color:%1; }").arg(dark?"#8bdfc0":"#167357"));
+    }
+    m_autoWorktree->setToolTip(tr("Create a generated branch and worktree when you start the session."));
+    m_plainFolder->setToolTip(tr("Start directly in the working folder."));
+    m_worktreeOptions=new QPushButton;m_worktreeOptions->setObjectName("launchWorktreeOptions");m_worktreeOptions->setProperty("sessionHeaderAction",true);
+    configureWorkspaceIconButton(m_worktreeOptions,"more",tr("Worktree options"),dark);m_worktreeOptions->setAutoDefault(false);
+    auto *worktreeMenu=new QMenu(m_worktreeOptions);
+    m_worktrees=worktreeMenu->addAction(workspaceIcon("git-branch",iconColor),tr("Choose existing…"));m_worktrees->setObjectName("chooseLaunchWorktree");
+    m_newWorktree=worktreeMenu->addAction(workspaceIcon("add",iconColor),tr("Create manually…"));m_newWorktree->setObjectName("newLaunchWorktree");
+    m_worktreeOptions->setMenu(worktreeMenu);worktreeRow->addWidget(m_worktreeOptions);worktreeRow->addStretch();worktreeField->addLayout(worktreeRow);
+    m_worktreeTarget=plainLabel();m_worktreeTarget->setObjectName("launchWorktreeTarget");m_worktreeTarget->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    worktreeField->addWidget(m_worktreeTarget);form->addRow(tr("Worktree"),worktreeField);
+    connect(m_autoWorktree,&QPushButton::clicked,this,[this]{m_autoPreferred=true;updateForm();});
+    connect(m_plainFolder,&QPushButton::clicked,this,[this]{m_autoPreferred=false;updateForm();});
+    connect(m_worktrees,&QAction::triggered,this,&NewSessionDialog::chooseWorktree);
+    connect(m_newWorktree,&QAction::triggered,this,&NewSessionDialog::createWorktree);
     m_agent=new QComboBox;m_agent->setObjectName("launchAgent");m_agent->addItems({"codex","claude","kimi","dsh","sh"});
     if(!agent.isEmpty()&&m_agent->findText(agent)<0)m_agent->addItem(agent);
+    for(int i=0;i<m_agent->count();++i){
+        const auto provider=m_agent->itemText(i);
+        const auto glyph=provider=="codex"||provider=="claude"||provider=="kimi"||provider=="dsh"?provider:QString("terminal");
+        m_agent->setItemIcon(i,workspaceIcon(glyph,iconColor));
+    }
     const auto lastAgent=QSettings().value("workspace/launchAgent").toString();
     if(!agent.isEmpty())m_agent->setCurrentText(agent);else if(m_agent->findText(lastAgent)>=0)m_agent->setCurrentText(lastAgent);
     m_account=new QComboBox;m_account->setObjectName("launchAccount");m_account->addItem(tr("Default account"),QString());
     form->addRow(tr("Agent"),m_agent);form->addRow(tr("Account"),m_account);
-    m_name=new QLineEdit("work-"+QUuid::createUuid().toString(QUuid::Id128).left(8));m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
+    m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();form->addRow(QString(),m_nameError);
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
     m_openTerminal->setChecked(QSettings().value("workspace/launchOpenTerminal",false).toBool());form->addRow(QString(),m_openTerminal);
     layout->addLayout(form);
     m_error=plainLabel();m_error->setObjectName("launchError");layout->addWidget(m_error);
-    layout->addStretch();auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");layout->addWidget(buttons);
+    layout->addStretch();auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");layout->addWidget(buttons);
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
@@ -92,7 +120,13 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         m_validation=0;
         const auto path=data.value("path").toString();
         if(!path.startsWith('/')) {m_error->setText(tr("The computer did not confirm this folder. Try again."));updateForm();return;}
-        launch(path);
+        if(m_startWithWorktree&&!automaticWorktreeAvailable()){
+            m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
+        }
+        if(m_startWithWorktree){
+            m_creationCatalog=m_worktreeCatalog;m_error->setText(tr("Creating worktree…"));
+            m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();
+        }else launch(path);
     });
     connect(&m_client,&HgsClient::directoriesFailed,this,[this](quint64 request,const QString &machine,const QString &error){
         if(!m_validation||request!=m_validation||machine!=host())return;
@@ -118,12 +152,22 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(m_prefillRequest&&request==m_prefillRequest){m_prefillRequest=0;updateForm();return;}
         if(request!=m_catalogRequest)return;m_catalogRequest=0;m_worktreeCatalog["stale"]=true;updateForm();
     });
+    connect(&m_client,&HgsClient::worktreeCreated,this,[this](quint64 request,bool ok,const QJsonObject &result,const QString &error){
+        if(!m_creation||request!=m_creation)return;m_creation=0;
+        if(!ok){m_creationFailed=true;m_error->setText(error);updateForm();return;}
+        const auto path=result["path"].toString();
+        auto entries=m_creationCatalog["worktrees"].toArray();entries.append(QJsonObject{{"path",path},{"kind","linked"},{"available",true}});
+        m_creationCatalog["worktrees"]=entries;m_verifiedWorktrees[host()+'\n'+path]=m_creationCatalog;
+        m_autoPreferred=false;selectPath(path);launch(path);
+    });
     setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
 }
+void NewSessionDialog::reject(){if(!m_creation)QDialog::reject();}
 QString NewSessionDialog::host() const {return m_machine->currentData().toString();}
 void NewSessionDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
+    if(m_creation||m_validation){updateForm();return;}
     loadMachines();loadFolders();
 }
 void NewSessionDialog::loadMachines()
@@ -236,20 +280,28 @@ void NewSessionDialog::updateForm()
     m_preview->setText(m_prefillRequest?tr("Checking the session's main working folder…"):
         path.isEmpty()?tr("Browse to choose a folder on this computer."):
         outside?tr("This folder is outside the project.\nStarting here will add it to this project."):
-        worktree?tr("Worktree in %1").arg(m_project->currentText()):
-        tr("Folder in %1").arg(m_project->currentText()));
+        QString());
     m_preview->setToolTip(m_preview->text());m_preview->ensurePolished();m_preview->setFixedHeight(2*m_preview->fontMetrics().lineSpacing());
     const QString nameProblem=SessionTag::problem(m_name->text());const bool validName=nameProblem.isEmpty();
     m_nameError->setText(nameProblem);m_nameError->setVisible(!validName);
-    m_start->setEnabled(m_account->currentIndex()>=0&&!m_accountRequest&&!m_validation&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool());
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_agent,m_name,m_manage,m_worktrees})widget->setEnabled(!m_validation);
+    const bool busy=m_validation||m_creation;
+    const bool automatic=m_autoPreferred&&automaticWorktreeAvailable();
+    m_start->setEnabled(m_account->currentIndex()>=0&&!m_accountRequest&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
+        &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
+    m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_agent,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
+    m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
+    m_worktreeTarget->setText(automatic?automaticWorktreePath():QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
+    m_worktreeTarget->ensurePolished();m_worktreeTarget->setFixedHeight(2*m_worktreeTarget->fontMetrics().lineSpacing());
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
-    m_browse->setEnabled(!m_validation&&machine&&machine->ok);
-    m_newWorktree->setEnabled(!m_validation&&!m_catalogRequest&&machine&&machine->ok&&m_worktreeCatalog["state"]=="ok"
-        &&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["common_dir"].toString().isEmpty());
-    m_openTerminal->setEnabled(!m_validation&&m_agent->currentText()!="dsh");
+    m_browse->setEnabled(!busy&&machine&&machine->ok);
+    m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
+    m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
+    m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled());
+    m_openTerminal->setEnabled(!busy&&m_agent->currentText()!="dsh");
     m_openTerminal->setToolTip(m_agent->currentText()=="dsh"?tr("DeepSeek opens in the workspace's Native UI."):tr("Also open an external terminal for this session."));
-    m_account->setEnabled(!m_validation&&QStringList{"codex","claude","kimi"}.contains(m_agent->currentText()));
+    m_account->setEnabled(!busy&&QStringList{"codex","claude","kimi"}.contains(m_agent->currentText()));
     const auto offline=tr("This computer is unavailable. Choose another folder or reconnect it.");
     if(!path.isEmpty()&&!m_folder->currentData(Qt::UserRole+3).toBool())m_error->setText(offline);
     else if(m_error->text()==offline)m_error->clear();
@@ -262,7 +314,25 @@ void NewSessionDialog::updateForm()
 void NewSessionDialog::start()
 {
     if(!m_start->isEnabled())return;
+    m_startWithWorktree=m_autoPreferred&&automaticWorktreeAvailable();
     m_error->setText(tr("Checking folder…"));m_validation=m_client.requestDirectories(host(),m_folder->currentData(Qt::UserRole+2).toString());updateForm();
+}
+bool NewSessionDialog::automaticWorktreeAvailable() const
+{
+    const auto path=m_folder->currentData(Qt::UserRole+2).toString();
+    const auto root=m_worktreeCatalog["selected_root"].toString();
+    if(m_catalogRequest||m_worktreeCatalog["state"]!="ok"||m_worktreeCatalog["stale"].toBool()||m_worktreeCatalog["partial"].toBool()
+        ||m_worktreeCatalog["common_dir"].toString().isEmpty()||!QDir::isAbsolutePath(root)||QFileInfo(root).fileName().isEmpty())return false;
+    for(const auto &value:m_worktreeCatalog["worktrees"].toArray()){
+        const auto entry=value.toObject();
+        if(entry["available"].toBool()&&entry["kind"]!="bare"&&withinFolder(path,entry["path"].toString()))return true;
+    }
+    return false;
+}
+QString NewSessionDialog::automaticWorktreePath() const
+{
+    const QFileInfo root(m_worktreeCatalog["selected_root"].toString());
+    return QDir(root.path()).filePath(root.fileName()+'-'+m_generatedBranch);
 }
 void NewSessionDialog::launch(const QString &target)
 {
@@ -311,10 +381,11 @@ void NewSessionDialog::selectAccount(const QString &account)
     m_accountPreset=true;updateAccounts();
 }
 
-void NewSessionDialog::selectPath(const QString &path)
+void NewSessionDialog::selectPath(const QString &path, bool automaticWorktree)
 {
     m_prefillRequest=0;
     if(!QDir::isAbsolutePath(path))return;
+    if(!automaticWorktree)m_autoPreferred=false;
     m_browsedFolders.remove(host());
     loadFolders(QDir::cleanPath(path));
 }
@@ -404,7 +475,7 @@ void NewSessionDialog::chooseWorktree()
     panel->setContext(machine,m_folder->currentData(Qt::UserRole+2).toString(),m_fleet);
     QString chosen;panel->launchRequested=[&](const QString &path){chosen=path;dialog.accept();};
     panel->cancelRequested=[&]{dialog.reject();};
-    if(dialog.exec()==QDialog::Accepted&&!chosen.isEmpty()&&host()==machine&&m_project->currentData().toString()==project)selectPath(chosen);
+    if(dialog.exec()==QDialog::Accepted&&!chosen.isEmpty()&&host()==machine&&m_project->currentData().toString()==project){m_autoPreferred=false;selectPath(chosen);}
 }
 void NewSessionDialog::createWorktree()
 {
@@ -423,5 +494,5 @@ void NewSessionDialog::createWorktree()
     auto entries=catalog["worktrees"].toArray();entries.append(QJsonObject{{"path",dialog.createdPath()},{"kind","linked"},{"available",true}});
     catalog["worktrees"]=entries;
     m_verifiedWorktrees[machine+'\n'+dialog.createdPath()]=catalog;
-    selectPath(dialog.createdPath());m_error->setText(tr("Worktree created. Ready to start the session."));
+    m_autoPreferred=false;selectPath(dialog.createdPath());
 }

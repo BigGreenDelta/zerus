@@ -1908,7 +1908,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     dialog.setGroups(m_organization, launchProject);
     if(context)dialog.prefillSessionFolder(selectedDirectory(),m_details.value("cwd_canonical").toString(context->session.canonicalCwd));
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}
-    if(!path.isEmpty())dialog.selectPath(path);
+    if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
         [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, bool addFolder) {

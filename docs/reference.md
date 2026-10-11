@@ -57,7 +57,9 @@ icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
 has room. The icon copies the ID as plain text;
 **Copy session reference** remains in the desktop session context menu and copies
-the portable URI. Before that ID is reported, **Run ID** identifies the current
+the portable URI. Successful text copies use the window's status confirmation
+without a system notification on Linux or macOS. Before that ID is reported,
+**Run ID** identifies the current
 process run; it can change on resume. Child details also show their agent ID.
 Search accepts complete IDs or
 parts of conversation, run, archive and reported child IDs; a child match
@@ -683,7 +685,7 @@ closing it clears this temporary choice. Selecting a listed folder unpins it.
 A folder outside the project shows a warning and is added only after a successful
 launch with the matching launch ID. Cancellation and launch failure add nothing.
 A worktree of a project folder on that computer is not outside the project, so
-starting there adds no folder; **Other worktrees…** offers it again.
+starting there adds no folder; **Choose existing…** offers it again.
 
 New launches immediately show **Starting…** until the matching session appears.
 Controls stay disabled before confirmation. Errors remove the placeholder and
@@ -812,11 +814,20 @@ Git metadata have no branch label.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
-**Other worktrees…** selects an existing checkout without changing machine, project
-or account. Bare or unavailable copies cannot launch; ordinary Browse remains
-available even without Git or after metadata errors.
+In **New session**, **Auto** creates a generated `work-…` branch from `HEAD` and a
+sibling worktree when **Start session** is pressed, then starts there. Its path is
+shown before launch. Opening the form and checking folders never create anything.
+**None** starts directly in the selected working folder; ordinary non-Git folders
+use this mode and never initialize Git. The adjacent options menu offers
+**Choose existing…** and **Create manually…**. Choosing an existing checkout keeps
+its path, machine, project and account. Explicit worktree launch actions also use
+that checkout directly. Bare or unavailable copies cannot launch; ordinary Browse
+remains available even without Git or after metadata errors. The project gear
+opens folder configuration, and each agent choice includes its provider icon.
+The folder status area stays empty unless it has a warning or an error.
 
-**New worktree…** is an explicit user operation. Choose a new branch, base ref
+**Create manually…** in this form, or **New worktree…** in Projects, lets you
+choose a new branch, base ref
 (default `HEAD`) and unused destination under an existing parent directory. The
 CLI is `hgs [@host] worktrees create --path /repo --branch feature/task
 --destination /repo-task --base HEAD --json`. Zerus also verifies `--common-dir`
@@ -825,6 +836,10 @@ checkout hooks, with no force, fetch or deletion. The ref is resolved before
 creation. The five-minute operation can leave partial results after failure;
 inspect the destination before retrying. Cancelling the session form preserves
 the created folder and branch. Closing or archiving a session never removes them.
+Automatic creation requires a fresh verified repository on the selected computer.
+The form stays locked during creation, starts only after its matching receipt,
+and never repeats a failed or unconfirmed request. Its destination remains
+available for inspection or an explicit direct-folder launch.
 
 Catalog reads are on demand, with a 30-second repository cache; `--refresh`
 bypasses it. Identity is machine plus canonical Git common directory, not equal

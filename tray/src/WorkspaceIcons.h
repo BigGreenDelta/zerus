@@ -25,6 +25,16 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         if (name == "github" || name == "zerus") {
             p.resetTransform(); p.drawPixmap(0, 0, symbol.pixmap(size, size));
             p.setCompositionMode(QPainter::CompositionMode_SourceIn); p.fillRect(pm.rect(), color);
+        } else if (name == "codex") {
+            QPainterPath petal;petal.moveTo(12,5);petal.cubicTo(20,2,23,12,16,15);petal.lineTo(10,12);petal.lineTo(10,7);
+            for(int i=0;i<6;++i){p.save();p.translate(12,12);p.rotate(i*60);p.translate(-12,-12);p.drawPath(petal);p.restore();}
+        } else if (name == "claude") {
+            for(int i=0;i<8;++i){p.save();p.translate(12,12);p.rotate(i*45);p.drawLine(QPointF(0,3),QPointF(0,9));p.restore();}
+        } else if (name == "kimi") {
+            p.drawLine(6,4,6,20);p.drawLine(6,12,18,4);p.drawLine(6,12,18,20);
+        } else if (name == "dsh") {
+            QPainterPath whale;whale.moveTo(3,10);whale.cubicTo(5,5,15,4,18,10);whale.lineTo(23,7);whale.lineTo(22,13);
+            whale.lineTo(18,13);whale.cubicTo(15,22,3,19,3,10);p.drawPath(whale);p.drawPoint(8,10);
         } else if (name == "sessions" || name == "all") {
             p.drawRoundedRect(QRectF(4, 4, 16, 7), 2, 2); p.drawRoundedRect(QRectF(4, 14, 16, 6), 2, 2);
             p.drawPoint(QPointF(8, 7.5)); p.drawLine(QPointF(12, 7.5), QPointF(16, 7.5));

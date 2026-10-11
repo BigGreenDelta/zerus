@@ -537,8 +537,8 @@ void TrayAgent::copyText(const QString &text)
 {
     ClipboardBackend clipboard;
     QString error;
-    if (clipboard.open(text, &error)) reportAdvisory(clipboard);
-    else notify(tr("Zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
+    if (!clipboard.open(text, &error))
+        notify(tr("Zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
 }
 
 void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId)

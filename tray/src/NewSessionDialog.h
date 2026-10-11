@@ -9,6 +9,7 @@ class QToolButton;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QAction;
 
 class NewSessionDialog : public QDialog {
     Q_OBJECT
@@ -18,9 +19,10 @@ public:
     void setFleet(const FleetState &fleet);
     void setGroups(const SessionOrganization &organization,const QString &selectedProject = {});
     bool selectFolder(const QString &folderId);
-    void selectPath(const QString &path);
+    void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    void reject() override;
 signals:
     // addFolder: the folder is outside the project and joins it once the session starts.
     void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,bool addFolder);
@@ -35,6 +37,8 @@ private:
     void finishFolderPrefill(const QJsonObject &catalog);
     void chooseWorktree();
     void createWorktree();
+    bool automaticWorktreeAvailable() const;
+    QString automaticWorktreePath() const;
     bool projectWorktree(const QString &path, const QJsonObject &catalog) const;
     bool projectWorktree(const QString &path) const;
     void loadAccounts();
@@ -55,7 +59,13 @@ private:
     QString m_folderContext;
     QLineEdit *m_name;
     QLabel *m_projectPath,*m_preview,*m_error,*m_nameError;
-    QPushButton *m_start,*m_browse,*m_worktrees,*m_newWorktree;
+    QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel;
+    QAction *m_worktrees,*m_newWorktree;
+    QLabel *m_worktreeTarget;
+    QString m_generatedBranch;
+    bool m_autoPreferred=true,m_creationFailed=false,m_startWithWorktree=false;
+    quint64 m_creation=0;
+    QJsonObject m_creationCatalog;
     QJsonObject m_worktreeCatalog;
     QMap<QString, QJsonObject> m_verifiedWorktrees;
     QString m_worktreeContext;

@@ -216,6 +216,8 @@ private slots:
     void launchListsSurviveFleetRefreshes();
     void sessionPanelHeaderStartsNewSession();
     void launchAddsOnlyFoldersOutsideTheProject();
+    void automaticLaunchWorktree_data();
+    void automaticLaunchWorktree();
     void arbitraryFolderAndTerminalPreference_data();
     void arbitraryFolderAndTerminalPreference();
     void terminationProgress_data();
@@ -5286,7 +5288,8 @@ void TestSessionsWindow::launchFolderFollowsSelectedSession()
     // Explicit launch paths keep linked worktrees; inheritance applies only to +.
     QTimer::singleShot(0,&window,[&]{
         auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
-        QCOMPARE(dialog->findChild<QComboBox *>("launchProjectFolder")->currentData(Qt::UserRole+2).toString(),QString("/linked"));dialog->reject();
+        QCOMPARE(dialog->findChild<QComboBox *>("launchProjectFolder")->currentData(Qt::UserRole+2).toString(),QString("/linked"));
+        QVERIFY(dialog->findChild<QPushButton *>("launchWithoutWorktree")->isChecked());dialog->reject();
     });
     window.showNewSession({},project,target,{},"/linked");
     auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);
@@ -5374,10 +5377,10 @@ void TestSessionsWindow::launchFoldersFollowProject()
     change(first);QCOMPARE(folder->currentData().toString(),original);QVERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->styleSheet().isEmpty());
     dialog.selectPath("/remote/contextual");dialog.setFleet(fleet());QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/remote/contextual"));
     QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
-    auto *worktrees=dialog.findChild<QPushButton *>("chooseLaunchWorktree");
-    auto *newWorktree=dialog.findChild<QPushButton *>("newLaunchWorktree");
-    worktrees->show();newWorktree->show();QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
-    worktrees->hide();newWorktree->hide();QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
+    auto *worktrees=dialog.findChild<QAction *>("chooseLaunchWorktree");
+    auto *newWorktree=dialog.findChild<QAction *>("newLaunchWorktree");
+    worktrees->setVisible(true);newWorktree->setVisible(true);QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
+    worktrees->setVisible(false);newWorktree->setVisible(false);QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
     change(second);QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/remote/different"));
     machine->setCurrentIndex(machine->findData(QString()));QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/local/second"));
     change(empty);QCOMPARE(machine->currentData().toString(),QString());QVERIFY(folder->currentData(Qt::UserRole+2).toString().isEmpty());
@@ -5444,6 +5447,7 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
             auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
             QTimer::singleShot(3000,dialog,&QDialog::reject);
             QTRY_COMPARE(dialog->findChild<QLabel *>("muted")->text(),hint);
+            dialog->findChild<QPushButton *>("launchWithoutWorktree")->click();
             dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
             dialog->findChild<QLineEdit *>("launchName")->setText(name);
             auto *button=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY(button->isEnabled());button->click();
@@ -5457,9 +5461,119 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
         paths.clear();for(const auto &folder:stored.group(group)->folders)paths<<folder.path;
     };
     // The fixture confirms every chosen folder as /remote/work tree.
-    start("/linked","linked","Worktree in Design");QCOMPARE(launches.size(),1);QCOMPARE(paths,QStringList{"/repo"});
+    start("/linked","linked",{});QCOMPARE(launches.size(),1);QCOMPARE(paths,QStringList{"/repo"});
     start("/elsewhere","outside","This folder is outside the project.\nStarting here will add it to this project.");
     QCOMPARE(launches.size(),2);QCOMPARE(paths,(QStringList{"/repo","/remote/work tree"}));
+}
+
+void TestSessionsWindow::automaticLaunchWorktree_data()
+{
+    QTest::addColumn<QString>("mode");QTest::addColumn<QString>("host");
+    QTest::newRow("local-auto")<<QString("created")<<QString();
+    QTest::newRow("remote-auto")<<QString("created")<<QString("mac");
+    QTest::newRow("no-worktree")<<QString("none")<<QString();
+    QTest::newRow("ordinary-folder")<<QString("not_repo")<<QString();
+    QTest::newRow("creation-failed")<<QString("failed")<<QString("mac");
+    QTest::newRow("unconfirmed-receipt")<<QString("wrong_receipt")<<QString();
+}
+
+void TestSessionsWindow::automaticLaunchWorktree()
+{
+    QFETCH(QString,mode);QFETCH(QString,host);
+    QTemporaryDir fixture;QFile program(fixture.filePath("hgs"));QVERIFY(program.open(QIODevice::WriteOnly));
+    program.write(R"PY(#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+mode = (root / 'mode').read_text()
+args = sys.argv[1:]
+with (root / 'calls').open('a') as log:
+    log.write(json.dumps(args) + '\n')
+if args and args[0].startswith('@'):
+    args.pop(0)
+def option(name):
+    return args[args.index(name) + 1]
+if args[0] == 'account':
+    print(json.dumps({'profiles': [{'id': 'native-codex', 'provider': 'codex', 'label': 'Native account', 'is_default': True}]}))
+elif args[0] == 'dirs':
+    print(json.dumps({'path': args[-1], 'directories': []}))
+elif args[:2] == ['worktrees', 'create']:
+    deadline = time.monotonic() + 10
+    while not (root / 'release').exists() and time.monotonic() < deadline:
+        time.sleep(.02)
+    if mode == 'failed':
+        print('Synthetic checkout failure', file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({'status': 'created', 'request_id': 'foreign-request' if mode == 'wrong_receipt' else option('--request-id'),
+                     'branch': option('--branch'), 'common_dir': option('--common-dir'), 'path': option('--destination')}))
+elif args[0] == 'worktrees':
+    print(json.dumps({'state': 'not_repo' if mode == 'not_repo' else 'ok', 'path': args[1], 'selected_root': '/repo',
+                     'common_dir': '/repo/.git', 'sampled_at': int(time.time()),
+                     'worktrees': [] if mode == 'not_repo' else [{'path': '/repo', 'kind': 'main', 'available': True}]}))
+)PY");program.close();
+    QVERIFY(program.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+    QFile modeFile(fixture.filePath("mode"));QVERIFY(modeFile.open(QIODevice::WriteOnly));modeFile.write(mode.toUtf8());modeFile.close();
+    QFile release(fixture.filePath("release"));
+    const auto releaseRequest=[&]{if(!release.exists()){release.open(QIODevice::WriteOnly);release.close();}};
+    const auto cleanup=qScopeGuard(releaseRequest);
+    const auto creations=[&]{
+        QList<QJsonArray> result;QFile calls(fixture.filePath("calls"));if(!calls.open(QIODevice::ReadOnly))return result;
+        while(!calls.atEnd()){
+            const auto args=QJsonDocument::fromJson(calls.readLine()).array();
+            if(args.contains(QString("create")))result.append(args);
+        }
+        return result;
+    };
+    SessionOrganization projects;const auto project=projects.createGroup("Launch");
+    projects.addFolder(project,host.isEmpty()?"arch":host,"/repo");
+    NewSessionDialog dialog(program.fileName(),fleet(),host,"codex",project);dialog.setGroups(projects,project);dialog.show();
+    auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");
+    auto *none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
+    auto *start=dialog.findChild<QPushButton *>("primary");
+    auto *name=dialog.findChild<QLineEdit *>("launchName");
+    auto *target=dialog.findChild<QLabel *>("launchWorktreeTarget");
+    QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+    QTRY_VERIFY(start->isEnabled());
+    QCOMPARE(creations().size(),0);QVERIFY(dialog.findChild<QLabel *>("muted")->text().isEmpty());
+    auto *manage=dialog.findChild<QToolButton *>("manageLaunchProject");QVERIFY(manage->text().isEmpty());QVERIFY(!manage->icon().isNull());
+    auto *agents=dialog.findChild<QComboBox *>("launchAgent");for(int i=0;i<agents->count();++i)QVERIFY(!agents->itemIcon(i).isNull());
+    const auto generated=name->text();const auto destination="/repo-"+generated;
+    name->setText("review-session");
+    if(mode=="not_repo"){
+        QVERIFY(!automatic->isEnabled());QVERIFY(none->isChecked());QVERIFY(target->text().isEmpty());
+    }else{
+        QVERIFY(automatic->isChecked());QCOMPARE(target->text(),destination);
+        dialog.setFleet(fleet());QCOMPARE(creations().size(),0);
+    }
+    if(mode=="none")none->click();
+    start->click();
+    if(mode=="none"||mode=="not_repo"){
+        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QCOMPARE(creations().size(),0);return;
+    }
+    QTRY_COMPARE(creations().size(),1);QVERIFY(!start->isEnabled());QVERIFY(!name->isEnabled());
+    QVERIFY(!dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->isEnabled());
+    dialog.reject();QVERIFY(dialog.isVisible());
+    dialog.setFleet(fleet());QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),host);
+    const auto args=creations().first();
+    const auto option=[&](const QString &key){
+        for(int i=0;i+1<args.size();++i)if(args.at(i).toString()==key)return args.at(i+1).toString();
+        return QString();
+    };
+    QCOMPARE(option("--path"),QString("/repo"));QCOMPARE(option("--common-dir"),QString("/repo/.git"));
+    QCOMPARE(option("--branch"),generated);QCOMPARE(option("--base"),QString("HEAD"));QCOMPARE(option("--destination"),destination);
+    QVERIFY(!QUuid(option("--request-id")).isNull());if(!host.isEmpty())QCOMPARE(args.first().toString(),"@"+host);
+    releaseRequest();
+    if(mode=="created"){
+        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][2].toString(),destination);
+        QCOMPARE(launched[0][3].toString(),QString("review-session"));QCOMPARE(launched[0][4].toString(),QString("native-codex"));
+        QCOMPARE(launched[0][5].toString(),project);QVERIFY(!launched[0][7].toBool());
+    }else{
+        QTRY_VERIFY(name->isEnabled());QVERIFY(!start->isEnabled());QCOMPARE(launched.size(),0);QVERIFY(dialog.isVisible());
+        QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().isEmpty());QCOMPARE(name->text(),QString("review-session"));
+        start->click();dialog.setFleet(fleet());QCOMPARE(creations().size(),1);QCOMPARE(launched.size(),0);
+        none->click();QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][2].toString(),QString("/repo"));
+    }
+    QCOMPARE(creations().size(),1);
 }
 
 void TestSessionsWindow::arbitraryFolderAndTerminalPreference_data()
@@ -6075,8 +6189,8 @@ void TestSessionsWindow::worktreePreview()
         QVERIFY(window.grab().save(destination+(dark?"/projects-dark.png":"/projects-light.png")));
         window.resize(1260,760);QTest::qWait(100);QVERIFY(window.grab().save(destination+(dark?"/projects-short-dark.png":"/projects-short-light.png")));
         NewSessionDialog launch(script(),state,{},"codex",project,&window);launch.setGroups(org,project);launch.show();QTest::qWait(100);QVERIFY(launch.grab().save(destination+(dark?"/launch-dark.png":"/launch-light.png")));
-        QTimer::singleShot(0,&launch,[&]{auto *form=launch.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);QTest::qWait(50);QVERIFY(form->grab().save(destination+(dark?"/create-dark.png":"/create-light.png")));form->reject();});launch.findChild<QPushButton *>("newLaunchWorktree")->click();
-        QTimer::singleShot(0,&launch,[&]{auto *picker=launch.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTest::qWait(100);QVERIFY(picker->grab().save(destination+(dark?"/picker-dark.png":"/picker-light.png")));picker->reject();});launch.findChild<QPushButton *>("chooseLaunchWorktree")->click();launch.reject();
+        QTimer::singleShot(0,&launch,[&]{auto *form=launch.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);QTest::qWait(50);QVERIFY(form->grab().save(destination+(dark?"/create-dark.png":"/create-light.png")));form->reject();});launch.findChild<QAction *>("newLaunchWorktree")->trigger();
+        QTimer::singleShot(0,&launch,[&]{auto *picker=launch.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTest::qWait(100);QVERIFY(picker->grab().save(destination+(dark?"/picker-dark.png":"/picker-light.png")));picker->reject();});launch.findChild<QAction *>("chooseLaunchWorktree")->trigger();launch.reject();
     }
     qApp->setPalette(original);
 }

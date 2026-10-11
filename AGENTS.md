@@ -53,8 +53,11 @@ GUI update. Test tmux operations with an existing isolated socket directory.
 Do not hot-reload a DeepSeek bridge that owns live agents: its disposal closes
 them. Use the native API compatibility path for resident adapters and keep
 unconfirmed permission setup blocked until an explicit resume verifies it.
-Ordinary non-Git folders are supported; do not create Git repositories or worktrees
-automatically. Destructive UI actions require explicit confirmation.
+Ordinary non-Git folders are supported; never initialize Git automatically.
+New session defaults to a generated worktree for a verified Git folder, created
+only after the user selects Start session. Inspecting or opening a dialog must
+never create a worktree. Keep direct-folder launch and explicit custom/existing
+worktree choices available. Destructive UI actions require explicit confirmation.
 
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 Use synthetic fixture paths, reserved example domains and local/private configuration
