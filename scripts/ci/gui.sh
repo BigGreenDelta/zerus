@@ -28,6 +28,9 @@ if [ "$windows" = true ]; then
         PATH="$(cygpath -u "$QT_ROOT_DIR")/bin:$PATH"
         export PATH
     fi
+    # Without a console window (hosted runners) QtTest results and warnings go
+    # to OutputDebugString; keep them in the CTest log instead.
+    export QT_FORCE_STDERR_LOGGING=1
 fi
 if command -v ccache >/dev/null 2>&1; then
     cmake_args+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
