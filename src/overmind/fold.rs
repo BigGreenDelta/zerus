@@ -4,10 +4,13 @@
 //! workflow in effect at that point; a refused transition stays visible as
 //! `[rejected]`.
 use super::model::*;
+use super::rank;
 use super::workflow::{Action, Role, Workflow, RESUME};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+
+const INVALID_EVENT: &str = "this event cannot be read by this version";
 
 pub const VERDICT_LABELS: [&str; 2] = ["reviewed", "review-failed"];
 
@@ -37,7 +40,7 @@ pub struct Task {
     pub attachments: Vec<Attachment>,
     pub stage: String,
     pub priority: u8,
-    pub rank: f64,
+    pub rank: String,
     pub labels: BTreeSet<String>,
     pub pinned: Option<SessionRef>,
     pub assignee: Option<SessionRef>,
@@ -66,7 +69,7 @@ struct Created {
     #[serde(default = "default_priority")]
     priority: u8,
     #[serde(default)]
-    rank: f64,
+    rank: String,
     #[serde(default)]
     labels: BTreeSet<String>,
     #[serde(default)]
@@ -75,6 +78,8 @@ struct Created {
     parent: String,
     #[serde(default)]
     follows: BTreeSet<String>,
+    #[serde(default)]
+    related: BTreeSet<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
     #[serde(default)]
@@ -106,6 +111,9 @@ struct WorkflowSet {
 }
 
 fn parse_workflow(event: &Event) -> Option<WorkflowSet> {
+    if event.actor.kind != ActorKind::Human {
+        return None;
+    }
     let set: WorkflowSet = serde_json::from_value(event.payload.clone()).ok()?;
     set.workflow.validate().ok()?;
     Some(set)
@@ -149,7 +157,40 @@ fn field(fields: &BTreeMap<String, String>, name: &str) -> String {
 }
 
 fn create(uuid: &str, event: &Event, wf: &Workflow) -> Option<Task> {
-    let payload: Created = serde_json::from_value(event.payload.clone()).ok()?;
+    let parsed = if event.v > EVENT_VERSION {
+        None
+    } else {
+        serde_json::from_value::<Created>(event.payload.clone()).ok()
+    };
+    let Some(payload) = parsed else {
+        return Some(Task {
+            uuid: uuid.into(),
+            project: event.project.clone(),
+            title: "(unreadable task)".into(),
+            prompt: String::new(),
+            attachments: Vec::new(),
+            stage: wf.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default(),
+            priority: 2,
+            rank: String::new(),
+            labels: BTreeSet::new(),
+            pinned: None,
+            assignee: None,
+            reviewer: None,
+            resume_stage: String::new(),
+            parent: String::new(),
+            follows: BTreeSet::new(),
+            related: BTreeSet::new(),
+            journal: Vec::new(),
+            flags: BTreeSet::new(),
+            head: event.id.clone(),
+            deleted: false,
+            read_only: true,
+            created_at: event.at,
+            updated_at: event.at,
+            created_by: event.actor.clone(),
+            rejections: BTreeMap::new(),
+        });
+    };
     let mut task = Task {
         uuid: uuid.into(),
         project: event.project.clone(),
@@ -166,7 +207,7 @@ fn create(uuid: &str, event: &Event, wf: &Workflow) -> Option<Task> {
         resume_stage: String::new(),
         parent: payload.parent,
         follows: payload.follows,
-        related: BTreeSet::new(),
+        related: payload.related,
         journal: Vec::new(),
         flags: BTreeSet::new(),
         head: event.id.clone(),
@@ -198,7 +239,7 @@ fn create(uuid: &str, event: &Event, wf: &Workflow) -> Option<Task> {
 
 fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refusal> {
     let p: Transition = serde_json::from_value(event.payload.clone())
-        .map_err(|e| Refusal::new("invalid_event", e.to_string()))?;
+        .map_err(|_| Refusal::new("invalid_event", INVALID_EVENT))?;
     if event.base != task.head {
         return Err(Refusal::new("stale", "the task changed since this action was prepared"));
     }
@@ -207,6 +248,9 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
     let from_role = wf.role(&from).unwrap_or(Role::Backlog);
     if matches!(from_role, Role::Done | Role::Parked) && actor != ActorKind::Human {
         return Err(Refusal::new("task_closed", "this task is done or parked; only a person can change it"));
+    }
+    if p.action == Action::Answer && task.resume_stage.is_empty() {
+        return Err(Refusal::new("no_question", "this task is not waiting for an answer"));
     }
     let target = if p.action == Action::Answer { RESUME.to_owned() } else { p.to.clone() };
     let rule = wf.allow(p.action, Some(&from), &target, actor, &p.fields)?;
@@ -287,7 +331,10 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
             task.journal("[decompose]", p.children.join(" "), event);
         }
         Action::Approve | Action::NeedsWork => {
-            if actor == ActorKind::Agent {
+            if task.labels.contains("epic") {
+                return Err(Refusal::new("epic", "an epic is a container and is never reviewed"));
+            }
+            if actor != ActorKind::Human {
                 let me = event.actor.session_ref();
                 if me.is_none() || me != task.reviewer || me == task.assignee {
                     return Err(Refusal::new("not_reviewer", "only the session this task was sent to for review can review it"));
@@ -308,6 +355,9 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
             task.journal("[moved]", format!("{from} -> {to}"), event);
         }
         Action::Move => task.journal("[moved]", format!("{from} -> {to}"), event),
+    }
+    if p.action != Action::Answer && wf.role(&from) == Some(Role::NeedsHuman) {
+        task.resume_stage.clear();
     }
     task.stage = to;
     task.head = event.id.clone();
@@ -336,6 +386,27 @@ fn remap(stage: &str, old: &Workflow, new: &Workflow, moves: &BTreeMap<String, S
         .unwrap_or_default()
 }
 
+/// Non-transition events are gated here so no write path can bypass the rules.
+fn gate(task: &Task, event: &Event, wf: &Workflow) -> Result<(), Refusal> {
+    let actor = event.actor.kind;
+    match event.kind.as_str() {
+        "field_set" | "rank_set" | "label_set" | "relation_set" | "pin_set" | "reviewer_set" | "task_deleted"
+            if actor != ActorKind::Human =>
+        {
+            Err(Refusal::new("human_only", "only a person can change this"))
+        }
+        "flag_set" if !matches!(actor, ActorKind::Human | ActorKind::Autopilot) => {
+            Err(Refusal::new("human_only", "only a person or the autopilot can change flags"))
+        }
+        "journal" | "attachment_added"
+            if actor != ActorKind::Human && matches!(wf.role(&task.stage), Some(Role::Done | Role::Parked)) =>
+        {
+            Err(Refusal::new("task_closed", "this task is done or parked; only a person can change it"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
     if event.v > EVENT_VERSION {
         task.read_only = true;
@@ -353,7 +424,7 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
                     *wf = set.workflow;
                 }
             }
-            "session_renamed" => {
+            "session_renamed" if p.get("machine").and_then(Value::as_str) == Some(event.origin.as_str()) => {
                 let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
                 let (machine, old, new) = (s("machine"), s("old"), s("new"));
                 rename(&mut task.pinned, &machine, &old, &new);
@@ -365,8 +436,18 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
         return;
     }
     task.updated_at = task.updated_at.max(event.at);
+    if let Err(refusal) = gate(task, event, wf) {
+        task.journal("[rejected]", refusal.message.clone(), event);
+        task.rejections.insert(event.id.clone(), refusal);
+        return;
+    }
     let text = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-    let session = |k: &str| serde_json::from_value::<Option<SessionRef>>(p.get(k).cloned().unwrap_or(Value::Null)).ok().flatten();
+    // None: malformed (ignored); Some(None): explicit null (clears).
+    let session = |k: &str| match p.get(k) {
+        Some(Value::Null) => Some(None),
+        Some(v) => serde_json::from_value::<SessionRef>(v.clone()).ok().map(Some),
+        None => None,
+    };
     match event.kind.as_str() {
         "task_created" => {}
         "field_set" => {
@@ -397,8 +478,8 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
             task.journal("[edited]", text("field"), event);
         }
         "rank_set" => {
-            if let Some(rank) = p.get("rank").and_then(Value::as_f64) {
-                task.rank = rank;
+            if let Some(rank) = p.get("rank").and_then(Value::as_str).filter(|r| rank::valid(r)) {
+                task.rank = rank.into();
             }
         }
         "label_set" => {
@@ -431,8 +512,16 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
                 _ => task.read_only = true,
             }
         }
-        "pin_set" => task.pinned = session("session"),
-        "reviewer_set" => task.reviewer = session("session"),
+        "pin_set" => {
+            if let Some(slot) = session("session") {
+                task.pinned = slot;
+            }
+        }
+        "reviewer_set" => {
+            if let Some(slot) = session("session") {
+                task.reviewer = slot;
+            }
+        }
         "flag_set" => {
             let flag = text("flag");
             if p.get("value").and_then(Value::as_bool).unwrap_or(false) {
@@ -474,6 +563,8 @@ pub fn fold(uuid: &str, events: &[&Event]) -> Option<Task> {
         .filter(|e| e.task == uuid || (e.task.is_empty() && matches!(e.kind.as_str(), "workflow_set" | "session_renamed")))
         .collect();
     sorted.sort_by(|a, b| a.order().cmp(&b.order()));
+    let mut seen = BTreeSet::new();
+    sorted.retain(|e| seen.insert(e.id.clone()));
     let created_at = sorted.iter().position(|e| e.task == uuid && e.kind == "task_created")?;
     let created = sorted[created_at];
     let project = created.project.clone();
@@ -487,18 +578,34 @@ pub fn fold(uuid: &str, events: &[&Event]) -> Option<Task> {
         apply(&mut task, event, &mut wf);
     }
     // A prompt delivered on a claim that lost the race cannot be recalled.
-    let sent_on_rejected: Vec<(String, Event)> = sorted
+    let sent_on_rejected: Vec<(usize, String, &Event)> = sorted
         .iter()
-        .filter(|e| e.task == uuid && e.kind == "journal")
-        .filter(|e| matches!(e.payload.get("marker").and_then(Value::as_str), Some("[sent]") | Some("[sent?]")))
-        .filter_map(|e| {
+        .enumerate()
+        .filter(|(_, e)| e.task == uuid && e.kind == "journal" && !task.rejections.contains_key(&e.id))
+        .filter(|(_, e)| matches!(e.payload.get("marker").and_then(Value::as_str), Some("[sent]") | Some("[sent?]")))
+        .filter_map(|(i, e)| {
             let claim = e.payload.get("transition").and_then(Value::as_str)?;
-            task.rejections.contains_key(claim).then(|| (claim.to_owned(), (*e).clone()))
+            task.rejections.contains_key(claim).then(|| (i, claim.to_owned(), *e))
         })
         .collect();
-    for (claim, event) in sent_on_rejected {
-        task.flags.insert("conflict".into());
-        task.journal("[conflict]", format!("a prompt was sent on claim {claim}, which lost to another claim"), &event);
+    for (index, claim, event) in sent_on_rejected {
+        let cleared = sorted[index + 1..].iter().any(|e| {
+            e.task == uuid
+                && e.kind == "flag_set"
+                && e.v <= EVENT_VERSION
+                && e.actor.kind == ActorKind::Human
+                && e.payload.get("flag").and_then(Value::as_str) == Some("conflict")
+                && e.payload.get("value").and_then(Value::as_bool) == Some(false)
+        });
+        if !cleared {
+            task.flags.insert("conflict".into());
+        }
+        let position = task.journal.iter().position(|j| j.event == event.id && j.marker != "[conflict]");
+        task.journal("[conflict]", format!("a prompt was sent on claim {claim}, which lost to another claim"), event);
+        if let Some(position) = position {
+            let entry = task.journal.pop().expect("just pushed");
+            task.journal.insert(position + 1, entry);
+        }
     }
     Some(task)
 }
@@ -601,7 +708,13 @@ mod tests {
         let first = transition(A, 2, 2, human(), &c.id, "claim", "Design", json!({}), session("w1"));
         let second = transition(B, 1, 2, Actor::human(B), &c.id, "claim", "Design", json!({}), json!({"machine": B, "name": "w9"}));
         let label = ev(B, 2, 3, Actor::human(B), "label_set", "", json!({"label": "ui", "present": true}));
-        let mut events = vec![c, first, second.clone(), label];
+        let mut wf_set = ev(B, 3, 4, Actor::human(B), "workflow_set", "", json!({"workflow": Workflow::default_v1(), "moves": {}}));
+        wf_set.task = String::new();
+        let mut renamed = ev(A, 2, 5, human(), "session_renamed", "", json!({"machine": A, "old": "zz", "new": "yy"}));
+        renamed.task = String::new();
+        renamed.project = String::new();
+        renamed.id = "rename-1".into();
+        let mut events = vec![c, first, second.clone(), label, wf_set, renamed];
         let expected = serde_json::to_value(run(&events)).unwrap();
         assert_eq!(expected["assignee"]["name"], "w1");
         let mut seed = 7u64;
@@ -694,5 +807,119 @@ mod tests {
         other.seq = 2;
         let tasks = fold_many(&[c, other]);
         assert_eq!(tasks.len(), 2);
+    }
+
+    fn claimed() -> (Event, Event) {
+        let c = created("Queue");
+        let claim = transition(A, 2, 2, human(), &c.id, "claim", "Design", json!({}), session("w1"));
+        (c, claim)
+    }
+
+    #[test]
+    fn workflow_set_by_non_humans_is_ignored() {
+        let c = created("Queue");
+        let mut set = ev(A, 2, 2, agent("w1"), "workflow_set", "", json!({"workflow": Workflow::default_v1(), "moves": {"Queue": "Done"}}));
+        set.task = String::new();
+        let mut wf = Workflow::default_v1();
+        wf.stages.retain(|s| s.name != "Queue");
+        set.payload = json!({"workflow": wf, "moves": {"Queue": "Done"}});
+        assert_eq!(run(&[c.clone(), set.clone()]).stage, "Queue");
+        let refs: Vec<&Event> = vec![&set];
+        assert_eq!(project_workflow(&refs, "p").stages.len(), Workflow::default_v1().stages.len());
+    }
+
+    #[test]
+    fn unreadable_creations_still_yield_read_only_tasks() {
+        let mut future = created("Queue");
+        future.v = 2;
+        let task = run(&[future]);
+        assert!(task.read_only);
+        assert_eq!(task.title, "(unreadable task)");
+        let bad = ev(A, 1, 1, human(), "task_created", "", json!({"title": 5}));
+        let task = run(&[bad.clone()]);
+        assert!(task.read_only && task.prompt.is_empty());
+        assert_eq!(task.head, bad.id);
+        assert!(!task.stage.is_empty());
+    }
+
+    #[test]
+    fn conflicts_can_be_cleared_and_sit_next_to_the_prompt() {
+        let c = created("Queue");
+        let first = transition(A, 2, 2, human(), &c.id, "claim", "Design", json!({}), session("w1"));
+        let second = transition(B, 1, 2, Actor::human(B), &c.id, "claim", "Design", json!({}), json!({"machine": B, "name": "w9"}));
+        let sent = ev(B, 2, 3, Actor::human(B), "journal", "", json!({"marker": "[sent]", "text": "w9", "transition": second.id}));
+        let after = ev(B, 3, 4, Actor::human(B), "journal", "", json!({"marker": "[comment]", "text": "later"}));
+        let task = run(&[c.clone(), first.clone(), second.clone(), sent.clone(), after.clone()]);
+        let i = task.journal.iter().position(|j| j.event == sent.id).unwrap();
+        assert_eq!(task.journal[i + 1].marker, "[conflict]");
+        assert_eq!(task.journal[i + 2].marker, "[comment]");
+        let clear = ev(B, 4, 5, Actor::human(B), "flag_set", "", json!({"flag": "conflict", "value": false}));
+        let task = run(&[c.clone(), first.clone(), second.clone(), sent.clone(), clear]);
+        assert!(!task.flags.contains("conflict"));
+        let winner = ev(B, 5, 3, Actor::human(B), "journal", "", json!({"marker": "[sent]", "text": "w1", "transition": first.id}));
+        let task = run(&[c, first, second, winner]);
+        assert!(!task.flags.contains("conflict"));
+        assert!(!task.journal.iter().any(|j| j.marker == "[conflict]"));
+    }
+
+    #[test]
+    fn non_transition_events_are_gated() {
+        let (c, claim) = claimed();
+        let edit = ev(A, 3, 3, agent("w1"), "field_set", "", json!({"field": "title", "value": "x"}));
+        let flag = ev(A, 4, 4, agent("w1"), "flag_set", "", json!({"flag": "f", "value": true}));
+        let auto = ev(A, 5, 5, Actor { kind: ActorKind::Autopilot, ..human() }, "flag_set", "", json!({"flag": "g", "value": true}));
+        let task = run(&[c.clone(), claim.clone(), edit.clone(), flag.clone(), auto]);
+        assert_eq!(task.title, "Title");
+        assert_eq!(task.rejections[&edit.id].code, "human_only");
+        assert_eq!(task.rejections[&flag.id].code, "human_only");
+        assert!(task.flags.contains("g") && !task.flags.contains("f"));
+        let park = transition(A, 3, 3, human(), &claim.id, "move", "Icebox", json!({}), Value::Null);
+        let note = ev(A, 4, 4, agent("w1"), "journal", "", json!({"marker": "[comment]", "text": "hi"}));
+        let task = run(&[c, claim, park, note.clone()]);
+        assert_eq!(task.rejections[&note.id].code, "task_closed");
+    }
+
+    #[test]
+    fn rank_and_creation_extras() {
+        let c = ev(A, 1, 1, human(), "task_created", "", json!({"title": "T", "prompt": "p", "stage": "Queue", "rank": "V", "related": ["x"]}));
+        let good = ev(A, 2, 2, human(), "rank_set", "", json!({"rank": "W"}));
+        let bad = ev(A, 3, 3, human(), "rank_set", "", json!({"rank": "a b"}));
+        let task = run(&[c.clone(), good]);
+        assert_eq!(task.rank, "W");
+        assert!(task.related.contains("x"));
+        assert_eq!(run(&[c, bad]).rank, "V");
+    }
+
+    #[test]
+    fn answers_pins_renames_and_epics_are_strict() {
+        let (c, claim) = claimed();
+        let answer = transition(A, 3, 3, human(), &claim.id, "answer", "", json!({"answer": "x"}), Value::Null);
+        assert_eq!(run(&[c.clone(), claim.clone(), answer.clone()]).rejections[&answer.id].code, "no_question");
+        let pin = ev(A, 3, 3, human(), "pin_set", "", json!({"session": session("p1")}));
+        let junk = ev(A, 4, 4, human(), "pin_set", "", json!({"session": 5}));
+        assert_eq!(run(&[c.clone(), pin.clone(), junk]).pinned.unwrap().name, "p1");
+        let clear = ev(A, 5, 5, human(), "pin_set", "", json!({"session": null}));
+        assert!(run(&[c.clone(), pin.clone(), clear]).pinned.is_none());
+        let mut foreign = ev(B, 1, 6, Actor::human(B), "session_renamed", "", json!({"machine": A, "old": "p1", "new": "q"}));
+        foreign.task = String::new();
+        assert_eq!(run(&[c.clone(), pin, foreign]).pinned.unwrap().name, "p1");
+        let spec = transition(A, 3, 3, agent("w1"), &claim.id, "advance", "Build", json!({"spec": "s"}), Value::Null);
+        let review = transition(A, 4, 4, agent("w1"), &spec.id, "advance", "Review", json!({"worklog": "w", "evidence": "e"}), Value::Null);
+        let epic = ev(A, 5, 5, human(), "label_set", "", json!({"label": "epic", "present": true}));
+        let approve = transition(A, 6, 6, human(), &review.id, "approve", "Review", json!({"report": "r"}), Value::Null);
+        let task = run(&[c, claim, spec, review, epic, approve.clone()]);
+        assert_eq!(task.rejections[&approve.id].code, "epic");
+    }
+
+    #[test]
+    fn leaving_your_call_clears_the_resume_stage_and_duplicates_collapse() {
+        let (c, claim) = claimed();
+        let spec = transition(A, 3, 3, agent("w1"), &claim.id, "advance", "Build", json!({"spec": "s"}), Value::Null);
+        let ask = transition(A, 4, 4, agent("w1"), &spec.id, "call_human", "Your Call", json!({"question": "q"}), Value::Null);
+        let ret = transition(A, 5, 5, human(), &ask.id, "move", "Icebox", json!({}), Value::Null);
+        let task = run(&[c.clone(), claim.clone(), spec.clone(), ask.clone(), ret, ask.clone()]);
+        assert_eq!(task.stage, "Icebox");
+        assert!(task.resume_stage.is_empty());
+        assert_eq!(task.journal.iter().filter(|j| j.marker == "[needs-human]").count(), 1);
     }
 }
