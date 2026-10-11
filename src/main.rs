@@ -4,11 +4,18 @@ mod config;
 mod machines;
 mod macos_session;
 mod metrics;
+#[cfg(unix)]
 mod mobile_peers;
 mod native_ui;
 mod session_reference;
 mod platform;
 mod presence;
+// The local session host (tmux, hooks, agent state) runs on Unix. Windows builds
+// are control consoles for remote machines and link the stubs in state_windows.rs.
+#[cfg(unix)]
+mod state;
+#[cfg(not(unix))]
+#[path = "state_windows.rs"]
 mod state;
 mod swarm;
 

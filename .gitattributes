@@ -1,3 +1,8 @@
+# hgs machine setup uploads the CLI sources from Windows checkouts too; the
+# peer's shell and interpreters need LF line endings.
+*.sh text eol=lf
+*.py text eol=lf
+
 # Captured terminal screens intentionally preserve whitespace and blank lines.
 tests/fixtures/*.txt -whitespace
 
@@ -17,3 +22,6 @@ CLAUDE.md export-ignore
 # Preserve the upstream Windows Gradle wrapper and CameraX license verbatim.
 mobile/android/gradlew.bat -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 mobile/android/app/src/main/assets/licenses/camerax.txt -whitespace
+
+# Third-party license texts for the Windows zip stay byte-for-byte as published.
+packaging/windows/licenses/*.txt -whitespace

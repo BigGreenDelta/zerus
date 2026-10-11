@@ -1,18 +1,20 @@
-//! Terminal, clipboard and graphical-session integration. External programs receive argv,
-//! never interpolated shell commands (the SSH peer and tmux pane are explicit exceptions).
+//! Unix (Linux and macOS) process, terminal, clipboard and file primitives.
+use super::{available, capture, silent};
 use crate::{
     cli::{Error, Result},
     config::Config,
 };
 use std::{
-    env, fs,
-    io::{self, IsTerminal, Write},
+    env,
+    ffi::OsString,
+    fs,
+    io::{self, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::ExitStatusExt,
+        process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::atomic::{AtomicI32, Ordering},
     time::Instant,
 };
@@ -44,41 +46,137 @@ pub fn code(status: ExitStatus) -> i32 {
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
 }
-pub fn capture(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program)
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        None
-    }
-}
-pub fn silent(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 pub fn executable(path: impl AsRef<Path>) -> bool {
     fs::metadata(path)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
-pub fn available(program: &str) -> bool {
-    if program.contains('/') {
-        return executable(program);
-    }
-    env::split_paths(&env::var_os("PATH").unwrap_or_default())
-        .any(|dir| executable(dir.join(program)))
+pub(super) fn is_path(program: &str) -> bool {
+    program.contains('/')
+}
+pub(super) fn candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
+    vec![dir.join(program)]
 }
 pub fn is_macos() -> bool {
     capture("uname", &[]).is_some_and(|name| name.trim() == "Darwin")
+}
+pub(super) fn default_ssh() -> OsString {
+    "ssh".into()
+}
+pub fn spawn_ssh(
+    command: &mut Command,
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
+) -> io::Result<super::SshChild> {
+    for (piped, set) in [
+        (stdin, Command::stdin as fn(&mut Command, Stdio) -> &mut Command),
+        (stdout, Command::stdout),
+        (stderr, Command::stderr),
+    ] {
+        if piped {
+            set(command, Stdio::piped());
+        }
+    }
+    let mut child = command.spawn()?;
+    Ok(super::SshChild {
+        stdin: child.stdin.take().map(|pipe| Box::new(pipe) as _),
+        stdout: child.stdout.take().map(|pipe| Box::new(pipe) as _),
+        stderr: child.stderr.take().map(|pipe| Box::new(pipe) as _),
+        child,
+    })
+}
+pub fn ssh_output(command: &mut Command) -> io::Result<Output> {
+    command.output()
+}
+pub fn ssh_status(command: &mut Command, input: fs::File) -> io::Result<ExitStatus> {
+    command.stdin(input).status()
+}
+pub fn home() -> Option<String> {
+    env::var("HOME").ok()
+}
+/// `relative`, written with '/', below `base`.
+pub fn below(base: &str, relative: &str) -> String {
+    format!("{base}/{relative}")
+}
+/// This machine's short host name, the default for HGS_SELF.
+pub fn hostname() -> String {
+    capture("hostname", &["-s"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+/// Owner-only access for a file holding private configuration.
+pub fn make_private(file: &fs::File) -> io::Result<()> {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+/// Owner-only access for a directory holding private configuration.
+pub fn restrict_dir(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+/// Create files owner-only.
+pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    options.mode(0o600)
+}
+/// Refuse a symbolic link as the final component and never block on a FIFO.
+pub fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+}
+/// Make a completed rename in `dir` durable.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+pub(super) fn transient_replace_error(_: &io::Error) -> bool {
+    false
+}
+/// Run `command` in a process group of its own: the terminal's job control does
+/// not reach it and `kill_process_group` stops everything it started.
+pub fn own_process_group(command: &mut Command) -> &mut Command {
+    command.process_group(0)
+}
+/// Stop a child started with `own_process_group` and every process in its group.
+/// Never signals the caller's own process group.
+pub fn kill_process_group(child: &mut Child) {
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+}
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+/// Distinguishes a file from a different one later found at the same path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub modified: i64,
+    pub modified_nanos: i64,
+}
+pub fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        modified: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+    })
+}
+/// The temporary directory of an interactive link's marker file.
+pub fn link_marker_dir() -> io::Result<tempfile::TempDir> {
+    tempfile::tempdir()
+}
+/// An OpenSSH LocalCommand for `ssh` that creates `path`; ssh runs it with the user's shell.
+pub fn create_file_command(_: &mut Command, path: &Path) -> String {
+    format!("touch {}", super::quote(&path.to_string_lossy()))
+}
+/// Escape sequences reach Unix terminals unchanged.
+pub(super) fn virtual_terminal() -> bool {
+    true
 }
 /// When `pid` started, as `ps -o lstart=` prints it with `LC_ALL=C TZ=UTC`, for
 /// example "Sat Oct 10 08:27:57 2026". Stored run identities compare this text,
@@ -164,24 +262,6 @@ fn lstart_text(seconds: u64) -> String {
     )
 }
 
-pub fn quote(word: &str) -> String {
-    if !word.is_empty()
-        && word
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_./:=@%+,~-".contains(&c))
-    {
-        word.into()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
-}
-pub fn join<S: AsRef<str>>(args: &[S]) -> String {
-    args.iter()
-        .map(|s| quote(s.as_ref()))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn runtime_directory() -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -242,92 +322,6 @@ pub fn gui_env() -> Vec<String> {
     result
 }
 
-fn konsole_args(method: &str, args: &[&str]) -> Option<Vec<String>> {
-    let service = env::var("KONSOLE_DBUS_SERVICE")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    let session = env::var("KONSOLE_DBUS_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    if !available("busctl") {
-        return None;
-    }
-    let mut result = vec![
-        "--user".into(),
-        "call".into(),
-        service,
-        session,
-        "org.kde.konsole.Session".into(),
-        method.into(),
-    ];
-    result.extend(args.iter().map(|s| s.to_string()));
-    Some(result)
-}
-fn konsole(method: &str, args: &[&str]) {
-    if let Some(args) = konsole_args(method, args) {
-        let _ = Command::new("busctl")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-fn konsole_get(mode: &str) -> String {
-    let Some(args) = konsole_args("tabTitleFormat", &["i", mode]) else {
-        return String::new();
-    };
-    Command::new("busctl")
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .and_then(|out| {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.trim()
-                .strip_prefix("s \"")
-                .and_then(|s| s.strip_suffix('"'))
-                .map(String::from)
-        })
-        .unwrap_or_default()
-}
-/// POSIX cksum, retained so existing host colours do not change on migration.
-fn cksum(bytes: &[u8]) -> u32 {
-    let feed = |mut crc: u32, byte: u8| {
-        crc ^= u32::from(byte) << 24;
-        for _ in 0..8 {
-            crc = if crc & 0x8000_0000 != 0 {
-                (crc << 1) ^ 0x04c1_1db7
-            } else {
-                crc << 1
-            };
-        }
-        crc
-    };
-    let mut crc = bytes.iter().fold(0, |crc, &byte| feed(crc, byte));
-    let mut len = bytes.len();
-    while len != 0 {
-        crc = feed(crc, len as u8);
-        len >>= 8;
-    }
-    !crc
-}
-pub fn tab_color(config: &Config, host: &str) -> String {
-    for pair in config.tab_colors.split_whitespace() {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == host {
-                return value.into();
-            }
-        }
-    }
-    if host == "local" {
-        return String::new();
-    }
-    [
-        "#f5a623", "#7aa2f7", "#00c9a7", "#e06c9f", "#bb9af7", "#9ece6a",
-    ][(cksum(host.as_bytes()) % 6) as usize]
-        .into()
-}
-
 /// Title output goes to the attached client terminals, never to an agent's pane
 /// input. SSH relays the same OSC sequence to clients on another machine.
 pub fn refresh_session_title(session: &str) -> Result<()> {
@@ -373,68 +367,6 @@ pub fn refresh_session_title(session: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct TabGuard {
-    active: bool,
-    konsole: bool,
-    formats: [String; 2],
-}
-impl TabGuard {
-    pub fn begin(config: &Config, title: &str, color: &str) -> Self {
-        let mut guard = Self {
-            active: config.tab && io::stdout().is_terminal(),
-            konsole: false,
-            formats: Default::default(),
-        };
-        if !guard.active {
-            return guard;
-        }
-        guard.konsole = konsole_args("tabTitleFormat", &[]).is_some();
-        if guard.konsole {
-            guard.formats = [konsole_get("0"), konsole_get("1")];
-            konsole("setTabTitleFormat", &["is", "0", title]);
-            konsole("setTabTitleFormat", &["is", "1", title]);
-            if !color.is_empty() {
-                konsole("setTabColor", &["s", color]);
-            }
-        }
-        print!("\x1b]30;{title}\x07\x1b]0;{title}\x07");
-        let _ = io::stdout().flush();
-        guard
-    }
-}
-impl Drop for TabGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if self.konsole {
-            konsole("setTabColor", &["s", ""]);
-            for (i, value) in self.formats.iter().enumerate() {
-                if !value.is_empty() {
-                    konsole("setTabTitleFormat", &["is", &i.to_string(), value]);
-                }
-            }
-        } else {
-            print!("\x1b]30;%d : %n\x07\x1b]0;\x07");
-            let _ = io::stdout().flush();
-        }
-    }
-}
-pub fn restore_terminal() {
-    if io::stdout().is_terminal() {
-        print!("\x1b[r\x1b(B\x1b[m\x1b[?1l\x1b>\x1b[0 q\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l\x1b[?2004l\x1b[?1004l\x1b[>4m\x1b[?69l\x1b[?2031l\x1b[?1049l");
-        let _ = io::stdout().flush();
-    }
-}
-pub fn client_done(rc: i32) -> bool {
-    if rc != 0 && !silent("tmux", &["list-sessions"]) {
-        restore_terminal();
-        eprintln!("hgs: the tmux server died; terminal restored, sessions on this box are gone");
-        true
-    } else {
-        false
-    }
-}
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 extern "C" fn forward_signal(signal: libc::c_int) {
@@ -637,7 +569,7 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
                     .reopen()
                     .ok()
                     .and_then(|file| {
-                        Command::new("ssh")
+                        super::ssh()
                             .args(crate::machines::ssh_options(config, who))
                             .args([
                                 "-o",

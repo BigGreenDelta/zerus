@@ -7,10 +7,9 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     env, fmt, fs,
-    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 #[derive(Debug)]
@@ -126,6 +125,26 @@ resume --all excludes Archive. kill --archive forgets only that archived entry.
 rename changes the session label while preserving its agent/project, process and conversation.
 "#;
 
+/// Fails where this build runs no local sessions (Windows). Forwarded `@host`
+/// commands never reach it.
+fn local_sessions() -> Result<()> {
+    if platform::LOCAL_SESSIONS {
+        Ok(())
+    } else {
+        Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
+    }
+}
+#[cfg(unix)]
+fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
+    crate::mobile_peers::dispatch(config, args)
+}
+#[cfg(not(unix))]
+fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
+    Err(Error::new(
+        2,
+        "Mobile peers are not supported on Windows yet; use a Linux or macOS machine as the mobile gateway.",
+    ))
+}
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
     let mut command = vec![verb.to_owned()];
     command.extend_from_slice(args);
@@ -208,6 +227,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
     if args.first().is_some_and(|a| a == "__state") {
+        local_sessions()?;
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     let config = Config::load()?;
@@ -218,15 +238,18 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             matches!(a.as_str(), "mobile-peers" | "mobile-peer" | "__mobile-peer-local" | "__mobile-peer-identity" | "__mobile-peer-transport")
         })
     {
-        return crate::mobile_peers::dispatch(&config, &args[1..]);
+        return mobile_peers(&config, &args[1..]);
     }
     if args.first().is_some_and(|a| {
         matches!(a.as_str(), "mobile-peers" | "mobile-peer" | "__mobile-peer-local" | "__mobile-peer-identity" | "__mobile-peer-transport")
     }) {
-        return crate::mobile_peers::dispatch(&config, &args);
+        return mobile_peers(&config, &args);
     }
     if args.first().is_some_and(|a| a == "--run") {
+        #[cfg(unix)]
         return run(&args[1..]);
+        #[cfg(not(unix))]
+        return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
     }
     let mut target = String::new();
     let mut dry = false;
@@ -282,6 +305,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             if local_only { return Err(Error::new(1,"A local session reference cannot route to another computer")); }
             return remote(&config,&target,command,args,false);
         }
+        local_sessions()?;
         println!("{}", crate::session_reference::inspect(&config,&reference)?);
         return Ok(0);
     }
@@ -307,6 +331,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);
+    }
+    // Commands that only read or change this machine's configuration, or reach
+    // remote machines, also run on a build without local sessions.
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account") {
+        local_sessions()?;
     }
     match command.as_str() {
         "__dsh-ui-url" => {
@@ -342,8 +371,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         "pause" | "resume" => pause_resume(&config, command, args, &client, dry),
         "fork" => fork_session(&config, args, &client, dry),
+        #[cfg(unix)]
         "notify" => notify(&config, args, dry),
+        #[cfg(unix)]
         "clip" => platform::clip(),
+        #[cfg(unix)]
         "paste" => platform::paste(
             &config,
             require(
@@ -367,6 +399,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
 }
 
+#[cfg(unix)]
 fn run(args: &[String]) -> Result<i32> {
     let n: usize = require(args, 0, "--run needs a resume-argument count")?
         .parse()
@@ -469,18 +502,19 @@ fn peer_session(command: &str, args: &[String]) -> String {
     )
 }
 fn peer_json(config: &Config, peer: &str) -> Value {
-    let output = Command::new("ssh")
-        .args(crate::machines::ssh_options(config, peer))
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=3",
-            peer,
-            "~/.local/bin/hgs ls --local --json",
-        ])
-        .stderr(Stdio::piped())
-        .output();
+    let output = platform::ssh_output(
+        platform::ssh()
+            .args(crate::machines::ssh_options(config, peer))
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                peer,
+                "~/.local/bin/hgs ls --local --json",
+            ])
+            .stderr(Stdio::piped()),
+    );
     let (error, detail) = match output {
         Ok(out) if out.status.success() && !out.stdout.is_empty() => {
             match serde_json::from_slice::<Value>(&out.stdout) {
@@ -538,6 +572,7 @@ fn remote(
     let mut flags: Vec<String>;
     let mut link = None;
     let mut tab = None;
+    let mut ssh = platform::ssh();
     let remote_args: Vec<String> = match command {
         "ls" => {
             flags = vec![
@@ -562,7 +597,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -577,7 +612,7 @@ fn remote(
             if has(&args, "-d") || (command == "resume" && has(&args, "--all")) {
                 flags = vec!["-o".into(), "BatchMode=yes".into()];
             } else {
-                let directory = tempfile::tempdir()?;
+                let directory = platform::link_marker_dir()?;
                 let marker = directory.path().join("up");
                 flags = vec![
                     "-t".into(),
@@ -585,8 +620,8 @@ fn remote(
                     "PermitLocalCommand=yes".into(),
                     "-o".into(),
                     format!(
-                        "LocalCommand=touch {}",
-                        platform::quote(&marker.to_string_lossy())
+                        "LocalCommand={}",
+                        platform::create_file_command(&mut ssh, &marker)
                     ),
                 ];
                 link = Some(directory);
@@ -620,7 +655,7 @@ fn remote(
         .map(|title| TabGuard::begin(config, title, &platform::tab_color(config, target)));
     flags.push(target.into());
     flags.push(remote);
-    let rc = platform::wait_interactive(Command::new("ssh").args(flags))?;
+    let rc = platform::wait_interactive(ssh.args(flags))?;
     if rc == 255 {
         if link
             .as_ref()
@@ -638,6 +673,16 @@ fn remote(
 }
 
 fn local_json(config: &Config) -> Result<Value> {
+    if !platform::LOCAL_SESSIONS {
+        // A control console: no tmux, session state or local projects. Absent
+        // `local_sessions` means true, so Unix listings stay as they were.
+        let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":{},"sessions":[],"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state),"local_sessions":false});
+        if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
+            raw["desktop_presence"] = presence;
+        }
+        raw["preferences"] = crate::swarm::preferences(config);
+        return Ok(raw);
+    }
     let mut projects = serde_json::Map::new();
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
@@ -675,6 +720,10 @@ fn local_json(config: &Config) -> Result<Value> {
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {
+    if !platform::LOCAL_SESSIONS {
+        println!("  (control console: sessions run on remote machines)");
+        return Ok(());
+    }
     match platform::capture(
         "tmux",
         &["list-sessions", "-F", "#{session_name}|#{session_attached}"],
@@ -695,6 +744,9 @@ fn local_list(config: &Config) -> Result<()> {
 }
 fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     let dry = global_dry || has(args, "--dry-run");
+    if dry && !platform::LOCAL_SESSIONS {
+        return Ok(0); // this machine's listing runs no command
+    }
     if has(args, "--json") {
         if dry {
             println!("tmux list-clients -F \"#{{client_session}}\\t#{{client_tty}}\"\ntmux list-sessions -F \"#{{session_name}}\\t#{{session_attached}}\\t#{{session_created}}\\t#{{HGS_LAUNCH_ID}}\"");
@@ -735,7 +787,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
             .into_iter()
             .map(str::to_owned),
         );
-        match platform::capture("ssh", &flags.iter().map(String::as_str).collect::<Vec<_>>()) {
+        match platform::ssh_capture(&flags) {
             Some(out) => println!("{}", out.trim_end_matches('\n')),
             None => println!("  offline"),
         }
@@ -1085,7 +1137,12 @@ fn pause_resume(
     attach(config, session, client, false)
 }
 
+#[cfg(unix)]
 fn notify(config: &Config, args: &[String], dry: bool) -> Result<i32> {
+    use std::{
+        io::Write,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     let bell = args.first().is_some_and(|s| s == "--bell");
     let args = if bell { &args[1..] } else { args };
     let session = require(args, 0, "usage: hgs notify [--bell] <session> [text...]")?;

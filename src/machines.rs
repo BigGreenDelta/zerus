@@ -12,7 +12,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::process::CommandExt,
     path::Path,
     process::{Command, Output, Stdio},
     time::{Duration, Instant},
@@ -118,7 +117,11 @@ fn validate(alias: &str, c: &Connection) -> Result<()> {
         || c.identity_file.chars().any(char::is_control)
         || (!c.identity_file.is_empty()
             && !c.identity_file.starts_with('/')
-            && !c.identity_file.starts_with("~/"))
+            && !c.identity_file.starts_with("~/")
+            // The key belongs to this machine's ssh.exe (machines.local.json is never shared).
+            && !(cfg!(windows)
+                && (Path::new(&c.identity_file).is_absolute()
+                    || c.identity_file.starts_with("~\\"))))
     {
         return Err(Error::new(
             1,
@@ -208,10 +211,9 @@ fn write_profile(
     output.push(b'\n');
     stage.write_all(&output)?;
     stage.as_file().sync_all()?;
-    stage
-        .persist(config.dir.join("machines.local.json"))
+    platform::persist(stage, config.dir.join("machines.local.json"))
         .map_err(|e| Error::new(1, e.to_string()))?;
-    fs::File::open(&config.dir)?.sync_all()?;
+    platform::sync_dir(&config.dir)?;
     Ok(())
 }
 fn list(config: &Config) -> Result<Value> {
@@ -240,12 +242,13 @@ fn resolve_output(command: &mut Command) -> Result<Output> {
     const LIMIT: u64 = 128 * 1024;
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(stdout.try_clone()?)
-        .stderr(stderr.try_clone()?)
-        .process_group(0)
-        .spawn()?;
+    let mut child = platform::own_process_group(
+        command
+            .stdin(Stdio::null())
+            .stdout(stdout.try_clone()?)
+            .stderr(stderr.try_clone()?),
+    )
+    .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(4);
     let status = loop {
         let error = if stdout.metadata()?.len() > LIMIT || stderr.metadata()?.len() > LIMIT {
@@ -258,7 +261,7 @@ fn resolve_output(command: &mut Command) -> Result<Output> {
         if let Some(error) = error {
             // Our own process group contains only this invocation and children
             // started by SSH configuration; never signal the app's process group.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            platform::kill_process_group(&mut child);
             let _ = child.wait();
             return Err(Error::new(1, error));
         }
@@ -286,7 +289,7 @@ fn resolve_output(command: &mut Command) -> Result<Output> {
 }
 fn resolve(config: &Config, alias: &str) -> Result<Value> {
     let out = resolve_output(
-        Command::new("ssh")
+        platform::ssh()
             .args(ssh_options(config, alias))
             .args(["-G", "-T", alias]),
     )?;
@@ -338,24 +341,25 @@ fn resolve(config: &Config, alias: &str) -> Result<Value> {
 }
 const PROBE: &str = r#"export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; printf '\n__HGS_MACHINE__\n'; printf 'os='; uname -s; printf 'arch='; uname -m; printf 'hgs='; if test -x "$HOME/.local/bin/hgs"; then "$HOME/.local/bin/hgs" --version 2>/dev/null; else printf '\n'; fi; printf 'tmux='; tmux -V 2>/dev/null || printf '\n'; printf 'cargo='; command -v cargo || true"#;
 fn check(config: &Config, alias: &str) -> Result<Value> {
-    let out = Command::new("ssh")
-        .args(ssh_options(config, alias))
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=6",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=2",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            alias,
-            PROBE,
-        ])
-        .stdin(Stdio::null())
-        .output()?;
+    let out = platform::ssh_output(
+        platform::ssh()
+            .args(ssh_options(config, alias))
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                alias,
+                PROBE,
+            ])
+            .stdin(Stdio::null()),
+    )?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut result = json!({"alias":alias,"ok":false,"ssh_ok":out.status.success(),"error":String::from_utf8_lossy(&out.stderr).chars().take(3000).collect::<String>()});
     if out.status.success() {
@@ -391,6 +395,15 @@ fn setup(config: &Config, alias: &str, source: Option<&str>, dry: bool) -> Resul
         || !root.join("src/main.rs").is_file()
     {
         return Err(Error::new(1, "HGS source folder not found. Choose the hgs checkout containing Cargo.toml and install.sh."));
+    }
+    if cfg!(windows) {
+        // The peer's shell and Python cannot run scripts with CRLF line endings,
+        // which a Git checkout on Windows may produce.
+        for file in ["install.sh", "hgs_state.py"] {
+            if fs::read(root.join(file)).is_ok_and(|bytes| bytes.contains(&b'\r')) {
+                return Err(Error::new(1, format!("{file} in the HGS source folder has Windows line endings. Check the source out again with LF line endings, then retry.")));
+            }
+        }
     }
     // Install in a unique staging directory: don't overwrite the peer's checkout,
     // shared configuration, tmux configuration, or any running process.
@@ -450,10 +463,10 @@ printf 'Setup complete: '
     if !result.success() {
         return Err(Error::new(1, "Could not package the HGS CLI sources."));
     }
-    let code = Command::new("ssh")
-        .args(arguments)
-        .stdin(fs::File::open(bundle.path())?)
-        .status()?;
+    let code = platform::ssh_status(
+        platform::ssh().args(arguments),
+        fs::File::open(bundle.path())?,
+    )?;
     Ok(code.code().unwrap_or(1))
 }
 
@@ -560,10 +573,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "ssh" => {
             let directory = match &args[2..] {
                 [] => None,
+                // The folder is on the remote POSIX machine, whatever this one is.
                 [flag, path]
-                    if flag == "--directory"
-                        && Path::new(path).is_absolute()
-                        && !path.contains('\0') =>
+                    if flag == "--directory" && path.starts_with('/') && !path.contains('\0') =>
                 {
                     Some(path)
                 }
@@ -589,7 +601,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 println!("ssh {}", platform::join(&arguments));
                 return Ok(0);
             }
-            platform::wait_interactive(Command::new("ssh").args(arguments))
+            platform::wait_interactive(platform::ssh().args(arguments))
         }
         _ => Err(Error::new(1, "Unknown machine command")),
     }

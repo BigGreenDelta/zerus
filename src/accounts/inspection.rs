@@ -1,7 +1,6 @@
 //! Read-only native identity/quota adapters. Only allowlisted display fields leave this module.
 use super::*;
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::process::CommandExt;
 use std::process::{Child, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,9 +28,7 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 fn stop(child: &mut Child) {
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
+    platform::kill_process_group(child);
     let _ = child.wait();
 }
 pub(super) fn capture(
@@ -47,13 +44,13 @@ pub(super) fn capture_with_exit(
     seconds: u64,
     accepted_exit: Option<i32>,
 ) -> std::result::Result<Vec<u8>, String> {
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let mut child = command
-        .spawn()
+    let mut child = platform::own_process_group(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .spawn()
         .map_err(|_| "Native account command is unavailable.".to_owned())?;
     let stdout = child.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
@@ -155,9 +152,8 @@ fn codex(home: &Path, native: bool) -> Value {
     cmd.args(["app-server", "--listen", "stdio://"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let Ok(mut child) = cmd.spawn() else {
+        .stderr(Stdio::null());
+    let Ok(mut child) = platform::own_process_group(&mut cmd).spawn() else {
         return result;
     };
     let (tx, rx) = mpsc::channel();
@@ -562,14 +558,13 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
         data["checked_at"] = json!(now());
         private_dir(&cache_dir)?;
         let mut f = tempfile::NamedTempFile::new_in(&cache_dir)?;
-        f.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        platform::make_private(f.as_file())?;
         f.write_all(
             json!({"signature":signature,"data":data})
                 .to_string()
                 .as_bytes(),
         )?;
-        f.persist(cache_path)
+        platform::persist(f, cache_path)
             .map_err(|_| Error::new(1, "Could not cache account status."))?;
         data
     };

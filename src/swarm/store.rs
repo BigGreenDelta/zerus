@@ -1,5 +1,5 @@
 use super::catalog::{new_id, Catalog, Key};
-use crate::config::Config;
+use crate::{config::Config, platform};
 use anyhow::{ensure, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,6 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -59,14 +58,15 @@ impl LockedStore {
     pub fn load(config: &Config) -> Result<Self> {
         let dir = config.dir.join("swarm");
         fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(dir.join("catalog.lock"))?;
+        platform::restrict_dir(&dir)?;
+        let lock = platform::private_open(
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true),
+        )
+        .open(dir.join("catalog.lock"))?;
         lock.lock_exclusive()?;
         let path = dir.join("catalog.json");
         let original = match fs::read(&path) {
@@ -155,11 +155,8 @@ impl LockedStore {
         let path = self
             .path
             .with_file_name(format!("backup-{reason}-{}.json", new_id()));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut file =
+            platform::private_open(OpenOptions::new().create_new(true).write(true)).open(&path)?;
         file.write_all(&serde_json::to_vec(&self.data)?)?;
         file.sync_all()?;
         Ok(path)
@@ -169,13 +166,11 @@ impl LockedStore {
 pub(super) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap();
     let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    platform::make_private(temporary.as_file())?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path)?;
-    File::open(dir)?.sync_all()?;
+    platform::persist(temporary, path)?;
+    platform::sync_dir(dir)?;
     Ok(())
 }
 

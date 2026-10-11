@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -49,7 +48,7 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
-    let mut command = Command::new("ssh");
+    let mut command = platform::ssh();
     command
         .args([
             "-o",
@@ -66,14 +65,12 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         .arg(format!(
             "~/.local/bin/hgs swarm {}",
             platform::quote(action)
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().context("start swarm connection")?;
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
+        ));
+    let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
+    let mut child = ssh.child;
+    let mut stdin = ssh.stdin.unwrap();
+    let mut stdout = ssh.stdout.unwrap();
+    let mut stderr = ssh.stderr.unwrap();
     let writer = thread::spawn(move || stdin.write_all(&bytes));
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();

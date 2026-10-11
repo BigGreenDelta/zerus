@@ -3,7 +3,6 @@
 //! unfinished (unlike its refresh-token login path), repeating login in the TUI.
 use super::*;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 
 pub(super) fn keychain_service(home: &Path, native: bool) -> String {
     let storage = if native { env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok() } else { None };
@@ -89,8 +88,7 @@ fn finish_onboarding(home: &Path) -> Result<()> {
         }
     }
     let _lock = ConfigLock(lock);
-    let file = fs::OpenOptions::new().read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path)?;
+    let file = platform::no_follow(fs::OpenOptions::new().read(true)).open(&path)?;
     if !file.metadata()?.is_file() { return Err(Error::new(1, "Claude account settings are not a regular file.")); }
     let mut bytes = Vec::new(); file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 1024 * 1024 { return Err(Error::new(1, "Claude account settings are too large.")); }
@@ -102,9 +100,9 @@ fn finish_onboarding(home: &Path) -> Result<()> {
     if settings["hasCompletedOnboarding"] == true { return Ok(()); }
     settings["hasCompletedOnboarding"] = json!(true);
     let mut stage = tempfile::NamedTempFile::new_in(home)?;
-    stage.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    platform::make_private(stage.as_file())?;
     stage.write_all(&serde_json::to_vec_pretty(&settings).map_err(|e| Error::new(1,e.to_string()))?)?;
     stage.write_all(b"\n")?; stage.as_file().sync_all()?;
-    stage.persist(path).map_err(|e| Error::new(1, e.to_string()))?;
+    platform::persist(stage, path).map_err(|e| Error::new(1, e.to_string()))?;
     Ok(())
 }

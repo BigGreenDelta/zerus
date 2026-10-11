@@ -2,6 +2,8 @@
 mod inspection;
 mod claude;
 mod claude_settings;
+// Only the Unix session host prepares managed agent homes for a launch.
+#[cfg(unix)]
 mod mcp_servers;
 mod permission_status;
 mod install;
@@ -19,7 +21,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -84,7 +85,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
     for (provider, id) in &catalog.defaults {
         if !["codex", "claude", "kimi"].contains(&provider.as_str())
             || catalog.hidden_profiles.contains(id)
-            || (id != &format!("native-{provider}") && !catalog.profiles.get(id).is_some_and(|p| &p.provider == provider)) {
+            || (id != &format!("native-{provider}") && catalog.profiles.get(id).is_none_or(|p| &p.provider != provider)) {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
@@ -203,7 +204,7 @@ fn private_dir(path: &Path) -> Result<()> {
             "Account profile directory must be a real directory.",
         ));
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    platform::restrict_dir(path)?;
     Ok(())
 }
 fn locked(config: &Config) -> Result<fs::File> {
@@ -217,13 +218,10 @@ fn locked(config: &Config) -> Result<fs::File> {
     loop {
         match f.try_lock_exclusive() {
             Ok(()) => break,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    && started.elapsed().as_secs() < 5 =>
-            {
+            Err(error) if platform::lock_contended(&error) && started.elapsed().as_secs() < 5 => {
                 std::thread::sleep(std::time::Duration::from_millis(20))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if platform::lock_contended(&error) => {
                 return Err(Error::new(
                     1,
                     "Account catalog is busy. Retry after the current operation finishes.",
@@ -236,16 +234,15 @@ fn locked(config: &Config) -> Result<fs::File> {
 }
 fn save(config: &Config, catalog: &Catalog) -> Result<()> {
     let mut f = tempfile::NamedTempFile::new_in(&config.dir)?;
-    f.as_file()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    platform::make_private(f.as_file())?;
     f.write_all(
         &serde_json::to_vec_pretty(catalog)
             .map_err(|_| Error::new(1, "Cannot encode account catalog."))?,
     )?;
     f.as_file().sync_all()?;
-    f.persist(config.dir.join("accounts.json"))
+    platform::persist(f, config.dir.join("accounts.json"))
         .map_err(|e| Error::new(1, e.to_string()))?;
-    fs::File::open(&config.dir)?.sync_all()?;
+    platform::sync_dir(&config.dir)?;
     Ok(())
 }
 fn credential_file(home: &Path, provider: &str) -> bool {
@@ -342,6 +339,7 @@ pub const AUTH_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
 /// Called before state lookup: a resumed/forked record still retains its original native home.
+#[cfg(unix)]
 pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result<String> {
     let id = if account.is_empty() {format!("native-{provider}")} else {account.into()};
     let (profile,_,_) = lookup(config,&id)?;
@@ -351,6 +349,7 @@ pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result
 
 /// Append native switches only to the spawned argv; saved resume recipes stay
 /// unchanged so returning to provider settings takes effect on the next start.
+#[cfg(unix)]
 pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
     if mode != "bypass" || argv.is_empty() { return; }
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
@@ -371,6 +370,7 @@ pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
     argv.splice(at..at,values.iter().map(|v|(*v).to_owned()));
 }
 
+#[cfg(unix)]
 pub fn prepare_claude_settings() -> Result<()> {
     let account = env::var("HGS_ACCOUNT_ID").unwrap_or_default();
     if account.is_empty() || account.starts_with("native-") { return Ok(()); }
@@ -380,6 +380,7 @@ pub fn prepare_claude_settings() -> Result<()> {
     claude_settings::inherit(&Path::new(&home).join(".claude"),Path::new(&profile))
 }
 /// Managed profiles use the user's MCP servers; provider logins stay separate.
+#[cfg(unix)]
 pub fn prepare_mcp_servers(agent: &str) -> Result<()> {
     let account = env::var("HGS_ACCOUNT_ID").unwrap_or_default();
     if account.is_empty() || account.starts_with("native-") { return Ok(()); }
@@ -452,6 +453,18 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let dry = dry || args.iter().any(|arg| arg == "--dry-run");
     let operation = args.first().map(String::as_str).unwrap_or("ls");
     let id = args.get(1).map(String::as_str).unwrap_or("");
+    if !platform::LOCAL_SESSIONS {
+        // No agents run here: an empty catalog, and copies between remote machines.
+        // As on Unix, `ls` ignores further arguments and `default` lists without an ID.
+        match operation {
+            "ls" | "default" if operation == "ls" || id.is_empty() => {
+                println!("{}", json!({"host":config.host(),"profiles":[],"removed_profiles":[],"defaults":{},"revision":revision(b"")}));
+                return Ok(0);
+            }
+            "copy" => {}
+            _ => return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED)),
+        }
+    }
     match operation {
         "ls"=>{println!("{}",list(config)?);},
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
@@ -494,7 +507,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if p.provider == "codex" {
                 let path = profile_home(config,id).join("config.toml");
                 let mut file = fs::OpenOptions::new().create_new(true).write(true).open(path)?;
-                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                platform::make_private(&file)?;
                 file.write_all(b"cli_auth_credentials_store = \"file\"\n")?; file.sync_all()?;
             }
             catalog.profiles.insert(id.into(),p);save(config,&catalog)?;println!("{}",list(config)?);
@@ -734,7 +747,7 @@ fn import(config: &Config, id: &str, label: &str, payload: &[u8]) -> Result<Valu
             .write(true)
             .create_new(true)
             .open(&path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        platform::make_private(&file)?;
         file.write_all(&data)?;
         file.sync_all()?;
     }
@@ -762,7 +775,7 @@ fn transport(
                 "Account transfer requires a configured, enabled machine.",
             ));
         }
-        command = Command::new("ssh");
+        command = platform::ssh();
         command.args([
             "-o",
             "BatchMode=yes",
@@ -780,27 +793,24 @@ fn transport(
             .arg(host)
             .arg(format!("~/.local/bin/hgs {}", platform::join(args)));
     }
-    command
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-    let mut child = command.spawn()?;
+    command.stdin(Stdio::null()).stderr(Stdio::null());
+    let ssh = platform::spawn_ssh(
+        platform::own_process_group(&mut command),
+        input.is_some(),
+        true,
+        false,
+    )?;
+    let mut child = ssh.child;
     let (write_tx, write_rx) = std::sync::mpsc::channel();
     if let Some(bytes) = input {
         let bytes = bytes.to_vec();
-        let mut pipe = child.stdin.take().unwrap();
+        let mut pipe = ssh.stdin.unwrap();
         std::thread::spawn(move || {
             let _ = write_tx.send(pipe.write_all(&bytes).is_ok());
         });
     }
     let (read_tx, read_rx) = std::sync::mpsc::channel();
-    let pipe = child.stdout.take().unwrap();
+    let pipe = ssh.stdout.unwrap();
     std::thread::spawn(move || {
         let mut output = Vec::new();
         let result = pipe
@@ -819,9 +829,7 @@ fn transport(
                 Ok(Some(result)) => {
                     status = Some(result);
                     // A proxy/helper may retain inherited pipe handles after its parent exits.
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGKILL);
-                    }
+                    platform::kill_process_group(&mut child);
                 }
                 Ok(None) => {}
                 Err(_) => break,
@@ -843,9 +851,7 @@ fn transport(
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     if status.is_none() {
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
+        platform::kill_process_group(&mut child);
         let _ = child.wait();
     }
     // Never join unfinished I/O workers: even a helper escaping its process group
@@ -873,6 +879,10 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
     let label = arg(args, "--label").unwrap_or(dest);
     let from = arg(args, "--from").unwrap_or("@local");
     let to = arg(args, "--to").ok_or_else(|| Error::new(1, "--to MACHINE is required."))?;
+    let local = |host: &str| host.is_empty() || host == "@local" || config.is_self(host);
+    if !platform::LOCAL_SESSIONS && (local(from) || local(to)) {
+        return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
+    }
     validate(
         dest,
         &Profile {
@@ -906,6 +916,7 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 }
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
+#[cfg(unix)]
 pub fn run_script(account: &str, provider: &str, home: &str) -> String {
     if account.is_empty() {
         return "exec \"$0\" --run \"$@\"".into();
@@ -931,7 +942,7 @@ pub fn run_script(account: &str, provider: &str, home: &str) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod permission_tests {
     use super::*;
     #[test]

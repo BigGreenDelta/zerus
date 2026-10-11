@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
 
+#[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is

@@ -4,7 +4,6 @@
 //! profile added, changed or removed itself keeps its local state.
 use super::*;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 
 const BASELINE: &str = ".hgs-inherited-mcp.json";
 const LOCK: &str = ".hgs-inherited-mcp.lock";
@@ -163,11 +162,11 @@ fn render(document: &Document) -> Result<String> {
 // profile. Never replace a version this merge did not read.
 fn replace(path: &Path, before: Option<&str>, after: &str) -> Result<bool> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    file.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    platform::make_private(file.as_file())?;
     file.write_all(after.as_bytes())?;
     file.as_file().sync_all()?;
     if read_text(path)?.as_deref() != before { return Ok(false); }
-    file.persist(path).map_err(|e| Error::new(1, e.to_string()))?;
+    platform::persist(file, path).map_err(|e| Error::new(1, e.to_string()))?;
     Ok(true)
 }
 
@@ -186,7 +185,7 @@ pub(super) fn inherit(provider: &str, home: &Path, profile: &Path) -> Result<()>
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(Error::new(1, "Managed agent configuration is a symlink; MCP servers were not inherited."));
     }
-    let guard = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).mode(0o600).open(profile.join(LOCK))?;
+    let guard = platform::private_open(fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)).open(profile.join(LOCK))?;
     guard.lock_exclusive()?;
     let native = parse(&layout, read_text(&source)?.as_deref(), &source)?;
     let inherited = servers(&native, layout.key);
@@ -220,6 +219,7 @@ pub(super) fn inherit(provider: &str, home: &Path, profile: &Path) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
