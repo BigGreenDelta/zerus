@@ -325,6 +325,7 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
         },
     }
     if let Some(approval)=claude_approval::current(record){cards.push(approval);}
+    if let Some(question)=claude_approval::native_question(record){cards.push(question);}
     if let Some(mode) = claude_permission::current(record) {
         cards.push(mode);
     }

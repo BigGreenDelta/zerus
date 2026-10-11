@@ -11,7 +11,7 @@ use std::path::Path;
 struct Panel { title:String, body:Vec<String>, question:String, labels:Vec<String>, selected:usize }
 
 // Claude also reports AskUserQuestion as a PermissionRequest; claude_question
-// owns that card. Plan approval can turn an option into a text field, so its
+// owns that card, or native_question when no tool call exists. Plan approval can turn an option into a text field, so its
 // card only points to Terminal.
 const QUESTION_TOOLS:[&str;3]=["AskUserQuestion","request_user_input","AskUser"];
 const TERMINAL_ONLY_TOOLS:[&str;2]=["ExitPlanMode","EnterPlanMode"];
@@ -174,6 +174,29 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
 }
 
+/// Claude Code asks some questions itself, such as a model switch after a
+/// safeguard stop. They arrive only as an AskUserQuestion PermissionRequest:
+/// without a tool call there is no tool result to acknowledge an answer, so
+/// the card mirrors the request and points to Terminal. A model question has
+/// an active tool call and keeps claude_question's answerable card.
+pub(super) fn native_question(record:&Value)->Option<Value> {
+    let request=&record["pending_approval"];
+    let tool=string(request,"tool_name");
+    if record["agent"]!="claude"||record["phase"]!="input"||pause_active(record)||!string(record,"error").is_empty()
+        ||!request.is_object()||!question_tool(tool)
+        ||record["active_tools"].as_object().into_iter().flatten().any(|(_,active)|active["name"]==tool) {return None;}
+    let mut items=questions::normalize(&request["tool_input"]["questions"]).unwrap_or_else(|_|json!([{"id":"q_0",
+        "question":"Claude asks a question in Terminal","header":tool,"body":summary(request),"options":[]}]));
+    for item in items.as_array_mut().into_iter().flatten() {item["allow_other"]=json!(false);}
+    let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
+        record["process_start"],tool,request["tool_input"]]).to_string()));
+    let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    Some(json!({"question_id":format!("claude-native-question:{hash}"),"question_hash":hash,"tool_call_id":"",
+        "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_native_question",
+        "can_answer":false,"answer_transport":"","answer_unavailable_reason":"Claude Code asks this itself. Answer it in Terminal.",
+        "created_at":created,"questions":items}))
+}
+
 fn snapshot(record:&Value,screen:&str)->Option<(Value,usize)> {
     let (card,panel)=build(record,Some(screen))?;
     if card["can_answer"]!=true {return None;}
@@ -281,6 +304,37 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
         assert!(parse(&OUTSIDE.replace("   4. Yes, but ask again next time","   5. Yes, but ask again next time")).is_none());
         assert!(parse(&OUTSIDE.replace("   3. No, and","❯  3. No, and")).is_none());
         assert!(parse(&OUTSIDE.replace("\n\n Esc to cancel","\n Esc to cancel")).is_none());
+    }
+
+    #[test] fn claude_code_questions_without_a_tool_call_point_to_terminal() {
+        // Claude Code asks this itself after a safeguard stop: no PreToolUse,
+        // no active tool, only the permission prompt of AskUserQuestion.
+        let input=json!({"metadata":{"source":"refusal_fallback_preference"},"questions":[{"header":"Model switch",
+            "multiSelect":false,"question":"Switch models and keep going whenever this happens?","options":[
+            {"label":"Switch automatically","description":"Continue on the other model now"},
+            {"label":"Stay","description":"Stop here without switching"}]}]});
+        let mut asked=record("AskUserQuestion",input);asked["phase"]=json!("input");asked["active_tools"]=json!({});
+        let card=native_question(&asked).unwrap();
+        assert_eq!((card["source"].clone(),card["can_answer"].clone(),card["created_at"].clone()),
+            (json!("claude_native_question"),json!(false),json!(10.0)));
+        assert_eq!(card["answer_unavailable_reason"],"Claude Code asks this itself. Answer it in Terminal.");
+        let item=&card["questions"][0];
+        assert_eq!((item["header"].clone(),item["allow_other"].clone()),(json!("Model switch"),json!(false)));
+        assert_eq!(item["question"],"Switch models and keep going whenever this happens?");
+        assert_eq!(item["options"][0]["label"],"Switch automatically");
+        assert_eq!(item["options"][1]["description"],"Stop here without switching");
+        // A request Zerus cannot normalize still shows that Claude waits.
+        let mut odd=asked.clone();odd["pending_approval"]["tool_input"]=json!({"questions":"?"});
+        let odd=native_question(&odd).unwrap();
+        assert_eq!(odd["questions"][0]["question"],"Claude asks a question in Terminal");
+        assert!(odd["questions"][0]["options"].as_array().unwrap().is_empty());
+        assert_ne!(odd["question_hash"],card["question_hash"]);
+        // The model's own question keeps claude_question's answerable card.
+        let mut model=asked.clone();model["active_tools"]=json!({"toolu_ask":{"name":"AskUserQuestion"}});
+        assert!(native_question(&model).is_none());
+        let mut resolved=asked.clone();resolved["phase"]=json!("working");assert!(native_question(&resolved).is_none());
+        let mut tool=asked.clone();tool["pending_approval"]["tool_name"]=json!("Read");assert!(native_question(&tool).is_none());
+        assert!(build(&asked,None).is_none());
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {
