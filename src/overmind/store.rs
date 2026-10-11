@@ -116,9 +116,11 @@ impl Store {
         if !path.exists() {
             fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path)?;
         }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(10))?;
-        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .context("the Overmind database is damaged")?;
         conn.execute_batch("PRAGMA synchronous=FULL;")?;
         conn.execute_batch(SCHEMA).context("the Overmind database is damaged")?;
         Ok(Self { conn, dir: dir.to_owned(), machine: machine.to_owned() })
@@ -198,7 +200,9 @@ impl Store {
             ensure!(
                 uuid::Uuid::parse_str(&event.id).is_ok()
                     && uuid::Uuid::parse_str(&event.origin).is_ok()
-                    && event.seq > 0,
+                    && event.seq > 0
+                    && event.seq <= i64::MAX as u64
+                    && event.lamport < i64::MAX as u64,
                 "received an invalid Overmind event"
             );
             let max: i64 = tx.query_row(
@@ -214,7 +218,7 @@ impl Store {
         }
         tx.commit()?;
         if inserted > 0 {
-            self.bump()?;
+            self.bump_quietly();
         }
         Ok(inserted)
     }
@@ -238,18 +242,32 @@ impl Store {
             wrapped.tx.commit()?;
             value
         };
-        self.bump()?;
+        self.bump_quietly();
         Ok(value)
     }
 
     /// Publishes the cursor in `rev` so that watchers notice changes.
     fn bump(&self) -> Result<()> {
+        use fs2::FileExt;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(self.dir.join("rev.lock"))?;
+        lock.lock_exclusive()?;
         let mut temp = tempfile::Builder::new().prefix(".rev-").tempfile_in(&self.dir)?;
         temp.write_all(self.cursor()?.to_string().as_bytes())?;
         temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
         temp.as_file().sync_all()?;
         temp.persist(self.dir.join("rev")).map_err(|e| e.error)?;
         Ok(())
+    }
+
+    /// The write is already committed, so a failed publication is only reported.
+    fn bump_quietly(&self) {
+        if let Err(error) = self.bump() {
+            eprintln!("hgs overmind: could not update rev: {error:#}");
+        }
     }
 }
 
@@ -460,6 +478,16 @@ mod tests {
         assert!(format!("{error:#}").contains("damaged"));
         let broken = tempfile::tempdir().unwrap();
         fs::write(broken.path().join("overmind.sqlite3"), b"not a database at all, definitely").unwrap();
-        assert!(Store::open(broken.path(), MACHINE).is_err());
+        let error = Store::open(broken.path(), MACHINE).err().expect("garbage file must fail");
+        assert!(format!("{error:#}").contains("damaged"));
+    }
+
+    #[test]
+    fn a_failed_rev_publication_does_not_fail_a_committed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        fs::create_dir(dir.path().join("rev")).unwrap();
+        store.write(|tx| tx.append(&draft("t"))).unwrap();
+        assert_eq!(store.load(&Filter::All).unwrap().len(), 1);
     }
 }

@@ -13,6 +13,9 @@ pub enum ActorKind {
     Agent,
     Autopilot,
     Manager,
+    /// A kind from a newer machine; it never matches a workflow rule.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +141,8 @@ mod tests {
         .unwrap();
         assert_eq!(event.v, 2);
         assert_eq!(event.actor.kind, ActorKind::Human);
+        let robot: Actor = serde_json::from_value(json!({"kind": "robot", "machine": "m"})).unwrap();
+        assert_eq!(robot.kind, ActorKind::Unknown);
     }
 
     #[test]

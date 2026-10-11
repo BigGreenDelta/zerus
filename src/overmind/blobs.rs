@@ -28,6 +28,7 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<String> {
     temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
     temp.as_file().sync_all()?;
     temp.persist(&target).map_err(|e| e.error)?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(sha)
 }
 
