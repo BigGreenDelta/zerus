@@ -1,7 +1,9 @@
 #include "UpdateController.h"
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -30,9 +32,22 @@ class TestUpdates : public QObject {
             {"packages",QJsonObject{{"zerus-ade-bin","0.37.0-1"},{"zerus-git","0.37.0.r10.gaaaaaaa-1"}}},
             {"artifacts",QJsonArray{QJsonObject{{"kind","arch-package"},{"name","zerus-ade-bin-0.37.0-1-x86_64.pkg.tar.zst"},{"url","https://zerus.dev/downloads/v0.37.0/zerus-ade-bin-0.37.0-1-x86_64.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}}}}};
     }
+    // A nightly catalog as scripts/update_feed.py publishes it (the Windows zip is
+    // linked from the release page only, never listed as an artifact).
+    QJsonObject nightlyRaw(const QString &version) const {
+        const QString tag="nightly-123",name="zerus-ade-nightly-bin-"+version+"-1-x86_64.pkg.tar.zst";
+        auto value=raw();value["channel"]="nightly";value["versionName"]=version;value["releaseUrl"]="https://github.com/ufna/zerus/releases/tag/"+tag;
+        value["packages"]=QJsonObject{{"zerus-ade-nightly-bin",version+"-1"}};
+        value["artifacts"]=QJsonArray{QJsonObject{{"kind","arch-package"},{"name",name},{"url","https://zerus.dev/downloads/"+tag+"/"+name},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}}};
+        return value;
+    }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
-    void initTestCase(){QCoreApplication::setOrganizationName("zerus-update-test");QCoreApplication::setApplicationName("isolated");QSettings::setDefaultFormat(QSettings::IniFormat);}
+    void initTestCase(){QCoreApplication::setOrganizationName("zerus-update-test");QCoreApplication::setApplicationName("isolated");QSettings::setDefaultFormat(QSettings::IniFormat);cleanup();}
+    // Tests point the settings at temporary folders of their own. Later writes
+    // (the next test, deferred work) go to empty settings that outlive the test
+    // run instead of recreating a removed folder.
+    void cleanup(){QVERIFY(m_settings.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());QSettings().clear();}
     void validCatalog(){auto value=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(value.valid);QCOMPARE(value.version,QString("0.37.0"));QCOMPARE(value.packages["zerus-git"].toString(),QString("0.37.0.r10.gaaaaaaa-1"));}
     void maliciousCatalog(){
         for(QString key:{"schemaVersion","product","platform","channel","releaseUrl","sourceCommit","publishedAt"}){auto value=raw();value[key]=key=="schemaVersion"?QJsonValue(2):QJsonValue("evil");QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
@@ -61,6 +76,71 @@ private slots:
         QVERIFY(UpdateController::comparisonMessage(actual,catalog,"0.9.0",1,true).contains("Update available"));
         QVERIFY(UpdateController::comparisonMessage(actual,catalog,"0.9.0",-1,true).contains("at least"));
         QVERIFY(UpdateController::comparisonMessage(actual,catalog,"0.9.0",0,false).contains("No matching"));
+#endif
+    }
+    void portableWindowsBuildFollowsNightlyReleases(){
+        auto stable=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(stable.valid);
+        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+        DesktopInstallation portable{"portable",{},{}};
+        // Stable releases carry no Windows build: never announced to a portable build.
+        QVERIFY(!UpdateController::portableUpdateAvailable("0.36.2",stable));
+        QCOMPARE(UpdateController::comparisonMessage(portable,stable,"0.36.2",0,false),QString("Stable releases do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds."));
+        // Nightlies do; the zip knows only its product version.
+        QVERIFY(UpdateController::portableUpdateAvailable("0.37.0",nightly));
+        QCOMPARE(UpdateController::comparisonMessage(portable,nightly,"0.37.0",0,false),QString("Zerus nightly 0.38.0.r10.gaaaaaaa.n5 is available. Download its Windows zip from the release page."));
+        QVERIFY(!UpdateController::portableUpdateAvailable("0.38.0",nightly));QVERIFY(!UpdateController::portableUpdateAvailable("0.39.0",nightly));
+        QVERIFY(!UpdateController::portableUpdateAvailable("0.38.0-dev",nightly));QVERIFY(!UpdateController::portableUpdateAvailable("0.37.0",DesktopUpdateFeed{}));
+        QVERIFY(UpdateController::comparisonMessage(portable,nightly,"0.38.0",0,false).contains("no self-update"));
+        QVERIFY(UpdateController::updateCommand(portable).isEmpty());QVERIFY(UpdateController::updateCommand(portable,"nightly").isEmpty());
+        // The catalog itself is unchanged: a Windows client accepts exactly what Linux clients do.
+        for(auto value:{raw(),nightlyRaw("0.38.0.r10.gaaaaaaa.n5")}){
+            const QString tag=value["releaseUrl"].toString().section('/',-1),channel=value["channel"].toString();
+            auto artifacts=value["artifacts"].toArray();
+            artifacts.append(QJsonObject{{"kind","windows-zip"},{"name","zerus-windows-x86_64.zip"},{"url","https://zerus.dev/downloads/"+tag+"/zerus-windows-x86_64.zip"},{"sha256",QString(64,'c')},{"size",100},{"os","windows"},{"arch","x86_64"}});
+            value["artifacts"]=artifacts;QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),channel).valid,qPrintable(channel));
+        }
+    }
+    void portableBuildDefaultsToNightlyAndNeverAnnouncesStable(){
+#ifdef Q_OS_WIN
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.37.0");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
+        QFile executable(dir.path()+"/hgs-tray.exe");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
+        QFile info(dir.path()+"/build-info.json");QVERIFY(info.open(QIODevice::WriteOnly));info.close();
+        const QByteArray stableFeed=QJsonDocument(raw()).toJson(),nightlyFeed=QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson();QStringList requested;
+        const auto fetch=[&](const QNetworkRequest &request){requested<<request.url().fileName();auto *reply=new FixtureReply;const auto bytes=request.url().fileName()=="nightly.json"?nightlyFeed:stableFeed;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
+        {
+            UpdateController controller(nullptr,executable.fileName(),fetch);QSignalSpy notified(&controller,&UpdateController::newerReleaseVerified);
+            QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("nightly"));
+            controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"nightly.json"});
+            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/nightly-123"));
+            // A deliberate stable choice is kept, and a newer stable release is not announced.
+            controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
+            QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),1);QVERIFY(controller.comparison().contains("nightly channel"));
+        }
+        UpdateController restarted(nullptr,executable.fileName(),fetch);QTRY_COMPARE(restarted.installation().kind,QString("portable"));QCOMPARE(restarted.channel(),QString("stable"));
+#else
+        QSKIP("Only Windows builds are portable");
+#endif
+    }
+    void installationKindFollowsTheFolderLayout(){
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+#ifdef Q_OS_WIN
+        // Wherever the temporary folder lies: the portable bundle (build-info.json
+        // next to hgs-tray.exe) stays portable inside a folder kept in Git, such as
+        // a profile, while a build tree in that checkout is a source build.
+        for(const char *folder:{"checkout/.git","checkout/bundle","checkout/build"})QVERIFY(QDir(dir.path()).mkpath(folder));
+        for(const char *file:{"checkout/bundle/hgs-tray.exe","checkout/bundle/build-info.json","checkout/build/hgs-tray.exe"}){QFile created(dir.filePath(file));QVERIFY(created.open(QIODevice::WriteOnly));}
+        UpdateController bundle(nullptr,dir.filePath("checkout/bundle/hgs-tray.exe"),[](const QNetworkRequest &){return new FixtureReply;});
+        UpdateController build(nullptr,dir.filePath("checkout/build/hgs-tray.exe"),[](const QNetworkRequest &){return new FixtureReply;});
+        QTRY_COMPARE(bundle.installation().kind,QString("portable"));QTRY_COMPARE(build.installation().kind,QString("source"));
+#else
+        QFile executable(dir.path()+"/hgs-tray.exe");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
+        UpdateController controller(nullptr,executable.fileName(),[](const QNetworkRequest &){return new FixtureReply;});
+#ifdef Q_OS_LINUX
+        QTRY_VERIFY(controller.installation().kind!="checking");QVERIFY(controller.installation().kind!="portable");
+#else
+        QTRY_COMPARE(controller.installation().kind,QString("unknown"));
+#endif
 #endif
     }
     void canonicalOwnershipAsync(){
@@ -132,6 +212,8 @@ private slots:
         QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport time\ntime.sleep(20)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());bool tick=false;QTimer::singleShot(30,[&]{tick=true;});QTRY_VERIFY_WITH_TIMEOUT(tick,1000);QTRY_COMPARE_WITH_TIMEOUT(controller.installation().kind,QString("unknown"),6500);qputenv("PATH",oldPath);
 #endif
     }
+private:
+    QTemporaryDir m_settings;
 };
 QTEST_MAIN(TestUpdates)
 #include "test_updates.moc"

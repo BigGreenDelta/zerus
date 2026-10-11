@@ -7,6 +7,8 @@
 
 #include <functional>
 
+class QProcess;
+
 // Запасной бэкенд: шаблон команды из ~/.config/hgs/tray.conf (`terminal=`) или из
 // --terminal. Ничего не знает ни про Konsole, ни про D-Bus, поэтому годится и как
 // «терминал, который выбрал пользователь», и как заглушка на платформе без бэкенда.
@@ -28,6 +30,12 @@ public:
     // командную строку одним аргументом: `foot -e bash -lc {cmd}`, а не `xterm -e {cmd}`.
     static QStringList buildArgv(const QString &terminalTemplate, const QString &command,
                                  QString *error);
+
+    // The detached start open() performs, without starting it: argv's first
+    // element is the program, the folder is home. On Windows a console program
+    // (powershell.exe -NoExit -Command {cmd}) gets a console window of its own
+    // instead of the hidden console QProcess gives children of a GUI process.
+    static void prepare(QProcess &process, QStringList argv);
 
     // Template for the desktop's default terminal, used on Linux when Konsole is not
     // installed and no terminal= is configured. Pure: isInstalled answers whether a

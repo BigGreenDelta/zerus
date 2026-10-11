@@ -44,6 +44,7 @@ private slots:
     void legacyMarksMigrateOnlyCurrentValues();
     void olderHostsKeepLocalReadStateAndQueueNothing();
     void recoveryAttentionWithoutSignatureStaysLocal();
+    void controlOnlyComputerHasNoLocalCount();
 };
 
 void TestFleetState::attentionMarksFollowConversationAndRejectStaleActions()
@@ -321,6 +322,19 @@ void TestFleetState::recoveryAttentionWithoutSignatureStaysLocal()
     QVERIFY(f.markSessionRead({}, f.local().sessions[0]));
     QVERIFY(f.local().sessions[0].attentionAcknowledged);
     f.setLocal(local, 2000); QVERIFY(f.local().sessions[0].attentionAcknowledged);
+}
+
+void TestFleetState::controlOnlyComputerHasNoLocalCount()
+{
+    BoxState local; local.host = "windows-pc"; local.ok = true; local.localSessions = false;
+    BoxState mac; mac.host = "mac"; mac.ok = true; SessionInfo s; s.name = "codex/p"; mac.sessions = {s};
+    FleetState state; state.setLocal(local, 1000); state.registerPeer("mac"); state.setPeer(mac, 1000);
+    const auto lines = state.tooltip(1000).split('\n');
+    QCOMPARE(lines.size(), 2);
+    QCOMPARE(lines[0], QString("0 need attention, 1 sessions total"));
+    QCOMPARE(lines[1], QString("1 on mac (just now)"));
+    local.localSessions = true; state.setLocal(local, 1000);
+    QVERIFY(state.tooltip(1000).contains("0 here"));
 }
 
 QTEST_APPLESS_MAIN(TestFleetState)

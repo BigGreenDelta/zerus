@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QSettings>
 #include <QTemporaryDir>
+#include "FakeCli.h"
 #include "SwarmController.h"
 #include "SwarmDialog.h"
 #include "SwarmConflictReview.h"
@@ -72,7 +73,7 @@ if action=='apply':
     result['versions']={'name-field':['own-'+str(count),'unseen-remote']}
 print(json.dumps(result))
 )PY";
-        write("hgs",script);QFile::setPermissions(m_program,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);response("Original");
+        write("hgs",script);QVERIFY(FakeCli::makeRunnable(m_program));response("Original");
     }
     void localPresentationSurvivesRemoteMembership() {
         auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};
@@ -81,7 +82,7 @@ print(json.dumps(result))
         QCOMPARE(p["name"].toString(),"Renamed");QVERIFY(p["collapsed"].toBool());QCOMPARE(p["sessions"].toArray(),QJsonArray({"b","a","new"}));QCOMPARE(result["runs"],local["runs"]);
     }
     void editDuringRefreshUsesVersionsTheUserSaw() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         write("hold",{});response("Remote change");controller.refresh();QTRY_COMPARE(requests().size(),2);
         controller.edit(organization("Local change"));QFile::remove(m_root+"/hold");
         QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
@@ -90,7 +91,7 @@ print(json.dumps(result))
         QCOMPARE(controller.snapshot()["organization"].toObject()["projects"].toArray()[0].toObject()["name"].toString(),"Local change");
     }
     void editDuringWriteAdvancesOnlyOwnAcknowledgedVersions() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         write("hold",{});controller.edit(organization("First"));QTRY_COMPARE(requests().size(),2);
         controller.edit(organization("Second"));QFile::remove(m_root+"/hold");QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
         const auto patch=requests()[2].toObject()["input"].toObject();QCOMPARE(patch["versions"].toObject()[m_key].toArray(),QJsonArray{"own-2"});
@@ -98,16 +99,16 @@ print(json.dumps(result))
     }
     void restartRetriesUnsavedDraftInsteadOfReplacingIt() {
         {
-            HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+            HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
             write("fail",{});controller.edit(organization("Unsaved"));QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(!controller.busy());
         }
         QFile::remove(m_root+"/fail");response("A newer remote value");
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Unsaved"));QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Unsaved"));QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
         const auto patch=requests()[3].toObject()["input"].toObject();QCOMPARE(patch["versions"].toObject()[m_key].toArray(),QJsonArray{"observed"});
         QCOMPARE(patch["desired"].toObject()["projects"].toArray()[0].toObject()["name"].toString(),"Unsaved");
     }
     void unfinishedTextFieldDefersRemoteRefresh() {
-        HgsClient client(m_program);SwarmController controller(&client);QSignalSpy rendered(&controller,&SwarmController::organizationReady);
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);QSignalSpy rendered(&controller,&SwarmController::organizationReady);
         controller.start(organization("Original"));QTRY_VERIFY(controller.settled());QCOMPARE(rendered.count(),1);
         write("hold",{});response("Remote name");controller.refresh();QTRY_COMPARE(requests().size(),2);
         controller.setDraftEditing(true);QFile::remove(m_root+"/hold");QTRY_VERIFY(!controller.busy());QCOMPARE(rendered.count(),1);
@@ -200,7 +201,7 @@ print(json.dumps(result))
         QVERIFY(!review.findChild<QPushButton*>("swarmResolve")->isEnabled());
     }
     void dialogResolvesOnlyTheExplicitlyReviewedChoice() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         auto snapshot=controller.snapshot();const auto context=conflictSnapshot();snapshot["machines"]=context["machines"];snapshot["node_id"]=context["node_id"];snapshot["organization"]=context["organization"];
         const auto c=conflict({{"kind","session"},{"machine","node-a"},{"session","codex/demo/review"}},"ungrouped","p");snapshot["conflicts"]=QJsonArray{c};controller.acceptExternal(snapshot);
         FleetState fleet;bool checked=false;
@@ -217,7 +218,7 @@ print(json.dumps(result))
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
     }
     void largeFleetKeepsScrollAndSelection() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         auto snapshot=controller.snapshot();QJsonArray machines;
         for(int i=0;i<30;++i)machines.append(QJsonObject{{"id",QString::number(i)},{"name",QString("Computer %1").arg(i,2,10,QChar('0'))},{"connection",QString("peer-%1").arg(i)}});
         snapshot["machines"]=machines;controller.acceptExternal(snapshot);FleetState fleet;bool checked=false;
@@ -241,7 +242,7 @@ print(json.dumps(result))
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
     }
     void previewsDoNotMoveSurroundingControls() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         FleetState fleet;BoxState remote;remote.host="mac";remote.ok=true;fleet.setPeer(remote,0);bool checked=false;
         QTimer::singleShot(0,this,[&]{
             auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
@@ -261,23 +262,24 @@ print(json.dumps(result))
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
     }
     void joinPreviewRequiresExplicitProjectMapping() {
-        HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         write("preview",QJsonDocument(QJsonObject{{"node_id","node-b"},{"swarm_id","swarm-b"},{"same_swarm",false},{"initialized",true},{"projects",QJsonArray{QJsonObject{{"id","different-id"},{"name","Original"}}}}}).toJson());
         FleetState fleet;BoxState local;local.host="arch";local.ok=true;fleet.setLocal(local,0);BoxState remote;remote.host="mac";remote.ok=true;fleet.setPeer(remote,0);
         bool checked=false;
         QTimer::singleShot(0,this,[&]{
             auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
             dialog->findChild<QTabWidget*>("swarmTabs")->setCurrentIndex(1);
-            auto *button=dialog->findChild<QPushButton*>("swarmPreview");QVERIFY(button);button->click();
-            QTimer::singleShot(300,dialog,[&,dialog]{
-                auto *table=dialog->findChild<QTableWidget*>("swarmProjectMapping");QVERIFY(table);QCOMPARE(table->rowCount(),1);
-                auto *choice=qobject_cast<QComboBox*>(table->cellWidget(0,1));QVERIFY(choice);QCOMPARE(choice->count(),2);QVERIFY(choice->currentData().toString().isEmpty());
-                auto *join=dialog->findChild<QPushButton*>("swarmJoin");QVERIFY(join);QVERIFY(join->isEnabled());
-                const auto preview=qEnvironmentVariable("HGS_SWARM_PREVIEW");if(!preview.isEmpty())QVERIFY(dialog->grab().save(preview));
-                checked=true;dialog->reject();
-            });
+            auto *button=dialog->findChild<QPushButton*>("swarmPreview");QVERIFY(button);auto *join=dialog->findChild<QPushButton*>("swarmJoin");QVERIFY(join);
+            QVERIFY(!join->isEnabled());button->click();
+            // Join turns on once the fixture's preview arrived and the mapping is built
+            // (slow under load: the fixture is a Python process on Windows).
+            QTRY_VERIFY_WITH_TIMEOUT(join->isEnabled(),15000);
+            auto *table=dialog->findChild<QTableWidget*>("swarmProjectMapping");QVERIFY(table);QCOMPARE(table->rowCount(),1);
+            auto *choice=qobject_cast<QComboBox*>(table->cellWidget(0,1));QVERIFY(choice);QCOMPARE(choice->count(),2);QVERIFY(choice->currentData().toString().isEmpty());
+            const auto preview=qEnvironmentVariable("HGS_SWARM_PREVIEW");if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(dialog->grab().save(preview));}
+            checked=true;dialog->reject();
         });
-        QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(10000);
+        QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(20000);
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
     }
 };

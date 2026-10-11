@@ -180,6 +180,8 @@ public:
                 ownershipText = tr("Local build in a Git checkout; update and rebuild deliberately.");
             else if (install.kind == "checking")
                 ownershipText = tr("Checking installation ownership…");
+            else if (install.kind == "portable")
+                ownershipText = tr("Portable Windows build %1. Download newer builds from the release page.").arg(QCoreApplication::applicationVersion());
             else
                 ownershipText = tr("Local / manually installed build; package ownership unconfirmed.");
             if (install.arch) ownershipText += tr("\nSystem: Arch-based Linux");

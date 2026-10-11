@@ -18,3 +18,8 @@ signals:
 };
 
 std::unique_ptr<AttentionNotifier> makeAttentionNotifier();
+
+class TrayIcon;
+// Windows (WindowsAttentionNotifier.cpp): notifications are the tray icon's own
+// messages, so the notifier needs that icon.
+std::unique_ptr<AttentionNotifier> makeAttentionNotifier(TrayIcon &tray);

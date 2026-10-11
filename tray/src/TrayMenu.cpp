@@ -64,14 +64,17 @@ void addBoxHeader(QMenu *menu, const QString &label, bool leadingSeparator)
 // сюда конструктором), а это только перевод на человеческий; незнакомое значение
 // показывается как есть, а не прячется (пункт без подписи выглядел бы как сломанное
 // меню).
-QString openModeLabel(const QString &mode)
+// windowsTerminal: the Windows set, where tab and window mean Windows Terminal.
+QString openModeLabel(const QString &mode, bool windowsTerminal)
 {
     if (mode == QLatin1String("auto"))
         return TrayMenu::tr("Automatic");
     if (mode == QLatin1String("tab"))
-        return TrayMenu::tr("Tab");
+        return windowsTerminal ? TrayMenu::tr("Windows Terminal tab") : TrayMenu::tr("Tab");
     if (mode == QLatin1String("window"))
-        return TrayMenu::tr("Window");
+        return windowsTerminal ? TrayMenu::tr("Windows Terminal window") : TrayMenu::tr("Window");
+    if (mode == QLatin1String("console"))
+        return TrayMenu::tr("Console window");
     if (mode == QLatin1String("terminal"))
         return TrayMenu::tr("Terminal.app");
     if (mode == QLatin1String("clipboard"))
@@ -101,8 +104,10 @@ TrayMenu::TrayMenu(const QStringList &openModes, const QString &currentMode,
     // Modes come from AppConfig so offered values and accepted config stay in sync.
     auto *group = new QActionGroup(m_openModeMenu);
     group->setExclusive(true);
+    // Only the Windows set has a console mode (see AppConfig::openModes).
+    const bool windowsTerminal = openModes.contains(QStringLiteral("console"));
     for (const QString &mode : openModes) {
-        auto *action = m_openModeMenu->addAction(openModeLabel(mode));
+        auto *action = m_openModeMenu->addAction(openModeLabel(mode, windowsTerminal));
         action->setCheckable(true); action->setChecked(mode == currentMode);
         group->addAction(action);
         connect(action, &QAction::triggered, this, [this, mode]() { emit openModeChosen(mode); });
@@ -128,7 +133,9 @@ void TrayMenu::rebuild(const FleetState &state)
     m_menu->addSeparator();
 
     // Свой бокс -- первая запись в меню, ведущий разделитель ему не нужен.
-    {
+    // A control-only computer (hgs.exe on Windows) hosts no sessions: no section.
+    const bool localSection = state.local().localSessions;
+    if (localSection) {
         const BoxState &box = state.local();
         const bool answered = !box.host.isEmpty();
         addBoxHeader(m_menu, answered ? escapeAmp(box.host) : QStringLiteral("this box"),
@@ -159,9 +166,11 @@ void TrayMenu::rebuild(const FleetState &state)
     // Пиры -- по одной секции на каждого, в порядке peerNames() (QMap -> отсортировано
     // по алиасу, стабильно между перестройками).
     const QList<QString> peers = state.peerNames();
+    if (!localSection && peers.isEmpty())
+        addDisabled(m_menu, tr("No remote machines"));
     for (const QString &alias : peers) {
         const QString escAlias = escapeAmp(alias);
-        addBoxHeader(m_menu, escAlias, /*leadingSeparator=*/true);
+        addBoxHeader(m_menu, escAlias, /*leadingSeparator=*/localSection || alias != peers.constFirst());
 
         const qint64 polledAt = state.peerPolledAt(alias);
         if (polledAt == 0) {

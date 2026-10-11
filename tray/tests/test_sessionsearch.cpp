@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
+#include "FakeCli.h"
 #include "SessionSearch.h"
 
 class TestSessionSearch : public QObject {
@@ -56,7 +57,7 @@ if value.get('error'):
  print(value['error'],file=sys.stderr);sys.exit(1)
 print(json.dumps({'query':query,'results':value.get('results',[]),'truncated':False}))
 )");
-    executable.close(); QVERIFY(executable.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    executable.close(); QVERIFY(FakeCli::makeRunnable(executable.fileName()));
     configure({}, "needle", {
         hit("codex/docs/live", "live-run", "live-message", "Needle live body"),
         hit("codex/docs/saved", "saved-run", "saved-message", "Needle saved body"),
@@ -98,7 +99,7 @@ QJsonArray TestSessionSearch::calls() const
 }
 void TestSessionSearch::resultsKeepArchivesRunsAndRemoteIdentities()
 {
-    SessionSearch search(script()); search.resize(340, 500); search.show();
+    SessionSearch search(FakeCli::program(script())); search.resize(340, 500); search.show();
     const auto state = fleet(); search.setScope(state, "all", {}); search.setQuery("needle");
     QSignalSpy activated(&search, &SessionSearch::resultActivated);
     QTRY_COMPARE(list(search)->count(), 4);
@@ -132,7 +133,7 @@ void TestSessionSearch::activeScopeIncludesChildRequestsAndOfflineReminders()
     auto &saved = box.sessions[1]; saved.reviewLater = true;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     QVERIFY(state.setReviewLater({}, saved, true));
-    SessionSearch search(script()); search.setScope(state, "active", {}); search.setQuery("needle");
+    SessionSearch search(FakeCli::program(script())); search.setScope(state, "active", {}); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(), 3);
     search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 2);
     box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
@@ -149,7 +150,7 @@ void TestSessionSearch::multipleMachinesScopeSearch()
     auto state=fleet(); BoxState third; third.host="build"; third.ok=true;
     SessionInfo session; session.name="codex/build"; session.runId="build-run"; session.state="running"; third.sessions={session}; state.setPeer(third,0);
     configure("build","needle",{hit("codex/build","build-run","build-msg","needle build")});
-    SessionSearch search(script()); search.setHostsScope(state,"all",{"@local","mac"}); search.setQuery("needle");
+    SessionSearch search(FakeCli::program(script())); search.setHostsScope(state,"all",{"@local","mac"}); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(),4); QCOMPARE(calls().size(),2);
     for(const auto &call:calls()) QVERIFY(call.toArray()[0].toString()!="build");
     search.setHostsScope(state,"all",{"mac","build"}); QTRY_COMPARE(list(search)->count(),2);
@@ -161,7 +162,7 @@ void TestSessionSearch::staleQueriesCannotReplaceCurrentResults()
 {
     configure({}, "alpha", {hit("codex/docs/live", "live-run", "alpha-result", "alpha result")}, 550);
     configure({}, "beta", {hit("codex/docs/live", "live-run", "beta-result", "beta current result")});
-    SessionSearch search(script()); search.setScope(fleet(), "all", "@local"); search.setQuery("alpha");
+    SessionSearch search(FakeCli::program(script())); search.setScope(fleet(), "all", "@local"); search.setQuery("alpha");
     QTRY_COMPARE(calls().size(), 1); search.setQuery("beta");
     bool displayedStale = false;
     connect(list(search)->model(), &QAbstractItemModel::rowsInserted, &search, [&] {
@@ -177,7 +178,7 @@ void TestSessionSearch::staleQueriesCannotReplaceCurrentResults()
 }
 void TestSessionSearch::selectionSurvivesFleetPollsAndExplicitRefresh()
 {
-    SessionSearch search(script()); search.setScope(fleet(), "all", "@local"); search.setQuery("needle");
+    SessionSearch search(FakeCli::program(script())); search.setScope(fleet(), "all", "@local"); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(), 3);
     QSignalSpy activated(&search, &SessionSearch::resultActivated);
     list(search)->setCurrentRow(1); const auto identity = list(search)->currentItem()->data(Qt::UserRole);
@@ -189,7 +190,7 @@ void TestSessionSearch::selectionSurvivesFleetPollsAndExplicitRefresh()
 }
 void TestSessionSearch::errorsFollowHostScopeAndRecoverWhenPeerConnects()
 {
-    SessionSearch search(script()); search.setScope(fleet(false), "all", {}); search.setQuery("needle");
+    SessionSearch search(FakeCli::program(script())); search.setScope(fleet(false), "all", {}); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(), 3); QVERIFY(status(search)->text().contains("unavailable"));
     search.setScope(fleet(false), "all", "@local");
     QVERIFY(!status(search)->text().contains("unavailable")); QVERIFY(!status(search)->toolTip().contains("mac"));
@@ -207,7 +208,7 @@ void TestSessionSearch::errorsFollowHostScopeAndRecoverWhenPeerConnects()
 }
 void TestSessionSearch::newlyAddedPeerIsSearchedForTheCurrentQuery()
 {
-    auto state = fleet(); SessionSearch search(script()); search.setScope(state, "all", {}); search.setQuery("needle");
+    auto state = fleet(); SessionSearch search(FakeCli::program(script())); search.setScope(state, "all", {}); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(), 4); QTRY_VERIFY(!status(search)->text().contains("Searching"));
     auto added = *state.peer("mac"); added.host = "laptop";
     configure("laptop", "needle", {hit("kimi/remote", "remote-run", "laptop-message", "needle laptop answer")});
@@ -217,7 +218,7 @@ void TestSessionSearch::newlyAddedPeerIsSearchedForTheCurrentQuery()
 }
 void TestSessionSearch::selectedResultCanBeReopenedWithoutDuplicateActivation()
 {
-    SessionSearch search(script()); search.resize(340, 500); search.show();
+    SessionSearch search(FakeCli::program(script())); search.resize(340, 500); search.show();
     search.setScope(fleet(), "all", "@local"); search.setQuery("needle");
     QTRY_COMPARE(list(search)->count(), 3);
     QSignalSpy activated(&search, &SessionSearch::resultActivated);
@@ -241,7 +242,7 @@ void TestSessionSearch::identifiersMatchWithoutHistoryAndKeepScope()
     box.sessions[1].conversationId = "saved-conversation";
     box.sessions[2].conversationId = "archived-conversation";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
-    SessionSearch search(script()); search.setScope(state, "all", {});
+    SessionSearch search(FakeCli::program(script())); search.setScope(state, "all", {});
     for (const auto &query : QStringList{conversation, "4111-8111", "LIVE-RUN", "child-reference", "child-conversation"}) {
         search.setQuery(query); QCOMPARE(list(search)->count(), 1);
         QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("ID:"));
@@ -261,7 +262,7 @@ void TestSessionSearch::identifiersMatchWithoutHistoryAndKeepScope()
 void TestSessionSearch::taskNumbersRemainPublicMessageMatches()
 {
     configure({}, "zerus-ab12", {hit("codex/docs/saved", "saved-run", "task-message", "Release task zerus-ab12 is in progress.")});
-    SessionSearch search(script()); search.setScope(fleet(), "all", {"@local"}); search.setQuery("zerus-ab12");
+    SessionSearch search(FakeCli::program(script())); search.setScope(fleet(), "all", {"@local"}); search.setQuery("zerus-ab12");
     QTRY_COMPARE(list(search)->count(), 1);
     QVERIFY(status(search)->text().contains("1 messages"));
     QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Release task zerus-ab12"));
@@ -281,7 +282,7 @@ void TestSessionSearch::preview()
         QWidget canvas; canvas.resize(310, 570); canvas.setObjectName("searchPreviewCanvas");
         canvas.setStyleSheet(QString("QWidget#searchPreviewCanvas { background:%1; }").arg(dark ? "#171e24" : "#f5f7fa"));
         auto *layout = new QVBoxLayout(&canvas); layout->setContentsMargins(0,0,0,0);
-        SessionSearch search(script()); search.setTheme(dark); layout->addWidget(&search); canvas.show();
+        SessionSearch search(FakeCli::program(script())); search.setTheme(dark); layout->addWidget(&search); canvas.show();
         search.setScope(fleet(), "all", {}); search.setQuery("recovery");
         QTRY_COMPARE(list(search)->count(), 4); list(search)->setCurrentRow(0); QTest::qWait(25);
         QVERIFY(canvas.grab().save(directory + (dark ? "/search-dark.png" : "/search-light.png")));

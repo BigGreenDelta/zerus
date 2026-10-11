@@ -9,6 +9,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
+#include "FakeCli.h"
 #include "WorktreePanel.h"
 #include "NewSessionDialog.h"
 
@@ -45,16 +46,44 @@ private slots:
         QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("worktree-panel");QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
         QFile response(dir.filePath("catalog.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(catalog()).toJson());response.close();
         QFile reviewed(dir.filePath("review.json"));QVERIFY(reviewed.open(QIODevice::WriteOnly));reviewed.write(QJsonDocument(review()).toJson());reviewed.close();
-        QFile program(script());QVERIFY(program.open(QIODevice::WriteOnly));program.write("#!/bin/sh\ncd \"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> calls\ncase \"$1\" in @*) shift;; esac\ncase \"$1\" in\nworktrees) if [ \"$2\" = create ]; then shift 2; while [ $# -gt 1 ]; do case \"$1\" in --request-id) token=$2;; --branch) branch=$2;; --destination) destination=$2;; esac; shift 2; done; sleep 0.05; if [ -f fail-create ]; then echo 'Branch already exists' >&2; exit 1; fi; printf '{\"status\":\"created\",\"request_id\":\"%s\",\"branch\":\"%s\",\"path\":\"%s\",\"common_dir\":\"/repo/.git\",\"machine\":\"fixture\"}' \"$token\" \"$branch\" \"$destination\"; "
-            "elif [ \"$2\" = review ]; then sleep 0.05; if [ -f old-hgs ]; then echo 'usage: hgs worktrees --path PATH [--refresh] [--json]' >&2; exit 1; fi; cat review.json; "
-            "elif [ \"$2\" = remove ]; then shift 2; while [ $# -gt 0 ]; do case \"$1\" in --request-id) token=$2; shift;; --path) target=$2; shift;; --common-dir|--fingerprint) shift;; esac; shift; done; sleep 0.05; "
-            "if grep -qxF \"$target\" fail-remove 2>/dev/null; then echo 'Worktree changed since the review. Review it again.' >&2; exit 1; fi; "
-            "printf '{\"status\":\"removed\",\"request_id\":\"%s\",\"path\":\"%s\",\"branch_deleted\":false}' \"$token\" \"$target\"; "
-            "else sleep 0.05; cat catalog.json; fi;;\naccount) echo '{\"profiles\":[{\"id\":\"work\",\"provider\":\"codex\",\"label\":\"Work\"}]}' ;;\ndirs) printf '{\"path\":\"%s\",\"directories\":[]}' \"$2\";;\nesac\n");program.close();QVERIFY(program.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+        QFile program(script());QVERIFY(program.open(QIODevice::WriteOnly));program.write(R"PY(#!/usr/bin/env python3
+import json,os,sys,time
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+open('calls','a').write(' '.join(sys.argv[1:])+'\n')
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+c=a[0] if a else ''
+dump=lambda value:sys.stdout.write(json.dumps(value,separators=(',',':')))
+if c=='worktrees':
+ if a[1:2]==['create']:
+  o=a[2:];v={}
+  for i in range(0,len(o)-1,2):v[o[i]]=o[i+1]
+  time.sleep(0.05)
+  if os.path.exists('fail-create'):print('Branch already exists',file=sys.stderr);sys.exit(1)
+  dump({'status':'created','request_id':v.get('--request-id',''),'branch':v.get('--branch',''),'path':v.get('--destination',''),'common_dir':'/repo/.git','machine':'fixture'})
+ elif a[1:2]==['review']:
+  time.sleep(0.05)
+  if os.path.exists('old-hgs'):print('usage: hgs worktrees --path PATH [--refresh] [--json]',file=sys.stderr);sys.exit(1)
+  sys.stdout.write(open('review.json').read())
+ elif a[1:2]==['remove']:
+  o=a[2:];v={};i=0
+  while i<len(o):
+   if o[i] in ('--request-id','--path') and i+1<len(o):v[o[i]]=o[i+1];i+=2
+   elif o[i] in ('--common-dir','--fingerprint'):i+=2
+   else:i+=1
+  time.sleep(0.05)
+  if os.path.exists('fail-remove') and v.get('--path','') in open('fail-remove').read().split('\n'):
+   print('Worktree changed since the review. Review it again.',file=sys.stderr);sys.exit(1)
+  dump({'status':'removed','request_id':v.get('--request-id',''),'path':v.get('--path',''),'branch_deleted':False})
+ else:
+  time.sleep(0.05);sys.stdout.write(open('catalog.json').read())
+elif c=='account':print('{"profiles":[{"id":"work","provider":"codex","label":"Work"}]}')
+elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
+)PY");program.close();QVERIFY(FakeCli::makeRunnable(program.fileName()));
     }
     void init(){QSettings().clear();for(const auto *name:{"calls","fail-create","fail-remove","old-hgs"})QFile::remove(dir.filePath(name));}
     void clientCachesCoalescesAndScopesSnapshots(){
-        HgsClient client(script());QSignalSpy ready(&client,&HgsClient::worktreesReady);
+        HgsClient client(FakeCli::program(script()));QSignalSpy ready(&client,&HgsClient::worktreesReady);
         const auto first=client.requestWorktrees({},"/repo"),second=client.requestWorktrees({},"/repo");QVERIFY(first!=second);QTRY_COMPARE(ready.size(),2);
         QFile calls(dir.filePath("calls"));QVERIFY(calls.open(QIODevice::ReadOnly));QCOMPARE(calls.readAll().count("worktrees"),1);calls.close();
         QVERIFY(client.worktreeSnapshot("mac","/repo").isEmpty());QCOMPARE(client.worktreeSnapshot({},"/linked")["selected_root"].toString(),QString("/linked"));
@@ -63,7 +92,7 @@ private slots:
         client.requestWorktrees({},"/repo",true);QTRY_COMPARE(ready.size(),5);
     }
     void catalogGuardsUnavailableFoldersAndKeepsOfflineSnapshot(){
-        HgsClient client(script());WorktreePanel panel(&client);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(580,400);panel.show();
+        HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(580,400);panel.show();
         auto *tree=panel.findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);
         QCOMPARE(tree->topLevelItem(0)->childCount(),1);QVERIFY(tree->topLevelItem(0)->child(0)->text(0).contains("codex/repo/one"));
         auto *use=panel.findChild<QPushButton *>("useWorktreeFolder");tree->setCurrentItem(tree->topLevelItem(2));QVERIFY(!use->isEnabled());tree->setCurrentItem(tree->topLevelItem(3));QVERIFY(!use->isEnabled());
@@ -73,14 +102,14 @@ private slots:
         const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(panel.grab().save(preview+"/offline.png"));}
     }
     void lateResponseCannotReplaceAnotherMachineOrFolder(){
-        HgsClient client(script());WorktreePanel panel(&client);auto state=fleet();panel.show();panel.setContext({},"/repo",state);panel.setContext("mac","/repo",state);
+        HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client);auto state=fleet();panel.show();panel.setContext({},"/repo",state);panel.setContext("mac","/repo",state);
         client.worktreesReady(1,{},"/repo",QJsonObject{{"state","not_repo"},{"path","/wrong"},{"worktrees",QJsonArray{}}});
         auto *tree=panel.findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);QCOMPARE(tree->topLevelItem(0)->childCount(),1);QVERIFY(tree->topLevelItem(0)->child(0)->text(0).contains("kimi/repo/two"));
         panel.setContext("mac","/plain",state);client.worktreesReady(2,"mac","/repo",catalog());QVERIFY(!panel.findChild<QLabel *>("worktreeStatus")->text().contains("/wrong"));
     }
     void pickerPreservesProjectMachineAccountAndCustomFolderAcrossPolls(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
-        NewSessionDialog dialog(script(),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
+        NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
         auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
         auto *choose=dialog.findChild<QAction *>("chooseLaunchWorktree");QVERIFY(choose);QTRY_VERIFY(choose->isVisible());
         QTimer::singleShot(0,&dialog,[&]{auto *picker=dialog.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTimer::singleShot(3000,picker,&QDialog::reject);auto *tree=picker->findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);tree->setCurrentItem(tree->topLevelItem(1));auto *use=picker->findChild<QPushButton *>("useWorktreeFolder");QTRY_VERIFY(use->isEnabled());use->click();});choose->trigger();
@@ -91,7 +120,7 @@ private slots:
     }
     void accountPresetWaitsForCatalogAndNeverFallsBackSilently(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");org.addFolder(project,"mac","/repo");
-        NewSessionDialog dialog(script(),state,"mac","codex",project);dialog.setGroups(org,project);dialog.selectAccount("work");dialog.show();
+        NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);dialog.selectAccount("work");dialog.show();
         auto *account=dialog.findChild<QComboBox *>("launchAccount");auto *start=dialog.findChild<QPushButton *>("primary");
         QVERIFY(!start->isEnabled());QTRY_COMPARE(account->currentData().toString(),QString("work"));QTRY_VERIFY(start->isEnabled());
         dialog.setFleet(state);QCOMPARE(account->currentData().toString(),QString("work"));
@@ -105,7 +134,7 @@ private slots:
     }
     void newWorktreeCreatesExplicitlyAndPreservesLaunchContext(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
-        NewSessionDialog dialog(script(),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
+        NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
         auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
         auto *create=dialog.findChild<QAction *>("newLaunchWorktree");QVERIFY(create);QTRY_VERIFY(create->isVisible()&&create->isEnabled());
         QTimer::singleShot(0,&dialog,[&]{auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);form->reject();});create->trigger();
@@ -127,7 +156,7 @@ private slots:
     void failedCreationRetainsFormAndOriginalFolder(){
         QFile fail(dir.filePath("fail-create"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.close();
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");org.addFolder(project,"arch","/repo");
-        NewSessionDialog dialog(script(),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
+        NewSessionDialog dialog(FakeCli::program(script()),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
         auto *create=dialog.findChild<QAction *>("newLaunchWorktree");QVERIFY(create);QTRY_VERIFY(create->isVisible()&&create->isEnabled());
         QTimer::singleShot(0,&dialog,[&]{
             auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);QTimer::singleShot(3000,form,&QDialog::reject);
@@ -140,7 +169,7 @@ private slots:
     void worktreeMembershipRequiresTheSelectedProjectAndMachine(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work"),other=org.createGroup("Other");
         org.addFolder(project,"arch","/repo/subfolder");org.addFolder(other,"arch","/unrelated");org.addFolder(project,"mac","/unrelated");
-        NewSessionDialog dialog(script(),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
+        NewSessionDialog dialog(FakeCli::program(script()),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
         QTRY_VERIFY(dialog.findChild<QAction *>("chooseLaunchWorktree")->isVisible());
         dialog.selectPath("/linked/subfolder");auto *hint=dialog.findChild<QLabel *>("muted");
         QTRY_VERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());
@@ -156,7 +185,7 @@ private slots:
         dialog.selectPath("/linked");QTRY_VERIFY(hint->property("outsideProject").toBool());
     }
     void cleanupReminderReviewsOnceAndNeverRemoves(){
-        HgsClient client(script());WorktreePanel panel(&client,false,nullptr,WorktreePanel::Layout::Compact);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(620,260);panel.show();
+        HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client,false,nullptr,WorktreePanel::Layout::Compact);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(620,260);panel.show();
         auto *cleanup=panel.findChild<QPushButton *>("cleanUpWorktrees");QTRY_COMPARE(cleanup->text(),QString("Clean up (2)"));QVERIFY(cleanup->isEnabled());
         panel.setContext({},"/linked",state);panel.setContext({},"/repo",state);QTest::qWait(200);
         QCOMPARE(calls().count("worktrees review --path /repo/.git --json"),1);QVERIFY(!calls().contains("worktrees remove"));
@@ -168,7 +197,7 @@ private slots:
     void cleanupDialogConfirmsAndRemovesSelectedRowsOneAtATime(){
         QFile fail(dir.filePath("fail-remove"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.write("/missing\n");fail.close();
         QSettings().setValue("workspace/worktreeCleanupDeleteBranches",true);
-        HgsClient client(script());WorktreePanel panel(&client,false,nullptr,WorktreePanel::Layout::Compact);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(620,260);panel.show();
+        HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client,false,nullptr,WorktreePanel::Layout::Compact);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(620,260);panel.show();
         auto *cleanup=panel.findChild<QPushButton *>("cleanUpWorktrees");QTRY_VERIFY(cleanup->isEnabled());bool checked=false;
         QTimer::singleShot(0,&panel,[&]{
             auto *dialog=panel.findChild<QDialog *>("worktreeCleanupDialog");QVERIFY(dialog);QTimer::singleShot(8000,dialog,[dialog]{dialog->done(0);});
@@ -196,7 +225,7 @@ private slots:
         cleanup->click();QVERIFY(checked);QTRY_VERIFY(calls().contains("worktrees --path /repo --json --refresh"));
     }
     void worktreeMenuReviewsOnlyTheChosenCheckout(){
-        HgsClient client(script());WorktreePanel panel(&client);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(580,400);panel.show();
+        HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client);auto state=fleet();panel.setContext({},"/repo",state);panel.resize(580,400);panel.show();
         auto *tree=panel.findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);QTRY_VERIFY(panel.findChild<QPushButton *>("cleanUpWorktrees")->isEnabled());
         const auto menuFor=[&](int row){tree->customContextMenuRequested(tree->visualItemRect(tree->topLevelItem(row)).center());return QPointer<QMenu>(panel.findChild<QMenu *>("worktreeMenu"));};
         auto menu=menuFor(0);QVERIFY(menu);QVERIFY(!menu->findChild<QAction *>("removeWorktreeAction"));QVERIFY(menu->findChild<QAction *>("copyWorktreePath"));delete menu.data();
@@ -212,7 +241,7 @@ private slots:
     }
     void olderMachineExplainsUpdateForCleanup(){
         QFile old(dir.filePath("old-hgs"));QVERIFY(old.open(QIODevice::WriteOnly));old.close();
-        HgsClient client(script());QSignalSpy failed(&client,&HgsClient::worktreeReviewFailed);client.reviewWorktrees("mac","/repo/.git");QTRY_COMPARE(failed.size(),1);
+        HgsClient client(FakeCli::program(script()));QSignalSpy failed(&client,&HgsClient::worktreeReviewFailed);client.reviewWorktrees("mac","/repo/.git");QTRY_COMPARE(failed.size(),1);
         QCOMPARE(failed.first()[3].toString(),QString("Update Zerus on mac to clean up worktrees."));QVERIFY(calls().contains("@mac worktrees review"));
     }
 };

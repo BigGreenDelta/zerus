@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QTemporaryDir>
+#include "FakeCli.h"
 #include "MobileDeliverySettings.h"
 
 class TestMobileDeliverySettings : public QObject {
@@ -39,11 +40,11 @@ elif args[2:4] == ['set', 'mobile_delivery'] and args[5:] == ['--json']:
 else:
     sys.exit(2)
 )PY");
-        script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+        script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
     }
     void loadsTheSharedValueAndOffersSixChoices() {
         touch("value", "away_15");
-        MobileDeliverySettings settings(m_hgs);
+        MobileDeliverySettings settings(FakeCli::program(m_hgs));
         auto *choice = settings.findChild<QComboBox *>("mobileDelivery"); QVERIFY(choice);
         QVERIFY(!choice->isEnabled()); QVERIFY(calls().isEmpty()); // nothing runs until Settings opens
         const QStringList values{"immediate", "away", "away_5", "away_10", "away_15", "away_30"};
@@ -57,7 +58,7 @@ else:
         QCOMPARE(calls(), QStringList{"swarm preference get --json"});
     }
     void choosingSavesThroughHgsAndKeepsTheConfirmedValue() {
-        MobileDeliverySettings settings(m_hgs); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
+        MobileDeliverySettings settings(FakeCli::program(m_hgs)); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
         settings.refresh(); QTRY_VERIFY(choice->isEnabled());
         choice->setCurrentIndex(3); choice->activated(3);
         QVERIFY(!choice->isEnabled());
@@ -67,7 +68,7 @@ else:
         QVERIFY(settings.findChild<QLabel *>("mobileDeliveryStatus")->text().startsWith("Saved"));
     }
     void failedSaveShowsTheErrorAndRestoresTheStoredValue() {
-        MobileDeliverySettings settings(m_hgs); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
+        MobileDeliverySettings settings(FakeCli::program(m_hgs)); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
         settings.refresh(); QTRY_VERIFY(choice->isEnabled());
         touch("fail-set");
         choice->setCurrentIndex(0); choice->activated(0);
@@ -79,12 +80,12 @@ else:
     }
     void olderCliKeepsTheChoiceDisabled() {
         touch("old");
-        MobileDeliverySettings settings(m_hgs); settings.refresh();
+        MobileDeliverySettings settings(FakeCli::program(m_hgs)); settings.refresh();
         QTRY_VERIFY(settings.findChild<QLabel *>("mobileDeliveryStatus")->text().contains("usage: hgs swarm get"));
         QVERIFY(!settings.findChild<QComboBox *>("mobileDelivery")->isEnabled());
     }
     void swarmSnapshotUpdatesTheValueAndNamesOutdatedMembers() {
-        MobileDeliverySettings settings(m_hgs);
+        MobileDeliverySettings settings(FakeCli::program(m_hgs));
         auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
         auto *outdated = settings.findChild<QLabel *>("mobileDeliveryOutdated");
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_30"}}},
@@ -101,7 +102,7 @@ else:
     }
     void anOutdatedSyncServiceIsNamedOnlyWhileItPersists() {
         qint64 now = 1000;
-        MobileDeliverySettings settings(m_hgs, nullptr, [&now] { return now; });
+        MobileDeliverySettings settings(FakeCli::program(m_hgs), nullptr, [&now] { return now; });
         auto *worker = settings.findChild<QLabel *>("mobileDeliveryWorker"); QVERIFY(worker);
         const auto snapshot = [](bool running, bool current) {
             return QJsonObject{{"preferences", QJsonObject{{"mobile_delivery", "away"}}}, {"peers", QJsonObject{}},
@@ -119,7 +120,7 @@ else:
         settings.setSwarmSnapshot(snapshot(true, false)); QVERIFY(worker->isHidden()); // a new episode starts its own delay
     }
     void lateSnapshotDoesNotRevertAConfirmedSave() {
-        MobileDeliverySettings settings(m_hgs); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
+        MobileDeliverySettings settings(FakeCli::program(m_hgs)); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
         settings.refresh(); QTRY_VERIFY(choice->isEnabled());
         choice->setCurrentIndex(3); choice->activated(3); QTRY_VERIFY(choice->isEnabled());
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}}, {"peers", QJsonObject{}}});
@@ -129,7 +130,7 @@ else:
         QCOMPARE(choice->currentData().toString(), QString("away_30")); // an agreeing snapshot ends the guard
     }
     void snapshotsWithoutPeersKeepTheOutdatedList() {
-        MobileDeliverySettings settings(m_hgs);
+        MobileDeliverySettings settings(FakeCli::program(m_hgs));
         auto *outdated = settings.findChild<QLabel *>("mobileDeliveryOutdated");
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}},
             {"peers", QJsonObject{{"mac", QJsonObject{{"catalog_outdated", true}}}}}});
@@ -139,7 +140,7 @@ else:
     }
     void validSnapshotAfterFailedLoadClearsTheError() {
         touch("old");
-        MobileDeliverySettings settings(m_hgs); settings.refresh();
+        MobileDeliverySettings settings(FakeCli::program(m_hgs)); settings.refresh();
         auto *status = settings.findChild<QLabel *>("mobileDeliveryStatus");
         QTRY_VERIFY(status->text().contains("Could not read"));
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_5"}}}, {"peers", QJsonObject{}}});

@@ -50,6 +50,16 @@ private slots:
         }
         QVERIFY(found); MachineAppearance::resetColor("arch"); QCOMPARE(MachineAppearance::color("arch"),before);
     }
+    void controlOnlyComputerIsNoFilterChoice() {
+        QWidget page; auto *layout=new QVBoxLayout(&page); auto *filter=new MachineFilter;
+        layout->addWidget(filter->button()); layout->addWidget(filter); layout->addStretch();
+        FleetState fleet; BoxState local; local.host="windows-pc"; local.ok=true; local.localSessions=false; fleet.setLocal(local,0);
+        BoxState mac; mac.host="mac"; mac.ok=true; fleet.setPeer(mac,0);
+        filter->setFleet(fleet); page.resize(290,300); page.show();
+        auto *menu=filter->button()->menu(); menu->popup(page.mapToGlobal(QPoint(0,30))); QTRY_VERIFY(menu->isVisible());
+        const auto choices=menu->findChildren<QCheckBox *>("machineFilterChoice"); QCOMPARE(choices.size(),1);
+        QCOMPARE(choices[0]->property("host").toString(),QString("mac")); menu->close();
+    }
 private:
     QTemporaryDir dir;
 };

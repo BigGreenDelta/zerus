@@ -1524,8 +1524,18 @@ void SessionsWindow::applySessionStrip()
     const int side = SessionStrip::cardSide(m_sessions->property("compact").toBool());
     setWorkspaceStyle(m_stripSearch, QString("QPushButton { min-height:%1px; max-height:%1px; min-width:%2px; max-width:%2px; }")
         .arg(qMax(0, m_search->sizeHint().height() - 2)).arg(side - 2));
-    m_search->setVisible(!strip); m_stripSearch->setVisible(strip);
-    m_stripSpacer->setFixedHeight(m_stripReserve); m_stripSpacer->setVisible(strip && m_stripReserve > 0);
+    // Rows hide before others show: showing a widget lays the panel out at once,
+    // and a row still to go would hold the list a row lower until the next layout.
+    const bool folder = !strip && !m_folderFilterPath.isEmpty(), spacer = strip && m_stripReserve > 0;
+    (strip ? static_cast<QWidget *>(m_search) : m_stripSearch)->hide();
+    if (strip) m_machineFilter->setConcealed(true);
+    if (!folder) m_folderFilterClear->hide();
+    if (!spacer) m_stripSpacer->hide();
+    m_stripSpacer->setFixedHeight(m_stripReserve);
+    (strip ? static_cast<QWidget *>(m_stripSearch) : m_search)->show();
+    if (spacer) m_stripSpacer->show();
+    if (!strip) m_machineFilter->setConcealed(false);
+    if (folder) m_folderFilterClear->show();
     // Narrow filters keep the active one and the most urgent beside it: sessions
     // that need attention, otherwise active ones, otherwise all of them.
     QString urgent;
@@ -1549,8 +1559,6 @@ void SessionsWindow::applySessionStrip()
         if (m_filterRow->itemAt(m_filterRow->indexOf(button))->alignment() != align) m_filterRow->setAlignment(button, align);
     }
     m_machineFilter->button()->setVisible(!filters);
-    m_machineFilter->setVisible(!strip && !m_hostFilters.isEmpty());
-    m_folderFilterClear->setVisible(!strip && !m_folderFilterPath.isEmpty());
     m_listStack->setCurrentIndex(!strip && m_searchResults->active() ? 1 : 0);
     m_count->setText(strip ? m_countShort : m_countFull);
     m_count->setAlignment(strip ? Qt::AlignCenter : Qt::AlignLeft | Qt::AlignVCenter);
@@ -1736,7 +1744,7 @@ void SessionsWindow::showWorkspaceSettings()
 
 void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
-    m_settingsPage->setPeers(fleet.peerNames());
+    m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
     m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
@@ -1882,7 +1890,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
             showNotice(tr("Resuming sessions on %1…").arg(machine)); renderDetails();
         });
     };
-    addMachine({}, m_fleet.local(), m_fleet.local().ok && m_connectionError.isEmpty());
+    if (m_fleet.local().localSessions) addMachine({}, m_fleet.local(), m_fleet.local().ok && m_connectionError.isEmpty());
     for (const auto &host : m_fleet.peerNames())
         if (const auto *box = m_fleet.peer(host))
             addMachine(host, *box, box->ok && QDateTime::currentMSecsSinceEpoch()
@@ -2366,7 +2374,8 @@ void SessionsWindow::rebuild()
     const int starting = std::count_if(rows.cbegin(), rows.cend(), [](const Row &row) { return !row.launch.isEmpty(); });
     if (starting) m_count->setText(visible.isEmpty() ? tr("%1 starting").arg(starting) : m_count->text() + tr(", %1 starting").arg(starting));
     m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
-    m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty());
+    // The strip keeps this row hidden (applySessionStrip()).
+    m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
     m_folderFilterClear->setText(tr("Folder: %1   ×").arg(m_folderFilterPath.section('/',-1)));m_folderFilterClear->setToolTip(m_folderFilterPath+tr("\nClear folder filter"));
     m_count->setToolTip(m_countFull);
     m_count->setVisible(!m_searchResults->active());

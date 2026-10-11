@@ -173,13 +173,15 @@ void NewSessionDialog::setFleet(const FleetState &fleet)
 void NewSessionDialog::loadMachines()
 {
     const auto previous=m_machine->currentIndex()<0?m_initialHost:host();
-    QStringList machines{m_fleet.local().host};machines.append(m_fleet.peerNames());
+    // A control-only computer (hgs.exe on Windows) starts sessions on remote machines only.
+    const bool local=m_fleet.local().localSessions;
+    QStringList machines;if(local)machines<<m_fleet.local().host;machines.append(m_fleet.peerNames());
     if(!previous.isEmpty()&&!machines.contains(previous))machines.append(previous);
     if(const auto *project=m_projects.group(m_project->currentData().toString()))
-        for(const auto &folder:project->folders)if(!machines.contains(folder.machine) && (folder.machineId.isEmpty() || folder.machine==m_fleet.local().host || m_fleet.peerNames().contains(folder.machine)))machines.append(folder.machine);
+        for(const auto &folder:project->folders)if(!machines.contains(folder.machine) && (folder.machine!=m_fleet.local().host || local) && (folder.machineId.isEmpty() || folder.machine==m_fleet.local().host || m_fleet.peerNames().contains(folder.machine)))machines.append(folder.machine);
     QList<QPair<QString,QString>> items;
     for(const auto &machine:machines){
-        if(machine.isEmpty())continue;
+        if(machine.isEmpty()||(!local&&machine==m_fleet.local().host))continue;
         const auto target=machine==m_fleet.local().host?QString():machine;
         const auto *box=target.isEmpty()?&m_fleet.local():m_fleet.peer(target);
         items.append({machine+(box&&box->ok?QString():tr(" (offline)")),target});
@@ -285,8 +287,9 @@ void NewSessionDialog::updateForm()
     const QString nameProblem=SessionTag::problem(m_name->text());const bool validName=nameProblem.isEmpty();
     m_nameError->setText(nameProblem);m_nameError->setVisible(!validName);
     const bool busy=m_validation||m_creation;
+    const bool noMachine=m_machine->count()==0;
     const bool automatic=m_autoPreferred&&automaticWorktreeAvailable();
-    m_start->setEnabled(m_account->currentIndex()>=0&&!m_accountRequest&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
+    m_start->setEnabled(!noMachine&&m_account->currentIndex()>=0&&!m_accountRequest&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
         &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
     for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_agent,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
@@ -295,7 +298,7 @@ void NewSessionDialog::updateForm()
     m_worktreeTarget->setText(automatic?automaticWorktreePath():QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
     m_worktreeTarget->ensurePolished();m_worktreeTarget->setFixedHeight(2*m_worktreeTarget->fontMetrics().lineSpacing());
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
-    m_browse->setEnabled(!busy&&machine&&machine->ok);
+    m_browse->setEnabled(!busy&&!noMachine&&machine&&machine->ok);
     m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
     m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
     m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled());
@@ -310,6 +313,8 @@ void NewSessionDialog::updateForm()
     const auto loadingAccount=tr("Loading this session's account…"),missingAccount=tr("This session's account is unavailable. Choose another account.");
     if(m_accountPreset&&m_account->currentIndex()<0)m_error->setText(m_accountRequest?loadingAccount:missingAccount);
     else if(m_error->text()==loadingAccount||m_error->text()==missingAccount)m_error->clear();
+    const auto remoteOnly=tr("Add a remote machine in Machines to start sessions from this computer.");
+    if(noMachine)m_error->setText(remoteOnly);else if(m_error->text()==remoteOnly)m_error->clear();
 }
 void NewSessionDialog::start()
 {
@@ -350,6 +355,7 @@ void NewSessionDialog::launch(const QString &target)
 }
 void NewSessionDialog::loadAccounts()
 {
+    if(m_machine->count()==0){m_accounts={};updateAccounts();return;}
     if(m_accountHost==host()&&(m_accountRequest||!m_accounts.isEmpty()))return;
     if(m_accountHost!=host()){m_removedAccounts={};m_accountPreset=false;}
     m_accountHost=host();m_accounts={};m_account->setToolTip({});updateAccounts();m_accountRequest=m_client.requestAccounts(host(),{"ls"});

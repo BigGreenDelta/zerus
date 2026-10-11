@@ -18,6 +18,10 @@ QtTrayIcon::QtTrayIcon()
             showMacTrayMenu(m_menu);
 #endif
     });
+    QObject::connect(&m_tray, &QSystemTrayIcon::messageClicked, &m_tray, [this]() {
+        if (const auto clicked = m_messageClicked)
+            clicked();
+    });
 }
 
 void QtTrayIcon::setIcon(const QIcon &icon)
@@ -43,6 +47,15 @@ void QtTrayIcon::setContextMenu(QMenu *menu)
 void QtTrayIcon::showMessage(const QString &title, const QString &body,
                              QSystemTrayIcon::MessageIcon icon, int msecs)
 {
+    m_messageClicked = {};
+    m_tray.showMessage(title, body, icon, msecs);
+}
+
+void QtTrayIcon::showClickableMessage(const QString &title, const QString &body,
+                                      QSystemTrayIcon::MessageIcon icon, int msecs,
+                                      std::function<void()> clicked)
+{
+    m_messageClicked = std::move(clicked);
     m_tray.showMessage(title, body, icon, msecs);
 }
 

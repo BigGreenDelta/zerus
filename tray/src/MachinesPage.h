@@ -2,7 +2,8 @@
 #include <QWidget>
 #include <QJsonObject>
 #include "FleetState.h"
-class QComboBox; class IdentityBadge; class HgsClient; class QListWidget; class QLabel; class QLineEdit; class QSpinBox; class QCheckBox; class QPushButton; class QPlainTextEdit;
+class QComboBox; class IdentityBadge; class HgsClient; class QListWidget; class QLabel; class QLineEdit; class QSpinBox; class QCheckBox;
+class QFormLayout; class QPushButton; class QPlainTextEdit;
 class MachinesPage : public QWidget {
     Q_OBJECT
 public:
@@ -44,6 +45,7 @@ private:
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
     QSpinBox *m_port;
     QCheckBox *m_enabled;
+    QFormLayout *m_form;
     QPushButton *m_save, *m_check, *m_ssh, *m_install, *m_remove, *m_reset, *m_sessions, *m_accounts, *m_add, *m_browse, *m_refresh;
     QPushButton *m_discardDraft;
     QPushButton *m_color, *m_colorReset;

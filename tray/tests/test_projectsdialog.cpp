@@ -63,7 +63,13 @@ void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist()
     QTemporaryDir directory; QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
     QCoreApplication::setOrganizationName("hgs-folder-transfer-test"); QCoreApplication::setApplicationName("projects");
+#ifdef Q_OS_WIN
+    // Project folders are POSIX paths on agent machines; a temporary folder of this
+    // Windows computer cannot be one, so the files check below is Unix-only.
+    const QString path = "/workspace/plain folder";
+#else
     const auto path = directory.path() + "/plain folder"; QVERIFY(QDir().mkpath(path));
+#endif
     SessionOrganization projects; const auto source = projects.createGroup("Source"), target = projects.createGroup("Work & docs");
     const auto original = projects.addFolder(source, machine, path, "Transfer this");
     const auto keep = projects.addFolder(source, machine, "/workspace/keep", "Keep this");
@@ -84,7 +90,10 @@ void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist()
     const auto transferred = saved.group(target)->folders.first();
     QCOMPARE(transferred.machine, machine); QCOMPARE(transferred.path, path); QCOMPARE(transferred.name, QString("Transfer this"));
     if (copy) QVERIFY(transferred.id != original); else QCOMPARE(transferred.id, original);
-    QCOMPARE(saved.groupFor(machine + "\nagent/session"), source); QVERIFY(QDir(path).exists());
+    QCOMPARE(saved.groupFor(machine + "\nagent/session"), source);
+#ifndef Q_OS_WIN
+    QVERIFY(QDir(path).exists());
+#endif
     QCOMPARE(table->rowCount(), 1); QCOMPARE(table->item(0, 0)->data(Qt::UserRole).toString(), transferred.id);
     delete menu;
 }

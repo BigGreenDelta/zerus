@@ -71,6 +71,10 @@ struct BoxState {
     QList<SessionInfo> sessions;
     QStringList peers;
     bool peersKnown = false;
+    // False for a control-only computer (hgs.exe on Windows): it manages remote
+    // machines but runs no sessions, accounts or recovery of its own. hgs omits
+    // "local_sessions" unless it is false.
+    bool localSessions = true;
 };
 
 struct ProjectInfo {

@@ -171,7 +171,8 @@ bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool onli
 void SessionSearch::request()
 {
     if (m_query.size() < 2) return;
-    QStringList hosts{QString()}; hosts.append(m_fleet.peerNames());
+    // A control-only computer (hgs.exe on Windows) has no conversations to search.
+    QStringList hosts; if (m_fleet.local().localSessions) hosts << QString(); hosts.append(m_fleet.peerNames());
     for (const auto &host : hosts) {
         if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) continue;
         if (m_pending.contains(host) || m_replies.contains(host) || m_errors.contains(host)) continue;
@@ -246,7 +247,8 @@ void SessionSearch::rebuild()
             if (shown) ++sessions;
         }
     };
-    append({}, m_fleet.local()); for (const auto &host : m_fleet.peerNames()) if (const auto *box = m_fleet.peer(host)) append(host, *box);
+    if (m_fleet.local().localSessions) append({}, m_fleet.local());
+    for (const auto &host : m_fleet.peerNames()) if (const auto *box = m_fleet.peer(host)) append(host, *box);
     m_list->verticalScrollBar()->setValue(scroll);
     int pending = 0; QStringList errors;
     for (const auto &host : visibleHosts) {

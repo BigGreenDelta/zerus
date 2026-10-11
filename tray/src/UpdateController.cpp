@@ -81,6 +81,13 @@ bool UpdateController::plainStableIsNewer(const QString &installed,const QString
     qsizetype installedEnd=0,releasedEnd=0;auto local=QVersionNumber::fromString(installed,&installedEnd);auto available=QVersionNumber::fromString(released,&releasedEnd);
     return installedEnd==installed.size()&&releasedEnd==released.size()&&local.segmentCount()==3&&available.segmentCount()==3&&QVersionNumber::compare(available,local)>0;
 }
+bool UpdateController::portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed){
+    // A nightly is <product>.r<count>.g<commit>.n<run>; the zip reports only its
+    // product version, so only a newer product version is known to be newer.
+    if(!feed.valid)return false;
+    auto nightly=QRegularExpression("\\A([0-9]+\\.[0-9]+\\.[0-9]+)\\.r[0-9]+\\.g[a-f0-9]{7}\\.n[0-9]+\\z").match(feed.version);
+    return nightly.hasMatch()&&plainStableIsNewer(appVersion,nightly.captured(1));
+}
 bool UpdateController::isUpdateToken(const QString &token){return matches(token,"\\Azerus-update:v1:(?:stable|nightly):[1-9][0-9]{0,15}\\z");}
 bool UpdateController::claimNotification(const QString &token){
     if(!isUpdateToken(token))return false;QSettings settings;QString key="updates/notified/"+token;
@@ -88,6 +95,13 @@ bool UpdateController::claimNotification(const QString &token){
 }
 QString UpdateController::comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared){
     if(!feed.valid)return tr("No verified release catalog yet.");
+    // Windows Phase 1: a portable zip without an installer or self-update, and
+    // only nightly releases carry it.
+    if(installation.kind=="portable"){
+        if(matches(feed.version,"\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))return tr("Stable releases do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds.");
+        return portableUpdateAvailable(appVersion,feed)?tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version)
+                                                       :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
+    }
 #ifdef Q_OS_MACOS
     Q_UNUSED(installation);Q_UNUSED(appVersion);Q_UNUSED(comparison);Q_UNUSED(compared);
     return tr("No macOS installer is published. See release or source build instructions.");
@@ -139,7 +153,24 @@ void UpdateController::run(const QString &program,const QStringList &arguments,s
     process->setProgram(program);process->setArguments(arguments);process->start();deadline->start(5000);
 }
 void UpdateController::sourceInstallation(const QString &executable){
-    m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();for(int depth=0;depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){m_installation.kind="source";break;}if(!directory.cdUp())break;}emit changed();compare();
+    m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
+#ifdef Q_OS_WIN
+    // The portable zip has build-info.json next to hgs-tray.exe: never a source
+    // build, even unpacked inside a folder kept in Git (a profile, for instance).
+    const bool bundle=QFileInfo(directory.filePath("build-info.json")).isFile();
+#else
+    const bool bundle=false;
+#endif
+    for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){m_installation.kind="source";break;}if(!directory.cdUp())break;}
+#ifdef Q_OS_WIN
+    // Windows builds ship as a portable zip; there is no package manager to ask.
+    // Only nightly releases carry the zip, so that channel is the default here.
+    if(m_installation.kind=="unknown"){
+        m_installation.kind="portable";
+        if(!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel","nightly");m_feed={};m_notice.clear();m_comparison.clear();m_message="Updates have not been checked for this channel.";m_lastSuccess=0;m_cached=false;m_available=false;restoreCatalog();}
+    }
+#endif
+    emit changed();compare();
 }
 void UpdateController::detectInstallation(const QString &executable){
     QString canonical=QFileInfo(executable).canonicalFilePath();if(canonical.isEmpty()){m_installation.kind="unknown";emit changed();compare();return;}
@@ -177,7 +208,9 @@ void UpdateController::completeComparison(bool newer,const QString &message){
 void UpdateController::compare(){
     if(!m_feed.valid||m_installation.kind=="checking")return;
     if(m_installation.kind!="package"){
-        completeComparison(channel()=="stable"&&plainStableIsNewer(QCoreApplication::applicationVersion(),m_feed.version),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
+        const auto version=QCoreApplication::applicationVersion();
+        const bool newer=m_installation.kind=="portable"?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
+        completeComparison(newer,comparisonMessage(m_installation,m_feed,version,0,false));return;
     }
     if(m_installation.package=="zerus-git"||m_installation.version.isEmpty()||!m_feed.packages.contains(m_installation.package)){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}
     QString vercmp=QStandardPaths::findExecutable("vercmp");if(vercmp.isEmpty()){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}

@@ -371,7 +371,9 @@ void DashboardPage::render()
     struct Machine { QString key, alias, host; BoxState box; bool fresh; };
     QList<Machine> machines;
     const auto local = m_fleet.local();
-    machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
+    // A control-only computer runs no agents; the overview covers remote machines.
+    if (local.localSessions)
+        machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
     for (const auto &host : m_fleet.peerNames()) {
         const auto *box = m_fleet.peer(host); if (!box) continue;
         machines.append({host, host, host, *box, box->ok && now - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs});

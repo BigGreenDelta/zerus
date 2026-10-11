@@ -4,6 +4,7 @@
 #include <QTemporaryDir>
 #include <QTextStream>
 #include "AppConfig.h"
+#include "SingleInstance.h"
 
 // --open-mode / open-mode= -- см. AppConfig.h. Сама логика "что означает значение" живёт
 // в бэкендах (auto/tab/window -- KonsoleBackend, terminal -- MacBackend,
@@ -36,6 +37,11 @@ private slots:
     void commandLineOpenModeBeatsConfigFile();
     void configFileOpenModeAppliesWhenCommandLineSilent();
     void configFileAcceptsClipboardMode();
+    void windowsModesKeepSharedValuesAndAddConsole();
+    void homeVariableLocatesTrayConfig();
+    void bundledHgsIsPreferredOnWindows();
+    void singleInstanceNameIsPerUserOnWindows();
+    void restartKeepsSettingsButNotOneShotOptions();
 
     void writeCreatesFileWithHeaderWhenAbsent();
     void writePreservesOtherKeysCommentsAndOrder();
@@ -136,11 +142,13 @@ void TestAppConfig::openModeListIsPlatformDependent()
     QVERIFY(!AppConfig::isValidOpenMode(QStringLiteral("tabby"), AppConfig::Platform::Linux));
     QVERIFY(!AppConfig::isValidOpenMode(QStringLiteral("sideways"), AppConfig::Platform::Linux));
     QVERIFY(!AppConfig::isValidOpenMode(QStringLiteral("sideways"), AppConfig::Platform::Mac));
-    // И список текущей платформы -- один из этих двух, а не что-то третье.
+    // И список текущей платформы -- один из трёх, а не что-то четвёртое.
     QVERIFY(AppConfig::openModes(AppConfig::currentPlatform())
             == AppConfig::openModes(AppConfig::Platform::Linux)
             || AppConfig::openModes(AppConfig::currentPlatform())
-                   == AppConfig::openModes(AppConfig::Platform::Mac));
+                   == AppConfig::openModes(AppConfig::Platform::Mac)
+            || AppConfig::openModes(AppConfig::currentPlatform())
+                   == AppConfig::openModes(AppConfig::Platform::Windows));
 }
 
 void TestAppConfig::clipboardIsTheOnlyModeOnBothPlatforms()
@@ -160,7 +168,7 @@ void TestAppConfig::clipboardIsTheOnlyModeOnBothPlatforms()
 
 void TestAppConfig::defaultOpenModeIsFirstOfItsList()
 {
-    for (AppConfig::Platform p : {AppConfig::Platform::Linux, AppConfig::Platform::Mac}) {
+    for (AppConfig::Platform p : {AppConfig::Platform::Linux, AppConfig::Platform::Mac, AppConfig::Platform::Windows}) {
         QCOMPARE(AppConfig::defaultOpenMode(p), AppConfig::openModes(p).constFirst());
         QVERIFY(AppConfig::isValidOpenMode(AppConfig::defaultOpenMode(p), p));
     }
@@ -476,6 +484,72 @@ void TestAppConfig::writeRejectsBadKeyAndLeavesFileAlone()
     QVERIFY2(!err.isEmpty(), "отказ обязан объяснить причину");
     // Файл не создан: неудачная запись не оставляет за собой полуфабрикат.
     QVERIFY(!QFile::exists(confPath));
+}
+
+void TestAppConfig::windowsModesKeepSharedValuesAndAddConsole()
+{
+    // Windows reads the Linux names (Windows Terminal there), so a tray.conf shared
+    // through dotfiles keeps working, and adds a console window.
+    QCOMPARE(AppConfig::openModes(AppConfig::Platform::Windows),
+             (QStringList{"auto", "tab", "window", "console", "clipboard"}));
+    QCOMPARE(AppConfig::defaultOpenMode(AppConfig::Platform::Windows), QStringLiteral("auto"));
+    for (const QString &mode : AppConfig::openModes(AppConfig::Platform::Linux))
+        QVERIFY(AppConfig::isValidOpenMode(mode, AppConfig::Platform::Windows));
+    QVERIFY(!AppConfig::isValidOpenMode("console", AppConfig::Platform::Linux));
+    QVERIFY(!AppConfig::isValidOpenMode("terminal", AppConfig::Platform::Windows));
+    if (AppConfig::currentPlatform() == AppConfig::Platform::Windows)
+        return;
+    // Elsewhere console is a Windows value: rejected with that explanation.
+    AppConfig cfg; QString err;
+    QVERIFY(!AppConfig::load({"hgs-tray", "--open-mode", "console"}, &cfg, &err));
+    QVERIFY2(err.contains("is a Windows mode"), qPrintable(err));
+}
+
+void TestAppConfig::homeVariableLocatesTrayConfig()
+{
+    AppConfig::setConfigPathOverrideForTests(QString());
+    const QByteArray saved = qgetenv("HOME");
+    qputenv("HOME", m_dir.path().toUtf8());
+    QCOMPARE(AppConfig::configPath(), m_dir.path() + "/.config/hgs/tray.conf");
+    qunsetenv("HOME");
+    QCOMPARE(AppConfig::configPath(), QDir::homePath() + "/.config/hgs/tray.conf");
+    qputenv("HOME", saved);
+}
+
+void TestAppConfig::bundledHgsIsPreferredOnWindows()
+{
+    QTemporaryDir app; QVERIFY(app.isValid());
+    QFile bundled(app.filePath("hgs.exe")); QVERIFY(bundled.open(QIODevice::WriteOnly)); bundled.close();
+    QCOMPARE(AppConfig::resolveHgsPath({}, app.path()), app.filePath("hgs.exe"));
+    // A configured path wins and becomes absolute; a bare name is looked up in PATH.
+    QCOMPARE(AppConfig::resolveHgsPath(m_dir.filePath("custom/hgs"), app.path()), m_dir.filePath("custom/hgs"));
+    QCOMPARE(AppConfig::resolveHgsPath("no-such-hgs-for-zerus", app.path()), QString("no-such-hgs-for-zerus"));
+    QTemporaryDir empty; QVERIFY(empty.isValid());
+    const QString fallback = AppConfig::resolveHgsPath({}, empty.path());
+    QVERIFY(fallback == "hgs" || QFileInfo(fallback).isAbsolute());
+}
+
+void TestAppConfig::singleInstanceNameIsPerUserOnWindows()
+{
+    QCOMPARE(SingleInstance::key(), QString("hgs-tray"));
+    const QString first = SingleInstance::key("C:/Users/alice"), second = SingleInstance::key("C:/Users/bob");
+    QVERIFY(first.startsWith("hgs-tray-")); QCOMPARE(first.size(), 9 + 16);
+    QVERIFY(first != second);
+    // Windows paths compare without case.
+    QCOMPARE(SingleInstance::key("c:/users/ALICE"), first);
+}
+
+void TestAppConfig::restartKeepsSettingsButNotOneShotOptions()
+{
+    // Windows restarts a crashed tray with these (RegisterApplicationRestart).
+    const QStringList args{"C:/Zerus/hgs-tray.exe", "--sessions", "--hgs", "D:/tools/hgs.exe", "--open-mode",
+                           "console", "--terminal", "--sessions", "--local-poll", "5000", "--icon-color", "#fff",
+                           "--peer-poll", "60000"};
+    QCOMPARE(AppConfig::restartArguments(args),
+             (QStringList{"--hgs", "D:/tools/hgs.exe", "--open-mode", "console", "--terminal", "--sessions",
+                          "--local-poll", "5000", "--icon-color", "#fff", "--peer-poll", "60000"}));
+    QVERIFY(AppConfig::restartArguments({"hgs-tray"}).isEmpty());
+    QVERIFY(AppConfig::restartArguments({"hgs-tray", "--sessions"}).isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestAppConfig)

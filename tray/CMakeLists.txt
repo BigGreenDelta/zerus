@@ -20,6 +20,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+if(MSVC)
+    # UTF-8 sources and literals also in targets without Qt (Qt adds -utf-8 only to
+    # its users), large translation units (SessionsWindow and its test), and
+    # <windows.h> without min/max macros next to std::min/std::max.
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
@@ -122,6 +130,20 @@ if(LINUX)
 else()
     target_sources(hgs-tray PRIVATE src/QtTrayIcon.cpp)
 endif()
+if(WIN32)
+    # Windows Terminal and console windows (hgs-tray.exe --console-run hosts the
+    # latter), tray-icon notifications, the taskbar badge and the swarm worker the
+    # tray runs itself (Windows has no user service manager). The resource script
+    # carries the icon and version information; the manifest sets UTF-8 as the
+    # ANSI code page and long-path support.
+    set(HGS_TRAY_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/hgs-zerus.ico")
+    configure_file(packaging/windows/hgs-tray.rc.in "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" @ONLY)
+    target_sources(hgs-tray PRIVATE src/WindowsTerminalBackend.cpp src/ConsoleHost.cpp src/WindowsAttentionNotifier.cpp
+        src/WindowsApplicationBadge.cpp src/SwarmWorkerSupervisor.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" packaging/windows/hgs-tray.manifest)
+    # A GUI program: no console window opens with it (see attachParentConsole in main.cpp).
+    set_target_properties(hgs-tray PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
 if(APPLE)
     # Тот же принцип, что и для Konsole: osascript и Terminal.app существуют только на маке.
     enable_language(OBJCXX)
@@ -150,6 +172,8 @@ include(CTest)
 if(BUILD_TESTING)
     hgs_add_terminal_tests()
     add_subdirectory(tests)
+    # test_terminalview is registered in this directory.
+    zerus_test_environment()
 endif()
 
 include(GNUInstallDirs)

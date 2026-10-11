@@ -28,6 +28,8 @@ public:
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
     static bool plainStableIsNewer(const QString &installed,const QString &released);
+    // The portable Windows build (Phase 1: nightly zips only) against a catalog.
+    static bool portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed);
     static bool claimNotification(const QString &token);
     static bool isUpdateToken(const QString &token);
     static QString comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared);

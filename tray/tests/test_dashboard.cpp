@@ -100,6 +100,17 @@ private slots:
         QCOMPARE(statuses.count("Offline"), 1); QCOMPARE(statuses.count("Connected"), 2);
         QVERIFY(page.findChildren<QLabel *>("dashboardMuted").size() > 5);
     }
+    void controlOnlyComputerHasNoMachineCard()
+    {
+        auto fleet = fixture(); auto local = fleet.local(); local.sessions.clear(); local.localSessions = false;
+        fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+        DashboardPage page; page.setFleet(fleet); page.resize(1120, 900); page.show();
+        QCOMPARE(page.findChild<QPushButton *>("dashboardConnected")->text(), QString("1 / 2\nMachines online"));
+        QStringList machines;
+        for (const auto *title : page.findChildren<QLabel *>("dashboardMachineTitle")) machines << title->toolTip();
+        machines.sort();
+        QCOMPARE(machines, QStringList({"mac", "studio"}));
+    }
     void reviewLaterStaysActiveOnOfflineMachine()
     {
         auto state = fixture(); auto box = *state.peer("studio"); box.sessions[0].reviewLater = true;
