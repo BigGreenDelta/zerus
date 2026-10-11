@@ -1288,6 +1288,35 @@ Closing a workspace never owns agent process lifetime. Local machine settings,
 credentials, runtime journals and personal connection values belong outside the
 repository.
 
+## Overmind tasks
+
+Overmind keeps tasks whose content is a ready prompt. Tasks belong to a project
+(or are pinned to a session), move through the project's workflow, and keep a
+journal of every step. The default workflow is Backlog → Queue → Design → Build →
+Review → Done, with Your Call for questions that need a person and Icebox for
+parked work. Only a person can move a task to Done.
+
+`hgs overmind --help` lists the commands. Requests are JSON on stdin with
+`--json`; replies are JSON. A refusal exits 1 and prints
+`{"ok": false, "error": {"code", "message", "field", "state"}}`, where `state`
+says whether a field was missing, empty or invalid. A write that carries a
+`request_id` UUID can be repeated safely: the same request returns the first
+result, a different request with the same ID is refused.
+
+Tasks are referenced by `om-` plus at least five characters, or by UUID. A
+reference grows when needed to stay unambiguous.
+
+Agents in Zerus sessions use their own commands (`mine`, `show`, `comment`,
+`advance`, `call-human`, `return`, `decompose`, `file`, `attach`, `review`).
+Their session is verified like hook events: `HGS_SESSION` and `HGS_RUN_ID` must
+name a live session. An agent may act only on tasks assigned to its session;
+in a Git repository, the evidence for review is a commit that exists there.
+
+Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
+blobs by SHA-256 and a `rev` file that changes with every write). Replication
+between machines, sending tasks into sessions and the desktop and phone
+interfaces are described in `docs/superpowers/specs/2026-10-11-overmind-core-design.md`.
+
 ## JSON and external clients
 
 ```sh

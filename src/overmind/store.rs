@@ -156,6 +156,7 @@ impl Store {
         Ok(tasks)
     }
 
+    #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn version_vector(&self) -> Result<BTreeMap<String, u64>> {
         let mut statement = self.conn.prepare("SELECT origin, MAX(seq) FROM events GROUP BY origin")?;
         let vector = statement
@@ -166,6 +167,7 @@ impl Store {
 
     /// Raw events the peer lacks, per origin in `seq` order, up to about
     /// `max_bytes`. The flag says whether more remain.
+    #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn missing(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
         let mut statement = self.conn.prepare("SELECT origin, seq, raw FROM events ORDER BY origin, seq")?;
         let rows = statement
@@ -186,6 +188,7 @@ impl Store {
         Ok((out, false))
     }
 
+    #[allow(dead_code)] // Used by replication (plan 1b).
     /// Inserts events from another machine. Known events are skipped, and an
     /// origin's events after a gap are left for a later exchange.
     pub fn insert_raw(&mut self, raws: &[Value]) -> Result<usize> {

@@ -539,6 +539,7 @@ pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MoveRequest {
+    #[allow(dead_code)] // Read from the raw request by the receipt layer; declared for deny_unknown_fields.
     #[serde(default)]
     request_id: String,
     task: String,

@@ -35,6 +35,7 @@ pub enum Action {
 }
 
 impl Action {
+    #[allow(dead_code)] // Part of the actor contract (listing and docs); no caller yet.
     pub const ALL: [Action; 13] = [
         Action::Create, Action::Move, Action::Claim, Action::Unclaim, Action::Advance, Action::CallHuman,
         Action::Answer, Action::Return, Action::Decompose, Action::Approve, Action::NeedsWork, Action::Done,

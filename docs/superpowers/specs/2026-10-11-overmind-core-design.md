@@ -88,7 +88,7 @@ events. Only sending a task into a session runs on the session's host.
 
 | Field | Meaning |
 |---|---|
-| `uuid` | Identity. UUIDv7, or the client `request_id` when created from the phone. |
+| `uuid` | Identity. UUID v4, or the client `request_id` of the creating request (the phone and any idempotent client). |
 | `ref` | Display reference `om-` + the shortest unambiguous base32 prefix of a hash of `uuid` (at least 5 characters), like a short Git SHA. |
 | `project` | Swarm project id. Optional only for tasks pinned to a session outside any project. |
 | `title` | Defaults to the first line of the prompt, at most 200 characters. |
@@ -96,7 +96,7 @@ events. Only sending a task into a session runs on the session's host.
 | `attachments` | Up to 8 images, 10 MiB each, 20 MiB total, stored by SHA-256. |
 | `stage` | A stage of the project workflow. |
 | `priority` | P0–P4, default P2. |
-| `rank` | Manual order inside a stage (fractional index string). |
+| `rank` | Manual order inside a stage (fractional index string; ranks use the characters 0-9A-Za-z and compare as bytes; a column is renumbered when a rank would exceed 64 characters). |
 | `labels` | Plain labels (`ui`) and requirement labels (`agent:codex`, `machine:<name>`). Reserved: `blocked`, `epic`, `epic-ready`, `bug`, `reviewed`, `review-failed`. |
 | `pinned` | Session the task is reserved for: machine uuid + session name. Follows renames. |
 | `assignee` | Session that took the task into an active stage. |
@@ -118,7 +118,7 @@ never translated. The prose after a marker follows the project language.
 | Actor | How it is recognized |
 |---|---|
 | `human` | GUI, phone or CLI not running inside a Zerus session. Carries `machine` and, from the phone, a device label. |
-| `agent:<session>` | `HGS_SESSION` and `HGS_RUN_ID` match a live binding on this host and the caller descends from the session pane, the same check hooks use. |
+| `agent:<session>` | `HGS_SESSION` and `HGS_RUN_ID` match a live binding on this host and that run has a live, matching tmux pane: the same check hook events pass. |
 | `autopilot` | Stage 2. |
 | `manager:<session>` | Stage 4. |
 
@@ -130,8 +130,7 @@ security boundary: an agent that strips its environment is not stopped.
 
 ### Local store
 
-`${XDG_STATE_HOME:-~/.local/state}/hgs/overmind/` (or `$HGS_STATE_DIR/../overmind`),
-mode 0700:
+`<state root>/overmind/` (`$HGS_STATE_DIR/overmind`, by default `~/.local/state/hgs/sessions/overmind`), mode 0700:
 
 - `overmind.sqlite3` (0600, WAL):
   - `events` — append-only log, primary key `(origin, seq)`, unique `id`;
@@ -174,6 +173,8 @@ external effect (a `[sent]` entry), the task gets the `conflict` flag and a
 `[conflict]` entry, and it appears in the human attention list. Nothing is
 resent or undone automatically: a prompt already delivered cannot be recalled.
 
+The fold itself enforces authority. It refuses human-only event kinds from non-humans (field, rank, label, relation, pin, reviewer, delete), flag changes except by people and the autopilot, workflow changes by non-humans, and agent journal or attachment events on Done or parked tasks. A task creation that is unreadable or newer than this build yields a read-only task instead of disappearing. A person can clear the conflict flag.
+
 ### Replication
 
 - Version vectors: "from origin X I have everything up to seq N".
@@ -210,12 +211,13 @@ The engine knows stage roles, not stage names: `backlog`, `ready`, `active`,
 ```json
 {"version": 1,
  "stages": [{"name": "Backlog", "role": "backlog"}, "..."],
- "transitions": [{"from": ["Design"], "to": "Build", "actors": ["agent"],
-                  "requires": ["spec"], "own": true}],
+ "rules": [{"action": "advance", "from": ["Design"], "to": "Build",
+            "actors": ["agent"], "requires": ["spec"], "own": true}],
  "evidence": "git_sha_or_text",
- "session_wip": 1,
- "review_independent": true}
+ "session_wip": 1}
 ```
+
+Reviewer independence is a fixed invariant, not a setting. Rules may not name unknown actor kinds. `@resume` targets are allowed only on `answer` rules from `needs_human` stages. Stage names are 1–40 printable characters without leading or trailing spaces.
 
 Validation: exactly one `done` stage, at least one stage for each of `backlog`,
 `ready`, `active`, `review`, `needs_human`; every stage reachable from `backlog`.
@@ -272,7 +274,7 @@ Rules carried over from vikunja-mcp:
 ### CLI
 
 `hgs [@host] overmind <command> [--json]`. Write commands take JSON on stdin,
-carry a `request_id` and are idempotent through `receipts`. Commands are flat.
+carry a `request_id` and are idempotent through `receipts`. Commands are flat. Commands accept CRLF text and store it with LF. Malformed or oversized requests are refusals with code `invalid_request`.
 
 Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`, `review-send`,
