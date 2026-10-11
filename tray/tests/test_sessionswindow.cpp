@@ -5471,6 +5471,7 @@ void TestSessionsWindow::automaticLaunchWorktree_data()
     QTest::addColumn<QString>("mode");QTest::addColumn<QString>("host");
     QTest::newRow("local-auto")<<QString("created")<<QString();
     QTest::newRow("remote-auto")<<QString("created")<<QString("mac");
+    QTest::newRow("outside-auto")<<QString("outside")<<QString("mac");
     QTest::newRow("no-worktree")<<QString("none")<<QString();
     QTest::newRow("ordinary-folder")<<QString("not_repo")<<QString();
     QTest::newRow("creation-failed")<<QString("failed")<<QString("mac");
@@ -5524,8 +5525,10 @@ elif args[0] == 'worktrees':
         return result;
     };
     SessionOrganization projects;const auto project=projects.createGroup("Launch");
-    projects.addFolder(project,host.isEmpty()?"arch":host,"/repo");
+    // An outside repository joins the project, never the worktree generated from it.
+    projects.addFolder(project,host.isEmpty()?"arch":host,mode=="outside"?"/unrelated":"/repo");
     NewSessionDialog dialog(program.fileName(),fleet(),host,"codex",project);dialog.setGroups(projects,project);dialog.show();
+    if(mode=="outside")dialog.selectPath("/repo");
     auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");
     auto *none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *start=dialog.findChild<QPushButton *>("primary");
@@ -5533,7 +5536,7 @@ elif args[0] == 'worktrees':
     auto *target=dialog.findChild<QLabel *>("launchWorktreeTarget");
     QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
     QTRY_VERIFY(start->isEnabled());
-    QCOMPARE(creations().size(),0);QVERIFY(dialog.findChild<QLabel *>("muted")->text().isEmpty());
+    QCOMPARE(creations().size(),0);QTRY_COMPARE(dialog.findChild<QLabel *>("muted")->property("outsideProject").toBool(),mode=="outside");
     auto *manage=dialog.findChild<QToolButton *>("manageLaunchProject");QVERIFY(manage->text().isEmpty());QVERIFY(!manage->icon().isNull());
     auto *agents=dialog.findChild<QComboBox *>("launchAgent");for(int i=0;i<agents->count();++i)QVERIFY(!agents->itemIcon(i).isNull());
     const auto generated=name->text();const auto destination="/repo-"+generated;
@@ -5547,7 +5550,7 @@ elif args[0] == 'worktrees':
     if(mode=="none")none->click();
     start->click();
     if(mode=="none"||mode=="not_repo"){
-        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QCOMPARE(creations().size(),0);return;
+        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QVERIFY(launched[0][7].toString().isEmpty());QCOMPARE(creations().size(),0);return;
     }
     QTRY_COMPARE(creations().size(),1);QVERIFY(!start->isEnabled());QVERIFY(!name->isEnabled());
     QVERIFY(!dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->isEnabled());
@@ -5562,10 +5565,10 @@ elif args[0] == 'worktrees':
     QCOMPARE(option("--branch"),generated);QCOMPARE(option("--base"),QString("HEAD"));QCOMPARE(option("--destination"),destination);
     QVERIFY(!QUuid(option("--request-id")).isNull());if(!host.isEmpty())QCOMPARE(args.first().toString(),"@"+host);
     releaseRequest();
-    if(mode=="created"){
+    if(mode=="created"||mode=="outside"){
         QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][2].toString(),destination);
         QCOMPARE(launched[0][3].toString(),QString("review-session"));QCOMPARE(launched[0][4].toString(),QString("native-codex"));
-        QCOMPARE(launched[0][5].toString(),project);QVERIFY(!launched[0][7].toBool());
+        QCOMPARE(launched[0][5].toString(),project);QCOMPARE(launched[0][7].toString(),mode=="outside"?QString("/repo"):QString());
     }else{
         QTRY_VERIFY(name->isEnabled());QVERIFY(!start->isEnabled());QCOMPARE(launched.size(),0);QVERIFY(dialog.isVisible());
         QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().isEmpty());QCOMPARE(name->text(),QString("review-session"));
@@ -5617,13 +5620,13 @@ void TestSessionsWindow::arbitraryFolderAndTerminalPreference()
     const auto preview=qEnvironmentVariable("HGS_NAVIGATION_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(40);QVERIFY(dialog.grab().save(preview+"/new-session-folder-"+theme+".png"));}
     QSignalSpy launches(&dialog,&NewSessionDialog::launchRequested);terminal->setChecked(true);QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launches.size(),1);
-    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(launches[0][7].toBool());
+    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(!launches[0][7].toString().isEmpty());QCOMPARE(launches[0][7].toString(),launches[0][2].toString());
     NewSessionDialog second(script(),fleet(),"mac");QVERIFY(second.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     second.setGroups(projects,id);QCOMPARE(second.findChild<QComboBox *>("launchProjectFolder")->count(),0);
     projects.addFolder(id,"mac","/remote/work tree");second.setGroups(projects,id);
     second.findChild<QCheckBox *>("launchOpenTerminal")->setChecked(false);
     QSignalSpy secondLaunch(&second,&NewSessionDialog::launchRequested);QTRY_VERIFY(second.findChild<QPushButton *>("primary")->isEnabled());second.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(secondLaunch.size(),1);
-    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(!secondLaunch[0][7].toBool());
+    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(secondLaunch[0][7].toString().isEmpty());
     NewSessionDialog third(script(),fleet());QVERIFY(!third.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     // Selecting a project folder explicitly replaces the earlier Browse choice.
     project->setCurrentIndex(project->findData(other));

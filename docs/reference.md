@@ -696,7 +696,9 @@ closing it clears this temporary choice. Selecting a listed folder unpins it.
 A folder outside the project shows a warning and is added only after a successful
 launch with the matching launch ID. Cancellation and launch failure add nothing.
 A worktree of a project folder on that computer is not outside the project, so
-starting there adds no folder; **Choose existing…** offers it again.
+starting there adds no folder; **Choose existing…** offers it again. When an
+automatic worktree is generated from an outside folder, the session starts in
+the worktree and the outside folder, not the worktree, joins the project.
 
 New launches immediately show **Starting…** until the matching session appears.
 Controls stay disabled before confirmation. Errors remove the placeholder and

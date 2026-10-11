@@ -24,8 +24,9 @@ public:
     void selectAccount(const QString &account);
     void reject() override;
 signals:
-    // addFolder: the folder is outside the project and joins it once the session starts.
-    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,bool addFolder);
+    // addFolder: the confirmed folder outside the project that joins it once the
+    // session starts, or empty. A worktree generated from it never replaces it.
+    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder);
     void manageProjectsRequested(const QString &host);
     void projectFoldersRequested(const QString &project);
 private:
@@ -45,7 +46,7 @@ private:
     void updateAccounts();
     void updateForm();
     void start();
-    void launch(const QString &target);
+    void launch(const QString &target,const QString &addFolder);
     QString host() const;
     HgsClient m_client;
     FleetState m_fleet;
@@ -66,6 +67,7 @@ private:
     bool m_autoPreferred=true,m_creationFailed=false,m_startWithWorktree=false;
     quint64 m_creation=0;
     QJsonObject m_creationCatalog;
+    QString m_creationFolder;
     QJsonObject m_worktreeCatalog;
     QMap<QString, QJsonObject> m_verifiedWorktrees;
     QString m_worktreeContext;
