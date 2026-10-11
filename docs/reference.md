@@ -520,8 +520,11 @@ plan approval stay visible with **Open Terminal**.
 
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
-its options verbatim with **Open Terminal**: no tool result can acknowledge an
-answer, so Zerus never chooses one of these options.
+its options verbatim with **Open Terminal** while Terminal still shows them: no
+tool result can acknowledge an answer, so Zerus never chooses one of these
+options. When Claude waits for input and no request explains it, Activity shows
+the chooser visible at the bottom of Terminal, such as **Session paused**, in
+the same read-only way. A new prompt ends any earlier request.
 
 Supported startup prompts include Claude workspace trust and auto-mode consent,
 Codex folder access, **Hooks need review** and **Update available**, and Kimi
