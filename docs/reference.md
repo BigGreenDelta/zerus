@@ -897,7 +897,12 @@ CLI is `hgs [@host] worktrees create --path /repo --branch feature/task
 --destination /repo-task --base HEAD --json`. Zerus also verifies `--common-dir`
 and a request ID. Creation uses normal `git worktree add -b`, including configured
 checkout hooks, with no force, fetch or deletion. The ref is resolved before
-creation. The five-minute operation can leave partial results after failure;
+creation. When the base is a local branch with a remote upstream, such as `HEAD`
+on `main` tracking `origin/main`, the new branch inherits that upstream so its
+session card can verify publication; Git's default `simple` push mode still
+refuses a bare `git push` to the differently named branch. Commits, tags,
+detached `HEAD`, local upstreams and `push.default=upstream` or `tracking` leave
+the new branch without an upstream. The five-minute operation can leave partial results after failure;
 inspect the destination before retrying. Cancelling the session form preserves
 the created folder and branch. Closing or archiving a session never removes them.
 Automatic creation requires a fresh verified repository on the selected computer.

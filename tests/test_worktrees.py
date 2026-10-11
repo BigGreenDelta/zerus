@@ -103,6 +103,27 @@ class Worktrees(Repository,unittest.TestCase):
         self.assertEqual(self.git('-C',str(destination),'branch','--show-current'),'feature/new')
         self.assertEqual(self.git('-C',str(self.repo),'branch','--show-current'),'main');self.assertEqual(dirty.read_text(),'keep my edits')
         self.assertEqual(len(self.catalog()['worktrees']),2)
+    def test_create_inherits_only_a_safe_remote_upstream(self):
+        remote=self.root/'remote.git';self.git('init','-q','--bare',str(remote))
+        self.git('-C',str(self.repo),'remote','add','origin',str(remote));self.git('-C',str(self.repo),'push','-qu','origin','main')
+        upstream=lambda path:subprocess.run([GIT,'-C',str(path),'rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}'],
+            env=self.env,text=True,capture_output=True).stdout.strip()
+        cases=[('head','HEAD',(),'origin/main'),('named','main',(),'origin/main'),
+            ('commit',self.git('-C',str(self.repo),'rev-parse','HEAD'),(),''),
+            ('pushes-upstream','HEAD',(('push.default','upstream'),),''),('local','HEAD',(('branch.main.remote','.'),),'')]
+        for name,base,config,expected in cases:
+            with self.subTest(name):
+                for key,value in config:self.git('-C',str(self.repo),'config',key,value)
+                try:
+                    destination=self.root/name;result=self.create(destination,branch='feature/'+name,base=base)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(json.loads(result.stdout)['upstream'],expected or None)
+                    self.assertEqual(upstream(destination),expected)
+                    self.assertEqual(upstream(self.repo),'origin/main' if name!='local' else 'main')
+                finally:
+                    for key,_ in config:self.git('-C',str(self.repo),'config','--unset',key)
+                    if name=='local':self.git('-C',str(self.repo),'config','branch.main.remote','origin')
+        self.assertEqual(self.git('-C',str(remote),'for-each-ref','--format=%(refname)'),'refs/heads/main')
     def test_create_rejects_collisions_symlinks_and_repository_change(self):
         destination=self.root/'new worktree'
         existing=self.create(branch='main');self.assertNotEqual(existing.returncode,0);self.assertFalse(destination.exists())
