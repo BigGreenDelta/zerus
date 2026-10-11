@@ -140,10 +140,6 @@ using SessionPresentation::currentActivity;
 using SessionPresentation::currentAction;
 using SessionPresentation::childCount;
 
-bool needsAttention(const SessionInfo &s)
-{
-    return s.needsAttention();
-}
 
 QString eventTitle(const QString &type)
 {
@@ -848,13 +844,24 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key,const QString &text,const QList<MessageAttachment> &files){sendMessage(key,text,files);});
     // An unsent draft becomes the row's status (see SessionDelegate::statusOf).
-    connect(m_composer, &MessageComposer::draftChanged, this, [this](const QString &key) {
+    const auto draftChanged = [this](const QString &key) {
         for (int row = 0; row < m_sessions->count(); ++row) {
             auto *item = m_sessions->item(row);
             if (item->data(SessionRoles::Key).toString() == key && item->data(SessionRoles::ChildId).toString().isEmpty())
                 item->setData(SessionRoles::Draft, m_composer->hasDraft(key));
         }
-    });
+        // Presence changes once when typing starts or the draft clears, rather
+        // than on each keystroke. Defer list rebuilding until the editor returns.
+        if (m_draftRefreshPending) return;
+        m_draftRefreshPending = true;
+        QTimer::singleShot(0, this, [this] {
+            m_draftRefreshPending = false;
+            if (isVisible()) rebuild();
+            updateDashboard();
+        });
+    };
+    connect(m_composer, &MessageComposer::draftChanged, this, draftChanged);
+    connect(m_subagentComposer, &MessageComposer::draftChanged, this, draftChanged);
     connect(m_activityView, &ActivityView::messageActionRequested, this, &SessionsWindow::messageAction);
     connect(m_composer, &MessageComposer::settingsTerminalRequested, this, [this](const QString &key) {
         if (key != m_selectedKey || !selected()) return;
@@ -1772,7 +1779,16 @@ void SessionsWindow::updateDashboard()
         if (!box.ok) fleet.setPeer(box, fleet.peerPolledAt(host));
     }
     if (!m_connectionError.isEmpty()) { auto local = fleet.local(); local.ok = false; local.error = m_connectionError; fleet.setLocal(local, 0); }
-    m_dashboard->setFleet(fleet);
+    QSet<QString> drafts;
+    const auto collectDrafts = [this, &drafts](const QString &host, const BoxState &box) {
+        for (const auto &session : box.sessions) {
+            const QString key = host + '\n' + session.name;
+            if (entryHasDraft({host, host.isEmpty() ? box.host : host, key, {}, session, box.ok})) drafts.insert(key);
+        }
+    };
+    collectDrafts({}, fleet.local());
+    for (const auto &host : fleet.peerNames()) collectDrafts(host, *fleet.peer(host));
+    m_dashboard->setFleet(fleet, drafts);
 }
 void SessionsWindow::setConnectionError(const QString &error) {
     if (m_connectionError == error) return;
@@ -2073,7 +2089,20 @@ bool SessionsWindow::childNeedsAction(const Entry &entry) const
 }
 bool SessionsWindow::entryNeedsAttention(const Entry &entry) const
 {
-    return entry.session.reviewLater || (entry.online && (needsAttention(entry.session) || (!entry.session.attentionAcknowledged && childNeedsAction(entry))));
+    return SessionPresentation::needsAttention(entry.session, entry.online)
+        || (entry.online && !entry.session.attentionAcknowledged && childNeedsAction(entry));
+}
+bool SessionsWindow::entryHasDraft(const Entry &entry) const
+{
+    if (entry.session.state == "archived") return false;
+    if (m_composer->hasDraft(entry.key)) return true;
+    const auto children = childRoster(entry);
+    const auto conversation = !entry.session.conversationId.isEmpty() ? entry.session.conversationId :
+        entry.key == m_selectedKey ? m_details.value("conversation_id").toString() : QString();
+    for (auto it = children.begin(); it != children.end(); ++it)
+        if (!it.value().toObject().value("group").toBool()
+            && m_subagentComposer->hasDraft(entry.machine + '\n' + entry.session.name + '\n' + conversation + '\n' + it.key())) return true;
+    return false;
 }
 void SessionsWindow::rebuild()
 {
@@ -2083,6 +2112,7 @@ void SessionsWindow::rebuild()
     m_rebuilding = true;
     QString requestedSelection = m_selectedKey;
     m_entries.clear(); int online = 0, attention = 0, saved = 0, archived = 0, total = 0, active = 0;
+    QSet<QString> drafts;
     const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
     auto append = [&](const QString &host, const BoxState &box) {
         if (box.host.isEmpty()) return;
@@ -2095,12 +2125,15 @@ void SessionsWindow::rebuild()
             const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
             if(key == m_selectedKey && m_inspectError.isEmpty())s=SessionPresentation::inspected(s,m_details);
             m_entries.append({host, host.isEmpty() ? box.host : host, key, {}, s, reachable});
+            if (entryHasDraft(m_entries.last())) drafts.insert(key);
             if (!selectedHost) continue;
+            if (!m_folderFilterPath.isEmpty() && (host != m_folderFilterHost ||
+                (m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd) != m_folderFilterPath)) continue;
             if (s.state == "archived") { ++archived; continue; }
             ++total;
             const bool needsAttention = entryNeedsAttention(m_entries.last());
             if (needsAttention) ++attention;
-            if (needsAttention || SessionPresentation::working(s, reachable)) ++active;
+            if (needsAttention || SessionPresentation::active(s, reachable, drafts.contains(key))) ++active;
             if (s.state != "running") ++saved;
         }
     };
@@ -2161,7 +2194,7 @@ void SessionsWindow::rebuild()
     m_machinesNav->setChecked(m_pages->currentIndex() == 2);
     { const QSignalBlocker block(m_machineFilter); m_machineFilter->setSelection(m_hostFilters); m_machineFilter->setFleet(m_fleet); }
     m_searchResults->setFolderScope(m_folderFilterHost,m_folderFilterPath,m_folderFilterCheckout);
-    m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters);
+    m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters, drafts);
     const QString query; // Text searches have their own result list and selection.
     QList<Entry> visible;
     for (const auto &e : m_entries) {
@@ -2170,7 +2203,7 @@ void SessionsWindow::rebuild()
         if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(e.host.isEmpty() ? "@local" : e.host)) continue;
         if (m_filter == "attention" && !entryNeedsAttention(e)
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
-        if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::working(s, e.online)
+        if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::active(s, e.online, drafts.contains(e.key))
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;

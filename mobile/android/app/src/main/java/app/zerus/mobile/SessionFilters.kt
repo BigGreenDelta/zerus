@@ -28,9 +28,11 @@ object SessionFilters {
         !(session.raw.string("conversation_state") == "ended" && session.raw.string("activity") != "idle")
     fun needsAction(session: Session): Boolean {
         val recovery = session.raw.optJSONObject("recovery")?.string("state").orEmpty()
+        val providerError = session.raw.optJSONObject("provider_error")?.string("error_kind").orEmpty()
         val phase = session.raw.string("phase")
         return !archived(session) && state(session) == "running" && session.raw.string("process_state") != "exited" &&
-            (phase in listOf("approval", "input") || phase == "error" && recovery !in listOf("waiting", "dispatching", "retrying") ||
+            (phase in listOf("approval", "input") || phase == "error" &&
+                (recovery !in listOf("waiting", "dispatching", "retrying") || providerError in listOf("quota", "provider_policy")) ||
                 recovery in listOf("uncertain", "blocked", "exhausted"))
     }
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
@@ -46,10 +48,23 @@ object SessionFilters {
         return !acknowledged && (needsAction(session) || childAttention) || session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply") ||
             currentActivity(session, online) && session.pendingCount > 0
     }
-    fun matches(session: Session, filter: SessionFilter, online: Boolean): Boolean = when (filter) {
+    /** Composer drafts remain local and count even when their machine is offline. */
+    fun draftedSessions(sessions: List<Session>, drafts: List<Draft>): Set<String> {
+        val unsent = drafts.filter { it.questionId.isBlank() && it.detachedId.isBlank() && it.target.archiveId.isBlank() &&
+            it.status !in listOf("submitting", "submitted", "recorded") && (it.text.isNotBlank() || it.attachments.isNotEmpty()) }
+        return sessions.filterNot(::archived).filter { session -> unsent.any { draft ->
+            if (draft.target.agentId.isBlank()) ContextPolicies.sameSession(draft.target, session.target)
+            else session.raw.string("subagent_source") != "hook_profiles" &&
+                draft.target.copy(conversation = draft.target.parentConversation, agentId = "", parentConversation = "") == session.target &&
+                session.raw.optJSONObject("subagents")?.optJSONObject(draft.target.agentId)?.optBoolean("group") == false
+        } }.mapTo(mutableSetOf()) { it.target.key }
+    }
+    fun active(session: Session, online: Boolean, hasDraft: Boolean = false) =
+        !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online))
+    fun matches(session: Session, filter: SessionFilter, online: Boolean, hasDraft: Boolean = false): Boolean = when (filter) {
         SessionFilter.All -> !archived(session)
         SessionFilter.Attention -> needsAttention(session, online)
-        SessionFilter.Active -> needsAttention(session, online) || working(session, online)
+        SessionFilter.Active -> active(session, online, hasDraft)
         SessionFilter.Saved -> !archived(session) && state(session) != "running"
         SessionFilter.Archive -> archived(session)
     }
@@ -106,8 +121,8 @@ object SessionFilters {
         return roster?.keys()?.asSequence()?.flatMap { id -> sequenceOf(id, roster.optJSONObject(id)?.string("conversation_id").orEmpty()) }?.toList().orEmpty() +
             previews.flatMap { listOf(it.string("id", "agent_id"), it.string("conversation_id")) }
     }
-    fun counts(sessions: List<Session>, machines: List<Machine>): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
-        sessions.count { matches(it, filter, online(it, machines)) }
+    fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
+        sessions.count { matches(it, filter, online(it, machines), it.target.key in drafts) }
     }
     fun grouped(sessions: List<Session>, projects: List<ProjectSummary>): List<SessionGroup> {
         val grouped = sessions.groupBy { it.projectKey ?: ProjectKey(it.target.connectionId, "unassigned:${it.target.computerId}", "unassigned") }

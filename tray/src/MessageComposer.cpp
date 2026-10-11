@@ -382,6 +382,16 @@ bool MessageComposer::isSending(const QString &key) const { return m_drafts.valu
 
 bool MessageComposer::hasDraft(const QString &key) const
 {
+    if (!m_drafts.contains(key)) {
+        // Read manifest metadata once. Filtering must find restored drafts without
+        // opening their conversations or reading attachment payloads.
+        if (!m_draftsIndexed) {
+            const auto keys = m_draftStore.keys();
+            m_storedDrafts = QSet<QString>(keys.cbegin(), keys.cend());
+            m_draftsIndexed = true;
+        }
+        return m_storedDrafts.contains(key);
+    }
     const auto draft = m_drafts.value(key);
     return !draft.sending && (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty());
 }
@@ -495,6 +505,7 @@ void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
     }
     if (!m_draftStore.save(newKey, moved)) { m_drafts[oldKey].storageError = moved.storageError; updateControls(); return; }
     Draft empty; m_draftStore.save(oldKey, empty);
+    m_storedDrafts.remove(oldKey);
     m_drafts.insert(newKey, m_drafts.take(oldKey));
     if(m_preservedDrafts.contains(oldKey))m_preservedDrafts.insert(newKey,m_preservedDrafts.take(oldKey));
     notifyDraft(oldKey); notifyDraft(newKey);

@@ -221,7 +221,7 @@ QStringList ComposerDraftStore::keys() const
         const auto object = QJsonDocument::fromJson(file.readAll()).object();
         const auto key = object.value("key").toString();
         if (object.value("version").toInt() == 1 && name == hash(key.toUtf8())
-            && (!object.value("text").toString().isEmpty() || !object.value("attachments").toArray().isEmpty())) result.append(key);
+            && (!object.value("text").toString().trimmed().isEmpty() || !object.value("attachments").toArray().isEmpty())) result.append(key);
     }
     result.sort(); return result;
 }

@@ -137,8 +137,12 @@ An unavailable gateway leaves the connection intact.
 
 Sessions is the initial view. Its compact filters use the desktop glyphs and
 native semantics: All sessions, Needs attention, Active, Saved sessions, and
-Archive. Active combines working sessions and sessions needing attention,
-counting each session once. Work requires a reachable computer and a current running agent;
+Archive. Active combines working sessions, sessions needing attention, and sessions
+with local unsent text or attachment drafts, counting each session once. Drafts
+(including visible subagent drafts) stay active offline and update the count as
+they are edited, cleared or sent; archived sessions remain exclusive to Archive.
+Drafts stay on their device; desktop and Android share the filter rules and IDs.
+Work requires a reachable computer and a current running agent;
 input, approval, non-recovering errors, and blocked recovery require attention.
 Optional native questions and explicit child requests also count as attention.
 Routine child failures and legacy hook-profile observations do not. Saved

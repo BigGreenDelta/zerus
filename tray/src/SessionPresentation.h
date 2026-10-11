@@ -159,7 +159,16 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
         const auto state = childState(value.toObject());
         if (state == "approval" || state == "input" || state == "attention") return true;
     }
+    for (const auto &value : s.subagentPreviews) {
+        const auto state = childState(value.toObject());
+        if (state == "approval" || state == "input" || state == "attention") return true;
+    }
     return false;
+}
+
+inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
+{
+    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online));
 }
 
 inline QString promptPreview(const QString &text)

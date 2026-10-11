@@ -115,6 +115,7 @@ private:
     QString childKey(const Entry &entry, const QString &id) const;
     bool childNeedsAction(const Entry &entry) const;
     bool entryNeedsAttention(const Entry &entry) const;
+    bool entryHasDraft(const Entry &entry) const;
     void renderDetails();
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
@@ -280,6 +281,7 @@ private:
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
+    bool m_draftRefreshPending = false;
     int m_tick = 0;
     QTimer m_timer;
     QElapsedTimer m_processPollAge,m_inspectionAge;

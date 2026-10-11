@@ -100,6 +100,7 @@ private slots:
     void init() { QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void crashRestoresLastEditAndAttachmentBytes();
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
+    void restoredDraftPresenceNeedsNoConversationOrAttachmentRead();
     void deliveryPersistence_data();
     void deliveryPersistence();
     void storageFailureKeepsDraftAndBlocksDispatch();
@@ -198,6 +199,28 @@ void TestMessageComposer::restartKeepsIsolationRenamesAndAttachmentRemoval()
     restored.setSessionKey("arch\nsame\nconversation\nchild"); QCOMPARE(restored.editor()->toPlainText(), "Child");
     restored.setAvailability(false, "Machine unavailable"); restored.setSessionKey({});
     restored.setSessionKey("arch\nsame"); QCOMPARE(restored.editor()->toPlainText(), "Local without marker");
+}
+
+void TestMessageComposer::restoredDraftPresenceNeedsNoConversationOrAttachmentRead()
+{
+    ComposerDraftStore store; ComposerDraft text; text.text = "Restored text";
+    QVERIFY(store.save("\ntext", text));
+    ComposerDraft attachment; attachment.attachments = {{"notes.txt", "text/plain", "snapshot", {}}};
+    QVERIFY(store.save("mac\nattachment", attachment));
+    ComposerDraft whitespace; whitespace.text = " \n\t"; QVERIFY(store.save("\nblank", whitespace));
+    MessageComposer restored;
+    QVERIFY(restored.hasDraft("\ntext")); QVERIFY(restored.hasDraft("mac\nattachment"));
+    QVERIFY(!restored.hasDraft("\nblank")); QVERIFY(!restored.hasDraft("\nmissing"));
+    QVERIFY(restored.sessionKey().isEmpty()); QVERIFY(restored.editor()->toPlainText().isEmpty());
+    // Presence uses metadata: removing the bytes after saving does not require
+    // reading them merely to decide whether a conversation belongs in Active.
+    for (const auto &folder : QDir(ComposerDraftStore::directory()).entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+        for (const auto &name : QDir(ComposerDraftStore::directory() + '/' + folder).entryList({"*.bin"}, QDir::Files))
+            QVERIFY(QFile::remove(ComposerDraftStore::directory() + '/' + folder + '/' + name));
+    MessageComposer metadata; QVERIFY(metadata.hasDraft("mac\nattachment"));
+    restored.setSessionKey("\ntext"); restored.renameDraft("\ntext", "\nrenamed");
+    QVERIFY(!restored.hasDraft("\ntext")); QVERIFY(restored.hasDraft("\nrenamed"));
+    restored.editor()->clear(); QVERIFY(!restored.hasDraft("\nrenamed"));
 }
 
 void TestMessageComposer::deliveryPersistence_data()

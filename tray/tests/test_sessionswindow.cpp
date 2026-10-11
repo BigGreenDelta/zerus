@@ -126,6 +126,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
+    void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
     void processPollingFollowsVisibilityAndSettings();
@@ -2025,12 +2026,14 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     overlap.conversationId = "overlap-conversation"; overlap.replyId = "overlap-reply";
     auto child = idle; child.name = "codex/hgs/child-request"; child.replyId.clear();
     child.subagentSource = "hooks"; child.subagents = {{"child", QJsonObject{{"display_state", "input"}}}};
+    auto preview = idle; preview.name = "codex/hgs/preview-request"; preview.replyId.clear();
+    preview.subagentSource = "hooks"; preview.subagentPreviews = {QJsonObject{{"state", "input"}}};
     auto reminder = box.sessions[2]; reminder.name = "codex/hgs/reminder"; reminder.reviewLater = true;
     auto exited = working; exited.name = "codex/hgs/exited"; exited.processState = "exited";
     auto ended = working; ended.name = "codex/hgs/ended"; ended.conversationState = "ended";
     auto unknown = working; unknown.name = "codex/hgs/unknown"; unknown.activity = "unknown";
     auto archived = overlap; archived.name = "codex/hgs/archive"; archived.state = "archived"; archived.archiveId = "archive-one";
-    box.sessions.append({overlap, child, reminder, exited, ended, unknown, archived});
+    box.sessions.append({overlap, child, preview, reminder, exited, ended, unknown, archived});
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     QVERIFY(state.setReviewLater({}, reminder, true));
     const auto previousMarks = QSettings().value("attention/sessionMarks");
@@ -2044,17 +2047,68 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
         QVERIFY(button->property("filter") != "working");
     }
     QVERIFY(active); QVERIFY(attention); QCOMPARE(active->accessibleName(), QString("Active"));
-    QCOMPARE(active->property("count").toInt(), 6); QCOMPARE(attention->property("count").toInt(), 5);
-    auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 6);
+    QCOMPARE(active->property("count").toInt(), 7); QCOMPARE(attention->property("count").toInt(), 6);
+    auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 7);
     QSet<QString> keys;
     for (int i = 0; i < list->count(); ++i) keys.insert(list->item(i)->data(Qt::UserRole).toString());
-    QCOMPARE(keys.size(), 6); QVERIFY(keys.contains("\ncodex/hgs/dashboard"));
+    QCOMPARE(keys.size(), 7); QVERIFY(keys.contains("\ncodex/hgs/dashboard"));
     QVERIFY(keys.contains("\nkimi/docs/research")); QVERIFY(keys.contains("mac\nclaude/infra/review"));
     QVERIFY(keys.contains("\ncodex/hgs/child-request")); QVERIFY(keys.contains("\ncodex/hgs/reminder"));
+    QVERIFY(keys.contains("\ncodex/hgs/preview-request"));
     box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     auto peer = *state.peer("mac"); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state); QCOMPARE(active->property("count").toInt(), 1); QCOMPARE(list->count(), 1);
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
+}
+
+void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery()
+{
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) { session.phase = "idle"; session.activity = "idle"; }
+    auto parent = box.sessions[0]; parent.name = "codex/hgs/child-parent"; parent.conversationId = "conversation-one";
+    parent.subagentSource = "hooks"; parent.subagents = {{"child", QJsonObject{{"state", "idle"}}}};
+    auto staleParent = parent; staleParent.name = "codex/hgs/stale-parent"; staleParent.conversationId = "new-conversation";
+    auto archived = box.sessions[0]; archived.name = "codex/hgs/archived-draft"; archived.state = "archived"; archived.archiveId = "archive-one";
+    box.sessions.append({parent, staleParent, archived}); state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto peer = *state.peer("mac"); peer.sessions[0].phase = "idle"; peer.sessions[0].activity = "idle";
+    state.setPeer(peer, QDateTime::currentMSecsSinceEpoch()); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
+    ComposerDraftStore store; ComposerDraft text; text.text = "Restored draft";
+    QVERIFY(store.save("\n" + box.sessions[2].name, text));
+    QVERIFY(store.save("arch\n" + parent.name + "\nconversation-one\nchild", text));
+    QVERIFY(store.save("arch\n" + staleParent.name + "\nconversation-one\nchild", text));
+    QVERIFY(store.save("\n" + archived.name + "\narchive-one", text));
+    ComposerDraft attachment; attachment.attachments = {{"notes.txt", "text/plain", "snapshot", {}}};
+    QVERIFY(store.save("mac\n" + peer.sessions[0].name, attachment));
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    QPushButton *active = nullptr; QSet<QString> filterIds;
+    for (auto *button : window.findChildren<QPushButton *>()) {
+        const auto id = button->property("filter").toString();
+        if (!id.isEmpty()) filterIds.insert(id);
+        if (id == "active") active = button;
+    }
+    QCOMPARE(filterIds, QSet<QString>({"all", "attention", "active", "paused", "archived"}));
+    QVERIFY(active); QCOMPARE(active->property("count").toInt(), 3);
+    auto *list = window.findChild<SessionList *>("sessionList"); active->click();
+    QSet<QString> keys;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) keys.insert(list->item(i)->data(SessionRoles::Key).toString());
+    QCOMPARE(keys, QSet<QString>({"\n" + box.sessions[2].name, "\n" + parent.name, "mac\n" + peer.sessions[0].name}));
+    window.findChild<MachineFilter *>()->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
+    window.findChild<MachineFilter *>()->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
+    window.showSession({}, staleParent.name); QTest::qWait(50);
+    QCOMPARE(active->property("count").toInt(), 3); // An older inspection cannot bind a child draft to a new parent conversation.
+    window.showSession({}, box.sessions[1].name);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    composer->editor()->setFocus(); composer->editor()->setPlainText("New draft");
+    QTRY_COMPARE(active->property("count").toInt(), 4);
+    const auto key = composer->sessionKey(); QCOMPARE(key, "\n" + box.sessions[1].name);
+    QVERIFY(composer->editor()->hasFocus());
+    composer->editor()->clear(); QTRY_COMPARE(active->property("count").toInt(), 3);
+    composer->editor()->setPlainText("Send this draft"); QTRY_COMPARE(active->property("count").toInt(), 4);
+    QVERIFY(composer->setSending(key)); QTRY_COMPARE(active->property("count").toInt(), 3);
+    composer->deliveryFinished(key, false, "Synthetic delivery failure"); QTRY_COMPARE(active->property("count").toInt(), 4);
+    QVERIFY(composer->setSending(key)); composer->deliveryFinished(key, true);
+    QTRY_COMPARE(active->property("count").toInt(), 3);
 }
 
 void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts_data()
@@ -6153,6 +6207,10 @@ void TestSessionsWindow::worktreeFilterKeepsConversationDraftAndSearchScope()
     auto *composer=window.findChild<MessageComposer *>("messageComposer");composer->editor()->setPlainText("Keep my draft");window.activateWindow();QTest::qWait(30);composer->editor()->setFocus();QTRY_COMPARE(QApplication::focusWidget(),composer->editor());
     auto *title=window.findChild<QLabel *>("detailTitle");const auto selected=title->text();
     auto *page=window.findChild<ProjectsDialog *>("projectsPage");page->folderSessionsRequested({},"/linked",true);
+    for (auto *button : window.findChildren<QPushButton *>()) {
+        if (button->property("filter") == "all") QCOMPARE(button->property("count").toInt(), 1);
+        if (button->property("filter") == "active") QCOMPARE(button->property("count").toInt(), 0);
+    }
     auto *list=window.findChild<SessionList *>("sessionList");QStringList keys;
     for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Key).toString().isEmpty())keys<<list->item(i)->data(SessionRoles::Key).toString();
     QCOMPARE(keys,QStringList{"\nkimi/docs/research"});QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));QCOMPARE(QApplication::focusWidget(),composer->editor());
@@ -6161,6 +6219,8 @@ void TestSessionsWindow::worktreeFilterKeepsConversationDraftAndSearchScope()
     auto *hits=window.findChild<QListWidget *>("searchResults");QVERIFY(hits->count()>0);for(int i=0;i<hits->count();++i)QVERIFY(hits->item(i)->data(Qt::AccessibleTextRole).toString().contains("research"));
     window.findChild<QLineEdit *>("search")->clear();window.findChild<QPushButton *>("clearFolderFilter")->click();QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
     page->folderSessionsRequested({},"/empty",true);QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
+    for (auto *button : window.findChildren<QPushButton *>())
+        if (button->property("filter").isValid()) QCOMPARE(button->property("count").toInt(), 0);
     page->relatedSessionRequested({},"kimi/docs/research",{});QVERIFY(title->text()!=selected);QVERIFY(!window.findChild<QPushButton *>("clearFolderFilter")->isVisible());
     window.showSession({},"codex/hgs/dashboard");QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
     page->folderSessionsRequested({},"/empty",true);window.findChild<DashboardPage *>()->filterRequested("@all","all");QVERIFY(!window.findChild<QPushButton *>("clearFolderFilter")->isVisible());

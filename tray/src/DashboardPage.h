@@ -15,7 +15,7 @@ class DashboardPage : public QWidget {
     Q_OBJECT
 public:
     explicit DashboardPage(QWidget *parent = nullptr);
-    void setFleet(const FleetState &fleet);
+    void setFleet(const FleetState &fleet, const QSet<QString> &drafts = {});
     void setTheme(bool dark);
     void setAccounts(const QJsonArray &profiles);
 signals:
@@ -34,6 +34,7 @@ private:
     void arrangeSessions();
     void arrangeAccounts();
     FleetState m_fleet;
+    QSet<QString> m_drafts;
     QLabel *m_inactive, *m_empty;
     QPushButton *m_active, *m_attention, *m_connected, *m_sessions;
     QGridLayout *m_machineGrid;

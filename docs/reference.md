@@ -320,11 +320,14 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
-The **Active** filter combines sessions currently working with those in
-**Needs attention**, counting each session once. It replaces the Working filter
-and also applies to content search. Explicit review-later reminders remain
-active offline; stale work alone does not. Archives stay in Archive. The
-Dashboard's Active counter opens this same filter.
+The **Active** filter combines sessions currently working, those in
+**Needs attention**, and sessions with unsent text or attachment drafts, counting
+each session once. Desktop and Android use the same filter IDs and membership
+rules; drafts remain local to each device. Drafts for visible subagents also keep
+their parent session active. Drafts and explicit review-later reminders remain
+active offline; stale work alone does not. Archives stay in Archive. Active also
+applies to desktop content search, and the Dashboard's Active counter opens this
+same filter. Creating, clearing or sending a draft updates the filter and count.
 
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project

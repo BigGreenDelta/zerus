@@ -108,6 +108,8 @@ private:
     QHash<QString, Draft> m_preservedDrafts;
     QHash<QString, QString> m_waitingSends;
     QSet<QString> m_unsent;   // keys whose last reported hasDraft() was true
+    mutable QSet<QString> m_storedDrafts;
+    mutable bool m_draftsIndexed = false;
     ComposerDraftStore m_draftStore;
     QHash<QString, quint64> m_saveRevision;
     QSet<QString> m_savingKeys;

@@ -525,8 +525,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }; return
     }
     val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
-    val counts = SessionFilters.counts(scoped, model.machines)
-    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines)) }
+    val drafts = SessionFilters.draftedSessions(scoped, model.drafts)
+    val counts = SessionFilters.counts(scoped, model.machines, drafts)
+    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
     val groups = SessionFilters.grouped(visible, model.projects)
     val readAllTargets = scoped.filterNot(SessionFilters::archived).map { it.target }
     val canReadAll = !model.demo && readAllTargets.any(model::canReadAll)
