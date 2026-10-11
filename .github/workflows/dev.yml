@@ -10,7 +10,8 @@ cache-mode: none
 
 jobs:
   desktop:
-    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -53,7 +54,8 @@ jobs:
           if-no-files-found: error
 
   android:
-    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment: release
@@ -139,7 +141,9 @@ jobs:
 
   channel:
     needs: [desktop, android]
-    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >-
+      !cancelled() && needs.desktop.result == 'success' && needs.android.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release

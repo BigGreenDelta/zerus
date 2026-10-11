@@ -96,7 +96,11 @@ jobs:
   dev:
     name: Verified main dev candidates
     needs: [gate, automatic]
-    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    # The PR/manual branch is intentionally skipped on main. An explicit status
+    # check avoids inheriting success() over that transitive skipped dependency.
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
     permissions:
       contents: write
     uses: ./.github/workflows/dev.yml

@@ -33,6 +33,50 @@ class WorkflowSecurityTests(unittest.TestCase):
     def setUp(self):
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
 
+    def dev_selected(self, workflow, name, results, cancelled=False, event='push',
+                     ref='refs/heads/main', repository='ufna/zerus', enabled='true', private=False):
+        expression = field(job(workflow, name), 'if')
+        # Without a status function GitHub adds success() over the dependency
+        # chain, including the deliberately skipped PR/manual branch on main.
+        self.assertIn('!cancelled()', expression)
+        expression = expression.replace('&&', ' and ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        return bool(eval(expression, {'__builtins__': {}}, {
+            'cancelled': lambda: cancelled,
+            'github': SimpleNamespace(repository=repository, ref=ref, event_name=event,
+                                      event=SimpleNamespace(repository=SimpleNamespace(private=private))),
+            'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled),
+            'needs': SimpleNamespace(**{key: SimpleNamespace(result=value) for key,value in results.items()}),
+        }))
+
+    def test_dev_requires_exact_main_gate_without_inheriting_skipped_review(self):
+        passed = {'gate':'success', 'automatic':'success', 'review':'skipped'}
+        self.assertTrue(self.dev_selected(self.ci, 'dev', passed))
+        for key in ['gate','automatic']:
+            for result in ['failure','cancelled','skipped']:
+                with self.subTest(key=key, result=result):
+                    self.assertFalse(self.dev_selected(self.ci, 'dev', {**passed,key:result}))
+        for overrides in [dict(cancelled=True), dict(event='pull_request'), dict(event='workflow_dispatch'),
+                          dict(ref='refs/heads/feature'), dict(repository='example/zerus'),
+                          dict(enabled=''), dict(private=True)]:
+            with self.subTest(overrides=overrides):
+                self.assertFalse(self.dev_selected(self.ci, 'dev', passed, **overrides))
+
+    def test_dev_reusable_jobs_preserve_status_and_candidate_success_checks(self):
+        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
+        passed = {'desktop':'success', 'android':'success', 'review':'skipped'}
+        for name in ['desktop','android','channel']:
+            self.assertTrue(self.dev_selected(workflow,name,passed))
+            for overrides in [dict(cancelled=True),dict(event='pull_request'),
+                              dict(ref='refs/heads/feature'),dict(repository='example/zerus')]:
+                with self.subTest(name=name,overrides=overrides):
+                    self.assertFalse(self.dev_selected(workflow,name,passed,**overrides))
+        for key in ['desktop','android']:
+            for result in ['failure','cancelled','skipped']:
+                with self.subTest(key=key,result=result):
+                    self.assertFalse(self.dev_selected(workflow,'channel',{**passed,key:result}))
+
     def test_dev_main_build_finishes_while_newer_main_waits(self):
         expression = re.search(r'(?m)^  cancel-in-progress: \$\{\{ (.*) \}\}$', self.ci)[1]
         expression = expression.replace('&&', ' and ')
