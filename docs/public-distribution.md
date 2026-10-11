@@ -94,6 +94,11 @@ The CI job is opt-in through repository variable `DEV_UPDATES_ENABLED=true`.
 Leave it unset until the signer and publisher are provisioned, so ordinary full
 CI keeps working during rollout. Once enabled, every successful main push is
 eligible automatically; missing required inputs fail publication.
+While Dev is enabled, the active upstream main CI run finishes instead of being
+cancelled by newer main pushes. GitHub keeps at most one pending revision in the
+concurrency group and replaces it with the newest push. This preserves publication
+progress during frequent development without an unbounded build queue. PR/manual
+checks and main checks before Dev activation retain their cancellation behavior.
 
 Install `dev_updates.py`, `publish-dev-feed.py`, `receive-dev-token.py` and the
 adjacent existing mirror modules on the public host. The protected `Publish Dev`

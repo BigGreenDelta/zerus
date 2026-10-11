@@ -33,6 +33,26 @@ class WorkflowSecurityTests(unittest.TestCase):
     def setUp(self):
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
 
+    def test_dev_main_build_finishes_while_newer_main_waits(self):
+        expression = re.search(r'(?m)^  cancel-in-progress: \$\{\{ (.*) \}\}$', self.ci)[1]
+        expression = expression.replace('&&', ' and ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        for event, ref, repository, enabled, private, cancels in [
+            ('push', 'refs/heads/main', 'ufna/zerus', 'true', False, False),
+            ('push', 'refs/heads/main', 'ufna/zerus', '', False, True),
+            ('push', 'refs/heads/main', 'ufna/zerus', 'true', True, True),
+            ('push', 'refs/heads/main', 'example/zerus', 'true', False, True),
+            ('push', 'refs/heads/feature', 'ufna/zerus', 'true', False, True),
+            ('pull_request', 'refs/pull/123/merge', 'ufna/zerus', 'true', False, True),
+            ('workflow_dispatch', 'refs/heads/main', 'ufna/zerus', 'true', False, True),
+        ]:
+            github = SimpleNamespace(repository=repository, ref=ref, event_name=event,
+                                     event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+            with self.subTest(event=event, repository=repository, enabled=enabled, private=private):
+                self.assertEqual(bool(eval(expression, {'__builtins__': {}}, {
+                    'github': github, 'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled)})), cancels)
+
     def test_dev_publisher_accepts_only_successful_main_events_or_main_retry(self):
         workflow = (ROOT / '.github/workflows/publish-dev.yml').read_text()
         expression = field(job(workflow, 'publish'), 'if').replace('&&', ' and ').replace('||', ' or ')

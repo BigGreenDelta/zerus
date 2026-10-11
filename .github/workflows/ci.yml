@@ -48,7 +48,9 @@ cache-mode: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
-  cancel-in-progress: true
+  # Finish a qualifying Dev build while the newest main revision waits. GitHub
+  # coalesces pending runs; PR/manual and pre-rollout behavior stays cancellable.
+  cancel-in-progress: ${{ !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') }}
 
 jobs:
   automatic:
