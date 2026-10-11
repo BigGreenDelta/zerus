@@ -265,9 +265,12 @@ fn delivery_names_are_exact_and_default_to_away() {
 }
 
 #[test]
-fn attention_and_error_candidates_drop_when_handled_read_or_replaced() {
+fn attention_and_error_candidates_drop_when_handled_or_read() {
     let read = |signature: &str, conversation: &str| json!({"conversation_id":conversation,"reply_id":null,"attention_signature":signature,"at":1.0});
-    for kind in ["attention", "error"] {
+    for (kind, need) in [
+        ("attention", json!({"phase":"input"})),
+        ("error", json!({"phase":"error"})),
+    ] {
         let held = candidate(kind);
         assert_eq!(
             (
@@ -276,33 +279,49 @@ fn attention_and_error_candidates_drop_when_handled_read_or_replaced() {
             ),
             (Some("s1"), None)
         );
+        let row = |changes: Value| with(state(need.clone()), changes);
         let cases = [
-            ("unchanged and unread", state(json!({})), false),
-            ("run changed", state(json!({"run_id":"r2"})), true),
+            ("unchanged and unread", row(json!({})), false),
+            ("run changed", row(json!({"run_id":"r2"})), true),
             (
                 "conversation changed",
-                state(json!({"conversation_id":"c2"})),
+                row(json!({"conversation_id":"c2"})),
                 true,
             ),
             (
-                "replaced by a new need",
-                state(json!({"attention_signature":"s2"})),
+                "a newer signature while the need remains",
+                row(json!({"attention_signature":"s2"})),
+                false,
+            ),
+            (
+                "a newer signature after the need is gone",
+                row(json!({"attention_signature":"s2","phase":"working"})),
                 true,
             ),
-            ("resolved", state(json!({"attention_signature":null})), true),
+            ("resolved", row(json!({"attention_signature":null})), true),
             (
                 "read on any device",
-                state(json!({ "read": read("s1", "c") })),
+                row(json!({ "read": read("s1", "c") })),
+                true,
+            ),
+            (
+                "the newer state read on any device",
+                row(json!({"attention_signature":"s2","read":read("s2", "c")})),
                 true,
             ),
             (
                 "an older read mark",
-                state(json!({ "read": read("s0", "c") })),
+                row(json!({ "read": read("s0", "c") })),
+                false,
+            ),
+            (
+                "an older read mark after a newer signature",
+                row(json!({"attention_signature":"s2","read":read("s0", "c")})),
                 false,
             ),
             (
                 "a mark for another conversation",
-                state(json!({ "read": read("s1", "c0") })),
+                row(json!({"attention_signature":"s2","read":read("s2", "c0")})),
                 false,
             ),
         ];
@@ -310,6 +329,90 @@ fn attention_and_error_candidates_drop_when_handled_read_or_replaced() {
             assert_eq!(held.resolved(Some(&row)), dropped, "{kind}: {name}");
         }
         assert!(held.resolved(None), "{kind}: session gone");
+    }
+}
+
+#[test]
+fn unannounced_signature_changes_keep_the_candidate_until_away() {
+    // hgs signatures change on details the relay never announces, so no
+    // replacement candidate exists; the held one must still alert.
+    let asked = |ids: &[&str]| {
+        json!(ids
+            .iter()
+            .map(|id| json!({"question_id":id,"question_hash":format!("h-{id}")}))
+            .collect::<Vec<_>>())
+    };
+    let cases = [
+        (
+            "a subagent request",
+            "attention",
+            json!({"phase":"input","attention_id":"q1"}),
+            json!({"subagents":{"a1":{"state":"approval","attention_id":"sub1"}}}),
+        ),
+        (
+            "a request start time only",
+            "attention",
+            json!({"phase":"approval","attention_id":"","attention_started":100.0}),
+            json!({"attention_started":160.0}),
+        ),
+        (
+            "a failed turn start time only",
+            "error",
+            json!({"phase":"error","attention_id":"","turn_started":100.0}),
+            json!({"turn_started":160.0}),
+        ),
+        (
+            "an unindexed Codex question list",
+            "attention",
+            json!({"phase":"working","mobile_attention":asked(&["q1"])}),
+            json!({}),
+        ),
+        (
+            "a removed one of several questions",
+            "attention",
+            json!({"phase":"working","mobile_attention":asked(&["q1", "q2"])}),
+            json!({"mobile_attention":asked(&["q2"])}),
+        ),
+    ];
+    let active = vec![machine(5.0, 1.0, None)];
+    let away = vec![machine(0.0, 4000.0, None)];
+    let mark = |signature: &str| json!({"conversation_id":"c","reply_id":null,"attention_signature":signature,"at":1.0});
+    for (name, kind, captured, change) in cases {
+        let before = with(
+            json!({"name":"s","run_id":"r","conversation_id":"c","activity":"busy","attention_signature":"s1","read":null}),
+            captured,
+        );
+        let after = with(
+            with(before.clone(), change),
+            json!({"attention_signature":"s2"}),
+        );
+        let previous = canonical(&json!({ "sessions": [before.clone()] })).unwrap();
+        assert!(
+            event_changes(
+                Some(previous.as_str()),
+                &json!({ "sessions": [after.clone()] })
+            )
+            .unwrap()
+            .is_empty(),
+            "{name}: the relay announces nothing"
+        );
+        let held = Candidate::capture(&json!({ "sessions": [before] }), "s", kind);
+        for (presence, expected) in [(&active, "wait"), (&away, "deliver")] {
+            assert_eq!(
+                outcome(&held, &after, Delivery::Away(0), presence),
+                expected,
+                "{name}"
+            );
+        }
+        // Reading the captured or the newer state on any device still drops it.
+        for read in ["s1", "s2"] {
+            let marked = with(after.clone(), json!({ "read": mark(read) }));
+            assert_eq!(
+                outcome(&held, &marked, Delivery::Away(0), &away),
+                "drop",
+                "{name}: read {read}"
+            );
+        }
     }
 }
 

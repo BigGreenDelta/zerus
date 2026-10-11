@@ -189,8 +189,8 @@ impl Candidate {
             reply_id: text(r, "reply_id"),
         }
     }
-    /// True when the current live row proves the item was handled, read or
-    /// replaced. `None` means the snapshot no longer has the live session.
+    /// True when the current live row proves the item was handled or read.
+    /// `None` means the snapshot no longer has the live session.
     pub fn resolved(&self, session: Option<&Value>) -> bool {
         let Some(v) = session else {
             return true;
@@ -217,7 +217,17 @@ impl Candidate {
             // Without a signature only the native state resolves it; read marks never do.
             return !native_need(v, &self.kind);
         };
-        current("attention_signature") != Some(captured)
-            || read["attention_signature"].as_str() == Some(captured)
+        let Some(signature) = current("attention_signature") else {
+            // hgs reports nothing that needs the owner any more.
+            return true;
+        };
+        // The signature also changes without a relay event (subagent requests,
+        // request start times, unindexed questions), so a change alone proves
+        // nothing; a real replacement event replaces the row instead. Reading
+        // either the captured or the newer state still acknowledges it.
+        let read = read["attention_signature"].as_str();
+        read == Some(captured)
+            || read == Some(signature)
+            || (signature != captured && !native_need(v, &self.kind))
     }
 }

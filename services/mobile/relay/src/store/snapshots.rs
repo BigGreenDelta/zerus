@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     alerts::{Candidate, Delivery, Presence},
-    db::{f, Arg, Tx},
+    db::{Arg, Tx},
     protocol::{self, MIB},
     registry,
 };
@@ -315,20 +315,20 @@ impl Store {
         Ok(event)
     }
     /// Coalesces one generic wake per registered device toward the newest alert.
+    /// A job whose send is in flight records the newer event too, and
+    /// `finish_push` then sends it again instead of deleting it.
     pub(super) async fn wake_devices(&self, t: &mut Tx, w: &str, event_id: &Value) -> Result<()> {
         let payload = canonical(&json!({"event_id":event_id,"kind":"wake"}))?;
         let registrations=t.all("SELECT p.device_id FROM pushes p JOIN devices d ON d.id=p.device_id WHERE d.workspace_id=? AND d.revoked=0 ORDER BY p.device_id LIMIT 1000",args![w]).await?;
         for reg in registrations {
             if let Some(j) = t
                 .one(
-                    "SELECT id,lease_until FROM push_jobs WHERE device_id=? ORDER BY id LIMIT 1",
+                    "SELECT id FROM push_jobs WHERE device_id=? ORDER BY id LIMIT 1",
                     args![&reg["device_id"]],
                 )
                 .await?
             {
-                if j["lease_until"].is_null() || f(&j, "lease_until") <= now() {
-                    t.exec("UPDATE push_jobs SET event_id=?,payload=?,next_at=CASE WHEN next_at<? THEN next_at ELSE ? END WHERE id=?",args![event_id,&payload,now(),now(),&j["id"]]).await?;
-                }
+                t.exec("UPDATE push_jobs SET event_id=?,payload=?,next_at=CASE WHEN next_at<? THEN next_at ELSE ? END WHERE id=?",args![event_id,&payload,now(),now(),&j["id"]]).await?;
                 continue;
             }
             let usage = t

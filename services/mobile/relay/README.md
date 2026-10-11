@@ -86,7 +86,9 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   The gateway snapshot's `preferences.mobile_delivery` is stored with it.
 - `alerts.rs` is the pure presence rule: preference parsing, owner away time
   over every remembered presence, and candidate resolution from
-  `attention_signature`, `reply_id`, shared read marks and native need.
+  `attention_signature`, `reply_id`, shared read marks and native need. A
+  changed signature drops an attention or error candidate only once the native
+  need is gone; a read mark of the captured or current signature drops it.
   Missing or malformed information means away.
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
@@ -105,7 +107,9 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   that order.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
-  PostgreSQL startup never retires another worker's claims.
+  PostgreSQL startup never retires another worker's claims. A failing alert
+  pass at startup is logged and left to the background loop. A wake job that
+  receives a newer alert while leased is sent again instead of deleted.
 - `push.rs` sends generic wake hints through FCM HTTP v1. Provider requests run
   outside transactions and never target client-supplied URLs. FCM uses
   short-lived service-account OAuth tokens and an RS256 signature from `ring`;

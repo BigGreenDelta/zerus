@@ -330,6 +330,32 @@ async fn sqlite_restart_keeps_claim_uncertain() {
     f.close().await;
 }
 #[tokio::test]
+async fn startup_defers_alert_pass_failure_but_not_record_maintenance() {
+    let f = Fixture::new().await;
+    let b = f.command("send");
+    f.submit(&b).await.unwrap();
+    f.store.claim(&f.node, false).await.unwrap();
+    // A failing alert pass (here its table is gone) must not stop a worker from starting.
+    f.store
+        .db
+        .exec("DROP TABLE alert_candidates", &[])
+        .await
+        .unwrap();
+    assert!(f.store.maintain(false).await.is_err());
+    f.store.maintain_at_startup(true).await.unwrap();
+    // The record stages before it still ran: the SQLite restart retired the claim.
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "uncertain");
+    f.check_accounting().await;
+    // Record maintenance failures stay fatal at startup.
+    f.store
+        .db
+        .exec("DROP TABLE rate_limits", &[])
+        .await
+        .unwrap();
+    assert!(f.store.maintain_at_startup(false).await.is_err());
+    f.close().await;
+}
+#[tokio::test]
 async fn legacy_oversized_receipt_does_not_change_delivery_identity() {
     let f = Fixture::new().await;
     let b = f.command("send");
@@ -656,6 +682,35 @@ async fn presence_holds_read_drops_and_lock_delivers_alert() {
         json!({"event_id":alerts[0]["id"],"kind":"wake"})
     );
     assert_eq!(f.count("alert_candidates").await, 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn unannounced_signature_change_keeps_held_candidate() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    let question = session_row("input", "busy", "q1", Some(&signature('1')), Value::Null);
+    f.beat_with(
+        &listing(session_row("working", "busy", "", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(&listing(question.clone()), &active).await;
+    // A subagent asks too: hgs changes the signature, the relay emits nothing.
+    let mut changed = question;
+    changed["subagents"] = json!({"a1":{"state":"approval","attention_id":"sub1"}});
+    changed["attention_signature"] = json!(signature('2'));
+    f.beat_with(&listing(changed.clone()), &active).await;
+    assert_eq!(f.events_of("attention").await.len(), 1);
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    f.beat_with(&listing(changed), &presence(2.0, Some(1.0)))
+        .await;
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
     f.close().await;
 }
 #[tokio::test]
@@ -1059,6 +1114,86 @@ async fn snapshot_events_and_push_claims() {
         .unwrap();
     assert_eq!(count["push_jobs"], 0);
     assert_eq!(count["events"], 2);
+    f.close().await;
+}
+#[tokio::test]
+async fn alert_during_an_in_flight_wake_wakes_again() {
+    let f = Fixture::new().await;
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let reg = f
+        .store
+        .push_registration(&f.phone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let question = |attention: &str, digit: char| {
+        listing(session_row(
+            "input",
+            "busy",
+            attention,
+            Some(&signature(digit)),
+            Value::Null,
+        ))
+    };
+    let wake = |job: &Value| serde_json::from_str::<Value>(s(job, "payload")).unwrap();
+    // Without presence the owner is away, so every question alerts at once.
+    f.beat(&listing(session_row(
+        "working",
+        "busy",
+        "",
+        None,
+        Value::Null,
+    )))
+    .await;
+    f.beat(&question("q1", '1')).await;
+    let first = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(first.len(), 1);
+    // The next alert commits while the first wake is being sent.
+    f.beat(&question("q2", '2')).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 2);
+    f.store
+        .finish_push(&first[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    let second = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        wake(&second[0]),
+        json!({"event_id":alerts[1]["id"],"kind":"wake"})
+    );
+    // A failed send with a newer alert is due again at once, as a new job would be.
+    f.beat(&question("q3", '3')).await;
+    f.store
+        .finish_push(&second[0], false, false, Some(&reg))
+        .await
+        .unwrap();
+    let third = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(third.len(), 1);
+    assert_eq!(
+        (
+            wake(&third[0])["event_id"].clone(),
+            i(&third[0], "attempts")
+        ),
+        (f.events_of("alert").await[2]["id"].clone(), 0)
+    );
+    // Without a newer alert the delivered job is finished.
+    f.store
+        .finish_push(&third[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    assert_eq!(f.count("push_jobs").await, 0);
+    let usage = f
+        .store
+        .db
+        .one("SELECT push_jobs FROM global_usage WHERE id=1", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage["push_jobs"], 0);
     f.close().await;
 }
 #[tokio::test]
@@ -1481,6 +1616,36 @@ async fn postgres_cross_worker_single_alert() {
     );
     // Both alerts coalesce into the device's single pending wake.
     assert_eq!(f.count("push_jobs").await, 1);
+    // An alert committed on one worker while the other sends the wake is sent again.
+    let leased = second.claim_push_jobs().await.unwrap();
+    assert_eq!(leased.len(), 1);
+    let next = question("q3", '3');
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":next,"presence":presence(600.0, None)}),
+            &canonical(&next).unwrap(),
+        )
+        .await
+        .unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 3);
+    let reg = f
+        .store
+        .push_registration(&f.phone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    second
+        .finish_push(&leased[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    let resent = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(resent.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(s(&resent[0], "payload")).unwrap(),
+        json!({"event_id":alerts[2]["id"],"kind":"wake"})
+    );
     second.db.close().await;
     f.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))

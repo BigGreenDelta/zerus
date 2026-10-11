@@ -101,7 +101,7 @@ async fn run(cli: Cli) -> Result<()> {
     let outcome = async {
         let value = match cli.command {
             Command::Serve { host, port } => {
-                store.maintain(!db.postgres).await?;
+                store.maintain_at_startup(!db.postgres).await?;
                 let app = App::new(store.clone()).await?;
                 let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
                 app.start_background();
