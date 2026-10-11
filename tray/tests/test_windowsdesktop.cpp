@@ -379,7 +379,8 @@ void TestWindowsDesktop::stoppingEndsARunningWorker()
     worker.start();
     QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(script + ".running"), 20000);
     QVERIFY(worker.isRunning());
-    QCOMPARE(started.size(), 1);
+    // The start notification can arrive after the child has already run (macOS).
+    QTRY_COMPARE_WITH_TIMEOUT(started.size(), 1, 10000);
     const qint64 pid = started[0][0].toLongLong();
     QVERIFY(FakeCli::processAlive(pid));
     worker.stop();
