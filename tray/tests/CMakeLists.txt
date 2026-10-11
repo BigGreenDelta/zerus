@@ -142,6 +142,10 @@ endif()
 # режим на маке один. Сам список мака по-прежнему проверяется дословно в test_appconfig,
 # на обеих платформах.
 if(APPLE)
+    add_executable(test_macpresence test_macpresence.cpp ../src/MacPresenceSource.cpp ../src/DesktopPresence.cpp)
+    target_include_directories(test_macpresence PRIVATE ../src)
+    target_link_libraries(test_macpresence PRIVATE Qt6::Test Qt6::Core "-framework CoreGraphics" "-framework CoreFoundation")
+    add_test(NAME macpresence COMMAND test_macpresence)
     add_executable(test_macapplicationbadge test_macapplicationbadge.mm)
     target_include_directories(test_macapplicationbadge PRIVATE ../src)
     target_compile_options(test_macapplicationbadge PRIVATE -fobjc-arc)

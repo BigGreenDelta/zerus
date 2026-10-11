@@ -198,6 +198,13 @@ Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent replies and explicit child
 questions can notify; ordinary child results and errors stay with the parent.
+
+While Zerus runs, even with its window closed, it records keyboard/mouse idle time
+and screen lock for phone notifications. macOS uses CoreGraphics without a
+permission prompt. Linux uses the desktop's screen-saver and idle interfaces (KDE
+Plasma, GNOME and other compositors with Wayland idle notifications). When none
+is available only input in Zerus windows counts, which can only cause extra phone
+notifications.
 Delivery failures show a reason and retry after a minute while still relevant.
 macOS uses Notification Center and needs its system permission; Focus and OS
 notification settings still apply. Notification Center looks up the icon by bundle

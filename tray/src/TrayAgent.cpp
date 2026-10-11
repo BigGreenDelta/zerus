@@ -231,6 +231,17 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     m_localTimer.start();
     m_client.requestLocal();
 
+    // Phone alerts wait while the owner uses any Zerus desktop. This runs with
+    // the window closed; failures are logged once per distinct message.
+    m_presence = std::make_unique<DesktopPresence>(makePresenceSource(),
+        [this](double idleSeconds, bool locked) { m_client.setPresence(idleSeconds, locked); });
+    connect(&m_client, &HgsClient::presenceFinished, this, [this](const QString &error) {
+        if (error == m_presenceError) return;
+        m_presenceError = error;
+        if (!error.isEmpty()) qWarning().noquote() << "hgs zerus: desktop presence:" << error;
+    });
+    m_presence->start();
+
     // Пиров локальный ответ не содержит; список известен только из полного `hgs ls
     // --json`, который сам по себе стоит времени самого медленного ssh во флоте.
     // Поэтому: локальный тик и первая отрисовка -- выше, синхронно; список пиров --

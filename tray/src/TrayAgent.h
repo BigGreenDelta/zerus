@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "AppConfig.h"
+#include "DesktopPresence.h"
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "IconFactory.h"
@@ -108,4 +109,7 @@ private:
     QString m_localReadError;
     QSet<QString> m_pollingHosts;
     SessionsWindow *m_sessionsWindow = nullptr;
+    // Records desktop activity for phone alerts; see DesktopPresence.h.
+    std::unique_ptr<DesktopPresence> m_presence;
+    QString m_presenceError;
 };
