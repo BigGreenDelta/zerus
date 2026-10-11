@@ -6,6 +6,8 @@
 #include <QHash>
 #include <QSet>
 #include <QWidget>
+#include <QImage>
+#include <memory>
 
 namespace ActivityWidth { class ColumnLayout; }
 class QAction;
@@ -14,7 +16,8 @@ class QPushButton;
 class QLabel;
 class QTextBrowser;
 class QUrl;
-class QImage;
+class QShowEvent;
+struct ActivityRenderResult;
 
 // Chronological, read-only journal presentation. Agent input lives in the
 // composer's own widget; viewing activity never writes to a running session.
@@ -48,6 +51,7 @@ public:
     void setAttachmentPreview(const QString &key, const QImage &image);
     // Journal HTML generations. Tests verify that unchanged polls skip them.
     int renderPasses() const { return m_renderPasses; }
+    bool renderPending() const { return m_renderDirty || m_renderInFlight || m_renderScheduled; }
 
 public slots:
     void jumpToLatest();
@@ -68,10 +72,14 @@ signals:
     void fullWidthRequested(bool full);
 
 protected:
+    void showEvent(QShowEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void render(bool contentUpdate);
+    void startRender();
+    void clearDocument();
+    void commitRender(const std::shared_ptr<ActivityRenderResult> &result);
     void updateJumpButton();
     void positionJumpButton();
     void activateLink(const QUrl &url);
@@ -103,6 +111,7 @@ private:
     QHash<QString, QString> m_deliveryKeys;
     QHash<QString, QJsonObject> m_attachmentLinks;
     QHash<QString, QJsonObject> m_previewFiles;
+    QHash<QString, QImage> m_previews;
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QString> m_copyTexts;   // copy button key -> the reply's Markdown source
     QString m_copyPressed;
@@ -111,6 +120,9 @@ private:
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
     bool m_dark = false, m_tracked = true, m_initial = true;
     bool m_rendering = false, m_followLatest = true, m_followScheduled = false;
+    quint64 m_renderGeneration = 0, m_contentRevision = 0;
+    bool m_renderDirty = false, m_renderInFlight = false, m_renderScheduled = false, m_pendingContentUpdate = false;
+    int m_renderWorkers = 0;
     int m_unseen = 0, m_renderPasses = 0;
     double m_scale = 1.0;
     int m_column = 0;               // 0: the transcript fills the pane

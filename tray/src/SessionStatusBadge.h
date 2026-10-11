@@ -21,8 +21,14 @@ inline int width(const QString &text, Kind kind, const QFont &base) {
     // Leave room for fractional glyph advances before elidedText rounds them.
     return CachedText::width(font(base), text) + 16 + (kind == Neutral ? 0 : 16);
 }
+// The maximum halo is a 5px ellipse. Include its antialiasing fringe.
+inline QPointF indicatorCenter(const QRect &rect) { return {qreal(rect.x() + 11), rect.center().y() + .5}; }
+inline QRect workingIndicatorRect(const QRect &rect) {
+    const auto c = indicatorCenter(rect);
+    return QRectF(c.x() - 6, c.y() - 6, 12, 12).toAlignedRect().intersected(rect);
+}
 // labelOpacity fades the caption while the collapsed session strip grows into cards.
-inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1) {
+inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1, bool indicatorOnly = false) {
     p->save(); p->setRenderHint(QPainter::Antialiasing); p->setClipRect(rect, Qt::IntersectClip);
     const QColor background = kind == Working ? QColor(dark ? "#194d36" : "#ccefdc")
         : (kind == Attention || kind == Unread) ? QColor(dark ? "#ffda76" : "#f4ce65")
@@ -35,7 +41,7 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         : kind == Paused ? QColor(dark ? "#dec3ff" : "#634187")
         : kind == Draft ? QColor(dark ? "#9cc0ec" : "#2f5f93") : QColor(dark ? "#b6c2d0" : "#566575");
     p->setPen(Qt::NoPen); p->setBrush(background); p->drawRoundedRect(rect, 5, 5);
-    const QPointF center(rect.x() + 11, rect.center().y() + .5);
+    const QPointF center = indicatorCenter(rect);
     p->setFont(font(p->font())); p->setPen(foreground);
     if (kind == Working) {
         p->setPen(Qt::NoPen); QColor halo(foreground); halo.setAlphaF(.08 + .25 * pulse);
@@ -59,6 +65,7 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         p->drawRoundedRect(QRectF(center.x() - 4, center.y() - 3, 8, 6), 1, 1);
         p->drawLine(center + QPointF(-4, -3), center); p->drawLine(center, center + QPointF(4, -3));
     }
+    if (indicatorOnly) { p->restore(); return; }
     p->setPen(foreground); p->setFont(font(p->font())); p->setOpacity(p->opacity() * labelOpacity);
     const QRect label = rect.adjusted(kind == Neutral ? 7 : 23, 0, -7, 0);
     // A growing badge reveals its caption under the clip instead of re-eliding it.

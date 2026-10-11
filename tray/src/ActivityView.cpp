@@ -16,6 +16,7 @@
 #include <QCursor>
 #include <QDesktopServices>
 #include <QEvent>
+#include <QEventLoop>
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QHelpEvent>
@@ -33,6 +34,7 @@
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSemaphore>
 #include <QStyle>
 #include <QStyleOption>
 #include <QTextBlock>
@@ -40,7 +42,15 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextFragment>
+#include <QTextDocumentFragment>
+#include <QTextFrame>
+#include <QTextInlineObject>
+#include <QTextObjectInterface>
+#include <QFontMetrics>
 #include <QTimer>
+#include <QThread>
+#include <QPointer>
+#include <memory>
 #include <QToolTip>
 #include <QUrl>
 #include <QUrlQuery>
@@ -117,15 +127,103 @@ QImage cardButton(const QUrl &url, qreal devicePixelRatio)
 class JournalDocument final : public QTextDocument {
 public:
     using QTextDocument::QTextDocument;
-    qreal pixelRatio = 1.0;
+    qreal pixelRatio = 1.0, defaultDpi = 96.0;
+    QImage metrics;
+    JournalDocument *layoutSource = nullptr;
 protected:
     // Only drawn Markdown decorations and card buttons load; remote and file resources never do.
-    QVariant loadResource(int, const QUrl &url) override
+    QVariant loadResource(int type, const QUrl &url) override
     {
+        if (layoutSource) return layoutSource->resource(type, url);
         if (url.scheme() == QLatin1String("hgs-ui")) return cardButton(url, pixelRatio);
         return MarkdownObjects::resource(url, pixelRatio);
     }
 };
+
+class JournalImages final : public QObject, public QTextObjectInterface {
+    Q_OBJECT
+    Q_INTERFACES(QTextObjectInterface)
+public:
+    JournalImages(JournalDocument *source, QObject *parent) : QObject(parent), m_source(source) {}
+    QSizeF intrinsicSize(QTextDocument *, int, const QTextFormat &format) override {
+        const auto image = format.toImageFormat();
+        const auto resource = m_source->resource(QTextDocument::ImageResource, QUrl(image.name())).value<QImage>();
+        const QSizeF natural = resource.deviceIndependentSize();
+        QSize size(qRound(image.hasProperty(QTextFormat::ImageWidth) ? image.width() : natural.width()),
+                   qRound(image.hasProperty(QTextFormat::ImageHeight) ? image.height() : natural.height()));
+        if (!resource.isNull()) size *= m_source->metrics.logicalDpiY() / m_source->defaultDpi;
+        return size;
+    }
+    void drawObject(QPainter *painter, const QRectF &rect, QTextDocument *, int, const QTextFormat &format) override {
+        painter->drawImage(rect, m_source->resource(QTextDocument::ImageResource, QUrl(format.toImageFormat().name())).value<QImage>());
+    }
+private:
+    JournalDocument *m_source;
+};
+
+// QTextEdit unconditionally sets the document page size during installation,
+// which invalidates even an already finished Qt layout. Keep that layout in an
+// owned immutable document and expose the same formatted text through this
+// adapter. Widget geometry changes request a new generation rather than laying
+// the complete transcript out again on the GUI thread.
+class JournalLayout final : public QAbstractTextDocumentLayout {
+public:
+    JournalLayout(JournalDocument *document, JournalDocument *source)
+        : QAbstractTextDocumentLayout(document), m_source(source) {
+        source->setParent(this);
+        setPaintDevice(&source->metrics);
+        registerHandler(QTextFormat::ImageObject, new JournalImages(source, this));
+        const auto collect = [&](const auto &self, QTextFrame *frame) -> void {
+            m_frames.insert(frame->firstPosition(), frame);
+            for (auto *child : frame->childFrames()) self(self, child);
+        };
+        collect(collect, source->rootFrame());
+    }
+    void draw(QPainter *painter, const PaintContext &context) override {
+        auto mapped = context;
+        for (auto &selection : mapped.selections) {
+            const auto original = selection.cursor;
+            selection.cursor = QTextCursor(m_source);
+            selection.cursor.setPosition(original.anchor());
+            selection.cursor.setPosition(original.position(), QTextCursor::KeepAnchor);
+        }
+        m_source->documentLayout()->draw(painter, mapped);
+    }
+    int hitTest(const QPointF &point, Qt::HitTestAccuracy accuracy) const override { return m_source->documentLayout()->hitTest(point, accuracy); }
+    int pageCount() const override { return m_source->documentLayout()->pageCount(); }
+    QSizeF documentSize() const override { return m_source->documentLayout()->documentSize(); }
+    QRectF frameBoundingRect(QTextFrame *frame) const override {
+        auto *source = m_frames.value(frame->firstPosition());
+        return source ? m_source->documentLayout()->frameBoundingRect(source) : QRectF();
+    }
+    QRectF blockBoundingRect(const QTextBlock &block) const override {
+        return m_source->documentLayout()->blockBoundingRect(m_source->findBlock(block.position()));
+    }
+protected:
+    void documentChanged(int, int, int) override {}
+    void resizeInlineObject(QTextInlineObject item, int position, const QTextFormat &format) override {
+        QAbstractTextDocumentLayout::resizeInlineObject(item, position, format);
+        const auto character = format.toCharFormat();
+        const qreal height = item.ascent() + item.descent();
+        if (character.verticalAlignment() == QTextCharFormat::AlignMiddle) {
+            const qreal halfX = QFontMetrics(character.font()).xHeight() / 2.;
+            item.setAscent((height + halfX) / 2.);
+            item.setDescent((height - halfX) / 2.);
+        } else if (character.verticalAlignment() == QTextCharFormat::AlignBaseline) {
+            const qreal descent = QFontMetricsF(character.font()).descent();
+            item.setAscent(height - descent); item.setDescent(descent);
+        }
+    }
+private:
+    JournalDocument *m_source;
+    QHash<int, QTextFrame *> m_frames;
+};
+
+JournalDocument *paintDocument(QTextDocument *document)
+{
+    auto *journal = static_cast<JournalDocument *>(document);
+    return journal->layoutSource ? journal->layoutSource : journal;
+}
 
 // Copies what the reader sees instead of U+FFFC for markers, and draws the
 // chips of inline code, which stays text so that it wraps and selects freely.
@@ -160,7 +258,7 @@ protected:
         QPainter painter(viewport());
         const QPoint scroll(horizontalScrollBar()->value(), verticalScrollBar()->value());
         painter.translate(-scroll);
-        MarkdownObjects::paintChips(&painter, document(), QRectF(event->rect().translated(scroll)), viewport()->palette(), selections);
+        MarkdownObjects::paintChips(&painter, paintDocument(document()), QRectF(event->rect().translated(scroll)), viewport()->palette(), selections);
     }
     void contextMenuEvent(QContextMenuEvent *event) override
     {
@@ -372,124 +470,34 @@ struct Position {
 };
 }
 
-ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
-{
-    setObjectName("activityView");
-    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(5);
-    auto *browser = new ActivityBrowser(this); m_browser = browser; m_browser->setObjectName("activity");
-    m_browser->setDocument(new JournalDocument(m_browser));
-    m_browser->setFrameShape(QFrame::NoFrame);
-    m_browser->setOpenLinks(false); m_browser->setOpenExternalLinks(false);
-    m_browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_browser->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-    m_browser->setAccessibleName(tr("Session activity"));
-    layout->addWidget(m_browser, 1);
-    // A browser child overlays the viewport without participating in layout
-    // or moving with its scrolled contents.
-    m_latest = new QPushButton(m_browser); m_latest->setObjectName("activityJumpLatest");
-    m_latest->setAccessibleName(tr("Jump to latest activity"));
-    m_latest->hide();
-    m_fullWidth = new QAction(tr("Full-width Activity"), this); m_fullWidth->setCheckable(true);
-    connect(m_fullWidth, &QAction::triggered, this, &ActivityView::fullWidthRequested);
-    m_resetWidth = new QAction(tr("Reset Activity width"), this);
-    connect(m_resetWidth, &QAction::triggered, this, &ActivityView::columnResetRequested);
-    browser->extendMenu = [this](QMenu *menu) { addColumnActions(menu); };
-    for (const bool right : {false, true}) {
-        auto *edge = new ColumnEdge(right, m_browser);
-        edge->pressed = [this] { m_dragOrigin = m_browser->viewport()->width(); };
-        edge->dragged = [this](int distance) { dragColumn(distance); };
-        edge->reset = [this] { emit columnResetRequested(); };
-        edge->menuRequested = [this](const QPoint &position) { showColumnMenu(position); };
-        m_edges.append(edge);
+// Values captured on the GUI thread; each job owns its document exclusively
+// until construction and layout finish. No widget or pixmap enters the worker.
+struct ActivityRenderResult {
+    QString m_sessionKey, m_conversation, m_fallbackPrompt, m_html;
+    QJsonObject m_details, m_searchResult;
+    QJsonArray m_events, m_localMessages;
+    QHash<QString, bool> m_expanded;
+    QHash<QString, QString> m_fileLinks, m_deliveryKeys, m_copyTexts;
+    QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles;
+    QHash<QString, QPair<QString, QString>> m_messageActions;
+    QHash<QString, QImage> m_previews;
+    QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
+    bool m_dark = false, m_tracked = true, processesEnabled = false, content = false;
+    double m_scale = 1.;
+    quint64 generation = 0, contentRevision = 0;
+    qreal width = 0;
+    QSizeF size;
+    qreal widthWithScrollBar = 0;
+    int viewportHeight = 0;
+    QMap<QString, int> anchors;
+    std::unique_ptr<JournalDocument> document;
+    static QString tr(const char *text) { return ActivityView::tr(text); }
+    QString copyButton(const QString &state, const QString &key) const {
+        return QString("hgs-ui:%1/%2/%3?card=%4").arg(state, m_dark ? "dark" : "light", QString::number(qRound(m_scale * 100)), key);
     }
-    // Viewport events need the column edges.
-    m_browser->viewport()->installEventFilter(this);
-    m_browser->installEventFilter(this);
-    m_compaction = new QWidget(this); m_compaction->setObjectName("activityCompaction");
-    m_compaction->setAttribute(Qt::WA_StyledBackground);
-    auto *progressRow = new QHBoxLayout(m_compaction); progressRow->setContentsMargins(12, 3, 12, 3); progressRow->setSpacing(10);
-    auto *progress = new CompactionProgress(m_compaction); progress->setObjectName("compactionProgress");
-    progress->setRange(0, 0); progress->setTextVisible(false); progress->setFixedSize(48, 5);
-    progress->setAccessibleName(tr("Compacting context"));
-    auto *caption = new QLabel(tr("Compacting context…"), m_compaction); caption->setObjectName("compactionCaption");
-    caption->setTextFormat(Qt::PlainText);
-    progressRow->addWidget(progress); progressRow->addWidget(caption); progressRow->addStretch();
-    m_compaction->setToolTip(tr("The agent is compressing conversation context."));
-    layout->addWidget(m_compaction); m_compaction->hide();
-    m_queue = new QWidget(this); m_queue->setObjectName("activityInputQueue"); m_queue->setAttribute(Qt::WA_StyledBackground);
-    auto *queueLayout = new QVBoxLayout(m_queue); queueLayout->setContentsMargins(12,8,12,8);
-    auto *queueHeader = new QHBoxLayout;
-    auto *queueCaption = new QLabel(tr("Queued in agent")); queueCaption->setObjectName("queueCaption");
-    queueHeader->addWidget(queueCaption); queueHeader->addStretch();
-    m_queueSend = new QPushButton(tr("Send now")); m_queueSend->setObjectName("queueSendNow"); queueHeader->addWidget(m_queueSend);
-    queueLayout->addLayout(queueHeader);
-    m_queueText = new QLabel; m_queueText->setObjectName("queueText"); m_queueText->setTextFormat(Qt::PlainText); m_queueText->setWordWrap(true);
-    m_queueText->setTextInteractionFlags(Qt::TextSelectableByMouse); m_queueText->setMaximumHeight(100);
-    queueLayout->addWidget(m_queueText);
-    m_queueColumn = new ActivityWidth::ColumnLayout; layout->addLayout(m_queueColumn);
-    m_queueColumn->addWidget(m_queue); m_queue->hide();
-    connect(m_queueSend, &QPushButton::clicked, this, [this] { emit queueSendNowRequested(m_details["input_queue"].toObject()["id"].toString()); });
-    connect(m_latest, &QPushButton::clicked, this, &ActivityView::jumpToLatest);
-    connect(m_browser, &QTextBrowser::anchorClicked, this, &ActivityView::activateLink);
-    connect(this, &ActivityView::externalLinkActivated, this, [](const QUrl &url) { QDesktopServices::openUrl(url); });
-    connect(m_browser->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
-        if (m_rendering) return;
-        m_followLatest = nearBottom() && !m_browser->textCursor().hasSelection();
-        if (m_followLatest) m_unseen = 0;
-        updateJumpButton();
-    });
-    connect(m_browser->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this] {
-        if (!m_rendering && m_followLatest && !m_browser->textCursor().hasSelection()) scheduleFollow();
-    });
-    connect(m_browser, &QTextBrowser::selectionChanged, this, [this] {
-        if (!m_rendering && m_browser->textCursor().hasSelection()) m_followLatest = false;
-    });
-    setTheme(false); updateColumnActions();
-}
-
-void ActivityView::setSessionKey(const QString &key)
-{
-    if (key == m_sessionKey) return;
-    m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
-    m_attachmentLinks.clear();m_fileLinks.clear();
-    m_previewFiles.clear(); m_deliveryKeys.clear();
-    m_messageActions.clear(); m_copyTexts.clear();
-    m_localMessages = {}; m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
-    m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
-    m_browser->clear(); updateJumpButton();
-    m_compaction->hide(); m_queue->hide();
-}
-
-namespace {
-// Everything setActivity renders from. Polls refresh live fields that Activity
-// never shows (goal observation time, cache age, token usage, process load);
-// of the processes only their IDs become links. Keep these out of the HTML.
-QJsonObject activityInput(QJsonObject details, const QJsonArray &events, const QString &fallbackPrompt, bool tracked)
-{
-    QJsonArray processes;
-    for (const auto &job : details.value("processes").toObject().value("items").toArray()) processes.append(job.toObject().value("id"));
-    for (const auto &key : {"goal_observed_at", "cache_hint", "session_usage"}) details.remove(QLatin1String(key));
-    details["processes"] = processes;
-    return {{"details", details}, {"events", events}, {"prompt", fallbackPrompt}, {"tracked", tracked}, {"process_links", ProcessSettings::enabled()}};
-}
-}
-
-void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &events, const QString &fallbackPrompt, bool tracked)
-{
-    // Theme, scale, search, cards and local messages render on their own; an
-    // identical poll would only regenerate the same journal.
-    auto input = activityInput(details, events, fallbackPrompt, tracked);
-    if (input == m_activityInput) return;
-    m_activityInput = std::move(input);
-    const auto conversation = details.value("conversation_id").toString();
-    if (!m_conversation.isEmpty() && !conversation.isEmpty() && conversation != m_conversation
-        && !details.value("cleared_conversations").toArray().contains(m_conversation)) {
-        m_previewFiles.clear(); m_deliveryKeys.clear();
-        m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
-        m_expanded.clear(); m_knownEvents.clear(); m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear();
-    }
-    if (!conversation.isEmpty()) m_conversation = conversation;
-    m_details = details; m_events = events; m_fallbackPrompt = fallbackPrompt; m_tracked = tracked;
+    void build() {
+    const bool searching = !m_searchResult.isEmpty();
+    const QJsonObject details = searching ? QJsonObject() : m_details;
     const auto clear = details.value("session_clear").toObject();
     if (clear.value("type") == "SessionCleared") m_fallbackPrompt.clear();
     if (clear.value("type") == "SessionCleared" && !std::any_of(m_events.cbegin(), m_events.cend(), [&clear](const QJsonValue &value) {
@@ -533,359 +541,6 @@ void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &eve
         if (error.value("type") == "StopFailure" && (error.value("source") == "codex_native_log"
             || error.value("source") == "codex_native_transcript")) m_events.append(error);
     }
-    render(true);
-}
-
-void ActivityView::setLocalMessages(const QJsonArray &messages)
-{
-    if (m_localMessages == messages) return;
-    m_localMessages = messages; render(true);
-}
-
-void ActivityView::setTimeline(const QJsonObject &details, const QJsonArray &events,
-                               const QJsonArray &localMessages, const QString &fallbackPrompt, bool tracked)
-{
-    // A poll can replace local delivery cards with native events. Commit both
-    // inputs together so the document never contains both generations.
-    if (m_localMessages != localMessages) { m_localMessages = localMessages; m_activityInput = {}; }
-    setActivity(details, events, fallbackPrompt, tracked);
-}
-
-void ActivityView::setTheme(bool dark)
-{
-    m_dark = dark;
-    auto background = this->palette();
-    background.setColor(QPalette::Window, QColor(dark ? "#1c2229" : "#ffffff"));
-    setPalette(background); setAutoFillBackground(true);
-    QPalette palette = m_browser->palette();
-    palette.setColor(QPalette::Base, QColor(dark ? "#1c2229" : "#ffffff"));
-    palette.setColor(QPalette::Text, QColor(dark ? "#e8edf4" : "#1a2733"));
-    palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
-    palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
-    m_browser->setPalette(palette);
-    m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }")
-        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#233a35" : "#e7f3ed", dark ? "#456e61" : "#a5c8b8"));
-    for (auto *edge : m_edges) { static_cast<ColumnEdge *>(edge)->color = QColor(dark ? "#8bdfc0" : "#167357"); edge->update(); }
-    m_compaction->setStyleSheet(QString("QWidget#activityCompaction { background:%3; } QLabel { color:%1; background:transparent; font-size:12px; } QProgressBar { background:%2; border:0; border-radius:2px; } QProgressBar::chunk { background:%1; border-radius:2px; }")
-        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? "#1c2229" : "#ffffff"));
-    m_queue->setStyleSheet(QString("QWidget#activityInputQueue{background:%1;border:1px solid %2;border-radius:7px;} QLabel#queueCaption{color:%3;font-weight:600;}")
-        .arg(dark ? "#2d2c23" : "#fff7e4", dark ? "#655638" : "#d7be84", dark ? "#edbd77" : "#805516")
-        + (qFuzzyCompare(m_scale, 1.0) ? QString() : QString(" QLabel#queueText{font-size:%1px;}").arg(ContentScale::px(13, m_scale))));
-    auto *progress = m_compaction->findChild<QProgressBar *>("compactionProgress");
-    auto progressPalette = progress->palette();
-    progressPalette.setColor(QPalette::Base, QColor(dark ? "#34404a" : "#dbe3e9"));
-    progressPalette.setColor(QPalette::Highlight, QColor(dark ? "#8bdfc0" : "#167357"));
-    progress->setPalette(progressPalette);
-    render(false);
-}
-
-void ActivityView::setContentScale(double scale)
-{
-    scale = ContentScale::clamp(scale);
-    if (qFuzzyCompare(scale, m_scale)) return;
-    m_scale = scale;
-    // Explicit HTML lengths are scaled while rendering. Markdown headings are
-    // relative to the document's default font, which follows the widget font.
-    m_browser->setStyleSheet(qFuzzyCompare(scale, 1.0) ? QString()
-        : QString("QTextBrowser { font-size:%1px; }").arg(ContentScale::px(13, scale)));
-    m_queueText->setMaximumHeight(ContentScale::px(100, scale));
-    setTheme(m_dark); updateColumnActions();
-}
-
-void ActivityView::setColumnWidth(int width)
-{
-    width = qMax(0, width);
-    if (width != m_column) { m_column = width; m_queueColumn->setColumnWidth(width); layoutColumn(); }
-    updateColumnActions();
-}
-
-int ActivityView::scrollBarReserve() const
-{
-    // As QAbstractScrollArea lays it out: a shown scroll bar takes its extent,
-    // less any overlap, from the side of the viewport.
-    auto *bar = m_browser->verticalScrollBar(); auto *container = bar->parentWidget();
-    if (!container || container == m_browser || !container->isVisibleTo(m_browser)) return 0;
-    return qMax(0, bar->sizeHint().width() - bar->style()->pixelMetric(QStyle::PM_ScrollView_ScrollBarOverlap, nullptr, bar));
-}
-
-void ActivityView::layoutColumn()
-{
-    const int pane = m_browser->width(), reserve = scrollBarReserve(), side = ActivityWidth::inset(pane, m_column);
-    // The scroll bar stays at the pane edge and takes its width from the right
-    // margin, so showing it does not rewrap the column.
-    static_cast<ActivityBrowser *>(m_browser)->setColumnMargins(QMargins(side, 0, qMax(0, side - reserve), 0));
-    // Edges need room beside the scroll bar. Without margins the pane edge
-    // remains where a text selection starts.
-    const auto viewport = m_browser->viewport()->geometry();
-    const bool edges = side - reserve >= ColumnEdge::Width;
-    m_edges[0]->setGeometry(viewport.left() - ColumnEdge::Width, 0, ColumnEdge::Width, m_browser->height());
-    m_edges[1]->setGeometry(viewport.right() + 1, 0, ColumnEdge::Width, m_browser->height());
-    for (auto *edge : m_edges) { edge->setVisible(edges); if (edges) edge->raise(); }
-}
-
-void ActivityView::dragColumn(int distance)
-{
-    // Both edges follow the pointer, so the column changes by twice its distance.
-    // Its edges stay within the pane and its width keeps a readable minimum.
-    const int widest = m_browser->width() - 2 * (scrollBarReserve() + ColumnEdge::Width);
-    const int narrowest = qMin(widest, ContentScale::px(ActivityWidth::Minimum, m_scale));
-    const int width = qBound(narrowest, m_dragOrigin + 2 * distance, widest);
-    if (width != m_column) emit columnWidthRequested(width);
-}
-
-void ActivityView::addColumnActions(QMenu *menu)
-{
-    updateColumnActions();
-    if (!menu->isEmpty()) menu->addSeparator();
-    menu->addAction(m_fullWidth); menu->addAction(m_resetWidth);
-}
-
-void ActivityView::showColumnMenu(const QPoint &position)
-{
-    auto *menu = new QMenu(this); addColumnActions(menu);
-    menu->setAttribute(Qt::WA_DeleteOnClose); menu->popup(position);
-}
-
-void ActivityView::updateColumnActions()
-{
-    m_fullWidth->setChecked(m_column == 0);
-    m_resetWidth->setEnabled(m_column != ContentScale::px(ActivityWidth::Default, m_scale));
-}
-
-QString ActivityView::plainText() const
-{
-    QTextCursor all(m_browser->document());
-    all.select(QTextCursor::Document);
-    return MarkdownObjects::plainText(all);
-}
-
-bool ActivityView::replyVisible(const QString &replyId) const
-{
-    if (!m_searchResult.isEmpty() || !nearBottom() || m_rendering || m_followScheduled) return false;
-    const auto anchors = bookmarks(m_browser->document());
-    const auto key = "item-" + replyId.section(':', 0, 0);
-    int start = anchors.value(key, -1);
-    if (start < 0 && !m_details.value("last_message").toString().isEmpty()) start = anchors.value("item-answer-snapshot", -1);
-    if (start < 0) {
-        // Providers can finish a turn without response text. Its visible Ready
-        // state and final operational event are the available result.
-        for (const auto &value : m_events) {
-            const auto event = value.toObject();
-            if (QString::number(event.value("seq").toInteger()) == replyId.section(':', 0, 0)
-                && event.value("type") == "Stop" && event.value("detail").toString().isEmpty()
-                && m_details.value("activity") == "idle") return true;
-        }
-        // Catching up to activity after a completed turn acknowledges that
-        // turn too, even after its event was pruned from the visible window.
-        bool numeric=false;const auto sequence=replyId.section(':',0,0).toLongLong(&numeric);
-        if(numeric&&sequence>0&&m_details.value("reply_id").toString()==replyId)
-            for(const auto &value:m_events) if(value.toObject().value("seq").toInteger()>=sequence)return true;
-        return false;
-    }
-    QTextCursor cursor(m_browser->document()); cursor.setPosition(start);
-    return m_browser->cursorRect(cursor).top() < m_browser->viewport()->height();
-}
-
-bool ActivityView::nearBottom() const
-{
-    auto *bar = m_browser->verticalScrollBar();
-    return bar->maximum() - bar->value() <= 30;
-}
-
-void ActivityView::scheduleFollow()
-{
-    if (m_followScheduled) return;
-    m_followScheduled = true;
-    QTimer::singleShot(0, this, [this] {
-        m_followScheduled = false;
-        if (m_followLatest && !m_browser->textCursor().hasSelection()) jumpToLatest();
-    });
-}
-
-void ActivityView::showSearchResult(const QJsonObject &event, const QString &query)
-{
-    m_searchResult = event; m_searchQuery = query;
-    m_initial = false; m_followLatest = false; m_html.clear();
-    m_expanded.insert("group-" + eventKey(event), true);
-    render(false);
-}
-
-void ActivityView::clearSearchResult()
-{
-    if (m_searchResult.isEmpty()) return;
-    m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
-    m_html.clear(); m_initial = true; m_followLatest = true; render(false);
-}
-
-void ActivityView::jumpToLatest()
-{
-    // Hiding a focused button would let Qt focus the next control (context
-    // usage). Keep explicit navigation in the journal, without taking focus
-    // from the composer during automatic following.
-    if (m_latest->hasFocus()) m_browser->setFocus(Qt::OtherFocusReason);
-    if (!m_searchResult.isEmpty()) { clearSearchResult(); return; }
-    m_rendering = true;
-    auto cursor = m_browser->textCursor(); cursor.clearSelection(); m_browser->setTextCursor(cursor);
-    m_followLatest = true; m_unseen = 0; m_latest->hide();
-    auto *bar = m_browser->verticalScrollBar(); bar->setValue(bar->maximum());
-    m_rendering = false;
-}
-
-void ActivityView::updateJumpButton()
-{
-    if (!m_searchResult.isEmpty()) {
-        m_latest->setText(tr("Back to latest activity")); m_latest->show(); positionJumpButton(); return;
-    }
-    m_latest->setText(m_unseen > 0 ? tr("↓  %1 new — Jump to latest").arg(m_unseen) : tr("↓  Jump to latest"));
-    m_latest->setVisible(!m_followLatest && m_browser->verticalScrollBar()->maximum() > 0);
-    positionJumpButton();
-}
-
-void ActivityView::positionJumpButton()
-{
-    if (!m_latest || m_latest->parentWidget()!=m_browser) return;
-    const auto viewport = m_browser->viewport()->geometry();
-    const auto size = m_latest->sizeHint().boundedTo(QSize(qMax(0,viewport.width()-16),viewport.height()));
-    m_latest->resize(size);
-    m_latest->move(viewport.left()+(viewport.width()-size.width())/2,
-        qMax(viewport.top(),viewport.bottom()+1-size.height()-8));
-    m_latest->raise();
-}
-
-bool ActivityView::eventFilter(QObject *watched, QEvent *event)
-{
-    if (watched == m_browser) {
-        // Before the scroll area places its viewport for the new width.
-        if (event->type() == QEvent::Resize) layoutColumn();
-        else if (event->type() == QEvent::Wheel) {
-            // The margins scroll the transcript like the column between them.
-            if (!m_browser->viewport()->geometry().contains(static_cast<QWheelEvent *>(event)->position().toPoint())) {
-                QCoreApplication::sendEvent(m_browser->verticalScrollBar(), event); return true;
-            }
-        } else if (event->type() == QEvent::ContextMenu) {
-            const auto *menu = static_cast<QContextMenuEvent *>(event);
-            if (menu->reason() == QContextMenuEvent::Mouse && !m_browser->viewport()->geometry().contains(menu->pos())) {
-                showColumnMenu(menu->globalPos()); return true;
-            }
-        }
-    }
-    // Copy buttons are images, not links: Tab, Enter and text selection never stop at them.
-    if (watched == m_browser->viewport()) {
-        auto *viewport = m_browser->viewport();
-        const auto *mouse = dynamic_cast<QMouseEvent *>(event);
-        if (event->type() == QEvent::ToolTip) {
-            const auto *help = static_cast<QHelpEvent *>(event);
-            if (!copyKeyAt(help->pos()).isEmpty()) {
-                QToolTip::showText(help->globalPos(), tr("Copy as Markdown"), viewport);
-                return true;
-            }
-        } else if (event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) {
-            const bool over = mouse && !copyKeyAt(mouse->position().toPoint()).isEmpty();
-            if (over && !m_copyHover) { m_copyCursor = viewport->cursor(); viewport->setCursor(Qt::PointingHandCursor); }
-            else if (!over && m_copyHover) viewport->setCursor(m_copyCursor);
-            m_copyHover = over;
-        } else if (mouse && mouse->button() == Qt::LeftButton
-                   && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
-            // A press on the button keeps the reader's selection and position.
-            m_copyPressed = copyKeyAt(mouse->position().toPoint());
-            if (!m_copyPressed.isEmpty()) return true;
-        } else if (mouse && mouse->button() == Qt::LeftButton && event->type() == QEvent::MouseButtonRelease && !m_copyPressed.isEmpty()) {
-            const auto pressed = std::exchange(m_copyPressed, QString());
-            if (copyKeyAt(mouse->position().toPoint()) == pressed) copyMarkdown(pressed);
-            return true;
-        }
-    }
-    if (watched == m_browser->viewport() && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
-        // A scroll bar that appears or hides moves the viewport's side.
-        if (event->type() == QEvent::Resize) layoutColumn();
-        positionJumpButton();
-        if (m_followLatest) scheduleFollow();
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
-void ActivityView::activateLink(const QUrl &url)
-{
-    if (url.scheme() == "hgs-activity" && m_toggleKeys.contains(url.path())) {
-        const auto key = url.path();
-        m_expanded.insert(key, !m_expanded.value(key));
-        // Expanding a card is an explicit reading action, even at the bottom.
-        m_followLatest = false; render(false); updateJumpButton();
-    } else if (url.scheme() == "hgs-file" && m_fileLinks.contains(url.path())) {
-        emit fileReferenceActivated(m_fileLinks.value(url.path()));
-    } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
-        emit attachmentActivated(m_attachmentLinks.value(url.path()));
-    } else if(url.scheme()=="hgs-message" && m_messageActions.contains(url.path())) {
-        const auto action=m_messageActions.value(url.path());emit messageActionRequested(action.first,action.second);
-    } else if(url.scheme()=="hgs-process" && m_processLinks.contains(url.path())) emit processRequested(url.path());
-    else if (webLink(url)) emit externalLinkActivated(url);
-}
-
-QString ActivityView::copyButton(const QString &state, const QString &key) const
-{
-    return QString("hgs-ui:%1/%2/%3?card=%4").arg(state, m_dark ? "dark" : "light", QString::number(qRound(m_scale * 100)), key);
-}
-
-QString ActivityView::copyKeyAt(const QPoint &position) const
-{
-    const QPointF content = position + QPoint(m_browser->horizontalScrollBar()->value(), m_browser->verticalScrollBar()->value());
-    const QUrl image(m_browser->document()->documentLayout()->imageAt(content));
-    if (image.scheme() != QLatin1String("hgs-ui") || !image.path().startsWith(QLatin1String("copy/"))) return {};
-    const auto key = QUrlQuery(image).queryItemValue("card");
-    return m_copyTexts.contains(key) ? key : QString();
-}
-
-void ActivityView::copyMarkdown(const QString &key)
-{
-    QGuiApplication::clipboard()->setText(m_copyTexts.value(key));
-    // Only the pressed button's image changes. Its size stays, so the document
-    // needs no edit and the reading position and selection stay where they are.
-    auto *document = static_cast<JournalDocument *>(m_browser->document());
-    const QUrl button(copyButton("copy", key));
-    document->addResource(QTextDocument::ImageResource, button, cardButton(QUrl(copyButton("copied", key)), document->pixelRatio));
-    m_browser->viewport()->update();
-    QToolTip::showText(QCursor::pos(), tr("Copied as Markdown"), m_browser->viewport());
-    QTimer::singleShot(1500, this, [this, button] {
-        auto *document = static_cast<JournalDocument *>(m_browser->document());
-        document->addResource(QTextDocument::ImageResource, button, cardButton(button, document->pixelRatio));
-        m_browser->viewport()->update();
-    });
-}
-
-void ActivityView::setAttachmentPreview(const QString &key, const QImage &image)
-{
-    if (image.isNull() || !m_previewFiles.contains(key) || !m_attachmentLinks.contains(key)) return;
-    QImage tile(192, 128, QImage::Format_ARGB32_Premultiplied); tile.fill(Qt::transparent);
-    const auto scaled = image.scaled(tile.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    QPainter painter(&tile); painter.drawImage((tile.width()-scaled.width())/2, (tile.height()-scaled.height())/2, scaled); painter.end();
-    m_browser->document()->addResource(QTextDocument::ImageResource, QUrl("hgs-thumbnail:"+key), tile);
-    // The reserved image dimensions stay constant. No setHtml, scroll reset or
-    // selection change is needed when a remote thumbnail arrives.
-    m_browser->document()->markContentsDirty(0, m_browser->document()->characterCount());
-    m_browser->viewport()->update();
-}
-
-void ActivityView::render(bool contentUpdate)
-{
-    ++m_renderPasses;
-    m_fileLinks.clear();
-    m_attachmentLinks.clear();
-    m_messageActions.clear();
-    m_copyTexts.clear();
-    const bool searching = !m_searchResult.isEmpty();
-    const QJsonObject details = searching ? QJsonObject() : m_details;
-    const auto queue = details["input_queue"].toObject();
-    m_queue->setVisible(m_tracked && !searching && !queue["id"].toString().isEmpty());
-    if (m_queueText->text() != queue["text"].toString()) m_queueText->setText(queue["text"].toString());
-    m_queueText->setToolTip(queue["text"].toString());
-    m_queueSend->setEnabled(queue["can_send_now"].toBool() && !details["queue_sending"].toBool());
-    m_queueSend->setText(details["queue_sending"].toBool() ? tr("Sending…") : tr("Send now"));
-    m_queueSend->setToolTip(queue["hint"].toString());
-    // Live state is separate from journal HTML: its animation and polls must
-    // not rebuild the transcript or disturb a text selection.
-    m_compaction->setVisible(m_tracked && !searching && details.value("phase") == "compacting"
-        && details.value("runtime_state") == "live" && details.value("process_state") == "running"
-        && details.value("state") != "archived");
     QJsonArray sourceEvents = searching ? QJsonArray{m_searchResult} : m_events;
     const QJsonArray localMessages = searching ? QJsonArray() : m_localMessages;
     for (const auto &value : localMessages) {
@@ -966,14 +621,9 @@ void ActivityView::render(bool contentUpdate)
             const auto caption=escaped((reference.isEmpty()?QString():reference+" ")+name)+(available?QString(" &nbsp; <span style='color:%1'>%2 &nbsp; %3</span>").arg(muted,escaped(meta),tr("Open →")):QString());
             QString preview;
             if(available && file.value("mime").toString().startsWith("image/") && file.value("mime")!="image/svg+xml") {
-                if(!m_previewFiles.contains(key)) {
-                    m_previewFiles.insert(key,file);
-                    QImage placeholder(192,128,QImage::Format_ARGB32_Premultiplied);placeholder.fill(Qt::transparent);
-                    m_browser->document()->addResource(QTextDocument::ImageResource,QUrl("hgs-thumbnail:"+key),placeholder);
-                    QTimer::singleShot(0,this,[this,key] {
-                        if(m_attachmentLinks.contains(key))emit attachmentPreviewRequested(key,m_attachmentLinks.value(key));
-                    });
-                }
+                m_previewFiles.insert(key,file);
+                QImage placeholder(192,128,QImage::Format_ARGB32_Premultiplied);placeholder.fill(Qt::transparent);
+                document->addResource(QTextDocument::ImageResource,QUrl("hgs-thumbnail:"+key), m_previews.value(key, placeholder));
                 preview=QString("<td width='96' height='64'><a href='hgs-attachment:%1'><img src='hgs-thumbnail:%1' width='96' height='64'></a></td>").arg(key);
             }
             result+=QString("<table cellspacing='0' cellpadding='8' style='margin-top:8px;border:1px solid %1;'><tr>%2<td>%3</td></tr></table>").arg(border,preview,
@@ -1203,7 +853,7 @@ void ActivityView::render(bool contentUpdate)
             const auto process=e.value("process_id").toString();
             bool recordedProcess=false;
             for(const auto &job:m_details.value("processes").toObject().value("items").toArray())if(job.toObject().value("id").toString()==process){recordedProcess=true;break;}
-            if(ProcessSettings::enabled() && recordedProcess && QRegularExpression("^[a-f0-9]{32}$").match(process).hasMatch()){
+            if(processesEnabled && recordedProcess && QRegularExpression("^[a-f0-9]{32}$").match(process).hasMatch()){
                 m_processLinks.insert(process);
                 html+=QString("<a href='hgs-process:%1' style='color:%2;'>%3</a>").arg(process,accent,tr("View process"));
             }
@@ -1225,14 +875,732 @@ void ActivityView::render(bool contentUpdate)
                 m_tracked ? tr("Messages, tools and approvals will appear as your agent works.") : tr("This session has no recorded activity. Open its terminal to see the agent."));
     }
     html += "</body></html>";
-    html = ContentScale::html(html, m_scale);
-    if (html == m_html) return;
-    const bool follow = !searching && ((m_initial && hasContent) || (m_followLatest && !m_browser->textCursor().hasSelection()));
-    if (contentUpdate && !m_initial && !follow) {
-        QSet<QString> added = seen; added.subtract(m_knownEvents);
-        m_unseen += qMax(added.size(), qsizetype(added.isEmpty() && seen == m_knownEvents ? 1 : 0));
+    m_html = ContentScale::html(html, m_scale);
+    m_knownEvents = seen;
+    content = hasContent;
+    document->setUndoRedoEnabled(false);
+    QTextCursor edit(document.get()); edit.beginEditBlock();
+    document->setHtml(m_html);
+    MarkdownObjects::convertChips(document.get(), agentTheme);
+    edit.endEditBlock();
+    document->setTextWidth(width);
+    size = document->documentLayout()->documentSize();
+    if (size.height() > viewportHeight && widthWithScrollBar != width) {
+        width = widthWithScrollBar;
+        document->setTextWidth(width);
+        size = document->documentLayout()->documentSize();
     }
-    m_knownEvents = seen; m_html = html;
+    anchors = bookmarks(document.get());
+
+    }
+};
+
+namespace {
+void destroyRenderLifetime();
+struct RenderJob {
+    std::shared_ptr<ActivityRenderResult> result = std::make_shared<ActivityRenderResult>();
+    QSemaphore prepared;
+    QPointer<JournalDocument> document;
+    QPointer<QTextBrowser> browser;
+};
+class RenderLifetime final : public QObject {
+public:
+    explicit RenderLifetime(QObject *parent) : QObject(parent) {}
+    ~RenderLifetime() override {
+        qRemovePostRoutine(destroyRenderLifetime);
+        // FreeType faces belong to their preparing thread even after the Qt
+        // document moves. Finish preparation, destroy every document tree while
+        // those faces remain alive, then stop the parked threads. This drain is
+        // only for application shutdown; navigation never waits for a worker.
+        for (const auto &job : jobs) job->prepared.acquire();
+        for (const auto &job : jobs) {
+            auto *document = job->document.data();
+            if (!document) continue;
+            if (job->browser && job->browser->document() == document) {
+                auto *empty = new JournalDocument(job->browser);
+                empty->setDefaultFont(job->browser->font());
+                job->browser->setDocument(empty);
+            }
+            if (job->result->document.get() == document) job->result->document.reset();
+            else delete document;
+        }
+        for (auto *worker : jobs.keys()) worker->quit();
+        for (auto *worker : jobs.keys()) worker->wait();
+        jobs.clear();
+    }
+    QHash<QThread *, std::shared_ptr<RenderJob>> jobs;
+};
+QPointer<RenderLifetime> renderOwner;
+QPointer<QCoreApplication> renderClosingApp;
+void destroyRenderLifetime()
+{
+    // QApplication calls post routines before deleting widget/font/palette
+    // globals. QObject-child destruction happens after those globals are gone.
+    // Deleting the receiver also removes any queued finished callbacks before
+    // their captured result documents and worker pointers can become stale.
+    renderClosingApp = qApp;
+    auto *owner = renderOwner.data();
+    renderOwner.clear();
+    delete owner;
+}
+RenderLifetime *renderLifetime()
+{
+    if (!renderOwner) {
+        renderOwner = new RenderLifetime(qApp);
+        qAddPostRoutine(destroyRenderLifetime);
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, renderOwner, [] { destroyRenderLifetime(); });
+    }
+    return renderOwner;
+}
+}
+
+ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
+{
+    setObjectName("activityView");
+    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(5);
+    auto *browser = new ActivityBrowser(this); m_browser = browser; m_browser->setObjectName("activity");
+    m_browser->setDocument(new JournalDocument(m_browser));
+    m_browser->setFrameShape(QFrame::NoFrame);
+    m_browser->setOpenLinks(false); m_browser->setOpenExternalLinks(false);
+    m_browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_browser->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    m_browser->setAccessibleName(tr("Session activity"));
+    layout->addWidget(m_browser, 1);
+    // A browser child overlays the viewport without participating in layout
+    // or moving with its scrolled contents.
+    m_latest = new QPushButton(m_browser); m_latest->setObjectName("activityJumpLatest");
+    m_latest->setAccessibleName(tr("Jump to latest activity"));
+    m_latest->hide();
+    m_fullWidth = new QAction(tr("Full-width Activity"), this); m_fullWidth->setCheckable(true);
+    connect(m_fullWidth, &QAction::triggered, this, &ActivityView::fullWidthRequested);
+    m_resetWidth = new QAction(tr("Reset Activity width"), this);
+    connect(m_resetWidth, &QAction::triggered, this, &ActivityView::columnResetRequested);
+    browser->extendMenu = [this](QMenu *menu) { addColumnActions(menu); };
+    for (const bool right : {false, true}) {
+        auto *edge = new ColumnEdge(right, m_browser);
+        edge->pressed = [this] { m_dragOrigin = m_browser->viewport()->width(); };
+        edge->dragged = [this](int distance) { dragColumn(distance); };
+        edge->reset = [this] { emit columnResetRequested(); };
+        edge->menuRequested = [this](const QPoint &position) { showColumnMenu(position); };
+        m_edges.append(edge);
+    }
+    // Viewport events need the column edges.
+    m_browser->viewport()->installEventFilter(this);
+    m_browser->installEventFilter(this);
+    m_compaction = new QWidget(this); m_compaction->setObjectName("activityCompaction");
+    m_compaction->setAttribute(Qt::WA_StyledBackground);
+    auto *progressRow = new QHBoxLayout(m_compaction); progressRow->setContentsMargins(12, 3, 12, 3); progressRow->setSpacing(10);
+    auto *progress = new CompactionProgress(m_compaction); progress->setObjectName("compactionProgress");
+    progress->setRange(0, 0); progress->setTextVisible(false); progress->setFixedSize(48, 5);
+    progress->setAccessibleName(tr("Compacting context"));
+    auto *caption = new QLabel(tr("Compacting context…"), m_compaction); caption->setObjectName("compactionCaption");
+    caption->setTextFormat(Qt::PlainText);
+    progressRow->addWidget(progress); progressRow->addWidget(caption); progressRow->addStretch();
+    m_compaction->setToolTip(tr("The agent is compressing conversation context."));
+    layout->addWidget(m_compaction); m_compaction->hide();
+    m_queue = new QWidget(this); m_queue->setObjectName("activityInputQueue"); m_queue->setAttribute(Qt::WA_StyledBackground);
+    auto *queueLayout = new QVBoxLayout(m_queue); queueLayout->setContentsMargins(12,8,12,8);
+    auto *queueHeader = new QHBoxLayout;
+    auto *queueCaption = new QLabel(tr("Queued in agent")); queueCaption->setObjectName("queueCaption");
+    queueHeader->addWidget(queueCaption); queueHeader->addStretch();
+    m_queueSend = new QPushButton(tr("Send now")); m_queueSend->setObjectName("queueSendNow"); queueHeader->addWidget(m_queueSend);
+    queueLayout->addLayout(queueHeader);
+    m_queueText = new QLabel; m_queueText->setObjectName("queueText"); m_queueText->setTextFormat(Qt::PlainText); m_queueText->setWordWrap(true);
+    m_queueText->setTextInteractionFlags(Qt::TextSelectableByMouse); m_queueText->setMaximumHeight(100);
+    queueLayout->addWidget(m_queueText);
+    m_queueColumn = new ActivityWidth::ColumnLayout; layout->addLayout(m_queueColumn);
+    m_queueColumn->addWidget(m_queue); m_queue->hide();
+    connect(m_queueSend, &QPushButton::clicked, this, [this] { emit queueSendNowRequested(m_details["input_queue"].toObject()["id"].toString()); });
+    connect(m_latest, &QPushButton::clicked, this, &ActivityView::jumpToLatest);
+    connect(m_browser, &QTextBrowser::anchorClicked, this, &ActivityView::activateLink);
+    connect(this, &ActivityView::externalLinkActivated, this, [](const QUrl &url) { QDesktopServices::openUrl(url); });
+    connect(m_browser->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (m_rendering) return;
+        m_followLatest = nearBottom() && !m_browser->textCursor().hasSelection();
+        if (m_followLatest) m_unseen = 0;
+        updateJumpButton();
+    });
+    connect(m_browser->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this] {
+        if (!m_rendering && m_followLatest && !m_browser->textCursor().hasSelection()) scheduleFollow();
+    });
+    connect(m_browser, &QTextBrowser::selectionChanged, this, [this] {
+        if (!m_rendering && m_browser->textCursor().hasSelection()) m_followLatest = false;
+    });
+    setTheme(false); updateColumnActions();
+}
+
+void ActivityView::setSessionKey(const QString &key)
+{
+    if (key == m_sessionKey) return;
+    m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
+    m_attachmentLinks.clear();m_fileLinks.clear();
+    m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
+    m_messageActions.clear(); m_copyTexts.clear();
+    m_localMessages = {}; m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
+    m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
+    ++m_renderGeneration; m_renderDirty = false; m_pendingContentUpdate = false;
+    m_details = {}; m_events = {}; m_fallbackPrompt.clear();
+    clearDocument(); updateJumpButton();
+    m_compaction->hide(); m_queue->hide();
+}
+
+namespace {
+// Everything setActivity renders from. Polls refresh live fields that Activity
+// never shows (goal observation time, cache age, token usage, process load);
+// of the processes only their IDs become links. Keep these out of the HTML.
+QJsonObject activityInput(QJsonObject details, const QJsonArray &events, const QString &fallbackPrompt, bool tracked)
+{
+    QJsonArray processes;
+    for (const auto &job : details.value("processes").toObject().value("items").toArray()) processes.append(job.toObject().value("id"));
+    for (const auto &key : {"goal_observed_at", "cache_hint", "session_usage"}) details.remove(QLatin1String(key));
+    details["processes"] = processes;
+    return {{"details", details}, {"events", events}, {"prompt", fallbackPrompt}, {"tracked", tracked}, {"process_links", ProcessSettings::enabled()}};
+}
+}
+
+void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &events, const QString &fallbackPrompt, bool tracked)
+{
+    // Theme, scale, search, cards and local messages render on their own; an
+    // identical poll would only regenerate the same journal.
+    auto input = activityInput(details, events, fallbackPrompt, tracked);
+    if (input == m_activityInput) return;
+    m_activityInput = std::move(input);
+    const auto conversation = details.value("conversation_id").toString();
+    if (!m_conversation.isEmpty() && !conversation.isEmpty() && conversation != m_conversation
+        && !details.value("cleared_conversations").toArray().contains(m_conversation)) {
+        m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
+        m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
+        m_fileLinks.clear(); m_attachmentLinks.clear(); m_messageActions.clear(); m_copyTexts.clear();
+        clearDocument();
+        m_expanded.clear(); m_knownEvents.clear(); m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear();
+    }
+    if (!conversation.isEmpty() && conversation != m_conversation) { ++m_renderGeneration; m_conversation = conversation; }
+    m_details = details; m_events = events; m_fallbackPrompt = fallbackPrompt; m_tracked = tracked;
+    render(true);
+}
+
+void ActivityView::setLocalMessages(const QJsonArray &messages)
+{
+    if (m_localMessages == messages) return;
+    m_localMessages = messages; render(true);
+}
+
+void ActivityView::setTimeline(const QJsonObject &details, const QJsonArray &events,
+                               const QJsonArray &localMessages, const QString &fallbackPrompt, bool tracked)
+{
+    // A poll can replace local delivery cards with native events. Commit both
+    // inputs together so the document never contains both generations.
+    if (m_localMessages != localMessages) { m_localMessages = localMessages; m_activityInput = {}; }
+    setActivity(details, events, fallbackPrompt, tracked);
+}
+
+void ActivityView::setTheme(bool dark)
+{
+    m_dark = dark;
+    auto background = this->palette();
+    background.setColor(QPalette::Window, QColor(dark ? "#1c2229" : "#ffffff"));
+    setPalette(background); setAutoFillBackground(true);
+    QPalette palette = m_browser->palette();
+    palette.setColor(QPalette::Base, QColor(dark ? "#1c2229" : "#ffffff"));
+    palette.setColor(QPalette::Text, QColor(dark ? "#e8edf4" : "#1a2733"));
+    palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
+    palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
+    m_browser->setPalette(palette);
+    m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }")
+        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#233a35" : "#e7f3ed", dark ? "#456e61" : "#a5c8b8"));
+    for (auto *edge : m_edges) { static_cast<ColumnEdge *>(edge)->color = QColor(dark ? "#8bdfc0" : "#167357"); edge->update(); }
+    m_compaction->setStyleSheet(QString("QWidget#activityCompaction { background:%3; } QLabel { color:%1; background:transparent; font-size:12px; } QProgressBar { background:%2; border:0; border-radius:2px; } QProgressBar::chunk { background:%1; border-radius:2px; }")
+        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? "#1c2229" : "#ffffff"));
+    m_queue->setStyleSheet(QString("QWidget#activityInputQueue{background:%1;border:1px solid %2;border-radius:7px;} QLabel#queueCaption{color:%3;font-weight:600;}")
+        .arg(dark ? "#2d2c23" : "#fff7e4", dark ? "#655638" : "#d7be84", dark ? "#edbd77" : "#805516")
+        + (qFuzzyCompare(m_scale, 1.0) ? QString() : QString(" QLabel#queueText{font-size:%1px;}").arg(ContentScale::px(13, m_scale))));
+    auto *progress = m_compaction->findChild<QProgressBar *>("compactionProgress");
+    auto progressPalette = progress->palette();
+    progressPalette.setColor(QPalette::Base, QColor(dark ? "#34404a" : "#dbe3e9"));
+    progressPalette.setColor(QPalette::Highlight, QColor(dark ? "#8bdfc0" : "#167357"));
+    progress->setPalette(progressPalette);
+    render(false);
+}
+
+void ActivityView::setContentScale(double scale)
+{
+    scale = ContentScale::clamp(scale);
+    if (qFuzzyCompare(scale, m_scale)) return;
+    m_scale = scale;
+    // Explicit HTML lengths are scaled while rendering. Markdown headings are
+    // relative to the document's default font, which follows the widget font.
+    m_browser->setStyleSheet(qFuzzyCompare(scale, 1.0) ? QString()
+        : QString("QTextBrowser { font-size:%1px; }").arg(ContentScale::px(13, scale)));
+    m_queueText->setMaximumHeight(ContentScale::px(100, scale));
+    setTheme(m_dark); updateColumnActions();
+}
+
+void ActivityView::setColumnWidth(int width)
+{
+    width = qMax(0, width);
+    if (width != m_column) { m_column = width; m_queueColumn->setColumnWidth(width); layoutColumn(); }
+    updateColumnActions();
+}
+
+int ActivityView::scrollBarReserve() const
+{
+    // As QAbstractScrollArea lays it out: a shown scroll bar takes its extent,
+    // less any overlap, from the side of the viewport.
+    auto *bar = m_browser->verticalScrollBar(); auto *container = bar->parentWidget();
+    if (!container || container == m_browser || !container->isVisibleTo(m_browser)) return 0;
+    return qMax(0, bar->sizeHint().width() - bar->style()->pixelMetric(QStyle::PM_ScrollView_ScrollBarOverlap, nullptr, bar));
+}
+
+void ActivityView::layoutColumn()
+{
+    const int pane = m_browser->width(), reserve = scrollBarReserve(), side = ActivityWidth::inset(pane, m_column);
+    // The scroll bar stays at the pane edge and takes its width from the right
+    // margin, so showing it does not rewrap the column.
+    static_cast<ActivityBrowser *>(m_browser)->setColumnMargins(QMargins(side, 0, qMax(0, side - reserve), 0));
+    // Edges need room beside the scroll bar. Without margins the pane edge
+    // remains where a text selection starts.
+    const auto viewport = m_browser->viewport()->geometry();
+    const bool edges = side - reserve >= ColumnEdge::Width;
+    m_edges[0]->setGeometry(viewport.left() - ColumnEdge::Width, 0, ColumnEdge::Width, m_browser->height());
+    m_edges[1]->setGeometry(viewport.right() + 1, 0, ColumnEdge::Width, m_browser->height());
+    for (auto *edge : m_edges) { edge->setVisible(edges); if (edges) edge->raise(); }
+}
+
+void ActivityView::dragColumn(int distance)
+{
+    // Both edges follow the pointer, so the column changes by twice its distance.
+    // Its edges stay within the pane and its width keeps a readable minimum.
+    const int widest = m_browser->width() - 2 * (scrollBarReserve() + ColumnEdge::Width);
+    const int narrowest = qMin(widest, ContentScale::px(ActivityWidth::Minimum, m_scale));
+    const int width = qBound(narrowest, m_dragOrigin + 2 * distance, widest);
+    if (width != m_column) emit columnWidthRequested(width);
+}
+
+void ActivityView::addColumnActions(QMenu *menu)
+{
+    updateColumnActions();
+    if (!menu->isEmpty()) menu->addSeparator();
+    menu->addAction(m_fullWidth); menu->addAction(m_resetWidth);
+}
+
+void ActivityView::showColumnMenu(const QPoint &position)
+{
+    auto *menu = new QMenu(this); addColumnActions(menu);
+    menu->setAttribute(Qt::WA_DeleteOnClose); menu->popup(position);
+}
+
+void ActivityView::updateColumnActions()
+{
+    m_fullWidth->setChecked(m_column == 0);
+    m_resetWidth->setEnabled(m_column != ContentScale::px(ActivityWidth::Default, m_scale));
+}
+
+QString ActivityView::plainText() const
+{
+    QTextCursor all(m_browser->document());
+    all.select(QTextCursor::Document);
+    return MarkdownObjects::plainText(all);
+}
+
+bool ActivityView::replyVisible(const QString &replyId) const
+{
+    if (renderPending() || !m_searchResult.isEmpty() || !nearBottom() || m_rendering || m_followScheduled) return false;
+    const auto anchors = bookmarks(m_browser->document());
+    const auto key = "item-" + replyId.section(':', 0, 0);
+    int start = anchors.value(key, -1);
+    if (start < 0 && !m_details.value("last_message").toString().isEmpty()) start = anchors.value("item-answer-snapshot", -1);
+    if (start < 0) {
+        // Providers can finish a turn without response text. Its visible Ready
+        // state and final operational event are the available result.
+        for (const auto &value : m_events) {
+            const auto event = value.toObject();
+            if (QString::number(event.value("seq").toInteger()) == replyId.section(':', 0, 0)
+                && event.value("type") == "Stop" && event.value("detail").toString().isEmpty()
+                && m_details.value("activity") == "idle") return true;
+        }
+        // Catching up to activity after a completed turn acknowledges that
+        // turn too, even after its event was pruned from the visible window.
+        bool numeric=false;const auto sequence=replyId.section(':',0,0).toLongLong(&numeric);
+        if(numeric&&sequence>0&&m_details.value("reply_id").toString()==replyId)
+            for(const auto &value:m_events) if(value.toObject().value("seq").toInteger()>=sequence)return true;
+        return false;
+    }
+    QTextCursor cursor(m_browser->document()); cursor.setPosition(start);
+    return m_browser->cursorRect(cursor).top() < m_browser->viewport()->height();
+}
+
+bool ActivityView::nearBottom() const
+{
+    auto *bar = m_browser->verticalScrollBar();
+    return bar->maximum() - bar->value() <= 30;
+}
+
+void ActivityView::scheduleFollow()
+{
+    if (m_followScheduled) return;
+    m_followScheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        m_followScheduled = false;
+        if (m_followLatest && !m_browser->textCursor().hasSelection()) jumpToLatest();
+    });
+}
+
+void ActivityView::showSearchResult(const QJsonObject &event, const QString &query)
+{
+    m_searchResult = event; m_searchQuery = query;
+    m_initial = false; m_followLatest = false; m_html.clear();
+    m_expanded.insert("group-" + eventKey(event), true);
+    render(false);
+}
+
+void ActivityView::clearSearchResult()
+{
+    if (m_searchResult.isEmpty()) return;
+    m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
+    m_html.clear(); m_initial = true; m_followLatest = true; render(false);
+}
+
+void ActivityView::jumpToLatest()
+{
+    // Hiding a focused button would let Qt focus the next control (context
+    // usage). Keep explicit navigation in the journal, without taking focus
+    // from the composer during automatic following.
+    if (m_latest->hasFocus()) m_browser->setFocus(Qt::OtherFocusReason);
+    if (!m_searchResult.isEmpty()) { clearSearchResult(); return; }
+    m_rendering = true;
+    auto cursor = m_browser->textCursor(); cursor.clearSelection(); m_browser->setTextCursor(cursor);
+    m_followLatest = true; m_unseen = 0; m_latest->hide();
+    auto *bar = m_browser->verticalScrollBar(); bar->setValue(bar->maximum());
+    m_rendering = false;
+}
+
+void ActivityView::updateJumpButton()
+{
+    if (!m_searchResult.isEmpty()) {
+        m_latest->setText(tr("Back to latest activity")); m_latest->show(); positionJumpButton(); return;
+    }
+    m_latest->setText(m_unseen > 0 ? tr("↓  %1 new — Jump to latest").arg(m_unseen) : tr("↓  Jump to latest"));
+    m_latest->setVisible(!m_followLatest && m_browser->verticalScrollBar()->maximum() > 0);
+    positionJumpButton();
+}
+
+void ActivityView::positionJumpButton()
+{
+    if (!m_latest || m_latest->parentWidget()!=m_browser) return;
+    const auto viewport = m_browser->viewport()->geometry();
+    const auto size = m_latest->sizeHint().boundedTo(QSize(qMax(0,viewport.width()-16),viewport.height()));
+    m_latest->resize(size);
+    m_latest->move(viewport.left()+(viewport.width()-size.width())/2,
+        qMax(viewport.top(),viewport.bottom()+1-size.height()-8));
+    m_latest->raise();
+}
+
+bool ActivityView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_browser) {
+        // Before the scroll area places its viewport for the new width.
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::ScreenChangeInternal
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+            || event->type() == QEvent::DevicePixelRatioChange
+#endif
+        ) render(false);
+        if (event->type() == QEvent::Resize) layoutColumn();
+        else if (event->type() == QEvent::Wheel) {
+            // The margins scroll the transcript like the column between them.
+            if (!m_browser->viewport()->geometry().contains(static_cast<QWheelEvent *>(event)->position().toPoint())) {
+                QCoreApplication::sendEvent(m_browser->verticalScrollBar(), event); return true;
+            }
+        } else if (event->type() == QEvent::ContextMenu) {
+            const auto *menu = static_cast<QContextMenuEvent *>(event);
+            if (menu->reason() == QContextMenuEvent::Mouse && !m_browser->viewport()->geometry().contains(menu->pos())) {
+                showColumnMenu(menu->globalPos()); return true;
+            }
+        }
+    }
+    // Copy buttons are images, not links: Tab, Enter and text selection never stop at them.
+    if (watched == m_browser->viewport()) {
+        auto *viewport = m_browser->viewport();
+        const auto *mouse = dynamic_cast<QMouseEvent *>(event);
+        if (event->type() == QEvent::ToolTip) {
+            const auto *help = static_cast<QHelpEvent *>(event);
+            if (!copyKeyAt(help->pos()).isEmpty()) {
+                QToolTip::showText(help->globalPos(), tr("Copy as Markdown"), viewport);
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) {
+            const bool over = mouse && !copyKeyAt(mouse->position().toPoint()).isEmpty();
+            if (over && !m_copyHover) { m_copyCursor = viewport->cursor(); viewport->setCursor(Qt::PointingHandCursor); }
+            else if (!over && m_copyHover) viewport->setCursor(m_copyCursor);
+            m_copyHover = over;
+        } else if (mouse && mouse->button() == Qt::LeftButton
+                   && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
+            // A press on the button keeps the reader's selection and position.
+            m_copyPressed = copyKeyAt(mouse->position().toPoint());
+            if (!m_copyPressed.isEmpty()) return true;
+        } else if (mouse && mouse->button() == Qt::LeftButton && event->type() == QEvent::MouseButtonRelease && !m_copyPressed.isEmpty()) {
+            const auto pressed = std::exchange(m_copyPressed, QString());
+            if (copyKeyAt(mouse->position().toPoint()) == pressed) copyMarkdown(pressed);
+            return true;
+        }
+    }
+    if (watched == m_browser->viewport() && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
+        // A scroll bar that appears or hides moves the viewport's side.
+        if (event->type() == QEvent::Resize) layoutColumn();
+        if (event->type() == QEvent::Resize && !m_rendering) render(false);
+        positionJumpButton();
+        if (m_followLatest) scheduleFollow();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void ActivityView::activateLink(const QUrl &url)
+{
+    if (url.scheme() == "hgs-activity" && m_toggleKeys.contains(url.path())) {
+        const auto key = url.path();
+        m_expanded.insert(key, !m_expanded.value(key));
+        // Expanding a card is an explicit reading action, even at the bottom.
+        m_followLatest = false; render(false); updateJumpButton();
+    } else if (url.scheme() == "hgs-file" && m_fileLinks.contains(url.path())) {
+        emit fileReferenceActivated(m_fileLinks.value(url.path()));
+    } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
+        emit attachmentActivated(m_attachmentLinks.value(url.path()));
+    } else if(url.scheme()=="hgs-message" && m_messageActions.contains(url.path())) {
+        const auto action=m_messageActions.value(url.path());emit messageActionRequested(action.first,action.second);
+    } else if(url.scheme()=="hgs-process" && m_processLinks.contains(url.path())) emit processRequested(url.path());
+    else if (webLink(url)) emit externalLinkActivated(url);
+}
+
+QString ActivityView::copyButton(const QString &state, const QString &key) const
+{
+    return QString("hgs-ui:%1/%2/%3?card=%4").arg(state, m_dark ? "dark" : "light", QString::number(qRound(m_scale * 100)), key);
+}
+
+QString ActivityView::copyKeyAt(const QPoint &position) const
+{
+    const QPointF content = position + QPoint(m_browser->horizontalScrollBar()->value(), m_browser->verticalScrollBar()->value());
+    const QUrl image(m_browser->document()->documentLayout()->imageAt(content));
+    if (image.scheme() != QLatin1String("hgs-ui") || !image.path().startsWith(QLatin1String("copy/"))) return {};
+    const auto key = QUrlQuery(image).queryItemValue("card");
+    return m_copyTexts.contains(key) ? key : QString();
+}
+
+void ActivityView::copyMarkdown(const QString &key)
+{
+    QGuiApplication::clipboard()->setText(m_copyTexts.value(key));
+    // Only the pressed button's image changes. Its size stays, so the document
+    // needs no edit and the reading position and selection stay where they are.
+    auto *document = paintDocument(m_browser->document());
+    const QUrl button(copyButton("copy", key));
+    document->addResource(QTextDocument::ImageResource, button, cardButton(QUrl(copyButton("copied", key)), document->pixelRatio));
+    m_browser->viewport()->update();
+    QToolTip::showText(QCursor::pos(), tr("Copied as Markdown"), m_browser->viewport());
+    QTimer::singleShot(1500, this, [this, button] {
+        auto *document = paintDocument(m_browser->document());
+        document->addResource(QTextDocument::ImageResource, button, cardButton(button, document->pixelRatio));
+        m_browser->viewport()->update();
+    });
+}
+
+void ActivityView::setAttachmentPreview(const QString &key, const QImage &image)
+{
+    if (image.isNull() || !m_previewFiles.contains(key) || !m_attachmentLinks.contains(key)) return;
+    QImage tile(192, 128, QImage::Format_ARGB32_Premultiplied); tile.fill(Qt::transparent);
+    const auto scaled = image.scaled(tile.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QPainter painter(&tile); painter.drawImage((tile.width()-scaled.width())/2, (tile.height()-scaled.height())/2, scaled); painter.end();
+    m_previews.insert(key, tile);
+    paintDocument(m_browser->document())->addResource(QTextDocument::ImageResource, QUrl("hgs-thumbnail:"+key), tile);
+    // The reserved image dimensions stay constant. No setHtml, scroll reset or
+    // selection change is needed when a remote thumbnail arrives.
+    m_browser->document()->markContentsDirty(0, m_browser->document()->characterCount());
+    m_browser->viewport()->update();
+}
+
+void ActivityView::render(bool contentUpdate)
+{
+    if (contentUpdate) ++m_contentRevision;
+    else ++m_renderGeneration;
+    m_renderDirty = true;
+    m_pendingContentUpdate |= contentUpdate;
+    const bool searching = !m_searchResult.isEmpty();
+    const QJsonObject details = searching ? QJsonObject() : m_details;
+    const auto queue = details["input_queue"].toObject();
+    m_queue->setVisible(m_tracked && !searching && !queue["id"].toString().isEmpty());
+    if (m_queueText->text() != queue["text"].toString()) m_queueText->setText(queue["text"].toString());
+    m_queueText->setToolTip(queue["text"].toString());
+    m_queueSend->setEnabled(queue["can_send_now"].toBool() && !details["queue_sending"].toBool());
+    m_queueSend->setText(details["queue_sending"].toBool() ? tr("Sending…") : tr("Send now"));
+    m_queueSend->setToolTip(queue["hint"].toString());
+    // Live state is separate from journal HTML: its animation and polls must
+    // not rebuild the transcript or disturb a text selection.
+    m_compaction->setVisible(m_tracked && !searching && details.value("phase") == "compacting"
+        && details.value("runtime_state") == "live" && details.value("process_state") == "running"
+        && details.value("state") != "archived");
+    if (!m_renderScheduled) {
+        m_renderScheduled = true;
+        QTimer::singleShot(0, this, [this] { m_renderScheduled = false; startRender(); });
+    }
+}
+
+void ActivityView::startRender()
+{
+    if (renderClosingApp == qApp || !isVisible() || m_renderInFlight || m_renderWorkers >= 2 || !m_renderDirty) return;
+    m_renderDirty = false;
+    m_renderInFlight = true;
+    ++m_renderWorkers;
+    ++m_renderPasses;
+    auto job = std::make_shared<RenderJob>();
+    auto result = job->result;
+    result->generation = m_renderGeneration;
+    result->contentRevision = m_contentRevision;
+    result->m_sessionKey = m_sessionKey; result->m_conversation = m_conversation;
+    result->m_details = m_details; result->m_searchResult = m_searchResult;
+    result->m_events = m_events; result->m_localMessages = m_localMessages;
+    result->m_fallbackPrompt = m_fallbackPrompt;
+    result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys;
+    result->m_previews = m_previews;
+    result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale;
+    result->processesEnabled = ProcessSettings::enabled();
+    result->width = m_browser->viewport()->width();
+    result->viewportHeight = m_browser->viewport()->height();
+    const int side = ActivityWidth::inset(m_browser->width(), m_column);
+    auto *bar = m_browser->verticalScrollBar();
+    const int reserve = qMax(0, bar->sizeHint().width() - bar->style()->pixelMetric(QStyle::PM_ScrollView_ScrollBarOverlap, nullptr, bar));
+    result->widthWithScrollBar = qMax(1, m_browser->width() - reserve - side - qMax(0, side - reserve));
+    const QFont font = m_browser->font();
+    const auto option = m_browser->document()->defaultTextOption();
+    const qreal ratio = m_browser->devicePixelRatioF();
+    const int dpiX = m_browser->logicalDpiX(), dpiY = m_browser->logicalDpiY();
+    QThread *guiThread = thread();
+    auto *lifetime = renderLifetime();
+    QPointer<ActivityView> view(this);
+    auto *worker = QThread::create([result, job, view, lifetime, font, option, ratio, dpiX, dpiY, guiThread] {
+        result->document = std::make_unique<JournalDocument>();
+        auto *document = result->document.get();
+        document->pixelRatio = ratio;
+        document->metrics = QImage(1, 1, QImage::Format_ARGB32_Premultiplied);
+        document->defaultDpi = document->metrics.logicalDpiY();
+        document->metrics.setDotsPerMeterX(qRound(dpiX / .0254));
+        document->metrics.setDotsPerMeterY(qRound(dpiY / .0254));
+        document->documentLayout()->setPaintDevice(&document->metrics);
+        document->setDefaultFont(font);
+        document->setDefaultTextOption(option);
+        result->build();
+        // Copy the text model without a second HTML import or layout.
+        auto target = std::make_unique<JournalDocument>();
+        target->setLayoutEnabled(false);
+        target->setUndoRedoEnabled(false);
+        target->pixelRatio = ratio;
+        target->setDefaultFont(font);
+        target->setDefaultTextOption(option);
+        QTextCursor(target.get()).insertFragment(QTextDocumentFragment(document));
+        target->rootFrame()->setFrameFormat(document->rootFrame()->frameFormat());
+        target->setPageSize(document->pageSize());
+        target->layoutSource = document;
+        target->setDocumentLayout(new JournalLayout(target.get(), document));
+        target->setLayoutEnabled(true);
+        Q_ASSERT(target->characterCount() == document->characterCount());
+        // QWidgetTextControl reads block.layout() directly for cursor geometry,
+        // keyboard movement and selection. Reproduce those lines on the worker;
+        // delegating blockBoundingRect alone would leave the clone unselectable.
+        for (auto block = target->begin(); block.isValid(); block = block.next()) {
+            const auto sourceBlock = document->findBlock(block.position());
+            const auto *sourceLayout = sourceBlock.layout();
+            auto *text = block.layout();
+            text->setFont(sourceLayout->font());
+            text->setTextOption(sourceLayout->textOption());
+            text->setFormats(sourceLayout->formats());
+            text->setPosition(sourceLayout->position());
+            text->beginLayout();
+            for (int i = 0; i < sourceLayout->lineCount(); ++i) {
+                const auto from = sourceLayout->lineAt(i);
+                auto line = text->createLine();
+                if (!line.isValid()) break;
+                line.setLineWidth(from.width());
+                line.setPosition(from.position());
+            }
+            text->endLayout();
+        }
+        result->document.release();
+        result->document = std::move(target);
+        document = result->document.get();
+        // Finish the layout's pending size notification on its owning worker.
+        // At shutdown there may be no GUI event turn to register a moved timer
+        // before its document is deleted. This dispatcher owns only this job.
+        QCoreApplication::processEvents(QEventLoop::AllEvents);
+        // Transfer from its owning thread, including layout/inline-code children.
+        document->moveToThread(guiThread);
+        job->document = document;
+        auto *worker = QThread::currentThread();
+        // QObject emits destroyed before destroying its children. Queue the
+        // release so source/layout/font destruction finishes first. Keeping
+        // this dedicated thread idle preserves its platform font faces without
+        // sharing mutable glyph caches with another rendering job.
+        QObject::connect(document, &QObject::destroyed, lifetime, [worker] { worker->quit(); }, Qt::QueuedConnection);
+        job->prepared.release();
+        QMetaObject::invokeMethod(lifetime, [view, result, job] {
+            if (view) {
+                view->m_renderInFlight = false;
+                if (view->isVisible() && result->generation == view->m_renderGeneration) {
+                    view->commitRender(result);
+                    job->browser = view->m_browser;
+                } else view->m_renderDirty = true;
+            }
+            // A stale, hidden or identical-HTML result was not installed. Drop
+            // its document now, otherwise the parked job would retain itself.
+            result->document.reset();
+            if (view) view->startRender();
+        }, Qt::QueuedConnection);
+        // QThread::quit also exits this loop, including a release that arrives
+        // before exec: Qt's quitNow flag makes exec return immediately then.
+        QEventLoop loop;
+        loop.exec();
+    });
+    // The application owns cleanup even if navigation destroys this view while
+    // the bounded one-job worker is finishing. Destruction never waits for it.
+    worker->setParent(lifetime);
+    worker->setObjectName("activityRenderWorker");
+    lifetime->jobs.insert(worker, job);
+    connect(worker, &QThread::finished, lifetime, [view, worker, lifetime] {
+        lifetime->jobs.remove(worker);
+        worker->deleteLater();
+        if (view) { --view->m_renderWorkers; view->startRender(); }
+    });
+    worker->start(QThread::LowPriority);
+}
+
+void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &result)
+{
+    const bool searching = !m_searchResult.isEmpty();
+    const auto *previous = paintDocument(m_browser->document());
+    const auto *next = result->document->layoutSource;
+    if (result->m_html == m_html && previous->textWidth() == result->width
+        && previous->defaultFont() == next->defaultFont()
+        && previous->pixelRatio == next->pixelRatio
+        && previous->metrics.dotsPerMeterX() == next->metrics.dotsPerMeterX()
+        && previous->metrics.dotsPerMeterY() == next->metrics.dotsPerMeterY()) {
+        // Attachment location metadata can change without changing its identity
+        // or markup. Keep the committed action maps current even in that case.
+        m_attachmentLinks = result->m_attachmentLinks;
+        m_messageActions = result->m_messageActions;
+        m_pendingContentUpdate = result->contentRevision != m_contentRevision;
+        return;
+    }
+    const bool hasContent = result->content;
+    const bool follow = !searching && ((m_initial && hasContent) || (m_followLatest && !m_browser->textCursor().hasSelection()));
+    if (m_pendingContentUpdate && !m_initial && !follow) {
+        QSet<QString> added = result->m_knownEvents; added.subtract(m_knownEvents);
+        m_unseen += qMax(added.size(), qsizetype(added.isEmpty() && result->m_knownEvents == m_knownEvents ? 1 : 0));
+    }
+    m_pendingContentUpdate = result->contentRevision != m_contentRevision;
+    m_knownEvents = result->m_knownEvents; m_html = result->m_html;
+    m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;
+    m_messageActions = result->m_messageActions; m_copyTexts = result->m_copyTexts;
+    m_expanded = result->m_expanded; m_deliveryKeys = result->m_deliveryKeys;
+    m_toggleKeys = result->m_toggleKeys; m_processLinks = result->m_processLinks;
+    QStringList requestPreviews;
+    for (auto it = result->m_previewFiles.cbegin(); it != result->m_previewFiles.cend(); ++it)
+        if (!m_previewFiles.contains(it.key())) requestPreviews.append(it.key());
+    m_previewFiles = result->m_previewFiles;
     if (hasContent) m_initial = false;
     const auto anchors = bookmarks(m_browser->document());
     const auto cursor = m_browser->textCursor();
@@ -1246,23 +1614,17 @@ void ActivityView::render(bool contentUpdate)
     // updates disabled lets a parent repaint erase Activity for a whole frame.
     const bool updatesEnabled = m_browser->updatesEnabled();
     m_browser->setUpdatesEnabled(false);
-    static_cast<JournalDocument *>(m_browser->document())->pixelRatio = m_browser->devicePixelRatioF();
-    // One edit block for the markup and its chips. Qt lays out a long document
-    // lazily, and a second edit would move later paragraphs without their layout:
-    // the spacers between cards would keep zero height.
-    QTextCursor edit(m_browser->document()); edit.beginEditBlock();
-    m_browser->setHtml(html);
-    MarkdownObjects::convertChips(m_browser->document(), agentTheme);
-    edit.endEditBlock();
-    // QTextDocument lays out long tables lazily. Resolve the final scroll
-    // range before restoring the viewport and allowing its next paint.
-    auto *layout = m_browser->document()->documentLayout();
-    // documentSize() finishes that layout but announces the final size only on
-    // the layout's next timer tick. Until then the scroll range keeps the lazy
-    // estimate, and following the latest message would paint one frame past
-    // the end of the document.
-    emit layout->documentSizeChanged(layout->documentSize());
-    const auto updatedAnchors = bookmarks(m_browser->document());
+    auto *oldDocument = m_browser->document();
+    auto *document = result->document.release();
+    // Thumbnails may have arrived while the snapshot was building. Their fixed
+    // dimensions permit the current resource to be installed without relayout.
+    for (auto it = m_previews.cbegin(); it != m_previews.cend(); ++it)
+        paintDocument(document)->addResource(QTextDocument::ImageResource, QUrl("hgs-thumbnail:" + it.key()), it.value());
+    document->setParent(m_browser);
+    m_browser->setDocument(document);
+    oldDocument->deleteLater();
+    emit document->documentLayout()->documentSizeChanged(result->size);
+    const auto &updatedAnchors = result->anchors;
     const int length = m_browser->document()->characterCount();
     QTextCursor restored(m_browser->document()); restored.setPosition(selectionStart.restored(updatedAnchors, length));
     restored.setPosition(selectionEnd.restored(updatedAnchors, length), QTextCursor::KeepAnchor);
@@ -1288,4 +1650,29 @@ void ActivityView::render(bool contentUpdate)
     } else if (follow) { jumpToLatest(); scheduleFollow(); }
     else updateJumpButton();
     m_browser->setUpdatesEnabled(updatesEnabled);
+    for (const auto &key : requestPreviews) {
+        const auto session = m_sessionKey, conversation = m_conversation;
+        QTimer::singleShot(0, this, [this, key, session, conversation] {
+            if (session == m_sessionKey && conversation == m_conversation && m_attachmentLinks.contains(key))
+                emit attachmentPreviewRequested(key, m_attachmentLinks.value(key));
+        });
+    }
 }
+
+void ActivityView::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_renderDirty) render(false);
+}
+
+void ActivityView::clearDocument()
+{
+    auto *old = m_browser->document();
+    auto *empty = new JournalDocument(m_browser);
+    empty->setDefaultFont(m_browser->font());
+    empty->setDefaultTextOption(old->defaultTextOption());
+    m_browser->setDocument(empty);
+    old->deleteLater();
+}
+
+#include "ActivityView.moc"

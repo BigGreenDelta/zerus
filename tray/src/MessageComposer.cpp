@@ -248,18 +248,24 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_feedback = new QHBoxLayout; m_feedback->setContentsMargins(0, 0, 0, 0); m_feedback->setSpacing(8); inputLayout->addLayout(m_feedback);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
+        if (m_drafts.value(m_key).sending || isWaitingToSend(m_key) || m_renamingKeys.contains(m_key)) {
+            m_loading = true; restoreDraft(); m_loading = false; return;
+        }
+        // Programmatic insertion can supersede a pending restore; actual input
+        // stays read-only until its exact draft has loaded.
+        m_loadingKeys.remove(m_key);
         auto &draft = m_drafts[m_key]; draft.text = m_editor->toPlainText();
         draft.position = m_editor->textCursor().position(); draft.anchor = m_editor->textCursor().anchor();
         if (!draft.error && !draft.uncertain) draft.notice.clear();
-        saveDraft(m_key, true);
+        saveDraft(m_key);
         updateControls();
     });
     auto rememberCursor = [this] {
-        if (m_loading || m_key.isEmpty() || m_drafts[m_key].sending) return;
+        if (m_loading || m_key.isEmpty() || m_drafts[m_key].sending || isWaitingToSend(m_key) || isDraftLoading(m_key)) return;
         auto &draft = m_drafts[m_key];
         if (draft.position == m_editor->textCursor().position() && draft.anchor == m_editor->textCursor().anchor()) return;
         draft.position = m_editor->textCursor().position(); draft.anchor = m_editor->textCursor().anchor();
-        saveDraft(m_key, true); updateControls();
+        saveDraft(m_key); updateControls();
     };
     connect(edit, &QPlainTextEdit::cursorPositionChanged, this, rememberCursor);
     connect(edit, &QPlainTextEdit::selectionChanged, this, rememberCursor);
@@ -284,13 +290,19 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     auto *retrySave = new QTimer(this); retrySave->setInterval(2000);
     connect(retrySave, &QTimer::timeout, this, [this] {
         const auto pending = m_failedSaves;
-        for (const auto &key : pending) saveDraft(key, true);
+        for (const auto &key : pending) saveDraft(key);
         if (!pending.isEmpty()) updateControls();
     }); retrySave->start();
+    m_draftStore.indexAsync(this, [this](const QHash<QString, QString> &index) {
+        for (auto it = index.cbegin(); it != index.cend(); ++it) {
+            if (!m_drafts.contains(it.key())) m_storedDrafts.insert(it.key());
+            notifyDraft(it.key());
+        }
+    });
     setTheme(true); updateControls();
 }
 
-MessageComposer::~MessageComposer() { ComposerDraftStore::flushWrites(); }
+MessageComposer::~MessageComposer() = default;
 
 void MessageComposer::resizeEvent(QResizeEvent *event)
 {
@@ -316,7 +328,18 @@ void MessageComposer::setSessionKey(const QString &key)
     if (key == m_key) return;
     m_settingsPopup->hide();
     m_toolbar->closePopovers(); m_preview->hide();
-    if (!key.isEmpty() && !m_drafts.contains(key)) m_drafts.insert(key, m_draftStore.load(key));
+    if (!key.isEmpty() && !m_drafts.contains(key)) {
+        m_drafts.insert(key, {}); m_loadingKeys.insert(key);
+        const auto revision = m_saveRevision.value(key);
+        m_draftStore.loadAsync(key, this, [this, key, revision](const ComposerDraft &draft) {
+            if (!m_loadingKeys.contains(key) || m_saveRevision.value(key) != revision) return;
+            m_loadingKeys.remove(key); m_drafts[key] = draft; notifyDraft(key);
+            if (m_key == key) {
+                m_loading = true; restoreDraft(); m_loading = false;
+                rebuildAttachments(); updateControls(); updatePlaceholder();
+            }
+        });
+    }
     m_key = key; m_loading = true;
     restoreDraft();
     m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
@@ -363,7 +386,7 @@ bool MessageComposer::requestInterrupt()
 
 bool MessageComposer::offerDraft(const QString &key, const QString &text)
 {
-    if (key.isEmpty() || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if (key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
@@ -378,20 +401,15 @@ void MessageComposer::setAvailability(bool available, const QString &reason)
     m_available = available; m_unavailableReason = reason; updateControls();
 }
 
-bool MessageComposer::isSending(const QString &key) const { return m_drafts.value(key).sending; }
+bool MessageComposer::isSending(const QString &key) const { return m_drafts.value(key).sending || m_preparingKeys.contains(key); }
 
 bool MessageComposer::hasDraft(const QString &key) const
 {
     if (!m_drafts.contains(key)) {
-        // Read manifest metadata once. Filtering must find restored drafts without
-        // opening their conversations or reading attachment payloads.
-        if (!m_draftsIndexed) {
-            const auto keys = m_draftStore.keys();
-            m_storedDrafts = QSet<QString>(keys.cbegin(), keys.cend());
-            m_draftsIndexed = true;
-        }
         return m_storedDrafts.contains(key);
     }
+    if (m_loadingKeys.contains(key)) return m_storedDrafts.contains(key) || (m_renamingKeys.contains(key)
+        && (!m_drafts.value(key).text.trimmed().isEmpty() || !m_drafts.value(key).attachments.isEmpty()));
     const auto draft = m_drafts.value(key);
     return !draft.sending && (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty());
 }
@@ -413,68 +431,88 @@ bool MessageComposer::draftMatches(const QString &key, const QString &text, cons
     return true;
 }
 
-bool MessageComposer::saveDraft(const QString &key, bool asynchronous)
+bool MessageComposer::saveDraft(const QString &key)
 {
-    // Retrying an older Activity message must never replace the current draft.
-    auto &draft = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
+    if (key.isEmpty() || m_loadingKeys.contains(key) || m_preparingKeys.contains(key) || m_preparingWaiting.contains(key)) return false;
+    const auto &draft = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
     const auto revision = ++m_saveRevision[key];
-    if (asynchronous) {
-        m_savingKeys.insert(key);
-        m_draftStore.saveAsync(key, draft, this, [this, key, revision](bool saved, const ComposerDraft &written) {
-            if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) return;
-            auto &current = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
-            current.storageError = written.storageError; current.attachmentHashes = written.attachmentHashes;
-            if (m_preservedDrafts.contains(key)) m_drafts[key].storageError = written.storageError;
-            m_savingKeys.remove(key);
-            if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
-            if (key == m_key) updateControls();
-        });
-        return true;
-    }
-    m_savingKeys.remove(key);
-    const bool saved = m_draftStore.save(key, draft);
-    if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
-    if (m_preservedDrafts.contains(key)) m_drafts[key].storageError = draft.storageError;
-    return saved;
+    m_savingKeys.insert(key);
+    m_draftStore.saveAsync(key, draft, this, [this, key, revision](bool saved, const ComposerDraft &written) {
+        if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) return;
+        auto &current = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
+        current.storageError = written.storageError; current.attachmentHashes = written.attachmentHashes;
+        if (m_preservedDrafts.contains(key)) m_drafts[key].storageError = written.storageError;
+        m_savingKeys.remove(key);
+        if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
+        if (key == m_key) updateControls();
+    });
+    return true;
 }
 
 bool MessageComposer::setWaitingToSend(const QString &key, const QString &reason)
 {
     if (key.isEmpty()) return false;
-    if (reason.isEmpty()) m_waitingSends.remove(key);
-    else {
-        if (isSending(key) || m_drafts.value(key).uncertain) return false;
-        if (!saveDraft(key)) { if (key == m_key) updateControls(); return false; }
-        m_waitingSends.insert(key, reason);
-    }
-    if (key == m_key) { if (!reason.isEmpty()) m_settingsPopup->hide(); updateControls(); updatePlaceholder(); }
-    return true;
+    if (reason.isEmpty()) { if (m_waitingSends.remove(key)) ++m_saveRevision[key]; m_preparingWaiting.remove(key); updateControls(); return true; }
+    if (isSending(key) || isWaitingToSend(key) || isDraftLoading(key) || m_drafts.value(key).uncertain
+        || !m_drafts.value(key).storageError.isEmpty()) return false;
+    prepareWaitingToSendAsync(key, reason, [](bool) {}); return true;
+}
+
+void MessageComposer::prepareWaitingToSendAsync(const QString &key, const QString &reason, std::function<void(bool)> done)
+{
+    if (key.isEmpty() || reason.isEmpty() || isSending(key) || m_preparingWaiting.contains(key)
+        || isDraftLoading(key) || m_drafts.value(key).uncertain) { done(false); return; }
+    m_waitingSends.insert(key, reason); m_preparingWaiting.insert(key);
+    const auto revision = ++m_saveRevision[key]; m_savingKeys.insert(key);
+    if (key == m_key) { m_settingsPopup->hide(); updateControls(); updatePlaceholder(); }
+    m_draftStore.saveDurableAsync(key, m_drafts.value(key), this, [this, key, revision, done = std::move(done)](bool okay, const ComposerDraft &written) {
+        if (m_saveRevision.value(key) != revision || !m_preparingWaiting.contains(key)) { done(false); return; }
+        m_preparingWaiting.remove(key); m_savingKeys.remove(key); m_drafts[key].storageError = written.storageError;
+        if (!okay) { m_waitingSends.remove(key); m_failedSaves.insert(key); }
+        if (key == m_key) { updateControls(); updatePlaceholder(); }
+        done(okay);
+    });
 }
 
 bool MessageComposer::setSending(const QString &key, bool preserveDraft)
 {
-    m_waitingSends.remove(key);
-    if(preserveDraft)m_preservedDrafts.insert(key,m_drafts.value(key));
-    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Sending…");
-    if (!saveDraft(key)) {
-        draft.sending = false; draft.notice.clear(); m_preservedDrafts.remove(key);
-        if (key == m_key) updateControls();
-        return false;
-    }
-    // Keep the submitted payload for failure recovery, but remove it from the
-    // composer as soon as the owner accepts delivery and adds it to Activity.
-    if (key == m_key) {
-        if (m_send->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
-        m_loading = true; m_editor->clear(); m_loading = false;
-        rebuildAttachments(); updateControls();
-    }
-    notifyDraft(key);
-    return true;
+    if (key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key)
+        || (m_drafts.value(key).uncertain && !preserveDraft)) return false;
+    prepareSendingAsync(key, preserveDraft, [](bool) {}); return true;
+}
+
+void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done)
+{
+    if (key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key) || (m_drafts.value(key).uncertain && !preserveDraft)) { done(false); return; }
+    m_waitingSends.remove(key); m_preparingKeys.insert(key);
+    if (preserveDraft) m_preservedDrafts.insert(key, m_drafts.value(key));
+    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Saving before sending…");
+    // Preserve a newer draft on Activity retry, but also durably record that a
+    // delivery may have begun. Recovery never repeats the older message.
+    auto snapshot = m_preservedDrafts.value(key, draft); snapshot.sending = true;
+    const auto revision = ++m_saveRevision[key]; m_savingKeys.insert(key);
+    if (key == m_key) updateControls();
+    m_draftStore.saveDurableAsync(key, snapshot, this, [this, key, revision, done = std::move(done)](bool okay, const ComposerDraft &written) {
+        if (m_saveRevision.value(key) != revision || !m_preparingKeys.contains(key)) { done(false); return; }
+        m_preparingKeys.remove(key); m_savingKeys.remove(key);
+        auto &draft = m_drafts[key]; draft.storageError = written.storageError;
+        if (!okay) {
+            draft.sending = false; draft.notice.clear(); m_preservedDrafts.remove(key); m_failedSaves.insert(key);
+            if (key == m_key) updateControls(); done(false); return;
+        }
+        m_failedSaves.remove(key); draft.notice = tr("Sending…");
+        if (key == m_key) {
+            if (m_send->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
+            m_loading = true; m_editor->clear(); m_loading = false;
+            rebuildAttachments(); updateControls();
+        }
+        notifyDraft(key); done(true);
+    });
 }
 
 void MessageComposer::deliveryFinished(const QString &key, bool ok, const QString &detail, bool uncertain)
 {
-    m_waitingSends.remove(key);
+    m_waitingSends.remove(key); m_preparingKeys.remove(key); m_preparingWaiting.remove(key);
     if(m_preservedDrafts.contains(key)) {
         m_drafts[key]=m_preservedDrafts.take(key);
         saveDraft(key);
@@ -494,22 +532,35 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
 
 void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
 {
-    if (oldKey == newKey || !m_drafts.contains(oldKey)) return;
-    auto moved = m_preservedDrafts.value(oldKey, m_drafts.value(oldKey));
-    auto destination = m_drafts.contains(newKey) ? m_drafts.value(newKey) : m_draftStore.load(newKey);
-    if (!destination.text.isEmpty() || !destination.attachments.isEmpty() || !destination.storageError.isEmpty()) {
-        m_drafts.insert(newKey, destination);
-        if (m_key == oldKey) { m_key.clear(); setSessionKey(newKey); }
-        showError(tr("Another draft already exists here. Recover the previous one from Saved drafts."));
+    if (oldKey == newKey || !m_drafts.contains(oldKey) || isSending(oldKey) || isWaitingToSend(oldKey)
+        || isDraftLoading(oldKey) || isSending(newKey) || isWaitingToSend(newKey) || m_renamingKeys.contains(newKey)) return;
+    const auto destination = m_drafts.value(newKey);
+    if (m_drafts.contains(newKey) && (!destination.text.isEmpty() || !destination.attachments.isEmpty() || !destination.storageError.isEmpty())) {
+        if (m_key == oldKey) { m_key.clear(); setSessionKey(newKey); showError(tr("Another draft already exists here. Recover the previous one from Saved drafts.")); }
         return;
     }
-    if (!m_draftStore.save(newKey, moved)) { m_drafts[oldKey].storageError = moved.storageError; updateControls(); return; }
-    Draft empty; m_draftStore.save(oldKey, empty);
-    m_storedDrafts.remove(oldKey);
-    m_drafts.insert(newKey, m_drafts.take(oldKey));
-    if(m_preservedDrafts.contains(oldKey))m_preservedDrafts.insert(newKey,m_preservedDrafts.take(oldKey));
-    notifyDraft(oldKey); notifyDraft(newKey);
-    if (m_key == oldKey) { m_key.clear(); setSessionKey(newKey); }
+    const auto moved = m_preservedDrafts.value(oldKey, m_drafts.value(oldKey));
+    m_drafts.insert(newKey, moved); m_loadingKeys.insert(oldKey); m_loadingKeys.insert(newKey);
+    m_renamingKeys.insert(oldKey); m_renamingKeys.insert(newKey);
+    const auto revision = ++m_saveRevision[oldKey], destinationRevision = ++m_saveRevision[newKey];
+    if (m_key == oldKey || m_key == newKey) updateControls();
+    m_draftStore.renameAsync(oldKey, newKey, moved, this, [this, oldKey, newKey, revision, destinationRevision](bool okay, const ComposerDraft &written) {
+        if (m_saveRevision.value(oldKey) != revision || m_saveRevision.value(newKey) != destinationRevision) return;
+        m_renamingKeys.remove(oldKey); m_renamingKeys.remove(newKey); m_loadingKeys.remove(oldKey); m_loadingKeys.remove(newKey);
+        if (!okay) {
+            m_drafts[oldKey].storageError = written.storageError;
+            m_drafts.remove(newKey);
+            if (m_key == newKey) { m_key.clear(); setSessionKey(newKey); }
+            else if (m_key == oldKey) updateControls();
+            return;
+        }
+        m_storedDrafts.remove(oldKey); m_storedDrafts.insert(newKey);
+        m_drafts.remove(oldKey); m_preservedDrafts.remove(oldKey); m_failedSaves.remove(oldKey); m_savingKeys.remove(oldKey);
+        m_drafts[newKey] = written;
+        notifyDraft(oldKey); notifyDraft(newKey);
+        if (m_key == oldKey) { m_key.clear(); setSessionKey(newKey); }
+        else if (m_key == newKey) { m_loading = true; restoreDraft(); m_loading = false; rebuildAttachments(); updateControls(); }
+    });
 }
 
 void MessageComposer::send()
@@ -522,7 +573,6 @@ void MessageComposer::send()
         return;
     }
     QToolTip::hideText();
-    if (!saveDraft(m_key)) { updateControls(); return; }
     const auto draft = m_drafts.value(m_key);
     // Sending answers the suggestion; the same one never returns.
     if (m_suggestions.contains(m_key)) {
@@ -650,11 +700,12 @@ void MessageComposer::openAttachment(int index)
 {
     const auto draft = m_drafts.value(m_key); if (draft.sending || index < 0 || index >= draft.attachments.size()) return;
     const auto &attachment = draft.attachments[index];
-    const QString path = AttachmentFiles::store(attachment.name, attachment.data);
-    if (path.isEmpty()) { showError(tr("Could not open %1.").arg(attachment.name)); return; }
+    const QString key = m_key;
     m_attachmentsChip->closePopover();
-    // Wayland launches only after the popup has gone: dispatch once it closed.
-    QTimer::singleShot(0, this, [this, path] {
+    AttachmentFiles::prepareAsync({attachment}, this, [this, key](const QJsonArray &files, const QString &error) {
+        if (m_key != key) return;
+        if (!error.isEmpty() || files.isEmpty()) { showError(error.isEmpty() ? tr("Could not open the attachment.") : error); return; }
+        const auto path = files.first().toObject().value("local_path").toString();
         if (!openUrl(QUrl::fromLocalFile(path))) showError(tr("Could not open the attachment with its default application."));
     });
 }
@@ -712,7 +763,7 @@ void MessageComposer::updateControls()
     const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
     const bool tooLong = draft.text.toUtf8().size() > MaxTextBytes;
     const bool waiting = isWaitingToSend(m_key);
-    const bool locked = draft.sending || waiting;
+    const bool locked = draft.sending || waiting || m_loadingKeys.contains(m_key);
     // Disabling a focused editor makes Qt focus another action (often Stop).
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
@@ -727,7 +778,7 @@ void MessageComposer::updateControls()
     m_retry->setVisible(draft.uncertain && !locked);
     m_settings->setEnabled(!m_key.isEmpty() && !locked);
     if (m_settingsPopup->isVisible()) updateSettingsApply();
-    QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
+    QString status = m_loadingKeys.contains(m_key) ? tr("Loading draft…") : !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
     // An available composer may still explain what Send will do first.
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_available || !m_unavailableReason.isEmpty() ? m_unavailableReason
         : hasContent ? (m_savingKeys.contains(m_key) ? tr("Saving draft… Enter to send; Shift+Enter for a new line")
@@ -743,14 +794,18 @@ void MessageComposer::showSavedDrafts()
     auto *hint = new QLabel(tr("Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message."));
     hint->setWordWrap(true); layout->addWidget(hint);
     auto *list = new QListWidget; list->setObjectName("savedDraftList"); layout->addWidget(list, 1);
-    auto keys = m_draftStore.keys();
-    for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it)
-        if ((!it->text.isEmpty() || !it->attachments.isEmpty()) && !keys.contains(it.key())) keys.append(it.key());
-    keys.sort();
-    for (const auto &key : keys) {
-        auto *item = new QListWidgetItem(m_draftStore.label(key), list);
-        item->setData(Qt::UserRole, key);
-    }
+    const auto populate = [this, list](const QHash<QString, QString> &index) {
+        QSet<QString> keys;
+        for (auto it = index.cbegin(); it != index.cend(); ++it) keys.insert(it.key());
+        for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it)
+            if (!it.value().text.trimmed().isEmpty() || !it.value().attachments.isEmpty()) keys.insert(it.key());
+        auto sorted = keys.values(); sorted.sort(); list->clear();
+        for (const auto &key : sorted) {
+            auto *item = new QListWidgetItem(index.value(key, QString(key).replace('\n', " / ")), list);
+            item->setData(Qt::UserRole, key);
+        }
+        if (list->count()) list->setCurrentRow(0);
+    };
     auto *preview = new QPlainTextEdit; preview->setObjectName("savedDraftPreview"); preview->setReadOnly(true); layout->addWidget(preview, 1);
     auto *detail = new QLabel; detail->setWordWrap(true); layout->addWidget(detail);
     auto *actions = new QHBoxLayout;
@@ -760,25 +815,38 @@ void MessageComposer::showSavedDrafts()
     actions->addWidget(copy); actions->addWidget(restore); actions->addStretch(); actions->addWidget(close); layout->addLayout(actions);
     const auto target = m_key;
     Draft selected;
-    connect(list, &QListWidget::currentItemChanged, &dialog, [&](QListWidgetItem *item) {
-        const auto key = item ? item->data(Qt::UserRole).toString() : QString();
-        if (!item) selected = {};
-        else if (m_preservedDrafts.contains(key)) selected = m_preservedDrafts.value(key);
-        else if (m_drafts.contains(key)) selected = m_drafts.value(key);
-        else selected = m_draftStore.load(key);
+    quint64 selection = 0;
+    const auto presentSelection = [&] {
         if (selected.sending) {
             selected.sending = false; selected.uncertain = true;
             selected.notice = tr("This message may already have been sent. Check Activity or Terminal before sending again.");
         }
         preview->setPlainText(selected.text);
         detail->setText(selected.storageError.isEmpty() ? tr("%1 attachment(s). %2").arg(selected.attachments.size()).arg(selected.notice) : selected.storageError);
-        copy->setEnabled(item && !selected.text.isEmpty());
-        restore->setEnabled(item && !target.isEmpty() && !isSending(target) && !isWaitingToSend(target) && selected.storageError.isEmpty());
+        copy->setEnabled(!selected.text.isEmpty());
+        restore->setEnabled(!target.isEmpty() && !isSending(target) && !isWaitingToSend(target)
+            && !isDraftLoading(target) && selected.storageError.isEmpty() && list->currentItem());
+    };
+    connect(list, &QListWidget::currentItemChanged, &dialog, [&](QListWidgetItem *item) {
+        const auto generation = ++selection;
+        const auto key = item ? item->data(Qt::UserRole).toString() : QString();
+        if (!item) selected = {};
+        else if (m_preservedDrafts.contains(key)) selected = m_preservedDrafts.value(key);
+        else if (m_drafts.contains(key) && !isDraftLoading(key)) selected = m_drafts.value(key);
+        else {
+            selected = {}; preview->clear(); detail->setText(tr("Loading draft…")); copy->setEnabled(false); restore->setEnabled(false);
+            m_draftStore.loadAsync(key, &dialog, [&, generation](const ComposerDraft &loaded) {
+                if (generation != selection) return;
+                selected = loaded; presentSelection();
+            }); return;
+        }
+        presentSelection();
     });
+
     connect(copy, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(selected.text); });
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
-        if (m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target)) return;
+        if (m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target) || isDraftLoading(target)) return;
         const auto current = m_drafts.value(target);
         if ((!current.text.isEmpty() || !current.attachments.isEmpty())
             && list->currentItem()->data(Qt::UserRole).toString() != target) {
@@ -793,7 +861,9 @@ void MessageComposer::showSavedDrafts()
         m_loading = true; restoreDraft(); m_loading = false; rebuildAttachments(); updateControls(); dialog.accept();
     });
     copy->setEnabled(false); restore->setEnabled(false);
-    if (list->count()) list->setCurrentRow(0); else hint->setText(tr("No saved drafts on this desktop."));
+    m_draftStore.indexAsync(&dialog, [&, populate](const QHash<QString, QString> &index) {
+        populate(index); if (!list->count()) hint->setText(tr("No saved drafts on this desktop."));
+    });
     dialog.exec();
 }
 

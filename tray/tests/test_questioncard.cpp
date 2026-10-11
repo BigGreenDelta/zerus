@@ -15,6 +15,10 @@
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QTest>
+#include <QSemaphore>
+#include <QScopeGuard>
+#include <QThread>
+#include <atomic>
 #include <QTemporaryDir>
 #include <QTextBrowser>
 #include <QVBoxLayout>
@@ -55,6 +59,22 @@ QPushButton *submit(QuestionCard &card) { return card.findChild<QPushButton *>("
 void complete(QuestionCard &card) { option(card, "opt_0_0")->click(); option(card, "opt_1_0")->click(); }
 }
 
+namespace {
+void setQuestionReady(QuestionCard &card, const QString &key, const QJsonObject &question, int count = 0)
+{
+    card.setQuestion(key, question, count); QTRY_VERIFY(!card.isDraftLoading());
+}
+bool setSendingReady(QuestionCard &card, const QString &key, const QString &id, bool sending = true)
+{
+    if (!sending) return card.setSending(key, id, false);
+    bool finished = false, okay = false;
+    card.prepareSendingAsync(key, id, [&](bool result) { okay = result; finished = true; });
+    QElapsedTimer clock; clock.start();
+    while (!finished && clock.elapsed() < 3000) QTest::qWait(1);
+    return finished && okay;
+}
+}
+
 class TestQuestionCard : public QObject {
     Q_OBJECT
 private slots:
@@ -64,7 +84,9 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
     }
-    void init() { QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void stalledWriterKeepsQuestionNavigationAndSubmissionResponsive();
+    void submittedReceiptSupersedesStalledPreparationWithoutReplay();
     void restoresUnsentAnswersAcrossRestartWithExactRequestIdentity();
     void interruptedAndSubmittedAnswersStayLockedAfterRestart();
     void allRequiredQuestionsAndStableAnswerIds();
@@ -100,7 +122,7 @@ void TestQuestionCard::contentScaleEnlargesQuestionTextOnly()
 {
     QWidget workspace; workspace.setStyleSheet("QWidget { font-size:13px; }");
     auto *layout = new QVBoxLayout(&workspace); auto *card = new QuestionCard; layout->addWidget(card);
-    card->setTheme(false); card->setQuestion("local", request()); workspace.resize(560, 700); workspace.show(); QTest::qWait(10);
+    card->setTheme(false); setQuestionReady(*card, "local", request()); workspace.resize(560, 700); workspace.show(); QTest::qWait(10);
     const auto pixels = [card](const QString &name) { auto *widget = card->findChild<QWidget *>(name); return widget ? QFontInfo(widget->font()).pixelSize() : -1; };
     const QStringList scaled{"questionPrompt", "questionChoiceTitle", "questionChoiceDescription", "questionFreeText"};
     QMap<QString, int> before; for (const auto &name : scaled) before.insert(name, pixels(name));
@@ -115,38 +137,74 @@ void TestQuestionCard::contentScaleEnlargesQuestionTextOnly()
     for (const auto &name : scaled) QCOMPARE(pixels(name), before.value(name));
 }
 
+void TestQuestionCard::stalledWriterKeepsQuestionNavigationAndSubmissionResponsive()
+{
+    QuestionCard card; setQuestionReady(card, "stalled/session", request());
+    QSemaphore entered, release; std::atomic<int> operations = 0;
+    ComposerDraftStore::setWriteObserver([&] { if (++operations == 1) { entered.release(); release.acquire(); } });
+    auto cleanup = qScopeGuard([&] { release.release(); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({}); });
+    option(card, "opt_0_0")->click(); QVERIFY(entered.tryAcquire(1, 3000));
+    option(card, "opt_1_0")->click(); QVERIFY(submit(card)->isEnabled());
+    int transports = 0; card.prepareSendingAsync("stalled/session", "tool-question", [&](bool okay) { if (okay) ++transports; });
+    card.setQuestion("stalled/other", request("other-question")); QVERIFY(card.isDraftLoading());
+    bool heartbeat = false; QTimer::singleShot(0, &card, [&] { heartbeat = true; }); QTRY_VERIFY(heartbeat);
+    QCOMPARE(transports, 0); release.release(); QTRY_COMPARE(transports, 1); QTRY_VERIFY(!card.isDraftLoading());
+    QCOMPARE(card.submissionSnapshot("stalled/other", "other-question").value("sending").toBool(), false);
+    QuestionCard recovered; setQuestionReady(recovered, "stalled/session", request());
+    QVERIFY(!submit(recovered)->isEnabled()); QVERIFY(option(recovered, "opt_0_0")->isChecked());
+    QVERIFY(option(recovered, "opt_1_0")->isChecked());
+}
+
+void TestQuestionCard::submittedReceiptSupersedesStalledPreparationWithoutReplay()
+{
+    auto question = request(); question["source"] = "codex_async"; question["optional"] = true;
+    QuestionCard card; setQuestionReady(card, "stalled/receipt", question); complete(card); ComposerDraftStore::flushWrites();
+    QSemaphore entered, release; std::atomic<int> operations = 0;
+    ComposerDraftStore::setWriteObserver([&] { if (++operations == 1) { entered.release(); release.acquire(); } });
+    auto cleanup = qScopeGuard([&] { release.release(); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({}); });
+    int transports = 0; bool completed = false;
+    card.prepareSendingAsync("stalled/receipt", "tool-question", [&](bool okay) { if (okay) ++transports; completed = true; });
+    QVERIFY(entered.tryAcquire(1, 3000)); card.setSubmitted("stalled/receipt", "tool-question");
+    QVERIFY(card.hasSubmittedAnswer("stalled/receipt", question));
+    bool heartbeat = false; QTimer::singleShot(0, &card, [&] { heartbeat = true; }); QTRY_VERIFY(heartbeat);
+    QVERIFY(!completed); release.release(); QTRY_VERIFY(completed); QCOMPARE(transports, 0);
+    ComposerDraftStore::flushWrites();
+    QuestionCard recovered; setQuestionReady(recovered, "stalled/receipt", question);
+    QVERIFY(recovered.hasSubmittedAnswer("stalled/receipt", question)); QVERIFY(!submit(recovered)->isEnabled());
+}
+
 void TestQuestionCard::restoresUnsentAnswersAcrossRestartWithExactRequestIdentity()
 {
     {
-        QuestionCard card; card.setQuestion("arch\nagent", request());
+        QuestionCard card; setQuestionReady(card, "arch\nagent", request());
         other(card, "q_0")->click(); text(card, "q_0")->setText("Keep every typed character");
         option(card, "opt_1_1")->click(); card.findChild<QTabBar *>("questionTabs")->setCurrentIndex(1);
     }
     QuestionCard restored; QSignalSpy sent(&restored, &QuestionCard::answerRequested);
-    restored.setQuestion("arch\nagent", request());
+    setQuestionReady(restored, "arch\nagent", request());
     QCOMPARE(text(restored, "q_0")->text(), "Keep every typed character");
     QVERIFY(other(restored, "q_0")->isChecked()); QVERIFY(option(restored, "opt_1_1")->isChecked());
     QCOMPARE(restored.findChild<QTabBar *>("questionTabs")->currentIndex(), 1); QCOMPARE(sent.count(), 0);
     auto changed = request(); changed["run_id"] = "different-run";
-    restored.setQuestion("arch\nagent", changed); QVERIFY(text(restored, "q_0")->text().isEmpty());
+    setQuestionReady(restored, "arch\nagent", changed); QVERIFY(text(restored, "q_0")->text().isEmpty());
     changed = request(); changed["conversation_id"] = "different-conversation";
-    restored.setQuestion("arch\nagent", changed); QVERIFY(text(restored, "q_0")->text().isEmpty());
-    restored.setQuestion("mac\nagent", request()); QVERIFY(text(restored, "q_0")->text().isEmpty());
-    restored.setQuestion("arch\nagent", request("tool-question", "different-hash")); QVERIFY(text(restored, "q_0")->text().isEmpty());
-    restored.setQuestion("arch\nagent", request()); QCOMPARE(text(restored, "q_0")->text(), "Keep every typed character");
+    setQuestionReady(restored, "arch\nagent", changed); QVERIFY(text(restored, "q_0")->text().isEmpty());
+    setQuestionReady(restored, "mac\nagent", request()); QVERIFY(text(restored, "q_0")->text().isEmpty());
+    setQuestionReady(restored, "arch\nagent", request("tool-question", "different-hash")); QVERIFY(text(restored, "q_0")->text().isEmpty());
+    setQuestionReady(restored, "arch\nagent", request()); QCOMPARE(text(restored, "q_0")->text(), "Keep every typed character");
 }
 
 void TestQuestionCard::interruptedAndSubmittedAnswersStayLockedAfterRestart()
 {
     {
-        QuestionCard card; card.setQuestion("arch\nagent", request()); complete(card);
-        QVERIFY(card.setSending("arch\nagent", "tool-question"));
+        QuestionCard card; setQuestionReady(card, "arch\nagent", request()); complete(card);
+        QVERIFY(setSendingReady(card, "arch\nagent", "tool-question"));
     }
-    QuestionCard restored; restored.setQuestion("arch\nagent", request());
+    QuestionCard restored; setQuestionReady(restored, "arch\nagent", request());
     QVERIFY(!submit(restored)->isEnabled());
     restored.findChild<QPushButton *>("questionAllowRetry")->click(); QVERIFY(submit(restored)->isEnabled());
     restored.setSubmitted("arch\nagent", "tool-question");
-    QuestionCard submitted; submitted.setQuestion("arch\nagent", request());
+    QuestionCard submitted; setQuestionReady(submitted, "arch\nagent", request());
     QVERIFY(!submit(submitted)->isEnabled()); QCOMPARE(submit(submitted)->text(), "Submitted");
     QVERIFY(option(submitted, "opt_0_0")->isChecked());
 }
@@ -154,14 +212,14 @@ void TestQuestionCard::interruptedAndSubmittedAnswersStayLockedAfterRestart()
 void TestQuestionCard::submittedAnswersRestoreAndIgnoreLateErrors()
 {
     QuestionCard card; auto question=request();question["source"]="codex_async";question["optional"]=true;question["can_skip"]=true;
-    card.setQuestion("local",question);card.show();
-    complete(card);card.setSending("local","tool-question",true);
+    setQuestionReady(card, "local",question);card.show();
+    complete(card);setSendingReady(card, "local","tool-question",true);
     question["can_answer"]=false;question["can_skip"]=false;
     question["answer_delivery"]=QJsonObject{{"status","submitted"},{"question_id","tool-question"},{"question_hash","hash-one"},
         {"run_id","run"},{"conversation_id","conversation"},{"answers",QJsonArray{
             QJsonObject{{"question_id","q_0"},{"selected_option_ids",QJsonArray{}},{"text","Saved queued answer"}},
             QJsonObject{{"question_id","q_1"},{"selected_option_ids",QJsonArray{"opt_1_1"}},{"text",""}}}}};
-    card.setQuestion("local",question);
+    setQuestionReady(card, "local",question);
     QVERIFY(card.hasSubmittedAnswer("local",question));
     QCOMPARE(text(card,"q_0")->text(),QString("Saved queued answer"));QVERIFY(other(card,"q_0")->isChecked());
     QVERIFY(option(card,"opt_1_1")->isChecked());QVERIFY(!option(card,"opt_1_0")->isChecked());
@@ -174,9 +232,9 @@ void TestQuestionCard::submittedAnswersRestoreAndIgnoreLateErrors()
     QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("Waiting for Codex"));
     QSignalSpy sent(&card,&QuestionCard::answerRequested);submit(card)->click();
     card.findChild<QPushButton *>("skipQuestion")->click();QCOMPARE(sent.size(),0);
-    card.setQuestion("other",request());complete(card);QVERIFY(submit(card)->isEnabled());
-    card.setQuestion("local",question);QVERIFY(!submit(card)->isEnabled());
-    QuestionCard fresh;fresh.setQuestion("local",question);
+    setQuestionReady(card, "other",request());complete(card);QVERIFY(submit(card)->isEnabled());
+    setQuestionReady(card, "local",question);QVERIFY(!submit(card)->isEnabled());
+    QuestionCard fresh;setQuestionReady(fresh, "local",question);
     QCOMPARE(text(fresh,"q_0")->text(),QString("Saved queued answer"));QVERIFY(!submit(fresh)->isEnabled());
     question.remove("answer_delivery");
     QVERIFY(fresh.hasSubmittedAnswer("local",question)); // stale metadata cannot reoffer a confirmed answer
@@ -185,19 +243,19 @@ void TestQuestionCard::submittedAnswersRestoreAndIgnoreLateErrors()
 void TestQuestionCard::submittedCallbacksAndMetadataKeepExactIdentity()
 {
     auto question=request();question["source"]="codex_async";question["optional"]=true;
-    QuestionCard card;card.setQuestion("local",question);complete(card);card.setSending("local","tool-question",true);
+    QuestionCard card;setQuestionReady(card, "local",question);complete(card);setSendingReady(card, "local","tool-question",true);
     auto replacement=question;replacement["question_hash"]="new-hash";
-    card.setQuestion("local",replacement);card.setSubmitted("local","tool-question");
+    setQuestionReady(card, "local",replacement);card.setSubmitted("local","tool-question");
     QVERIFY(!card.hasSubmittedAnswer("local",replacement));
     QVERIFY(submit(card)->text()!=QString("Submitted"));complete(card);
     QVERIFY(submit(card)->isEnabled());
-    card.setQuestion("local",question);QVERIFY(!submit(card)->isEnabled());QCOMPARE(submit(card)->text(),QString("Submitted"));
+    setQuestionReady(card, "local",question);QVERIFY(!submit(card)->isEnabled());QCOMPARE(submit(card)->text(),QString("Submitted"));
     QVERIFY(card.hasSubmittedAnswer("local",question));
-    card.setQuestion("remote",question);complete(card);QVERIFY(submit(card)->isEnabled());
+    setQuestionReady(card, "remote",question);complete(card);QVERIFY(submit(card)->isEnabled());
     QVERIFY(!card.hasSubmittedAnswer("remote",question));
     for(const auto &field:{"run_id","conversation_id"}) {
         auto unrelated=question;unrelated[field]="other-identity";
-        card.setQuestion("local",unrelated);complete(card);QVERIFY(submit(card)->isEnabled());
+        setQuestionReady(card, "local",unrelated);complete(card);QVERIFY(submit(card)->isEnabled());
         QVERIFY(!card.hasSubmittedAnswer("local",unrelated));
     }
     const QJsonObject delivery{{"status","submitted"},{"question_id","tool-question"},{"question_hash","hash-one"},
@@ -205,13 +263,13 @@ void TestQuestionCard::submittedCallbacksAndMetadataKeepExactIdentity()
     for(const auto &field:{"question_id","question_hash","run_id","conversation_id"}) {
         QuestionCard fresh;auto stale=delivery;stale[field]="unrelated";auto snapshot=question;snapshot["answer_delivery"]=stale;
         const auto unsubmitted = QString("unsubmitted-%1").arg(field);
-        fresh.setQuestion(unsubmitted,snapshot);complete(fresh);QVERIFY(submit(fresh)->isEnabled());
+        setQuestionReady(fresh, unsubmitted,snapshot);complete(fresh);QVERIFY(submit(fresh)->isEnabled());
         QVERIFY(!fresh.hasSubmittedAnswer(unsubmitted,snapshot));
-        QuestionCard known; known.setQuestion("local",snapshot); QVERIFY(!submit(known)->isEnabled());
+        QuestionCard known; setQuestionReady(known, "local",snapshot); QVERIFY(!submit(known)->isEnabled());
         QVERIFY(known.hasSubmittedAnswer("local",snapshot));
     }
     QuestionCard unsupported;auto snapshot=question;snapshot["source"]="other";snapshot["answer_delivery"]=delivery;
-    unsupported.setQuestion("unsupported",snapshot);complete(unsupported);QVERIFY(submit(unsupported)->isEnabled());
+    setQuestionReady(unsupported, "unsupported",snapshot);complete(unsupported);QVERIFY(submit(unsupported)->isEnabled());
     QVERIFY(!unsupported.hasSubmittedAnswer("unsupported",snapshot));
 
 }
@@ -219,8 +277,8 @@ void TestQuestionCard::submittedCallbacksAndMetadataKeepExactIdentity()
 void TestQuestionCard::submissionRecognitionKeepsUnconfirmedAnswers()
 {
     auto question=request();question["source"]="codex_async";question["optional"]=true;
-    QuestionCard card;card.setQuestion("local",question);complete(card);
-    card.setSending("local","tool-question");QVERIFY(!card.hasSubmittedAnswer("local",question));
+    QuestionCard card;setQuestionReady(card, "local",question);complete(card);
+    setSendingReady(card, "local","tool-question");QVERIFY(!card.hasSubmittedAnswer("local",question));
     card.setError("local","tool-question","No receipt",true);QVERIFY(!card.hasSubmittedAnswer("local",question));
     card.setSubmitted("local","tool-question");QVERIFY(card.hasSubmittedAnswer("local",question));
     // A persisted receipt can be recognized before the question is displayed.
@@ -243,7 +301,7 @@ void TestQuestionCard::claudeResumePreservesQuotaWarningAndExplicitChoice()
             QJsonObject{{"id", "resume"}, {"label", "Resume"}},
             QJsonObject{{"id", "new_conversation"}, {"label", "Start a new conversation"},
                 {"description", "Claude can look this one up if you refer to it later"}}}}}};
-    card.setQuestion("claude/session", question); card.resize(700, 350); card.show();
+    setQuestionReady(card, "claude/session", question); card.resize(700, 350); card.show();
     QVERIFY(!submit(card)->isEnabled());
     QVERIFY(!option(card, "resume")->isChecked()); QVERIFY(!option(card, "new_conversation")->isChecked());
     QVERIFY(card.findChildren<QLineEdit *>("questionFreeText").isEmpty());
@@ -263,7 +321,7 @@ void TestQuestionCard::hookTrustRequiresAnExplicitChoice()
         {"body","4 hooks are new or changed. Hooks can run outside the sandbox after you trust them."},{"allow_other",false},
         {"options",QJsonArray{QJsonObject{{"id","review"},{"label","Review hooks"}},QJsonObject{{"id","trust"},{"label","Trust all and continue"}},
             QJsonObject{{"id","continue_without_trusting"},{"label","Continue without trusting (hooks won't run)"}}}}}};
-    card.setQuestion("startup",hooks);card.resize(700,450);card.show();
+    setQuestionReady(card, "startup",hooks);card.resize(700,450);card.show();
     QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(),QString("Agent needs your approval"));
     QVERIFY(card.findChild<QPushButton *>("skipQuestion")->isHidden());
     QVERIFY(!submit(card)->isEnabled());QSignalSpy sent(&card,&QuestionCard::answerRequested);
@@ -276,7 +334,7 @@ void TestQuestionCard::hookTrustRequiresAnExplicitChoice()
 
 void TestQuestionCard::reviewCountdownAndNextNavigation()
 {
-    QuestionCard card;card.resize(700,450);card.setQuestion("session",request());card.show();card.activateWindow();QApplication::setActiveWindow(&card);
+    QuestionCard card;card.resize(700,450);setQuestionReady(card, "session",request());card.show();card.activateWindow();QApplication::setActiveWindow(&card);
     auto *next=card.findChild<QPushButton *>("questionNext"),*back=card.findChild<QPushButton *>("questionPrevious");
     QVERIFY(next->isVisible());QVERIFY(!back->isEnabled());QVERIFY(submit(card)->isHidden());
     option(card,"opt_0_0")->click();next->click();
@@ -285,7 +343,7 @@ void TestQuestionCard::reviewCountdownAndNextNavigation()
     auto approval=request("approval","command-one");approval["approval"]=true;
     approval["questions"]=QJsonArray{QJsonObject{{"id","approval"},{"question","Approve this Bash command?"},{"body","printf fixture > fixture.txt"},
         {"options",QJsonArray{QJsonObject{{"id","allow"},{"label","Approve once"}},QJsonObject{{"id","deny"},{"label","Deny"}}}}}};
-    card.setQuestion("session",approval);
+    setQuestionReady(card, "session",approval);
     // Approval commands read as code: an installed fixed-pitch family, never the
     // generic "monospace" that macOS lacks and resolves to its proportional font.
     const auto *command = card.findChild<QLabel *>("questionBody"); QVERIFY(command);
@@ -293,10 +351,10 @@ void TestQuestionCard::reviewCountdownAndNextNavigation()
     auto *allow=card.findChild<QPushButton *>("approveToolRequest");auto *deny=card.findChild<QPushButton *>("denyToolRequest");
     QSignalSpy sent(&card,&QuestionCard::answerRequested);
     QVERIFY(!allow->isEnabled());QVERIFY(deny->isEnabled());QVERIFY(allow->text().contains("(3)"));
-    QTest::qWait(1100);card.setQuestion("session",approval);QVERIFY(!allow->isEnabled());
+    QTest::qWait(1100);setQuestionReady(card, "session",approval);QVERIFY(!allow->isEnabled());
     card.hide();QTest::qWait(150);card.show();card.activateWindow();QApplication::setActiveWindow(&card);QVERIFY(!allow->isEnabled());
     QTRY_VERIFY_WITH_TIMEOUT(allow->isEnabled(),4000);QCOMPARE(sent.size(),0);
-    approval["question_hash"]="command-two";card.setQuestion("session",approval);QVERIFY(!allow->isEnabled());
+    approval["question_hash"]="command-two";setQuestionReady(card, "session",approval);QVERIFY(!allow->isEnabled());
     QTRY_VERIFY_WITH_TIMEOUT(allow->isEnabled(),4000);allow->click();QCOMPARE(sent.size(),1);
     QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"allow"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/approval.png"));}
@@ -312,7 +370,7 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
             QJsonObject{{"id","2"},{"label","No, and block reads outside the working directories from now on"},{"scope","broader"}},
             QJsonObject{{"id","3"},{"label","No, and ask again next time"},{"scope","once"}},
             QJsonObject{{"id","4"},{"label","Yes, but ask again next time"},{"scope","once"}}}}}};
-    card.setQuestion("session",approval);
+    setQuestionReady(card, "session",approval);
     QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(),QString("Agent needs your approval"));
     QVERIFY(card.findChild<QPushButton *>("approveToolRequest")->isHidden());QVERIFY(card.findChild<QPushButton *>("denyToolRequest")->isHidden());
     QVERIFY(option(card,"1")->isVisible());QVERIFY(option(card,"4")->isVisible());
@@ -327,7 +385,7 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     option(card,"4")->click();QCOMPARE(submit(card)->text(),QString("Submit answer"));
     option(card,"1")->click();submit(card)->click();QCOMPARE(sent.size(),0);submit(card)->click();QCOMPARE(sent.size(),1);
     QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"1"});
-    approval["question_hash"]="read-two";card.setQuestion("session",approval);QVERIFY(!submit(card)->isEnabled());
+    approval["question_hash"]="read-two";setQuestionReady(card, "session",approval);QVERIFY(!submit(card)->isEnabled());
     option(card,"4")->click();QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(),4000);submit(card)->click();QCOMPARE(sent.size(),2);
     QCOMPARE(sent.last()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"4"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/claude-approval.png"));}
@@ -340,7 +398,7 @@ void TestQuestionCard::unreadableApprovalPointsToTerminal()
     approval["answer_unavailable_reason"]="Zerus cannot read this approval completely. Enlarge Terminal or answer it there.";
     approval["questions"]=QJsonArray{QJsonObject{{"id","approval"},{"question","Claude asks to use Read"},{"body","Read\n\n/home/user/notes.txt"},
         {"allow_other",false},{"options",QJsonArray{}}}};
-    card.setQuestion("session",approval);
+    setQuestionReady(card, "session",approval);
     QVERIFY(card.isVisible());QVERIFY(submit(card)->isHidden());
     QVERIFY(card.findChild<QPushButton *>("approveToolRequest")->isHidden());QVERIFY(card.findChild<QPushButton *>("denyToolRequest")->isHidden());
     QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->isVisible());
@@ -349,7 +407,7 @@ void TestQuestionCard::unreadableApprovalPointsToTerminal()
 
 void TestQuestionCard::allRequiredQuestionsAndStableAnswerIds()
 {
-    QuestionCard card; card.setQuestion("arch/session", request());
+    QuestionCard card; setQuestionReady(card, "arch/session", request());
     QSignalSpy submitted(&card, &QuestionCard::answerRequested);
     QVERIFY(!submit(card)->isEnabled());
     option(card, "opt_0_1")->click(); QVERIFY(!submit(card)->isEnabled());
@@ -368,7 +426,7 @@ void TestQuestionCard::allRequiredQuestionsAndStableAnswerIds()
 
 void TestQuestionCard::customAndMultipleAnswers()
 {
-    QuestionCard card; card.setQuestion("arch/session", request());
+    QuestionCard card; setQuestionReady(card, "arch/session", request());
     QSignalSpy submitted(&card, &QuestionCard::answerRequested);
     complete(card); other(card, "q_0")->click();
     QVERIFY(!option(card, "opt_0_0")->isChecked()); QVERIFY(!submit(card)->isEnabled());
@@ -397,13 +455,13 @@ void TestQuestionCard::enterSubmitsFreeformAnswers()
     QuestionCard card; auto data = request(); data["optional"] = true; data["can_skip"] = true;
     auto question = data["questions"].toArray().first().toObject();
     if (!hasOptions) question["options"] = QJsonArray{};
-    data["questions"] = QJsonArray{question}; card.setQuestion("fixture/session", data); card.show();
+    data["questions"] = QJsonArray{question}; setQuestionReady(card, "fixture/session", data); card.show();
     if (hasOptions) other(card, "q_0")->click();
     auto *editor = text(card, "q_0"); editor->setText("  Keyboard answer  "); editor->setFocus();
     QVERIFY(submit(card)->isVisible()); QVERIFY(submit(card)->isEnabled());
     QSignalSpy sent(&card, &QuestionCard::answerRequested);
     connect(&card, &QuestionCard::answerRequested, &card, [&card](const QString &session, const QString &id) {
-        card.setSending(session, id);
+        setSendingReady(card, session, id);
     });
     QTest::keyClick(editor, Qt::Key(key)); QCOMPARE(sent.size(), 1);
     QCOMPARE(sent.first()[0].toString(), QString("fixture/session"));
@@ -419,15 +477,15 @@ void TestQuestionCard::enterRespectsSubmissionGuards()
 {
     QuestionCard card; auto data = request();
     data["questions"] = QJsonArray{QJsonObject{{"id", "free"}, {"question", "Your answer?"}, {"allow_other", true}}};
-    card.setQuestion("fixture/session", data); card.show();
+    setQuestionReady(card, "fixture/session", data); card.show();
     auto *editor = text(card, "free"); editor->setFocus();
     QSignalSpy sent(&card, &QuestionCard::answerRequested);
     QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 0);
     editor->setText("/invalid-answer"); QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 0);
     editor->setText("Valid answer");
-    data["can_answer"] = false; card.setQuestion("fixture/session", data);
+    data["can_answer"] = false; setQuestionReady(card, "fixture/session", data);
     QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 0);
-    data["can_answer"] = true; card.setQuestion("fixture/session", data);
+    data["can_answer"] = true; setQuestionReady(card, "fixture/session", data);
     card.setAvailability(false, "Offline");
     QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 0);
     card.setAvailability(true); card.setError("fixture/session", "tool-question", "Check delivery", true);
@@ -442,7 +500,7 @@ void TestQuestionCard::enterCannotBypassQuestionNavigationOrApproval()
     data["questions"] = QJsonArray{
         QJsonObject{{"id", "first"}, {"question", "First answer?"}, {"allow_other", true}},
         QJsonObject{{"id", "last"}, {"question", "Last answer?"}, {"allow_other", true}}};
-    card.setQuestion("fixture/session", data); card.show();
+    setQuestionReady(card, "fixture/session", data); card.show();
     text(card, "first")->setText("First"); text(card, "last")->setText("Last");
     QVERIFY(submit(card)->isEnabled()); QVERIFY(submit(card)->isHidden());
     QSignalSpy sent(&card, &QuestionCard::answerRequested);
@@ -450,26 +508,26 @@ void TestQuestionCard::enterCannotBypassQuestionNavigationOrApproval()
     card.findChild<QTabBar *>("questionTabs")->setCurrentIndex(1);
     QTest::keyClick(text(card, "last"), Qt::Key_Return); QCOMPARE(sent.size(), 1);
     data["approval"] = true; data["questions"] = QJsonArray{data["questions"].toArray().first()};
-    card.setQuestion("fixture/session", data);
+    setQuestionReady(card, "fixture/session", data);
     QVERIFY(submit(card)->isHidden());
     QTest::keyClick(text(card, "first"), Qt::Key_Return); QCOMPARE(sent.size(), 1);
 }
 
 void TestQuestionCard::draftsSurviveRefreshAndSessionSwitch()
 {
-    QuestionCard card; card.setQuestion("arch/session", request()); complete(card);
+    QuestionCard card; setQuestionReady(card, "arch/session", request()); complete(card);
     other(card, "q_0")->click(); text(card, "q_0")->setText("Remember this");
     card.findChild<QTabBar *>("questionTabs")->setCurrentIndex(1);
     auto *editor = text(card, "q_0"); editor->setSelection(0, 8);
-    card.setQuestion("arch/session", request());
+    setQuestionReady(card, "arch/session", request());
     QCOMPARE(text(card, "q_0"), editor); QCOMPARE(editor->selectedText(), "Remember");
-    card.setQuestion("mac/session", request()); QVERIFY(!submit(card)->isEnabled());
+    setQuestionReady(card, "mac/session", request()); QVERIFY(!submit(card)->isEnabled());
     QVERIFY(text(card, "q_0")->text().isEmpty());
-    card.setQuestion("arch/session", request());
+    setQuestionReady(card, "arch/session", request());
     QCOMPARE(text(card, "q_0")->text(), "Remember this"); QVERIFY(submit(card)->isEnabled());
     QCOMPARE(card.findChild<QTabBar *>("questionTabs")->currentIndex(), 1);
-    card.setQuestion({}, {}); QVERIFY(card.isHidden());
-    card.setQuestion("arch/session", request()); QVERIFY(submit(card)->isEnabled());
+    setQuestionReady(card, {}, {}); QVERIFY(card.isHidden());
+    setQuestionReady(card, "arch/session", request()); QVERIFY(submit(card)->isEnabled());
 }
 
 void TestQuestionCard::claudeCapabilityRefreshPreservesCompletedOtherDraft()
@@ -483,7 +541,7 @@ void TestQuestionCard::claudeCapabilityRefreshPreservesCompletedOtherDraft()
     auto questions = data["questions"].toArray(); auto last = questions[1].toObject();
     last["question"] = QString("Which checks should run? Review the synthetic fixture details.\n").repeated(80);
     questions[1] = last; data["questions"] = questions;
-    card->setQuestion("fixture/claude", data); activity.show();
+    setQuestionReady(*card, "fixture/claude", data); activity.show();
     option(*card, "opt_0_1")->click();
     auto *tabs = card->findChild<QTabBar *>("questionTabs"); tabs->setCurrentIndex(1);
     other(*card, "q_1")->click();
@@ -502,7 +560,7 @@ void TestQuestionCard::claudeCapabilityRefreshPreservesCompletedOtherDraft()
     QSignalSpy sent(card, &QuestionCard::answerRequested);
 
     data["can_answer"] = true; data.remove("answer_unavailable_reason");
-    card->setQuestion("fixture/claude", data);
+    setQuestionReady(*card, "fixture/claude", data);
     QTRY_VERIFY(submit(*card)->isEnabled());
     QCOMPARE(text(*card, "q_1"), editor); QCOMPARE(editor->text(), draft);
     QCOMPARE(editor->cursorPosition(), cursor); QCOMPARE(editor->selectedText(), selection);
@@ -510,7 +568,7 @@ void TestQuestionCard::claudeCapabilityRefreshPreservesCompletedOtherDraft()
     QCOMPARE(scroll->value(), 50); QVERIFY(other(*card, "q_1")->isChecked());
     QVERIFY(option(*card, "opt_0_1")->isChecked()); QCOMPARE(sent.size(), 0);
     // A later poll still cannot submit; only the user's explicit action does.
-    card->setQuestion("fixture/claude", data); QCOMPARE(sent.size(), 0);
+    setQuestionReady(*card, "fixture/claude", data); QCOMPARE(sent.size(), 0);
     submit(*card)->click(); QCOMPARE(sent.size(), 1);
     QCOMPARE(sent.first()[2].toJsonArray(), QJsonArray({
         QJsonObject{{"question_id", "q_0"}, {"selected_option_ids", QJsonArray{"opt_0_1"}}, {"text", ""}},
@@ -519,17 +577,17 @@ void TestQuestionCard::claudeCapabilityRefreshPreservesCompletedOtherDraft()
 
 void TestQuestionCard::replacementHashAndBackgroundReplyAreIsolated()
 {
-    QuestionCard card; card.setQuestion("arch/session", request()); complete(card);
-    card.setSending("arch/session", "tool-question");
+    QuestionCard card; setQuestionReady(card, "arch/session", request()); complete(card);
+    setSendingReady(card, "arch/session", "tool-question");
     QVERIFY(!submit(card)->isEnabled()); QVERIFY(!option(card, "opt_0_0")->isEnabled());
-    card.setQuestion("mac/session", request()); complete(card);
+    setQuestionReady(card, "mac/session", request()); complete(card);
     card.setAnswered("arch/session", "tool-question"); QVERIFY(submit(card)->isEnabled());
-    card.setQuestion("arch/session", request()); QVERIFY(!submit(card)->isEnabled());
+    setQuestionReady(card, "arch/session", request()); QVERIFY(!submit(card)->isEnabled());
     QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("Answer sent"));
-    card.setQuestion("arch/session", request("tool-question", "hash-two"));
+    setQuestionReady(card, "arch/session", request("tool-question", "hash-two"));
     QVERIFY(!option(card, "opt_0_0")->isChecked()); complete(card);
-    card.setSending("arch/session", "tool-question");
-    card.setQuestion("arch/session", request("tool-question", "hash-three"));
+    setSendingReady(card, "arch/session", "tool-question");
+    setQuestionReady(card, "arch/session", request("tool-question", "hash-three"));
     // Keep a replacement request locked until the old hash's callback arrives.
     QVERIFY(!option(card, "opt_0_0")->isEnabled());
     card.setAnswered("arch/session", "tool-question");
@@ -540,20 +598,20 @@ void TestQuestionCard::capabilityOfflineAndErrorStates()
 {
     QuestionCard card; auto unsupported = request(); unsupported["can_answer"] = false;
     unsupported["answer_unavailable_reason"] = "This agent requires Terminal.";
-    card.setQuestion("arch/session", unsupported); complete(card);
+    setQuestionReady(card, "arch/session", unsupported); complete(card);
     QVERIFY(!submit(card)->isEnabled()); QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), "This agent requires Terminal.");
     QSignalSpy terminal(&card, &QuestionCard::openTerminalRequested);
     card.findChild<QPushButton *>("questionOpenTerminal")->click(); QCOMPARE(terminal.size(), 1);
-    card.setQuestion("arch/session", request()); QVERIFY(submit(card)->isEnabled());
+    setQuestionReady(card, "arch/session", request()); QVERIFY(submit(card)->isEnabled());
     card.setAvailability(false, "Machine is offline."); QVERIFY(!submit(card)->isEnabled());
     QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), "Machine is offline.");
     card.setAvailability(true);
-    card.setSending("arch/session", "tool-question");
+    setSendingReady(card, "arch/session", "tool-question");
     card.setError("arch/session", "tool-question", "Cannot confirm delivery", true);
     QVERIFY(!submit(card)->isEnabled()); QVERIFY(option(card, "opt_0_0")->isChecked());
     QVERIFY(card.findChild<QPushButton *>("questionAllowRetry")->isVisible());
     card.findChild<QPushButton *>("questionAllowRetry")->click(); QVERIFY(submit(card)->isEnabled());
-    card.setSending("arch/session", "tool-question"); card.setError("arch/session", "tool-question", "Request changed");
+    setSendingReady(card, "arch/session", "tool-question"); card.setError("arch/session", "tool-question", "Request changed");
     QVERIFY(submit(card)->isEnabled()); QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), "Request changed");
 }
 
@@ -561,7 +619,7 @@ void TestQuestionCard::freeformLimitsAndPlainText()
 {
     QuestionCard card; auto data = request();
     data["questions"] = QJsonArray{QJsonObject{{"id", "free"}, {"question", "<img src='file:///private'>"}, {"allow_other", true}, {"options", QJsonArray{}}}};
-    card.setQuestion("arch/session", data);
+    setQuestionReady(card, "arch/session", data);
     const auto *prompt = card.findChild<QLabel *>("questionPrompt");
     QCOMPARE(prompt->textFormat(), Qt::PlainText); QVERIFY(prompt->text().contains("<img"));
     QVERIFY(!submit(card)->isEnabled());
@@ -582,7 +640,7 @@ void TestQuestionCard::longProviderTextKeepsCompactWidth()
     const QString token(8000, QChar('x'));
     data["questions"] = QJsonArray{QJsonObject{{"id", "long"}, {"question", token}, {"body", "body" + token},
         {"options", QJsonArray{QJsonObject{{"id", "long-option"}, {"label", token}, {"description", token}}}}}};
-    QuestionCard card; card.resize(480, 360); card.setQuestion("arch/session", data); card.show();
+    QuestionCard card; card.resize(480, 360); setQuestionReady(card, "arch/session", data); card.show();
     QTest::qWait(25); QCOMPARE(card.width(), 480);
     const auto *scroll = card.findChild<QScrollArea *>(); QVERIFY(scroll);
     QVERIFY(scroll->widget()->width() <= scroll->viewport()->width());
@@ -603,14 +661,14 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     auto data = request(); data["optional"] = true; data["can_skip"] = true;
     data["created_at"] = double(QDateTime::currentSecsSinceEpoch());
     auto question = QJsonObject{{"id", "free"}, {"question", "Which folder should I use for the next step?"}, {"allow_other", true}};
-    data["questions"] = QJsonArray{question}; card->setQuestion("fixture", data); activity.show();
+    data["questions"] = QJsonArray{question}; setQuestionReady(*card, "fixture", data); activity.show();
     QTRY_VERIFY(card->height() < 240);
     QTRY_VERIFY(history->height() > activity.height() * 2 / 3);
     auto *editor = text(*card, "free"); editor->setText("Keep this draft");
     auto *scroll = card->findChild<QScrollArea *>("questionContent");
     QTRY_COMPARE(scroll->verticalScrollBar()->maximum(), 0);
     question["question"] = QString("Long question with enough text to wrap and scroll.\n").repeated(80);
-    data["questions"] = QJsonArray{question}; card->setQuestion("fixture", data);
+    data["questions"] = QJsonArray{question}; setQuestionReady(*card, "fixture", data);
     editor = text(*card, "free"); scroll = card->findChild<QScrollArea *>("questionContent");
     QTRY_VERIFY(scroll->verticalScrollBar()->maximum() > 0);
     QTRY_COMPARE(card->height(), activity.height() * 60 / 100);
@@ -631,7 +689,7 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
     if (!directory.isEmpty()) QVERIFY(activity.grab().save(directory + "/question-long-in-activity.png"));
     question["question"] = "Which folder should I use for the next step?";
-    data["questions"] = QJsonArray{question}; card->setQuestion("fixture", data);
+    data["questions"] = QJsonArray{question}; setQuestionReady(*card, "fixture", data);
     activity.resize(820, 720);
     QTRY_VERIFY(card->height() < 240);
     if (!directory.isEmpty()) QVERIFY(activity.grab().save(directory + "/question-short-in-activity.png"));
@@ -647,7 +705,7 @@ void TestQuestionCard::currentQuestionAndOtherAnswerResizeTheForm()
     auto first = questions[0].toObject();
     first["question"] = QString("Long option question\n").repeated(80); questions[0] = first;
     auto second = questions[1].toObject(); second["options"] = QJsonArray{}; questions[1] = second;
-    data["questions"] = questions; card->setQuestion("fixture", data); activity.show();
+    data["questions"] = questions; setQuestionReady(*card, "fixture", data); activity.show();
     auto *tabs = card->findChild<QTabBar *>("questionTabs");
     auto *pages = card->findChild<QStackedWidget *>("questionPages");
     QTRY_VERIFY(pages->currentWidget()->findChild<QScrollArea *>("questionContent")->verticalScrollBar()->maximum() > 0);
@@ -668,7 +726,7 @@ void TestQuestionCard::preview()
     if (directory.isEmpty()) QSKIP("Set HGS_PREVIEW_DIR to render question form previews");
     QDir().mkpath(directory);
     for (const bool dark : {true, false}) {
-        QuestionCard card; card.resize(620, 420); card.setTheme(dark); card.setQuestion("arch/session", request());
+        QuestionCard card; card.resize(620, 420); card.setTheme(dark); setQuestionReady(card, "arch/session", request());
         complete(card); card.show(); QTest::qWait(25);
         QVERIFY(card.styleSheet().contains(dark ? "#202a2c" : "#f4f9f7"));
         QCOMPARE(card.grab().toImage().pixelColor(600, 345), QColor(dark ? "#202a2c" : "#f4f9f7"));
@@ -678,7 +736,7 @@ void TestQuestionCard::preview()
         auto optional=request("queued");optional["optional"]=true;optional["can_skip"]=true;
         optional["created_at"]=double(QDateTime(QDate(2026,10,7),QTime(12,34,56)).toSecsSinceEpoch());
         optional["questions"]=QJsonArray{optional["questions"].toArray().first()};
-        card.setQuestion("arch/session",optional,3);card.setQueueNavigation(1,3);QTest::qWait(20);
+        setQuestionReady(card, "arch/session",optional,3);card.setQueueNavigation(1,3);QTest::qWait(20);
         QVERIFY(card.grab().save(directory + (dark ? "/question-dark-queue.png" : "/question-light-queue.png")));
     }
 }
@@ -691,26 +749,26 @@ void TestQuestionCard::optionalQuestionsHaveExplicitSkipAndKeepDrafts()
     QuestionCard card;auto data=request();data["optional"]=true;data["can_skip"]=true;
     auto item=data["questions"].toArray().first().toObject();item["required"]=false;
     const auto created=QDateTime(QDate(2026,10,7),QTime(12,34,56)).toSecsSinceEpoch();data["created_at"]=double(created);
-    data["questions"]=QJsonArray{item};card.setQuestion("session",data,3);card.show();
+    data["questions"]=QJsonArray{item};setQuestionReady(card, "session",data,3);card.show();
     auto *asked=card.findChild<QLabel *>("questionAskedAt"),*pending=card.findChild<QLabel *>("questionPendingCount");
     QVERIFY(asked->isVisible());QVERIFY(asked->text().contains("7 Oct"));QVERIFY(asked->text().contains("12:34:56"));QCOMPARE(pending->text(),QString("3 pending"));
     const auto timestamp=asked->text();
     auto *skip=card.findChild<QPushButton *>("skipQuestion");QVERIFY(skip->isVisible());QVERIFY(skip->isEnabled());
     QVERIFY(!submit(card)->isEnabled());QSignalSpy sent(&card,&QuestionCard::answerRequested);
     other(card,"q_0")->click();text(card,"q_0")->setText("Draft answer");
-    card.setQuestion("session",data,2);QCOMPARE(text(card,"q_0")->text(),QString("Draft answer"));
+    setQuestionReady(card, "session",data,2);QCOMPARE(text(card,"q_0")->text(),QString("Draft answer"));
     QCOMPARE(asked->text(),timestamp);QCOMPARE(pending->text(),QString("2 pending"));
-    data["created_at"]=0;card.setQuestion("session",data,2);QVERIFY(asked->isHidden());QVERIFY(asked->text().isEmpty());
+    data["created_at"]=0;setQuestionReady(card, "session",data,2);QVERIFY(asked->isHidden());QVERIFY(asked->text().isEmpty());
     QCOMPARE(text(card,"q_0")->text(),QString("Draft answer"));
-    data["can_answer"]=false;card.setQuestion("session",data);QVERIFY(skip->isEnabled());QVERIFY(!submit(card)->isEnabled());
+    data["can_answer"]=false;setQuestionReady(card, "session",data);QVERIFY(skip->isEnabled());QVERIFY(!submit(card)->isEnabled());
     card.resize(620,420);QTest::qWait(1);
     const auto submitBounds=submit(card)->geometry(),skipBounds=skip->geometry();
     skip->click();QCOMPARE(sent.size(),1);QCOMPARE(sent.first()[2].toJsonArray(),QJsonArray{QJsonObject({{"question_id","q_0"},{"skip",true}})});
-    card.setSending("session",data["question_id"].toString());QTest::qWait(1);
+    setSendingReady(card, "session",data["question_id"].toString());QTest::qWait(1);
     QCOMPARE(submit(card)->text(),QString("Submitting…"));
     QCOMPARE(submit(card)->geometry(),submitBounds);QCOMPARE(skip->geometry(),skipBounds);
     card.setError("session",data["question_id"].toString(),"Try again");QTest::qWait(1);
     QCOMPARE(submit(card)->geometry(),submitBounds);QCOMPARE(skip->geometry(),skipBounds);
     card.setAvailability(false,"Offline");QVERIFY(!skip->isEnabled());
-    card.setAvailability(true);card.setQuestion("session",request());QVERIFY(skip->isHidden());
+    card.setAvailability(true);setQuestionReady(card, "session",request());QVERIFY(skip->isHidden());
 }

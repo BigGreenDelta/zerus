@@ -3,6 +3,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QStandardItemModel>
+#include <QPaintEvent>
 #include "CachedText.h"
 #include "DashboardPage.h"
 #include "MachineAppearance.h"
@@ -153,6 +154,131 @@ private slots:
         const QImage first = paint(); const auto misses = CachedText::misses();
         QCOMPARE(paint(), first);
         QCOMPARE(CachedText::misses(), misses);
+    }
+    void animatedClipsMatchFullPaints()
+    {
+        QStandardItemModel model; auto *item = new QStandardItem; model.appendRow(item);
+        item->setData("A sufficiently long session title", SessionRoles::Title);
+        item->setData("feature/example", SessionRoles::Meta); item->setData(true, SessionRoles::BranchIcon);
+        item->setData("codex", SessionRoles::Agent); item->setData("example", SessionRoles::Host);
+        item->setData("Rendering a changing pulse", SessionRoles::Detail); item->setData("example-model", SessionRoles::Model);
+        item->setData("Working", SessionRoles::Status); item->setData(12, SessionRoles::Working);
+        item->setData(25, SessionRoles::Total); item->setData(QColor("#60ae91"), SessionRoles::ProjectColor);
+        QWidget owner; SessionDelegate delegate;
+        QStyleOptionViewItem option; option.font = QApplication::font(); option.widget = &owner;
+        const auto index = model.index(0, 0);
+        for (qreal dpr : {1.0, 1.25, 1.5, 2.0}) for (bool dark : {false, true}) for (bool compact : {false, true})
+            for (qreal expansion : {0.0, .15, .5, 1.0}) for (int kind : {0, 1, 2, 3}) for (bool selected : {false, true}) {
+                owner.setProperty("hgsDark", dark); owner.setProperty("compact", compact); owner.setProperty("expansion", expansion);
+                owner.setProperty("expandedRowWidth", 360);
+                item->setData(kind >= 2, SessionRoles::Header); item->setData(kind == 1 ? "child" : "", SessionRoles::ChildId);
+                item->setData(kind == 3 ? 2 : 0, SessionRoles::Attention); item->setData(kind == 3 ? 3 : 0, SessionRoles::Unread);
+                option.state = QStyle::State_Enabled | (selected ? QStyle::State_Selected : QStyle::State_MouseOver);
+                option.rect = QRect(0, 0, expansion == 1 ? 360 : expansion == 0 ? 98 : 180, kind >= 2 ? 40 : kind == 1 ? 64 : compact ? 94 : 104);
+                const QColor background(dark ? "#161c21" : "#f3f5f7");
+                const auto render = [&](qreal pulse, QImage previous = {}, QRegion clip = {}) {
+                    owner.setProperty("workingPulse", pulse);
+                    QImage image = previous.isNull() ? QImage(QSize(360, 104) * dpr, QImage::Format_ARGB32_Premultiplied) : previous;
+                    image.setDevicePixelRatio(dpr);
+                    if (previous.isNull()) image.fill(background);
+                    QPainter p(&image); p.setFont(option.font);
+                    if (!clip.isEmpty()) { p.setClipRegion(clip); p.fillRect(option.rect, background); }
+                    delegate.paint(&p, option, index); return image;
+                };
+                auto previous = render(0);
+                const QRegion region = SessionDelegate::animationRegion(option, index);
+                for (qreal pulse : {.25, 1.0, .75, 0.0}) {
+                    const QImage expected = render(pulse);
+                    const QImage actual = region.isEmpty() ? previous : render(pulse, previous, region);
+                    if (actual != expected)
+                        QFAIL(qPrintable(QString("DPR %1 dark %2 compact %3 expansion %4 kind %5 selected %6 pulse %7")
+                            .arg(dpr).arg(dark).arg(compact).arg(expansion).arg(kind).arg(selected).arg(pulse)));
+                    previous = actual;
+                }
+            }
+    }
+    void indicatorClipsSkipStaticCardWork()
+    {
+        struct Model : QStandardItemModel {
+            mutable int staticReads = 0;
+            QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override {
+                if (role == SessionRoles::Meta || role == SessionRoles::Detail || role == SessionRoles::Model || role == SessionRoles::GitStatus) ++staticReads;
+                return QStandardItemModel::data(index, role);
+            }
+        } model;
+        auto *item = new QStandardItem; model.appendRow(item);
+        item->setData("Probe", SessionRoles::Title); item->setData("Working", SessionRoles::Status); item->setData(1, SessionRoles::Working);
+        QWidget owner; SessionDelegate delegate; QStyleOptionViewItem option;
+        option.font = QApplication::font(); option.widget = &owner; option.state = QStyle::State_Enabled;
+        for (bool compact : {false, true}) for (qreal expansion : {0.0, 1.0}) {
+            owner.setProperty("compact", compact); owner.setProperty("expansion", expansion); owner.setProperty("expandedRowWidth", 360);
+            option.rect = QRect(0, 0, expansion == 1 ? 360 : 98, compact ? 94 : 104);
+            QImage image(360, 104, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::white); QPainter p(&image); p.setFont(option.font);
+            p.setClipRegion(SessionDelegate::animationRegion(option, model.index(0, 0)));
+            model.staticReads = 0; delegate.paint(&p, option, model.index(0, 0)); QCOMPARE(model.staticReads, 0);
+            p.setClipping(false); delegate.paint(&p, option, model.index(0, 0)); QVERIFY(model.staticReads > 0);
+        }
+    }
+    void elapsedClipsRestoreMovingBadges()
+    {
+        QStandardItemModel model; auto *item = new QStandardItem; model.appendRow(item);
+        item->setData("A long title that elides as elapsed text grows", SessionRoles::Title); item->setData("codex", SessionRoles::Agent);
+        item->setData("Working", SessionRoles::Status); item->setData(1, SessionRoles::Working); item->setData(true, SessionRoles::Unread);
+        QWidget owner; SessionDelegate delegate; QStyleOptionViewItem option;
+        option.font = QApplication::font(); option.widget = &owner; option.state = QStyle::State_Selected | QStyle::State_Enabled;
+        owner.setProperty("expandedRowWidth", 360);
+        for (qreal dpr : {1.0, 1.25, 2.0}) for (bool compact : {false, true}) for (qreal expansion : {0.0, .15, .5, 1.0}) {
+            owner.setProperty("compact", compact); owner.setProperty("expansion", expansion); owner.setProperty("workingPulse", .8);
+            option.rect = QRect(0, 0, expansion == 1 ? 360 : expansion == 0 ? 98 : 180, compact ? 94 : 104);
+            QImage previous;
+            for (int seconds : {9, 10, 59, 60, 3599, 3600, 86400}) {
+                item->setData(double(QDateTime::currentSecsSinceEpoch() - seconds), SessionRoles::WorkingSince);
+                const auto render = [&](QImage image, bool clipped) {
+                    if (image.isNull()) { image = QImage(QSize(360, 104) * dpr, QImage::Format_ARGB32_Premultiplied); image.setDevicePixelRatio(dpr); image.fill(Qt::white); }
+                    QPainter p(&image); p.setFont(option.font);
+                    if (clipped) { p.setClipRegion(SessionDelegate::elapsedRegion(option, model.index(0, 0))); p.fillRect(option.rect, Qt::white); }
+                    delegate.paint(&p, option, model.index(0, 0)); return image;
+                };
+                QImage expected, actual;
+                qint64 sampled;
+                do {
+                    sampled = QDateTime::currentSecsSinceEpoch();
+                    expected = render({}, false);
+                    if (!previous.isNull()) actual = render(previous, true);
+                } while (sampled != QDateTime::currentSecsSinceEpoch());
+                if (!previous.isNull()) {
+                    if (actual != expected) {
+                        QRect differences;
+                        for (int y = 0; y < actual.height(); ++y) for (int x = 0; x < actual.width(); ++x)
+                            if (actual.pixel(x, y) != expected.pixel(x, y)) differences |= QRect(x, y, 1, 1);
+                        QFAIL(qPrintable(QString("elapsed DPR %1 compact %2 expansion %3 seconds %4 difference %5,%6 %7x%8").arg(dpr).arg(compact).arg(expansion).arg(seconds)
+                            .arg(differences.x()).arg(differences.y()).arg(differences.width()).arg(differences.height())));
+                    }
+                }
+                previous = expected;
+            }
+        }
+    }
+    void workingListPaintsOnlyIndicators()
+    {
+        SessionList list; list.resize(360, 800); list.setItemDelegate(new SessionDelegate(&list));
+        for (int i = 0; i < 1000; ++i) {
+            auto *item = new QListWidgetItem(&list); item->setData(SessionRoles::Title, QString("session %1").arg(i));
+            item->setData(SessionRoles::Working, 1); item->setData(SessionRoles::Status, "Working");
+        }
+        struct Counter : QObject {
+            qint64 area = 0; int paints = 0;
+            bool eventFilter(QObject *, QEvent *event) override {
+                if (event->type() == QEvent::Paint) {
+                    ++paints; for (const auto &rect : static_cast<QPaintEvent *>(event)->region()) area += qint64(rect.width()) * rect.height();
+                }
+                return false;
+            }
+        } counter;
+        list.show(); QVERIFY(QTest::qWaitForWindowExposed(&list)); QTest::qWait(100);
+        list.viewport()->installEventFilter(&counter); QTest::qWait(260);
+        QVERIFY(counter.paints >= 2); QVERIFY(counter.area < qint64(counter.paints) * 8 * 200);
+        list.hide(); QVERIFY(!list.activityAnimationRunning());
     }
     void overviewScrollsWithoutRepaintingVisibleCards()
     {

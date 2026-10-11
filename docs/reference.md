@@ -417,6 +417,14 @@ Pause/resume continues the same conversation journal. Selected Activity normally
 polls every 2.5 seconds while visible; host lists poll every five seconds, and the
 tray keeps its background polling when the workspace is closed.
 
+Activity prepares transcript text and layout in the background. Each view keeps
+one render in progress and the latest pending snapshot; hidden views defer this
+work until opened. Same-conversation refreshes keep the current transcript
+readable while its replacement is prepared. Installing a replacement preserves
+the reader's current selection and scroll position. Changing conversations
+clears the previous transcript immediately, and results for an obsolete session,
+search or display configuration cannot replace the current view.
+
 Kimi replies and intermediate public messages come from the exact conversation's
 `agents/main/wire.jsonl` when Stop lacks text. Transcript reads are bounded to an
 8 MiB tail, 50 replies and 32,000 characters per reply. Late copies do not duplicate
@@ -446,11 +454,16 @@ Ordinary text, cursor and question-form edits save through one ordered backgroun
 writer. Waiting edits coalesce to the latest snapshot per draft, so typing does
 not wait for disk commits. The editor shows **Saving draft** until its latest
 checkpoint completes; a crash before that checkpoint can lose pending edits.
-Graceful close drains outstanding writes. Sending, renaming and delivery-state
-changes use durable barriers, and an older queued save cannot replace a later
-checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
-immutable. Save failures remain visible and block sending until persistence
-succeeds.
+Draft loading, Saved drafts and rename operations also run in the background.
+An editor shows **Loading draft** and stays read-only until its own draft is
+ready; other sessions and workspace controls remain usable. Sending waits
+asynchronously for a durable recovery snapshot, then rechecks the captured
+session and consent before dispatch. Renaming saves the destination before
+retiring the source. Ordered delivery-state saves prevent older queued edits
+from replacing a later checkpoint. Attachment snapshots remain immutable;
+saving and checking delivery copies happens in the background. Save failures
+remain visible and block sending until persistence succeeds. Graceful application
+exit drains outstanding draft writes; closing an editor does not wait for disk.
 
 **Saved drafts** below the session list lets you preview, copy or restore drafts
 from ended or missing sessions into the current session. Copying keeps the dialog

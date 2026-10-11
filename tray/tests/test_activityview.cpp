@@ -7,6 +7,11 @@
 #include "WorkspaceFocus.h"
 
 #include <QApplication>
+#include <QElapsedTimer>
+#include <QTemporaryDir>
+#include <QSettings>
+#include <QTimer>
+#include <QThread>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QDir>
@@ -18,6 +23,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QProgressBar>
+#include <QProcess>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -35,8 +41,49 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <ctime>
+#include <limits>
+#include <QKeySequence>
 
 namespace {
+// Existing presentation contracts assert the committed document. Keep their
+// setup explicit while the responsiveness tests below use the asynchronous API.
+qint64 threadCpuMs()
+{
+    timespec now{}; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+}
+void standardKey(QWidget *widget, QKeySequence::StandardKey key)
+{
+    const QKeySequence sequence(key);
+    QTest::keyClick(widget, sequence[0].key(), sequence[0].keyboardModifiers());
+}
+
+void settle(ActivityView &view)
+{
+    if (!view.isVisible()) return;
+    QElapsedTimer timeout; timeout.start();
+    while (view.renderPending() && timeout.elapsed() < 15000) QTest::qWait(1);
+    if (view.renderPending()) qFatal("Activity render did not complete");
+}
+
+class SettledActivityView : public ActivityView {
+public:
+    SettledActivityView() { show(); settle(*this); }
+    void setActivity(const QJsonObject &details, const QJsonArray &events, const QString &prompt = {}, bool tracked = true) {
+        ActivityView::setActivity(details, events, prompt, tracked); settle(*this);
+    }
+    void setTimeline(const QJsonObject &details, const QJsonArray &events, const QJsonArray &messages, const QString &prompt = {}, bool tracked = true) {
+        ActivityView::setTimeline(details, events, messages, prompt, tracked); settle(*this);
+    }
+    void setLocalMessages(const QJsonArray &messages) { ActivityView::setLocalMessages(messages); settle(*this); }
+    void setTheme(bool dark) { ActivityView::setTheme(dark); settle(*this); }
+    void setContentScale(double scale) { ActivityView::setContentScale(scale); settle(*this); }
+    void showSearchResult(const QJsonObject &event, const QString &query) { ActivityView::showSearchResult(event, query); settle(*this); }
+    void clearSearchResult() { ActivityView::clearSearchResult(); settle(*this); }
+    void jumpToLatest() { ActivityView::jumpToLatest(); settle(*this); }
+};
+
 QJsonObject journalEvent(int seq, const QString &type, const QString &detail, const QString &tool = {})
 {
     return {{"seq", seq}, {"at", 1791018000 + seq}, {"type", type}, {"detail", detail}, {"tool", tool}};
@@ -87,6 +134,7 @@ int fontPixels(QTextBrowser *browser, const QString &text)
 void activate(QTextBrowser *browser, const QString &url)
 {
     QMetaObject::invokeMethod(browser, "anchorClicked", Qt::DirectConnection, Q_ARG(QUrl, QUrl(url)));
+    if (auto *view = qobject_cast<ActivityView *>(browser->parentWidget())) settle(*view);
 }
 
 void mouse(QWidget *widget, QEvent::Type type, const QPoint &global, Qt::MouseButton button, Qt::MouseButtons buttons)
@@ -130,6 +178,15 @@ QAction *menuAction(QMenu *menu, const QString &text)
 class TestActivityView : public QObject {
     Q_OBJECT
 private slots:
+    void hiddenSnapshotsDoNotBuildDocuments();
+    void preparedWorkerLifetimeFollowsDocuments();
+    void longUpdatesKeepQueuedEditorInputResponsive();
+    void staleIdentityAndPresentationResultsAreRejected();
+    void streamingSnapshotsMakeProgress();
+    void destroyingViewDoesNotWaitForWorker();
+    void applicationShutdownDrainsOutstandingWorkers();
+    void keyboardSelectionAndFindUseCommittedLineGeometry();
+    void renderedModelMatchesLaidOutSource();
     void toolDetailsUseAnInstalledMonospaceFamily();
     void caughtUpActivityAcknowledgesEarlierReplyWithoutIntermediatePaint();
     void updatesRemainPaintableBeforeTheNextEventLoop();
@@ -198,11 +255,215 @@ private slots:
     void preview();
 };
 
+namespace {
+QJsonArray longHistory()
+{
+    auto events = history(500);
+    for (int i = 0; i < events.size(); ++i) {
+        auto event = events[i].toObject();
+        event["detail"] = event["detail"].toString() + QString(" The complete explanation remains available and selectable.").repeated(16);
+        events[i] = event;
+    }
+    return events;
+}
+}
+
+void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()
+{
+    ActivityView view; view.resize(700, 400); view.setSessionKey("hidden");
+    const int passes = view.renderPasses();
+    view.setActivity({}, longHistory());
+    view.setActivity({}, {journalEvent(1, "Stop", "Newest hidden snapshot")});
+    QTest::qWait(30);
+    QCOMPARE(view.renderPasses(), passes);
+    QCOMPARE(view.browser()->document()->characterCount(), 1);
+    view.show(); settle(view);
+    QVERIFY(view.browser()->toPlainText().contains("Newest hidden snapshot"));
+    QVERIFY(!view.browser()->toPlainText().contains("Message number"));
+}
+
+void TestActivityView::preparedWorkerLifetimeFollowsDocuments()
+{
+    const auto workers = [] { return qApp->findChildren<QThread *>("activityRenderWorker"); };
+    QTRY_COMPARE_WITH_TIMEOUT(workers().size(), 0, 15000);
+    auto *view = new ActivityView; view->resize(700, 400); view->show();
+    auto events = history(20);
+    for (int revision = 0; revision < 6; ++revision) {
+        auto last = events.last().toObject(); last["detail"] = QString("Document revision %1").arg(revision);
+        events[events.size() - 1] = last;
+        const int passes = view->renderPasses(); view->setActivity({}, events);
+        QTRY_VERIFY(view->renderPasses() > passes);
+        QVERIFY(workers().size() <= 2);
+        settle(*view);
+        QVERIFY(view->browser()->toPlainText().contains(QString("Document revision %1").arg(revision)));
+        QTRY_COMPARE(workers().size(), 1);
+        QVERIFY(workers().first()->isRunning());
+        // A first paint after preparation must retain its platform font faces.
+        view->browser()->viewport()->repaint();
+    }
+    delete view;
+    QTRY_COMPARE_WITH_TIMEOUT(workers().size(), 0, 15000);
+}
+
+void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()
+{
+    ActivityView view; view.resize(900, 500); view.show(); view.setSessionKey("responsive");
+    settle(view);
+    auto events = longHistory(); view.setActivity({}, events); settle(view);
+    qint64 bestCpu = std::numeric_limits<qint64>::max();
+    for (int run = 0; run < 3; ++run) {
+        auto last = events.last().toObject(); last["detail"] = last["detail"].toString() + " Changed response."; events[events.size() - 1] = last;
+        QLineEdit editor; editor.show();
+        bool editorEvent = false; int beats = 0;
+        QTimer heartbeat; heartbeat.setInterval(5);
+        connect(&heartbeat, &QTimer::timeout, [&] { ++beats; }); heartbeat.start();
+        const auto cpu = threadCpuMs();
+        view.setActivity({}, events);
+        QTimer::singleShot(0, &editor, [&] { QTest::keyClicks(&editor, "queued editor input"); editorEvent = true; });
+        QTRY_VERIFY(editorEvent);
+        QCOMPARE(editor.text(), QString("queued editor input"));
+        QVERIFY(view.renderPending());
+        settle(view); view.browser()->viewport()->repaint();
+        QVERIFY(beats > 0);
+        bestCpu = std::min(bestCpu, threadCpuMs() - cpu);
+        QVERIFY(view.browser()->toPlainText().contains("Changed response."));
+    }
+    // Thread CPU excludes host scheduling stalls. The old GUI import/layout
+    // consumes ~600 ms for this history; the commit and first paint are bounded.
+    QVERIFY2(bestCpu < 200, qPrintable(QString("GUI CPU including first paint: %1 ms").arg(bestCpu)));
+}
+
+void TestActivityView::staleIdentityAndPresentationResultsAreRejected()
+{
+    ActivityView view; view.resize(900, 500); view.show(); view.setSessionKey("old");
+    view.setActivity({{"conversation_id", "old-conversation"}}, longHistory());
+    QTest::qWait(20); QVERIFY(view.renderPending());
+    view.setSessionKey("new");
+    QVERIFY(view.browser()->toPlainText().isEmpty());
+    view.setActivity({{"conversation_id", "new-conversation"}}, {journalEvent(1, "Stop", "Newest **identity** with `code`.")});
+    view.setTheme(true); view.setContentScale(1.5); view.resize(550, 320); view.setColumnWidth(450);
+    settle(view);
+    QVERIFY(view.browser()->toPlainText().contains("Newest identity"));
+    QVERIFY(!view.browser()->toPlainText().contains("Message number"));
+    auto *source = view.browser()->document()->findChild<QTextDocument *>(); QVERIFY(source);
+    QCOMPARE(source->textWidth(), qreal(view.browser()->viewport()->width()));
+    QVERIFY(qAbs(fontPixels(view.browser(), "Newest") - ContentScale::px(13, 1.5)) <= 1);
+    const auto code = codeRuns(view.browser()->document()); QVERIFY(!code.isEmpty());
+    QVERIFY(code.first().foreground().color().lightness() > 128);
+}
+
+void TestActivityView::streamingSnapshotsMakeProgress()
+{
+    ActivityView view; view.resize(900, 500); view.show(); view.setSessionKey("streaming");
+    auto events = longHistory(); view.setActivity({}, events); settle(view);
+    int revision = 0, commitsDuringStream = 0;
+    QTimer stream; stream.setInterval(10);
+    connect(&stream, &QTimer::timeout, [&] {
+        auto last = events.last().toObject(); last["detail"] = QString("Streaming revision %1 ").arg(++revision) + QString("complete transcript ").repeated(50);
+        events[events.size() - 1] = last; view.setActivity({}, events);
+    });
+    connect(view.browser(), &QTextBrowser::textChanged, [&] {
+        if (stream.isActive() && view.browser()->toPlainText().contains("Streaming revision")) ++commitsDuringStream;
+    });
+    stream.start();
+    QTRY_VERIFY_WITH_TIMEOUT(commitsDuringStream > 0, 10000);
+    QVERIFY(stream.isActive()); QVERIFY(revision > 1);
+    stream.stop(); settle(view);
+    QVERIFY(view.browser()->toPlainText().contains(QString("Streaming revision %1 ").arg(revision)));
+}
+
+void TestActivityView::destroyingViewDoesNotWaitForWorker()
+{
+    auto *view = new ActivityView; view->resize(900, 500); view->show();
+    view->setActivity({}, longHistory()); QTest::qWait(20); QVERIFY(view->renderPending());
+    const auto cpu = threadCpuMs(); delete view;
+    QVERIFY(threadCpuMs() - cpu < 100);
+    bool heartbeat = false; QTimer::singleShot(0, this, [&] { heartbeat = true; });
+    QTRY_VERIFY(heartbeat);
+}
+
+void TestActivityView::applicationShutdownDrainsOutstandingWorkers()
+{
+    // Run just the destruction contract in a fresh QApplication, so its worker
+    // is still active when Qt begins deleting global fonts and palettes.
+    QProcess child;
+    child.start(QCoreApplication::applicationFilePath(), {"destroyingViewDoesNotWaitForWorker"});
+    QVERIFY(child.waitForStarted(10000));
+    QVERIFY(child.waitForFinished(30000));
+    QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+    QVERIFY2(child.exitCode() == 0, child.readAllStandardError().constData());
+}
+
+void TestActivityView::keyboardSelectionAndFindUseCommittedLineGeometry()
+{
+    SettledActivityView view; view.resize(450, 300);
+    view.setActivity({}, {journalEvent(1, "Stop", QString("Readable wrapping prose with `inline code` and plain text. ").repeated(25) + "\n\n- first list item\n- second list item\n\nשלום עולם مرحبا بالعالم")});
+    auto *browser = view.browser();
+    // QTextBrowser's default interaction flags offer mouse selection. Opt into
+    // keyboard selection here to exercise the adapter's complete line model.
+    browser->setTextInteractionFlags(browser->textInteractionFlags() | Qt::TextSelectableByKeyboard);
+    browser->setFocus();
+    browser->moveCursor(QTextCursor::Start);
+    QVERIFY(browser->find("wrapping"));
+    QCOMPARE(browser->textCursor().selectedText(), QString("wrapping"));
+    auto found = browser->textCursor(); found.clearSelection(); browser->setTextCursor(found);
+    standardKey(browser, QKeySequence::MoveToEndOfLine);
+    const auto atEnd = browser->textCursor();
+    const auto block = atEnd.block();
+    const auto line = block.layout()->lineForTextPosition(atEnd.position() - block.position());
+    QVERIFY(line.isValid());
+    const auto end = atEnd.position();
+    standardKey(browser, QKeySequence::SelectPreviousChar);
+    QCOMPARE(browser->textCursor().selectionStart(), end - 1);
+    QCOMPARE(browser->textCursor().selectionEnd(), end);
+    standardKey(browser, QKeySequence::MoveToStartOfLine);
+    const auto home = browser->textCursor();
+    const auto homeLine = home.block().layout()->lineForTextPosition(home.position() - home.block().position());
+    QCOMPARE(home.position(), home.block().position() + homeLine.textStart());
+    standardKey(browser, QKeySequence::SelectNextLine);
+    QVERIFY(browser->textCursor().hasSelection());
+    QVERIFY(browser->textCursor().selectedText().size() > 1);
+    browser->moveCursor(QTextCursor::End);
+    const int previous = browser->textCursor().position();
+    standardKey(browser, QKeySequence::MoveToPreviousPage);
+    QVERIFY(browser->textCursor().position() < previous);
+    standardKey(browser, QKeySequence::SelectAll);
+    QCOMPARE(browser->textCursor().selectionStart(), 0);
+    QCOMPARE(browser->textCursor().selectionEnd(), browser->document()->characterCount() - 1);
+    const auto selected = browser->textCursor().selectedText();
+    view.setColumnWidth(350); settle(view);
+    QCOMPARE(browser->textCursor().selectedText(), selected);
+}
+
+void TestActivityView::renderedModelMatchesLaidOutSource()
+{
+    SettledActivityView view; view.resize(420, 300);
+    view.setActivity({}, {journalEvent(1, "Stop", "Long wrapped **formatted** prose with `inline code` repeated across lines. " + QString("More text ").repeated(30) + "\n\n- first\n- second\n\n| Name | Value |\n|---|---|\n| one | two |\n\nשלום עולם مرحبا بالعالم")});
+    auto *document = view.browser()->document();
+    auto *source = document->findChild<QTextDocument *>(); QVERIFY(source);
+    QCOMPARE(document->characterCount(), source->characterCount());
+    QCOMPARE(document->documentLayout()->paintDevice(), source->documentLayout()->paintDevice());
+    for (auto block = document->begin(); block.isValid(); block = block.next()) {
+        const auto original = source->findBlock(block.position());
+        QCOMPARE(block.text(), original.text());
+        const auto *actual = block.layout(), *expected = original.layout();
+        QCOMPARE(actual->lineCount(), expected->lineCount());
+        for (int i = 0; i < expected->lineCount(); ++i) {
+            const auto a = actual->lineAt(i), e = expected->lineAt(i);
+            QCOMPARE(a.textStart(), e.textStart()); QCOMPARE(a.textLength(), e.textLength());
+            for (int offset = e.textStart(); offset <= e.textStart() + e.textLength(); ++offset)
+                QVERIFY2(qAbs(a.cursorToX(offset) - e.cursorToX(offset)) < .1,
+                    qPrintable(QString("block %1 line %2 offset %3: %4 vs %5").arg(block.text()).arg(i).arg(offset).arg(a.cursorToX(offset)).arg(e.cursorToX(offset))));
+            QVERIFY(qAbs(a.height() - e.height()) < .1);
+        }
+    }
+}
+
 void TestActivityView::toolDetailsUseAnInstalledMonospaceFamily()
 {
     // The generic "monospace" is no macOS family: Qt spent ~60 ms populating
     // aliases and then fell back to the proportional system font.
-    ActivityView view; view.resize(600, 500); view.setSessionKey("codex/session");
+    SettledActivityView view; view.resize(600, 500); view.setSessionKey("codex/session");
     view.setActivity({}, {journalEvent(4, "Stop", "Answer"), journalEvent(5, "PostToolUse", "printf fixture-detail", "Bash")});
     activate(view.browser(), "hgs-activity:group-5");
     const auto found = view.browser()->document()->find("printf fixture-detail");
@@ -234,7 +495,7 @@ void TestActivityView::contentScaleEnlargesTranscriptAndQueue()
 {
     // The workspace sets this base font on every widget.
     QWidget workspace; workspace.setStyleSheet("QWidget { font-size:13px; }");
-    auto *layout = new QVBoxLayout(&workspace); auto *view = new ActivityView; layout->addWidget(view);
+    auto *layout = new QVBoxLayout(&workspace); auto *view = new SettledActivityView; layout->addWidget(view);
     view->setTheme(false); workspace.resize(520, 700); workspace.show();
     view->setSessionKey("arch/scaled");
     const QString literal = "style='font-size:12px' and https://example.com/icon-16px.png";
@@ -273,7 +534,7 @@ void TestActivityView::contentScaleEnlargesTranscriptAndQueue()
 
 void TestActivityView::agentMarkdownLooksLikeGitHub()
 {
-    ActivityView view; view.resize(560, 600); view.show();
+    SettledActivityView view; view.resize(560, 600); view.show();
     view.setActivity({}, {journalEvent(1, "Stop", "Use `ctest` and:\n\n- one\n- two\n\n```\ncode\n```")});
     auto *document = view.browser()->document();
     QStringList images;
@@ -290,7 +551,7 @@ void TestActivityView::agentMarkdownLooksLikeGitHub()
 
 void TestActivityView::searchResultKeepsInlineCodeSearchable()
 {
-    ActivityView view; view.resize(560, 400); view.show();
+    SettledActivityView view; view.resize(560, 400); view.show();
     view.showSearchResult(journalEvent(1, "AgentMessage", "Run `ctest -R markdown` now"), "ctest");
     QCOMPARE(codeRuns(view.browser()->document()).size(), 1);
     QVERIFY(!view.browser()->document()->find("ctest -R markdown").isNull());
@@ -299,7 +560,7 @@ void TestActivityView::searchResultKeepsInlineCodeSearchable()
 
 void TestActivityView::copyGivesVisibleText()
 {
-    ActivityView view; view.resize(560, 400); view.show();
+    SettledActivityView view; view.resize(560, 400); view.show();
     view.setActivity({}, {journalEvent(1, "Stop", "Edit `src/cli.rs`:\n\n1. first\n2. second")});
     view.browser()->selectAll(); view.browser()->copy();
     const auto copied = QGuiApplication::clipboard()->text();
@@ -309,7 +570,7 @@ void TestActivityView::copyGivesVisibleText()
 
 void TestActivityView::agentRepliesCopyAsMarkdown()
 {
-    ActivityView view; view.setSessionKey("arch/copy"); view.resize(560, 500); view.show();
+    SettledActivityView view; view.setSessionKey("arch/copy"); view.resize(560, 500); view.show();
     const QString reply = "## Done\n\n- `src/cli.rs` — **fixed**\n\n```sh\nctest -R activityview\n```";
     view.setActivity({{"last_message", "An older *recorded* response"}},
         {journalEvent(1, "UserPromptSubmit", "Fix the launcher"), journalEvent(2, "AgentThinking", "Considering the fix."),
@@ -374,7 +635,7 @@ void TestActivityView::agentRepliesCopyAsMarkdown()
 
 void TestActivityView::markdownFollowsThemeAndScale()
 {
-    ActivityView view; view.resize(560, 400); view.show();
+    SettledActivityView view; view.resize(560, 400); view.show();
     view.setActivity({}, {journalEvent(1, "Stop", "- item with `code`")});
     view.setTheme(true); view.setContentScale(2.0);
     QStringList images;
@@ -395,7 +656,7 @@ void TestActivityView::agentCardsKeepZerusSurface()
 {
     // GitHub styling applies to the Markdown, not to the Zerus card around it.
     for (bool dark : {false, true}) {
-        ActivityView view; view.resize(560, 400); view.setTheme(dark); view.show();
+        SettledActivityView view; view.resize(560, 400); view.setTheme(dark); view.show();
         view.setActivity({}, {journalEvent(1, "Stop", "Reply prose\n\n```\nblock text\n```")});
         const auto cellColour = [&](const QString &text) {
             for (auto block = view.browser()->document()->begin(); block.isValid(); block = block.next())
@@ -413,7 +674,7 @@ void TestActivityView::agentCardsKeepZerusSurface()
 void TestActivityView::mouseSelectsProseAndPartOfInlineCode()
 {
     // Inline code is text: a drag from prose may end on any character of the code.
-    ActivityView view; view.resize(560, 300); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(560, 300); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     view.setActivity({}, {journalEvent(1, "Stop", "Please run `ctest --output-on-failure` today.")});
     auto *browser = view.browser(); auto *document = browser->document();
     const QTextCursor prose = document->find("Please"), code = document->find("ctest");
@@ -434,7 +695,7 @@ void TestActivityView::wrappedCodeIsDrawnAsARoundedChip()
 {
     // Long code stays text so that it can wrap; the journal still draws its chip,
     // rounded and padded, on the card below the scrolled transcript.
-    ActivityView view; view.resize(420, 300); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(420, 300); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     QJsonArray events = history(12);
     events.append(journalEvent(13, "Stop", "Then run `cargo test --workspace --all-features --no-fail-fast` again."));
     view.setActivity({}, events);
@@ -463,7 +724,7 @@ void TestActivityView::resizingWithoutChipChangesKeepsTheJournal()
 {
     // Toggling the session panel widens the conversation once. Inline code wraps
     // with its text, so a re-render would only shift a transcript the reader follows.
-    ActivityView view; view.resize(864, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(864, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     QJsonArray events;
     for (int i = 1; i <= 40; ++i) events.append(journalEvent(i, i % 2 ? "UserPromptSubmit" : "Stop",
         QString("Message %1 runs `cargo test` in `src/file-%1.rs` with enough words to wrap across the pane.").arg(i)));
@@ -480,7 +741,7 @@ void TestActivityView::darkCardsUseNeutralTablesAndVisibleChips()
 {
     // On the grey Zerus card, zebra rows are a step lighter (not the near-black code
     // surface) and inline code is dense enough to stand out.
-    ActivityView view; view.resize(560, 400); view.setTheme(true); view.show();
+    SettledActivityView view; view.resize(560, 400); view.setTheme(true); view.show();
     view.setActivity({}, {journalEvent(1, "Stop", "Use `x`.\n\n| A |\n|---|\n| one |\n| two |")});
     QString stripe; double chipAlpha = 0;
     for (auto block = view.browser()->document()->begin(); block.isValid(); block = block.next()) {
@@ -506,7 +767,7 @@ void TestActivityView::lastCardEndsTheJournal()
 {
     // Cards are spaced apart, but nothing pads the journal below the last one.
     QFETCH(bool, toolsLast);
-    ActivityView view; view.resize(540, 320); view.show();
+    SettledActivityView view; view.resize(540, 320); view.show();
     QJsonArray events{journalEvent(1, "UserPromptSubmit", "Please inspect the source"), journalEvent(2, "Stop", "Done.")};
     if (toolsLast) events.append(journalEvent(3, "PostToolUse", "command completed", "Bash"));
     view.setActivity({}, events); QTest::qWait(20);
@@ -528,7 +789,7 @@ void TestActivityView::cardsKeepTheirSpacingAfterChips()
 {
     // Qt lays out a long journal lazily. Converting chips must not leave later
     // paragraphs, such as the spacers between cards, without layout and height.
-    ActivityView view; view.resize(540, 320); view.show();
+    SettledActivityView view; view.resize(540, 320); view.show();
     QJsonArray events{journalEvent(1, "Stop", "Reply with `inline code`.")};
     for (int i = 0; i < 40; ++i) {
         events.append(journalEvent(2 * i + 2, "UserPromptSubmit", QString("Request %1").arg(i)));
@@ -555,7 +816,7 @@ void TestActivityView::contextCounterKeepsPhysicalRightAlignment()
 
 void TestActivityView::attachmentDeliveryKeepsThumbnailAndViewport()
 {
-    ActivityView view; view.resize(540,380); view.show(); view.setSessionKey("arch/session");
+    SettledActivityView view; view.resize(540,380); view.show(); view.setSessionKey("arch/session");
     const auto events = history(30);
     QJsonObject details{{"conversation_id","conversation"}};
     QJsonObject file{{"name","screenshot.png"},{"mime","image/png"},{"bytes",120},
@@ -600,7 +861,7 @@ void TestActivityView::attachmentDeliveryKeepsThumbnailAndViewport()
 
 void TestActivityView::nativeQueueStaysSeparateFromHistoryAndTracksIdentity()
 {
-    ActivityView view; view.resize(600,550); view.setSessionKey("queue-session"); view.show();
+    SettledActivityView view; view.resize(600,550); view.setSessionKey("queue-session"); view.show();
     auto events = history(15); QJsonObject details{{"conversation_id","conversation"}};
     view.setActivity(details,events);
     auto *send = view.findChild<QPushButton *>("queueSendNow");
@@ -631,7 +892,7 @@ void TestActivityView::updatesRemainPaintableBeforeTheNextEventLoop()
             return false;
         }
     } counter;
-    ActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
+    SettledActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
     auto events = history(24); view.setActivity({{"conversation_id", "one"}}, events);
     QTest::qWait(30);
     auto *browser = view.browser(); browser->viewport()->installEventFilter(&counter);
@@ -644,7 +905,7 @@ void TestActivityView::updatesRemainPaintableBeforeTheNextEventLoop()
         view.setActivity({{"conversation_id", "one"}}, events);
         // Another widget can repaint the parent before queued callbacks run.
         // Activity must participate in that frame, never leave a blank rectangle.
-        counter.paints = 0; view.repaint();
+        counter.paints = 0; browser->viewport()->repaint();
         QVERIFY2(counter.paints > 0, "Activity disappeared from the parent repaint while its update was pending");
         QCOMPARE(browser->textCursor().selectedText(), selected);
         QCOMPARE(browser->verticalScrollBar()->value(), scroll);
@@ -654,7 +915,7 @@ void TestActivityView::updatesRemainPaintableBeforeTheNextEventLoop()
 
 void TestActivityView::jumpOverlayPreservesViewportAndReadingPosition()
 {
-    ActivityView view;view.resize(700,420);view.show();view.setSessionKey("overlay");
+    SettledActivityView view;view.resize(700,420);view.show();view.setSessionKey("overlay");
     auto events=history(24);view.setActivity({},events);
     auto *browser=view.browser();auto *bar=browser->verticalScrollBar();
     auto *latest=view.findChild<QPushButton *>("activityJumpLatest");
@@ -694,7 +955,7 @@ void TestActivityView::jumpToLatestKeepsFocusInActivity()
     QFETCH(bool, keyboard); QFETCH(bool, search);
     WorkspaceFocus::install();
     QWidget window; QVBoxLayout layout(&window);
-    ActivityView view; SessionUsage::ContextButton context; QLineEdit composer;
+    SettledActivityView view; SessionUsage::ContextButton context; QLineEdit composer;
     context.setData({{"context", QJsonObject{{"used", 220000}, {"limit", 1000000}}}});
     layout.addWidget(&view, 1); layout.addWidget(&context); layout.addWidget(&composer);
     window.resize(520, 420); window.show(); window.activateWindow();
@@ -729,7 +990,7 @@ void TestActivityView::jumpToLatestKeepsFocusInActivity()
 
 void TestActivityView::sessionClearIsAColoredBoundaryAndSurvivesReload()
 {
-    ActivityView view; view.resize(560, 420); view.show(); view.setSessionKey("codex/session");
+    SettledActivityView view; view.resize(560, 420); view.show(); view.setSessionKey("codex/session");
     auto clear=journalEvent(3,"SessionCleared",{});clear["activity_key"]="confirmed-clear";
     const QJsonObject details{{"conversation_id","old"},{"session_clear",clear}};
     const QJsonArray events{journalEvent(1,"Stop","Previous answer"),journalEvent(2,"PostToolUse","Before clear","Read"),
@@ -776,7 +1037,7 @@ void TestActivityView::sessionClearIsAColoredBoundaryAndSurvivesReload()
 
 void TestActivityView::liveCompactionProgressPreservesTranscriptAndClears()
 {
-    ActivityView view; view.resize(520, 380); view.show(); view.setSessionKey("kimi/session");
+    SettledActivityView view; view.resize(520, 380); view.show(); view.setSessionKey("kimi/session");
     QJsonObject details{{"runtime_state","live"},{"process_state","running"},{"phase","working"}};
     const QJsonArray events{journalEvent(1,"UserPromptSubmit","Review this project"), journalEvent(2,"Stop","Previous response")};
     view.setActivity(details, events);
@@ -804,7 +1065,7 @@ void TestActivityView::liveCompactionProgressPreservesTranscriptAndClears()
 
 void TestActivityView::searchResultIsolatedFromLiveUpdatesAndReturnsToLatest()
 {
-    ActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
+    SettledActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
     view.setActivity({{"conversation_id", "one"}, {"last_message", "Latest live response"}}, history(24));
     view.setLocalMessages({QJsonObject{{"request_id", "draft"}, {"text", "Pending local message"}, {"state", "sending"}}});
     QTest::qWait(20);
@@ -823,7 +1084,7 @@ void TestActivityView::searchResultIsolatedFromLiveUpdatesAndReturnsToLatest()
     view.setActivity({{"conversation_id", "one"}, {"last_message", "New live response"}}, history(26));
     QCOMPARE(browser->document()->revision(), revision);
     QVERIFY(browser->toPlainText().contains("Saved NEEDLE response"));
-    latest->click();
+    latest->click(); settle(view);
     QVERIFY(browser->toPlainText().contains("Message number 26"));
     QVERIFY(browser->toPlainText().contains("Pending local message"));
     QVERIFY(!browser->toPlainText().contains("Saved NEEDLE response"));
@@ -832,7 +1093,7 @@ void TestActivityView::searchResultIsolatedFromLiveUpdatesAndReturnsToLatest()
 }
 void TestActivityView::searchResultClearsOnConversationChange()
 {
-    ActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
+    SettledActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("arch/session");
     view.setActivity({{"conversation_id", "one"}}, history(12));
     view.showSearchResult(journalEvent(100, "AgentMessage", "Needle from old conversation"), "needle");
     QVERIFY(view.browser()->toPlainText().contains("old conversation"));
@@ -848,7 +1109,7 @@ void TestActivityView::searchResultClearsOnConversationChange()
 }
 void TestActivityView::searchToolExcerptIsExpandedAndClearlyMarked()
 {
-    ActivityView view; view.setSessionKey("arch/session"); view.setActivity({}, history(2));
+    SettledActivityView view; view.setSessionKey("arch/session"); view.setActivity({}, history(2));
     auto event = journalEvent(99, "PostToolUse", "A long log excerpt containing needle", "Bash");
     event["content_truncated"] = true;
     view.showSearchResult(event, "needle");
@@ -863,7 +1124,7 @@ void TestActivityView::searchToolExcerptIsExpandedAndClearlyMarked()
 
 void TestActivityView::kimiWireAnswerReplacesEmptyStop()
 {
-    ActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("kimi/project");
+    SettledActivityView view; view.resize(520, 340); view.show(); view.setSessionKey("kimi/project");
     const QJsonArray events{journalEvent(1, "TurnStarted", "Please push"),
         journalEvent(2, "PostToolUse", "git push", "Bash"), journalEvent(3, "Stop", "")};
     const auto reply = QJsonObject{{"type", "AgentMessage"}, {"source", "kimi_wire"},
@@ -881,7 +1142,7 @@ void TestActivityView::kimiWireAnswerReplacesEmptyStop()
 void TestActivityView::progressCommentaryAppearsBeforeFinalResponse()
 {
     for (const QString &source : {QString("codex_transcript"),QString("claude_transcript"),QString("kimi_wire")}) {
-        ActivityView view; view.setSessionKey(source);
+        SettledActivityView view; view.setSessionKey(source);
         auto progress=journalEvent(0,"AgentMessage","Checking the deployment.");progress["at"]=1791018002.0;progress["source"]=source;
         auto final=journalEvent(0,"AgentMessage","Deployment complete.");final["at"]=1791018004.0;final["source"]=source;
         QJsonArray hooks{journalEvent(1,"UserPromptSubmit","Deploy"),journalEvent(3,"PostToolUse","Check services","Bash")};
@@ -897,7 +1158,7 @@ void TestActivityView::progressCommentaryAppearsBeforeFinalResponse()
 
 void TestActivityView::claudeThinkingStaysSeparateFromToolsAndReplies()
 {
-    ActivityView view;view.setSessionKey("claude/thinking");view.resize(700,500);view.show();
+    SettledActivityView view;view.setSessionKey("claude/thinking");view.resize(700,500);view.show();
     const auto body=QString("Read all 24 pages. ")+QString("More recorded thinking. ").repeated(10)+"END_OF_THINKING";
     auto thinking=journalEvent(0,"AgentThinking",body);thinking["source"]="claude_transcript";thinking["message_id"]="thinking-one";thinking["at"]=1791018002.0;
     QJsonArray hooks{journalEvent(1,"PreToolUse","Read report","Read"),journalEvent(3,"PostToolUse","Inspect source","Bash"),journalEvent(4,"Stop","")};
@@ -920,7 +1181,7 @@ void TestActivityView::claudeThinkingStaysSeparateFromToolsAndReplies()
 
 void TestActivityView::kimiCommentaryDoesNotReplaceEmptyStop()
 {
-    ActivityView view; view.setSessionKey("kimi/project");
+    SettledActivityView view; view.setSessionKey("kimi/project");
     auto started = journalEvent(2, "PreToolUse", "Writing the file", "Write");
     started["at"] = 1791018002.5;
     const QJsonArray events{journalEvent(1, "TurnStarted", "Build the file"), started,
@@ -946,7 +1207,7 @@ void TestActivityView::kimiCommentaryDoesNotReplaceEmptyStop()
 
 void TestActivityView::emptyPromptHooksDoNotCreateCards()
 {
-    ActivityView view;
+    SettledActivityView view;
     QJsonArray events{journalEvent(1, "UserPromptSubmit", ""),
         journalEvent(2, "TurnStarted", "Please inspect this"),
         journalEvent(3, "StopFailure", "Provider failed"),
@@ -981,7 +1242,7 @@ void TestActivityView::providerErrorsStayVisibleAndStable_data()
 void TestActivityView::providerErrorsStayVisibleAndStable()
 {
     QFETCH(QString,source);
-    ActivityView view;view.setSessionKey("codex/project/session");
+    SettledActivityView view;view.setSessionKey("codex/project/session");
     const QJsonObject error{{"type","StopFailure"},{"source",source},{"message_id","codex-error-1"},
         {"at",1791018002.5},{"detail","Selected model is at capacity. Please try a different model."}};
     const QJsonObject details{{"provider_errors",QJsonArray{error,error}}};
@@ -999,7 +1260,7 @@ void TestActivityView::providerErrorsStayVisibleAndStable()
 
 void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()
 {
-    ActivityView view;view.setSessionKey("mac/project/session");
+    SettledActivityView view;view.setSessionKey("mac/project/session");
     const QJsonObject file{{"request_id","receipt-one"},{"index",0},{"name","screen.png"},{"mime","image/png"},{"bytes",2048}};
     QJsonArray events{journalEvent(1,"Stop","Earlier response"),journalEvent(4,"Stop","Later response")};
     view.setActivity({},events);view.setLocalMessages({QJsonObject{{"id","1"},{"text",""},{"status","sent"},{"submitted_at",1791018002.0},{"attachments",QJsonArray{file}}}});
@@ -1018,7 +1279,7 @@ void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()
 
 void TestActivityView::attachmentThumbnailArrivesWithoutMovingTranscript()
 {
-    ActivityView view;view.resize(640,420);view.show();view.setSessionKey("arch/session");
+    SettledActivityView view;view.resize(640,420);view.show();view.setSessionKey("arch/session");
     QSignalSpy previews(&view,&ActivityView::attachmentPreviewRequested);
     const QJsonObject file{{"name","screen.png"},{"mime","image/png"},{"request_id","receipt"},{"index",0},{"bytes",38400}};
     auto events=history(12);
@@ -1049,7 +1310,7 @@ void TestActivityView::followingPaintsAtTheFinalScrollRange()
 {
     // A long journal is laid out lazily. Every rebuild must paint at its final
     // scroll range: the lazy estimate showed one frame past the end, a flicker.
-    ActivityView view; view.resize(900, 700); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(900, 700); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     auto events = history(400); view.setActivity({}, events); QTest::qWait(50);
     auto *bar = view.browser()->verticalScrollBar();
     struct Paints : QObject {
@@ -1072,7 +1333,7 @@ void TestActivityView::unchangedPollsSkipRendering()
 {
     // Polls repeat the same inspection with fresh live fields that Activity never
     // shows. They must not rebuild the journal, scroll, selection or expanded cards.
-    ActivityView view; view.resize(640, 360); view.show(); view.setSessionKey("arch\ncodex/hgs/poll");
+    SettledActivityView view; view.resize(640, 360); view.show(); view.setSessionKey("arch\ncodex/hgs/poll");
     QJsonObject details{{"tracked", true}, {"conversation_id", "poll"}, {"phase", "idle"}, {"goal_observed_at", 100.},
         {"cache_hint", QJsonObject{{"status", "warm"}}}, {"processes", QJsonObject{{"items", QJsonArray{QJsonObject{{"id", "job"}, {"cpu", 1.5}}}}}}};
     QJsonArray events;
@@ -1104,7 +1365,7 @@ void TestActivityView::unchangedPollsSkipRendering()
 
 void TestActivityView::startsAtLatestAndFollows()
 {
-    ActivityView view; view.resize(520, 340); view.show();
+    SettledActivityView view; view.resize(520, 340); view.show();
     view.setSessionKey("arch/one"); view.setActivity({}, {});
     QTest::qWait(20);
     auto *bar = view.browser()->verticalScrollBar();
@@ -1129,7 +1390,7 @@ void TestActivityView::startsAtLatestAndFollows()
 
 void TestActivityView::preservesSelectionAndReadingPosition()
 {
-    ActivityView view; view.resize(560, 350); view.show();
+    SettledActivityView view; view.resize(560, 350); view.show();
     view.setSessionKey("arch/one"); view.setActivity({}, history(30));
     QTest::qWait(20);
     auto *browser = view.browser(); auto *bar = browser->verticalScrollBar();
@@ -1164,7 +1425,7 @@ void TestActivityView::idleNotificationsStayOutOfTheTimeline()
 {
     // Claude sends an empty Notification a minute after every finished turn
     // ("waiting for your input"); it is not part of the conversation.
-    ActivityView view; view.resize(540, 320); view.show();
+    SettledActivityView view; view.resize(540, 320); view.show();
     QJsonObject typed = journalEvent(4, "Notification", "Claude is waiting for your input");
     typed["notification_type"] = "idle_prompt";
     view.setActivity({}, {journalEvent(1, "UserPromptSubmit", "Do the work"), journalEvent(2, "Stop", "Done."),
@@ -1178,7 +1439,7 @@ void TestActivityView::idleNotificationsStayOutOfTheTimeline()
 
 void TestActivityView::groupsToolsAndKeepsExpansion()
 {
-    ActivityView view; view.resize(540, 320); view.show();
+    SettledActivityView view; view.resize(540, 320); view.show();
     view.setSessionKey("arch/one");
     QJsonArray events{journalEvent(1, "UserPromptSubmit", "Please inspect the source"),
         journalEvent(2, "PreToolUse", "hidden-command-first", "Bash"),
@@ -1206,7 +1467,7 @@ void TestActivityView::groupsToolsAndKeepsExpansion()
 
 void TestActivityView::rejectsMarkupResourcesAndUnsafeLinks()
 {
-    ActivityView view; view.resize(540, 320); view.show();
+    SettledActivityView view; view.resize(540, 320); view.show();
     const QString text = "**Good prose**\n\n<script>bad()</script><img src='file:///etc/passwd'>\n\n"
         "![tracking](https://example.invalid/tracker.png)\n\n[bad](javascript:alert(1)) [file](file:///etc/passwd) "
         "[forged](hgs-activity:group-2) [safe](https://example.com/docs)\n\n```sh\necho '<script>'\n```";
@@ -1255,7 +1516,7 @@ void TestActivityView::preservesLiteralUserMessages()
         "**буквальные звёздочки** и `код`\n"
         "<b>буквальный HTML</b> & <img src='file:///etc/passwd'>\n"
         "[ссылка](https://example.com)  два пробела";
-    ActivityView view; view.resize(420, 800); view.setTheme(dark); view.show();
+    SettledActivityView view; view.resize(420, 800); view.setTheme(dark); view.show();
     view.setSessionKey("arch/quoted-request");
     if (source == "snapshot") view.setActivity({{"prompt", text}}, {});
     else if (source == "fallback") view.setActivity({}, {}, text);
@@ -1291,7 +1552,7 @@ void TestActivityView::preservesLiteralUserMessages()
 
 void TestActivityView::preservesSessionFileReferences()
 {
-    ActivityView view;
+    SettledActivityView view;
     const QString text = "[Package](/home/user/packages/setup.zip)\n\n"
         "[Instructions](files/README.txt) [Registry](<docs/client map.md:12>)\n\n"
         "[**Formatted** label](/tmp/result.txt#L4) [file URI](file:///tmp/report.txt)\n\n"
@@ -1327,7 +1588,7 @@ void TestActivityView::preservesSessionFileReferences()
 
 void TestActivityView::expandsMatchingSnapshotWithoutDuplicate()
 {
-    ActivityView view;
+    SettledActivityView view;
     view.setActivity({{"prompt", "Please implement this feature completely"}, {"last_message", "Finished the change and ran all tests."}},
         {journalEvent(1, "UserPromptSubmit", "Please implement…"), journalEvent(2, "Stop", "Finished the change…")});
     QCOMPARE(view.browser()->toPlainText().count("Please implement"), 1);
@@ -1341,7 +1602,7 @@ void TestActivityView::expandsMatchingSnapshotWithoutDuplicate()
 
 void TestActivityView::crossSessionMessageIsAFullNoticeFromThatSession()
 {
-    ActivityView view; view.setTheme(true);
+    SettledActivityView view; view.setTheme(true);
     auto message = journalEvent(2, "UserPromptSubmit", "Message from zerus-19");
     message["origin"] = "peer_message"; message["agent_id"] = ""; message["sender"] = "zerus-19";
     message["report"] = "SessionsWindow.cpp is free again.\n\n- **Re-apply** your edits on top of HEAD";
@@ -1358,7 +1619,7 @@ void TestActivityView::crossSessionMessageIsAFullNoticeFromThatSession()
 
 void TestActivityView::subagentReportIsShortUntilExpanded()
 {
-    ActivityView view; view.setTheme(true); view.resize(630, 520); view.show();
+    SettledActivityView view; view.setTheme(true); view.resize(630, 520); view.show();
     const auto preview = qEnvironmentVariable("HGS_REPORT_PREVIEW");
     auto report = journalEvent(2, "UserPromptSubmit", "Agent \"Review branch\" finished");
     report["origin"] = "subagent_report"; report["agent_id"] = ""; report["from_agent"] = "a15";
@@ -1388,7 +1649,7 @@ void TestActivityView::subagentReportIsShortUntilExpanded()
 
 void TestActivityView::taskNotificationIsAColoredNoticeNotYou()
 {
-    ActivityView view; view.setTheme(true);
+    SettledActivityView view; view.setTheme(true);
     auto notice = journalEvent(2, "UserPromptSubmit", "Background command \"Run checks\" completed (exit code 0)");
     notice["origin"] = "task_notification"; notice["agent_id"] = "";
     view.setActivity({}, {journalEvent(1, "UserPromptSubmit", "Run checks in the background"), notice, journalEvent(3, "Stop", "Checks passed")});
@@ -1406,7 +1667,7 @@ void TestActivityView::taskNotificationIsAColoredNoticeNotYou()
 
 void TestActivityView::kimiTurnStartedKeepsRequestBeforeTools()
 {
-    ActivityView view;
+    SettledActivityView view;
     const QString request = "Investigate the dashboard error";
     QJsonArray events{journalEvent(1, "SessionStart", {}), journalEvent(2, "UserPromptSubmit", {}),
         journalEvent(3, "TurnStarted", request), journalEvent(4, "PreToolUse", "Inspect the logs", "Bash"),
@@ -1433,7 +1694,7 @@ void TestActivityView::kimiTurnStartedKeepsRequestBeforeTools()
 
 void TestActivityView::confirmedQuestionAnswerStaysInTimeline()
 {
-    ActivityView view;
+    SettledActivityView view;
     auto confirmed = journalEvent(3, "QuestionAnswered", "Which scope? → Documents");
     confirmed["seq"] = 5; // receipt is journaled after a fast subsequent agent response
     view.setActivity({{"prompt", "Ask about scope"}}, {
@@ -1473,7 +1734,7 @@ void TestActivityView::nativeQuestionReplies()
     QString text = "<send_user_message_question_reply>\n" + QString::fromUtf8(payload.toJson(QJsonDocument::Compact))
         + "\n</send_user_message_question_reply>";
     if (format == "ide") text.prepend("# Context from my IDE setup:\nOpen files: src/example.rs\n## My request for Codex:\n");
-    ActivityView view; view.resize(560, 500); view.setTheme(dark); view.setSessionKey("codex/sample/review"); view.show();
+    SettledActivityView view; view.resize(560, 500); view.setTheme(dark); view.setSessionKey("codex/sample/review"); view.show();
     if (source == "snapshot") view.setActivity({{"prompt", text}}, {});
     else if (source == "local") view.setTimeline({}, {}, {QJsonObject{{"id", "reply"}, {"text", text}, {"status", "sent"}}});
     else if (source == "search") view.showSearchResult(journalEvent(1, "UserPromptSubmit", text), "compatibility");
@@ -1525,7 +1786,7 @@ void TestActivityView::unknownQuestionReplyMessages_data()
 void TestActivityView::unknownQuestionReplyMessages()
 {
     QFETCH(QString, text);
-    ActivityView view;
+    SettledActivityView view;
     view.setActivity({}, {journalEvent(1, "UserPromptSubmit", text)});
     const auto plain = view.browser()->toPlainText();
     QVERIFY2(plain.contains(text), qPrintable(plain));
@@ -1541,7 +1802,7 @@ void TestActivityView::nativeQuestionRepliesPreserveLiteralText()
     const QString text = "<send_user_message_question_reply>\n" + QString::fromUtf8(payload.toJson(QJsonDocument::Compact))
         + "\n</send_user_message_question_reply>";
     for (bool dark : {false, true}) {
-        ActivityView view; view.setTheme(dark);
+        SettledActivityView view; view.setTheme(dark);
         view.setActivity({}, {journalEvent(1, "UserPromptSubmit", text)});
         const auto plain = view.browser()->toPlainText();
         QVERIFY(plain.contains(question)); QVERIFY(plain.contains(answer));
@@ -1553,7 +1814,7 @@ void TestActivityView::nativeQuestionRepliesPreserveLiteralText()
 
 void TestActivityView::unmatchedContextPrecedesTimeline()
 {
-    ActivityView view; view.resize(560, 360); view.show(); view.setSessionKey("arch/one");
+    SettledActivityView view; view.resize(560, 360); view.show(); view.setSessionKey("arch/one");
     view.setActivity({{"prompt", "Request missing from journal"}, {"last_message", "Response outside the journal"}}, history(30));
     QTest::qWait(20); // let QTextDocument finish its deferred layout
     auto *browser = view.browser(); auto *bar = browser->verticalScrollBar();
@@ -1570,7 +1831,7 @@ void TestActivityView::unmatchedContextPrecedesTimeline()
 
 void TestActivityView::failedMessageActionsFollowCardIdentity()
 {
-    ActivityView view;view.resize(600,350);view.show();view.setTheme(true);view.setSessionKey("session-one");
+    SettledActivityView view;view.resize(600,350);view.show();view.setTheme(true);view.setSessionKey("session-one");
     QSignalSpy actions(&view,&ActivityView::messageActionRequested);
     const QJsonArray events{journalEvent(1,"Stop","Earlier response"),journalEvent(4,"Stop","Later response")};
     view.setActivity({},events);
@@ -1591,7 +1852,7 @@ void TestActivityView::failedMessageActionsFollowCardIdentity()
 
 void TestActivityView::localDeliveryCards()
 {
-    ActivityView view; view.setSessionKey("arch/one"); view.setActivity({}, history(2));
+    SettledActivityView view; view.setSessionKey("arch/one"); view.setActivity({}, history(2));
     QJsonObject message{{"id", "outgoing-1"}, {"text", "Look at **this image**"}, {"status", "sending"},
         {"attachments", QJsonArray{QJsonObject{{"name", "screenshot.png"}}}}};
     view.setLocalMessages({message});
@@ -1612,7 +1873,7 @@ void TestActivityView::preview()
     if (directory.isEmpty()) QSKIP("Set HGS_PREVIEW_DIR to render the activity preview");
     QDir().mkpath(directory);
     for (bool dark : {true, false}) {
-        ActivityView view; view.resize(630, 750); view.setTheme(dark); view.show();
+        SettledActivityView view; view.resize(630, 750); view.setTheme(dark); view.show();
         view.setActivity({}, {
             journalEvent(1, "UserPromptSubmit", "Make the activity easier to read.\n\nKeep **messages** separate from tool output and show the latest event by default."),
             journalEvent(2, "PreToolUse", "rg -n renderDetails tray/src/SessionsWindow.cpp", "Bash"),
@@ -1634,24 +1895,23 @@ void TestActivityView::preview()
 
 void TestActivityView::caughtUpActivityAcknowledgesEarlierReplyWithoutIntermediatePaint()
 {
-    ActivityView view;view.resize(560,250);view.show();view.setSessionKey("polling");
+    SettledActivityView view;view.resize(560,250);view.show();view.setSessionKey("polling");
     QJsonObject details{{"conversation_id","same"},{"reply_id","10:100"},{"activity","busy"}};
     QJsonArray events{QJsonObject{{"seq",10},{"type","Stop"},{"at",100},{"detail","Completed the previous step."}}};
     for(int i=11;i<120;++i)events.append(QJsonObject{{"seq",i},{"at",100+i},{"type","AgentMessage"},{"detail",QString("Progress update %1").arg(i)}});
     view.setActivity(details,events);QTest::qWait(20);view.jumpToLatest();QTest::qWait(20);
     QVERIFY(view.replyVisible("10:100"));
     auto *browser=view.browser();browser->verticalScrollBar()->setValue(0);QVERIFY(!view.replyVisible("10:100"));
-    bool changed=false,paintedDuringUpdate=false;
-    connect(browser->document(),&QTextDocument::contentsChanged,&view,[&]{changed=true;paintedDuringUpdate|=browser->updatesEnabled();});
+    auto *previousDocument = browser->document();
     events.append(QJsonObject{{"seq",120},{"at",220},{"type","AgentMessage"},{"detail","Another update"}});
-    view.setActivity(details,events);QVERIFY(changed);QVERIFY(!paintedDuringUpdate);
+    view.setActivity(details,events);QVERIFY(browser->document() != previousDocument);
     QTRY_VERIFY(browser->updatesEnabled());QCOMPARE(browser->verticalScrollBar()->value(),0);
     const auto revision=browser->document()->revision();view.setActivity(details,events);QCOMPARE(browser->document()->revision(),revision);
 }
 
 void TestActivityView::readingColumnCentersTranscriptAndQueue()
 {
-    ActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     const QJsonObject details{{"input_queue", QJsonObject{{"id", "queue"}, {"text", "queued words"}}}};
     view.setActivity(details, history(30));
     auto *browser = view.browser(); auto *viewport = browser->viewport(); auto *bar = browser->verticalScrollBar();
@@ -1685,7 +1945,7 @@ void TestActivityView::readingColumnCentersTranscriptAndQueue()
 
 void TestActivityView::columnEdgesResizeSymmetrically()
 {
-    ActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     view.setActivity({}, history(30));
     // The owner stores the requested width and applies it to every column.
     connect(&view, &ActivityView::columnWidthRequested, &view, &ActivityView::setColumnWidth);
@@ -1723,7 +1983,7 @@ void TestActivityView::columnEdgesResizeSymmetrically()
 
 void TestActivityView::contextMenuSwitchesFullWidth()
 {
-    ActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+    SettledActivityView view; view.resize(1400, 400); view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
     view.setActivity({}, history(4));
     QSignalSpy full(&view, &ActivityView::fullWidthRequested), reset(&view, &ActivityView::columnResetRequested);
     view.setColumnWidth(800);
@@ -1754,5 +2014,15 @@ void TestActivityView::contextMenuSwitchesFullWidth()
     QCOMPARE(full.count(), 2); QCOMPARE(full.last().first().toBool(), false);
 }
 
-QTEST_MAIN(TestActivityView)
+int main(int argc, char **argv)
+{
+    QApplication app(argc, argv);
+    QTemporaryDir settings;
+    app.setOrganizationName("ZerusTests"); app.setApplicationName("ActivityView");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settings.path());
+    TestActivityView test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "test_activityview.moc"
