@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <limits>
 #include "DesktopPresence.h"
 
 class FakeSource : public PresenceSource {
@@ -19,6 +20,7 @@ private slots:
     void periodicSamplesAlwaysWriteAndChecksWriteOnlyTransitions();
     void slowSourcesAreNotQueuedTwice();
     void withoutPlatformIdleOnlyZerusInputCounts();
+    void negativeOrNonFiniteIdleIsNoEvidenceOfInput();
 };
 
 void TestDesktopPresence::transitionsWriteOnlyLockChangesAndReturns()
@@ -74,6 +76,22 @@ void TestDesktopPresence::withoutPlatformIdleOnlyZerusInputCounts()
     now = 50000; presence.noteInput(); QCOMPARE(writes.size(), 2);
     now = 60000; QEvent key(QEvent::KeyPress); QCoreApplication::sendEvent(&target, &key);
     now = 400000; presence.poll(true); QCOMPARE(writes.last().idle, 340.0);
+}
+
+void TestDesktopPresence::negativeOrNonFiniteIdleIsNoEvidenceOfInput()
+{
+    qint64 now = 0; QList<Write> writes;
+    auto *fake = new FakeSource;
+    DesktopPresence presence(std::unique_ptr<PresenceSource>(fake),
+        [&writes](double idle, bool locked) { writes.append({idle, locked}); }, [&now] { return now; });
+    const double values[] = {-5, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()};
+    for (const double idle : values) {
+        now += 30000; fake->next = {true, idle, false}; presence.poll(true);
+        QCOMPARE(writes.last().idle, DesktopPresence::ActiveSeconds + now / 1000.0); // away, as without platform idle
+    }
+    now += 1000; presence.noteInput(); // Zerus-window input still counts
+    now += 30000; fake->next = {true, -1, false}; presence.poll(true);
+    QCOMPARE(writes.last().idle, 30.0);
 }
 
 QTEST_GUILESS_MAIN(TestDesktopPresence)

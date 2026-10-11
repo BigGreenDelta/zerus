@@ -68,6 +68,17 @@ private slots:
         QVERIFY(result->available); QCOMPARE(result->idleSeconds, 90.5); QVERIFY(result->locked);
         QCOMPARE(saver.idleCalls, 0);
     }
+    void negativeX11IdleFallsBackToTheScreenSaver() {
+        // KIdleTime's X11 counter wraps negative after about 24.8 idle days.
+        ScreenSaver saver; saver.idle = 42;
+        serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
+        LinuxPresenceSource source(QDBusConnection::sessionBus(), {}, [] { return std::optional<qint64>(-5000); });
+        auto result = sample(source); QVERIFY(result);
+        QVERIFY(result->available); QCOMPARE(result->idleSeconds, 42.0); QCOMPARE(saver.idleCalls, 1);
+        QDBusConnection::disconnectFromBus("fake-screensaver");
+        result = sample(source); QVERIFY(result);
+        QVERIFY(!result->available);
+    }
     void screenSaverFallbackUsesSecondsOutsideKde() {
         ScreenSaver saver; saver.idle = 42; saver.active = true;
         serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
@@ -93,6 +104,24 @@ private slots:
         QVERIFY(!result->available); QVERIFY(!result->locked); // unverified thresholds never mean "active"
         source.thresholdReached(); now += 20000;
         result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 30.0);
+        source.resumed();
+        result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 0.0);
+    }
+    void waylandThresholdsAreNotTrustedOnceEventsStop() {
+        ScreenSaver saver; saver.idleSupported = false;
+        serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
+        qint64 now = 1000000;
+        LinuxPresenceSource source(QDBusConnection::sessionBus(), [&now] { return now; });
+        source.resumed();
+        now += LinuxPresenceSource::ThresholdStaleMs - 1;
+        auto result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 0.0);
+        // A compositor restart or an idle inhibitor can end the events; "active" must not last forever.
+        now += 1;
+        result = sample(source); QVERIFY(result); QVERIFY(!result->available);
+        source.thresholdReached();
+        result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 10.0);
+        now += LinuxPresenceSource::ThresholdStaleMs;
+        result = sample(source); QVERIFY(result); QVERIFY(!result->available);
         source.resumed();
         result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 0.0);
     }

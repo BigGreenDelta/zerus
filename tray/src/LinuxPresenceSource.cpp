@@ -44,7 +44,9 @@ void LinuxPresenceSource::sample()
         std::optional<qint64> freedesktopIdle, mutterIdleMs;
     };
     auto replies = std::make_shared<Replies>();
-    const std::optional<qint64> localIdleMs = m_localIdle ? m_localIdle() : std::nullopt;
+    std::optional<qint64> localIdleMs = m_localIdle ? m_localIdle() : std::nullopt;
+    // KIdleTime's X11 idle time wraps negative after about 24.8 days; ask D-Bus instead.
+    if (localIdleMs && *localIdleMs < 0) localIdleMs.reset();
     replies->remaining = localIdleMs ? 3 : 5;
     const auto finished = [this, replies, localIdleMs] {
         if (--replies->remaining) return;
@@ -93,19 +95,19 @@ void LinuxPresenceSource::call(const QString &service, const QString &path, cons
 
 void LinuxPresenceSource::thresholdReached()
 {
-    m_thresholdsVerified = true;
-    m_idleSince = m_clock() - ThresholdMs;
+    m_lastThresholdEvent = m_clock();
+    m_idleSince = *m_lastThresholdEvent - ThresholdMs;
 }
 
 void LinuxPresenceSource::resumed()
 {
-    m_thresholdsVerified = true;
+    m_lastThresholdEvent = m_clock();
     m_idleSince.reset();
 }
 
 std::optional<double> LinuxPresenceSource::thresholdIdle() const
 {
-    if (!m_thresholdsVerified) return std::nullopt;
+    if (!m_lastThresholdEvent || m_clock() - *m_lastThresholdEvent >= ThresholdStaleMs) return std::nullopt;
     // Between events the last input is less than ThresholdMs old. Zero delays
     // "away" by at most that much; it never causes a missed phone alert.
     return m_idleSince ? (m_clock() - *m_idleSince) / 1000.0 : 0.0;

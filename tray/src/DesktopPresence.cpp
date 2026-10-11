@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QEvent>
+#include <cmath>
 #include <utility>
 
 DesktopPresence::DesktopPresence(std::unique_ptr<PresenceSource> source, Writer writer, Clock clock, QObject *parent)
@@ -38,7 +39,8 @@ void DesktopPresence::sampled(const PresenceSample &sample)
     m_requestedAt = -1;
     const qint64 now = m_clock();
     double idle = sample.idleSeconds;
-    if (!sample.available) {
+    // A negative or non-finite idle time is no evidence of input.
+    if (!sample.available || !std::isfinite(idle) || idle < 0) {
         // Only Zerus windows count. Before any input here the owner counts as
         // away: an extra phone alert is better than a missed one.
         idle = m_lastInput < 0 ? ActiveSeconds + (now - m_started) / 1000.0 : (now - m_lastInput) / 1000.0;
