@@ -46,5 +46,15 @@ class BeadsAttributionTest(unittest.TestCase):
         self.assertEqual(privacy.findings(".beads/issues.jsonl", line), [(1, "non-example absolute home path")])
 
 
+class FileNameTest(unittest.TestCase):
+    def test_homebrew_cask_files_are_not_addresses(self):
+        # Homebrew names channel casks token@channel; their files end in .rb.
+        for text in ("Edit Casks/zerus@nightly.rb.", "packaging/homebrew/zerus@nightly.rb.in"):
+            with self.subTest(text=text):
+                self.assertEqual(privacy.findings("docs/notes.md", text), [])
+        self.assertEqual(privacy.findings("docs/notes.md", "Mail zerus" + "@" + "nightly.dev."),
+                         [(1, "non-example email address")])
+
+
 if __name__ == "__main__":
     unittest.main()

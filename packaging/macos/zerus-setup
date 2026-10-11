@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Create opt-in per-user integration for the Zerus application from Homebrew.
+
+SSH protocols call ~/.local/bin/hgs, and agents started over SSH need the
+desktop security-session bridge to reach the login Keychain. A cask cannot
+write to a user's home, so this explicit command performs those steps. It
+checks every conflict first, never replaces files it did not create and never
+restarts anything that already runs.
+"""
+import argparse
+import os
+from pathlib import Path
+import plistlib
+import re
+import subprocess
+import sys
+
+LABELS = {
+    "session": "com.hgdev.hgs.user-session",
+    "tray": "com.hgdev.hgs-tray",
+    "recovery": "com.hgdev.hgs-recovery",
+    "swarm": "com.hgdev.hgs-swarm",
+}
+INSTALLERS = {
+    "session": "install-macos-session-service.py",
+    "recovery": "install-recovery-service.py",
+    "swarm": "install-swarm-service.py",
+}
+MIGRATION = ("Nothing was changed. Move the existing installation aside deliberately; "
+             "see 'Migrating from a source installation' in docs/installation.md.")
+
+
+def inside(path, app):
+    try:
+        Path(path).resolve().relative_to(app)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def agent_path(kind):
+    return Path.home() / "Library/LaunchAgents" / (LABELS[kind] + ".plist")
+
+
+def agent_program(path):
+    try:
+        return plistlib.loads(path.read_bytes())["ProgramArguments"][0]
+    except Exception:
+        # An unreadable definition is somebody else's; never overwrite it.
+        return None
+
+
+def owned_agent(kind, app):
+    program = agent_program(agent_path(kind))
+    return program is not None and inside(program, app)
+
+
+def install_tray(app, hgs, setup):
+    log = Path.home() / "Library/Logs/hgs-tray.log"
+    # The source template carries commentary that launchd tolerates but XML forbids.
+    # Write a canonical definition instead, so later runs can recognize it.
+    template = re.sub(r"<!--.*?-->", "", (setup / "com.hgdev.hgs-tray.plist").read_text(), flags=re.S)
+    definition = plistlib.loads(template.encode())
+    values = {"__APP__": str(app), "__HGS__": str(hgs), "__LOG__": str(log)}
+
+    def substitute(value):
+        if isinstance(value, str):
+            for marker, replacement in values.items():
+                value = value.replace(marker, replacement)
+            return value
+        if isinstance(value, list):
+            return [substitute(item) for item in value]
+        if isinstance(value, dict):
+            return {key: substitute(item) for key, item in value.items()}
+        return value
+
+    payload = plistlib.dumps(substitute(definition))
+    path = agent_path("tray")
+    if path.exists() and path.read_bytes() == payload:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    stage = path.with_name("." + path.name + ".new")
+    stage.write_bytes(payload)
+    os.replace(stage, path)
+    print("Zerus starts at your next login. To start it now: "
+          f"launchctl bootstrap gui/{os.getuid()} '{path}'")
+
+
+def remove(app, links):
+    for kind, label in LABELS.items():
+        path = agent_path(kind)
+        if not os.path.lexists(path):
+            continue
+        if not owned_agent(kind, app):
+            print(f"Kept {path}: it does not run {app}.")
+            continue
+        target = f"gui/{os.getuid()}/{label}"
+        if subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0:
+            result = subprocess.run(["launchctl", "bootout", target], capture_output=True, text=True)
+            if result.returncode:
+                print(f"Cannot unload {label}: {result.stderr.strip()}", file=sys.stderr)
+                return 1
+        path.unlink()
+    for destination, target in links:
+        if destination.is_symlink() and inside(destination, app):
+            destination.unlink()
+        elif os.path.lexists(destination):
+            print(f"Kept {destination}: it does not point into {app}.")
+    print("Removed Zerus links and agents. Agent sessions, tmux and ~/.config/hgs were left untouched.")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--app", type=Path, default=Path(__file__).resolve().parents[3],
+                        help="Zerus application bundle (default: the bundle containing this command)")
+    parser.add_argument("--autostart", action="store_true", help="start the Zerus menu bar app at login")
+    parser.add_argument("--workers", action="store_true", help="install the recovery and swarm workers")
+    parser.add_argument("--remove", action="store_true",
+                        help="remove only the links and agents that point into this application")
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        parser.error("run this command as the desktop user, without sudo")
+    if args.remove and (args.autostart or args.workers):
+        parser.error("--remove cannot be combined with other options")
+    app = args.app.resolve()
+    hgs = app / "Contents/MacOS/hgs"
+    setup = app / "Contents/Resources/setup"
+    if not (hgs.is_file() and os.access(hgs, os.X_OK)):
+        parser.error(f"not a Zerus application: {app}")
+    directory = Path.home() / ".local/bin"
+    links = [(directory / "hgs", hgs), (directory / "hgs_state.py", setup / "hgs_state.py")]
+    if args.remove:
+        return remove(app, links)
+
+    kinds = ["session"] + (["tray"] if args.autostart else []) + (["recovery", "swarm"] if args.workers else [])
+    conflicts = []
+    source_app = Path.home() / "Applications/hgs-tray.app"
+    if os.path.lexists(source_app):
+        conflicts.append(f"source-installed application: {source_app}")
+    for destination, target in links:
+        if not target.is_file():
+            parser.error(f"application file is missing: {target}")
+        if os.path.lexists(destination) and destination.resolve() != target:
+            conflicts.append(f"existing file kept: {destination}")
+    for kind in kinds:
+        if os.path.lexists(agent_path(kind)) and not owned_agent(kind, app):
+            conflicts.append(f"existing LaunchAgent {LABELS[kind]} kept: {agent_path(kind)}")
+    if conflicts:
+        for conflict in conflicts:
+            print(f"zerus-setup: {conflict}", file=sys.stderr)
+        print(f"zerus-setup: {MIGRATION}", file=sys.stderr)
+        return 2
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for destination, target in links:
+        if not os.path.lexists(destination):
+            destination.symlink_to(target)
+    for kind in kinds:
+        if kind == "tray":
+            install_tray(app, hgs, setup)
+            continue
+        # The installers leave an unchanged running service alone; --restart is never passed.
+        result = subprocess.run([sys.executable, str(setup / INSTALLERS[kind]), str(hgs)])
+        if result.returncode:
+            print(f"zerus-setup: {INSTALLERS[kind]} failed; links already created were kept.", file=sys.stderr)
+            return 1
+    print("Zerus is ready for SSH sessions. Existing agent sessions and tmux servers were left running.")
+    if not args.autostart:
+        print("Optional login start: zerus-setup --autostart")
+    if not args.workers:
+        print("Optional background workers: zerus-setup --workers")
+    print("Before uninstalling: zerus-setup --remove")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

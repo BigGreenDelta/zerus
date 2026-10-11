@@ -183,19 +183,8 @@ public:
 
         auto refresh = [=] {
             const auto install = controller->installation();
-            QString ownershipText;
-            if (install.kind == "package")
-                ownershipText = tr("Package: %1\nInstalled package: %2").arg(install.package, install.version.isEmpty() ? tr("unconfirmed") : install.version);
-            else if (install.kind == "source")
-                ownershipText = tr("Local build in a Git checkout; update and rebuild deliberately.");
-            else if (install.kind == "checking")
-                ownershipText = tr("Checking installation ownership…");
-            else if (install.kind == "portable")
-                ownershipText = tr("Portable Windows build %1. Download newer builds from the release page.").arg(QCoreApplication::applicationVersion());
-            else
-                ownershipText = tr("Local / manually installed build; package ownership unconfirmed.");
-            if (install.arch) ownershipText += tr("\nSystem: Arch-based Linux");
-            ownership->setText(ownershipText);
+            const auto guide = UpdateController::installationGuide(install, controller->channel());
+            ownership->setText(guide.ownership);
 
             const auto feed = controller->feed();
             release->setText(controller->channel()=="dev" ? tr("View build") : tr("View release"));
@@ -214,16 +203,12 @@ public:
             check->setEnabled(!controller->busy());
             release->setEnabled(feed.valid);
 
-            const auto value = UpdateController::updateCommand(install, controller->channel());
-            const bool optional = install.kind != "package";
-            command->setText((optional ? tr("Optional AUR installation: ") : tr("Full system update: ")) + value);
-            command->setVisible(!value.isEmpty());
-            copy->setVisible(!value.isEmpty());
-            copy->setAccessibleName(optional ? tr("Copy optional installation command") : tr("Copy update command"));
-            instructions->setText(optional ? tr("This installs an AUR package; the current local build remains separate. Review the full system upgrade and your executable path.") : tr("Run this through your AUR helper and review the full system upgrade before confirming."));
-            if (value.isEmpty() && install.arch)
-                instructions->setText(tr("No supported update command is available for this installation. See the installation instructions."));
-            instructions->setVisible(!value.isEmpty() || install.arch);
+            command->setText(guide.command);
+            command->setVisible(!guide.command.isEmpty());
+            copy->setVisible(!guide.command.isEmpty());
+            copy->setAccessibleName(guide.copyName);
+            instructions->setText(guide.instructions);
+            instructions->setVisible(!guide.instructions.isEmpty());
         };
         connect(controller, &UpdateController::changed, this, refresh);
         refresh();

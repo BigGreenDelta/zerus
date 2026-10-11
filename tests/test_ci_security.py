@@ -346,5 +346,76 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertIn("run_macos:", verify)
 
 
+    def test_apple_signing_secrets_stay_in_the_signing_job(self):
+        text = (ROOT / ".github/workflows/macos-cask.yml").read_text()
+        self.assertRegex(text, r"(?m)^cache-mode: none$")
+        self.assertNotIn("actions/cache@", text)
+        sign = job(text, "sign")
+        self.assertRegex(sign, r"(?m)^    environment: macos-signing$")
+        for secret in ("MACOS_DEVELOPER_ID_P12", "MACOS_DEVELOPER_ID_P12_PASSWORD", "APPLE_NOTARY_API_KEY_P8",
+                       "APPLE_NOTARY_API_KEY_ID", "APPLE_NOTARY_API_ISSUER_ID"):
+            self.assertIn(f"secrets.{secret}", sign)
+        self.assertIn("vars.MACOS_TEAM_ID", sign)
+        self.assertIn('test "$WORKFLOW_REF" = refs/heads/main', sign)
+        self.assertRegex(sign, r"if: always\(\)\n        run: bash scripts/ci/macos-keychain.sh delete")
+        for name in ("bundle", "verify"):
+            self.assertNotIn("secrets.", job(text, name), name)
+            self.assertNotIn("environment:", job(text, name), name)
+        self.assertNotIn("environment: release", text)
+        for name in ("release.yml", "nightly.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text()
+            self.assertNotIn("MACOS_DEVELOPER_ID", workflow, name)
+            self.assertNotIn("APPLE_NOTARY", workflow, name)
+            self.assertNotIn("secrets: inherit", workflow, name)
+
+    def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
+        expression = field(job(workflow, "assemble"), "if")
+        self.assertIn("!cancelled()", expression)
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        expression = re.sub(r"!(?!=)", "not ", expression)
+        expression = re.sub(r"(?<!')\btrue\b(?!')", "True", expression)
+        return bool(eval(expression, {"__builtins__": {}}, {
+            "cancelled": lambda: False, "inputs": SimpleNamespace(macos_cask=requested),
+            "vars": SimpleNamespace(MACOS_CASKS_ENABLED="true" if enabled else ""),
+            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos)),
+        }))
+
+    def test_casks_are_built_only_once_signing_is_enabled(self):
+        for name, channel in (("release.yml", "stable"), ("nightly.yml", "nightly")):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                macos = job(workflow, "macos")
+                self.assertEqual(field(macos, "uses"), "./.github/workflows/macos-cask.yml")
+                self.assertIn(f"channel: {channel}", macos)
+                self.assertIn("vars.MACOS_CASKS_ENABLED == 'true'", field(macos, "if"))
+                self.assertIn("verify", field(macos, "needs"))
+                for requested in (True, False):
+                    if name == "nightly.yml" and not requested:
+                        continue
+                    for enabled in (True, False):
+                        wanted = enabled and requested
+                        expected = {"success": True, "skipped": not wanted, "failure": False, "cancelled": False}
+                        for result, runs in expected.items():
+                            self.assertEqual(self.assemble_runs(workflow, "success", result, enabled, requested), runs,
+                                             (requested, enabled, result))
+                        self.assertFalse(self.assemble_runs(workflow, "failure", "skipped", enabled, requested))
+
+    def test_release_draft_survives_a_skipped_cask(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        expression = field(job(workflow, "draft"), "if")
+        # Without a status function GitHub adds success() over the whole chain,
+        # which would skip the draft whenever the optional cask was skipped.
+        self.assertIn("!cancelled()", expression)
+        self.assertIn("needs.assemble.result == 'success'", expression)
+        self.assertIn("inputs.create_draft", expression)
+
+    def test_tap_deploy_key_is_only_available_to_the_publishers(self):
+        for workflow in (ROOT / ".github/workflows").glob("*.yml"):
+            text = workflow.read_text()
+            if "HOMEBREW_TAP_DEPLOY_KEY" in text:
+                self.assertIn(workflow.name, {"publish.yml", "publish-nightly.yml"})
+                self.assertRegex(job(text, "publish"), r"(?m)^    environment: release$")
+                self.assertIn("--tap-ssh-key", job(text, "publish"))
+
 if __name__ == "__main__":
     unittest.main()

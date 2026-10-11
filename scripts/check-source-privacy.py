@@ -57,7 +57,7 @@ def findings(name, text):
         if not name.startswith(THIRD_PARTY):
             for address in EMAIL.findall(addresses):
                 domain = address.rsplit('@', 1)[1].lower()
-                if address in PUBLIC_CONTACTS | {'git@github.com', 'aur@aur.archlinux.org'} or domain.endswith(('.png', '.svg', '.icns')):
+                if address in PUBLIC_CONTACTS | {'git@github.com', 'aur@aur.archlinux.org'} or domain.endswith(('.png', '.svg', '.icns', '.rb', '.rb.in')):
                     continue
                 if not (domain in {'example.com', 'example.org', 'example.net', 'example.test',
                                    'users.noreply.github.com'} or domain.endswith(('.example', '.test', '.invalid'))):

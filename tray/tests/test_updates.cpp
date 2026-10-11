@@ -1,6 +1,7 @@
 #include "UpdateController.h"
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QScopeGuard>
@@ -47,6 +48,9 @@ class TestUpdates : public QObject {
             QJsonObject{{"kind","arch-package"},{"name","zerus.pkg.tar.zst"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}},
             QJsonObject{{"kind","source"},{"name","zerus-source.tar.gz"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus-source.tar.gz"},{"sha256",QString(64,'c')},{"size",100},{"os","any"},{"arch","source"}}};
         return value;
+    }
+    DesktopUpdateFeed nightlyCatalog(const QString &version) const {
+        return UpdateController::parseFeed(QJsonDocument(nightlyRaw(version)).toJson(),"nightly");
     }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
@@ -98,11 +102,12 @@ private slots:
         DesktopInstallation unknown{"unknown",{},"0.99.0"};
         DesktopInstallation actual{"package","zerus-ade-bin","0.9.0-1"};
 #ifdef Q_OS_MACOS
-        const auto unavailable=QString("No macOS installer is published. See release or source build instructions.");
-        QCOMPARE(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false),unavailable);
-        QCOMPARE(UpdateController::comparisonMessage(actual,catalog,"0.9.0",1,true),unavailable);
-        QCOMPARE(UpdateController::comparisonMessage(actual,catalog,"0.9.0",-1,true),unavailable);
-        QCOMPARE(UpdateController::comparisonMessage(actual,catalog,"0.9.0",0,false),unavailable);
+        const QString cask="brew install --cask ufna/zerus/zerus";
+        QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("unconfirmed"));
+        QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains(cask));
+        QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.9.0",0,false).contains("Update available"));
+        QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.9.0",0,false).contains(cask));
+        QVERIFY(!UpdateController::comparisonMessage(actual,catalog,"0.9.0",1,true).contains("No macOS installer"));
 #else
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("unconfirmed"));
         QVERIFY(UpdateController::comparisonMessage(actual,catalog,"0.9.0",1,true).contains("Update available"));
@@ -184,6 +189,92 @@ private slots:
 #else
         QTRY_COMPARE(controller.installation().kind,QString("unknown"));
 #endif
+#endif
+    }
+    void homebrewCaskOwnership(){
+        QTemporaryDir dir;QVERIFY(dir.isValid());const QString exe=dir.path()+"/Applications/Zerus.app/Contents/MacOS/hgs-tray";QVERIFY(QDir().mkpath(QFileInfo(exe).path()));
+        const QString brew=dir.path()+"/brew",nightly="0.38.0.r812.gabcdef0.n41";
+        auto owner=[&](const QString &path,const QStringList &prefixes){return UpdateController::homebrewInstallation(path,prefixes);};
+        QCOMPARE(owner(exe,{brew}).kind,QString());
+        QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.0"));QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/.metadata"));
+        auto stable=owner(exe,{dir.path()+"/missing",brew});QCOMPARE(stable.kind,QString("homebrew-cask"));QCOMPARE(stable.package,QString("zerus"));QCOMPARE(stable.version,QString("0.38.0"));
+        QCOMPARE(owner(dir.path()+"/Applications/hgs-tray.app/Contents/MacOS/hgs-tray",{brew}).kind,QString());
+        QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.1"));QCOMPARE(owner(exe,{brew}).kind,QString());
+        QVERIFY(QDir(brew+"/Caskroom/zerus").removeRecursively());
+        QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus@nightly/"+nightly));
+        auto daily=owner(exe,{brew});QCOMPARE(daily.kind,QString("homebrew-cask"));QCOMPARE(daily.package,QString("zerus@nightly"));QCOMPARE(daily.version,nightly);
+        // Conflicting casks cannot both own the application; the owner stays unknown.
+        QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.0"));QCOMPARE(owner(exe,{brew}).kind,QString());
+        QVERIFY(QDir(brew+"/Caskroom/zerus").removeRecursively());QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/"+nightly));QCOMPARE(owner(exe,{brew}).kind,QString());
+        QVERIFY(UpdateController::prefersNightly({"homebrew-cask","zerus@nightly",nightly}));QVERIFY(UpdateController::prefersNightly({"package","zerus-ade-nightly-bin","1"}));
+        QVERIFY(!UpdateController::prefersNightly({"homebrew-cask","zerus","0.38.0"}));
+    }
+    void homebrewCaskInstructions(){
+        const DesktopInstallation stable{"homebrew-cask","zerus","0.36.0"},nightly{"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"};
+        QCOMPARE(UpdateController::updateCommand(stable),QString("brew upgrade --cask zerus"));
+        QCOMPARE(UpdateController::updateCommand(nightly,"nightly"),QString("brew upgrade --cask zerus@nightly"));
+        QCOMPARE(UpdateController::updateCommand(stable,"nightly"),QString("brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly"));
+        QCOMPARE(UpdateController::updateCommand(nightly,"stable"),QString("brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus"));
+        QVERIFY(UpdateController::updateCommand(stable,"dev").isEmpty());
+        QVERIFY(UpdateController::updateCommand({"homebrew-cask","zerus; sudo command","0.36.0"}).isEmpty());
+        auto catalog=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
+        QVERIFY(UpdateController::comparisonMessage(stable,catalog,"0.36.0",0,false).contains("brew upgrade --cask zerus"));
+        auto current=stable;current.version="0.37.0";QVERIFY(UpdateController::comparisonMessage(current,catalog,"0.37.0",0,false).contains("at least as new"));
+        QVERIFY(UpdateController::comparisonMessage(nightly,catalog,"0.37.0",0,false).contains("brew install --cask ufna/zerus/zerus"));
+        auto daily=nightlyCatalog("0.37.0.r61.gbbbbbbb.n8");QVERIFY(daily.valid);
+        QVERIFY(UpdateController::comparisonMessage(nightly,daily,"0.37.0",0,false).contains("brew upgrade --cask zerus@nightly"));
+        auto newest=nightly;newest.version="0.37.0.r61.gbbbbbbb.n8";QVERIFY(UpdateController::comparisonMessage(newest,daily,"0.37.0",0,false).contains("at least as new"));
+        QVERIFY(UpdateController::comparisonMessage(stable,daily,"0.37.0",0,false).contains("ufna/zerus/zerus@nightly"));
+        DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.37.0 (dev 50)";
+        QVERIFY(UpdateController::comparisonMessage(stable,dev,"0.37.0",0,false).contains("zerus@nightly"));
+    }
+    void installationGuidesNameTheirPackageManager(){
+        auto cask=UpdateController::installationGuide({"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"},"nightly");
+        QVERIFY(cask.ownership.contains("Homebrew cask: zerus@nightly"));QVERIFY(cask.ownership.contains("0.37.0.r60.gaaaaaaa.n7"));
+        QCOMPARE(cask.command,QString("Homebrew: brew upgrade --cask zerus@nightly"));
+        QVERIFY(!cask.command.contains("AUR"));QVERIFY(!cask.instructions.contains("AUR"));QVERIFY(cask.instructions.contains("Restart to finish update"));
+        auto dev=UpdateController::installationGuide({"homebrew-cask","zerus","0.37.0"},"dev");QVERIFY(dev.command.isEmpty());QVERIFY(dev.instructions.isEmpty());
+        DesktopInstallation package{"package","zerus-ade-bin","0.36.2-1",true,"paru"};auto arch=UpdateController::installationGuide(package,"stable");
+        QCOMPARE(arch.command,QString("Full system update: paru -Syu zerus-ade-bin"));QVERIFY(arch.ownership.contains("Arch-based"));QVERIFY(arch.instructions.contains("AUR helper"));
+        DesktopInstallation local{"unknown",{},{},true,"yay"};auto optional=UpdateController::installationGuide(local,"stable");
+        QCOMPARE(optional.command,QString("Optional AUR installation: yay -Syu zerus-ade-bin"));QCOMPARE(optional.copyName,QString("Copy optional installation command"));
+        auto build=UpdateController::installationGuide({"source",{},{}},"stable");QVERIFY(build.command.isEmpty());QVERIFY(build.instructions.isEmpty());QVERIFY(build.ownership.contains("Git checkout"));
+        auto portable=UpdateController::installationGuide({"portable",{},{}},"nightly");QVERIFY(portable.ownership.contains("Portable Windows build"));QVERIFY(portable.command.isEmpty());QVERIFY(portable.instructions.isEmpty());
+    }
+    void nightlyBuildsCompareByBuildNumber(){
+        QVERIFY(UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n41","0.38.0.r815.g1234567.n42"));
+        QVERIFY(UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n9","0.38.0.r815.g1234567.n10"));
+        QVERIFY(!UpdateController::nightlyIsNewer("0.38.0.r815.g1234567.n42","0.38.0.r812.gabcdef0.n41"));
+        QVERIFY(!UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n41","0.38.0.r812.gabcdef0.n41"));
+        QVERIFY(!UpdateController::nightlyIsNewer("0.38.0","0.38.0.r815.g1234567.n42"));
+        QVERIFY(!UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n41","0.39.0"));
+    }
+    void replacedBundleRequestsRestart(){
+        QTemporaryDir dir;const QString contents=dir.path()+"/Zerus.app/Contents";QVERIFY(QDir().mkpath(contents+"/MacOS"));
+        auto plist=[&](const QByteArray &body){QFile file(contents+"/Info.plist");QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));file.write(body);};
+        plist(R"(<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Zerus</string><key>CFBundleShortVersionString</key><string>0.38.1</string></dict></plist>)");
+        QCOMPARE(UpdateController::bundleRelease(contents+"/Info.plist"),QString("0.38.1"));
+        QVERIFY(UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray","0.38.0"));QVERIFY(!UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray","0.38.1"));
+        // A nightly keeps its product version; its release version tells builds apart.
+        plist("<plist><dict><key>CFBundleShortVersionString</key><string>0.38.1</string><key>ZerusReleaseVersion</key><string>0.38.1.r812.gabcdef0.n41</string></dict></plist>");
+        QCOMPARE(UpdateController::bundleRelease(contents+"/Info.plist"),QString("0.38.1.r812.gabcdef0.n41"));
+        QVERIFY(UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray","0.38.1.r800.g1234567.n40"));
+        QVERIFY(!UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray","0.38.1.r812.gabcdef0.n41"));
+        plist("<plist><dict><key>ZerusReleaseVersion</key><string>../evil</string><key>CFBundleShortVersionString</key><string>0.38.1</string></dict></plist>");QCOMPARE(UpdateController::bundleRelease(contents+"/Info.plist"),QString("0.38.1"));
+        plist("<plist><dict><key>CFBundleName</key><string>Zerus</string></dict></plist>");QVERIFY(UpdateController::bundleRelease(contents+"/Info.plist").isEmpty());QVERIFY(!UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray","0.38.0"));
+        plist("<plist><dict><key>CFBundleShortVersionString</key>");QVERIFY(UpdateController::bundleRelease(contents+"/Info.plist").isEmpty());
+        QVERIFY(!UpdateController::bundleReplaced(contents+"/MacOS/hgs-tray",{}));
+        QVERIFY(!UpdateController::bundleReplaced(dir.path()+"/plain/hgs-tray","0.38.0"));
+    }
+    void controllerOffersRestartAfterBundleReplacement(){
+#ifdef Q_OS_MACOS
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const QString contents=dir.path()+"/Zerus.app/Contents";QVERIFY(QDir().mkpath(contents+"/MacOS"));
+        auto plist=[&](const QByteArray &release){QFile file(contents+"/Info.plist");QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));file.write("<plist><dict><key>CFBundleShortVersionString</key><string>0.38.0</string><key>ZerusReleaseVersion</key><string>"+release+"</string></dict></plist>");};
+        plist("0.38.0.r812.gabcdef0.n41");
+        UpdateController controller(nullptr,contents+"/MacOS/hgs-tray");QTRY_COMPARE(controller.installation().kind,QString("unknown"));QVERIFY(!controller.restartRequired());
+        QSignalSpy changed(&controller,&UpdateController::changed);
+        plist("0.38.0.r815.g1234567.n42");controller.refreshBundleState();QVERIFY(controller.restartRequired());QVERIFY(changed.count()>0);
 #endif
     }
     void canonicalOwnershipAsync(){

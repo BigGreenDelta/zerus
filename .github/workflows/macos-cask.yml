@@ -1,0 +1,158 @@
+name: macOS cask
+
+# Builds, signs, notarizes and installs the Apple Silicon bundle of one Homebrew
+# channel for an already verified main revision. Only release.yml and nightly.yml
+# call it; neither passes secrets. The signing job alone reads the macos-signing
+# environment, whose deployment policy admits only main.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Homebrew channel of the candidate, stable or nightly
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  bundle:
+    name: macOS bundle
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A nightly version counts the revisions of main.
+          fetch-depth: 0
+      - name: Select the release version
+        id: release
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from macos_release import cask_for
+          from nightly_common import nightly_version
+          channel = os.environ['CHANNEL']
+          cask_for(channel)
+          product = pathlib.Path('VERSION').read_text().strip()
+          if channel == 'nightly':
+              # The same inputs prepare-nightly.py uses for the Arch nightly.
+              count = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], text=True))
+              release = nightly_version(product, count, os.environ['COMMIT'], int(os.environ['RUN_NUMBER']))
+          else:
+              release = product
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'release={release}\n')
+          print(f'Building the {channel} macOS bundle {release}.')
+          PY
+      - run: brew install cmake ninja
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install the pinned official Qt
+        run: python3 scripts/install-qt-macos.py --output "$RUNNER_TEMP/qt"
+      - name: Build, test and assemble the unsigned bundle
+        env:
+          ZERUS_RELEASE_VERSION: ${{ steps.release.outputs.release }}
+        run: ZERUS_QT_PREFIX="$RUNNER_TEMP/qt" bash scripts/ci/macos-bundle.sh
+      - name: Retain macOS bundle test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-bundle-results-${{ github.sha }}
+          path: artifacts/test-results
+          retention-days: 3
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-unsigned-${{ github.sha }}
+          path: artifacts/macos-unsigned/Zerus-unsigned.zip
+          retention-days: 3
+  sign:
+    name: macOS signing and notarization
+    needs: bundle
+    runs-on: macos-15
+    timeout-minutes: 150
+    environment: macos-signing
+    steps:
+      - name: Require upstream main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$WORKFLOW_REF" = refs/heads/main
+          test "$WORKFLOW_REPOSITORY" = ufna/zerus
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-unsigned-${{ github.sha }}
+          path: artifacts/macos-unsigned
+      - name: Prepare a temporary signing keychain
+        env:
+          P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
+          TEAM_ID: ${{ vars.MACOS_TEAM_ID }}
+        run: bash scripts/ci/macos-keychain.sh create
+      - name: Sign, notarize, staple and check
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+          # Empty for an individual API key.
+          NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+          TEAM_ID: ${{ vars.MACOS_TEAM_ID }}
+          RELEASE: ${{ needs.bundle.outputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing="$RUNNER_TEMP/zerus-signing"
+          version="$(cat VERSION)"
+          issuer=()
+          if [ -n "$NOTARY_ISSUER" ]; then issuer=(--notary-issuer "$NOTARY_ISSUER"); fi
+          ditto -x -k artifacts/macos-unsigned/Zerus-unsigned.zip "$RUNNER_TEMP/unsigned"
+          python3 scripts/sign-macos.py --app "$RUNNER_TEMP/unsigned/Zerus.app" \
+            --identity "$(cat "$signing/identity")" --team-id "$TEAM_ID" --keychain "$signing/signing.keychain-db" \
+            --version "$version" --release "$RELEASE" --output artifacts/macos-signed \
+            --notary-key-file "$signing/notary.p8" --notary-key-id "$NOTARY_KEY_ID" "${issuer[@]}"
+          ditto -x -k "artifacts/macos-signed/zerus-$RELEASE-macos-arm64.zip" "$RUNNER_TEMP/signed"
+          python3 scripts/check-macos-bundle.py "$RUNNER_TEMP/signed/Zerus.app" --version "$version" \
+            --release "$RELEASE" --team-id "$TEAM_ID"
+      - name: Remove signing material
+        if: always()
+        run: bash scripts/ci/macos-keychain.sh delete
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
+          retention-days: 3
+  verify:
+    name: macOS cask installation
+    needs: sign
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
+      - name: Install the candidate cask from a local tap
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          # Nightly prereleases are tagged with the calling workflow run.
+          TAG: ${{ inputs.channel == 'nightly' && format('nightly-{0}', github.run_id) || '' }}
+        run: bash scripts/ci/macos-cask-install.sh artifacts/macos-signed "$CHANNEL" "$TAG"

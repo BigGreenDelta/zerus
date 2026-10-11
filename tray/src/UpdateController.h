@@ -21,6 +21,10 @@ struct DesktopInstallation {
     bool arch=false;
     QString helper;
 };
+// What Settings > Updates says about an installation and how it is updated.
+struct InstallationGuide {
+    QString ownership, command, copyName, instructions;
+};
 
 class UpdateController : public QObject {
     Q_OBJECT
@@ -30,6 +34,7 @@ public:
     static DesktopUpdateFeed parseFeed(const QByteArray &data,const QString &channel);
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
+    static InstallationGuide installationGuide(const DesktopInstallation &installation,const QString &channel);
     static bool plainStableIsNewer(const QString &installed,const QString &released);
     // The portable Windows build (Phase 1: nightly zips only) against a catalog.
     static bool portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed);
@@ -38,6 +43,17 @@ public:
     static bool claimNotification(const QString &token);
     static bool isUpdateToken(const QString &token);
     static QString comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared);
+    // The zerus or zerus@nightly cask that installed this Zerus.app with its version. The
+    // kind stays empty unless exactly one cask owns exactly one installed version.
+    static DesktopInstallation homebrewInstallation(const QString &canonicalExecutable,const QStringList &prefixes);
+    // Installations that follow nightly builds until the user picks a channel.
+    static bool prefersNightly(const DesktopInstallation &installation);
+    static bool nightlyIsNewer(const QString &installed,const QString &released);
+    // ZerusReleaseVersion of a bundle, else its CFBundleShortVersionString; empty if unreadable.
+    static QString bundleRelease(const QString &infoPlistPath);
+    // True when the application bundle on disk now holds another release than the one this
+    // process started from, for example after `brew upgrade --cask zerus`.
+    static bool bundleReplaced(const QString &executable,const QString &startedRelease);
     QString channel() const;
     void setChannel(const QString &value);
     void check();
@@ -55,6 +71,11 @@ public:
     DesktopInstallation installation() const{return m_installation;}
     DesktopUpdateFeed feed() const{return m_feed;}
     bool busy() const{return m_busy;}
+    bool restartRequired() const{return m_restartRequired;}
+    void refreshBundleState();
+    // Quits after starting a detached helper that reopens the installed bundle once this
+    // process has exited. Drafts are already persisted; agents and tmux are untouched.
+    void restartIntoInstalledBundle();
 signals:
     void changed();
     void requestStarted();
@@ -77,4 +98,6 @@ private:
     qint64 m_lastSuccess=0;
     bool m_busy=false,m_startCheck=false;
     quint64 m_checkGeneration=0;
+    QString m_executable,m_startedRelease;
+    bool m_restartRequired=false;
 };

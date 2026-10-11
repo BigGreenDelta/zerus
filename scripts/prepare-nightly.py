@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 
+from macos_release import add_macos
 from nightly_common import PACKAGE, ROOT, nightly_version, render_recipe, windows_asset
 from release_common import require, sha256
 import windows_portable
@@ -21,6 +22,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--run-number", type=int, required=True)
+    parser.add_argument("--macos", type=Path, help="signed and notarized macOS artifact from the macos-signing job")
     args = parser.parse_args()
     require(args.run_id > 0, "Invalid nightly run ID.")
     product = (ROOT / "VERSION").read_text().strip()
@@ -52,8 +54,11 @@ def main():
     recipe = args.output / "aur" / PACKAGE
     recipe.mkdir(parents=True)
     (recipe / "PKGBUILD").write_text(render_recipe(info, sha256(binary)))
+    if args.macos:
+        add_macos(args.output, args.macos, version, info, "nightly")
     (args.output / "release-info.json").write_text(json.dumps(info, indent=2) + "\n")
-    print(f"Prepared exact nightly {version}; validate and seal before publication.")
+    print(f"Prepared exact nightly {version}{' with its notarized macOS bundle' if args.macos else ''}; "
+          "validate and seal before publication.")
 
 
 if __name__ == "__main__":

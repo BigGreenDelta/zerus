@@ -159,6 +159,9 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
+On Apple Silicon Macs, install with `brew install --cask ufna/zerus/zerus` (daily
+builds: `ufna/zerus/zerus@nightly`) and run `zerus-setup`
+([macOS installation](docs/installation.md#macos-homebrew)).
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
 choose an agent, machine, project and folder. Ordinary folders without Git work

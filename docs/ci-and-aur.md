@@ -100,10 +100,14 @@ format is required by the existing verified agent input transport. Unknown input
 mode must keep rejecting delivery; upgrading the test toolchain preserves that
 guard. The package requires tmux 3.7+. A binary upgrade must not restart live
 servers; see the [installation requirements](installation.md#requirements).
-Stable release packaging supports **Arch x86_64 only**. The macOS runner checks
-build/test compatibility; it does not create a notarized macOS installer. Nightlies
-add the Windows x86_64 portable zip described below; a stable Windows asset is a
-separate owner decision. Arch ARM is outside this first package matrix.
+Release packaging covers **Arch x86_64** and, through the `zerus` and
+`zerus@nightly` Homebrew casks, **Apple Silicon macOS**; see
+[macOS distribution](macos-distribution.md). Ordinary macOS CI checks build/test
+compatibility with Homebrew Qt; only stable and nightly candidates build, sign and
+notarize the bundle, and only once the repository variable `MACOS_CASKS_ENABLED`
+is `true`. Nightlies add the Windows x86_64 portable zip described below; a stable
+Windows asset is a separate owner decision. Intel Macs and Arch ARM are outside
+this package matrix.
 
 All CI jobs have bounded timeouts. Checkout credentials are not persisted and
 Actions are pinned to commit SHAs. Dependabot proposes monthly grouped action/Cargo
@@ -429,6 +433,10 @@ Downloaded scripts/PKGBUILDs are never executed with publication credentials.
 Each build creates an immutable `nightly-RUN_ID` GitHub prerelease and updates only
 `zerus-ade-nightly-bin` in AUR. It never becomes the latest stable release or changes
 `zerus`/`zerus-ade-bin`/`zerus-git`. Its public binary URL and SHA-256 stay fixed.
+With `MACOS_CASKS_ENABLED=true` the Nightly run also builds, signs and notarizes the
+Apple Silicon bundle with the same nightly version, adds it to the prerelease
+(candidate schema 2) and updates only `Casks/zerus@nightly.rb` in the tap after AUR.
+A failed macOS bundle fails the nightly, so AUR and Homebrew nightlies stay equal.
 Binary library floors come from the verified source package's `.BUILDINFO`.
 Stable and nightly publishers share a serialization group, preventing AUR races.
 
@@ -665,7 +673,16 @@ bash scripts/check-release-packages.sh dist
 The helper requires an empty output directory. Build artifacts are ignored and
 are never committed to the application or AUR repositories.
 
-### 2. Publish the reviewed candidate and update AUR
+Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
+also builds the Apple Silicon bundle against the pinned official Qt, signs and
+notarizes it in the main-only `macos-signing` environment and installs the result
+through a local tap before assembly (`macos-cask.yml`). The candidate then uses
+release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
+`homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate is
+Arch-only. Details, secrets and retry rules are in
+[macOS distribution](macos-distribution.md).
+
+### 2. Publish the reviewed candidate and update AUR and Homebrew
 
 `publish.yml` takes the **successful candidate run ID** and its version. It uses
 one Ubuntu runner, does no compilation and allocates no Arch/macOS runners:
@@ -686,7 +703,9 @@ Before any GitHub release write it authenticates to AUR, checks ownership of all
 names, prepares Git changes and refuses recipe downgrades. It creates or finishes
 a draft for the exact commit, publishes it, verifies **every asset anonymously**,
 then pushes the stable source, binary and VCS recipe updates. AUR Git receives only
-`PKGBUILD` and `.SRCINFO`; release archives stay on GitHub.
+`PKGBUILD` and `.SRCINFO`; release archives stay on GitHub. A macOS candidate also
+stages the cask in `ufna/homebrew-zerus` with a dry-run push before the GitHub
+write and pushes it after the AUR recipes.
 
 The VCS flavor follows `main` automatically when users rebuild. Release-time sync
 updates its recipe when dependencies/build/package logic change; pure `pkgver`

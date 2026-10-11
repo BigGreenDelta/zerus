@@ -1130,6 +1130,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(updates, &UpdateController::changed, this, updateEntryState);
     connect(updateEntry, &QPushButton::clicked, this, &SessionsWindow::showUpdates);
     updateEntryState();
+    auto *restartEntry = new QPushButton(tr("Restart to finish update"));
+    restartEntry->setObjectName("restartToUpdate");
+    restartEntry->setProperty("glyph", "zerus");
+    restartEntry->setIconSize(QSize(14, 14));
+    restartEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; agents and tmux keep running."));
+    restartEntry->setAccessibleName(restartEntry->toolTip());
+    statusLayout->addWidget(restartEntry);
+    auto restartEntryState = [updates, restartEntry] { restartEntry->setVisible(updates->restartRequired()); };
+    connect(updates, &UpdateController::changed, this, restartEntryState);
+    connect(restartEntry, &QPushButton::clicked, updates, &UpdateController::restartIntoInstalledBundle);
+    restartEntryState();
     m_connectionRetry = new QPushButton(tr("Retry now")); m_connectionRetry->setObjectName("connectionRetry");
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
@@ -1429,8 +1441,8 @@ void SessionsWindow::applyTheme()
         QLabel#notice { color:%6; font-size:11px; }
         QLabel#workspaceConnectionStatus { color:%12; font-size:11px; }
         QPushButton#connectionRetry { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
-        QPushButton#updatesAvailable { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
-        QPushButton#updatesAvailable:hover { background:%7; }
+        QPushButton#updatesAvailable, QPushButton#restartToUpdate { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
+        QPushButton#updatesAvailable:hover, QPushButton#restartToUpdate:hover { background:%7; }
         QLabel#notice[error="true"] { color:%12; }
         QSplitter::handle { background:transparent; width:8px; }
         QFrame#sessionInspectorPanel { background:%11; border:1px solid %4; border-radius:8px; }
@@ -1441,7 +1453,7 @@ void SessionsWindow::applyTheme()
               m_dark ? "#12372b" : "#ffffff", m_dark ? "#aae9d2" : "#115d46", selected,
               m_dark ? "#151b21" : "#f3f6f8", tone("Error", m_dark).name()) + workspaceScrollbars(m_dark));
     for (auto *button : findChildren<QPushButton *>()) if (button != m_windowPin && !button->property("glyph").toString().isEmpty())
-        button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" ? m_accent : m_muted)));
+        button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance();
     if (m_sessionDock) m_sessionDock->setEdgeColor(QColor(m_border));
     if (m_brand) m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),

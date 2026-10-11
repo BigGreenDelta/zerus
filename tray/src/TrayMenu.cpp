@@ -130,6 +130,7 @@ void TrayMenu::rebuild(const FleetState &state)
     QAction *dashboard = m_menu->addAction(tr("Open Zerus"));
     connect(dashboard, &QAction::triggered, this, &TrayMenu::sessionsRequested);
     auto *updates=UpdateController::instance();if(updates->updateAvailable()){auto *entry=m_menu->addAction(tr("Update available: Zerus %1").arg(updates->feed().version));entry->setObjectName("updatesAvailable");connect(entry,&QAction::triggered,this,&TrayMenu::updatesRequested);}
+    if(updates->restartRequired()){auto *restart=m_menu->addAction(tr("Restart to finish update"));restart->setObjectName("restartToUpdate");connect(restart,&QAction::triggered,updates,&UpdateController::restartIntoInstalledBundle);}
     m_menu->addSeparator();
 
     // Свой бокс -- первая запись в меню, ведущий разделитель ему не нужен.

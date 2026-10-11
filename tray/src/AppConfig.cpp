@@ -40,6 +40,20 @@ QString AppConfig::fallbackHgsPath(const QString &pathEnv, const QStringList &in
     return QStandardPaths::findExecutable(QStringLiteral("hgs"), installDirs);
 }
 
+QString AppConfig::bundledHgsPath(const QString &executable, Platform p)
+{
+    if (p != Platform::Mac || executable.isEmpty())
+        return {};
+    const QDir macos = QFileInfo(executable).absoluteDir();
+    QDir bundle = macos;
+    if (macos.dirName() != QLatin1String("MacOS") || !bundle.cdUp()
+        || bundle.dirName() != QLatin1String("Contents") || !bundle.cdUp()
+        || !bundle.dirName().endsWith(QLatin1String(".app")))
+        return {};
+    const QFileInfo hgs(macos.filePath(QStringLiteral("hgs")));
+    return hgs.isFile() && hgs.isExecutable() ? hgs.absoluteFilePath() : QString();
+}
+
 void AppConfig::setConfigPathOverrideForTests(const QString &path)
 {
     g_configPathOverride = path;

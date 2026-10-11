@@ -198,7 +198,7 @@ def aur_versions(path):
 
 
 def build_feed(release,info,files,sums,package_versions,commit):
-    tag=safe_name(release['tag_name']);require(info.get('schema')==1 and type(info.get('schema')) is int,'Unsupported release metadata schema')
+    tag=safe_name(release['tag_name']);require(info.get('schema') in (1,2) and type(info.get('schema')) is int and (info['schema']==1)==('macos' not in info),'Unsupported release metadata schema')
     require(info.get('source_commit')==commit and HEX40.fullmatch(commit),'Release tag/source commit mismatch')
     platform=info.get('platform','desktop');channel=info.get('channel','stable')
     require(platform in {'android','desktop'} and channel in {'dev','stable','nightly'},'Unknown release platform/channel')
@@ -227,6 +227,13 @@ def build_feed(release,info,files,sums,package_versions,commit):
         if channel=='nightly' and portable is not None:
             # Linked from GitHub only; deployed GUIs reject unknown feed artifact kinds.
             require(portable==windows_portable(version),'Unexpected Windows portable asset');expected.add(portable)
+        macos=info.get('macos')
+        if macos is not None:
+            # Schema 2 adds the notarized Apple Silicon bundle of the channel's Homebrew cask.
+            # Homebrew updates it, so the catalog keeps listing only artifacts existing clients know.
+            cask={'stable':'zerus','nightly':'zerus@nightly'}.get(channel)
+            require(cask is not None and info.get('schema')==2 and info.get('homebrew_casks')==[cask] and isinstance(macos,dict) and macos.get('asset')==f'zerus-{version}-macos-arm64.zip','Unexpected macOS release metadata')
+            expected.add(macos['asset'])
         require(set(sums)==expected,'Unexpected desktop asset family')
     artifacts=[]
     declared=info.get('artifacts') if platform=='android' else None
@@ -303,11 +310,15 @@ def validate_and_fetch(client,release,directory,expected_platform,expected_chann
     if info.get('platform','desktop')!=expected_platform or info.get('channel','stable')!=expected_channel:
         raise ChannelMismatch('Selected release belongs to another channel')
     portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel=='nightly' else None
+    macos=info.get('macos') if expected_platform=='desktop' else None
+    cask=macos.get('asset') if isinstance(macos,dict) else None
     for name,digest in sums.items():
         if name in files:continue
-        if isinstance(portable,str) and name==portable and name.endswith('-windows-x86_64.zip'):
+        if (isinstance(portable,str) and name==portable and name.endswith('-windows-x86_64.zip')) or \
+                (isinstance(cask,str) and name==cask and name.endswith('-macos-arm64.zip')):
             # Not mirrored (the mirror never deletes and has a fixed disk budget)
-            # and not a feed artifact; build_feed checks its sealed name.
+            # and not a feed artifact; build_feed checks its sealed name. Homebrew
+            # downloads the macOS zip from GitHub.
             declared=assets[name].get('digest')
             require(declared is None or declared=='sha256:'+digest,'GitHub asset digest mismatch')
             continue

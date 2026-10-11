@@ -3,9 +3,10 @@
 [Product overview](../README.md) | [Detailed reference](reference.md#installation)
 
 Zerus runs on Linux and macOS. Arch Linux x86_64 users can install the complete
-CLI and desktop bundle from AUR. Other installations build from source. The CLI
-keeps the name `hgs`; the desktop executable is `hgs-tray`. Windows has a
-portable [control console](#windows) for remote Linux and macOS machines.
+CLI and desktop bundle from AUR; Apple Silicon Macs can use the Homebrew cask.
+Other installations build from source. The CLI keeps the name `hgs`; the desktop
+executable is `hgs-tray`. Windows has a portable [control console](#windows) for
+remote Linux and macOS machines.
 
 ## Requirements
 
@@ -95,6 +96,89 @@ Services and autostart are opt-in. Inspect old user unit files before enabling
 packaged services; local definitions can shadow the system package. Package
 installation and upgrades do not restart native agents, tmux or the GUI.
 [Service setup and migration](ci-and-aur.md#package-contents-and-compatibility).
+
+## macOS (Homebrew)
+
+Apple Silicon Macs running macOS 14 or later can install the signed and notarized
+application and CLI from the Zerus tap. The casks appear in the tap with the first
+signed builds.
+
+```sh
+brew install --cask ufna/zerus/zerus
+zerus-setup
+```
+
+The tap has two channels. `zerus` follows stable releases; `zerus@nightly` follows
+the daily build from main that passed the full CI, published at the same time as
+the AUR nightly. Both install the same `Zerus.app`, so only one can be installed.
+Settings, agents and conversations are shared. To switch channels:
+
+```sh
+brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly
+brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus
+```
+
+A Zerus installed from `zerus@nightly` checks the nightly update channel unless you
+choose another one in **Settings > Updates**. The Dev channel, built from every main
+push, has no cask; use `zerus@nightly` for prebuilt builds from main.
+
+The cask installs `/Applications/Zerus.app`, links `hgs` and `zerus-setup` into
+Homebrew's `bin` directory and installs `tmux` as a dependency. It starts nothing
+and does not write to your home directory. Run `zerus-setup` once as your normal
+user, **without sudo**. It links `~/.local/bin/hgs` for SSH protocols and installs
+the on-demand session bridge that lets agents started over SSH use your login
+Keychain. Options:
+
+```sh
+zerus-setup --autostart   # start Zerus at login
+zerus-setup --workers     # recovery and swarm background workers
+```
+
+`brew upgrade --cask zerus` (or `zerus@nightly`) replaces the application but never
+quits it, unloads its LaunchAgents or stops tmux and native agents. When the
+installed bundle is another build than the running GUI, Zerus shows **Restart to
+finish update**; drafts are kept. Background workers keep the previous binary until
+you restart them:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-recovery"
+launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-swarm"
+```
+
+To uninstall, remove the per-user integration first:
+
+```sh
+zerus-setup --remove
+brew uninstall --cask zerus
+```
+
+`brew uninstall --zap --cask zerus` (or `zerus@nightly`) additionally removes the Zerus LaunchAgents,
+including ones created by a source installation, the logs and saved window state.
+`~/.config/hgs`, agent state and conversations are never removed.
+
+### Migrating from a source installation
+
+`zerus-setup` changes nothing while it finds a source installation:
+`~/Applications/hgs-tray.app`, a regular file at `~/.local/bin/hgs`, or Zerus
+LaunchAgents that run a program outside `/Applications/Zerus.app`. Keep your
+configuration and agent state, then migrate deliberately:
+
+1. Quit Zerus from its menu bar icon. Native agents and tmux keep running.
+2. Unload the old agents, ignoring ones you never installed:
+
+   ```sh
+   for label in com.hgdev.hgs-tray com.hgdev.hgs-recovery com.hgdev.hgs-swarm com.hgdev.hgs.user-session; do
+     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+   done
+   ```
+
+3. Move `~/Applications/hgs-tray.app`, `~/.local/bin/hgs`, `~/.local/bin/hgs_state.py`
+   and the matching `~/Library/LaunchAgents/com.hgdev.hgs*.plist` files into a
+   backup folder.
+4. Run `zerus-setup` with the options you used before.
+
+To return to the source installation, run `zerus-setup --remove` and restore the
+backup.
 
 <a id="windows"></a>
 

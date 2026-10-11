@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Assemble the unsigned Apple Silicon Zerus.app from verified build outputs.
+
+The result embeds the pinned official Qt through macdeployqt, adds the hgs CLI,
+the per-user setup command and every notice, thins all code to arm64 and applies
+an ad-hoc signature so the bundle can be checked locally. The macos-signing job
+replaces that signature with the Developer ID one. Nothing is published here.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+MINIMUM_SYSTEM = "14.0"
+# Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
+SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
+                 "install-swarm-service.py", "launchd_agent.py")
+QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtwebengine",
+              "qtwebengine-chromium-webengine")
+SOURCE_NOTE = """# Qt in Zerus.app
+
+Zerus.app contains unmodified Qt {version} frameworks and plugins from the official
+Qt online repository, used under the GNU Lesser General Public License v3
+(LGPL-3.0-only; its text and the GPL-3.0 text it incorporates are in this folder).
+The frameworks are dynamically linked from `Contents/Frameworks` and can be
+replaced with compatible builds.
+
+Exact corresponding Qt sources:
+
+- https://download.qt.io/archive/qt/{series}/{version}/single/qt-everywhere-src-{version}.tar.xz
+- Git tags `v{version}` in the Qt Project repositories at https://code.qt.io
+
+Per-module licenses, including the third-party components of Qt WebEngine and
+Chromium, are listed in the SPDX documents next to this file. Zerus' own sources
+are at https://github.com/ufna/zerus.
+"""
+
+
+def run(*command):
+    subprocess.run([str(part) for part in command], check=True)
+
+
+def thin_to_arm64(bundle):
+    """Replace every universal Mach-O file with its arm64 slice."""
+    for directory, _, files in os.walk(bundle):
+        for name in files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                continue
+            with path.open("rb") as stream:
+                if stream.read(4) not in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+                    continue
+            architectures = subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()
+            if architectures != ["arm64"]:
+                mode = path.stat().st_mode
+                run("lipo", path, "-thin", "arm64", "-output", path.with_name(name + ".arm64"))
+                path.with_name(name + ".arm64").replace(path)
+                path.chmod(mode)
+
+
+def install(source, destination, mode=0o644):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    destination.chmod(mode)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--qt", type=Path, required=True, help="Qt prefix created by install-qt-macos.py")
+    parser.add_argument("--app", type=Path, required=True, help="production hgs-tray.app (BUILD_TESTING=OFF)")
+    parser.add_argument("--cli", type=Path, required=True, help="release hgs executable")
+    parser.add_argument("--licenses", type=Path, required=True, help="output of collect-licenses.py")
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--release", help="--version, or a nightly release version built from it (default: --version)")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.version != (ROOT / "VERSION").read_text().strip():
+        parser.error("bundle version must match VERSION")
+    if args.release and not re.fullmatch(re.escape(args.version) + r"(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?", args.release):
+        parser.error("--release must be --version or a nightly built from it")
+    qt = json.loads((args.qt / "zerus-qt.json").read_text())["qt_version"]
+    if qt != json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"]:
+        parser.error("the Qt prefix does not match packaging/macos/qt.json")
+    if not (args.licenses / "inventory.json").is_file():
+        parser.error("collect Cargo dependency notices first")
+    if args.output.exists() and any(args.output.iterdir()):
+        parser.error("use an empty output directory")
+    args.output.mkdir(parents=True, exist_ok=True)
+    work = args.output / "work"
+    # macdeployqt derives the executable name from the bundle name, so deploy Qt
+    # into hgs-tray.app and rename the finished bundle afterwards.
+    staged = work / "hgs-tray.app"
+    run("ditto", args.app, staged)
+
+    info_path = staged / "Contents/Info.plist"
+    info = plistlib.loads(info_path.read_bytes())
+    if info.get("CFBundleShortVersionString") != args.version or info.get("CFBundleIdentifier") != "com.hgdev.hgs-tray":
+        parser.error("the GUI build does not match this version and bundle identifier")
+    # LaunchServices needs CFBundleExecutable once the bundle is no longer named hgs-tray.app.
+    # Terminal integration runs osascript; under the hardened runtime TCC attributes its
+    # Apple Events to Zerus, which therefore declares their purpose.
+    info.update(CFBundleName="Zerus", CFBundleDisplayName="Zerus", CFBundleExecutable="hgs-tray",
+                LSMinimumSystemVersion=MINIMUM_SYSTEM, ZerusReleaseVersion=args.release or args.version,
+                NSAppleEventsUsageDescription="Zerus opens your agent sessions in Terminal.")
+    info_path.write_bytes(plistlib.dumps(info))
+
+    run(args.qt / "bin/macdeployqt", staged, "-verbose=1", "-no-codesign")
+    # The NMEA position source needs QtSerialPort, which Zerus neither uses nor ships.
+    (staged / "Contents/PlugIns/position/libqtposition_nmea.dylib").unlink(missing_ok=True)
+
+    contents = staged / "Contents"
+    install(args.cli, contents / "MacOS/hgs", 0o755)
+    resources = contents / "Resources"
+    install(ROOT / "packaging/macos/zerus-setup", resources / "bin/zerus-setup", 0o755)
+    for name in SETUP_SCRIPTS:
+        install(ROOT / "scripts" / name, resources / "setup" / name)
+    install(ROOT / "hgs_state.py", resources / "setup/hgs_state.py")
+    install(ROOT / "tray/packaging/com.hgdev.hgs-tray.plist", resources / "setup/com.hgdev.hgs-tray.plist")
+    install(ROOT / "README.md", resources / "doc/README.md")
+    install(ROOT / "tmux.conf", resources / "doc/tmux.conf")
+    licenses = resources / "licenses"
+    install(ROOT / "LICENSE", licenses / "LICENSE")
+    install(ROOT / "THIRD_PARTY_NOTICES.md", licenses / "THIRD_PARTY_NOTICES.md")
+    install(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
+    install(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
+    install(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
+    shutil.copytree(args.licenses, licenses / "rust")
+    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        install(ROOT / "packaging/macos/licenses" / name, licenses / "qt" / name)
+    for module in QT_NOTICES:
+        install(args.qt / "sbom" / f"{module}-{qt}.spdx.json", licenses / "qt" / f"{module}.spdx.json")
+    series = ".".join(qt.split(".")[:2])
+    (licenses / "qt/SOURCE.md").write_text(SOURCE_NOTE.format(version=qt, series=series))
+
+    # The official Qt frameworks are universal; ship Apple Silicon code only.
+    thin_to_arm64(staged)
+    bundle = args.output / "Zerus.app"
+    run("ditto", staged, bundle)
+    shutil.rmtree(work)
+    # Thinning invalidates signatures. An ad-hoc signature keeps the unsigned
+    # candidate runnable for checks; release signing replaces it.
+    run("codesign", "--force", "--deep", "--sign", "-", bundle)
+    print(f"Assembled {bundle} for Zerus {args.version} with Qt {qt}. Nothing was signed for release.")
+
+
+if __name__ == "__main__":
+    main()

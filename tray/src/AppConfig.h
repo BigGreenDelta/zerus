@@ -61,6 +61,11 @@ struct AppConfig {
     // start it with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which has no hgs. Empty
     // keeps the PATH lookup when PATH provides hgs or nothing is installed.
     static QString fallbackHgsPath(const QString &pathEnv, const QStringList &installDirs);
+    // The hgs executable bundled next to the GUI in <name>.app/Contents/MacOS. Finder,
+    // Spotlight and launchd start the application without Homebrew in PATH; without
+    // this lookup a Homebrew installation would show an empty fleet. Empty unless p is
+    // Mac, the GUI lives in an application bundle and the sibling is executable.
+    static QString bundledHgsPath(const QString &executable, Platform p);
 
     // Записывает "ключ=значение" в configPath(), СОХРАНЯЯ файл дословно: чужие ключи,
     // комментарии, пустые строки и их порядок остаются как были — переписывается ровно

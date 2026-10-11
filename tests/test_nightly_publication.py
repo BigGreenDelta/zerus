@@ -11,6 +11,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+from homebrew_tap_fixture import make_tap_remote, remote_file
+import macos_release
 import nightly_common as nightly
 import release_common as common
 import windows_portable
@@ -27,6 +29,9 @@ fetch = load("nightly_fetch", "fetch-release-candidate.py")
 publish = load("nightly_publish", "publish-release.py")
 prepare = load("nightly_prepare", "prepare-nightly.py")
 COMMIT = "a" * 40
+TAG = "nightly-123"
+MACOS = {"qt_version": "6.11.2", "team_id": "ABCDE12345",
+         "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef", "minimum_system_version": "14.0"}
 
 
 def portable_zip(path, commit=COMMIT, version="0.37.0", entries=()):
@@ -66,7 +71,7 @@ class NightlyTests(unittest.TestCase):
                      "architecture": "x86_64", "distribution": "Arch Linux", "native_agents_bundled": False,
                      "binary_dependencies": {name: "1.2.3" for name in common.BINARY_LIBRARIES}}
 
-    def candidate(self, windows=False, name="candidate", **zip_options):
+    def candidate(self, windows=False, name="candidate", macos=False, **zip_options):
         directory = self.directory / name
         directory.mkdir()
         version = self.info["version"]
@@ -76,6 +81,8 @@ class NightlyTests(unittest.TestCase):
         binary = directory / f"zerus-{version}-arch-x86_64.tar.gz"
         binary.write_bytes(b"verified binary")
         (directory / f"{nightly.PACKAGE}-{version}-1-x86_64.pkg.tar.zst").write_bytes(b"checked package")
+        if macos:
+            macos_release.add_macos(directory, self.signed_macos(), version, self.info, "nightly")
         (directory / "release-info.json").write_text(json.dumps(self.info))
         recipe = directory / "aur" / nightly.PACKAGE
         recipe.mkdir(parents=True)
@@ -91,6 +98,123 @@ class NightlyTests(unittest.TestCase):
             f"\tprovides = zerus={version}\n\tprovides = hgs\n\tprovides = hgs-tray\npkgname = {nightly.PACKAGE}\n")
         common.finish_candidate(directory, nightly.PACKAGES)
         return directory
+
+    def signed_macos(self, version=None):
+        directory = self.directory / "macos-signed"
+        directory.mkdir()
+        asset = macos_release.macos_asset(version or self.info["version"])
+        (directory / asset).write_bytes(b"notarized nightly application")
+        (directory / "macos-info.json").write_text(json.dumps(dict(MACOS, asset=asset)))
+        return directory
+
+    def test_nightly_cask_follows_the_immutable_prerelease(self):
+        version = self.info["version"]
+        text = macos_release.render_cask(version, "c" * 64, "nightly", TAG)
+        self.assertTrue(text.startswith('cask "zerus@nightly" do\n'))
+        self.assertIn(f'version "{version}"', text)
+        self.assertIn("releases/download/nightly-123/zerus-#{version}-macos-arm64.zip", text)
+        self.assertIn('conflicts_with cask: "zerus"\n', text)
+        self.assertEqual(macos_release.cask_fields(text), {"version": version, "sha256": "c" * 64})
+        self.assertNotIn("@", text.replace("#{", "").replace("zerus@nightly", ""), "template markers must all be replaced")
+        for stanza in ("preflight", "postflight", "uninstall", "uninstall_preflight", "auto_updates"):
+            self.assertNotRegex(text, rf"(?m)^  {stanza}\b", "upgrades must not quit the GUI or unload agents")
+        for line in ("  depends_on arch: :arm64", '  app "Zerus.app"', "  zap launchctl: ["):
+            self.assertIn(line, text, "stable and nightly install the same application")
+        with self.assertRaisesRegex(ValueError, "version"):
+            macos_release.render_cask("0.37.0", "c" * 64, "nightly", TAG)
+        with self.assertRaisesRegex(ValueError, "version"):
+            macos_release.render_cask(version, "c" * 64)
+        with self.assertRaisesRegex(ValueError, "tag"):
+            macos_release.render_cask(version, "c" * 64, "nightly", "v0.37.0")
+
+    def test_nightly_cask_versions_compare_by_build_number(self):
+        def key(product, count, commit, number):
+            return macos_release.cask_version_key(nightly.nightly_version(product, count, commit, number), "nightly")
+        self.assertLess(key("0.37.0", 60, COMMIT, 7), key("0.37.0", 60, COMMIT, 8))
+        self.assertLess(key("0.38.0", 70, "b" * 40, 9), key("0.37.0", 60, COMMIT, 10))
+        with self.assertRaisesRegex(ValueError, "version"):
+            macos_release.cask_version_key("0.37.0", "nightly")
+
+    def test_macos_nightly_seals_its_zip_and_cask(self):
+        directory = self.candidate(macos=True)
+        info, sums = nightly.validate_nightly(directory)
+        self.assertEqual((info["schema"], info["homebrew_casks"]), (2, ["zerus@nightly"]))
+        self.assertIn(macos_release.macos_asset(info["version"]), sums)
+        self.assertEqual(sorted(path.name for path in (directory / "homebrew").iterdir()), ["zerus@nightly.rb"])
+        cask = directory / "homebrew/zerus@nightly.rb"
+        original = cask.read_text()
+        for text in (original + "# edited\n", original.replace(TAG, "nightly-124")):
+            cask.write_text(text)
+            with self.assertRaisesRegex(ValueError, "template"):
+                nightly.validate_nightly(directory)
+        cask.write_text(original)
+        info = json.loads((directory / "release-info.json").read_text())
+        info["homebrew_casks"] = ["zerus"]
+        (directory / "release-info.json").write_text(json.dumps(info))
+        with self.assertRaisesRegex(ValueError, "cask family"):
+            nightly.validate_nightly(directory)
+
+    def test_nightly_without_macos_cannot_carry_a_cask(self):
+        directory = self.candidate()
+        (directory / "homebrew").mkdir()
+        (directory / "homebrew/zerus@nightly.rb").write_text(
+            macos_release.render_cask(self.info["version"], "c" * 64, "nightly", TAG))
+        with self.assertRaisesRegex(ValueError, "Unsealed"):
+            nightly.validate_nightly(directory)
+
+    def tap(self, files):
+        root = self.directory / f"tap-{len(list(self.directory.glob('tap-*')))}"
+        root.mkdir()
+        workspace = root / "work"
+        workspace.mkdir()
+        return make_tap_remote(root, files), workspace
+
+    def test_nightly_tap_update_keeps_the_stable_cask(self):
+        candidate = self.candidate(macos=True)
+        version = self.info["version"]
+        stable = macos_release.render_cask("0.38.0", "e" * 64)
+        remote, workspace = self.tap({"Casks/zerus.rb": stable})
+        directory = publish.prepare_tap(candidate, workspace, None, version, "nightly", remote=str(remote))
+        self.assertIsNone(remote_file(remote, "Casks/zerus@nightly.rb"), "only a dry-run push happens before GitHub")
+        publish.git(directory, "push", "origin", "HEAD:main")
+        self.assertEqual(remote_file(remote, "Casks/zerus@nightly.rb"),
+                         (candidate / "homebrew/zerus@nightly.rb").read_text())
+        self.assertEqual(remote_file(remote, "Casks/zerus.rb"), stable)
+        remote, workspace = self.tap({"Casks/zerus@nightly.rb": (candidate / "homebrew/zerus@nightly.rb").read_text()})
+        self.assertIsNone(publish.prepare_tap(candidate, workspace, None, version, "nightly", remote=str(remote)))
+        newer = nightly.nightly_version("0.37.0", 61, "b" * 40, 8)
+        for existing in (macos_release.render_cask(newer, "e" * 64, "nightly", "nightly-200"),
+                         macos_release.render_cask(version, "e" * 64, "nightly", TAG)):
+            remote, workspace = self.tap({"Casks/zerus@nightly.rb": existing})
+            with self.assertRaisesRegex(ValueError, "downgrade"):
+                publish.prepare_tap(candidate, workspace, None, version, "nightly", remote=str(remote))
+            self.assertEqual(remote_file(remote, "Casks/zerus@nightly.rb"), existing)
+
+    def test_macos_nightly_publishes_the_tap_after_github_and_aur(self):
+        directory = self.candidate(macos=True)
+        arguments = ["publish-release.py", "--nightly", "--candidate", str(directory), "--ssh-key", "/unused/key"]
+        with patch.object(sys, "argv", arguments), patch.object(publish, "ssh_environment", return_value=([], {})), \
+                patch.object(publish, "prepare_aur") as aur, patch.object(publish, "publish_github") as github:
+            with self.assertRaisesRegex(ValueError, "tap deploy key"):
+                publish.main()
+            aur.assert_not_called()
+            github.assert_not_called()
+        events = []
+        def push(repo, *args, **kwargs):
+            events.append(repo.name)
+        tap_calls = []
+        def prepare_tap(*args, **kwargs):
+            tap_calls.append(args)
+            return self.directory / "homebrew-zerus"
+        with patch.object(sys, "argv", arguments + ["--tap-ssh-key", "/unused/tap-key"]), \
+                patch.object(publish, "ssh_environment", return_value=([], {})), \
+                patch.object(publish, "prepare_aur", return_value=[(nightly.PACKAGE, self.directory / nightly.PACKAGE)]), \
+                patch.object(publish, "prepare_tap", side_effect=prepare_tap), \
+                patch.object(publish, "publish_github", side_effect=lambda *args, **kwargs: events.append("GitHub")), \
+                patch.object(publish, "git", side_effect=push):
+            publish.main()
+        self.assertEqual(events, ["GitHub", nightly.PACKAGE, "homebrew-zerus"])
+        self.assertEqual(tap_calls[0][3:], (self.info["version"], "nightly"))
 
     def test_only_successful_upstream_scheduled_or_manual_runs_are_trusted(self):
         run = {"path": ".github/workflows/nightly.yml", "event": "schedule", "head_branch": "main",

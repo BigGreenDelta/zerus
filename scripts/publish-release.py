@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish an immutable verified GitHub release, then synchronize its AUR recipes."""
+"""Publish an immutable verified GitHub release, then synchronize its AUR recipes and Homebrew cask."""
 import argparse
 import hashlib
 import json
@@ -13,20 +13,24 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from macos_release import CASKS, cask_fields, cask_for, cask_version_key
 from release_common import (PACKAGES, REPOSITORY, api, gh, metadata, package_version,
                             recipe_changed, retains_description_update, require, sha256, validate_candidate)
 
 HOST_FINGERPRINT = "SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
+# GitHub's published Ed25519 host key fingerprint; packaging/homebrew/known_hosts pins the key.
+GITHUB_FINGERPRINT = "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+TAP_REMOTE = "git@github.com:ufna/homebrew-zerus.git"
 
 
 def git(directory, *arguments, env=None):
     return subprocess.check_output(["git", "-C", str(directory), *arguments], env=env, text=True).strip()
 
 
-def ssh_environment(identity, hosts):
+def ssh_environment(identity, hosts, expected=HOST_FINGERPRINT, service="AUR"):
     fingerprint = subprocess.check_output(["ssh-keygen", "-lf", str(hosts), "-E", "sha256"], text=True)
-    require(len(fingerprint.splitlines()) == 1 and fingerprint.split()[1] == HOST_FINGERPRINT, "Unverified AUR host key; consult the official AUR homepage.")
-    require(identity.is_file() and identity.stat().st_mode & 0o077 == 0, "AUR private key must be a private file (0600).")
+    require(len(fingerprint.splitlines()) == 1 and fingerprint.split()[1] == expected, f"Unverified {service} host key; consult the official {service} documentation.")
+    require(identity.is_file() and identity.stat().st_mode & 0o077 == 0, f"{service} private key must be a private file (0600).")
     command = ["ssh", "-F", "/dev/null", "-i", str(identity.resolve()), "-o", "IdentitiesOnly=yes",
                "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
                "-o", f"UserKnownHostsFile={hosts.resolve()}", "-o", "ConnectTimeout=10"]
@@ -81,6 +85,35 @@ def prepare_aur(candidate, workspace, ssh, env, packages=PACKAGES):
         git(directory, "push", "--dry-run", "origin", "HEAD:master", env=env)
         plans.append((package, directory))
     return plans
+
+
+def prepare_tap(candidate, workspace, env, version, channel="stable", remote=TAP_REMOTE):
+    """Stage the channel's reviewed cask in the tap; push only after GitHub and AUR publication."""
+    cask = cask_for(channel)
+    directory = workspace / "homebrew-zerus"
+    subprocess.run(["git", "clone", "--quiet", remote, str(directory)], env=env, check=True)
+    casks = {name for name in git(directory, "ls-files").splitlines() if name.startswith(("Casks/", "Formula/"))}
+    require(casks <= {"Casks/.gitkeep", *(f"Casks/{name}.rb" for name in CASKS.values())},
+            "Unexpected tap contents; inspect the tap manually.")
+    new = (candidate / "homebrew" / f"{cask}.rb").read_text()
+    path = directory / "Casks" / f"{cask}.rb"
+    if path.exists():
+        old = path.read_text()
+        if old == new:
+            print(f"Homebrew {cask} cask already synchronized.")
+            return None
+        # A published cask version is immutable; changed bytes need a new version.
+        require(cask_version_key(version, channel) > cask_version_key(cask_fields(old)["version"], channel),
+                "Refusing a Homebrew cask downgrade or a changed cask with the same version.")
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(new)
+    git(directory, "add", f"Casks/{cask}.rb")
+    git(directory, "diff", "--cached", "--check")
+    git(directory, "-c", "user.name=Vladimir Alyamkin", "-c", "user.email=ufna@ufna.dev",
+        "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", f"Update {cask} cask to {version}")
+    # Checks write access with the deploy key before any GitHub release write.
+    git(directory, "push", "--dry-run", "origin", "HEAD:main", env=env)
+    return directory
 
 
 def release_for_tag(tag):
@@ -149,10 +182,14 @@ def publish_github(candidate, info, sums, nightly=False):
     verify_tag(tag, commit)
     release = release_for_tag(tag)
     if release is None:
-        notes = (f"Arch Linux x86_64 ADE bundle.\n\n"
+        macos = (f"On Apple Silicon Macs, install with `brew install --cask ufna/zerus/zerus` "
+                 f"and run `zerus-setup` once. The Homebrew tap updates after GitHub and AUR publication.\n\n"
+                 if info.get("macos") else "")
+        notes = (f"Arch Linux x86_64{' and Apple Silicon macOS' if macos else ''} ADE bundle.\n\n"
                  f"Install a stable binary with `yay -S zerus-ade-bin`, stable sources with `yay -S zerus`, "
                  f"or upstream main with `yay -S zerus-git`. Run `zerus-setup` once as your normal user. "
                  f"AUR updates follow GitHub publication; consult the publication workflow if an update is pending.\n\n"
+                 f"{macos}"
                  f"Native agents are installed separately. Services and autostart are opt-in.\n\n"
                  f"Source commit: `{commit}`. Verify downloads using `SHA256SUMS`.\n")
         if nightly:
@@ -205,6 +242,8 @@ def main():
     parser.add_argument("--nightly", action="store_true")
     parser.add_argument("--ssh-key", type=Path, required=True)
     parser.add_argument("--known-hosts", type=Path, default=Path("packaging/aur/known_hosts"))
+    parser.add_argument("--tap-ssh-key", type=Path, help="deploy key for the Homebrew tap (macOS candidates)")
+    parser.add_argument("--tap-known-hosts", type=Path, default=Path("packaging/homebrew/known_hosts"))
     args = parser.parse_args()
     if args.nightly:
         from nightly_common import PACKAGES as nightly_packages, validate_nightly
@@ -214,13 +253,20 @@ def main():
         require(args.version is not None, "Stable publication requires --version.")
         info, sums = validate_candidate(args.candidate, args.version)
         packages = PACKAGES
+    channel = "nightly" if args.nightly else "stable"
+    macos = bool(info.get("macos"))
+    require(not macos or args.tap_ssh_key is not None, "The macOS candidate needs the Homebrew tap deploy key.")
     ssh, env = ssh_environment(args.ssh_key, args.known_hosts)
+    tap_env = ssh_environment(args.tap_ssh_key, args.tap_known_hosts, GITHUB_FINGERPRINT, "GitHub")[1] if macos else None
     with tempfile.TemporaryDirectory(prefix="zerus-aur-") as temporary:
         if args.nightly:
             plans = prepare_aur(args.candidate, Path(temporary), ssh, env, packages=packages)
-            publish_github(args.candidate, info, sums, nightly=True)
         else:
             plans = prepare_aur(args.candidate, Path(temporary), ssh, env)
+        tap = prepare_tap(args.candidate, Path(temporary), tap_env, info["version"], channel) if macos else None
+        if args.nightly:
+            publish_github(args.candidate, info, sums, nightly=True)
+        else:
             publish_github(args.candidate, info, sums)
         for package, directory in plans:
             try:
@@ -228,7 +274,13 @@ def main():
             except subprocess.CalledProcessError:
                 raise SystemExit(f"GitHub assets remain published; {package} AUR update failed. Rerun publication with this same candidate; do not rebuild or replace assets.")
             print(f"{package}: AUR update published.")
-    print(f"Zerus {info['version']}: GitHub and all selected AUR recipes synchronized.")
+        if tap:
+            try:
+                git(tap, "push", "origin", "HEAD:main", env=tap_env)
+            except subprocess.CalledProcessError:
+                raise SystemExit("GitHub assets and AUR recipes remain published; the Homebrew tap update failed. Rerun publication with this same candidate; do not rebuild or replace assets.")
+            print(f"Homebrew {cask_for(channel)} cask published to ufna/homebrew-zerus.")
+    print(f"Zerus {info['version']}: GitHub, AUR{' and Homebrew' if macos else ''} synchronized.")
 
 
 if __name__ == "__main__":

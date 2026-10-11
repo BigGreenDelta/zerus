@@ -55,6 +55,10 @@ private slots:
     void fallbackHgsKeepsPathLookupWhenPathProvidesHgs();
     void fallbackHgsFindsFirstExecutableInstall();
     void fallbackHgsIsEmptyWithoutAnyInstall();
+    void bundledHgsIsFoundNextToMacBundleExecutable();
+    void bundledHgsRequiresAnExecutableFile();
+    void bundledHgsRequiresAnApplicationBundle();
+    void bundledHgsIsMacOnly();
 
 private:
     static QString writeHgs(const QString &dir, bool executable);
@@ -623,6 +627,66 @@ void TestAppConfig::fallbackHgsIsEmptyWithoutAnyInstall()
     QVERIFY(dir.isValid());
     QCOMPARE(AppConfig::fallbackHgsPath(dir.path(), {dir.filePath(QStringLiteral("missing"))}),
              QString());
+}
+
+namespace {
+// A synthetic Foo.app/Contents/MacOS directory with hgs-tray and, optionally, hgs.
+QString makeBundle(const QString &root, const QString &bundle, bool withHgs, bool executable)
+{
+    const QString macos = root + QLatin1Char('/') + bundle + QStringLiteral("/Contents/MacOS");
+    QDir().mkpath(macos);
+    for (const QString &name : {QStringLiteral("hgs-tray"), QStringLiteral("hgs")}) {
+        if (name == QLatin1String("hgs") && !withHgs)
+            continue;
+        QFile file(macos + QLatin1Char('/') + name);
+        file.open(QIODevice::WriteOnly);
+        file.write("#!/bin/sh\n");
+        file.close();
+        auto permissions = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+        if (executable)
+            permissions |= QFileDevice::ExeOwner;
+        file.setPermissions(permissions);
+    }
+    return macos;
+}
+} // namespace
+
+void TestAppConfig::bundledHgsIsFoundNextToMacBundleExecutable()
+{
+    QTemporaryDir dir;
+    const QString macos = makeBundle(dir.path(), QStringLiteral("Zerus.app"), true, true);
+    QCOMPARE(AppConfig::bundledHgsPath(macos + QStringLiteral("/hgs-tray"), AppConfig::Platform::Mac),
+             QFileInfo(macos + QStringLiteral("/hgs")).absoluteFilePath());
+}
+
+void TestAppConfig::bundledHgsRequiresAnExecutableFile()
+{
+    QTemporaryDir dir;
+    const QString missing = makeBundle(dir.path(), QStringLiteral("Missing.app"), false, true);
+    QVERIFY(AppConfig::bundledHgsPath(missing + QStringLiteral("/hgs-tray"), AppConfig::Platform::Mac).isEmpty());
+    const QString plain = makeBundle(dir.path(), QStringLiteral("Plain.app"), true, false);
+    QVERIFY(AppConfig::bundledHgsPath(plain + QStringLiteral("/hgs-tray"), AppConfig::Platform::Mac).isEmpty());
+}
+
+void TestAppConfig::bundledHgsRequiresAnApplicationBundle()
+{
+    QTemporaryDir dir;
+    const QString build = dir.path() + QStringLiteral("/build");
+    QDir().mkpath(build);
+    for (const QString &name : {QStringLiteral("hgs-tray"), QStringLiteral("hgs")}) {
+        QFile file(build + QLatin1Char('/') + name);
+        file.open(QIODevice::WriteOnly);
+        file.close();
+        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    }
+    QVERIFY(AppConfig::bundledHgsPath(build + QStringLiteral("/hgs-tray"), AppConfig::Platform::Mac).isEmpty());
+}
+
+void TestAppConfig::bundledHgsIsMacOnly()
+{
+    QTemporaryDir dir;
+    const QString macos = makeBundle(dir.path(), QStringLiteral("Zerus.app"), true, true);
+    QVERIFY(AppConfig::bundledHgsPath(macos + QStringLiteral("/hgs-tray"), AppConfig::Platform::Linux).isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestAppConfig)

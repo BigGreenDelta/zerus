@@ -303,12 +303,17 @@ nightly versions never imply that an unowned executable is up to date. Arch is
 detected independently by bounded parsing of os-release, never by sourcing it.
 Available yay/paru helpers supply safe copied commands. An unowned local build
 on Arch gets an explicitly optional AUR installation command rather than a false
-package-ownership claim; no command is executed by Zerus. There is currently no
-published macOS installer. The Windows portable build has no installer or
-self-update: it follows the nightly channel by default and links newer nightlies
-to their GitHub release page. On Stable or Dev it reports that the channel has no
-Windows build and never reports an update. Updates never stop agents, tmux or
-resident adapters.
+package-ownership claim; no command is executed by Zerus. A Homebrew cask
+installation is recognized by its single `Caskroom/zerus/<version>` or
+`Caskroom/zerus@nightly/<version>` record. The UI copies `brew upgrade --cask` for
+the cask matching the selected channel, or the uninstall-and-install command that
+switches casks; a `zerus@nightly` installation starts on the nightly channel.
+Nightlies compare by Nightly run number. Zerus offers **Restart to finish update**
+once the bundle's `ZerusReleaseVersion` differs from the one the GUI started with.
+The Windows portable build has no installer or self-update: it follows the nightly
+channel by default and links newer nightlies to their GitHub release page. On
+Stable or Dev it reports that the channel has no Windows build and never reports
+an update. Updates never stop agents, tmux or resident adapters.
 
 ## Desktop mobile-connection settings
 
@@ -349,6 +354,16 @@ path), `GH_TOKEN` or `GITHUB_TOKEN`. Only `api.github.com` requests receive it;
 redirected asset/CDN requests never receive authorization. Credentials and signed
 CDN URLs are not logged or placed in published files. No GitHub deploy secret is
 needed on the website.
+
+Stable releases and nightly prereleases from candidate schema 2 also carry the
+notarized `zerus-<version>-macos-arm64.zip` of the `zerus` or `zerus@nightly`
+Homebrew cask. Like the Windows nightly zip it stays on GitHub, where Homebrew
+downloads it: the mirror checks its sealed name and GitHub digest but neither
+stores it (it never deletes and has a fixed disk budget) nor lists it in catalog
+artifacts, which existing desktop clients would reject as an unknown kind.
+**Deploy the current `update_feed.py` to the mirror before setting
+`MACOS_CASKS_ENABLED`**; an older mirror rejects such a release and keeps the
+previous catalog.
 
 Downloaded assets are checked against GitHub sizes/digests and sealed checksums.
 Existing assets are streamed and rehashed for reuse, avoiding repeated binary

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Sign, notarize and staple Zerus.app with a Developer ID identity.
+
+Runs only trusted repository code on an already checked bundle and compiles
+nothing. Every nested code object is signed inside-out with the hardened
+runtime. Without notarization it can sign for local verification, but it never
+creates a release archive.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB_ENTITLEMENTS = ROOT / "packaging/macos/QtWebEngineProcess.entitlements"
+APP_ENTITLEMENTS = ROOT / "packaging/macos/Zerus.entitlements"
+MINIMUM_SYSTEM = "14.0"
+MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
+          b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# A stable release, or a nightly built from that product version.
+RELEASE = re.compile(r"\d+\.\d+\.\d+(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?")
+
+
+def is_mach_o(path):
+    with path.open("rb") as stream:
+        return stream.read(4) in MACH_O
+
+
+def bundle_executable(bundle):
+    return bundle / "Contents/MacOS" / plistlib.loads((bundle / "Contents/Info.plist").read_bytes())["CFBundleExecutable"]
+
+
+def signing_order(app):
+    """Standalone code first, then nested bundles deepest first, then the application."""
+    standalone, bundles, main_binaries = [], [], {bundle_executable(app)}
+    for directory, names, files in os.walk(app):
+        for name in names:
+            path = Path(directory) / name
+            if path.is_symlink():
+                continue
+            if name.endswith(".app"):
+                bundles.append(path)
+                main_binaries.add(bundle_executable(path))
+            elif name.endswith(".framework"):
+                stem = name[:-len(".framework")]
+                versions = [version for version in sorted((path / "Versions").iterdir())
+                            if version.is_dir() and not version.is_symlink()] if (path / "Versions").is_dir() else [path]
+                bundles += versions
+                main_binaries.update(version / stem for version in versions)
+        standalone += [Path(directory) / name for name in files
+                       if not (Path(directory) / name).is_symlink() and is_mach_o(Path(directory) / name)]
+    depth = lambda path: len(path.parts)
+    standalone = sorted((path for path in standalone if path not in main_binaries), key=depth, reverse=True)
+    return standalone + sorted(bundles, key=depth, reverse=True) + [app]
+
+
+def entitlements_for(path, app):
+    if path == app:
+        return APP_ENTITLEMENTS
+    if path.name == "QtWebEngineProcess.app":
+        return WEB_ENTITLEMENTS
+    return None
+
+
+def codesign_command(path, identity, entitlements, keychain=None):
+    command = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
+    command.append("--timestamp=none" if identity == "-" else "--timestamp")
+    if keychain:
+        command += ["--keychain", str(keychain)]
+    if entitlements:
+        command += ["--entitlements", str(entitlements)]
+    return command + [str(path)]
+
+
+def release_archive(app, output, version, notarization_id, qt_version, team_id):
+    if not (isinstance(notarization_id, str) and UUID.fullmatch(notarization_id)):
+        raise ValueError("Refusing to create a release archive without an accepted notarization.")
+    output.mkdir(parents=True)
+    asset = output / f"zerus-{version}-macos-arm64.zip"
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(asset)], check=True)
+    (output / "macos-info.json").write_text(json.dumps({
+        "asset": asset.name, "qt_version": qt_version, "team_id": team_id,
+        "notarization_id": notarization_id, "minimum_system_version": MINIMUM_SYSTEM}, indent=2) + "\n")
+    return asset
+
+
+def notary_credentials(key_file, key_id, issuer):
+    # Team API keys name their issuer; individual API keys must not.
+    return ["--key", str(key_file), "--key-id", key_id, *(["--issuer", issuer] if issuer else [])]
+
+
+def notarize(app, key_file, key_id, issuer):
+    with tempfile.TemporaryDirectory(prefix="zerus-notarize-") as temporary:
+        upload = Path(temporary) / "Zerus.zip"
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(upload)], check=True)
+        credentials = notary_credentials(key_file, key_id, issuer)
+        result = subprocess.run(["xcrun", "notarytool", "submit", str(upload), *credentials, "--wait",
+                                 "--timeout", "2h", "--output-format", "json"], capture_output=True, text=True)
+    try:
+        submission = json.loads(result.stdout)
+    except ValueError:
+        submission = {}
+    identifier, status = submission.get("id", ""), submission.get("status")
+    if status != "Accepted" or not UUID.fullmatch(identifier):
+        if UUID.fullmatch(identifier):
+            log = subprocess.run(["xcrun", "notarytool", "log", identifier, *credentials], capture_output=True, text=True)
+            print(log.stdout, file=sys.stderr)
+        raise SystemExit(f"Notarization was not accepted ({status}): {result.stderr.strip()}")
+    subprocess.run(["xcrun", "stapler", "staple", str(app)], check=True)
+    subprocess.run(["xcrun", "stapler", "validate", str(app)], check=True)
+    return identifier
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--app", type=Path, required=True, help="checked unsigned Zerus.app")
+    parser.add_argument("--identity", required=True, help="Developer ID Application identity, or - for ad-hoc")
+    parser.add_argument("--team-id", required=True)
+    parser.add_argument("--keychain", type=Path)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--release", help="stable or nightly release version (default: --version)")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--notary-key-file", type=Path)
+    parser.add_argument("--notary-key-id")
+    parser.add_argument("--notary-issuer", help="issuer ID of a team API key; omit for an individual key")
+    args = parser.parse_args()
+    notary = [args.notary_key_file, args.notary_key_id]
+    if (any(notary) or args.notary_issuer) and not all(notary):
+        parser.error("notarization needs the key file and key ID together")
+    release = args.release or args.version
+    if not RELEASE.fullmatch(release) or release.split(".r", 1)[0] != args.version:
+        parser.error("--release must be --version or a nightly built from it")
+    if not re.fullmatch(r"[A-Z0-9]{10}", args.team_id):
+        parser.error("invalid Team ID")
+    if args.output.exists():
+        parser.error("use a fresh output directory")
+    info = plistlib.loads((args.app / "Contents/Info.plist").read_bytes())
+    if info.get("CFBundleShortVersionString") != args.version or info.get("ZerusReleaseVersion") != release:
+        parser.error("the bundle version does not match --version and --release")
+    qt_version = json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"]
+    work = args.output.with_name(args.output.name + ".signing")
+    app = work / "Zerus.app"
+    subprocess.run(["ditto", str(args.app), str(app)], check=True)
+    for path in signing_order(app):
+        subprocess.run(codesign_command(path, args.identity, entitlements_for(path, app), args.keychain), check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True)
+    if args.identity != "-":
+        details = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True).stderr
+        if f"TeamIdentifier={args.team_id}" not in details.splitlines():
+            raise SystemExit("The signature does not belong to the expected Team ID.")
+    if not all(notary):
+        print(f"Signed {app} for local verification. No release archive was created.")
+        return
+    identifier = notarize(app, args.notary_key_file, args.notary_key_id, args.notary_issuer)
+    asset = release_archive(app, args.output, release, identifier, qt_version, args.team_id)
+    print(f"Notarized submission {identifier}; created {asset}.")
+
+
+if __name__ == "__main__":
+    main()
