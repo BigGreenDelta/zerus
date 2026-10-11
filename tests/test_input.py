@@ -104,7 +104,7 @@ class InputTransport(unittest.TestCase):
             status = subprocess.run(['ps', '-p', ','.join(sorted(pids)), '-o', 'pid=,stat='],
                                     capture_output=True, text=True, timeout=5)
             pids = {parts[0] for line in status.stdout.splitlines()
-                    if len(parts := line.split()) >= 2 and not parts[1].startswith('Z')}
+                    if len(parts := line.split()) >= 2 and not parts[1].startswith(('Z', 'X'))}
             if not pids or time.monotonic() >= deadline:
                 break
             time.sleep(.02)

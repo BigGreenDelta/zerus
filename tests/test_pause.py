@@ -180,7 +180,7 @@ class Harness(unittest.TestCase):
                     break
                 owned.update(children)
             return {pid: table[pid][1] for pid, started in owned.items()
-                    if pid in table and table[pid][2] == started and not table[pid][1].startswith("Z")}
+                    if pid in table and table[pid][2] == started and not table[pid][1].startswith(("Z", "X"))}
 
         live_owned(table)
         subprocess.run([TMUX, "-S", self.socket, "kill-server"], env=self.env, capture_output=True)

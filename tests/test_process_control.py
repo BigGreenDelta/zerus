@@ -67,7 +67,7 @@ class ProcessControl(unittest.TestCase):
         self.wait_for(lambda:len(self.jobs())==1)
         self.assertEqual(self.jobs()[0]['os_pid'],self.children[1])
         state=subprocess.run(['ps','-p',str(grandchild),'-o','stat='],text=True,capture_output=True).stdout.strip()
-        self.assertTrue(not state or state.startswith('Z'),state)
+        self.assertTrue(not state or state.startswith(('Z','X')),state)
         os.kill(self.record['pid'],0)
         self.cli('processes',self.name,'--stop',chosen['id'],'--run',self.run_id,'--conversation',self.conversation_id,ok=False)
         self.assertEqual(len(self.jobs()),1)

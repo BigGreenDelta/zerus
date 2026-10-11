@@ -37,7 +37,7 @@ class MobileWorktreesNative(unittest.TestCase):
         deadline=time.monotonic()+3
         while time.monotonic()<deadline:
             result=subprocess.run(['ps','-o','stat=','-p',str(pid)],capture_output=True,text=True)
-            if not result.stdout.strip() or result.stdout.lstrip().startswith('Z'):return
+            if not result.stdout.strip() or result.stdout.lstrip().startswith(('Z','X')):return
             time.sleep(.02)
         self.fail('owned Git hook still alive after mobile helper finished')
     def test_mobile_deadline_cleans_slow_hook_and_preserves_partial_work(self):

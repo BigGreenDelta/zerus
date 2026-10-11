@@ -118,14 +118,15 @@ class MobilePeers(unittest.TestCase):
             os.kill(pid, 0)
         except ProcessLookupError:
             return False
+        # Linux briefly reports X (dead) while a parent reaps a zombie; both are gone.
         proc = Path(f'/proc/{pid}/stat')
         if proc.exists():
             try:
-                return proc.read_text().split(') ', 1)[1][0] != 'Z'
+                return proc.read_text().split(') ', 1)[1][0] not in 'ZX'
             except (FileNotFoundError, ProcessLookupError):
                 return False
         status = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
-        return status.returncode == 0 and not status.stdout.strip().startswith('Z')
+        return status.returncode == 0 and not status.stdout.strip().startswith(('Z', 'X'))
 
     def wait_hanging_pids(self):
         until = time.monotonic() + 5
