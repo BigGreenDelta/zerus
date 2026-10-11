@@ -791,3 +791,28 @@ archive digests. No Android device was connected.
 Existing Linux and macOS source installations run **Zerus 0.42.0 / hgs 1.51.0**
 from that commit. Native agent and tmux processes were unchanged; only the GUI and
 hgs helper services restarted.
+
+### Shared Dev channel activation
+
+On **2026-10-11**, [main CI 38170405374](https://github.com/ufna/zerus/actions/runs/38170405374)
+passed the full Linux/Arch/macOS matrix and sealed desktop and Android Dev builds
+from `196d2817ebb9efbe4521d55d9a2e91702dbffa48`. The lightweight `dev` tag advanced
+to that source. [Protected publisher 38172339849](https://github.com/ufna/zerus/actions/runs/38172339849)
+published this same candidate through the existing mirror after the Actions archive
+media-type fix in `d45e8d2`; no candidate was rebuilt or GitHub Release created.
+Both anonymous [desktop Dev](https://zerus.dev/updates/v2/desktop/dev.json) and
+[Android Dev](https://zerus.dev/updates/v2/android/dev.json) catalogs, every payload
+size/digest and exact Git source archive were verified. Android **0.1.30-dev.201 /
+code 10201** preserves `app.zerus.mobile` and the original signing certificate.
+
+`DEV_UPDATES_ENABLED=true` now enables successful-main publication. The existing
+protected Android inputs and restricted SSH transport are provisioned; each
+publisher lends only its repository-scoped Actions/Contents-read job token to the
+existing unprivileged mirror. There is no stored personal token or second public
+host. The original three mirror timers and legacy v1 catalogs remain in use;
+GitHub latest remains `v0.42.0`. A fresh isolated desktop controller discovered the
+real public Dev feed, emitted one verified notice, persisted its channel choice
+and suppressed a duplicate check. Retention keeps three Dev builds per platform,
+a 72-hour retirement grace and the shared 20 GiB limit. Desktop installation stays
+explicit; macOS Dev currently offers source and notices while its signed binary
+distribution remains tracked in `zerus-osef.2`.

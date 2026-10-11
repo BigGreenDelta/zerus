@@ -56,7 +56,10 @@ The same signing configuration builds stable and dev APKs; no dev-specific
 application ID or generated replacement signer is used. `-PzerusVersionCode=N`
 sets the shared Android version sequence; CI dev uses `10000 + CI run_number`.
 All subsequent stable APKs must use a code larger than already distributed dev
-APKs. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
+APKs, and subsequent dev APKs must exceed that stable code as well. The current
+fixed dev offset does not coordinate this later Stable-to-Dev transition; track
+the shared publication sequence in `zerus-osef.3` before publishing a stable APK
+above distributed dev codes. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
 channel with an older version leaves the current app/data installed until a newer
 compatible APK is published. Do not reset the version-code sequence when changing
 workflow names or channels.
