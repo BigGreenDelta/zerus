@@ -130,7 +130,7 @@ import org.json.JSONObject
                 if (details == null) Text("Reading native details…")
                 else when(tab) {
                     0 -> {
-                        DetailFields(details.fields)
+                        DetailFields(details.fields, copyIdentities = true)
                         HorizontalDivider()
                         DetailFields(details.goal)
                         Text(details.goalNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -207,9 +207,20 @@ import org.json.JSONObject
     showOutput?.let { process -> ProcessOutputDialog(model,target,process) { showOutput = null } }
 }
 
-@Composable private fun DetailFields(fields: List<ContextDetail>) {
+@Composable private fun DetailFields(fields: List<ContextDetail>, copyIdentities: Boolean = false) {
+    val clipboard = LocalClipboardManager.current
     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        fields.forEach { field -> Column { Text(field.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(field.value) } }
+        fields.forEach { field -> Column {
+            Text(field.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (copyIdentities && field.label in listOf("Session ID", "Run ID", "Agent ID", "Archive ID")) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(field.value, Modifier.weight(1f))
+                    IconButton(onClick = { clipboard.setText(AnnotatedString(field.value)) }) {
+                        Icon(Icons.Default.ContentCopy, "Copy ${field.label.removeSuffix(" ID").lowercase()} ID")
+                    }
+                }
+            } else Text(field.value)
+        } }
     } }
 }
 

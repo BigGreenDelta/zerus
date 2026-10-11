@@ -52,7 +52,9 @@ same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
 Native conversation IDs appear only in **Details** on desktop and **Session
-details → Overview** on Android, where they can be selected and copied. Before
+details → Overview** on Android, labeled **Session ID** with a dedicated copy
+button beside the exact identifier. The button copies the ID as plain text;
+**Copy session reference** continues to copy the portable URI. Before
 that ID is reported, **Run ID** identifies the current process run; it can change
 on resume. Child details also show their agent ID. Search accepts complete IDs or
 parts of conversation, run, archive and reported child IDs; a child match

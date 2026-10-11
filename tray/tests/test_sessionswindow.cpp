@@ -3172,6 +3172,7 @@ void TestSessionsWindow::copySessionReferencePreservesSelectionAndDraft()
 }
 void TestSessionsWindow::sessionIdentifiersRemainInDetailsAcrossNavigation()
 {
+    QSettings().setValue("workspace/inspectorVisible", true); QSettings().setValue("workspace/inspectorTab", 1);
     auto state = fleet(); auto box = state.local();
     box.ok = false; box.sessions[0].conversationId = "11111111-1111-4111-8111-111111111111";
     box.sessions[1].conversationId.clear(); box.sessions[1].runId = "unconfirmed-run";
@@ -3179,19 +3180,37 @@ void TestSessionsWindow::sessionIdentifiersRemainInDetailsAcrossNavigation()
     SessionsWindow window(script()); window.resize(820, 700); window.setFleet(state); window.show();
     window.showSession({}, box.sessions[0].name);
     QVERIFY(!window.findChild<QLabel *>("sessionId"));
-    auto *info = window.findChild<QTextBrowser *>("sessionInfo"); QVERIFY(info);
-    QVERIFY(info->toPlainText().contains(box.sessions[0].conversationId));
-    auto cursor = info->document()->find(box.sessions[0].conversationId);
-    QCOMPARE(cursor.selectedText(), box.sessions[0].conversationId);
+    auto *value = window.findChild<QLabel *>("detailsIdentityValue"); QVERIFY(value);
+    auto *title = window.findChild<QLabel *>("detailsIdentityTitle"); QVERIFY(title);
+    auto *copy = window.findChild<QPushButton *>("copySessionIdAction"); QVERIFY(copy); QTRY_VERIFY(copy->isVisible());
+    QVERIFY(window.findChild<QTabWidget *>("sessionInspector")->isAncestorOf(value));
+    const auto copyFits = [&] {
+        for (auto *parent = copy->parentWidget(); parent; parent = parent->parentWidget())
+            if (!parent->rect().contains(QRect(copy->mapTo(parent, QPoint()), copy->size()))) return false;
+        return true;
+    };
+    QTRY_VERIFY(copyFits());
+    QCOMPARE(title->text(), QString("Session ID")); QCOMPARE(value->text(), box.sessions[0].conversationId);
+    QVERIFY(value->textInteractionFlags().testFlag(Qt::TextSelectableByMouse));
+    QCOMPARE(copy->accessibleName(), QString("Copy session ID"));
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); composer->editor()->setPlainText("Keep this draft");
+    QSignalSpy copied(&window, &SessionsWindow::copyTextRequested);
+    copy->click(); QCOMPARE(copied.size(), 1); QCOMPARE(copied[0][0].toString(), box.sessions[0].conversationId);
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    const auto preview = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window.grab().save(preview + "/copy-session-id.png")); }
     window.showSession({}, box.sessions[1].name);
-    QVERIFY(info->toPlainText().contains("Run ID")); QVERIFY(info->toPlainText().contains("unconfirmed-run"));
-    window.showSession({}, box.sessions[0].name); QVERIFY(info->toPlainText().contains(box.sessions[0].conversationId));
+    QCOMPARE(title->text(), QString("Run ID")); QCOMPARE(value->text(), QString("unconfirmed-run"));
+    QCOMPARE(copy->accessibleName(), QString("Copy run ID"));
+    window.showSession({}, box.sessions[0].name); QCOMPARE(value->text(), box.sessions[0].conversationId);
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
     window.findChild<HgsClient *>()->inspectionReady({}, box.sessions[0].name,
         {{"tracked", true}, {"conversation_id", "new-conversation"}, {"run_id", "new-run"}});
-    QVERIFY(info->toPlainText().contains("new-conversation"));
-    QVERIFY(!info->toPlainText().contains(box.sessions[0].conversationId));
+    QCOMPARE(value->text(), QString("new-conversation"));
+    copy->click(); QCOMPARE(copied.size(), 2); QCOMPARE(copied[1][0].toString(), QString("new-conversation"));
+    box.sessions[1].runId.clear(); state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    window.showSession({}, box.sessions[1].name); QCOMPARE(value->text(), QString("Not confirmed")); QVERIFY(!copy->isEnabled());
+    copy->click(); QCOMPARE(copied.size(), 2);
 }
 
 void TestSessionsWindow::activityMarkReadKeepsReadingPosition_data()
@@ -3840,6 +3859,10 @@ void TestSessionsWindow::subagentActivityKeepsMainDraftAndRejectsStaleHistory()
         {"history_scope","Native subagent history"},{"events",QJsonArray{QJsonObject{{"type","AgentMessage"},{"detail","Review finished"},{"at",1700000000}}}}};
     child["session_usage"]=QJsonObject{{"context",QJsonObject{{"used",500},{"limit",2000}}}};
     client->subagentInspectionReady({},"codex/hgs/dashboard","child-1",{},child);
+    QCOMPARE(window.findChild<QLabel *>("detailsIdentityValue")->text(), QString("conversation-one/child-1"));
+    QSignalSpy copied(&window, &SessionsWindow::copyTextRequested);
+    window.findChild<QPushButton *>("copySessionIdAction")->click(); QCOMPARE(copied.size(), 1);
+    QCOMPARE(copied[0][0].toString(), QString("conversation-one/child-1"));
     QVERIFY(view->browser()->toPlainText().contains("Review finished"));
     QCOMPARE(window.findChild<QPushButton *>("subagentContext")->property("contextPercent").toDouble(),25.);
     auto *childComposer=window.findChild<MessageComposer *>("subagentComposer");auto *childContext=window.findChild<QPushButton *>("subagentContext");

@@ -356,6 +356,8 @@ private:
     QTabWidget *m_detailTabs = nullptr;
     QTabWidget *m_inspector = nullptr;
     QLabel *m_detailsContext = nullptr;
+    QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
+    QPushButton *m_copySessionId = nullptr;
     QPushButton *m_detailsClear = nullptr;
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;

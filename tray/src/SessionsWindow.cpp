@@ -916,7 +916,24 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_worktrees->filterRequested=[this](const QString &path,bool checkout){if(const auto *entry=selected())filterFolder(entry->host,path,checkout);};
     m_worktrees->sessionRequested=[this](const QString &name,const QString &archive){if(const auto *entry=selected())openRelatedSession(entry->host,name,archive);};
     m_worktrees->launchRequested=[this](const QString &path){if(const auto *entry=selected())showNewSession({},m_organization.groupFor(entry->identity),entry->host,{},path);};
-    auto *detailsPage=new QWidget;auto *detailsLayout=new QVBoxLayout(detailsPage);detailsLayout->setContentsMargins(0,0,0,0);detailsLayout->addWidget(m_info,1);
+    auto *detailsPage=new QWidget;auto *detailsLayout=new QVBoxLayout(detailsPage);detailsLayout->setContentsMargins(0,0,0,0);
+    auto *identity = new QWidget; identity->setObjectName("detailsIdentity");
+    auto *identityLayout = new QVBoxLayout(identity); identityLayout->setContentsMargins(4,8,4,2); identityLayout->setSpacing(4);
+    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); identityLayout->addWidget(m_detailsIdTitle);
+    auto *identityRow = new QHBoxLayout;
+    m_detailsIdValue = label(tr("Not confirmed"), "detailsIdentityValue"); m_detailsIdValue->setWordWrap(true);
+    m_detailsIdValue->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
+    m_detailsIdValue->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    identityRow->addWidget(m_detailsIdValue, 1);
+    m_copySessionId = iconButton("copy", tr("Copy session ID"), "copySessionIdAction"); m_copySessionId->setAutoDefault(false);
+    configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
+    connect(m_copySessionId, &QPushButton::clicked, this, [this] {
+        const auto value = m_detailsIdValue->property("copyValue").toString();
+        if (!selected() || value.isEmpty()) return;
+        emit copyTextRequested(value); showNotice(tr("%1 copied").arg(m_detailsIdTitle->text()));
+    });
+    identityRow->addWidget(m_copySessionId); identityLayout->addLayout(identityRow);
+    detailsLayout->addWidget(identity); detailsLayout->addWidget(m_info,1);
     auto *contextRow=new QHBoxLayout;m_detailsContext=new QLabel;m_detailsContext->setObjectName("detailsContext");m_detailsContext->setWordWrap(true);
     m_detailsClear=new QPushButton(tr("Clear session"));m_detailsClear->setObjectName("clearSessionFromDetails");m_detailsClear->setAutoDefault(false);
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
@@ -1287,6 +1304,7 @@ void SessionsWindow::applyTheme()
         QLabel#eyebrow { font-size:10px; font-weight:600; letter-spacing:1px; color:%6; }
         QLabel#heading { font-size:16px; font-weight:600; }
         QLabel#detailTitle { font-size:16px; font-weight:600; }
+        QLabel#detailsIdentityTitle { font-size:14px; font-weight:600; }
         QLabel#emptyTitle { font-size:21px; font-weight:600; margin-bottom:8px; }
         QLabel#muted, QLabel#footnote, QLabel#sessionMeta, QLabel#listSummary { color:%6; }
         QLabel#sessionMeta, QLabel#listSummary { font-size:11px; }
@@ -2589,6 +2607,8 @@ void SessionsWindow::renderDetails()
     if (!m_subagentId.isEmpty() && (!entry || (m_subagentConversation != m_details.value("conversation_id").toString(entry->session.conversationId))
         || !childRoster(*entry).contains(m_subagentId))) closeSubagent();
     if (!entry) {
+        m_detailsIdValue->setText(tr("Not confirmed")); m_detailsIdValue->setProperty("copyValue", QString());
+        m_copySessionId->setEnabled(false);
         m_copyReference->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
@@ -2886,12 +2906,26 @@ void SessionsWindow::renderDetails()
     updateBrowser(m_children, children, m_childrenHtml);
     const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
     const auto run = m_details.value("run_id").toString(s.runId);
-    QString info = QString("<h3>Session</h3><p>%1</p><h3>Conversation</h3><p>%2</p><h3>Directory</h3><p>%3</p><h3>Last recorded event</h3><p>%4</p><h3>History</h3><p>Activity stays on %5. Closing this window does not stop your agent.</p>")
-        .arg(htmlText(s.name), htmlText(conversation.isEmpty() ? tr("Not confirmed") : conversation),
+    QString identity = conversation.isEmpty() ? run : conversation;
+    QString identityTitle = conversation.isEmpty() && !run.isEmpty() ? tr("Run ID") : tr("Session ID");
+    QString copyCaption = conversation.isEmpty() && !run.isEmpty() ? tr("Copy run ID") : tr("Copy session ID");
+    if (!m_subagentId.isEmpty()) {
+        const auto childConversation = m_subagentDetails.value("conversation_id").toString();
+        identity = childConversation.isEmpty() ? m_subagentId : childConversation;
+        identityTitle = childConversation.isEmpty() ? tr("Agent ID") : tr("Session ID");
+        copyCaption = childConversation.isEmpty() ? tr("Copy agent ID") : tr("Copy session ID");
+    }
+    m_detailsIdTitle->setText(identityTitle);
+    const auto identityText = identity.isEmpty() ? tr("Not confirmed") : identity;
+    if (m_detailsIdValue->text() != identityText) m_detailsIdValue->setText(identityText);
+    m_detailsIdValue->setProperty("copyValue", identity); m_detailsIdValue->setAccessibleName(identityTitle + ": " + identityText);
+    m_copySessionId->setEnabled(!identity.isEmpty());
+    m_copySessionId->setToolTip(copyCaption); m_copySessionId->setAccessibleName(copyCaption);
+    QString info = QString("<h3>Session</h3><p>%1</p><h3>Directory</h3><p>%2</p><h3>Last recorded event</h3><p>%3</p><h3>History</h3><p>Activity stays on %4. Closing this window does not stop your agent.</p>")
+        .arg(htmlText(s.name),
              htmlText(s.cwd.isEmpty() ? tr("Not reported") : s.cwd),
              m_details.value("last_event_at").toDouble() ? QDateTime::fromSecsSinceEpoch(qint64(m_details.value("last_event_at").toDouble())).toLocalTime().toString("ddd, d MMM HH:mm:ss") : tr("No events yet"), htmlText(entry->machine));
     if (!m_model->text().isEmpty()) info += QString("<h3>Model</h3><p>%1</p>").arg(htmlText(m_model->text()));
-    if (conversation.isEmpty() && !run.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Run ID"), htmlText(run));
     if (!s.gitRoot.isEmpty()) info += QString("<h3>Git</h3><p>%1<br>%2</p>").arg(htmlText(projectContext(s)), htmlText(s.gitRoot));
     if (!m_subagentId.isEmpty()) info = QString("<h3>%1</h3><p>%2</p><h3>%3</h3><p>%4</p><h3>%5</h3><p>%6</p>")
         .arg(tr("Subagent"), htmlText(m_subagentId), tr("Parent session"), htmlText(s.name), tr("Directory"), htmlText(m_subagentCwd));
