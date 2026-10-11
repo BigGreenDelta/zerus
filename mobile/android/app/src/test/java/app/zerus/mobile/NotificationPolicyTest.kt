@@ -269,27 +269,66 @@ class NotificationPolicyTest {
         assertEquals(SessionAlertKind.Error, error.desired.single().kind)
     }
 
-    @Test fun presenceAlertsPostOnlyForMatchingAlertRows() {
+    @Test fun presenceAlertsPostOnlyForNeedAlertRows() {
         val changed = current(identity = "question-2")
         val waiting = alertPlan(ready(), changed, event())
         assertTrue(waiting.desired.isEmpty())
         assertTrue(waiting.retained.isEmpty())
-        assertTrue(alertPlan(waiting.state, changed, alert(kind = "error")).desired.isEmpty())
+        // A need observed at a computer stays held across later batches without its alert.
+        assertTrue(alertPlan(waiting.state, changed, null, at = now + 1).desired.isEmpty())
+        assertTrue(alertPlan(waiting.state, changed, alert(kind = "completed")).desired.isEmpty())
         val alerted = alertPlan(waiting.state, changed, alert(3))
         assertEquals(SessionAlertKind.Input, alerted.desired.single().kind)
         assertTrue(alerted.desired.single().fresh)
     }
 
-    @Test fun presenceAlertsKeepPostedCardAndCancelReplacedNeedWithoutAlert() {
+    @Test fun presenceAlertsAnnounceInputAndErrorCardsFromEitherNeedAlert() {
+        // The relay names a need attention before error; the phone shows error first.
+        val error = current(kind = SessionAlertKind.Error, identity = "failed-recovery-with-question")
+        val fromAttention = alertPlan(ready(), error, alert(kind = "attention"))
+        assertEquals(SessionAlertKind.Error, fromAttention.desired.single().kind)
+        assertTrue(fromAttention.desired.single().fresh)
+        val input = current(identity = "question-2")
+        val fromError = alertPlan(ready(), input, alert(kind = "error"))
+        assertEquals(SessionAlertKind.Input, fromError.desired.single().kind)
+        assertTrue(fromError.desired.single().fresh)
+    }
+
+    @Test fun presenceAlertsUpdatePostedCardSilentlyAndHoldNewNeedWithoutAlert() {
         val changed = current(identity = "question-2")
         val alerted = alertPlan(ready(), changed, alert())
         val posted = roundtrip(NotificationPolicy.reserve(alerted.state, alerted.desired.single(), true, 10_000))
         val refresh = alertPlan(posted, changed, event(3), at = now + 1)
         assertEquals(setOf(changed.slot.key), refresh.retained)
         assertFalse(refresh.desired.single().fresh)
-        val replaced = alertPlan(refresh.state, changed.copy(identity = "question-3"), event(4), at = now + 2)
+        // Details the relay never announces (a shorter question list, recovery or
+        // provider error text) update the posted card silently, as without the feature.
+        val detail = changed.copy(identity = "question-2-details")
+        for (batch in listOf(null, event(4, kind = "completed"))) {
+            val updated = alertPlan(refresh.state, detail, batch, at = now + 2)
+            assertEquals(setOf(changed.slot.key), updated.retained)
+            assertEquals(SessionAlertKind.Input, updated.desired.single().kind)
+            assertFalse(updated.desired.single().fresh)
+            assertNotEquals(posted.records.single().postedFingerprint, updated.desired.single().fingerprint)
+        }
+        // A posted error card that turns back into a pending question stays as well.
+        val errorCard = current(kind = SessionAlertKind.Error, identity = "error-1")
+        val errorAlerted = alertPlan(ready(), errorCard, alert(kind = "error"))
+        val errorPosted = NotificationPolicy.reserve(errorAlerted.state, errorAlerted.desired.single(), true, 10_000)
+        assertEquals(SessionAlertKind.Input, alertPlan(errorPosted, changed, null, at = now + 1).desired.single().kind)
+        // A new need the relay announced while the owner is at a computer withdraws
+        // the card until its alert, and so does another run without one.
+        val updated = alertPlan(refresh.state, detail, null, at = now + 2)
+        val reposted = roundtrip(NotificationPolicy.reserve(updated.state, updated.desired.single(), false, 20_000))
+        val next = changed.copy(identity = "question-3")
+        val replaced = alertPlan(reposted, next, event(5), at = now + 3)
         assertTrue(replaced.desired.isEmpty())
         assertTrue(replaced.retained.isEmpty())
+        val newRun = alertPlan(reposted, changed.copy(target = "new-run/conversation", identity = "question-3"), null, at = now + 3)
+        assertTrue(newRun.desired.isEmpty())
+        val announced = alertPlan(replaced.state, next, alert(6), at = now + 4)
+        assertEquals(SessionAlertKind.Input, announced.desired.single().kind)
+        assertTrue(announced.desired.single().fresh)
     }
 
     @Test fun presenceAlertsAnnounceCompletionOnlyFromCompletedAlert() {

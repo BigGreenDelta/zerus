@@ -77,6 +77,26 @@ class NotificationCatalogTest {
         assertEquals(SessionAlertKind.Error, parse(listOf(machine(listOf(row)))).sessions.single().kind)
     }
 
+    @Test fun presenceAlertsKeepPostedErrorCardAcrossFailedRecoveryStates() {
+        // The relay emits no event when a failed recovery request only changes its failed state.
+        val row = session().put("phase", "working").put("recovery", JSONObject().put("state", "uncertain").put("request_id", "retry-1"))
+        val uncertain = parse(listOf(machine(listOf(row)))).sessions.single()
+        row.getJSONObject("recovery").put("state", "exhausted")
+        val exhausted = parse(listOf(machine(listOf(row)))).sessions.single()
+        assertEquals(listOf(SessionAlertKind.Error, SessionAlertKind.Error), listOf(uncertain.kind, exhausted.kind))
+        assertNotEquals(uncertain.identity, exhausted.identity)
+        fun plan(state: NotificationState, current: NotificationCurrent, event: NotificationEvent?, at: Double) =
+            NotificationPolicy.plan(state, listOf(current), listOfNotNull(event).map { current.slot to it },
+                NotificationPreferences(), at, alertsOnly = true)
+        val alerted = plan(NotificationState(bootstrap = false, settingsGeneration = 0), uncertain,
+            NotificationEvent(2, computer, "raw/session/opaque", "alert", 1_000.0, "error"), 1_000.0)
+        val posted = NotificationPolicy.reserve(alerted.state, alerted.desired.single(), true, 10_000)
+        val later = plan(posted, exhausted, null, 1_030.0)
+        assertEquals(setOf(exhausted.slot.key), later.retained)
+        assertEquals(SessionAlertKind.Error, later.desired.single().kind)
+        assertFalse(later.desired.single().fresh)
+    }
+
     @Test fun displayTextIsBoundedAndControlsCannotSpoofNotificationLines() {
         val row = session().put("tag", "Review\n\u202erequested" + "x".repeat(300))
         val current = parse(listOf(machine(listOf(row)))).sessions.single()

@@ -91,6 +91,10 @@ object NotificationPolicy {
         // With presence alerts only relay alert rows announce; other rows refresh state.
         val announcing = events.filter { (_, event) -> if (alertsOnly) event.isAlert else event.kind != "alert" }
         val candidates = announcing.groupBy { it.first.key }.mapValues { (_, rows) -> rows.maxBy { it.second.id }.second }
+        // Relay and phone order input and error differently, so either need alert announces either card.
+        val needs = setOf("attention", "error")
+        val alerted = events.filter { (_, event) -> event.isAlert && event.signal in needs }.map { it.first.key }.toSet()
+        val transitions = events.filter { (_, event) -> event.kind in needs }.map { it.first.key }.toSet()
         val reconcile = preferences.generation != state.settingsGeneration
         val restoreKinds = (state.pendingRestoreKinds + SessionAlertKind.entries.filter {
             preferences.enabledAt(it) > state.settingsGeneration }).filter(preferences::allows).toSet()
@@ -128,13 +132,18 @@ object NotificationPolicy {
                     identity = previous.postedFingerprint
                 }
             }
+            var detailOnly = false
             if (alertsOnly && (kind == SessionAlertKind.Input || kind == SessionAlertKind.Error) &&
-                previous?.postedFingerprint != identity) {
-                val announced = if (kind == SessionAlertKind.Input) "attention" else "error"
-                // Observed while the owner was at a computer: no card until the relay alerts.
-                if (event?.signal != announced) { kind = null; identity = "" }
+                previous?.postedFingerprint != identity && session.slot.key !in alerted) {
+                // A posted input or error card follows detail changes silently, as without
+                // presence alerts. A need the relay announced without an alert, or one never
+                // posted, was observed while the owner was at a computer: no card until it alerts.
+                detailOnly = previous != null && previous.postedFingerprint.isNotBlank() &&
+                    (previous.postedKind == SessionAlertKind.Input || previous.postedKind == SessionAlertKind.Error) &&
+                    previous.postedTarget == session.target && session.slot.key !in transitions
+                if (!detailOnly) { kind = null; identity = "" }
             }
-            val freshTransition = recent && identity != previous?.observedFingerprint
+            val freshTransition = recent && !detailOnly && identity != previous?.observedFingerprint
             val summaryOnly = previous?.summaryOnly?.let { it && !freshTransition } ?: state.truncated
             val observed = previous ?: NotificationRecord(session.slot, session.target, now)
             val recoveringCompletion = kind == SessionAlertKind.Finished && !freshCompletion
