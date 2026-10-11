@@ -95,6 +95,24 @@ packaged services; local definitions can shadow the system package. Package
 installation and upgrades do not restart native agents, tmux or the GUI.
 [Service setup and migration](ci-and-aur.md#package-contents-and-compatibility).
 
+## Checking for updates
+
+Open **Settings > Updates** to see the installed and published desktop versions,
+the last successful check and any check error. **Update checks** contains the
+automatic-check switch, release channel and **Check now** action. Automatic
+checks run at most once a day per channel; manual checks remain available when
+automatic checks are disabled.
+
+When a newer release is verified, the workspace shows a compact **New version**
+button with the Zerus mark. Its tooltip identifies Zerus and the release version;
+clicking it opens Updates. The tray menu also offers Updates, and fresh newer
+releases can show a system notification.
+
+**View release** opens the published release page. Expand **Show installation
+details** for package ownership, copyable Arch commands and installation
+instructions. These actions do not install an update automatically. A local
+build remains separate from an optional AUR installation.
+
 ## Other machines
 
 Add an SSH connection in **Machines**. The agent's machine needs `hgs` installed
