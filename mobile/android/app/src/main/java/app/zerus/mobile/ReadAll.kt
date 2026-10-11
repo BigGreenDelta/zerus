@@ -10,6 +10,23 @@ data class ReadAllUpdate(val state:ConversationReadState,val result:ReadAllResul
 object ReadAllPolicies {
     fun available(evidence:ReadAttentionEvidence?)=evidence!=null &&
         (evidence.authoritative && evidence.epoch.isNotBlank() && evidence.head!=null || evidence.loadedIds.isNotEmpty())
+    /** A known head past the watermark, or a loaded reply this phone counts as unread. */
+    fun unreadReplies(record:ConversationReadRecord?,rows:List<Event>)=
+        record!=null && record.epoch.isNotBlank() && (record.headIncoming ?: 0)>record.readThrough ||
+        rows.any { ConversationReadPolicies.unread(record,it) }
+    /** Cheap check before capturing evidence: a local reminder or replies counted unread. */
+    fun pending(record:ConversationReadRecord?,rows:List<Event>)=record?.reviewLater==true || unreadReplies(record,rows)
+    /**
+     * Whether [apply] with this evidence would clear something this phone shows: a reminder or replies counted unread.
+     * Uses apply's own skip rules; [full] is a missing record that the 500-record cap would refuse.
+     */
+    fun changes(record:ConversationReadRecord?,evidence:ReadAttentionEvidence?,rows:List<Event>,full:Boolean=false):Boolean {
+        if(!available(evidence) || record==null && full || record?.epoch.orEmpty()!=evidence!!.epoch || record?.headIncoming!=evidence.head ||
+            evidence.authoritative && record?.headComplete!=true) return false
+        if(record?.reviewLater==true) return true
+        return if(evidence.authoritative) evidence.head!!>record!!.readThrough
+            else rows.any { it.id in evidence.loadedIds && ConversationReadPolicies.unread(record,it) }
+    }
     /** All evidence is captured before the single ordered edit; reducers never fetch or inspect UI state. */
     fun apply(state:ConversationReadState,captured:List<ReadAllCapture>,current:List<ReadAllCapture>):ReadAllUpdate {
         var next=state;var marked=0;var skipped=0;var partial=0

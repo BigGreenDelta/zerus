@@ -43,6 +43,10 @@ import org.json.JSONObject
     val clipboard = LocalClipboardManager.current
     val nativeMachineName = model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.nativeName.orEmpty()
     val sessionReference = remember(target,nativeMachineName) { SessionReference.create(target,nativeMachineName) }
+    // A Sessions long-press action opened this session; confirm it here against fresh native details.
+    LaunchedEffect(model.sessionMenuRequest,target.key) {
+        model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
+    }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else details = true }, modifier = Modifier.weight(1f)) {
@@ -111,21 +115,25 @@ import org.json.JSONObject
     val target = session.target
     val raw = model.activity
     val verified = model.activityVerified
-    val prepared by produceState<Pair<JSONObject?,SessionDetailsView>?>(null,raw,target,verified) {
-        value = raw to withContext(Dispatchers.Default) { SessionDetailsPresentation.parse(raw,target,verified) }
-    }
-    val details = prepared?.takeIf { it.first === raw }?.second
+    // Polls replace the activity record; keep showing this target's previous view
+    // while the next one is parsed so the sheet never collapses to a placeholder.
+    var parsed by remember(target.key) { mutableStateOf<SessionDetailsView?>(null) }
+    LaunchedEffect(raw,target,verified) { parsed = withContext(Dispatchers.Default) { SessionDetailsPresentation.parse(raw,target,verified) } }
+    val details = parsed
     var tab by remember(target.key) { mutableIntStateOf(0) }
     var stop by remember(target.key) { mutableStateOf<Pair<DetailProcess,String>?>(null) }
     var showOutput by remember(target.key) { mutableStateOf<DetailProcess?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 680.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Session details", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            if (details?.recorded == true) Text("Last known / Read-only", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.labelMedium)
-            ScrollableTabRow(selectedTabIndex = tab, edgePadding = 8.dp) {
-                listOf("Overview","Tasks","Agents","Processes").forEachIndexed { index,label -> Tab(tab == index,{ tab = index },text = { Text(label) }) }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        // A fixed height keeps the sheet still when tabs or polled content change size.
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.88f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Session details", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                if (details?.recorded == true) Text("Last known / Read-only", style = MaterialTheme.typography.labelMedium)
             }
-            Column(Modifier.fillMaxWidth().weight(1f,fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
+                listOf("Overview","Tasks","Agents","Processes").forEachIndexed { index,label -> Tab(tab == index,{ tab = index },text = { Text(label, maxLines = 1, softWrap = false) }) }
+            }
+            Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(key(tab) { rememberScrollState() }).padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (details == null) Text("Reading native details…")
                 else when(tab) {
@@ -267,7 +275,8 @@ import org.json.JSONObject
         dismissButton = { TextButton(onClick = { review = false }) { Text("Cancel") } })
 }
 
-@Composable private fun SessionActionDialog(model: ZerusViewModel, session: Session, operation: String, onDismiss: () -> Unit) {
+/** Exact-identity confirmation; its action stays disabled until a fresh inspection of this session permits it. */
+@Composable internal fun SessionActionDialog(model: ZerusViewModel, session: Session, operation: String, onDismiss: () -> Unit) {
     val target = session.target
     var tag by remember(target,operation) { mutableStateOf(if(operation == "rename" && target.session.split('/').size == 3) target.session.substringAfterLast('/') else "") }
     val computer = remember(target) { model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.name ?: "selected machine" }
@@ -283,6 +292,10 @@ import org.json.JSONObject
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("${target.session} on $computer")
             when(operation) {
+                "pause" -> Text("Pause keeps the exact native conversation for Resume. Open network connections, child processes and unsent terminal input are not kept.")
+                "resume" -> Text("Start the agent again with its saved native conversation.")
+                "archive" -> Text("Move this saved session to Archive. Your private drafts stay on this phone.")
+                "restore" -> Text("Start the agent again with this archived conversation. The archive is removed only after the agent confirms that conversation.")
                 "terminate" -> Text("The agent and its running processes will stop. Native conversation history is kept where supported. Your private drafts stay on this phone.")
                 "forget" -> Text(if(target.archiveId.isNotBlank()) "Remove this selected archived version from Zerus on this machine. Your private drafts stay on this phone."
                     else "Stop this session and its running processes, then remove its Zerus record without keeping a new Zerus archive. Native provider history may remain. Your private drafts stay on this phone.")

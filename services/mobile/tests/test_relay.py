@@ -204,6 +204,34 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         # Marks are idempotent and forward-only, so a pruned identity may be repeated.
         await self.call("POST", "/v1/requests", command, expected=202)
 
+    async def test_attachment_read_is_exact_gated_and_short_lived(self):
+        self.assertIn("attachment_read", (await self.call("GET", "/v1/capabilities"))["operations"])
+        command = self.command("attachment_read")
+        command["payload"] = {"request_id": command["request_id"], "expected_run_id": "example-run",
+                              "expected_conversation_id": "example-conversation",
+                              "message_id": "00000000-0000-4000-8000-000000000001", "index": 0, "offset": 0, "length": 524288}
+        await self.call("POST", "/v1/requests", command, expected=409)
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["attachment_read"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        for change in ({"path": "/private/file.png"}, {"message_id": "../../private/file.png"}, {"index": 8},
+                       {"length": 524289}, {"offset": 10 * 1024 * 1024}, {"expected_conversation_id": ""}, {"text": "Hello"}):
+            invalid = self.command("attachment_read")
+            invalid["payload"] = {**command["payload"], "request_id": invalid["request_id"], **change}
+            await self.call("POST", "/v1/requests", invalid, expected=400)
+        self.assertEqual((await self.call("POST", "/v1/requests", command, expected=202))["state"], "queued")
+        delivered = await self.call("GET", "/v1/node/requests", node=True)
+        self.assertEqual(delivered["requests"][0]["payload"], command["payload"])
+        data = "A" * 699052  # A maximum 512 KiB range in base64 fits the ordinary result bound.
+        await self.call("POST", "/v1/node/requests/" + command["request_id"] + "/result",
+                        {"state": "completed", "result": {"request_id": command["request_id"], "data_base64": data}, "error": None}, node=True)
+        self.assertEqual(len((await self.call("GET", "/v1/requests/" + command["request_id"]))["result"]["data_base64"]), 699052)
+        self.store.maintain()
+        self.assertIsNotNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (command["request_id"],)).fetchone())
+        with self.store.db:
+            self.store.db.execute("UPDATE requests SET result_read=? WHERE id=? AND result_read IS NOT NULL", (time.time() - 6, command["request_id"]))
+        self.store.maintain()
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (command["request_id"],)).fetchone())
+
     async def test_long_poll_rechecks_revocation(self):
         task = asyncio.create_task(self.client.get("/v1/node/requests?wait=1", headers=self.headers(node=True)))
         await asyncio.sleep(0.05)

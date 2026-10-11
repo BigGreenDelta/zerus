@@ -137,7 +137,7 @@ private val Muted = Color(0xFF9AACB2)
                     colorHex = model.machineColor(machineKey))
                 Column(Modifier.padding(start = if (hasChildren) 28.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (caption.isNotEmpty()) Text(caption, color = Muted, style = MaterialTheme.typography.bodySmall)
-                    Text(if (machine.lastKnown) "Last known" else if (machine.online) "Online" else "Offline",
+                    Text(MachineCatalog.status(machine),
                         color = if (machine.online && !machine.lastKnown) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 }
             }

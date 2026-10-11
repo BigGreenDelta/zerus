@@ -53,6 +53,16 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
 - `protocol.rs` validates exact operation envelopes and native identities.
   Attachment validation decodes into one reusable 48 KiB buffer. The relay never
   executes native commands or follows paths supplied by a phone.
+  `attachment_read` is an additive read: exact `expected_run_id` and nonempty
+  `expected_conversation_id`, canonical receipt `message_id`, `index` 0–7,
+  `offset` below 10 MiB and `length` 1–524,288 (`offset + length` ≤ 10 MiB),
+  optional nonzero `archive_id` and child `agent_id`; any other field is
+  rejected. Its base64 result fits the ordinary 1 MiB result bound. It is a read
+  for quotas, outside the persisted `READ_SQL`/`read_history_v3` text, with its
+  own retention: the partial `attachment_history` index lets maintenance delete
+  a completed row 5 seconds after the phone has read its terminal receipt
+  (`result_read`) or 60 seconds after completion, so file bytes are carried,
+  not kept. Submission requires the computer to advertise the operation.
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000
@@ -75,7 +85,10 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
 - `registry.rs` binds physical computers, aliases and immutable one-hop routes.
   Catalog size is checked before fetching selected payloads, then fetched in a
   batch. A withdrawn or revoked route fails queued requests and makes claimed
-  requests uncertain. It never reroutes a claimed request.
+  requests uncertain. It never reroutes a claimed request. A peer the gateway
+  manifest marks offline stays listed on its computer with `online: false` and
+  no snapshot; it is never selected, claimed or updated by a peer heartbeat, and
+  needs a fresh peer heartbeat after it is marked online again.
 - `store/snapshots.rs` separates liveness and event-free snapshot changes from
   shared payload accounting. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
@@ -184,6 +197,13 @@ workers together: an older worker would wake phones for every event, reject the
 `presence` field and serve `alert` rows without `alert_kind`. The offline
 SQLite-to-PostgreSQL migration does not carry candidates or `alert_kind`;
 phones ignore such migrated alert rows.
+
+Attachment reads add only the `attachment_history` partial index (schema version
+1; the Python reference creates it too). Its first `CREATE INDEX` scans the
+requests table once, briefly blocking writes on PostgreSQL. Phones use the
+operation only when both relay capabilities and the computer snapshot list it,
+so the relay, connector and app can be deployed in any order; replace all
+PostgreSQL workers together so every worker accepts and expires the operation.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite

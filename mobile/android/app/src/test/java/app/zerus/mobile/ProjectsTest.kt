@@ -29,6 +29,14 @@ class ProjectsTest {
         val another = parse(listOf(a), connection.copy(id = "workspace-b"))
         assertNotEquals(result.sessions.first().projectKey, another.sessions.first().projectKey)
     }
+    @Test fun offlinePeerWithoutSnapshotIsNotReportedAsCatalogFailure() {
+        val online = computer("a", listOf(project("p", "Project"))).put("online", true)
+        val offline = JSONObject().put("id", "mac").put("name", "Mac").put("online", false).put("snapshot", JSONObject.NULL)
+        val pending = JSONObject().put("id", "new").put("name", "New").put("online", true).put("snapshot", JSONObject.NULL)
+        val result = parse(listOf(online, offline, pending))
+        assertEquals(listOf("New"), result.unavailableComputers)
+        assertEquals(listOf("p"), result.projects.map { it.key.id })
+    }
     @Test fun emptyHeadersAreVisibleWithZeroComputersEvenWhenReplicated() {
         val result = parse(listOf(computer("a", listOf(project("empty", "Empty"))), computer("b", listOf(project("empty", "Empty")))))
         assertEquals(1, result.projects.size)

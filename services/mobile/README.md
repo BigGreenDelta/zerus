@@ -400,6 +400,17 @@ must allow 29 MiB only on `POST /v1/requests` with at least 75-second upstream
 read/write deadlines; keep the 1 MiB limit on other endpoints. The supplied
 Caddy configuration applies this route distinction.
 
+`attachment_read` lets a phone open a sent file. It names a receipt
+(`message_id` from a history row's `attachments[].request_id`) and `index`,
+never a path, and asks for one range of at most 512 KiB. The connector
+advertises it when native help lists
+`attachment <session> --request ID --index N`, verifies run/conversation with
+`hgs inspect`, and reads the file once through `hgs attachment`, which enforces
+receipt ownership, the private store, no symlinks and the 10 MiB bound. It keeps
+the verified bytes in memory for at most 120 seconds (30 MiB per machine) and
+returns `{…, bytes, sha256, offset, length, data_base64}`; the journal drops
+delivered ranges after 120 seconds. See `docs/mobile-architecture.md`.
+
 ## Archived conversations
 
 Current, paused and stopped conversations keep the ordinary `inspect` payload

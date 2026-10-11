@@ -110,6 +110,74 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 await runner.cleanup()
                 store.close()
 
+    async def test_unreachable_peer_stays_listed_offline_under_its_gateway(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-peer-offline-') as directory:
+            root = Path(directory)
+            native = root / 'hgs'
+            native.write_text(Path(__file__).with_name('fixture_peer_hgs.py').read_text())
+            native.chmod(0o700)
+            inventory = {'schema': 1, 'local': {'machine_id': LOCAL, 'name': 'Gateway'},
+                         'peers': [{'via': 'private-peer-alias', 'machine_id': PEER, 'name': 'Peer',
+                                    'online': True, 'error': None, 'identity': 'verified'}]}
+            (root / 'inventory.json').write_text(json.dumps(inventory))
+            store = Store(root / 'relay.sqlite3')
+            workspace = store.workspace('Example workspace')
+            gateway = store.node(workspace, 'Gateway')
+            phone = store.pair(store.invite(workspace)['pair_code'], 'Example phone')
+            runner, url = await start_relay(store, Config(background=False))
+            connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
+                                   'hgs_path': str(native), 'state_dir': str(root / 'journal'),
+                                   'poll_interval': 1}, allow_insecure_localhost=True)
+            task = asyncio.create_task(connector.run())
+            try:
+                async with ClientSession(headers={'Authorization': 'Bearer ' + phone['device_token']}) as client:
+                    async def wait_for(predicate, seconds=15):
+                        async def poll():
+                            while True:
+                                if task.done():
+                                    task.result()
+                                async with client.get(url + '/v1/computers') as response:
+                                    self.assertEqual(response.status, 200)
+                                    data = await response.json()
+                                peer = next((row for row in data['computers'] if row.get('machine_id') == PEER), None)
+                                if predicate(peer):
+                                    return data, peer
+                                await asyncio.sleep(.05)
+                        return await asyncio.wait_for(poll(), seconds)
+
+                    _, online = await wait_for(lambda row: row and row['online'] and row['snapshot'])
+                    inventory['peers'][0].update(online=False, error='unavailable', identity='last_verified')
+                    (root / 'inventory.json').write_text(json.dumps(inventory))
+                    catalog, offline = await wait_for(lambda row: row and not row['online'])
+                    # Same computer (aliases, colours and filters stay stable), still one hop
+                    # below the enrolled gateway, without stale sessions or the SSH alias.
+                    self.assertEqual(offline['id'], online['id'])
+                    self.assertEqual(offline['via']['gateway_id'], gateway['node_id'])
+                    self.assertIsNone(offline['snapshot'])
+                    self.assertNotIn('private-peer-alias', json.dumps(catalog))
+                    calls = (root / 'calls.jsonl').read_text().count('"mobile-peer"')
+                    identity = str(uuid.uuid4())
+                    body = {'request_id': identity, 'computer_id': offline['id'], 'operation': 'send',
+                            'session': 'codex/example', 'payload': {'request_id': identity,
+                            'expected_run_id': 'peer-run', 'expected_conversation_id': 'peer-conversation',
+                            'text': 'Literal message for an offline peer'}}
+                    async with client.post(url + '/v1/requests', json=body) as response:
+                        self.assertEqual(response.status, 409)
+                    await asyncio.sleep(1.5)
+                    self.assertEqual((root / 'calls.jsonl').read_text().count('"mobile-peer"'), calls)
+                    self.assertFalse((root / 'native_effects.jsonl').exists())
+                    # Reconnection with the same verified identity restores that computer.
+                    inventory['peers'][0].update(online=True, error=None, identity='verified')
+                    (root / 'inventory.json').write_text(json.dumps(inventory))
+                    _, restored = await wait_for(lambda row: row and row['online'] and row['snapshot'])
+                    self.assertEqual(restored['id'], online['id'])
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                connector.journal.close()
+                await runner.cleanup()
+                store.close()
+
 
 if __name__ == '__main__':
     unittest.main()

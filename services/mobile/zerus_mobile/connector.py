@@ -27,10 +27,11 @@ import aiohttp
 
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
-from .attachments import MAX_REQUEST_BYTES, validate_send
+from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
+from . import attachment_reads
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
+from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
 from .launch import catalog as project_catalog, validate as validate_launch
 from .launch import projects as launch_projects, project_choice
 from . import worktrees
@@ -176,6 +177,7 @@ class Journal:
                                 (state, json.dumps(response), now, request_id))
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
+        self.db.execute("CREATE INDEX IF NOT EXISTS attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS journal_operation ON requests(operation)")
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_reads ON requests(delivered_at) WHERE operation='inspect' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS mutation_retention ON requests(delivered_at) WHERE operation!='inspect' AND delivered=1 AND state!='running' AND response IS NOT NULL AND response_expired=0")
@@ -185,8 +187,10 @@ class Journal:
         now = time.time() if now is None else now
         with self.db:
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            # Delivered attachment chunks are never kept beyond the same short window.
+            self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
-            rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
+            rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
             for request_id, state in rows:
                 expired = {"state": state, "result": {"status": "history_expired"},
                            "error": "Native result history expired; this request will not execute again"}
@@ -204,7 +208,7 @@ class Journal:
                     raise ConnectorError("request_id conflicts with preserved native request identity")
                 return False
             reads = operation in READ_OPERATIONS
-            count = self.db.execute(f"SELECT count(*) FROM requests WHERE (operation IN {READ_SQL})=?", (int(reads),)).fetchone()[0]
+            count = self.db.execute(f"SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL})=?", (int(reads),)).fetchone()[0]
             if count >= (5000 if reads else 100000):
                 raise ConnectorError("connector retained request limit reached")
             cursor = self.db.execute(
@@ -296,6 +300,8 @@ class Connector:
         self.worktree_supported = False
         self.read_supported = False
         self.preference_supported = False
+        self.attachment_read_supported = False
+        self.attachment_reads = attachment_reads.AttachmentReads()
         self.capabilities_next_poll = 0.0
         self.presence = None  # Latest listing desktop_presence; sent beside, never inside, the snapshot.
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
@@ -311,7 +317,7 @@ class Connector:
 
     async def native(self, argv: list[str], payload: dict | None = None,
                      *, timeout: float | None = None, json_output: bool = True,
-                     failure_json: bool = False) -> object:
+                     failure_json: bool = False, max_output_bytes: int | None = None) -> object:
         machine_id = LOCAL_MACHINE_GUARD.get()
         if machine_id is not None:
             payload = {"schema": 1, "target_machine_id": machine_id,
@@ -320,7 +326,7 @@ class Connector:
         if argv and argv[0] == "worktrees":
             argv = ["__state", *argv]
         return await self._native(argv, payload, timeout=timeout, json_output=json_output,
-                                  failure_json=failure_json)
+                                  failure_json=failure_json, max_output_bytes=max_output_bytes)
 
     async def _native(self, argv: list[str], payload: dict | None = None,
                       *, timeout: float | None = None, json_output: bool = True,
@@ -460,7 +466,7 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS)
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -481,6 +487,7 @@ class Connector:
         self.worktree_supported = False
         self.read_supported = False
         self.preference_supported = False
+        self.attachment_read_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -495,6 +502,7 @@ class Connector:
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
+            self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -621,7 +629,7 @@ class Connector:
                 raise ConnectorError("session must match an exact nonarchived snapshot entry")
             return operation, session, payload or None
         payload = request.get("payload")
-        archived_output = operation in {"process_output", "history", "restore", "forget", "rename", "fork"} and isinstance(payload, dict) and "archive_id" in payload
+        archived_output = operation in {"process_output", "history", "restore", "forget", "rename", "fork", "attachment_read"} and isinstance(payload, dict) and "archive_id" in payload
         if isinstance(payload, dict) and "archive_id" in payload and not archived_output:
             raise ConnectorError("archived targets support inspection only")
         if archived_output:
@@ -639,6 +647,9 @@ class Connector:
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation == "attachment_read":
+            try: validate_read(payload,request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation in TERMINAL_OPERATIONS:
             try:
@@ -703,6 +714,35 @@ class Connector:
                     or compact.get("status") != "completed"
                     or detail.get("phase") != "idle" or detail.get("activity") != "idle"):
                 raise ConnectorError("compaction is not confirmed for this conversation; message was not sent")
+
+    async def read_attachment(self, session: str, payload: dict, request_id: str) -> dict:
+        """One bounded range of a receipt file of this exact conversation.
+
+        The first range verifies identity and reads the whole file through
+        native hgs; later ranges of the same exact identity reuse that brief
+        in-memory copy instead of re-reading (or re-transferring from a peer).
+        """
+        key = attachment_reads.AttachmentReads.key(session, payload)
+        entry = self.attachment_reads.get(key)
+        try:
+            if entry is None:
+                argv = ["inspect", session]
+                if "archive_id" in payload:
+                    argv.extend(["--archive", payload["archive_id"]])
+                argv.append("--skip-processes")
+                attachment_reads.check_identity(await self.native(argv), session, payload)
+                try:
+                    raw = await self.native(attachment_reads.native_argv(session, payload),
+                                            max_output_bytes=attachment_reads.NATIVE_OUTPUT_BYTES)
+                except ConnectorError as error:
+                    if str(error) != "native command failed":
+                        raise
+                    raise ConnectorError("attachment is not available from this conversation on the computer") from None
+                entry = await asyncio.to_thread(attachment_reads.decode, raw, payload)
+                self.attachment_reads.put(key, entry)
+            return await asyncio.to_thread(attachment_reads.chunk, entry, session, payload, request_id)
+        except attachment_reads.AttachmentReadError as error:
+            raise ConnectorError(str(error)) from None
 
     async def child_send_preflight(self, session, payload):
         if not session.startswith("dsh/"):
@@ -784,6 +824,8 @@ class Connector:
                 raise ConnectorError("native mobile worktree ABI is unavailable")
             if operation == "mark_read" and not self.read_supported:
                 raise ConnectorError("native shared read ABI is unavailable")
+            if operation == "attachment_read" and not self.attachment_read_supported:
+                raise ConnectorError("native attachment read ABI is unavailable")
             if operation == "worktree_create":
                 from pathlib import PurePosixPath
                 destination = PurePosixPath(payload["destination"])
@@ -1013,6 +1055,8 @@ class Connector:
                 result = await self.native(["swarm", "preference", "set", "mobile_delivery", payload["value"], "--json"], timeout=10)
                 if not isinstance(result, dict) or result.get("ok") is not True or result.get("mobile_delivery") != payload["value"]:
                     raise ConnectorError("native delivery setting acknowledgement did not match")
+            elif operation == "attachment_read":
+                result = await self.read_attachment(session, payload, request_id)
             elif operation == "mark_read":
                 result = await self.native(["read", session, "--json"], payload, failure_json=True)
                 if not mark_read_result(result, payload):

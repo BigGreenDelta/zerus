@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the bounded attachment view cache; never drafts, credentials or other app files. -->
+<paths>
+    <cache-path name="attachment_view" path="attachment-view/" />
+</paths>

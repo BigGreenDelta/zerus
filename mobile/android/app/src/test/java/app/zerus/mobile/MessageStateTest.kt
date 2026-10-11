@@ -141,7 +141,7 @@ class MessageStateTest {
         assertEquals(1, merged.events.size)
         assertEquals("Native transformed prompt", merged.events.single().text)
         assertEquals("recorded", merged.events.single().delivery)
-        assertEquals(listOf(DisplayedAttachment(attachment.name, attachment.mime, attachment.bytes)), merged.events.single().attachments)
+        assertEquals(listOf(attachment.displayed()), merged.events.single().attachments) // Opens from the private copy.
     }
 
     @Test fun requestIdOnAgentOrUntrustedSourceCannotConfirmAUserDelivery() {

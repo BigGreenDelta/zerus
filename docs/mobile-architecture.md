@@ -135,7 +135,11 @@ Publish each peer separately through
 The authenticated gateway must already advertise that exact route/UUID pair in
 its current manifest. Updating it does not enroll a gateway. Each peer has its
 own observation time: fresh Arch heartbeats cannot keep stale Mac data online.
-A withdrawn or explicitly offline route becomes unavailable immediately. Existing
+A withdrawn or explicitly offline route becomes unavailable immediately. An
+offline route stays listed beneath its gateway with `online: false` and no
+snapshot, so its computer ID, phone label and color remain stable, but it cannot
+be selected, claimed or receive a peer snapshot. After reconnection it needs a
+fresh peer observation before it becomes usable. Existing
 body, response and workspace resource limits continue to apply; peer count does
 not multiply the permitted size of an individual request or computer response.
 Peer snapshot storage is capped at 1 MiB of canonical JSON, as is the connector's
@@ -180,9 +184,22 @@ operations cannot be retroactively cancelled by withdrawing a route.
 The native ABI consists of `hgs mobile-peers --json` and
 `hgs mobile-peer --json`. Discovery returns schema 1, a local
 `{machine_id,name}` object, and direct peer rows containing
-`{via,machine_id,name,online,error}`; `via` is a configured alias retained only on
-the gateway. Unreachable peers may have no newly verified identity. Discovery
-does not inspect their neighbors. The dispatch stdin envelope is
+`{via,machine_id,name,online,error,identity}`; `via` is a configured alias
+retained only on the gateway. A reachable peer has `identity: "verified"`. An
+unreachable peer is `online: false` with the UUID and name this gateway last
+verified through the same alias (`identity: "last_verified"`), or with
+`machine_id: null` and `identity: null` when none exists. The gateway records its
+own successful probes per enabled direct alias in private
+`swarm/mobile-peers.json`, bound to its local machine UUID: removing or disabling
+an alias forgets it, a changed verified UUID replaces it, and a copied or reset
+configuration inherits nothing. Without such a record, a binding pinned by this
+machine's own `swarm hello` or `export` through that alias may supply the UUID.
+Shared catalog data, including machine names, redirects and `swarm get` machine
+rows, is replicated from other members and is never identity evidence. A
+remembered identity only presents an offline route and never authorizes
+dispatch. The connector advertises such a row as an offline route and omits
+identity-less rows; a changed UUID yields a new route ID and withdraws the old
+one. Discovery does not inspect neighbors. The dispatch stdin envelope is
 `{schema:1,via,target_machine_id,argv,payload}`. It resolves `via` against the
 currently enabled local configuration, then invokes the fixed remote
 `hgs swarm __mobile-peer-local --json` entrypoint with only
@@ -301,6 +318,21 @@ the separate Projects catalog includes empty canonical projects. Directory
 fallback groups remain confined to the session list. Provider badges and filter
 glyphs reuse the desktop drawing geometry.
 
+`SessionCardPresentation` ports the desktop card rules from
+`SessionPresentation.h` and the session tree in `SessionsWindow.cpp`. The
+checkout line is `branchContext` (branch or detached HEAD, none for `not_repo`),
+with the desktop Git branch glyph. `checkout` keeps the `projectContext`
+worktree suffix for headers, Details and spoken descriptions. The counter is
+`childCount` without completed children. Rows come only from the snapshot
+`subagents` roster, never previews, and never for `hook_profiles`. They use
+`childStatus`, `Recorded` without current activity, and the `showChild`
+visibility rules. Attention counting stays in `SessionFilters`. Expanded cards
+are kept per exact target in the ViewModel. A child row first opens its parent.
+The ViewModel binds the request to that navigation, run and conversation for 30
+seconds. After the first verified parent presentation, `inspectAgent` rechecks
+the roster and capabilities. A changed conversation, an expired request or a
+missing child reports an error without retrying.
+
 [Telegram's chat behavior](https://github.com/DrKLO/Telegram/blob/master/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java)
 is a design reference for read positions, unread boundaries, paging and
 jump-to-latest controls. Its GPL source is not copied into this client.
@@ -417,17 +449,21 @@ catalog, an explicit directory browser and a native launch UUID. Only an
 authoritative snapshot carrying that UUID can identify the created session.
 An uncertain launch is checked through its original receipt and never repeated
 automatically. Ordinary non-Git folders work without creating repositories or
-worktrees. The compact form proposes an editable name once per new dialog and
+worktrees. The full-screen form proposes one generated name per form and
 preserves deliberate edits through dependent selector changes. A delayed result
-cannot change a later deliberate selection.
+cannot change a later deliberate selection. It cannot be dismissed while a
+creation is in flight.
 
 Worktree discovery and creation are separate capability-gated operations on the
 selected computer. Discovery returns a bounded native catalog; stale data cannot
-authorize creation or project membership. Explicit creation pins the source,
-verified Git common directory, new branch, destination, base revision and durable
-request UUID. Native UUIDs correlate results; the connector's mutation journal
-prevents replay. Unknown creation results offer only an original receipt read,
-with no automatic cleanup or session launch. Related-worktree placement requires
+authorize creation or project membership. Creation pins the source, verified Git
+common directory, new branch, destination, base revision and durable request
+UUID. Native UUIDs correlate results; the connector's mutation journal prevents
+replay. The default Auto mode sends creation only from **Create session**, then
+launches in the confirmed checkout through the view model, pinned to that form.
+Manual creation never launches. Unknown or failed creation results offer only an
+original receipt read, with no automatic cleanup, retry or session launch.
+Related-worktree placement requires
 the fresh native catalog to contain both the chosen checkout and a current saved
 project folder, rechecked at connector preflight and native assignment. Peer
 commands use the same narrow argument allowlist and never fall back to the
@@ -466,7 +502,17 @@ exact reply and request read for every device. Read all marks replies only, one
 approvals, questions and errors highlighted until the session is viewed. Every
 mark captures the displayed message evidence and never answers a question or
 authorizes a native action. With partial history, Mark loaded replies read
-acknowledges only that loaded subset.
+acknowledges only that loaded subset. Read all is enabled only when, for some
+conversation in its scope, the captured evidence would clear a phone-local
+reminder or advance past replies counted unread; the predicate follows the same
+skip rules as the ordered edit.
+
+The Sessions long-press menu is a presentation of the catalog row. Its Mark as
+read is Read all for one conversation; Clear review reminder changes only the
+local reminder. Terminal and native lifecycle items open that exact session and
+hand the chosen operation to its header, which shows the existing confirmation.
+Submission still requires the fresh exact inspection, gateway and computer
+capabilities, and durable receipt flow used by the conversation menu.
 
 ### Read-only Accounts
 
@@ -632,6 +678,21 @@ request bodies have a 100 MiB per-workspace budget with one additional MiB
 reserved for small text and control operations. A full budget rejects new
 requests without evicting uncertain attempts or changing existing receipts.
 
+Tapping an attachment row opens it. A draft or outbox file, or this phone's own
+delivered message while its outbox copy remains, is decrypted from the private
+store without network access. Other files come from the owning computer through
+the read-only `attachment_read` operation (below), in ranges of at most 512 KiB.
+Every range must name the same request, receipt, position, size and SHA-256;
+the assembled file must match that digest. Android keeps opened files in a
+private `cacheDir/attachment-view/` cache keyed by exact identity, verified on
+reuse, removed 24 hours after creation, trimmed least-recently-opened first above
+100 MiB and cleared when a gateway is disconnected. Images open in an in-app
+full-screen preview with zoom, Open with and Share; other types open through
+`ACTION_VIEW` with a FileProvider URI and a temporary read grant, or report that
+no app can open the type. Rows show progress and errors; a failed read is never
+retried automatically. Without the operation on the relay and the computer, the
+row says "Update Zerus on this computer to open attachments."
+
 ## Protocol version 1
 
 Authenticated requests use `Authorization: Bearer <credential>`. Bodies and
@@ -660,7 +721,29 @@ are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 `compact_context`, `clear_context`, `send_now`, `settings`, `process_output`
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
 `terminal_input`, `history`, `catalog`, `dirs`, `launch`, `worktrees`,
-`worktree_create`, `recovery_action`, `mark_read` and `set_mobile_delivery`.
+`worktree_create`, `recovery_action`, `mark_read`, `set_mobile_delivery` and
+`attachment_read`.
+
+`attachment_read` is a read of one byte range of a file in the exact
+conversation's own delivery receipt. Its payload is `{request_id,
+expected_run_id, expected_conversation_id, message_id, index, offset, length,
+archive_id?, agent_id?}`: `message_id` is the canonical receipt UUID from a
+history row's `attachments[].request_id`, `index` its position (0–7), `offset`
+below 10 MiB and `length` 1–524,288 bytes. A child read supplies the parent
+conversation and `agent_id`. The phone never sends a path. The connector checks
+the session against its snapshot (archives against a fresh snapshot), verifies
+run and conversation with `hgs inspect --skip-processes`, then runs native
+`hgs attachment <session> --request ID --index N --conversation ID [--archive ID]
+[--agent ID]`, which binds the receipt to that conversation and child, opens only
+regular files inside its private attachment store without following symlinks
+and bounds them to 10 MiB. The connector keeps the verified file briefly in
+memory (120 seconds, 30 MiB per machine) so later ranges do not reread it. The
+result is `{request_id, name, run_id, conversation_id, message_id, index,
+file_name, mime, bytes, sha256, offset, length, data_base64, archive_id?,
+agent_id?}` and stays below the 1 MiB result limit. The relay deletes completed
+`attachment_read` rows five seconds after the phone reads the terminal receipt,
+or 60 seconds after completion; the connector journal drops delivered results
+after 120 seconds. Old relays and computers do not advertise the operation.
 
 `set_mobile_delivery` is computer-scoped: an empty session and payload
 `{value}` with `immediate`, `away`, `away_5`, `away_10`, `away_15` or `away_30`.

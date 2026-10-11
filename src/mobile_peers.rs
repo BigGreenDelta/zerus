@@ -2,12 +2,17 @@
 //! The remote shell sees only fixed helper commands; native argv travels as data.
 use crate::{cli, config::Config, machines, platform, swarm};
 use anyhow::{bail, ensure, Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     io::{Read, Seek, Write},
-    os::fd::AsRawFd,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, OpenOptionsExt},
+    },
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -23,6 +28,9 @@ const MAX_PEERS: usize = 32;
 const CAPABILITY: &str = "mobile-peer ABI 1";
 const IDENTITY_HELPER: &str = "~/.local/bin/hgs swarm __mobile-peer-identity --json";
 const LOCAL_HELPER: &str = "~/.local/bin/hgs swarm __mobile-peer-local --json";
+const REMEMBERED: &str = "swarm/mobile-peers.json";
+const REMEMBERED_LOCK: &str = "swarm/mobile-peers.lock";
+const REMEMBERED_BYTES: u64 = 64 * 1024;
 static TRANSPORT_STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -91,6 +99,23 @@ struct Identity {
     schema: u32,
     machine_id: String,
     name: String,
+}
+
+/// An identity this gateway itself verified through one configured alias.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Verified {
+    machine_id: String,
+    name: String,
+}
+
+/// Last verified peer identities, bound to the local identity that observed them.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Remembered {
+    schema: u32,
+    local: String,
+    peers: BTreeMap<String, Verified>,
 }
 
 fn uuid(value: &str) -> bool {
@@ -805,6 +830,83 @@ fn identity(output: Output) -> Result<Identity> {
     Ok(identity)
 }
 
+fn verified(id: &Verified, local: &str) -> bool {
+    uuid(&id.machine_id) && id.machine_id != local && text(&id.name, 256, false)
+}
+
+/// Identities this gateway verified itself through each configured alias. A
+/// damaged record, or one observed under another local identity (a copied or
+/// reset configuration), is ignored. It only describes offline routes; it never
+/// authorizes dispatch, whose destination verifies its own UUID again.
+fn remembered(config: &Config, local: &str) -> BTreeMap<String, Verified> {
+    let record = fs::File::open(config.dir.join(REMEMBERED))
+        .ok()
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(REMEMBERED_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            (bytes.len() as u64 <= REMEMBERED_BYTES).then_some(())?;
+            serde_json::from_slice::<Remembered>(&bytes).ok()
+        });
+    match record {
+        Some(record) if record.schema == 1 && record.local == local => record
+            .peers
+            .into_iter()
+            .filter(|(via, id)| alias(via) && verified(id, local))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// Keep currently direct aliases and replace the identities verified just now.
+/// A removed or disabled edge forgets its identity. Writes happen only on a
+/// change, and a concurrent writer postpones this one instead of blocking.
+fn remember(
+    config: &Config,
+    local: &str,
+    direct: &BTreeSet<String>,
+    now: &BTreeMap<String, Verified>,
+    previous: &BTreeMap<String, Verified>,
+) -> Result<()> {
+    let merge = |current: &BTreeMap<String, Verified>| {
+        let mut next: BTreeMap<_, _> = current
+            .iter()
+            .filter(|(via, _)| direct.contains(*via))
+            .map(|(via, id)| (via.clone(), id.clone()))
+            .collect();
+        next.extend(now.iter().map(|(via, id)| (via.clone(), id.clone())));
+        next
+    };
+    if merge(previous) == *previous {
+        return Ok(());
+    }
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(config.dir.join("swarm"))?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(config.dir.join(REMEMBERED_LOCK))?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(());
+    }
+    let current = remembered(config, local);
+    let next = merge(&current);
+    if next == current {
+        return Ok(());
+    }
+    let record = Remembered {
+        schema: 1,
+        local: local.to_owned(),
+        peers: next,
+    };
+    swarm::replace(&config.dir.join(REMEMBERED), &serde_json::to_vec(&record)?)
+}
+
 fn discovery(config: &Config) -> Result<Value> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let local = identity(transport(
@@ -814,18 +916,18 @@ fn discovery(config: &Config) -> Result<Value> {
         deadline.min(Instant::now() + Duration::from_secs(3)),
         4096,
     )?)?;
-    let peers: BTreeSet<_> = config
+    let direct_peers: BTreeSet<_> = config
         .peers
         .iter()
         .filter(|via| direct(config, via))
         .cloned()
         .collect();
     ensure!(
-        peers.len() <= MAX_PEERS,
+        direct_peers.len() <= MAX_PEERS,
         "too many direct mobile peers (maximum 32)"
     );
-    let peers: Vec<_> = peers.into_iter().collect();
-    let mut rows = Vec::new();
+    let peers: Vec<_> = direct_peers.iter().cloned().collect();
+    let mut outcomes = Vec::new();
     // Four owned worker threads, each bounded by the shared discovery deadline.
     thread::scope(|scope| {
         let (sender, receiver) = mpsc::channel();
@@ -838,18 +940,55 @@ fn discovery(config: &Config) -> Result<Value> {
                         supported(via, deadline)?;
                         identity(transport(via, Helper::Identity, None, deadline.min(Instant::now() + Duration::from_secs(3)), 4096)?)
                     })();
-                    let row = match outcome {
-                        Ok(id) => json!({"via":via,"machine_id":id.machine_id,"name":id.name,"online":true,"error":null}),
-                        Err(_) => json!({"via":via,"machine_id":null,"name":via,"online":false,"error":"unavailable"}),
-                    };
-                    if sender.send(row).is_err() { return; }
+                    if sender.send((via.clone(), outcome.ok())).is_err() { return; }
                 }
             });
         }
         drop(sender);
-        rows.extend(receiver);
+        outcomes.extend(receiver);
     });
-    rows.sort_by(|a, b| a["via"].as_str().cmp(&b["via"].as_str()));
+    outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+    let now: BTreeMap<_, _> = outcomes
+        .iter()
+        .filter_map(|(via, id)| {
+            let id = id.as_ref()?;
+            Some((
+                via.clone(),
+                Verified {
+                    machine_id: id.machine_id.clone(),
+                    name: id.name.clone(),
+                },
+            ))
+        })
+        .filter(|(_, id)| verified(id, &local.machine_id))
+        .collect();
+    let previous = remembered(config, &local.machine_id);
+    if let Err(error) = remember(config, &local.machine_id, &direct_peers, &now, &previous) {
+        eprintln!("hgs: cannot remember verified mobile peers: {error:#}");
+    }
+    // Unreachable peers keep the identity this gateway last verified through
+    // the same alias: first its own mobile record, then the local swarm binding
+    // pinned by `swarm hello`. Shared catalog data is never identity evidence.
+    let mut bindings = None;
+    let rows: Vec<_> = outcomes
+        .into_iter()
+        .map(|(via, outcome)| match outcome {
+            Some(id) => json!({"via":via,"machine_id":id.machine_id,"name":id.name,"online":true,"error":null,"identity":"verified"}),
+            None => {
+                let last = previous.get(&via).cloned().or_else(|| {
+                    bindings
+                        .get_or_insert_with(|| swarm::verified_bindings(config, &local.machine_id))
+                        .get(&via)
+                        .map(|id| Verified { machine_id: id.clone(), name: via.clone() })
+                        .filter(|id| verified(id, &local.machine_id))
+                });
+                match last {
+                    Some(id) => json!({"via":via,"machine_id":id.machine_id,"name":id.name,"online":false,"error":"unavailable","identity":"last_verified"}),
+                    None => json!({"via":via,"machine_id":null,"name":via,"online":false,"error":"unavailable","identity":null}),
+                }
+            }
+        })
+        .collect();
     Ok(json!({"schema":1,"local":{"machine_id":local.machine_id,"name":local.name},"peers":rows}))
 }
 
@@ -1194,5 +1333,107 @@ mod tests {
         let mut empty = mark;
         empty["run_id"] = json!("");
         assert!(validate(&request(&["read", "codex/project", "--json"], Some(empty))).is_err());
+    }
+
+    fn fixture_config(dir: &std::path::Path) -> Config {
+        Config {
+            home: dir.to_str().unwrap().into(),
+            dir: dir.join("config"),
+            state: dir.join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec!["peer".into(), "other".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+
+    fn known(machine_id: &str, name: &str) -> Verified {
+        Verified {
+            machine_id: machine_id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn remembered_identities_follow_direct_edges_and_the_observing_identity() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let config = fixture_config(temp.path());
+        let local = uuid::Uuid::new_v4().to_string();
+        let peer = uuid::Uuid::new_v4().to_string();
+        let path = config.dir.join(REMEMBERED);
+        let direct: BTreeSet<String> = ["peer".into(), "other".into()].into();
+        let now = BTreeMap::from([("peer".to_string(), known(&peer, "Peer"))]);
+        remember(&config, &local, &direct, &now, &BTreeMap::new()).unwrap();
+        let previous = remembered(&config, &local);
+        assert_eq!(previous, now);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // Unchanged observations do not rewrite the record.
+        let inode = fs::metadata(&path).unwrap().ino();
+        remember(&config, &local, &direct, &now, &previous).unwrap();
+        remember(&config, &local, &direct, &BTreeMap::new(), &previous).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        // Another local identity (a copied or reset configuration) inherits nothing.
+        assert!(remembered(&config, &uuid::Uuid::new_v4().to_string()).is_empty());
+        // A removed or disabled edge forgets its identity.
+        let only_other: BTreeSet<String> = ["other".into()].into();
+        remember(&config, &local, &only_other, &BTreeMap::new(), &previous).unwrap();
+        assert!(remembered(&config, &local).is_empty());
+        // Invalid entries are never reported, and damaged records report none.
+        for record in [
+            json!({"schema":1,"local":local,"peers":{"peer":{"machine_id":local,"name":"Self"}}}),
+            json!({"schema":1,"local":local,"peers":{"-oProxyCommand=x":{"machine_id":peer,"name":"Peer"}}}),
+            json!({"schema":1,"local":local,"peers":{"peer":{"machine_id":"not-a-uuid","name":"Peer"}}}),
+            json!({"schema":1,"local":local,"peers":{"peer":{"machine_id":peer,"name":"bad\nname"}}}),
+            json!({"schema":2,"local":local,"peers":{"peer":{"machine_id":peer,"name":"Peer"}}}),
+            json!({"schema":1,"local":local,"peers":{"peer":{"machine_id":peer,"name":"Peer","via":"x"}}}),
+        ] {
+            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(remembered(&config, &local).is_empty(), "{record}");
+        }
+        fs::write(&path, b"{damaged").unwrap();
+        assert!(remembered(&config, &local).is_empty());
+        let mut large = serde_json::to_vec(
+            &json!({"schema":1,"local":local,"peers":{"peer":{"machine_id":peer,"name":"Peer"}}}),
+        )
+        .unwrap();
+        large.extend(std::iter::repeat_n(b' ', REMEMBERED_BYTES as usize));
+        fs::write(&path, large).unwrap();
+        assert!(remembered(&config, &local).is_empty());
+        // A damaged record is replaced by the next verified observation.
+        remember(&config, &local, &direct, &now, &BTreeMap::new()).unwrap();
+        assert_eq!(remembered(&config, &local), now);
+    }
+
+    #[test]
+    fn only_verified_local_swarm_bindings_are_identity_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = fixture_config(temp.path());
+        let local = uuid::Uuid::new_v4().to_string();
+        let (peer, placeholder) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        fs::create_dir_all(config.dir.join("swarm")).unwrap();
+        let store = json!({"node_id":local,"catalog":{"shared":"ignored"},"bindings":{
+            "peer":{"id":peer,"verified":true},
+            "other":{"id":placeholder,"verified":false},
+            "example-local":{"id":local,"verified":true},
+            "loop":{"id":local,"verified":true}}});
+        fs::write(
+            config.dir.join("swarm/catalog.json"),
+            serde_json::to_vec(&store).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            swarm::verified_bindings(&config, &local),
+            BTreeMap::from([("peer".to_string(), peer)])
+        );
+        assert!(swarm::verified_bindings(&config, &placeholder).is_empty());
+        fs::write(config.dir.join("swarm/catalog.json"), b"{damaged").unwrap();
+        assert!(swarm::verified_bindings(&config, &local).is_empty());
     }
 }

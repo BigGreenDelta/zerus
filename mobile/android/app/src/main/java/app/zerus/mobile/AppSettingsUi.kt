@@ -77,7 +77,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
                             val computers = connectedMachines.filter { it.connectionId == connection.id }
                             if (computers.isNotEmpty() && model.connections.size > 1) Text(connection.displayName, style = MaterialTheme.typography.labelLarge)
                             computers.forEach { machine ->
-                                val version = if (machine.hgsVersion.isBlank()) "hgs CLI version unavailable" else "hgs CLI ${machine.hgsVersion}"
+                                val version = when {
+                                    machine.hgsVersion.isNotBlank() -> "hgs CLI ${machine.hgsVersion}"
+                                    !machine.online -> "hgs CLI version unavailable while offline"
+                                    else -> "hgs CLI version unavailable"
+                                }
                                 val suffix = if (machine.hgsVersion.isNotBlank() && (!machine.online || machine.lastKnown)) " (last known)" else ""
                                 SelectionContainer { Text("${machine.name}: $version$suffix", style = MaterialTheme.typography.bodySmall) }
                             }

@@ -546,6 +546,61 @@ async fn one_hop_routes_freeze_and_withdraw() {
     f.close().await;
 }
 #[tokio::test]
+async fn offline_peer_route_stays_listed_but_unavailable() {
+    let f = Fixture::new().await;
+    let root = Uuid::new_v4().to_string();
+    let machine = Uuid::new_v4().to_string();
+    let route = Uuid::new_v4().to_string();
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS,"features":["gateway_one_hop"]}});
+    let peers = |online: bool| json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":online}]);
+    let listed = |catalog: &Value| {
+        catalog["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["machine_id"] == machine)
+            .cloned()
+            .unwrap()
+    };
+    gateway_beat(&f, &root, &peers(true), &snapshot).await;
+    peer_beat(&f, &route, &machine, &snapshot, &Value::Null).await;
+    let online = listed(&f.store.computers(&f.phone).await.unwrap());
+    assert_eq!(online["online"], true);
+    gateway_beat(&f, &root, &peers(false), &snapshot).await;
+    let offline = listed(&f.store.computers(&f.phone).await.unwrap());
+    assert_eq!(offline["id"], online["id"]);
+    assert_eq!(offline["online"], false);
+    assert_eq!(offline["via"]["gateway_id"], f.node.id);
+    assert!(offline["snapshot"].is_null());
+    let mut b = f.command("send");
+    b["computer_id"] = offline["id"].clone();
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    let body = json!({"machine_id":machine,"snapshot":snapshot});
+    assert_eq!(
+        f.store
+            .peer_heartbeat(&f.node, &route, &body, &canonical(&snapshot).unwrap())
+            .await
+            .unwrap_err()
+            .0
+            .as_u16(),
+        409
+    );
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    // Reconnection needs a fresh peer observation before the route is usable.
+    gateway_beat(&f, &root, &peers(true), &snapshot).await;
+    assert_eq!(
+        listed(&f.store.computers(&f.phone).await.unwrap())["online"],
+        false
+    );
+    peer_beat(&f, &route, &machine, &snapshot, &Value::Null).await;
+    let restored = listed(&f.store.computers(&f.phone).await.unwrap());
+    assert_eq!(
+        (restored["id"].clone(), restored["online"].clone()),
+        (online["id"].clone(), json!(true))
+    );
+    f.close().await;
+}
+#[tokio::test]
 async fn heartbeats_store_presence_outside_the_snapshot() {
     let empty = json!({"sessions":[]});
     assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":null})).is_ok());
@@ -1861,6 +1916,145 @@ async fn mark_read_payload_is_exact_and_capability_gated() {
         .unwrap()
         .iter()
         .any(|v| v == "mark_read"));
+    f.close().await;
+}
+
+fn attachment_read(f: &Fixture) -> Value {
+    let id = Uuid::new_v4().to_string();
+    json!({"request_id":id,"computer_id":f.node.id,"operation":"attachment_read","session":"codex/example/tag",
+        "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation",
+            "message_id":"00000000-0000-4000-8000-000000000001","index":0,"offset":0,"length":524288}})
+}
+
+#[tokio::test]
+async fn attachment_read_is_exact_gated_and_short_lived() {
+    assert!(protocol::READS.contains(&"attachment_read"));
+    assert!(!protocol::READ_SQL.contains("attachment_read"));
+    assert!(protocol::capabilities(vec![])["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "attachment_read"));
+    let f = Fixture::new().await;
+    let b = attachment_read(&f);
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["attachment_read"],"features":[]}}))
+        .await;
+    for (field, value) in [
+        ("message_id", Value::Null),
+        ("message_id", json!("00000000-0000-4000-8000-00000000000A")),
+        ("message_id", json!("not-a-uuid")),
+        ("index", json!(8)),
+        ("index", json!(-1)),
+        ("index", json!(0.0)),
+        ("index", json!("0")),
+        ("offset", json!(10 * 1024 * 1024)),
+        ("offset", json!(10 * 1024 * 1024 - 10)),
+        ("length", json!(0)),
+        ("length", json!(524289)),
+        ("length", Value::Null),
+        ("expected_conversation_id", json!("")),
+        ("expected_run_id", json!("")),
+        ("archive_id", json!("00000000-0000-0000-0000-000000000000")),
+        ("agent_id", json!("../child")),
+        ("path", json!("/private/file.png")),
+        ("text", json!("hello")),
+    ] {
+        let mut invalid = b.clone();
+        invalid["request_id"] = json!(Uuid::new_v4().to_string());
+        invalid["payload"]["request_id"] = invalid["request_id"].clone();
+        if value.is_null() {
+            invalid["payload"].as_object_mut().unwrap().remove(field);
+        } else {
+            invalid["payload"][field] = value;
+        }
+        assert!(
+            matches!(zerus_relay::store::Submission::new(invalid), Err(e) if e.0.as_u16() == 400),
+            "{field}"
+        );
+    }
+    let mut child = attachment_read(&f);
+    child["payload"]["agent_id"] = json!("worker-1");
+    child["payload"]["archive_id"] = json!(Uuid::new_v4().to_string());
+    assert!(zerus_relay::store::Submission::new(child).is_ok());
+    // A completed maximum chunk fits the ordinary result bound; once the phone
+    // has read it, the bytes leave the relay after a short grace period.
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let data = "A".repeat(699_052);
+    let result = json!({"state":"completed","result":{"request_id":b["request_id"],"name":"codex/example/tag","file_name":"Скриншот 😀.png","data_base64":data},"error":null});
+    let e = canonical(&result["result"]).unwrap();
+    f.store
+        .result(&f.node, s(&b, "request_id"), &result, Some(&e))
+        .await
+        .unwrap();
+    f.check_accounting().await;
+    let receipt = f
+        .store
+        .receipt(&f.phone, s(&b, "request_id"))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt["result"]["data_base64"].as_str().unwrap().len(),
+        699_052
+    );
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        f.count("requests WHERE operation='attachment_read'").await,
+        1
+    );
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET result_read=? WHERE id=?",
+            args![now() - 6.0, &b["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        f.count("requests WHERE operation='attachment_read'").await,
+        0
+    );
+    f.check_accounting().await;
+    // An unread result is removed after its TTL; a pruned read identity is new again.
+    let unread = attachment_read(&f);
+    assert_eq!(f.submit(&unread).await.unwrap()["state"], "queued");
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let failed =
+        json!({"state":"failed","result":null,"error":"attachment is no longer available"});
+    f.store
+        .result(&f.node, s(&unread, "request_id"), &failed, None)
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 59.0, &unread["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        f.count("requests WHERE operation='attachment_read'").await,
+        1
+    );
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 61.0, &unread["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        f.count("requests WHERE operation='attachment_read'").await,
+        0
+    );
+    f.check_accounting().await;
+    assert_eq!(f.submit(&unread).await.unwrap()["state"], "queued");
     f.close().await;
 }
 

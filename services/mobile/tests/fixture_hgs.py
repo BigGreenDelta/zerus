@@ -250,7 +250,21 @@ def main():
     args = sys.argv[1:]
     if args[:2] == ["__state", "worktrees"]: args=args[1:]
     if args == ["--help"]:
-        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read\nhgs swarm preference set mobile_delivery VALUE --json")
+        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read\nhgs swarm preference set mobile_delivery VALUE --json\nhgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment")
+        return
+    if len(args) >= 8 and args[0] == "attachment" and "--stage" not in args:
+        # Receipt-addressed read of the exact conversation's own staged file.
+        options = dict(zip(args[2::2], args[3::2]))
+        row = next((row for row in [record, *states] if row["name"] == args[1]
+                    and (row.get("archive_id") == options.get("--archive") if "--archive" in options else not row.get("archive_id"))), None)
+        if row is None or options.get("--conversation") != row["conversation_id"] or options.get("--agent", "") != "":
+            raise SystemExit("The session conversation changed; refresh Activity")
+        message = next((item for item in row.get("attachment_messages", []) if item["message_id"] == options["--request"]), None)
+        index = int(options["--index"])
+        stored = root / "attachment-store" / f"{options['--request']}-{index}.bin"
+        if message is None or index >= len(message["attachments"]) or not stored.is_file() or stored.is_symlink():
+            raise SystemExit("The attachment is no longer available")
+        print(json.dumps({**message["attachments"][index], "data_base64": base64.b64encode(stored.read_bytes()).decode()}))
         return
     if args == ["ls", "--json", "--local"]:
         summaries = [{key: value for key, value in row.items()
@@ -526,6 +540,8 @@ def main():
             files = []
             for index, attachment in enumerate(payload.get("attachments", [])):
                 raw = base64.b64decode(attachment["data_base64"], validate=True)
+                (root / "attachment-store").mkdir(mode=0o700, exist_ok=True)
+                (root / "attachment-store" / f"{payload['request_id']}-{index}.bin").write_bytes(raw)
                 files.append({"request_id": payload["request_id"], "index": index,
                               "name": attachment["name"], "mime": attachment["mime"],
                               "bytes": len(raw), "reference": attachment.get("reference", "")})

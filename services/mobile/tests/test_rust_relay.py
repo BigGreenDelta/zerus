@@ -118,5 +118,6 @@ for name in (
     'heartbeat_events_baseline_transition_and_privacy', 'body_cap_nonfinite_and_poll_bounds',
     'async_question_fingerprints_add_change_remove', 'push_retired_unifiedpush_and_unavailable_fcm',
     'mark_read_is_exact_and_capability_gated', 'set_mobile_delivery_request_validation', 'mark_read_is_read_class_and_pruned_like_reads',
+    'attachment_read_is_exact_gated_and_short_lived',
 ):
     setattr(RustHttpContracts, 'test_' + name, getattr(test_relay.RelayTests, 'test_' + name))

@@ -20,6 +20,8 @@ import asyncpg
 from .async_store import Notifications
 from .attachments import MAX_QUEUE_BYTES
 from .context import (
+    ATTACHMENT_READ_GRACE,
+    ATTACHMENT_RESULT_TTL,
     CAPABILITY_OPERATIONS,
     READ_OPERATIONS,
     READ_SQL,
@@ -647,7 +649,7 @@ class PostgresStore(Notifications):
                         row = await conn.fetchrow(
                             f"SELECT {RECEIPT_COLUMNS} FROM requests WHERE id=$1", value
                         )
-                if row["operation"] == "terminal_snapshot" and row["state"] in TERMINAL:
+                if row["operation"] in ("terminal_snapshot", "attachment_read") and row["state"] in TERMINAL:
                     await conn.execute(
                         "UPDATE requests SET result_read=$2 WHERE id=$1",
                         value,
@@ -1620,13 +1622,15 @@ class PostgresStore(Notifications):
         async with self.pool.acquire(timeout=5) as conn, conn.transaction():
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock(735628111)"):
                 return
-            # Four independently indexed bounded retention classes.
+            # Independently indexed bounded retention classes.
             candidates = await conn.fetch(
-                f"(SELECT id,workspace_id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$1 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$2 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE body!='' AND state IN ('completed','failed','uncertain') AND updated<$3 ORDER BY updated LIMIT $4) LIMIT $4",
+                f"(SELECT id,workspace_id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$1 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$2 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE body!='' AND state IN ('completed','failed','uncertain') AND updated<$3 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<$5 OR result_read<$6) ORDER BY updated LIMIT $4) LIMIT $4",
                 now - 120,
                 now - min(retention, 3600),
                 now - retention,
                 batch_size,
+                now - ATTACHMENT_RESULT_TTL,
+                now - ATTACHMENT_READ_GRACE,
             )
             for shard in sorted({self.shard(r["workspace_id"]) for r in candidates}):
                 await conn.fetchval(
@@ -1637,7 +1641,7 @@ class PostgresStore(Notifications):
                 await self._usage(conn, workspace)
             for candidate in candidates:
                 row = await conn.fetchrow(
-                    "SELECT id,workspace_id,operation,state,updated,body_bytes,result_bytes,reserved_bytes,(body!='') AS has_body FROM requests WHERE id=$1 FOR UPDATE",
+                    "SELECT id,workspace_id,operation,state,updated,result_read,body_bytes,result_bytes,reserved_bytes,(body!='') AS has_body FROM requests WHERE id=$1 FOR UPDATE",
                     candidate["id"],
                 )
                 if not row or row["state"] not in TERMINAL:
@@ -1645,6 +1649,10 @@ class PostgresStore(Notifications):
                 remove = (
                     row["operation"] == "terminal_snapshot"
                     and row["updated"] < now - 120
+                ) or (
+                    row["operation"] == "attachment_read"
+                    and (row["updated"] < now - ATTACHMENT_RESULT_TTL
+                         or (row["result_read"] is not None and row["result_read"] < now - ATTACHMENT_READ_GRACE))
                 ) or (
                     row["operation"] in READ_OPERATIONS
                     and row["operation"] != "terminal_snapshot"

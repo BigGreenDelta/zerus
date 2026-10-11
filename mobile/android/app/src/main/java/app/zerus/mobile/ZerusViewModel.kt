@@ -2,6 +2,7 @@ package app.zerus.mobile
 
 import android.app.Application
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -54,6 +55,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleMachine(key: MachineKey) { selectedMachines = if (key in selectedMachines) selectedMachines - key else selectedMachines + key; resetSessionScroll() }
     fun allMachines() { selectedMachines = emptySet(); resetSessionScroll() }
     fun toggleProject(key: ProjectKey) { collapsedProjects = if (key.key in collapsedProjects) collapsedProjects - key.key else collapsedProjects + key.key }
+    /** Session cards whose subagent rows are open, by exact parent target, as the desktop session tree keeps them. */
+    var expandedSubagents by mutableStateOf<Set<String>>(emptySet()); private set
+    fun toggleSubagents(target: Target) { expandedSubagents = if (target.key in expandedSubagents) expandedSubagents - target.key else expandedSubagents + target.key }
     fun saveSessionScroll(index: Int, offset: Int, scope: String, reset: Long) {
         if (scope != sessionProjectScope?.key?.key.orEmpty() || reset != sessionScrollReset) return
         sessionListIndex = index; sessionListOffset = offset
@@ -127,12 +131,22 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(incoming.isEmpty()) return
         readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention();shareRead(target)
     }
+    /** Replies this phone has loaded for the conversation: the open window, else a retained page or frame. */
+    private fun loadedRows(target:Target):List<Event>? =
+        if(selected?.target==target) conversationEvents else historyWindows[target.key]?.events ?: frames[target.key]?.events
+    private var readIndex:Pair<ConversationReadState,Map<String,ConversationReadRecord>>?=null
+    /** Same result as readState.record(target), keyed once per read state for scope-wide checks. */
+    private fun indexedReadRecord(target:Target):ConversationReadRecord? {
+        val state=readState
+        val index=readIndex?.takeIf { it.first===state }?.second
+            ?: HashMap<String,ConversationReadRecord>().also { map -> state.records.forEach { map.putIfAbsent(ConversationReadPolicies.key(it.target),it) } }.also { readIndex=state to it }
+        return index[ConversationReadPolicies.key(target)]
+    }
     fun loadedUnreadCount(target:Target):Int? {
         val record=readState.record(target)
         if(!readTrackingReady) return null
         if(record?.incomplete == true || readState.records.size >= 500 && record == null) return null
-        val rows=if(selected?.target==target) conversationEvents else historyWindows[target.key]?.events ?: frames[target.key]?.events
-        return ConversationReadPolicies.lowerBound(record,rows)
+        return ConversationReadPolicies.lowerBound(record,loadedRows(target))
     }
     fun unreadCount(target:Target):Int? {
         val record=readState.record(target) ?: return null
@@ -280,9 +294,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             } finally { if(!published && selected?.target==target && navigationId==navigation) readPositionReady=true }
         }
     }
-    private fun watchHistoryHeads() {
+    private fun watchHistoryHeads(priority:Target?=null) {
         if(historyHeadJob?.isActive==true || !readTrackingReady) return
-        val eligible=sessions.filter { row -> historyNetworkReason(row.target).isBlank() && SessionFilters.online(row,machines) }
+        val eligible=sessions.filter { row -> historyNetworkReason(row.target).isBlank() && SessionFilters.online(row,machines) && (priority==null || row.target==priority) }
         val candidates=ReadAllHeadCandidates.candidates(eligible,readState).mapNotNull { row ->
             val hint=ReadAllHeadCandidates.hint(row)
             val key=ConversationReadPolicies.key(row.target)
@@ -325,7 +339,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val record=readState.record(target)
         val raw=if(selected?.target==target) activity else sessions.find { it.target==target }?.raw
         val fingerprint=HistoryHeadHints.readFingerprint(target,raw,record)
-        val rows=if(selected?.target==target) conversationEvents else historyWindows[target.key]?.events ?: frames[target.key]?.events.orEmpty()
+        val rows=loadedRows(target).orEmpty()
         return ReadAttentionEvidence(target,fingerprint,record?.epoch.orEmpty(),record?.headIncoming,
             readTrackingReady && record?.headComplete==true && ConversationReadPolicies.key(target) in currentHistoryHeads,
             rows.filter(ConversationReadPolicies::incoming).map { it.id }.toSet(),
@@ -349,6 +363,23 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return captured.copy(fingerprint=captured.fingerprint+JSONArray(listOf(currentHint,observedHint)).toString(),authoritative=freshHead)
     }
     fun canMarkRead(target:Target):Boolean=ReadAllPolicies.available(readAllEvidence(target))
+    /** Something Read all could clear here once it has usable evidence: a reminder or replies counted unread. */
+    fun readAllPending(target:Target):Boolean=readTrackingReady && !demo && ReadAllPolicies.pending(indexedReadRecord(target),loadedRows(target).orEmpty())
+    /** Read all is enabled only when its current evidence would clear something this phone shows. */
+    fun canReadAll(target:Target):Boolean {
+        if(!readAllPending(target)) return false
+        val record=indexedReadRecord(target)
+        return ReadAllPolicies.changes(record,readAllEvidence(target),loadedRows(target).orEmpty(),record==null && readState.records.size>=500)
+    }
+    /** Whether marking this one conversation would use only loaded replies rather than a fresh complete head. */
+    fun readAllPartial(target:Target):Boolean=readAllEvidence(target)?.authoritative!=true
+    /** Clears only this phone's reminder; read markers stay and nothing is shared with the computer. */
+    fun clearReviewLater(target:Target) {
+        if(!readTrackingReady || demo || !reviewLater(target)) return
+        readWriter?.let { readState=it.edit { state -> state.review(target,false) } };refreshReadAttention();flushDrafts()
+    }
+    /** Opening a session's actions asks the bounded head probe to check that row first. */
+    fun prepareReadEvidence(target:Target) { if(!demo) watchHistoryHeads(target) }
     fun markAllRead(targets:List<Target>):ReadAllResult {
         val distinct=targets.distinctBy(ConversationReadPolicies::key)
         val captured=distinct.map { ReadAllCapture(it,readAllEvidence(it)) }
@@ -444,6 +475,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     val pickerId get() = messageState.pickerId
     var attachmentImporting by mutableStateOf(false); private set
     private val attachmentStore = AttachmentStore(application)
+    val attachments = AttachmentViewer(application, attachmentStore, api, viewModelScope,
+        { id -> connections.find { it.id == id } }) { target ->
+        AttachmentIdentity.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],
+            machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
+    }
     private var importJob: Job? = null
     var selected by mutableStateOf<Session?>(null); private set
     var activity by mutableStateOf<JSONObject?>(null); private set
@@ -647,6 +683,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
                 editState { state -> state.copy(outgoing = state.outgoing.map { if (it.requestId in merged.recordedRequestIds && it.status != "reviewed") it.copy(status = "recorded", error = "") else it }) }
             }
+            // Last: opening a child replaces this parent presentation.
+            if (activityVerified) openPendingAgent()
         }
     }
     private suspend fun inspectOnce(connection: Connection, target: Target): Deferred<Frame> {
@@ -775,6 +813,18 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var launchCatalogJob:Job?=null
     private var launchDirectoryJob:Job?=null
     private var launchCatalogEvidence=""
+    /** Identifies one opened New session form; its saved UI state is keyed by it. */
+    var launchFormId by mutableLongStateOf(0L);private set
+    /** Generated once per form: the default session name and Auto's new branch. */
+    var launchGeneratedName by mutableStateOf("");private set
+    /** Launch and worktree receipt statuses when the form opened; later changes belong to this form. */
+    var launchBaseline by mutableStateOf<Map<String,String>>(emptyMap());private set
+    /** Auto worktree launch progress: creating, checking or launching. */
+    var launchStage by mutableStateOf("");private set
+    var launchCreatedWorktree by mutableStateOf("");private set
+    var launchCreatedEvidence by mutableStateOf<JSONObject?>(null);private set
+    var launchAutomaticFailed by mutableStateOf(false);private set
+    val launchBusy get() = launchSubmitting || worktreeSubmitting || launchStage.isNotEmpty()
     fun launchCatalogSignature()=launchCatalogEvidence
     fun launchReason(machine:MachineKey):String {
         if(updateInstallPreparing) return "Saving drafts for an app update."
@@ -785,8 +835,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return ""
     }
     fun prepareLaunch(machine:MachineKey) {
+        if(launchBusy) return
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         launchGeneration++;launchMachine=machine;launchVisible=true;launchCatalogState=null;launchDirectoryState=null;launchWorktreeState=null;launchError="";launchCatalogEvidence=""
+        launchFormId=launchGeneration;launchGeneratedName=LaunchPresentation.generatedName();launchStage="";launchCreatedWorktree="";launchCreatedEvidence=null;launchAutomaticFailed=false
+        launchBaseline=sessionActions.filter { it.operation in setOf("launch","worktree_create") }.associate { it.requestId to it.status }
         launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchDirectoryLoading=false
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration;launchCatalogLoading=true
@@ -803,32 +856,44 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         browseLaunchDirectory(machine,"~")
     }
-    fun closeLaunch() { if(worktreeSubmitting) return;launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchVisible=false;launchGeneration++;launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchCatalogLoading=false;launchDirectoryLoading=false }
+    /** Closing never interrupts worktree creation or a launch; their receipts must settle first. */
+    fun closeLaunch() { if(launchBusy) return;finishLaunch() }
+    private fun finishLaunch() { launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchVisible=false;launchGeneration++;launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchCatalogLoading=false;launchDirectoryLoading=false }
+    private suspend fun readLaunchDirectory(connection:Connection,machine:MachineKey,path:String):JSONObject {
+        val target=Target(machine.computerId,"","","",machine.connectionId);val id=UUID.randomUUID().toString()
+        val receipt=api.await(connection,api.submit(connection,target,"dirs",JSONObject().put("request_id",id).put("path",path),id))
+        check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "This folder is unavailable." } }
+        val raw=receipt.getJSONObject("result")
+        check(raw.string("path").startsWith('/')) { "Computer returned an invalid folder." }
+        return raw.put("requested_path",path)
+    }
+    private suspend fun readLaunchWorktrees(connection:Connection,machine:MachineKey,path:String,requested:String):JSONObject {
+        val id=UUID.randomUUID().toString();val target=Target(machine.computerId,"","","",machine.connectionId)
+        val receipt=api.await(connection,api.submit(connection,target,"worktrees",JSONObject().put("request_id",id).put("path",path),id))
+        check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "Worktree catalog unavailable." } }
+        return receipt.getJSONObject("result").put("requested_path",requested)
+    }
     fun browseLaunchDirectory(machine:MachineKey,path:String) {
-        if(launchMachine != machine || launchDirectoryLoading || !launchVisible) return
+        if(launchMachine != machine || launchDirectoryLoading || !launchVisible || launchStage.isNotEmpty()) return
         if(path != "~" && (!path.startsWith('/') || path.length > 4096 || path.any(Char::isISOControl))) { launchError="Choose an absolute native folder.";return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         launchWorktreeJob?.cancel();launchWorktreeState=null;launchWorktreeLoading=false;launchDirectoryState=null
         val generation=launchGeneration;launchDirectoryLoading=true;launchError=""
         launchDirectoryJob=viewModelScope.launch {
             try {
-                val target=Target(machine.computerId,"","","",machine.connectionId);val id=UUID.randomUUID().toString()
-                val receipt=api.await(connection,api.submit(connection,target,"dirs",JSONObject().put("request_id",id).put("path",path),id))
-                check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "This folder is unavailable." } }
-                val raw=receipt.getJSONObject("result")
-                check(raw.string("path").startsWith('/')) { "Computer returned an invalid folder." }
+                val raw=readLaunchDirectory(connection,machine,path)
                 if(launchGeneration == generation && launchMachine == machine) {
-                    launchDirectoryState=raw.put("requested_path",path)
+                    launchDirectoryState=raw
                     loadLaunchWorktrees(machine,raw.getString("path"),path)
                 }
             } catch(e:Exception) { if(e is CancellationException) throw e;if(launchGeneration == generation) launchError=e.message.orEmpty() }
             finally { if(launchGeneration == generation) launchDirectoryLoading=false }
         }
     }
+    fun worktreeOperationsSupported(machine:MachineKey)=listOf("worktrees","worktree_create").all { it in relayOperations[machine.connectionId].orEmpty() && it in machineOperations[machine].orEmpty() }
     fun worktreeReason(machine:MachineKey):String {
         if(launchReason(machine).isNotBlank()) return launchReason(machine)
-        if(listOf("worktrees","worktree_create").any { it !in relayOperations[machine.connectionId].orEmpty() || it !in machineOperations[machine].orEmpty() })
-            return "Update Zerus on this computer to use worktree actions."
+        if(!worktreeOperationsSupported(machine)) return "Update Zerus on this computer to use worktree actions."
         if(sessionActions.any { it.operation=="worktree_create" && it.target.connectionId==machine.connectionId && it.target.computerId==machine.computerId && it.blocksSending })
             return "Check the previous worktree creation receipt before creating another."
         return ""
@@ -840,87 +905,157 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val generation=launchGeneration;launchWorktreeLoading=true
         launchWorktreeJob=viewModelScope.launch {
             try {
-                val id=UUID.randomUUID().toString();val target=Target(machine.computerId,"","","",machine.connectionId)
-                val receipt=api.await(connection,api.submit(connection,target,"worktrees",JSONObject().put("request_id",id).put("path",path),id))
-                check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "Worktree catalog unavailable." } }
-                val raw=receipt.getJSONObject("result").put("requested_path",requested)
+                val raw=readLaunchWorktrees(connection,machine,path,requested)
                 if(launchGeneration==generation && launchMachine==machine) launchWorktreeState=raw
             } catch(e:Exception) { if(e is CancellationException) throw e }
             finally { if(launchGeneration==generation && launchMachine==machine) launchWorktreeLoading=false }
         }
     }
-    fun createLaunchWorktree(machine:MachineKey,evidence:JSONObject,branch:String,base:String,destination:String,onCreated:(String)->Unit) {
-        val problem=worktreeReason(machine)
-        if(problem.isNotBlank() || worktreeSubmitting || !launchVisible || launchMachine!=machine || !WorktreePresentation.healthy(evidence) ||
-            launchWorktreeState?.string("common_dir")!=evidence.string("common_dir")) { launchError=problem.ifBlank { "Refresh the current worktrees before creation." };return }
+    private fun worktreeAction(machine:MachineKey,evidence:JSONObject,branch:String,base:String,destination:String):Pair<SessionAction,JSONObject> {
         val arguments=JSONObject().put("path",evidence.getString("path")).put("common_dir",evidence.getString("common_dir"))
             .put("branch",branch).put("base",base).put("destination",destination)
-        try { SessionActionPolicies.arguments("worktree_create",arguments) } catch(e:Exception) { launchError=e.message.orEmpty();return }
-        val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"worktree_create",arguments.toString())
+        SessionActionPolicies.arguments("worktree_create",arguments)
+        return SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"worktree_create",arguments.toString()) to arguments
+    }
+    /** Sends one durable creation request and returns its confirmed path, or "" after a recorded failure or unknown result. */
+    private suspend fun submitWorktree(machine:MachineKey,connection:Connection,action:SessionAction,arguments:JSONObject,evidence:JSONObject,generation:Long):String {
+        var attempted=false;var rejected=false
+        try {
+            durable({ state -> check(state.sessionActions.none { it.operation=="worktree_create" && it.target==action.target && it.blocksSending });state.action(action) },
+                { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
+            check(launchVisible && launchGeneration==generation && launchMachine==machine && launchWorktreeState?.string("common_dir")==evidence.string("common_dir")) { "The selected repository changed. Worktree creation was not sent." }
+            attempted=true
+            val initial=try { api.submit(connection,action.target,"worktree_create",JSONObject(arguments.toString()).put("request_id",action.requestId),action.requestId) }
+                catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+            settleSessionAction(action,api.await(connection,initial))
+            val completed=messageState.sessionActions.find { it.requestId==action.requestId }
+            if(completed?.status=="completed" && completed.resultPath.isNotBlank()) return completed.resultPath
+            launchError=completed?.error.orEmpty().ifBlank { "Worktree creation is unconfirmed. Check its original receipt; nothing has been retried." }
+            return ""
+        } catch(e:Exception) {
+            try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { existing ->
+                state.action(existing.copy(status=if(!attempted || rejected) "failed" else "uncertain",error=if(!attempted || rejected) e.message.orEmpty() else "Worktree creation is unconfirmed. Check the original receipt and folder; nothing has been retried.")) } ?: state }) }
+            catch(_:Exception) { launchError="Could not save the creation outcome. The original request remains recoverable." }
+            if(e is CancellationException) throw e
+            launchError=if(!attempted || rejected) e.message.orEmpty() else "Worktree creation is unconfirmed. Check its original receipt; nothing has been retried."
+            return ""
+        }
+    }
+    /** Keeps a confirmed checkout in this form, selected for a direct-folder launch. */
+    private fun retainCreatedWorktree(path:String,evidence:JSONObject) { launchCreatedEvidence=WorktreePresentation.withCreated(evidence,path);launchCreatedWorktree=path }
+    fun createLaunchWorktree(machine:MachineKey,evidence:JSONObject,branch:String,base:String,destination:String) {
+        val problem=worktreeReason(machine)
+        if(problem.isNotBlank() || launchBusy || !launchVisible || launchMachine!=machine || !WorktreePresentation.healthy(evidence) ||
+            launchWorktreeState?.string("common_dir")!=evidence.string("common_dir")) { launchError=problem.ifBlank { "Refresh the current worktrees before creation." };return }
+        val (action,arguments)=try { worktreeAction(machine,evidence,branch,base,destination) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id==machine.connectionId } ?: return
         val generation=launchGeneration;worktreeSubmitting=true;actionFlights+=action.requestId;launchError=""
         viewModelScope.launch {
-            var attempted=false;var rejected=false
             try {
-                durable({ state -> check(state.sessionActions.none { it.operation=="worktree_create" && it.target==action.target && it.blocksSending });state.action(action) },
-                    { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
-                check(launchVisible && launchGeneration==generation && launchMachine==machine && launchWorktreeState?.string("common_dir")==evidence.string("common_dir")) { "The selected repository changed. Worktree creation was not sent." }
-                attempted=true
-                val initial=try { api.submit(connection,action.target,"worktree_create",JSONObject(arguments.toString()).put("request_id",action.requestId),action.requestId) }
-                    catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
-                settleSessionAction(action,api.await(connection,initial))
-                val completed=messageState.sessionActions.find { it.requestId==action.requestId }
-                if(completed?.status=="completed" && completed.resultPath.isNotBlank() && launchVisible && launchGeneration==generation && launchMachine==machine)
-                    onCreated(completed.resultPath)
-                else launchError=completed?.error.orEmpty()
-            } catch(e:Exception) {
-                try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { existing ->
-                    state.action(existing.copy(status=if(!attempted || rejected) "failed" else "uncertain",error=if(!attempted || rejected) e.message.orEmpty() else "Worktree creation is unconfirmed. Check the original receipt and folder; nothing has been retried.")) } ?: state }) }
-                catch(_:Exception) { launchError="Could not save the creation outcome. The original request remains recoverable." }
-                if(e is CancellationException) throw e
-                launchError=if(!attempted || rejected) e.message.orEmpty() else "Worktree creation is unconfirmed. Check its original receipt; nothing has been retried."
+                val created=submitWorktree(machine,connection,action,arguments,evidence,generation)
+                if(created.isNotBlank() && launchVisible && launchGeneration==generation && launchMachine==machine) {
+                    retainCreatedWorktree(created,evidence);browseLaunchDirectory(machine,created)
+                }
             } finally { actionFlights-=action.requestId;worktreeSubmitting=false }
         }
     }
+    private fun launchArguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?):JSONObject {
+        check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
+        check(accountId != null && LaunchPresentation.accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
+        val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
+        if(catalog.opt("project_launch_supported")==true) LaunchPresentation.projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
+        else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
+        return SessionActionPolicies.arguments("launch",args)
+    }
     fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null) {
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
-        if(launchSubmitting || worktreeSubmitting || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
+        if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         val catalog=launchCatalogState ?: return
-        if(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } != true) { launchError="This native provider is unavailable.";return }
-        if(accountId == null || LaunchPresentation.accounts(catalog,agent).none { it.id == accountId }) { launchError="Choose an offered account for the selected provider.";return }
         if(!LaunchPresentation.selectedFolder(launchDirectoryState,directory)) { launchError="Select a folder from the current native browser.";return }
-        val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
-        if(catalog.opt("project_launch_supported")==true) {
-            try { LaunchPresentation.projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } } }
-            catch(e:Exception) { launchError=e.message.orEmpty();return }
-        } else if(projectId.isNotBlank()) { launchError="This computer does not support scoped project assignment.";return }
-        try { SessionActionPolicies.arguments("launch",args) } catch(e:Exception) { launchError=e.message.orEmpty();return }
-        val target=Target(machine.computerId,"","","",machine.connectionId)
-        val action=SessionAction(UUID.randomUUID().toString(),target,"launch",args.toString())
+        val args=try { launchArguments(catalog,agent,directory,tag,accountId,projectId,worktrees) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
-        val generation=launchGeneration;launchSubmitting=true;actionFlights+=action.requestId
+        val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
+        val generation=launchGeneration;launchSubmitting=true;actionFlights+=action.requestId;launchError=""
+        viewModelScope.launch { submitLaunch(machine,connection,action,agent,directory,expectedCatalog,generation) }
+    }
+    /** The caller marks the launch in flight; this records, sends and settles it exactly once. */
+    private suspend fun submitLaunch(machine:MachineKey,connection:Connection,action:SessionAction,agent:String,directory:String,expectedCatalog:String,generation:Long) {
+        val target=action.target
+        var attempted=false;var rejected=false
+        try {
+            durable({ state -> check(state.sessionActions.none { it.operation == "launch" && it.target.computerId == target.computerId && it.target.connectionId == target.connectionId && it.blocksSending });state.action(action) }, { current,written -> current.action(written.sessionActions.first { it.requestId == action.requestId }) })
+            check(launchVisible && launchGeneration == generation && launchMachine == machine && launchCatalogEvidence == expectedCatalog && connections.any { it.id == machine.connectionId }) { "The launch form changed before creating the session." }
+            attempted=true
+            val initial=try { api.submit(connection,target,"launch",JSONObject(action.arguments).put("request_id",action.requestId),action.requestId) } catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+            val receipt=api.await(connection,initial);settleSessionAction(action,receipt)
+            val completed=messageState.sessionActions.find { it.requestId == action.requestId }
+            if(completed?.status == "completed" && completed.resultTarget != null && launchVisible && launchGeneration == generation && launchMachine == machine) {
+                if(completed.error.isBlank()) {
+                    val created=completed.resultTarget;finishLaunch()
+                    open(Session(created,created.session,agent,"starting",directory,"",0,JSONObject().put("name",created.session).put("run_id",created.run).put("conversation_id",created.conversation)))
+                    refresh()
+                } else { launchError=completed.error;refresh() }
+            } else if(completed?.status != "completed") launchError=completed?.error.orEmpty()
+        } catch(e:Exception) {
+            val status=if(!attempted || rejected) "failed" else "uncertain"
+            try { durable({ state -> state.sessionActions.find { it.requestId == action.requestId }?.let { if(it.status in setOf("sending","uncertain")) state.action(it.copy(status=status,error=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt; it has not been retried.")) else state } ?: state }) } catch(_:Exception) { launchError="Could not save the launch result. Its original request remains recoverable." }
+            if(e is CancellationException) throw e
+            launchError=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt before creating another session."
+        } finally { actionFlights-=action.requestId;launchSubmitting=false }
+    }
+    /**
+     * Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
+     * Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
+     */
+    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String) {
+        val reason=worktreeReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
+        if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
+        // One generated branch per form: after any creation or failed attempt, only direct launches remain.
+        if(launchAutomaticFailed || launchCreatedWorktree.isNotBlank()) { launchError="This form already attempted worktree creation. Choose None or another worktree.";return }
+        val catalog=launchCatalogState ?: return
+        if(!LaunchPresentation.selectedFolder(launchDirectoryState,folder)) { launchError="Select a folder from the current native browser.";return }
+        val evidence=WorktreePresentation.forFolder(launchWorktreeState,folder)?.takeIf { WorktreePresentation.automaticAvailable(it,folder) }
+            ?: run { launchError="The repository could not be confirmed. Choose a working folder again.";return }
+        val branch=launchGeneratedName
+        val destination=WorktreePresentation.automaticPath(evidence,branch)
+        // Everything the session needs is checked before anything is created.
+        try { launchArguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val (creation,arguments)=try { worktreeAction(machine,evidence,branch,"HEAD",destination) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val connection=connections.find { it.id == machine.connectionId } ?: return
+        val generation=launchGeneration
+        launchStage="creating";worktreeSubmitting=true;actionFlights+=creation.requestId;launchError=""
+        fun current()=launchVisible && launchGeneration == generation && launchMachine == machine
         viewModelScope.launch {
-            var attempted=false;var rejected=false
             try {
-                durable({ state -> check(state.sessionActions.none { it.operation == "launch" && it.target.computerId == target.computerId && it.target.connectionId == target.connectionId && it.blocksSending });state.action(action) }, { current,written -> current.action(written.sessionActions.first { it.requestId == action.requestId }) })
-                check(launchVisible && launchGeneration == generation && launchMachine == machine && launchCatalogEvidence == expectedCatalog && connections.any { it.id == machine.connectionId }) { "The launch form changed before creating the session." }
-                attempted=true
-                val initial=try { api.submit(connection,target,"launch",JSONObject(args.toString()).put("request_id",action.requestId),action.requestId) } catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
-                val receipt=api.await(connection,initial);settleSessionAction(action,receipt)
-                val completed=messageState.sessionActions.find { it.requestId == action.requestId }
-                if(completed?.status == "completed" && completed.resultTarget != null && launchVisible && launchGeneration == generation && launchMachine == machine) {
-                    if(completed.error.isBlank()) {
-                        val created=completed.resultTarget;closeLaunch()
-                        open(Session(created,created.session,agent,"starting",directory,"",0,JSONObject().put("name",created.session).put("run_id",created.run).put("conversation_id",created.conversation)))
-                        refresh()
-                    } else { launchError=completed.error;refresh() }
-                } else if(completed?.status != "completed") launchError=completed?.error.orEmpty()
-            } catch(e:Exception) {
-                val status=if(!attempted || rejected) "failed" else "uncertain"
-                try { durable({ state -> state.sessionActions.find { it.requestId == action.requestId }?.let { if(it.status in setOf("sending","uncertain")) state.action(it.copy(status=status,error=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt; it has not been retried.")) else state } ?: state }) } catch(_:Exception) { launchError="Could not save the launch result. Its original request remains recoverable." }
-                if(e is CancellationException) throw e
-                launchError=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt before creating another session."
-            } finally { actionFlights-=action.requestId;launchSubmitting=false }
+                val created=try { submitWorktree(machine,connection,creation,arguments,evidence,generation) } finally { actionFlights-=creation.requestId;worktreeSubmitting=false }
+                if(created.isBlank()) { launchAutomaticFailed=true;return@launch }
+                if(!current()) return@launch
+                launchDirectoryJob?.cancel();launchWorktreeJob?.cancel()
+                launchStage="checking";launchDirectoryState=null;launchWorktreeState=null;retainCreatedWorktree(created,evidence)
+                launchDirectoryLoading=true
+                val directory=try { readLaunchDirectory(connection,machine,created) }
+                    catch(e:Exception) { if(e is CancellationException) throw e
+                        if(current()) launchError="Worktree created at $created. Checking its folder failed: ${e.message.orEmpty().trimEnd('.').ifBlank { "no response" }}. Check it again before starting there."
+                        return@launch }
+                    finally { if(launchGeneration == generation) launchDirectoryLoading=false }
+                if(!current()) return@launch
+                launchDirectoryState=directory
+                launchWorktreeLoading=true
+                val fresh=try { if("worktrees" in relayOperations[machine.connectionId].orEmpty() && "worktrees" in machineOperations[machine].orEmpty()) readLaunchWorktrees(connection,machine,directory.getString("path"),created) else null }
+                    catch(e:Exception) { if(e is CancellationException) throw e;null }
+                    finally { if(launchGeneration == generation) launchWorktreeLoading=false }
+                if(!current()) return@launch
+                launchWorktreeState=fresh
+                val blocked=launchReason(machine)
+                if(blocked.isNotBlank() || expectedCatalog != launchCatalogEvidence) { launchError="Worktree created at $created. ${blocked.ifBlank { "The creation details changed." }} Start the session there when ready.";return@launch }
+                val project=LaunchPresentation.projects(catalog).find { it.id == projectId }
+                val placement=WorktreePresentation.placement(fresh,launchCreatedEvidence,project,created)
+                val args=try { launchArguments(catalog,agent,created,tag,accountId,projectId,placement) }
+                    catch(e:Exception) { launchError="Worktree created at $created. ${e.message.orEmpty()}";return@launch }
+                val launch=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
+                launchStage="launching";launchSubmitting=true;actionFlights+=launch.requestId
+                submitLaunch(machine,connection,launch,agent,created,expectedCatalog,generation)
+            } finally { launchStage="" }
         }
     }
     fun mobileDeliveryGateway(connectionId:String)=MobileDelivery.gateway(machines.filter { it.connectionId==connectionId }) {
@@ -1104,6 +1239,43 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     })
     fun processStop(target: Target, processId: String, generation: String? = null) = sessionAction(target,"process_stop",JSONObject().put("process_id",processId).also { if(generation != null) it.put("generation",generation) })
     fun sessionAction(target: Target, operation: String, args: JSONObject = JSONObject())=submitSessionAction(target,operation,args)
+    /** Presentation for one Sessions row's long-press actions; the opened conversation re-verifies before any native request. */
+    fun sessionMenu(session: Session): List<List<SessionMenuItem>> {
+        val target = session.target
+        val online = SessionFilters.online(session,machines)
+        val blocked = when {
+            demo -> "Unavailable in preview."
+            updateInstallPreparing -> "Saving drafts for an app update."
+            !storageReady -> "Private storage is still loading."
+            else -> ""
+        }
+        val busy = contextBlocked(target) || outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets
+        val read = SessionMenuRead(
+            unavailable = if(demo) "Unavailable in preview." else if(!readTrackingReady || readWriter == null) "Read state is still loading on this phone." else "",
+            canMark = canReadAll(target), partial = readAllPartial(target),
+            replies = ReadAllPolicies.unreadReplies(indexedReadRecord(target),loadedRows(target).orEmpty()) ||
+                session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"),
+            reminder = reviewLater(target), checking = online && historyNetworkReason(target).isBlank())
+        val machine = machines.find { it.connectionId == target.connectionId && it.id == target.computerId }
+        return SessionActionsMenu.items(SessionMenuFacts(target,session.raw,SessionFilters.state(session),SessionFilters.archived(session),online,
+            relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
+            blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
+            SessionReference.create(target,machine?.nativeName.orEmpty()),session.raw.string("cwd")))
+    }
+    var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
+    /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
+    fun openWithSessionAction(session: Session, operation: String) {
+        if(operation != "terminal" && operation !in SessionActionPolicies.lifecycle) return
+        open(session,preserveProject = true)
+        sessionMenuRequest = SessionMenuRequest(session.target,operation,navigationId)
+    }
+    /** Hands the request over once, only to the session and navigation that it opened. */
+    fun takeSessionMenuRequest(target: Target): String? {
+        val request = sessionMenuRequest ?: return null
+        if(request.navigation == navigationId && request.target != target) return null
+        sessionMenuRequest = null
+        return request.operation.takeIf { request.navigation == navigationId && request.target == target }
+    }
     private fun submitSessionAction(target:Target,operation:String,args:JSONObject,authorized:SessionAction?=null,frame:Frame?=null,terminalBuffer:TerminalBuffer?=null) {
         val inspected=frame?.raw ?: activity ?: JSONObject()
         val reason = if(authorized == null) actionReason(target,operation) else authorizedSettingsReason(target,args,authorized,frame); if(reason.isNotBlank()) { error=reason; return }
@@ -1432,6 +1604,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
+            attachments.clear()
             sessions = sessions.filterNot { it.target.connectionId == connection.id }
             projects = projects.filterNot { it.key.connectionId == connection.id }
             if (selectedProject?.key?.connectionId == connection.id) selectedProject = null
@@ -1578,6 +1751,34 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val current=selected ?: return
         parentSelection=current
         open(current.copy(target=parent.copy(agentId=agentId,parentConversation=parent.conversation,conversation=parent.conversation + "/" + agentId),title=agentId),true)
+    }
+    private data class PendingAgentOpen(val navigation: Long, val parent: Target, val agentId: String, val deadline: Long)
+    private var pendingAgentOpen: PendingAgentOpen? = null
+    /** Checks a session card can make before its parent is open; [agentInspectReason] repeats them on the verified parent. */
+    fun agentListReason(parent: Target, agentId: String, online: Boolean): String {
+        if (demo) return "Preview sessions have no subagent activity."
+        if (parent.agentId.isNotBlank() || parent.archiveId.isNotBlank()) return "Archived subagent activity is not available on this phone."
+        if (!online) return "This computer is unavailable."
+        if("inspect_agent" !in relayFeatures[parent.connectionId].orEmpty() || "inspect_agent" !in machineFeatures[MachineKey(parent.connectionId,parent.computerId)].orEmpty()) return "This computer does not support child inspection."
+        return if (SessionCardPresentation.openableAgent(agentId)) "" else "Invalid child identity."
+    }
+    /** As in the desktop session tree, a child row opens its parent first, then the child once that exact conversation is verified. */
+    fun openAgent(parent: Session, agentId: String, online: Boolean) {
+        val reason = agentListReason(parent.target, agentId, online); if (reason.isNotBlank()) { error = reason; return }
+        open(parent, preserveProject = true)
+        pendingAgentOpen = PendingAgentOpen(navigationId, parent.target, agentId, android.os.SystemClock.elapsedRealtime() + 30_000)
+    }
+    private fun openPendingAgent() {
+        val pending = pendingAgentOpen ?: return
+        val target = selected?.target
+        if (pending.navigation != navigationId || target == null) { pendingAgentOpen = null; return }
+        if (!fresh(target)) return
+        pendingAgentOpen = null
+        when {
+            android.os.SystemClock.elapsedRealtime() > pending.deadline -> error = "The session took too long to load. Open the subagent again."
+            target.run != pending.parent.run || target.conversation != pending.parent.conversation -> error = "This session has a new conversation. Its earlier subagent was not opened."
+            else -> inspectAgent(target, pending.agentId)
+        }
     }
     fun openFromNotification(connection: String, computer: String, session: String) {
         pendingNotification = Triple(connection, computer, session); refresh()

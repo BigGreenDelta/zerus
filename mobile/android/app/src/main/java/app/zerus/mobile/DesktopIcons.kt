@@ -92,6 +92,26 @@ object DesktopIcons {
         moveTo(7f, 9f); lineTo(10f, 12f); lineTo(7f, 15f)
         moveTo(13f, 15f); lineTo(17f, 15f)
     }
+    /** WorkspaceIcons "folder": the same outline as Projects. */
+    val Folder get() = Projects
+
+    private fun PathBuilder.circle(x: Float, y: Float, r: Float) {
+        moveTo(x + r, y); arcTo(r, r, 0f, true, true, x - r, y)
+        arcTo(r, r, 0f, true, true, x + r, y); close()
+    }
+
+    /** WorkspaceIcons "git-branch". */
+    val GitBranch = stroke("DesktopGitBranch") {
+        moveTo(6f, 7.5f); lineTo(6f, 16.5f)
+        moveTo(18f, 7.5f); lineTo(18f, 10f); curveTo(18f, 15f, 6f, 11f, 6f, 16.5f)
+        circle(6f, 5f, 2.5f); circle(6f, 19f, 2.5f); circle(18f, 5f, 2.5f)
+    }
+    // SessionCardDelegate.h paints this subagent counter mark inline, centered here in 16 units.
+    val Subagents = stroke("DesktopSubagents", 1.2f, 16f) {
+        circle(5.5f, 5.75f, 2f); circle(11.5f, 6.75f, 2f)
+        moveTo(9.5f, 11.75f); arcTo(4f, 3f, 0f, false, false, 1.5f, 11.75f)
+        moveTo(14.5f, 12.25f); arcTo(3.5f, 2.5f, 0f, false, false, 7.5f, 12.25f)
+    }
 
     fun forName(name: String): ImageVector = when (name.lowercase(Locale.ROOT)) {
         "all", "sessions" -> All
@@ -101,6 +121,8 @@ object DesktopIcons {
         "archive", "archived" -> Archived
         "machine", "machines" -> Machines
         "folder", "project", "projects", "group" -> Projects
+        "git-branch" -> GitBranch
+        "subagents" -> Subagents
         else -> Terminal
     }
 

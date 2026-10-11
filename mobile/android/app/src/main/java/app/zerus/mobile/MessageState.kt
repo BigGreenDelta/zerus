@@ -121,9 +121,10 @@ object ConversationMerge {
                 used += match
                 recorded += message.requestId
                 result[match] = result[match].copy(id = "outgoing:${message.requestId}", outgoingId = message.requestId,
-                    attachments = if (result[match].attachments.isNotEmpty()) result[match].attachments else message.attachments.map { DisplayedAttachment(it.name, it.mime, it.bytes) }, delivery = "recorded")
+                    attachments = if (result[match].attachments.isNotEmpty()) AttachmentIdentity.withLocal(result[match].attachments, message.attachments)
+                        else message.attachments.map(Attachment::displayed), delivery = "recorded")
             } else result += Event("outgoing:${message.requestId}", "You", message.submittedText.ifBlank { message.text }, "", message.submittedAt.takeIf { it > 0 } ?: message.createdAt, message.requestId,
-                message.attachments.map { DisplayedAttachment(it.name, it.mime, it.bytes) }, "mobile_outbox", message.status, message.requestId)
+                message.attachments.map(Attachment::displayed), "mobile_outbox", message.status, message.requestId)
         }
         val ordered = result.take(native.size).toMutableList()
         result.drop(native.size).forEach { fallback ->
