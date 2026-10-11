@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Desktop presence and shared preferences through the real CLI with isolated state."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -59,6 +60,19 @@ class Presence(unittest.TestCase):
         for written_at in (time.time() - 121, time.time() + 600):
             self.file.write_text(json.dumps({**record, 'written_at': written_at}))
             self.assertNotIn('desktop_presence', self.listing())
+
+    def test_shared_state_files_are_not_scanned_as_session_bindings(self):
+        self.hgs('presence', 'set', '--json', data={'idle_seconds': 0, 'locked': False})
+        (self.state / 'read-marks.json').write_text(json.dumps({'sessions': {}}))
+        damaged = self.state / (hashlib.sha256(b'claude/demo').hexdigest() + '.json')
+        damaged.write_text('{"damaged":')
+        result = subprocess.run([str(HGS), 'ls', '--json', '--local'], env=self.env, text=True,
+                                capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('desktop-presence.json', result.stderr)
+        self.assertNotIn('read-marks.json', result.stderr)
+        # A damaged binding remains visible to its owner.
+        self.assertIn(damaged.name, result.stderr)
 
     def test_lock_time_survives_consecutive_locked_writes(self):
         self.hgs('presence', 'set', '--json', data={'idle_seconds': 0, 'locked': True})

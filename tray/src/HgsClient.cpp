@@ -1289,9 +1289,11 @@ quint64 HgsClient::requestCompactContext(const QString &host, const QString &nam
     return runSessionAction(host,name,"compact-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
 }
 
-quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation)
+quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt)
 {
-    return runSessionAction(host,name,"clear-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
+    QJsonObject data{{"expected_run_id",run},{"expected_conversation_id",conversation}};
+    if (dismissPrompt) data["dismiss_prompt"] = true; // Older hgs rejects the unknown field.
+    return runSessionAction(host,name,"clear-context",data);
 }
 
 quint64 HgsClient::requestInterrupt(const QString &host, const QString &name, const QString &run,

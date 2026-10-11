@@ -531,16 +531,25 @@ option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
 plan approval stay visible with **Open Terminal**.
 
+Claude Code can also ask its own questions without an agent tool call, such as
+whether to switch models after a safeguard stop. Activity shows the question and
+its options verbatim with **Open Terminal** while Terminal still shows them: no
+tool result can acknowledge an answer, so Zerus never chooses one of these
+options. When Claude waits for input and no request explains it, Activity shows
+the chooser visible at the bottom of Terminal, such as **Session paused**, in
+the same read-only way. A new prompt ends any earlier request.
+
 Supported startup prompts include Claude workspace trust and auto-mode consent,
 Codex folder access, **Hooks need review** and **Update available**, and Kimi
 folder/MCP trust. These can appear before a conversation exists, but only with
 verified startup identity.
 Claude workspace trust preserves its full permissions warning; Kimi includes the
-visible MCP commands. Trust persistence belongs to the native agent.
-Already-running Claude sessions can retain the exact Keychain or Bitwarden
-launcher notices above the complete workspace-trust panel. These notices do not
-change the request identity or appear in its disclosure; unrelated terminal
-output remains unsupported.
+visible MCP commands, and also asks for folders without project MCP targets.
+Trust persistence belongs to the native agent.
+Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
+notices above the complete workspace-trust panel; Claude also accepts its
+Keychain notice. These notices do not change the request identity or appear in
+its disclosure; unrelated terminal output remains unsupported.
 
 Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
 abbreviations that match the verified launch directory. It remains answerable
@@ -597,7 +606,13 @@ the current settings without retrying the stale request or showing a failure.
 
 Native clear/compact operations are capability-gated and require exact identity.
 **Clear session** requires confirmation naming the session and host, preserves
-unsent drafts and rechecks identity. DeepSeek context reset is unavailable until
+unsent drafts and rechecks identity. While Claude shows an approval, question or
+another chooser, **Clear session** asks for a separate **Dismiss and clear**
+confirmation: Zerus presses Esc once, as in Terminal, so an approval is denied and
+a question stays unanswered. It runs `/clear` only after the chooser closed and the
+empty native prompt is verified, and never repeats an uncertain attempt. Startup
+choices such as resume, permission mode and folder trust are answered in Activity
+instead. DeepSeek context reset is unavailable until
 its native Session Controller provides the supported operation. A confirmed clear
 adds an amber **Session cleared** boundary to Activity and keeps the earlier local
 timeline above it: the agent no longer sees that history, but you can still read
@@ -704,7 +719,9 @@ closing it clears this temporary choice. Selecting a listed folder unpins it.
 A folder outside the project shows a warning and is added only after a successful
 launch with the matching launch ID. Cancellation and launch failure add nothing.
 A worktree of a project folder on that computer is not outside the project, so
-starting there adds no folder; **Choose existing…** offers it again.
+starting there adds no folder; **Choose existing…** offers it again. When an
+automatic worktree is generated from an outside folder, the session starts in
+the worktree and the outside folder, not the worktree, joins the project.
 
 New launches immediately show **Starting…** until the matching session appears.
 Controls stay disabled before confirmation. Errors remove the placeholder and
@@ -1255,6 +1272,9 @@ and installs it under `~/Applications/hgs-tray.app` with
 for the tray. Signing precedes bundle replacement; matching code hashes avoid
 unnecessary replacement. Ad-hoc signing is not a Developer ID distribution
 signature. LaunchAgent crash recovery is independent of native agent engines.
+Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
+and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
+the standard install directories listed under **Desktop option** below.
 
 ```sh
 launchctl list | grep com.hgdev.hgs-tray
@@ -1270,7 +1290,7 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable, normally discovered through PATH |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |

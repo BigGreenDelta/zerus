@@ -24,9 +24,13 @@ fn border(row: &str) -> bool {
 }
 
 fn parse(screen: &str) -> Option<Panel> {
-    let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
+    let all: Vec<_> = screen.trim().lines().map(str::trim).collect();
+    let divider = all.iter().position(|row| border(row))?;
+    if divider > 0 && !kimi_tui_choice::launcher_notices(&all[..divider], "kimi") {
+        return None;
+    }
+    let rows = &all[divider..];
     if rows.len() < 15
-        || !border(rows[0])
         || !border(*rows.last()?)
         || rows[1] != TITLE
         || rows[2] != HINT
@@ -57,10 +61,15 @@ fn parse(screen: &str) -> Option<Panel> {
             return None;
         }
     }
+    // Kimi asks for every untrusted folder and lists targets only when the
+    // project's MCP configuration gates some. A listed heading needs targets.
     let disclosure = rows[6..options].join("\n").trim().to_owned();
     let normalized = disclosure.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !normalized.starts_with(EXPLANATION)
-        || !normalized.contains("Project MCP targets:")
+    let targets = normalized.strip_prefix(EXPLANATION)?;
+    if !(targets.is_empty()
+        || targets
+            .strip_prefix(" Project MCP targets: ")
+            .is_some_and(|listed| !listed.is_empty()))
         || disclosure.contains('…')
     {
         return None;
@@ -181,6 +190,32 @@ mod tests {
             format!("{SCREEN}\n > composer"),
         ] {
             assert!(parse(&invalid).is_none());
+        }
+    }
+    #[test]
+    fn launcher_notices_and_panel_without_targets() {
+        const LAUNCHED: &str = include_str!("../../tests/fixtures/kimi-folder-trust-launcher.txt");
+        let record = json!({"agent":"kimi","run_id":"run","run_identity_version":1,
+            "supervisor":{},"launch_dir":"/work/example"});
+        let prelude = "? Master password: [hidden]\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_kimi: secrets unlocked → launching kimi\n";
+        let native = LAUNCHED.strip_prefix(prelude).unwrap();
+        let panel = parse(LAUNCHED).unwrap();
+        assert_eq!((panel.selected, panel.folder.as_str()), (0, "/work/example"));
+        assert!(!panel.disclosure.contains("Project MCP targets"));
+        let question = card(&record, &panel).unwrap();
+        assert_eq!(question, card(&record, &parse(native).unwrap()).unwrap());
+        assert!(!string(&question["questions"][0], "body").contains("launching kimi"));
+        let reused = "run_kimi: SOPS_AGE_KEY already set — reusing it.\nrun_kimi: secrets unlocked → launching kimi\n";
+        assert_eq!(question, card(&record, &parse(&format!("{reused}{native}")).unwrap()).unwrap());
+        for invalid in [
+            format!("agent said:\n{LAUNCHED}"),
+            format!("{prelude}unrelated output\n{native}"),
+            LAUNCHED.replace("launching kimi", "launching claude"),
+            LAUNCHED.replace("secrets unlocked", "secrets unavailable"),
+            LAUNCHED.replace("remembers this folder.\n", "remembers this folder.\n  Project MCP targets:\n"),
+            format!("{LAUNCHED} > composer"),
+        ] {
+            assert!(parse(&invalid).is_none(), "{invalid}");
         }
     }
     #[test]

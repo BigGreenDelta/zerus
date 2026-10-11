@@ -21,10 +21,8 @@ fn parse(screen: &str) -> Option<Panel> {
     if divider > 0 {
         // Already-running launchers can leave these exact notices above the
         // native panel. Never skip arbitrary output to find a quoted dialog.
-        let prelude = all[..divider].join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
-        let bitwarden = prelude == "Bitwarden master password: unlock: SOPS_AGE_KEY loaded for this session. run_claude: secrets unlocked → launching claude"
-            || prelude == "run_claude: SOPS_AGE_KEY already set — reusing it. run_claude: secrets unlocked → launching claude";
-        if !bitwarden {
+        if !kimi_tui_choice::launcher_notices(&all[..divider], "claude") {
+            let prelude = all[..divider].join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
             let prompt = prelude.strip_prefix("hgs: Claude token is in the locked login keychain (ssh context); unlocking it password to unlock ")?;
             if !prompt.starts_with('/') || !prompt.ends_with("/Library/Keychains/login.keychain-db:") { return None; }
         }
@@ -167,6 +165,7 @@ mod tests {
         let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
         for prefix in [
             "Bitwarden master password:\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_claude: secrets unlocked → launching claude\n\n",
+            "? Master password: [hidden]\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_claude: secrets unlocked → launching claude\n\n",
             "run_claude: SOPS_AGE_KEY already set — reusing it.\nrun_claude: secrets unlocked → launching claude\n\n",
         ] {
             let screen = format!("{prefix}{SCREEN}");

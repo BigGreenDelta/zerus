@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
 #include <QIcon>
 #include <QLocalServer>
@@ -73,6 +74,9 @@ int main(int argc, char *argv[])
         errOut << QStringLiteral("hgs-tray: %1\n\n").arg(parseError) << AppConfig::usage();
         return 2;
     }
+    if (cfg.hgsPath.isEmpty())
+        cfg.hgsPath = AppConfig::fallbackHgsPath(qEnvironmentVariable("PATH"),
+                                                 AppConfig::hgsInstallDirs(QDir::homePath()));
 
     if (cfg.selfTest) {
         QCoreApplication app(argc, argv);

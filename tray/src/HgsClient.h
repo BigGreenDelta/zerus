@@ -159,7 +159,7 @@ public:
     quint64 requestStageFiles(const QString &host, const QString &name, const QStringList &paths,
                              const QString &run, const QString &conversation);
     quint64 requestCompactContext(const QString &host, const QString &name, const QString &run, const QString &conversation);
-    quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation);
+    quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt = false);
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
