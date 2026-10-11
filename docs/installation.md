@@ -22,7 +22,7 @@ native agents as part of a Zerus GUI/package update.
 For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets and WebEngine.
 Linux also needs KDE Frameworks 6 KStatusNotifierItem, KWindowSystem and KIdleTime,
 a system tray and user systemd for the standard autostart setup. On macOS, the
-installer uses Qt from Homebrew.
+installer uses Qt from Homebrew, and the desktop app requires macOS 14 or later.
 
 ## Local installation
 

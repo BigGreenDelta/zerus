@@ -15,6 +15,7 @@
     <key>CFBundleVersion</key>           <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>    <string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
     <!-- Start in the menu bar. MacAppVisibility enables Dock / Cmd-Tab while
          an application window is open, including minimized windows. -->
     <key>LSUIElement</key>               <true/>

@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
-# До project(): иначе CMake зафиксирует minos от SDK хоста и переменная не подхватится.
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
+# Set before project(); otherwise CMake fixes minos to the host SDK. Homebrew Qt
+# 6.11 frameworks are built for macOS 14.0, so the app cannot start on older systems.
+# FORCE also raises a lower value cached by an existing build directory.
+if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "14.0"))
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
 project(hgs-tray VERSION 0.38.0 LANGUAGES CXX)
