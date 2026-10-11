@@ -81,6 +81,17 @@ public slots:
     void record(const QUrl &url) { urls<<url; }
 };
 
+// Question prompts as shown: the agent's Markdown, or plain text for terminal panels.
+QStringList questionPrompts(const QuestionCard *card)
+{
+    QStringList prompts;
+    for (const auto *prompt : card->findChildren<QWidget *>("questionPrompt")) {
+        if (const auto *markdown = qobject_cast<const QTextBrowser *>(prompt)) prompts << markdown->toPlainText();
+        else if (const auto *label = qobject_cast<const QLabel *>(prompt)) prompts << label->text();
+    }
+    return prompts;
+}
+
 class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
@@ -2830,7 +2841,7 @@ elif sys.argv[1]=='answer':
     details["pending_questions"]=QJsonArray{submittedQuestion,nextQuestion};QVERIFY(save());
     client->inspectionReady({},"codex/hgs/dashboard",details);
     QVERIFY(card->isVisible());QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("1 pending"));
-    QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(),QString("Another unanswered question?"));
+    QCOMPARE(questionPrompts(card),QStringList{"Another unanswered question?"});
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question"));
     QVERIFY(card->findChild<QToolButton *>("questionQueuePrevious")->isHidden());
     QVERIFY(card->findChild<QToolButton *>("questionQueueNext")->isHidden());
@@ -2908,7 +2919,7 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
     auto olderItems=question["questions"].toArray();auto secondItem=olderItems.first().toObject();secondItem["id"]="q_1";secondItem["question"]="Another older question?";olderItems.append(secondItem);question["questions"]=olderItems;
     details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};client->inspectionReady({},"codex/hgs/dashboard",details);
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("3 pending"));
-    QStringList labels;for(auto *label:card->findChildren<QLabel *>())labels<<label->text();
+    QStringList labels=questionPrompts(card);
     QVERIFY(labels.contains("Most recent question?"));QVERIFY(!labels.contains("Which option?"));
     auto *previous=card->findChild<QToolButton *>("questionQueuePrevious"),*next=card->findChild<QToolButton *>("questionQueueNext");
     QVERIFY(previous->isVisible());QVERIFY(!previous->isEnabled());QVERIFY(next->isEnabled());
@@ -2921,7 +2932,7 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
     };
     firstAnswer()->setText("Latest draft");
     next->click();
-    labels.clear();for(auto *label:card->findChildren<QLabel *>("questionPrompt"))labels<<label->text();
+    labels=questionPrompts(card);
     QVERIFY(labels.contains("Which option?"));QVERIFY(!labels.contains("Most recent question?"));
     QVERIFY(previous->isEnabled());QVERIFY(!next->isEnabled());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #2/2"));
@@ -3806,6 +3817,14 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     });
     activity->fileReferenceActivated("docs/README.md:12");
     QCOMPARE(copied.takeFirst().at(0).toString(), QString("/local/project/docs/README.md"));
+    // A file link in a question's Markdown opens the same dialog.
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+        QCOMPARE(dialog->findChild<QLineEdit *>("sessionFilePath")->text(), QString("/local/project/docs/README.md"));
+        dialog->reject();
+    });
+    window.findChild<QuestionCard *>()->fileReferenceActivated("docs/README.md:12");
+    QVERIFY(!window.findChild<QDialog *>("sessionFileDialog"));
     window.showSession("mac", "claude/infra/review"); QTest::qWait(50);
     client->inspectionReady("mac", "claude/infra/review", {{"cwd", "/Users/remote/project"}, {"conversation_id", "conversation-one"}});
     QTimer::singleShot(0, &window, [&] {

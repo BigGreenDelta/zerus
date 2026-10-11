@@ -514,6 +514,13 @@ locally. They restore only for the same machine/session, run, conversation and
 question hash. Interrupted submissions remain locked until reviewed; confirmed
 queued answers keep their submitted state after a GUI restart.
 
+Questions the agent wrote render its Markdown like replies in Activity: the
+prompt, details and option descriptions, at the card's text sizes. A link opens
+only when clicked: web links in the default browser and file references in the
+file dialog. Other link targets, raw HTML and images remain text. Approval and
+trust disclosures and panels read from Terminal, such as folder trust and resume
+prompts, are shown exactly as reported.
+
 Question cards fit the current question's content, up to 600 px or 60% of the
 Activity area's height, whichever is smaller. Longer prompts and options scroll
 inside the card; freeform answer fields and actions stay visible. Short questions

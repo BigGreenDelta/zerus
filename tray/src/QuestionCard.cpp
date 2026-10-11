@@ -1,6 +1,8 @@
 #include "QuestionCard.h"
 #include "MonospaceFont.h"
 #include "ContentScale.h"
+#include "MarkdownText.h"
+#include "SessionFileReference.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -8,6 +10,8 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QCheckBox>
+#include <QCryptographicHash>
+#include <QDesktopServices>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -54,6 +58,24 @@ private:
     QStringList m_labels;
 };
 
+// The card's colours; setTheme() styles the widgets with them.
+struct CardColors {
+    QColor surface, text, border, selected, accent, onAccent, muted, field;
+};
+
+CardColors cardColors(bool dark)
+{
+    return {QColor(dark ? "#202a2c" : "#f4f9f7"), QColor(dark ? "#e8edf4" : "#1a2733"), QColor(dark ? "#40544e" : "#cbded4"),
+            QColor(dark ? "#293d35" : "#e4f3ec"), QColor(dark ? "#8bdfc0" : "#167357"), QColor(dark ? "#10231b" : "#ffffff"),
+            QColor(dark ? "#a2adbc" : "#627082"), QColor(dark ? "#192228" : "#ffffff")};
+}
+
+bool webLink(const QUrl &url)
+{
+    return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty()
+        && (url.scheme() == "https" || url.scheme() == "http");
+}
+
 QString customAnswerProblem(const QString &text)
 {
     if (text.toUtf8().size() > 4096) return QObject::tr("Keep your custom answer under 4 KiB.");
@@ -67,7 +89,8 @@ QString customAnswerProblem(const QString &text)
 
 class Choice final : public QFrame {
 public:
-    Choice(bool multi, const QString &label, const QString &description, QWidget *parent)
+    // A Markdown description replaces the plain one.
+    Choice(bool multi, const QString &label, const QString &description, QWidget *parent, MarkdownText *markdown = nullptr)
         : QFrame(parent), button(multi ? static_cast<QAbstractButton *>(new QCheckBox(this)) : new QRadioButton(this))
     {
         setObjectName("questionChoice"); setProperty("checked", false);
@@ -80,15 +103,21 @@ public:
         title->setTextFormat(Qt::PlainText); title->setWordWrap(true); title->setAttribute(Qt::WA_TransparentForMouseEvents);
         title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         copy->addWidget(title);
-        if (!description.isEmpty()) {
+        if (markdown) {
+            // Clicks outside its links select the option, like the rest of the row.
+            markdown->setClickThrough(true); copy->addWidget(markdown);
+        } else if (!description.isEmpty()) {
             auto *detail = new QLabel(description, this); detail->setObjectName("questionChoiceDescription");
             detail->setTextFormat(Qt::PlainText); detail->setWordWrap(true); detail->setAttribute(Qt::WA_TransparentForMouseEvents);
             detail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             copy->addWidget(detail);
         }
         row->addLayout(copy, 1);
-        connect(button, &QAbstractButton::toggled, this, [this](bool checked) {
-            setProperty("checked", checked); style()->unpolish(this); style()->polish(this); update();
+        connect(button, &QAbstractButton::toggled, this, [this, markdown](bool checked) {
+            setProperty("checked", checked); style()->unpolish(this); style()->polish(this);
+            // The description's background follows the row's state.
+            if (markdown) { markdown->style()->unpolish(markdown); markdown->style()->polish(markdown); }
+            update();
         });
     }
     QAbstractButton *button;
@@ -189,6 +218,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
         for (const auto &key : pending) saveDraft(key, true);
         if (!pending.isEmpty()) updateControls();
     }); retrySave->start();
+    connect(this, &QuestionCard::externalLinkActivated, this, [](const QUrl &url) { QDesktopServices::openUrl(url); });
     setTheme(true); hide();
 }
 
@@ -361,7 +391,12 @@ void QuestionCard::setSubmitted(const QString &sessionKey, const QString &questi
 
 void QuestionCard::rebuild()
 {
-    m_loading = true; m_forms.clear();
+    m_loading = true; m_forms.clear(); m_fileLinks.clear();
+    // Questions the agent wrote are its Markdown. Approval and trust disclosures
+    // and panels read from a terminal, such as a folder path, stay as reported.
+    static const QSet<QString> authored{"hook", "codex_async", "kimi_wire", "dsh_native", "claude_native_question"};
+    const bool literal = m_question.value("approval").toBool() || m_question.value("trust_request").toBool()
+        || !authored.contains(m_question.value("source").toString());
     while (m_pages->count()) { auto *page = m_pages->widget(0); m_pages->removeWidget(page); delete page; }
     while (m_tabs->count()) m_tabs->removeTab(0);
     const auto draft = m_drafts.value(m_key);
@@ -380,17 +415,22 @@ void QuestionCard::rebuild()
         formLayout->addWidget(scroll, 1);
         auto *page = new QWidget; page->setObjectName("questionPage");
         auto *column = new QVBoxLayout(page); column->setContentsMargins(0, 0, 7, 0); column->setSpacing(7);
-        auto *prompt = new QLabel(question.value("question").toString()); prompt->setObjectName("questionPrompt");
-        prompt->setTextFormat(Qt::PlainText); prompt->setWordWrap(true); prompt->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        prompt->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        column->addWidget(prompt);
+        const QString promptText = question.value("question").toString();
+        if (literal) {
+            auto *prompt = new QLabel(promptText); prompt->setObjectName("questionPrompt");
+            prompt->setTextFormat(Qt::PlainText); prompt->setWordWrap(true); prompt->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            prompt->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            column->addWidget(prompt);
+        } else column->addWidget(markdownText("questionPrompt", promptText));
         const QString body = question.value("body").toString();
-        if (!body.isEmpty() && body != prompt->text()) {
-            auto *detail = new QLabel(body); detail->setObjectName("questionBody"); detail->setTextFormat(Qt::PlainText); detail->setWordWrap(true);
-            detail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            if(m_question.value("approval").toBool()) {auto font=detail->font();font.setFamily(monospaceFamily());detail->setFont(font);}
-            column->addWidget(detail);
+        if (!body.isEmpty() && body != promptText) {
+            if (literal) {
+                auto *detail = new QLabel(body); detail->setObjectName("questionBody"); detail->setTextFormat(Qt::PlainText); detail->setWordWrap(true);
+                detail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                if(m_question.value("approval").toBool()) {auto font=detail->font();font.setFamily(monospaceFamily());detail->setFont(font);}
+                column->addWidget(detail);
+            } else column->addWidget(markdownText("questionBody", body));
         }
         auto *mode = new QLabel(form.multi ? tr("Select one or more") : tr("Select one")); mode->setObjectName("questionMode"); column->addWidget(mode);
         auto *group = new QButtonGroup(page); group->setExclusive(!form.multi);
@@ -401,7 +441,8 @@ void QuestionCard::rebuild()
             const auto option = optionValue.toObject();
             const QString description = option.value("scope") == "broader"
                 ? tr("Applies beyond this request. Asks for confirmation.") : option.value("description").toString();
-            auto *choice = new Choice(form.multi, option.value("label").toString(), description, page);
+            auto *choice = new Choice(form.multi, option.value("label").toString(), description, page,
+                literal || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
             choice->button->setObjectName("questionOption"); choice->button->setProperty("optionId", option.value("id").toString());
             choice->button->setProperty("questionId", form.id); group->addButton(choice->button);
             choice->button->setChecked(answer.options.contains(option.value("id").toString()));
@@ -417,7 +458,7 @@ void QuestionCard::rebuild()
                 connect(form.other, &QAbstractButton::toggled, this, [this] { capture(); });
             }
             form.text = new QLineEdit; form.text->setObjectName("questionFreeText"); form.text->setProperty("questionId", form.id);
-            form.text->setPlaceholderText(tr("Write your answer…")); form.text->setAccessibleName(tr("Your answer to %1").arg(prompt->text()));
+            form.text->setPlaceholderText(tr("Write your answer…")); form.text->setAccessibleName(tr("Your answer to %1").arg(promptText));
             form.text->setMinimumHeight(35); form.text->setMaxLength(4096); form.text->setText(answer.text);
             // Keep the answer reachable while a long prompt or option list scrolls.
             formLayout->addWidget(form.text); connect(form.text, &QLineEdit::textChanged, this, [this] { capture(); });
@@ -434,6 +475,46 @@ void QuestionCard::rebuild()
     m_tabs->setVisible(m_tabs->count() > 1);
     if (m_tabs->count()) m_tabs->setCurrentIndex(qBound(0, draft.page, m_tabs->count() - 1));
     m_loading = false;
+}
+
+MarkdownText *QuestionCard::markdownText(const QString &name, const QString &source)
+{
+    auto *text = new MarkdownText; text->setObjectName(name);
+    connect(text, &QTextBrowser::anchorClicked, this, &QuestionCard::activateLink);
+    renderMarkdown(text, source);
+    return text;
+}
+
+void QuestionCard::renderMarkdown(MarkdownText *text, const QString &source)
+{
+    const auto colors = cardColors(m_dark);
+    const bool prompt = text->objectName() == "questionPrompt";
+    // GitHub's 14 px Markdown at the card's type sizes: 13 px prompts, 11 px details.
+    auto theme = MarkdownTheme::github(m_dark, text->objectName() == "questionChoiceDescription" ? colors.field : colors.surface,
+                                       m_scale * (prompt ? 13 : 11) / 14.0);
+    theme.fg = prompt ? colors.text : colors.muted;
+    // Activity's code surface and denser dark chips keep code visible on the card.
+    theme.subtle = QColor(m_dark ? "#171e25" : "#e8eef2"); theme.stripe = m_dark ? QColor("#2a333d") : theme.subtle;
+    if (m_dark) theme.chip.setAlphaF(0.33f);
+    text->setMarkdownSource(source, theme, [this](const QString &href) { return link(href); });
+}
+
+MarkdownLink QuestionCard::link(const QString &href)
+{
+    const auto file = SessionFileReference::parse(href);
+    if (file.valid()) {
+        const QString key = QString::fromLatin1(QCryptographicHash::hash(href.toUtf8(), QCryptographicHash::Sha256).toHex());
+        m_fileLinks.insert(key, href);
+        return {"hgs-file:" + key, file.path + file.location, file.path + file.location};
+    }
+    if (webLink(QUrl(href))) return {href, {}, {}};
+    return {};
+}
+
+void QuestionCard::activateLink(const QUrl &url)
+{
+    if (url.scheme() == "hgs-file" && m_fileLinks.contains(url.path())) emit fileReferenceActivated(m_fileLinks.value(url.path()));
+    else if (webLink(url)) emit externalLinkActivated(url);
 }
 
 QuestionCard::~QuestionCard() { ComposerDraftStore::flushWrites(); }
@@ -694,6 +775,7 @@ void QuestionCard::setContentScale(double scale)
 void QuestionCard::setTheme(bool dark)
 {
     m_dark = dark;
+    const auto colors = cardColors(dark);
     setStyleSheet(QString(R"(
         QWidget#questionCard { background:%1; border:1px solid %3; border-radius:10px; }
         QWidget#questionPage, QScrollArea { background:transparent; border:0; }
@@ -702,6 +784,11 @@ void QuestionCard::setTheme(bool dark)
         QLabel#questionAskedAt, QLabel#questionPendingCount, QLabel#questionProgress, QLabel#questionMode, QLabel#questionBody, QLabel#questionChoiceDescription { color:%7; font-size:%10px; }
         QLabel#questionPrompt { font-size:%9px; font-weight:600; padding-bottom:3px; }
         QLabel#questionChoiceTitle { font-size:%11px; }
+        QTextBrowser#questionPrompt, QTextBrowser#questionBody { background:%1; border:0; }
+        QTextBrowser#questionPrompt { font-size:%9px; font-weight:600; }
+        QTextBrowser#questionBody, QTextBrowser#questionChoiceDescription { font-size:%10px; }
+        QFrame#questionChoice QTextBrowser#questionChoiceDescription { background:%8; border:0; }
+        QFrame#questionChoice[checked=true] QTextBrowser#questionChoiceDescription { background:%4; }
         QFrame#questionChoice { background:%8; border:1px solid %3; border-radius:7px; }
         QFrame#questionChoice[checked=true] { background:%4; border-color:%5; }
         QFrame#questionChoice:hover { border-color:%5; }
@@ -723,12 +810,12 @@ void QuestionCard::setTheme(bool dark)
         QToolButton#questionQueuePrevious, QToolButton#questionQueueNext { color:%2; background:%8; border:1px solid %3; border-radius:5px; padding:0; }
         QToolButton#questionQueuePrevious:hover, QToolButton#questionQueueNext:hover { border-color:%5; }
         QToolButton#questionQueuePrevious:disabled, QToolButton#questionQueueNext:disabled { color:%7; background:transparent; }
-    )").arg(dark ? "#202a2c" : "#f4f9f7", dark ? "#e8edf4" : "#1a2733", dark ? "#40544e" : "#cbded4",
-             dark ? "#293d35" : "#e4f3ec", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff",
-             dark ? "#a2adbc" : "#627082", dark ? "#192228" : "#ffffff")
+    )").arg(colors.surface.name(), colors.text.name(), colors.border.name(), colors.selected.name(),
+             colors.accent.name(), colors.onAccent.name(), colors.muted.name(), colors.field.name())
         .arg(ContentScale::px(13, m_scale)).arg(ContentScale::px(11, m_scale)).arg(ContentScale::px(12, m_scale)).arg(ContentScale::px(7, m_scale)));
     style()->unpolish(this); style()->polish(this);
     for (auto *child : findChildren<QWidget *>()) { child->style()->unpolish(child); child->style()->polish(child); }
+    for (auto *text : findChildren<MarkdownText *>()) renderMarkdown(text, text->markdownSource());
     update();
     updateControls();
 }

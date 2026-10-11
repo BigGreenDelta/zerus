@@ -6,10 +6,14 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QRegularExpression>
+#include <QScrollBar>
+#include <QStyle>
+#include <QStyleOption>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QTextEdit>
 #include <QTextFragment>
 #include <QTextTable>
 #include <QUrlQuery>
@@ -252,6 +256,26 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         each.layout()->draw(painter, layout->blockBoundingRect(each).topLeft() - each.layout()->position(), ranges, reach);
     }
     painter->restore();
+}
+
+void MarkdownObjects::paintChips(QTextEdit *view, const QRect &exposed)
+{
+    // The selections as QTextEdit paints them: found text, then the reader's.
+    QList<QAbstractTextDocumentLayout::Selection> selections;
+    for (const auto &extra : view->extraSelections()) selections.append({extra.cursor, extra.format});
+    if (view->textCursor().hasSelection()) {
+        const auto group = view->hasFocus() ? QPalette::Active : QPalette::Inactive;
+        QTextCharFormat format;
+        format.setBackground(view->palette().brush(group, QPalette::Highlight));
+        format.setForeground(view->palette().brush(group, QPalette::HighlightedText));
+        QStyleOption option; option.initFrom(view);
+        if (view->style()->styleHint(QStyle::SH_RichText_FullWidthSelection, &option, view)) format.setProperty(QTextFormat::FullWidthSelection, true);
+        selections.append({view->textCursor(), format});
+    }
+    QPainter painter(view->viewport());
+    const QPoint scroll(view->horizontalScrollBar()->value(), view->verticalScrollBar()->value());
+    painter.translate(-scroll);
+    paintChips(&painter, view->document(), QRectF(exposed.translated(scroll)), view->viewport()->palette(), selections);
 }
 
 QString MarkdownObjects::plainText(const QTextCursor &selection)

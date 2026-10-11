@@ -235,7 +235,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_questioncard test_questioncard.cpp ../src/QuestionCard.cpp ../src/ComposerDraftStore.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
-target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown)
 add_test(NAME questioncard COMMAND test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

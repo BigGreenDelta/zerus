@@ -788,6 +788,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     }
     m_question->hide();
     connect(m_question, &QuestionCard::answerRequested, this, &SessionsWindow::answerQuestion);
+    connect(m_question, &QuestionCard::fileReferenceActivated, this, openFileReference);
     connect(m_question, &QuestionCard::queueNavigationRequested, this, [this](int direction) {
         if(const auto *entry=selected())renderQuestion(*entry,direction);
     });
