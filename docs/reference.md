@@ -531,11 +531,12 @@ Codex folder access, **Hooks need review** and **Update available**, and Kimi
 folder/MCP trust. These can appear before a conversation exists, but only with
 verified startup identity.
 Claude workspace trust preserves its full permissions warning; Kimi includes the
-visible MCP commands. Trust persistence belongs to the native agent.
-Already-running Claude sessions can retain the exact Keychain or Bitwarden
-launcher notices above the complete workspace-trust panel. These notices do not
-change the request identity or appear in its disclosure; unrelated terminal
-output remains unsupported.
+visible MCP commands, and also asks for folders without project MCP targets.
+Trust persistence belongs to the native agent.
+Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
+notices above the complete workspace-trust panel; Claude also accepts its
+Keychain notice. These notices do not change the request identity or appear in
+its disclosure; unrelated terminal output remains unsupported.
 
 Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
 abbreviations that match the verified launch directory. It remains answerable
