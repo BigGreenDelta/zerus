@@ -1,6 +1,8 @@
 # Windows support
 
-Status: approved direction, not implemented, 2026-10-10. Tracking: `zerus-ziq3`.
+Status: Phase 1 implemented, pending review, 2026-10-11 (approved direction
+2026-10-10). Tracking: `zerus-ziq3`. Decisions and deviations made during the
+implementation are in [Implementation notes](#implementation-notes-2026-10-11).
 
 This document is the starting point for Windows support. It records the owner's
 decisions, the verified state of the code on Windows, prior art and an ordered list
@@ -254,8 +256,9 @@ is covered by the existing Linux and macOS tests, run after every step.
 2. **Hosted CI:** a `windows-desktop` job on a standard `windows-2025` runner in
    `.github/workflows/checks.yml`:
    - Rust tests for the client subset;
-   - Qt via a SHA-pinned `install-qt-action`, cached under the existing token
-     rules (write only for exact upstream main pushes and schedules);
+   - Qt via `aqt install-qt` from a hash-locked aqtinstall closure in its own
+     virtual environment (no unhashed PyPI code in the job), cached under the
+     existing token rules (write only for exact upstream main pushes and schedules);
    - GUI tests with `QT_QPA_PLATFORM=offscreen`;
    - `windeployqt`, then a zip artifact with bounded retention.
    The job joins the CI gate only after it is stable.
@@ -376,3 +379,119 @@ Constraints that shape the work:
 7. Add the `windows-desktop` CI job, then the nightly zip.
 8. Document Windows in `docs/installation.md` and `CONTRIBUTING.md`, and
    describe the Windows job and asset in `docs/ci-and-aur.md`.
+
+## Implementation notes (2026-10-11)
+
+Phase 1 follows the design above. User documentation is in
+[installation](../../installation.md#windows), the
+[reference](../../reference.md#windows),
+[CONTRIBUTING](../../../CONTRIBUTING.md#windows) and
+[CI](../../ci-and-aur.md#windows-client-desktop-and-portable-zip). These decisions
+refine or change the plan:
+
+- **Qt 6.10.3, not the newest Qt.** aqtinstall 3.3.0 cannot resolve the split
+  repository layout of Qt 6.11 and later for Windows. CI installs Qt 6.10.3
+  `win64_msvc2022_64` with `aqt install-qt` from a hash-locked closure
+  (`scripts/ci/aqt-requirements.txt`) on a pinned CPython 3.13, instead of
+  `install-qt-action`.
+- **Minimum Windows 10 1903.** The manifest sets UTF-8 as the process code page,
+  which needs 1903. The pseudoconsole API (1809) is looked up at run time.
+- **`local_sessions` key.** The local element of `hgs ls --json` on Windows is a
+  control-only box with `"local_sessions": false`, empty `projects` and `sessions`,
+  and metrics without load averages. The key is emitted only when false, so Unix
+  output is unchanged. The GUI decides every control-only behavior from this key,
+  not from `#ifdef`, so the same tests cover all platforms. The exceptions are the
+  swarm worker supervisor and the disabled desktop presence, which depend on the
+  platform. Local session commands exit with code 2; DeepSeek Native UI and mobile
+  peers also exit 2 with their own messages. `account ls` and `account default`
+  without an ID return an empty catalog, and `account copy` works between two
+  remote machines. `macos_session` stays compiled: it already stubs non-macOS
+  systems. `state` is replaced by fail-closed stubs in `src/state_windows.rs`.
+- **`HGS_SSH`.** It overrides the OpenSSH client on every platform; tests inject
+  their fake client this way. Windows otherwise uses
+  `%SystemRoot%\System32\OpenSSH\ssh.exe`, then `PATH` with `PATHEXT`. The self
+  name is `HGS_SELF`, else the lowercase `COMPUTERNAME`.
+- **Overlapped pipes for `ssh.exe`.** Windows OpenSSH (9.5p2, inbox) never exits
+  after it has used a synchronous pipe for one of its standard streams, even with
+  no network. Rust's standard library, Python, PowerShell and the GitHub Actions
+  runner create such pipes. It also never ends a remote command's input read from
+  `NUL` or a non-empty file, and writes output files from offset 0, over what `>>`
+  keeps. `hgs.exe` gives `ssh.exe` overlapped named pipes and relays its own
+  stdin, stdout and stderr unless they are a console, waiting for slow readers and
+  abandoning a relay only after 5 s idle in a read once `ssh.exe` has exited.
+  Unpiped `ssh` input is a pipe that is already closed, and `machine setup` pumps
+  its bundle through a pipe. CI steps read stdin from `/dev/null`, and the fake
+  client refuses synchronous pipes, `NUL` or a non-empty file as input and output
+  files that already hold data, so a regression fails instead of hanging.
+- **`LocalCommand` through `cmd.exe`.** Windows OpenSSH runs `LocalCommand` with
+  `_wsystem`, which ignores `SHELL`. The interactive link marker is
+  `type nul > "%%HGS_LINK_MARKER%%"`, with the path in the ssh child's environment,
+  so a `%` in the temporary path is not expanded. Marker folders are named
+  `hgs-link-<pid>-<random>`; the next link removes those of ended processes, and a
+  closing console removes its own. Unix keeps `touch '<path>'`.
+- **Job objects.** `hgs.exe` places itself in a kill-on-close job at startup (best
+  effort), so `ssh.exe` and `tar.exe` children die with it. Each ConPTY client, the
+  supervised swarm worker and the test fixture shim have their own kill-on-close
+  jobs. Interactive waits swallow Ctrl+C and Ctrl+Break with a console handler
+  instead of `SetConsoleCtrlHandler(NULL, TRUE)`.
+- **Tray-supervised swarm worker.** Windows has no user service manager. On Windows
+  the tray runs one hidden `hgs.exe swarm worker` and restarts it with a delay that
+  doubles from one second to five minutes. Executable-replacement detection works
+  through volume serial number, file index and last-write time.
+- **Windows Terminal with a console fallback.** The open modes `auto`, `tab` and
+  `window` keep their names and mean Windows Terminal (`wt.exe`); `console` is new.
+  When `wt.exe` is missing or would change an argument, `hgs-tray.exe --console-run`
+  hosts a console window (`ConsoleHost`) that starts `hgs.exe` with the exact
+  argument vector and stays open when it fails. Copied commands use PowerShell
+  quoting, with `Start-Process` for arguments that Windows PowerShell 5.1 would
+  pass incorrectly.
+- **Control-only GUI.** Recovery settings on a control-only computer are saved to
+  the first reachable remote machine. The local poll interval is at least 15 s,
+  because every poll starts processes. Settings use the INI format, single
+  instance uses a per-user pipe name and lock file, and Windows Error Reporting
+  restarts the tray after a watchdog abort.
+- **Nightly channel for the portable zip.** Only nightly prereleases carry
+  `zerus-<version>-windows-x86_64.zip`; it is copied unchanged from the CI run,
+  sealed in `SHA256SUMS` and checked again before upload. It is GitHub-only: the
+  zerus.dev mirror neither stores it nor lists it in the v1 feed. A portable
+  installation defaults Settings → Updates to the nightly channel and has no
+  self-update. A stable Windows asset remains a separate decision.
+- **Packaging.** `windeployqt` runs with `--no-opengl-sw`,
+  `--no-system-d3d-compiler` and `--no-system-dxc-compiler`, and the ICU DLLs it
+  copies from System32 are removed: Windows 10 1903 and later ship
+  `D3DCompiler_47.dll`, and packaging and the checker reject the Direct3D and DXC
+  compiler DLLs. The zip carries the app-local Visual C++ runtime and the Qt SPDX
+  documents. It also carries the text of every license those documents name, from
+  `packaging/windows/licenses`. The zip is about 138 MB, about 345 MB unpacked.
+- **Python test fixtures and a native shim.** The GUI tests' shell fixtures were
+  ported to Python for every platform. On Windows, `zerus-test-helper.exe` (static
+  runtime, kill-on-close job) starts them with their command line unchanged and
+  stands in for `/bin/sh`. Three session-window tests that need local folders are
+  skipped on Windows. `tests/test_windows_client.py` drives `hgs.exe` against
+  `examples/fake_ssh.rs`.
+- **Machine setup from Windows.** `hgs machine setup` stays available. It packs the
+  source checkout with System32 `tar.exe` (bsdtar; GNU tar extracts the result
+  unchanged) and refuses a checkout whose `install.sh` or `hgs_state.py` has CRLF
+  line endings. `.gitattributes` keeps `*.sh` and `*.py` in LF.
+- **CI gate.** The `windows-desktop` job joined the CI gate and the nightly at
+  once, not after a stability period as planned. Clippy runs as
+  `cargo +1.85.0 clippy -D warnings` over the Windows target. On the development
+  PC, the parallel Qt suites showed load-sensitive timing failures that pass
+  serially. Watch the first hosted runs.
+- **Measured latency.** One `hgs.exe @peer ls --json` took about 150 ms over the
+  LAN (median of ten, full handshake each time; the remote listing itself took
+  13 ms). No persistent connection is needed for Phase 1.
+
+Verified on the development PC against a disposable Linux peer:
+
+- machine profiles, polling, forwarded commands and swarm join and sync;
+- the Windows swarm worker;
+- the packaged zip, started from an isolated extraction;
+- a ConPTY attach built from `PtyProcess_win.cpp` running the real `hgs.exe` and
+  `ssh.exe`: input, resize, Ctrl+C reaching the remote shell, and stop.
+
+Not yet verified:
+
+- the interactive desktop: Windows Terminal tabs, tray notifications, the taskbar
+  badge and the embedded terminal inside the running app;
+- a hosted `windows-2025` run.

@@ -745,7 +745,8 @@ once every ten minutes and only for the default configuration directory, never
 under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
 `hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
 running worker stays outdated, Settings → Mobile connection asks you to restart the
-sync service.
+sync service. Windows has no service manager for the worker; the desktop app runs
+it there ([Windows control console](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
@@ -1195,14 +1196,41 @@ Enabling that API grants other session-bus processes control of terminal tabs.
 Terminal.app remains the native macOS backend; alternate terminal bundles need a
 supported explicit launch template, not an executable path guessed from a bundle.
 
+Windows offers `auto`, `tab`, `window`, `console` and `clipboard`. `auto` and `tab`
+open a tab in the most recent Windows Terminal (`wt.exe`) window and `window` a new
+Windows Terminal window; Windows Terminal starts `hgs.exe` directly. When `wt.exe`
+is missing or would change an argument (it re-joins the command line and expands
+`%NAME%`), the session opens in a console window instead; `tab` and `window` report
+that, `auto` does not. `console` always uses a console window, hosted by
+`hgs-tray.exe --console-run`: it starts `hgs.exe` with the exact arguments and no
+shell, and stays open with the exit code until Enter when `hgs` fails. A
+`--terminal` template (`terminal=` in `tray.conf`) takes the place of every mode
+but `clipboard`: Zerus starts the template's own program with `{cmd}` replaced by
+the PowerShell command, and a console program gets a console window of its own.
+Name a shell that runs that command, for example
+`powershell.exe -NoExit -Command {cmd}`. A Linux template from a shared
+`tray.conf`, such as `foot -e bash -lc {cmd}`, does not work on Windows. A
+`tray.conf` shared with Linux keeps its mode; a macOS mode such as `terminal`
+falls back to `auto` with a warning.
+
 Clipboard mode copies the shell-safe connect/restore command instead of launching
 a terminal. Explicit **Open terminal** still opens one without changing that mode.
-Linux uses its desktop clipboard; macOS uses the native clipboard. New-session
-**Open terminal window** remains an independent preference.
+Linux uses its desktop clipboard; macOS and Windows use the native clipboard.
+New-session **Open terminal window** remains an independent preference.
 
-The tray config lives at `~/.config/hgs/tray.conf` unless overridden. CLI flags win
-at startup; a later tray-menu selection takes effect immediately and writes the
-config for subsequent runs. A later launch with the same explicit flag wins again.
+On Windows, copied and displayed commands are written for PowerShell: arguments
+are single-quoted when needed, `'@host'` is always quoted, and a quoted `hgs.exe`
+path gets the `&` call operator. When Windows PowerShell 5.1 would pass an argument
+incorrectly (an empty one, a double quote, or a space before a final backslash),
+the command is copied as `Start-Process -FilePath … -ArgumentList … -NoNewWindow -Wait`
+instead. A computer without local sessions offers no local folder shell.
+
+The tray config lives at `~/.config/hgs/tray.conf` unless overridden; on Windows
+`~` is `HOME` when set, otherwise the account's profile folder (normally
+`%USERPROFILE%`; unlike `hgs.exe`, the desktop app ignores a changed
+`USERPROFILE`). CLI flags win at startup; a later tray-menu selection takes effect
+immediately and writes the config for subsequent runs. A later launch with the
+same explicit flag wins again.
 
 <a id="installation"></a>
 
@@ -1220,8 +1248,10 @@ HGS_TAB_COLORS="macbook=#80ff80"
 ```
 
 The CLI config is `~/.config/hgs/config`; `HGS_CONFIG_DIR` and `HGS_STATE_DIR` permit
-isolated setups. Runtime storage, `HGS_*` variables and application/service IDs
-stay compatible with existing installations. Source is [MIT](../LICENSE); see
+isolated setups. `HGS_SSH` names the OpenSSH client for every peer connection
+(dry runs still print `ssh`); without it `hgs` runs `ssh` from `PATH`, and on
+Windows `%SystemRoot%\System32\OpenSSH\ssh.exe` first. Runtime storage, `HGS_*`
+variables and application/service IDs stay compatible with existing installations. Source is [MIT](../LICENSE); see
 [third-party notices](../THIRD_PARTY_NOTICES.md) for dependency licensing.
 
 The GUI installer updates only Zerus and its desktop integration. It never
@@ -1257,12 +1287,12 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable, normally discovered through PATH |
+| `--hgs PATH` | CLI executable, normally discovered through PATH; on Windows `hgs.exe` next to `hgs-tray.exe` first |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
 | `--icon-color COLOR` | Override tray mark/counter foreground |
-| `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard |
+| `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace |
 
@@ -1273,6 +1303,96 @@ unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,
 credentials, runtime journals and personal connection values belong outside the
 repository.
+
+<a id="windows"></a>
+
+## Windows control console
+
+On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines;
+the local session host is not compiled in. See
+[installation and limitations](installation.md#windows).
+
+**Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
+remote command stays `~/.local/bin/hgs` with POSIX quoting. Locally, `ls`,
+`machine`, `project`, `swarm` and `presence` work. `account ls` and `account
+default` without an ID print an empty catalog, and `account copy` works between
+two remote machines. Every other local command, such as `a`, `send`, `inspect` of a
+local session or a launch without `@host`, exits with code 2:
+
+```text
+hgs: Local sessions are not supported on Windows yet; choose a remote machine.
+```
+
+The DeepSeek Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`)
+and the mobile-peer commands also exit with code 2, each with its own message.
+
+**Listing.** The local element of `hgs ls --json` and `hgs ls --json --local` is a
+control-only box with `"local_sessions": false`, `projects: {}` and `sessions: []`.
+Its metrics include CPU, memory and uptime; load averages are null. Plain `hgs ls`
+prints `(control console: sessions run on remote machines)` for this computer, and
+`--dry-run ls` prints nothing for it. The computer's name is `HGS_SELF` when set,
+otherwise its lowercase `COMPUTERNAME`. Configuration and state live under `HOME`
+when set, otherwise `%USERPROFILE%`, in the usual `.config\hgs` and
+`.local\state\hgs` folders.
+
+**OpenSSH.** Windows OpenSSH never exits after it has used a synchronous pipe for
+one of its standard streams, the kind that Rust's standard library, Python and
+PowerShell create. It never sends the end of a non-empty file or of `NUL` given
+as input, so a remote command reading its input waits forever, and it writes an
+output file from its start, over what `>>` keeps. Every stream that carries data
+between `hgs.exe` and `ssh.exe` is therefore a console or an overlapped pipe:
+`hgs.exe` relays its own input and output unless they are a console, so `< NUL`
+ends the remote input and `>> log` appends. Scripts must not run `ssh.exe` with
+such streams directly: call `hgs.exe @host …`. `hgs.exe` runs in a kill-on-close
+job object, so its `ssh.exe` and `tar.exe` children end when it is killed. Windows
+OpenSSH has no connection sharing, so every poll is a full SSH handshake.
+
+**Interactive links.** `hgs @host a SESSION` runs `ssh.exe -t` on the inherited
+console. Ctrl+C and Ctrl+Break reach the remote program; `hgs.exe` ignores them while
+it waits. Windows OpenSSH runs the `LocalCommand` that marks an established link
+through `cmd.exe`, as `type nul > "%%HGS_LINK_MARKER%%"`: the marker path travels in
+that environment variable, so a `%` or another special character in the temporary
+folder is never expanded. Each link uses a `hgs-link-<pid>-<random>` folder in
+`%TEMP%`. A closing console window removes its folder. A client the desktop app
+kills leaves its folder behind until the next interactive link, which removes the
+folders of ended processes.
+
+**Embedded terminal.** The built-in Terminal runs `hgs.exe @host a SESSION
+--existing` in a Windows pseudoconsole (ConPTY). Disconnect closes the
+pseudoconsole, waits up to a second and then ends `hgs.exe` and `ssh.exe` through a
+job object; the session keeps running on the remote machine.
+
+**Machine setup.** `hgs machine setup` (**Install / update HGS…**) needs a source
+checkout on Windows. It packs the checkout with the system `tar.exe` and refuses one
+whose `install.sh` or `hgs_state.py` has CRLF line endings; `.gitattributes` keeps
+`*.sh` and `*.py` in LF. Identity files in `machines.local.json` may be Windows
+paths or `~\…`.
+
+**Swarm worker.** Windows has no user service manager. The desktop app runs one
+hidden `hgs.exe swarm worker` and restarts it after an exit. The delay doubles
+from one second up to five minutes and resets after a run of a minute or more. A
+kill-on-close job ends the worker with the app, also after a crash. Without the
+desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when needed.
+`hgs swarm get` reports `worker: {running, current}` as elsewhere.
+
+**Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
+`PATH`; `--hgs` overrides both. Settings are in `%APPDATA%\hgdev\hgs-tray.ini`, with
+drafts beside it, and one instance runs per user. When the local box reports
+`local_sessions: false`, the app offers remote machines only: in New session,
+Overview, the tray menu, Accounts, Projects and search. The Machines page lists
+this computer as a control console without SSH settings. Settings → Mobile
+connection is hidden, automatic recovery settings are saved to the first
+reachable remote machine, no desktop presence is recorded, and this computer is
+listed at most once every 15 seconds. Attention notices are tray notifications
+with a taskbar badge. After a main-thread watchdog abort, Windows Error Reporting
+restarts the app with the same options.
+
+**Updates.** The portable zip has no installer or self-update, and only nightly
+releases carry it. Settings → Updates therefore uses the nightly channel by
+default on a portable installation. It reports a nightly with a newer product
+version than the running app and links to its release page; nightlies of the same
+product version cannot be told apart. The zip is published on GitHub only: the
+zerus.dev mirror neither stores it nor lists it in the v1 desktop feed.
 
 ## JSON and external clients
 
@@ -1303,6 +1423,11 @@ an empty array. A minimal shape is:
   }]
 }
 ```
+
+A computer that runs no sessions of its own (`hgs.exe` on Windows) adds
+`"local_sessions": false` and returns empty `projects` and `sessions`. The key
+appears only when false; a missing key means true, so Linux and macOS snapshots
+are unchanged. [Windows control console](#windows).
 
 Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.

@@ -60,6 +60,8 @@ never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
+On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after
+using a synchronous pipe, so scripts and tests must not pipe it directly.
 Use synthetic fixture paths, reserved example domains and local/private configuration
 for deployment values. Never commit login material, runtime data or personal audits.
 All Beads data on the repository remote may eventually be public, including history.
@@ -69,8 +71,8 @@ no-reply address instead if email privacy matters.
 
 ## Validation and handoff
 
-Hosted CI runs the complete Linux/Arch/macOS matrix automatically on pushes to
-main and pull requests targeting main. Manual checks remain available. Public
+Hosted CI runs the complete Linux/Arch/macOS/Windows matrix automatically on
+pushes to main and pull requests targeting main. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise
 the 10 GiB cache limit without owner authorization. Authenticated model tests stay
 opt-in. Validate workflow edits locally before pushing. See `docs/ci-and-aur.md`.
@@ -96,7 +98,9 @@ publish automatically only after full CI and package checks succeed. Publication
 credentials remain confined to trusted main in the release environment, never PR
 code. Nightly tags/assets are immutable and never become the latest stable release.
 Retry publishers with the same verified candidate; never rebuild or overwrite its
-assets. Pure VCS version bumps do not create AUR commits.
+assets. Pure VCS version bumps do not create AUR commits. Nightly prereleases also
+carry the tested Windows x86_64 portable zip unchanged; it stays GitHub-only (not
+mirrored or in the v1 feed), and stable releases have no Windows asset.
 
 Run checks appropriate to the change; see `CONTRIBUTING.md`. Update Beads status
 and export with `bd export -o .beads/issues.jsonl` before staging tracker changes.

@@ -4,7 +4,8 @@
 
 Zerus runs on Linux and macOS. Arch Linux x86_64 users can install the complete
 CLI and desktop bundle from AUR. Other installations build from source. The CLI
-keeps the name `hgs`; the desktop executable is `hgs-tray`.
+keeps the name `hgs`; the desktop executable is `hgs-tray`. Windows has a
+portable [control console](#windows) for remote Linux and macOS machines.
 
 ## Requirements
 
@@ -94,6 +95,92 @@ Services and autostart are opt-in. Inspect old user unit files before enabling
 packaged services; local definitions can shadow the system package. Package
 installation and upgrades do not restart native agents, tmux or the GUI.
 [Service setup and migration](ci-and-aur.md#package-contents-and-compatibility).
+
+<a id="windows"></a>
+
+## Windows control console
+
+Nightly releases include a portable Windows x86_64 zip with the desktop app
+(`hgs-tray.exe`) and the CLI (`hgs.exe`). They manage agent sessions on your Linux
+and macOS machines through the Windows OpenSSH client. Agents do not run on the
+Windows computer itself: this is the first phase of the
+[Windows plan](superpowers/specs/2026-10-10-windows-support-design.md).
+
+Requirements:
+
+- Windows 10 version 1903 or later, or Windows 11, on x86_64.
+- The OpenSSH client. `ssh -V` in PowerShell shows whether it is installed;
+  otherwise add **OpenSSH Client** in Settings → Optional features.
+- At least one Linux or macOS machine with `hgs` installed at `~/.local/bin/hgs`
+  (see [local installation](#local-installation)) and key-based SSH access from
+  Windows. Status polls run SSH in batch mode, so the key must work without a
+  passphrase prompt, for example through the Windows `ssh-agent` service (disabled
+  by default; enabling it needs an administrator). Host aliases from
+  `%USERPROFILE%\.ssh\config` work as usual.
+
+Install and start:
+
+1. From a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
+   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`.
+2. Check the zip in PowerShell. Both commands must show the same hash
+   (`Get-FileHash` prints it in upper case):
+
+   ```powershell
+   Get-FileHash .\zerus-<version>-windows-x86_64.zip -Algorithm SHA256
+   Select-String -Path .\SHA256SUMS -Pattern windows-x86_64.zip
+   ```
+
+3. Extract the whole zip and run `zerus-windows-x86_64\hgs-tray.exe`. Keep the
+   files together: the app uses the `hgs.exe` next to it. The executables are not
+   code-signed, so SmartScreen may show **Windows protected your PC** on the first
+   start; choose **More info → Run anyway** only for a zip whose hash matched.
+4. Add your machines in **Machines**. Accept a new host key once with
+   **Open SSH terminal**, then use **Test connection**. **Install / update HGS…**
+   builds `hgs` on the remote machine from a Zerus source checkout on this computer;
+   the remote machine needs the [CLI requirements](#requirements). A checkout whose
+   `install.sh` or `hgs_state.py` has CRLF line endings is refused.
+
+In PowerShell, run the CLI from the folder with `.\hgs.exe` and quote a machine
+argument, because `@` is special there: `.\hgs.exe '@build-01' ls`. Commands
+copied from the desktop are quoted for PowerShell the same way. From Git Bash, set
+`MSYS_NO_PATHCONV=1` before passing remote paths such as `/workspace/orbit`;
+otherwise Git Bash rewrites them into Windows paths.
+
+Configuration and state use the same layout as on Linux and macOS under
+`%USERPROFILE%`, or under `HOME` when it is set: `.config\hgs` holds `config`,
+`machines.local.json` and `tray.conf`, and `.local\state\hgs` holds the CLI state.
+`HGS_CONFIG_DIR` and `HGS_STATE_DIR` move only the CLI's configuration and state;
+the desktop app always reads `tray.conf` from `.config\hgs` under `HOME`, or
+else under the account's profile folder, whatever `USERPROFILE` says. Desktop
+settings are in `%APPDATA%\hgdev\hgs-tray.ini`, and drafts in the
+`hgs-tray.ini.drafts` folder next to it. The computer's name in the fleet is
+`HGS_SELF` when set, otherwise its lowercase `COMPUTERNAME`.
+
+Limitations of the control console:
+
+- No local sessions, local agent accounts or hooks: `hgs.exe` exits with code 2 for
+  local session commands. Commands for another machine (`hgs.exe '@build-01' …`)
+  work as on Linux.
+- No DeepSeek Native UI from Windows: it needs SSH connection sharing, which
+  Windows OpenSSH lacks, so a DeepSeek session cannot be opened externally
+  either. Its Activity still works; DeepSeek sessions have no Terminal tab on any
+  platform.
+- No mobile gateway: pair your phone with a Linux or macOS machine. Settings →
+  Mobile connection is hidden, and activity on the Windows computer does not
+  delay phone alerts.
+- Other machines cannot connect to the Windows computer as a peer.
+- No installer, code signing, autostart or self-update, and only nightly
+  releases carry the zip. **Settings → Updates** reports nightlies with a newer
+  product version. To update, quit Zerus from the tray menu and replace the
+  folder with the new one; configuration and state stay in your profile. To start
+  Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the Startup folder
+  (`shell:startup`).
+- Without SSH connection sharing, every poll of every machine is a full SSH
+  handshake: about 150 ms per machine on a LAN. The app lists this computer at
+  most once every 15 seconds.
+
+[Windows details in the reference](reference.md#windows) |
+[Building on Windows](../CONTRIBUTING.md#windows)
 
 ## Checking for updates
 

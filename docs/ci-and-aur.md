@@ -3,16 +3,18 @@
 This document describes the checks, package layout and publication workflow.
 [Zerus 0.37.0](https://github.com/ufna/zerus/releases/tag/v0.37.0) is the first
 public Arch x86_64 bundle. Stable release builds and GitHub/AUR publication remain
-separate manual workflows; verified nightlies publish automatically.
+separate manual workflows; verified nightlies publish automatically. Nightlies
+also carry a Windows x86_64 portable zip of the control console.
 
 ## Continuous integration
 
 Hosted checks run automatically on pushes to `main` and pull requests targeting
 `main`, including Dependabot proposals. External fork workflows wait for a
 maintainer's **Approve and run** decision. Every automatic run selects source/MSRV,
-full Linux CLI, Arch desktop/package and both macOS suites. The owner enabled
-this policy on 2026-10-09 after making the repository public: standard Ubuntu and
-macOS GitHub-hosted runners are free for public repositories.
+full Linux CLI, Arch desktop/package, both macOS suites and the Windows client and
+desktop suite. The owner enabled this policy on 2026-10-09 after making the
+repository public: standard Ubuntu, macOS and Windows GitHub-hosted runners are
+free for public repositories.
 
 Manual CI remains available and defaults to all suites. `ci.yml` chooses the cache
 trust boundary and calls the shared jobs in `checks.yml`. Reusable CI keeps explicit
@@ -26,6 +28,7 @@ GitHub merge commit; a manual `ref` can select a PR head or another exact revisi
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop/package | Always | Qt build and all CTest suites, production package, namcap, staged and installed bundle checks |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
+| Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 The full jobs start after quick checks. New CI runs cancel obsolete runs for the
@@ -76,12 +79,12 @@ and [cache access limits](https://docs.github.com/en/actions/reference/workflows
 ### Manual checks
 
 ```sh
-# Full Linux, Arch and macOS coverage:
+# Full Linux, Arch, macOS and Windows coverage:
 gh workflow run ci.yml --ref main
 # Full coverage of a PR head with the current upstream workflow:
 gh workflow run ci.yml --ref main -f ref=refs/pull/123/head
 # Source/MSRV checks plus the aggregate gate only:
-gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false
+gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false -f run_windows=false
 ```
 
 An explicit test `ref` changes the checked-out commit, not GitHub's workflow run
@@ -97,17 +100,18 @@ format is required by the existing verified agent input transport. Unknown input
 mode must keep rejecting delivery; upgrading the test toolchain preserves that
 guard. The package requires tmux 3.7+. A binary upgrade must not restart live
 servers; see the [installation requirements](installation.md#requirements).
-Current release packaging supports **Arch x86_64 only**. The macOS runner checks
-build/test compatibility; it does not create a notarized macOS installer. Windows
-and Arch ARM are outside this first package matrix.
+Stable release packaging supports **Arch x86_64 only**. The macOS runner checks
+build/test compatibility; it does not create a notarized macOS installer. Nightlies
+add the Windows x86_64 portable zip described below; a stable Windows asset is a
+separate owner decision. Arch ARM is outside this first package matrix.
 
 All CI jobs have bounded timeouts. Checkout credentials are not persisted and
 Actions are pinned to commit SHAs. Dependabot proposes monthly grouped action/Cargo
 updates. Rust/C++ caches reduce repeated build time; their repository limit stays
 at 10 GiB. Ordinary test artifacts expire after seven days and stable candidates
-after fourteen. Scheduled logs, Arch packages and nightly candidates expire after
-three days.
-Standard Ubuntu/macOS runners and public artifacts are free while the repository
+after fourteen. Scheduled logs, Arch packages, Windows zips and nightly candidates
+expire after three days.
+Standard Ubuntu/macOS/Windows runners and public artifacts are free while the repository
 is public. Larger runners and explicitly increased cache storage have separate
 billing rules. No self-hosted runner is attached to a development machine.
 [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
@@ -116,7 +120,8 @@ The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses curre
 Arch packages. This tests rolling-distribution compatibility; it does not promise
 bit-for-bit reproducibility months later. Rust dependencies are locked, fetched
 in `prepare()` and built/tested with `--frozen` inside source packages. The CI
-image, tmux and official DeepSeek fixture pins need periodic maintainer review.
+image, tmux, official DeepSeek fixture and Windows Qt installer pins need periodic
+maintainer review.
 
 ### Dependency updates and cost
 
@@ -174,6 +179,143 @@ Claude TUI with a private home/socket and a localhost fake API. Set
 account. Claude 2.1.296 coverage verifies literal trailing backslashes, multiline
 messages and durable request replay. Terminal submission alone is insufficient:
 the test waits for the unchanged user message in native history.
+
+### Windows client, desktop and portable zip
+
+The `windows-desktop` job runs on a standard `windows-2025` runner. It disables
+Git's CRLF conversion before checkout, so fixtures and scripts keep LF, and every
+Python step uses one exact CPython 3.13 from the SHA-pinned `actions/setup-python`.
+It runs `cargo test` with stable Rust and `cargo +1.85.0 clippy --all-targets -- -D
+warnings`: clippy is pinned like the relay lints, so a new stable release cannot
+fail an unchanged commit, and Windows-only code, compiled nowhere else, is checked
+against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` example and
+runs `tests/test_windows_client.py` against them. The Rust cache uses its own
+`windows-cli-` key with line-table debug information to bound its size. The runner
+gives each step a synchronous anonymous pipe as stdin, and Windows OpenSSH never
+exits after using one (the fake client refuses it), so steps that start `hgs.exe`,
+`ssh` or the desktop app read stdin from `/dev/null`.
+
+Qt 6.10.3 for MSVC 2022 x64 with Qt WebEngine, Qt WebChannel and Qt Positioning
+comes from `aqt install-qt` with aqtinstall 3.3.0, which cannot resolve the split
+repository layout of Qt 6.11 and later for Windows yet. No unhashed PyPI code runs
+in the job: `scripts/ci/aqt-requirements.txt` locks aqtinstall, py7zr and their
+whole dependency closure to the SHA-256 of each CPython 3.13 `win_amd64` wheel.
+The job installs it with `pip install --require-hashes --only-binary :all:` into a
+virtual environment under `RUNNER_TEMP` that no later step uses; aqtinstall checks
+the Qt archives against the checksums of the Qt repository. The header of the lock
+records how to regenerate it; review a new lock like the other pins. The Qt
+directory is cached with `actions/cache` under a key that covers the Qt release,
+its modules and the lock. That cache follows the same token rules as every other
+cache: upstream `main` pushes and schedules save it, while PR and manual runs
+restore it and only log a warning when saving is refused. Such a run downloads
+about 1.5 GB of Qt when no cache entry exists yet.
+
+`scripts/ci/gui.sh` re-enters itself through `scripts/ci/msvc-env.py`, which
+locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake
+and Ninja first on `PATH`) to that build only, then builds with Ninja and `cl` and
+runs every CTest suite offscreen.
+
+`scripts/package-windows.py` bundles the exact tested `hgs.exe` and `hgs-tray.exe`
+into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folder:
+
+- `windeployqt` adds Qt, its plugins (including the SVG image and icon plugins
+  loaded at run time), translations, `QtWebEngineProcess.exe` and its resources.
+  It runs with `--no-opengl-sw`: Qt Quick and Qt WebEngine render through
+  Direct3D, and the Mesa software OpenGL fallback would need notices the zip does
+  not carry. `--no-system-d3d-compiler` and `--no-system-dxc-compiler` keep
+  Microsoft's shader compilers out: Windows includes `D3DCompiler_47.dll`, and
+  the notices do not cover the Windows SDK's `dxcompiler.dll` and `dxil.dll`.
+  The ICU DLLs it copies from the build machine's System32 (a forwarder
+  to `icu.dll` on current Windows) are removed; `Qt6Core.dll` uses the system ICU.
+  The minimum is Windows 10 1903, which the desktop app's UTF-8 code page also
+  needs.
+- The app-local Visual C++ runtime DLLs come from the default redistributable
+  folder of the Visual Studio found by `vswhere`, never a hard-coded version.
+- `licenses/` holds the libvterm, md4c and Codex texts, the host-target Rust
+  dependency notices from `scripts/collect-licenses.py`, the per-module SPDX
+  documents shipped with Qt and, in `licenses/qt`, the texts from
+  `packaging/windows/licenses` (sources in its `README.md`). Packaging parses the
+  documents and fails when one names a standard license or exception without its
+  text there, or a `LicenseRef-` without extracted text in the documents; the
+  Qt WebEngine documents carry the Chromium component texts that way.
+- `LICENSE`, `THIRD_PARTY_NOTICES.md`, a `README.txt` for Windows users and
+  `build-info.json` with the source commit, product, CLI and Qt versions.
+
+`scripts/check-windows-portable.py` then checks every entry (no absolute, parent,
+device, case-duplicate or symlink names, no ICU, software OpenGL or Direct3D
+shader compiler DLLs), the required runtime and license texts, the manifest
+provenance and the limits: at most 512 MiB compressed, the release mirror's
+asset limit, and 500 MB unpacked, the bound applied to whole nightly candidates.
+With `--run --selftest` on Windows it extracts the zip and starts both
+executables with a minimal environment, without Qt or the bundle on `PATH`:
+`--version` of each, `hgs.exe ls --json --local` must report the control-only
+local computer, and `hgs-tray.exe --selftest` must find the `hgs.exe` next to
+it. The job uploads the zip and logs as `windows-x86_64-<commit>` without
+recompressing them and keeps them for seven days (three for schedules). With Qt
+WebEngine the zip is about 140 MB, about 345 MB unpacked.
+
+On a Windows development PC the same steps run from Git Bash;
+[CONTRIBUTING.md](../CONTRIBUTING.md#windows) lists the requirements and commands.
+
+### Real-peer smoke on a Windows PC
+
+Hosted CI runs `hgs.exe` only against the fake SSH client. Changes to SSH handling,
+the embedded terminal or swarm transport also need a manual check against a real
+Linux peer from a Windows development PC. The names below (`winpeer`, user `peer`,
+`/workspace/sample-project`) are placeholders; keep real host names, addresses and
+accounts in private configuration.
+
+1. **Peer.** Use a disposable Linux container or virtual machine with its own user,
+   home, tmux server and hgs state, never a machine that runs live agents. Install
+   the tested tree's `hgs` at `~/.local/bin/hgs`, add a project and start a
+   detached shell session (`hgs sh sample-project -d`). Make its SSH server
+   reachable from the PC, for example through a loopback-only tunnel.
+2. **Isolation on the PC.** Use the executables from the extracted zip and point
+   `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `HGS_CONFIG_DIR`
+   and `HGS_STATE_DIR` at a scratch folder. That isolates `hgs.exe` and the desktop
+   app's `tray.conf`, not the rest of `hgs-tray.exe`: Qt finds its settings,
+   drafts and single-instance lock through the Windows known folders, which ignore
+   `APPDATA` and `LOCALAPPDATA`, and names its single-instance pipe after the
+   account's profile folder, whatever `USERPROFILE` says. No other Zerus tray may
+   run during the desktop part (a second tray only activates the running one);
+   otherwise run that part under a separate Windows test account. Before changing
+   the variables, back up `hgdev\hgs-tray.ini` and the `hgs-tray.ini.drafts`
+   folder next to it in the real Roaming AppData folder, and `hgdev\hgs-tray` in
+   the real Local AppData folder, when they exist
+   (`[Environment]::GetFolderPath('ApplicationData')` and
+   `'LocalApplicationData'` name them). `ssh.exe` ignores `HOME` and
+   `USERPROFILE` and keeps using the real `%USERPROFILE%\.ssh\known_hosts`. Back up
+   that whole file before the first connection and restore it byte for byte
+   afterwards: OpenSSH's `UpdateHostKeys` appends the peer's other host keys, so
+   removing the one line you added is not enough. Alternatively point `HGS_SSH` at
+   a small wrapper executable (not a batch file) that inherits its standard handles
+   and runs `%SystemRoot%\System32\OpenSSH\ssh.exe -o UserKnownHostsFile=<scratch
+   file> -o UpdateHostKeys=no` followed by its own arguments.
+3. **Checks.** Run them from PowerShell, or from Git Bash with `MSYS_NO_PATHCONV=1`:
+   - register the peer's host, port, user and key with
+     `hgs.exe machine set winpeer --json '{…}'` (Windows PowerShell 5.1 strips
+     unescaped double quotes from native arguments, so write them as `\"` there),
+     then run `hgs.exe machine check winpeer`;
+   - `hgs.exe '@winpeer' ls --json`, then `hgs.exe ls --json` (the control-only
+     local box and the peer) and plain `hgs.exe ls`. Time ten `@winpeer ls --json`
+     calls: about 150 ms each over a LAN on 2026-10-11, almost all of it the SSH
+     handshake;
+   - forwarded read-only commands: `inspect`, `project ls --json`, `dirs`,
+     `git-status --path /workspace/sample-project --json` and `worktrees`;
+   - join the peer's swarm and run `hgs.exe swarm sync`: `hgs.exe swarm get` and
+     `hgs.exe '@winpeer' swarm get` must report the same `digest`. With
+     `hgs.exe swarm worker` running, a preference change reaches the peer within
+     seconds;
+   - when the PC's desktop is free: attach the desktop app's Terminal to the peer's
+     session, type, resize, interrupt a running command with Ctrl+C and
+     disconnect. `hgs.exe` and `ssh.exe` must end, and the session must stay on
+     the peer.
+4. **Cleanup.** End every `hgs.exe`, `ssh.exe` and `hgs-tray.exe` started for the
+   smoke, restore `known_hosts`, and delete the scratch folder and the disposable
+   peer. In the real Roaming and Local AppData folders, remove
+   `hgdev\hgs-tray.ini`, `hgs-tray.ini.drafts` and `hgdev\hgs-tray` written by
+   the smoke, or restore their backups.
+   Never attach to, stop or restart live sessions or tmux servers.
 
 ### Native agent compatibility and upstream review
 
@@ -252,7 +394,10 @@ terminal-backed sessions requires separate ownership/resume verification.
 No blanket formatting/clippy gate was added over legacy source: it would reject
 unrelated existing formatting rather than verify this change. Existing unit,
 integration and Qt suites provide the initial gate. Add stricter linting with a
-separate, reviewed baseline cleanup. Logs are under ignored
+separate, reviewed baseline cleanup. The Windows job is the exception: it runs
+the pinned Rust 1.85 clippy with `-D warnings` over every module compiled for the
+Windows target, which is clean today; Linux-only modules are not linted.
+Logs are under ignored
 `artifacts/test-results/`; packaging outputs are under ignored `artifacts/` and
 `dist/`.
 
@@ -260,9 +405,10 @@ separate, reviewed baseline cleanup. Logs are under ignored
 
 `nightly.yml` runs daily at 00:17 UTC (03:17 Europe/Moscow) and supports manual
 launches. It verifies one exact upstream `main` commit with the complete Linux,
-Arch and macOS CI matrix, then repackages its already tested Arch binary. It
-checks the generated pacman package, namcap output and installed bundle in an
-isolated home. There is no second Rust/C++ compilation during nightly assembly.
+Arch, macOS and Windows CI matrix, then repackages its already tested Arch binary
+and copies the tested Windows zip unchanged. It checks the generated pacman
+package, namcap output and installed bundle in an isolated home. There is no
+second Rust/C++ compilation during nightly assembly.
 
 The package is `zerus-ade-nightly-bin`; `zerus-git` remains a source package that
 tracks upstream `main`. Nightly versions have the form
@@ -282,6 +428,23 @@ Each build creates an immutable `nightly-RUN_ID` GitHub prerelease and updates o
 `zerus`/`zerus-ade-bin`/`zerus-git`. Its public binary URL and SHA-256 stay fixed.
 Binary library floors come from the verified source package's `.BUILDINFO`.
 Stable and nightly publishers share a serialization group, preventing AUR races.
+
+The Windows zip from the same CI run becomes `zerus-<nightly version>-windows-x86_64.zip`.
+`prepare-nightly.py` reads only its zip directory and a bounded `build-info.json`,
+requires the nightly's commit and product version, and records the name as
+`windows_portable` in `release-info.json`. The zip is sealed in `SHA256SUMS`, and the
+publisher checks its layout and provenance again before uploading it to the same
+immutable prerelease; nothing in it is extracted or executed. A candidate whose
+manifest names a zip must contain exactly that file, while retries of candidates
+built before the Windows job remain valid. Because nightly publication requires the
+whole CI run to succeed, a Windows failure also holds back the Arch nightly.
+
+The zerus.dev mirror accepts the zip in the nightly asset family and checks its
+GitHub digest, but neither mirrors it (the mirror never deletes and has a fixed
+disk budget) nor lists it in the v1 desktop feed: deployed GUIs reject unknown
+artifact kinds. Deploy the updated `scripts/update_feed.py` to the mirror before
+the first nightly with a zip: older mirror code fails closed on the new asset
+family and stops updating the nightly feed.
 
 ```sh
 # Build and automatically publish a new fully verified nightly:
@@ -458,7 +621,8 @@ GitHub releases or a schedule.
 ### 1. Build and review a candidate
 
 `release.yml` runs quick checks plus full Linux CLI, Arch and macOS validation from
-one exact commit. macOS can be explicitly disabled. It consumes that run's
+one exact commit. macOS can be explicitly disabled. Windows is not selected:
+stable candidates carry no Windows asset. It consumes that run's
 Arch package, verifies its embedded version/source commit, assembles source and
 binary archives, rebuilds both stable recipes, runs namcap and seals the result.
 

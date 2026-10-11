@@ -118,6 +118,15 @@ The pull publisher consumes current main's sealed `release-info.json`,
 workflow version provenance. It resolves each tag to its real source commit and
 never substitutes GitHub's generic `/latest` endpoint for independent channels.
 
+Nightly releases can also carry the Windows portable zip,
+`zerus-<version>-windows-x86_64.zip`, named as `windows_portable` in
+`release-info.json` and sealed in `SHA256SUMS`. It is a GitHub-only asset: the
+mirror checks its exact name and GitHub digest but neither downloads nor serves
+it, and the v1 desktop feed does not list it, because deployed GUIs reject unknown
+artifact kinds. A zip in a stable release fails closed. Deploy the updated
+`update_feed.py` before the first nightly that carries a zip; older mirror code
+rejects the new asset family and stops updating the nightly catalog.
+
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy
 of the stable version. The feed describes the release recipes; live AUR
@@ -157,7 +166,9 @@ detected independently by bounded parsing of os-release, never by sourcing it.
 Available yay/paru helpers supply safe copied commands. An unowned local build
 on Arch gets an explicitly optional AUR installation command rather than a false
 package-ownership claim; no command is executed by Zerus. There is currently no
-published macOS installer. Updates never stop agents, tmux or resident adapters.
+published macOS installer. The Windows portable build has no installer or
+self-update: it follows the nightly channel by default and links newer nightlies
+to their GitHub release page. Updates never stop agents, tmux or resident adapters.
 
 ## Desktop mobile-connection settings
 
