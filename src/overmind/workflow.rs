@@ -178,6 +178,10 @@ impl Workflow {
                 (1..=40).contains(&length) && !stage.name.chars().any(char::is_control) && !stage.name.starts_with('@'),
                 "stage names are 1 to 40 printable characters and do not start with @"
             );
+            ensure!(
+                stage.name.trim() == stage.name,
+                "stage names have no leading or trailing whitespace"
+            );
             ensure!(names.insert(stage.name.as_str()), "duplicate stage {}", stage.name);
         }
         let count = |role: Role| self.stages.iter().filter(|s| s.role == role).count();
@@ -185,9 +189,23 @@ impl Workflow {
         for role in [Role::Backlog, Role::Ready, Role::Active, Role::Review, Role::NeedsHuman] {
             ensure!(count(role) >= 1, "a workflow needs a {role:?} stage");
         }
+        ensure!(self.session_wip >= 1, "session_wip must be at least 1");
         ensure!(self.rules.len() <= 200, "a workflow has at most 200 rules");
         for rule in &self.rules {
             ensure!(!rule.actors.is_empty(), "every rule names its actors");
+            ensure!(
+                !rule.actors.contains(&ActorKind::Unknown),
+                "a rule names an unknown actor kind"
+            );
+            if rule.to == RESUME {
+                ensure!(rule.action == Action::Answer, "only answer rules may target {RESUME}");
+                for name in &rule.from {
+                    ensure!(
+                        self.role(name) == Some(Role::NeedsHuman),
+                        "answer rules may only leave the human stage, not {name}"
+                    );
+                }
+            }
             ensure!((rule.action == Action::Create) == rule.from.is_empty(), "only create rules have no source stage");
             for name in &rule.from {
                 ensure!(names.contains(name.as_str()), "a rule refers to unknown stage {name}");
@@ -233,6 +251,12 @@ impl Workflow {
         actor: ActorKind,
         fields: &BTreeMap<String, String>,
     ) -> Result<&Rule, Refusal> {
+        if actor == ActorKind::Unknown {
+            return Err(Refusal::new(
+                "transition_not_allowed",
+                format!("{to} is not allowed for an actor kind this build does not know"),
+            ));
+        }
         let candidates: Vec<&Rule> = self
             .rules
             .iter()
@@ -339,5 +363,49 @@ mod tests {
         let mut bad_field = Workflow::default_v1();
         bad_field.rules[0].requires.push("password".into());
         assert!(bad_field.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_actor_kinds_never_satisfy_a_rule() {
+        let rule: Rule = serde_json::from_str(
+            r#"{"action":"move","from":["Backlog"],"to":"Queue","actors":["bogus"]}"#,
+        )
+        .unwrap();
+        assert_eq!(rule.actors, vec![Unknown]);
+        let mut wf = Workflow::default_v1();
+        wf.rules.push(rule);
+        assert!(wf.validate().is_err());
+        let refusal = Workflow::default_v1()
+            .allow(Action::Move, Some("Backlog"), "Queue", Unknown, &fields(&[]))
+            .unwrap_err();
+        assert_eq!(refusal.code, "transition_not_allowed");
+    }
+
+    #[test]
+    fn resume_answers_only_come_from_the_human_stage() {
+        let mut wf = Workflow::default_v1();
+        wf.rules.push(Rule { action: Action::Answer, from: vec!["Done".into()], to: RESUME.into(), actors: vec![Human], requires: vec!["answer".into()], own: false });
+        assert!(wf.validate().is_err());
+        assert!(Workflow::default_v1().validate().is_ok());
+    }
+
+    #[test]
+    fn humans_may_finish_a_reviewed_task() {
+        let wf = Workflow::default_v1();
+        assert!(wf.allow(Action::Done, Some("Review"), "Done", Human, &fields(&[])).is_ok());
+    }
+
+    #[test]
+    fn stage_names_and_session_wip_are_checked() {
+        let mut blank = Workflow::default_v1();
+        blank.stages.push(Stage { name: "   ".into(), role: Role::Parked });
+        assert!(blank.validate().is_err());
+        let mut padded = Workflow::default_v1();
+        padded.stages.push(Stage { name: " Idle".into(), role: Role::Parked });
+        padded.rules.push(Rule { action: Action::Move, from: vec!["Backlog".into()], to: " Idle".into(), actors: vec![Human], requires: vec![], own: false });
+        assert!(padded.validate().is_err());
+        let mut no_wip = Workflow::default_v1();
+        no_wip.session_wip = 0;
+        assert!(no_wip.validate().is_err());
     }
 }
