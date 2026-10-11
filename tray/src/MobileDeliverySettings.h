@@ -1,6 +1,7 @@
 #pragma once
 #include "HgsClient.h"
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QLabel>
 #include <QPair>
@@ -42,7 +43,17 @@ public:
     // hgs is too old to receive it.
     void setSwarmSnapshot(const QJsonObject &snapshot) {
         const auto value = snapshot.value("preferences").toObject().value("mobile_delivery").toString();
-        if (!setRequest && choice->findData(value) >= 0 && value != current) { current = value; show(value); }
+        // A snapshot requested before a confirmed save may arrive after it; it
+        // must not put the old value back. Differing values are ignored until one
+        // agrees or a few poll periods pass.
+        const bool stale = !confirmed.isEmpty() && value != confirmed && confirmedAge.isValid() && confirmedAge.elapsed() < 15000;
+        if (value == confirmed || !confirmedAge.isValid() || confirmedAge.elapsed() >= 15000) confirmed.clear();
+        if (!setRequest && !stale && choice->findData(value) >= 0 && (value != current || loadFailed)) {
+            current = value; show(value);
+            if (std::exchange(loadFailed, false)) status->clear();
+        }
+        // Commands without peers (or an older hgs) leave the outdated list unchanged.
+        if (!snapshot.contains("peers")) return;
         QStringList names;
         const auto peers = snapshot.value("peers").toObject();
         for (auto it = peers.begin(); it != peers.end(); ++it)
@@ -61,7 +72,7 @@ private:
         if (id && id == setRequest) {
             setRequest = 0;
             if (error.isEmpty() && result.value("ok").toBool() && choice->findData(value) >= 0) {
-                current = value; show(value);
+                current = value; show(value); confirmed = value; confirmedAge.start();
                 status->setText(tr("Saved. Your other computers and the phone receive it with the next sync."));
             } else {
                 status->setText(tr("Could not save: %1").arg(error.isEmpty() ? tr("unexpected response from hgs") : error));
@@ -89,5 +100,7 @@ private:
     QComboBox *choice; QLabel *status, *outdated;
     QString current;
     quint64 getRequest = 0, setRequest = 0;
+    QString confirmed;
+    QElapsedTimer confirmedAge;
     bool loadFailed = false;
 };

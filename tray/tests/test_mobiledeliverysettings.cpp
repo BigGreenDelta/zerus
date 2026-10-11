@@ -94,6 +94,34 @@ else:
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "unknown"}}}, {"peers", QJsonObject{}}});
         QCOMPARE(choice->currentData().toString(), QString("away_30")); QVERIFY(outdated->isHidden());
     }
+    void lateSnapshotDoesNotRevertAConfirmedSave() {
+        MobileDeliverySettings settings(m_hgs); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");
+        settings.refresh(); QTRY_VERIFY(choice->isEnabled());
+        choice->setCurrentIndex(3); choice->activated(3); QTRY_VERIFY(choice->isEnabled());
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}}, {"peers", QJsonObject{}}});
+        QCOMPARE(choice->currentData().toString(), QString("away_10"));
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_10"}}}, {"peers", QJsonObject{}}});
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_30"}}}, {"peers", QJsonObject{}}});
+        QCOMPARE(choice->currentData().toString(), QString("away_30")); // an agreeing snapshot ends the guard
+    }
+    void snapshotsWithoutPeersKeepTheOutdatedList() {
+        MobileDeliverySettings settings(m_hgs);
+        auto *outdated = settings.findChild<QLabel *>("mobileDeliveryOutdated");
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}},
+            {"peers", QJsonObject{{"mac", QJsonObject{{"catalog_outdated", true}}}}}});
+        QVERIFY(!outdated->isHidden());
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}}});
+        QVERIFY(!outdated->isHidden()); QVERIFY(outdated->text().contains("mac"));
+    }
+    void validSnapshotAfterFailedLoadClearsTheError() {
+        touch("old");
+        MobileDeliverySettings settings(m_hgs); settings.refresh();
+        auto *status = settings.findChild<QLabel *>("mobileDeliveryStatus");
+        QTRY_VERIFY(status->text().contains("Could not read"));
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_5"}}}, {"peers", QJsonObject{}}});
+        QVERIFY(status->text().isEmpty()); QVERIFY(settings.findChild<QComboBox *>("mobileDelivery")->isEnabled());
+        QCOMPARE(settings.findChild<QComboBox *>("mobileDelivery")->currentData().toString(), QString("away_5"));
+    }
 };
 
 QTEST_MAIN(TestMobileDeliverySettings)
