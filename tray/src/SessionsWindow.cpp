@@ -664,18 +664,23 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_compactCancel->setStyleSheet(QStringLiteral("QPushButton { min-height: 20px; max-height: 20px; padding: 0 6px; margin: 0; border: none; background: transparent; } QPushButton:hover { text-decoration: underline; }"));
     m_compactCancel->hide();
     connect(m_compactCancel,&QPushButton::clicked,this,[this] {
-        cancelCompactContinuation(tr("Pending send cancelled. Your draft is unchanged."));
-        cancelStartContinuation(tr("Pending send cancelled. Your draft is unchanged."));
+        cancelCompactContinuation(m_selectedKey, tr("Pending send cancelled. Your draft is unchanged."));
+        if (m_startSend.key == m_selectedKey) cancelStartContinuation(tr("Pending send cancelled. Your draft is unchanged."));
         if (m_composer->isInputVisible()) m_composer->editor()->setFocus(Qt::OtherFocusReason);
         renderDetails();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
-        if (!m_compact.request || id != m_compact.request) return;
-        m_compact.request = 0;
-        if (!ok) cancelCompactContinuation(error);
-        else { m_compact.commandId=receipt.value("request_id").toString(); inspect(); }
-        renderDetails();
+        for (const auto &key : m_compacts.keys()) {
+            auto &pending = m_compacts[key];
+            if (!pending.request || id != pending.request) continue;
+            pending.request = 0;
+            if (!ok) cancelCompactContinuation(key, error);
+            else { pending.commandId=receipt.value("request_id").toString(); pollCompactContinuations(); }
+            renderDetails(); return;
+        }
     });
+    m_compactTimer.setInterval(2500);
+    connect(&m_compactTimer, &QTimer::timeout, this, &SessionsWindow::pollCompactContinuations);
     m_markRead=new ToolbarChip;m_markRead->setObjectName("activityMarkRead");
     m_markRead->setLabels(tr("Mark as read"));m_markRead->setIconName("read-all");m_markRead->setTone(ChipTone::Accent);
     toolbar->add(ComposerToolbar::Slot::MarkRead,m_markRead);
@@ -813,7 +818,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_composer,&MessageComposer::interruptRequested,this,[this](const QString &key) {
         const auto *entry=selected();
         if(!entry||key!=m_selectedKey||m_interruptRequest||m_details.value("interrupt_supported")!=true)return;
-        cancelCompactContinuation(tr("Interrupted. Your draft was kept without sending."));
+        cancelCompactContinuation(m_selectedKey, tr("Interrupted. Your draft was kept without sending."));
+        if (m_startSend.key == m_selectedKey) cancelStartContinuation(tr("Interrupted. Your draft was kept without sending."));
         m_interruptKey=key;
         // As in Terminal, the prompt of an interrupted turn returns to the message field.
         const QString prompt=interruptedPrompt(key);
@@ -2492,6 +2498,7 @@ void SessionsWindow::closeSubagent()
 
 void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId)
 {
+    if (archiveId.isEmpty()) { continueAfterCompact(host, name, data); continueAfterStart(host, name, data); }
     if (!m_pending && !m_renameKey.isEmpty()) return;
     const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
     // A confirmed clear continues the same Activity timeline, and its global
@@ -2501,7 +2508,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
         // The conversation changed under this terminal. Fetch its initial window;
         // a cursor from the previous conversation must never skip the new history.
         m_events = data.value("events").toArray(); m_cursor = 0; m_details = data; m_processPollAge.invalidate();
-        reconcileMessages(); continueAfterCompact(); continueAfterStart(); renderDetails(); inspect(); return;
+        reconcileMessages(); renderDetails(); inspect(); return;
     }
     const auto previousRoster = childRoster(*entry);
     const auto inspected=SessionPresentation::inspected(entry->session,data);
@@ -2516,17 +2523,13 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     if (data.value("replace_events").toBool()) m_events = data.value("events").toArray();
     else for (const auto &event : data.value("events").toArray()) if (event.toObject().value("seq").toInteger() > m_cursor) m_events.append(event);
     while (m_events.size() > 500) m_events.removeFirst();
-    m_cursor = data.value("cursor").toInteger(); reconcileMessages(); continueAfterCompact(); continueAfterStart(); renderDetails(); applyPendingModelSettings();
+    m_cursor = data.value("cursor").toInteger(); reconcileMessages(); renderDetails(); applyPendingModelSettings();
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
 }
 
 void SessionsWindow::renderDetails()
 {
-    if (!m_compact.key.isEmpty() && m_compact.key != m_selectedKey)
-        cancelCompactContinuation(tr("Session changed. Your draft was kept without sending."));
-    if (!m_startSend.key.isEmpty() && m_startSend.key != m_selectedKey)
-        cancelStartContinuation(tr("Session changed. Your draft was kept without sending."));
-    m_compactCancel->setVisible(!m_compact.key.isEmpty() || !m_startSend.key.isEmpty());
+    m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
     const auto recoveryDetails=entry && entry->session.state != "archived"
         && m_details.value("provider_status_at").toDouble() >= entry->session.providerStatusAt ? m_details : QJsonObject();
@@ -2955,7 +2958,7 @@ void SessionsWindow::applyQueuedModelSettings()
 QString SessionsWindow::messageBlockReason(const Entry &entry) const
 {
     if (entry.key == m_startSend.key) return tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit.");
-    if (entry.key == m_compact.key) return tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit.");
+    if (m_compacts.contains(entry.key)) return tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit.");
     if (entry.key == m_clearKey && m_clearRequest) return tr("Wait for the context reset to finish. Your draft stays here.");
     if (isTerminating(entry)) return tr("The session is terminating. Your draft stays here.");
     if (entry.key == m_settingsKey && m_settingsRequest) return tr("Wait for the model settings change to finish.");
@@ -3029,37 +3032,85 @@ void SessionsWindow::messageAction(const QString &id,const QString &action)
     }
 }
 
-void SessionsWindow::cancelCompactContinuation(const QString &reason)
+void SessionsWindow::cancelCompactContinuation(const QString &key, const QString &reason)
 {
-    if (m_compact.key.isEmpty()) return;
-    const auto key=m_compact.key; m_compact={};
+    if (!m_compacts.remove(key)) return;
+    if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key,false,reason);
 }
 
-void SessionsWindow::continueAfterCompact()
+void SessionsWindow::compactToSend(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
+                                 const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId)
 {
-    if (m_compact.key.isEmpty() || m_compact.key != m_selectedKey) return;
-    if (m_details.value("run_id") != m_compact.run || m_details.value("conversation_id") != m_compact.conversation) {
-        cancelCompactContinuation(tr("Conversation changed. Your draft was kept without sending.")); return;
+    if (m_compacts.contains(key) || !m_composer->draftMatches(key,text,attachments)
+        || !m_composer->setWaitingToSend(key, tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."))) return;
+    CompactContinuation pending;
+    pending.key=key; pending.host=host; pending.name=name; pending.run=run; pending.conversation=conversation;
+    pending.text=text; pending.attachments=attachments; pending.retryId=retryId;
+    pending.started=QDateTime::currentMSecsSinceEpoch();
+    pending.request=m_client.requestCompactContext(host,name,run,conversation);
+    m_compacts.insert(key,pending); m_compactTimer.start();
+}
+
+void SessionsWindow::pollCompactContinuations()
+{
+    if (!m_startSend.key.isEmpty()) {
+        if (QDateTime::currentMSecsSinceEpoch()-m_startSend.started > 180000)
+            cancelStartContinuation(tr("The agent did not become ready. Check Terminal; your draft was kept without sending."));
+        else {
+            const auto *box = m_startSend.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(m_startSend.host);
+            if (box && box->ok && (!m_startSend.host.isEmpty() || m_connectionError.isEmpty()))
+                m_client.requestInspection(m_startSend.host,m_startSend.name,m_startSend.key == m_selectedKey ? m_cursor : 0,{},false);
+        }
     }
-    if (QDateTime::currentMSecsSinceEpoch()-m_compact.started > 600000) {
-        cancelCompactContinuation(tr("Compaction was not confirmed. Check Terminal; your draft was kept without sending.")); return;
+    for (const auto &key : m_compacts.keys()) {
+        const auto pending = m_compacts.value(key);
+        if (QDateTime::currentMSecsSinceEpoch()-pending.started > 600000) {
+            cancelCompactContinuation(key, tr("Compaction was not confirmed. Check Terminal; your draft was kept without sending."));
+            continue;
+        }
+        if (pending.request || pending.commandId.isEmpty()) continue;
+        const auto *box = pending.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(pending.host);
+        if (!box || !box->ok || (pending.host.isEmpty() && !m_connectionError.isEmpty())) continue;
+        // This poll belongs to the accepted send, even when its row is hidden
+        // by a filter, another page is open, or the workspace is closed.
+        m_client.requestInspection(pending.host, pending.name, key == m_selectedKey ? m_cursor : 0, {}, false);
     }
-    if (!m_composer->draftMatches(m_compact.key,m_compact.text,m_compact.attachments)) {
-        cancelCompactContinuation(tr("Draft changed. Send it when you are ready.")); return;
+}
+
+void SessionsWindow::continueAfterCompact(const QString &host, const QString &name, const QJsonObject &data)
+{
+    for (const auto &key : m_compacts.keys()) {
+        const auto pending = m_compacts.value(key);
+        if (pending.host != host || pending.name != name) continue;
+        if (data.value("run_id") != pending.run || data.value("conversation_id") != pending.conversation) {
+            cancelCompactContinuation(key, tr("Conversation changed. Your draft was kept without sending.")); return;
+        }
+        if (QDateTime::currentMSecsSinceEpoch()-pending.started > 600000) {
+            cancelCompactContinuation(key, tr("Compaction was not confirmed. Check Terminal; your draft was kept without sending.")); return;
+        }
+        if (!m_composer->draftMatches(key,pending.text,pending.attachments)) {
+            cancelCompactContinuation(key, tr("Draft changed. Send it when you are ready.")); return;
+        }
+        if (pending.request || pending.commandId.isEmpty()) return;
+        const auto result=data.value("compact_context_request").toObject();
+        if (result.value("request_id") != pending.commandId) return;
+        const auto status=result.value("status").toString();
+        if (status=="failed" || status=="cancelled" || status=="unchanged" || status=="uncertain") {
+            cancelCompactContinuation(key, status=="unchanged" ? tr("No history could be compacted. Your draft was kept without sending.")
+                : tr("Compaction did not complete. Check Terminal; your draft was kept without sending.")); return;
+        }
+        if (status!="completed" || data.value("phase")!="idle" || data.value("activity")!="idle"
+            || data.value("runtime_state")!="live" || data.value("process_state")!="running"
+            || !data.value("tracked").toBool() || !data.value("error").toString().isEmpty()
+            || !data.value("expected_id").toString().isEmpty() || m_terminating.contains(key)) return;
+        // Remove the intent before delivery: duplicate inspection signals must
+        // never submit it twice. The CLI also verifies the compaction UUID.
+        m_compacts.remove(key);
+        if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
+        deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId);
+        return;
     }
-    if (m_compact.request || m_compact.commandId.isEmpty()) return;
-    const auto result=m_details.value("compact_context_request").toObject();
-    if (result.value("request_id") != m_compact.commandId) return;
-    const auto status=result.value("status").toString();
-    if (status=="failed" || status=="cancelled" || status=="unchanged" || status=="uncertain") {
-        cancelCompactContinuation(status=="unchanged" ? tr("No history could be compacted. Your draft was kept without sending.")
-            : tr("Compaction did not complete. Check Terminal; your draft was kept without sending.")); return;
-    }
-    if (status!="completed" || m_details.value("phase")!="idle" || m_details.value("activity")!="idle") return;
-    const auto pending=m_compact; m_compact={};
-    m_composer->setWaitingToSend(pending.key, {});
-    sendMessage(pending.key,pending.text,pending.attachments,pending.retryId,pending.commandId);
 }
 
 void SessionsWindow::clearContext()
@@ -3096,7 +3147,7 @@ bool SessionsWindow::canStartStopped(const Entry &entry) const
     return entry.online && (s.state == "paused" || s.state == "stopped") && s.tracked
         && QStringList{"codex", "claude", "kimi"}.contains(s.cmd) && !isTerminating(entry)
         && !m_pending && !m_settingsRequest && m_renameKey.isEmpty() && m_startSend.key.isEmpty()
-        && m_compact.key.isEmpty() && !m_composer->isSending(entry.key);
+        && !m_compacts.contains(entry.key) && !m_composer->isSending(entry.key);
 }
 
 void SessionsWindow::startFresh()
@@ -3134,22 +3185,30 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
     dialog.setInformativeText(tr("Resume continues the saved conversation, and the message is sent with its full context%1.\n\n"
         "Start fresh begins a new conversation with the same folder, account and model. Earlier messages stay readable in Activity.")
         .arg(context.isEmpty() ? QString() : tr(" (%1)").arg(context)));
+    dialog.setInformativeText(dialog.informativeText()+tr("\n\nResume, compact and send summarizes the saved history first. Compaction uses tokens and may omit details."));
     auto *resume = dialog.addButton(tr("Resume and send"), QMessageBox::AcceptRole);
     resume->setObjectName("resumeAndSend"); resume->setEnabled(original.session.resumable);
+    auto *compact = dialog.addButton(tr("Resume, compact and send"), QMessageBox::ActionRole);
+    compact->setObjectName("resumeCompactAndSend"); compact->setEnabled(original.session.resumable);
+    compact->setToolTip(tr("Resume the saved conversation, run native /compact when ready, then send this exact message after successful completion."));
     auto *fresh = dialog.addButton(tr("Start fresh and send"), QMessageBox::ActionRole); fresh->setObjectName("startFreshAndSend");
     auto *cancel = dialog.addButton(QMessageBox::Cancel); dialog.setDefaultButton(cancel); dialog.setEscapeButton(cancel);
     dialog.exec();
     const bool startFresh = dialog.clickedButton() == fresh;
-    if (!startFresh && dialog.clickedButton() != resume) return;
+    const bool compactFirst = dialog.clickedButton() == compact;
+    if (!startFresh && !compactFirst && dialog.clickedButton() != resume) return;
     entry = selected();
     if (!entry || entry->key != key || entry->session.runId != original.session.runId
         || entry->session.conversationId != original.session.conversationId || !canStartStopped(*entry)) {
         showNotice(tr("The session changed. Your draft was kept without sending."), true); return;
     }
     if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
-    if (!m_composer->setWaitingToSend(key, tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."))) return;
+    if (!m_composer->setWaitingToSend(key, compactFirst
+        ? tr("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit.")
+        : tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."))) return;
     m_startSend = {key, entry->host, entry->session.name, entry->session.runId, entry->session.conversationId,
-        text, attachments, startFresh, QDateTime::currentMSecsSinceEpoch()};
+        text, attachments, startFresh, compactFirst, QDateTime::currentMSecsSinceEpoch()};
+    m_compactTimer.start();
     m_pending = true; m_restoreKey.clear();
     if (startFresh) m_client.startFreshSession(entry->host, entry->session.name, entry->session.runId);
     else m_client.resumeSession(entry->host, entry->session.name);
@@ -3160,31 +3219,38 @@ void SessionsWindow::cancelStartContinuation(const QString &reason)
 {
     if (m_startSend.key.isEmpty()) return;
     const auto key = m_startSend.key; m_startSend = {};
+    if (m_compacts.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key, false, reason);
 }
 
 // Send the waiting draft once the new run accepts input. A resume must keep
 // its conversation; a fresh start must never reopen the replaced one.
-void SessionsWindow::continueAfterStart()
+void SessionsWindow::continueAfterStart(const QString &host, const QString &name, const QJsonObject &data)
 {
-    if (m_startSend.key.isEmpty() || m_startSend.key != m_selectedKey) return;
+    if (m_startSend.key.isEmpty() || m_startSend.host != host || m_startSend.name != name) return;
     if (!m_composer->draftMatches(m_startSend.key, m_startSend.text, m_startSend.attachments)) {
         cancelStartContinuation(tr("Draft changed. Send it when you are ready.")); return;
     }
     if (QDateTime::currentMSecsSinceEpoch() - m_startSend.started > 180000) {
         cancelStartContinuation(tr("The agent did not become ready. Check Terminal; your draft was kept without sending.")); return;
     }
-    const auto *entry = selected();
-    const auto run = m_details.value("run_id").toString(), conversation = m_details.value("conversation_id").toString();
-    if (!entry || entry->session.state != "running" || m_pending || run.isEmpty() || run == m_startSend.run) return;
+    const auto run = data.value("run_id").toString(), conversation = data.value("conversation_id").toString();
+    if (m_pending || run.isEmpty() || run == m_startSend.run) return;
     const bool sameConversation = conversation == m_startSend.conversation;
     if (m_startSend.fresh ? sameConversation : !conversation.isEmpty() && !sameConversation) {
         cancelStartContinuation(tr("The agent opened an unexpected conversation. Your draft was kept without sending.")); return;
     }
-    const auto pending = m_startSend; m_startSend = {};
-    if (!messageBlockReason(*entry).isEmpty()) { m_startSend = pending; return; }
-    m_composer->setWaitingToSend(pending.key, {});
-    sendMessage(pending.key, pending.text, pending.attachments, {}, {}, true);
+    if (!data.value("tracked").toBool() || data.value("runtime_state")!="live" || data.value("process_state")!="running"
+        || !data.value("error").toString().isEmpty() || data.value("phase")!="idle" || data.value("activity")!="idle"
+        || m_terminating.contains(m_startSend.key)
+        || (!data.value("expected_id").toString().isEmpty() && !data.value("resume_message_can_send").toBool())
+        || (conversation.isEmpty() && !data.value("first_message_can_send").toBool())) return;
+    const auto pending = m_startSend;
+    if (pending.compact && (conversation.isEmpty() || !data.value("compact_context_supported").toBool())) return;
+    m_startSend = {};
+    if (pending.compact) compactToSend(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments);
+    else deliverMessage(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments,{},{});
+    if (m_compacts.isEmpty()) m_compactTimer.stop();
 }
 
 void SessionsWindow::sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId, bool contextChosen)
@@ -3203,7 +3269,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
             tr("The next message may process the entire conversation again, increasing token usage, cost or subscription usage. Send with the full history, compact it into a summary before sending, or clear it and keep your draft. Compaction also uses tokens and may omit details."),QMessageBox::NoButton,this);
         dialog.setObjectName("coldCacheConfirm");auto *proceed=dialog.addButton(tr("Send with full context"),QMessageBox::AcceptRole);
         auto *compact=dialog.addButton(tr("Compact and continue"),QMessageBox::ActionRole);
-        compact->setEnabled(m_details.value("compact_context_supported").toBool() && m_compact.key.isEmpty());
+        compact->setEnabled(m_details.value("compact_context_supported").toBool() && !m_compacts.contains(key));
         compact->setToolTip(tr("Run native /compact, then send this draft only after successful completion."));
         auto *clear=dialog.addButton(tr("Clear context"),QMessageBox::ActionRole);
         clear->setEnabled(m_details.value("clear_context_supported").toBool() && !m_clearRequest);
@@ -3214,17 +3280,19 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         if(dialog.clickedButton()==clear){clearContext();return;}
         if(dialog.clickedButton()==compact) {
             if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
-            if (!m_composer->setWaitingToSend(key, tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."))) return;
-            m_compact = {}; m_compact.key=key; m_compact.run=runId; m_compact.conversation=conversationId;
-            m_compact.text=text; m_compact.attachments=attachments; m_compact.retryId=retryId;
-            m_compact.started=QDateTime::currentMSecsSinceEpoch();
-            m_compact.request=m_client.requestCompactContext(host,name,runId,conversationId);
+            compactToSend(key,host,name,runId,conversationId,text,attachments,retryId);
             renderDetails(); return;
         }
         const auto currentProblem=messageBlockReason(*entry);if(!currentProblem.isEmpty()){showNotice(currentProblem,true);return;}
     }
-    if (!m_composer->setSending(key,!retryId.isEmpty() && !m_composer->draftMatches(key,text,attachments))) return;
-    const quint64 request = m_client.requestSendMessage(entry->host, entry->session.name, text, attachments, runId, conversationId, {}, compactionId);
+    deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId);
+}
+
+void SessionsWindow::deliverMessage(const QString &key, const QString &host, const QString &name, const QString &runId, const QString &conversationId,
+                                   const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId)
+{
+    if (m_composer->isSending(key) || !m_composer->setSending(key,!retryId.isEmpty() && !m_composer->draftMatches(key,text,attachments))) return;
+    const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
     m_pendingMessages.insert(request, {key, runId, conversationId});
     QJsonArray files;
     for (const auto &file : attachments) files.append(QJsonObject{{"name",file.name},{"mime",file.mime},{"bytes",file.data.size()},{"reference",file.reference},
@@ -3239,7 +3307,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         {"attachments", files}, {"run_id", runId}, {"conversation_id", conversationId},
         {"submitted_at", QDateTime::currentMSecsSinceEpoch() / 1000.0}});
     while (messages.size() > 50) messages.removeFirst();
-    renderDetails(); m_activityView->jumpToLatest();
+    if (key == m_selectedKey) { renderDetails(); m_activityView->jumpToLatest(); }
 }
 
 void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error, bool uncertain)

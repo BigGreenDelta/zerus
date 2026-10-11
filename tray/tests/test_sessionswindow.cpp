@@ -1628,10 +1628,10 @@ a=sys.argv[1:]
 if a[0].startswith('@'):a=a[1:]
 if a[0]=='resume':
  with open(root/'resume.log','a') as log:log.write(json.dumps(a)+'\n')
-elif a[0]=='send':
- p=json.load(sys.stdin);(root/'send.json').write_text(json.dumps(p))
- print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
-elif a[0]=='inspect':print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
+elif a[0] in ['send','compact-context']:
+ p=json.load(sys.stdin);(root/(a[0]+'.json')).write_text(json.dumps(p))
+ print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],first_message=not p['expected_conversation_id'],status='submitted')))
+elif a[0]=='inspect':print((root/'details.json').read_text() if a[1]=='codex/website/navigation' and (root/'details.json').exists() else '{}')
 else:print('{}')
 )PY");fixture.close();fixture.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     const QString name="codex/website/navigation";
@@ -1690,12 +1690,44 @@ else:print('{}')
     QFile sent(temp.filePath("send.json"));QVERIFY(sent.open(QIODevice::ReadOnly));const auto payload=QJsonDocument::fromJson(sent.readAll()).object();
     QCOMPARE(payload["expected_run_id"].toString(),QString("run-new"));QVERIFY(QJsonDocument(payload).toJson().contains("Continue after start"));
     QVERIFY(!window.findChild<QMessageBox *>("coldCacheConfirm"));
+    // A resumed conversation compacts before delivering the captured message.
+    sent.close(); QTRY_VERIFY(!composer->isSending(composer->sessionKey()));
+    QVERIFY(QFile::remove(temp.filePath("send.json")));
+    setState("stopped","run-old","conversation-old");window.setFleet(state);
+    details=QJsonObject{{"tracked",true},{"run_id","run-old"},{"conversation_id","conversation-old"},{"runtime_state","saved"},{"process_state","exited"}};apply();
+    composer->editor()->setPlainText("Continue with a compacted conversation");
+    QTRY_VERIFY2(send->isEnabled(),qPrintable(status->text()));choose("resumeCompactAndSend");send->click();QTRY_COMPARE(writes.size(),4);
+    QVERIFY(status->text().contains("then compact"));
+    window.showSession({},"codex/hgs/dashboard");
+    composer->editor()->setPlainText("Keep the other dialog draft");
+    QVERIFY(!window.findChild<QPushButton *>("cancelCompactSend")->isVisible());
+    QVERIFY(!QFileInfo::exists(temp.filePath("compact-context.json")));
+    setState("running","run-resumed","conversation-old");window.setFleet(state);
+    details=QJsonObject{{"tracked",true},{"run_id","run-resumed"},{"conversation_id","conversation-old"},
+        {"runtime_state","live"},{"process_state","running"},{"activity","idle"},{"phase","idle"},
+        {"compact_context_supported",true},{"cache_hint",QJsonObject{{"status","cold"}}}};apply();
+    QTRY_VERIFY(QFileInfo::exists(temp.filePath("compact-context.json")));
+    QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
+    QFile compacted(temp.filePath("compact-context.json"));QVERIFY(compacted.open(QIODevice::ReadOnly));
+    const auto compactPayload=QJsonDocument::fromJson(compacted.readAll()).object();
+    QCOMPARE(compactPayload["expected_run_id"].toString(),QString("run-resumed"));
+    QCOMPARE(compactPayload["expected_conversation_id"].toString(),QString("conversation-old"));
+    details["compact_context_request"]=QJsonObject{{"status","completed"},{"request_id",compactPayload["request_id"]}};
+    apply();QTRY_VERIFY(QFileInfo::exists(temp.filePath("send.json")));
+    QFile finalSend(temp.filePath("send.json"));QVERIFY(finalSend.open(QIODevice::ReadOnly));
+    const auto finalPayload=QJsonDocument::fromJson(finalSend.readAll()).object();
+    QCOMPARE(finalPayload["text"].toString(),QString("Continue with a compacted conversation"));
+    QCOMPARE(finalPayload["expected_compaction_id"],compactPayload["request_id"]);
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep the other dialog draft"));
+    QVERIFY(!window.findChild<QMessageBox *>("coldCacheConfirm"));
+
 }
 
 void TestSessionsWindow::coldCacheCompactWaitsForSuccess_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const auto &value:{"completed","failed","cancelled","unchanged","draft","identity","cancel"}) QTest::newRow(value)<<QString(value);
+    for (const auto &value:{"completed","failed","cancelled","unchanged","draft","identity","cancel",
+        "navigation","hidden","navigation-identity","navigation-cancel"}) QTest::newRow(value)<<QString(value);
 }
 void TestSessionsWindow::coldCacheCompactWaitsForSuccess()
 {
@@ -1708,8 +1740,10 @@ a=sys.argv[1:]
 if a[0].startswith('@'):a=a[1:]
 if a[0] in ['compact-context','send']:
  p=json.load(sys.stdin);(root/(a[0]+'.json')).write_text(json.dumps(p))
+ if a[0]=='send':
+  with (root/'send-targets.txt').open('a') as log:log.write(a[1]+'\n')
  print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
-elif a[0]=='inspect':print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
+elif a[0]=='inspect':print((root/'details.json').read_text() if a[1]=='claude/infra/review' and (root/'details.json').exists() else '{}')
 else:print('{}')
 )PY");fixture.close();fixture.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},{"activity","idle"},{"phase","idle"},
@@ -1737,17 +1771,49 @@ else:print('{}')
     if(!qEnvironmentVariable("HGS_COMPACT_PREVIEW").isEmpty())QVERIFY(window.grab().save(qEnvironmentVariable("HGS_COMPACT_PREVIEW")));
     if(outcome=="draft")composer->editor()->setPlainText("Edited draft");
     if(outcome=="identity")details["conversation_id"]="another";
+    const bool navigated = outcome.startsWith("navigation") || outcome == "hidden";
+    if (navigated) {
+        window.showSession({},"codex/hgs/dashboard");
+        QVERIFY(!window.findChild<QPushButton *>("cancelCompactSend")->isVisible());
+        composer->editor()->setPlainText("Unrelated session draft");
+        if (outcome == "navigation-cancel") {
+            window.showSession("mac","claude/infra/review"); apply();
+            QVERIFY(composer->editor()->isReadOnly());
+            QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));
+            window.findChild<QPushButton *>("cancelCompactSend")->click();
+            window.showSession({},"codex/hgs/dashboard");
+        }
+        if (outcome == "navigation-identity") details["conversation_id"]="another";
+        if (outcome == "hidden") window.hide();
+    }
     if(outcome=="cancel") {
         window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
         window.findChild<QPushButton *>("cancelCompactSend")->click();
         QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(composer->canAttachFiles());
         QCOMPARE(QApplication::focusWidget(), composer->editor());
     }
-    details["compact_context_request"]=QJsonObject{{"request_id",id},{"status",outcome=="draft"||outcome=="identity"||outcome=="cancel"?"completed":outcome}};
-    details["activity"]="idle";details["phase"]="idle";apply();
-    if(outcome=="completed") {
+    details["compact_context_request"]=QJsonObject{{"request_id",id},{"status",navigated||outcome=="draft"||outcome=="identity"||outcome=="cancel"?"completed":outcome}};
+    details["activity"]="idle";details["phase"]="idle";
+    if (navigated) { QFile data(temp.filePath("details.json")); QVERIFY(data.open(QIODevice::WriteOnly)); data.write(QJsonDocument(details).toJson()); }
+    else apply();
+    if(outcome=="completed" || outcome=="navigation" || outcome=="hidden") {
         QTRY_VERIFY(QFileInfo::exists(temp.filePath("send.json")));QFile sent(temp.filePath("send.json"));QVERIFY(sent.open(QIODevice::ReadOnly));
         const auto message=QJsonDocument::fromJson(sent.readAll()).object();QCOMPARE(message["text"].toString(),QString("Keep until compacted"));QCOMPARE(message["expected_compaction_id"].toString(),id);
+        if (navigated) {
+            QCOMPARE(composer->editor()->toPlainText(),QString("Unrelated session draft"));
+            QVERIFY(!composer->editor()->isReadOnly());
+            window.show(); window.showSession("mac","claude/infra/review"); apply();
+            QTRY_VERIFY(composer->editor()->toPlainText().isEmpty());
+            apply(); QTest::qWait(100);
+        }
+        QFile targets(temp.filePath("send-targets.txt")); QVERIFY(targets.open(QIODevice::ReadOnly));
+        QCOMPARE(targets.readAll(),QByteArray("claude/infra/review\n"));
+    } else if (navigated) {
+        QTest::qWait(2800); QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
+        QCOMPARE(composer->editor()->toPlainText(),QString("Unrelated session draft"));
+        window.showSession("mac","claude/infra/review"); apply();
+        QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));
+        QVERIFY(!composer->editor()->isReadOnly());
     } else {QTest::qWait(100);QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));QCOMPARE(composer->editor()->toPlainText(),outcome=="draft"?QString("Edited draft"):QString("Keep until compacted"));
         QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(!composer->isWaitingToSend(composer->sessionKey()));}
 }

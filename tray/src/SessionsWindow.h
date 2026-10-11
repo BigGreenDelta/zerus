@@ -194,20 +194,25 @@ private:
     struct StartContinuation {
         QString key, host, name, run, conversation, text;
         QList<MessageAttachment> attachments;
-        bool fresh = false;
+        bool fresh = false, compact = false;
         qint64 started = 0;
     } m_startSend;
     void cancelStartContinuation(const QString &reason);
-    void continueAfterStart();
+    void continueAfterStart(const QString &host, const QString &name, const QJsonObject &data);
     struct CompactContinuation {
         quint64 request = 0;
-        QString key, run, conversation, text, retryId, commandId;
+        QString key, host, name, run, conversation, text, retryId, commandId;
         QList<MessageAttachment> attachments;
         qint64 started = 0;
-    } m_compact;
+    };
+    QHash<QString, CompactContinuation> m_compacts;
+    QTimer m_compactTimer;
     QPushButton *m_compactCancel = nullptr;
-    void cancelCompactContinuation(const QString &reason);
-    void continueAfterCompact();
+    void cancelCompactContinuation(const QString &key, const QString &reason);
+    void pollCompactContinuations();
+    void continueAfterCompact(const QString &host, const QString &name, const QJsonObject &data);
+    void compactToSend(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
+                       const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {});
     quint64 m_clearRequest = 0;
     QString m_clearKey;
     quint64 m_interruptRequest = 0;
@@ -230,6 +235,8 @@ private:
     void applyPendingModelSettings();
     void applyQueuedModelSettings();
     void sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {}, const QString &compactionId = {}, bool contextChosen = false);
+    void deliverMessage(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
+                        const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId);
     void messageAction(const QString &id, const QString &action);
     void finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error = {}, bool uncertain = false);
     void reconcileMessages();

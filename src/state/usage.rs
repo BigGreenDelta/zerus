@@ -176,9 +176,11 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
                 return;
             }
             accumulate(state, buckets(&message["usage"], provider), Some(id));
-            cache_observation(state,event,&message["usage"],provider);
-            if let Some(n) = number(&state["last"]["input"]) {
-                state["context"]["used"] = json!(n);
+            if search::timestamp(&event["timestamp"]) >= state["compaction_at"].as_f64().unwrap_or(0.0) {
+                cache_observation(state,event,&message["usage"],provider);
+                if let Some(n) = number(&state["last"]["input"]) {
+                    state["context"]["used"] = json!(n);
+                }
             }
             if state["cost_usd"].is_number() {
                 state["cost_stale"] = json!(true);
@@ -203,6 +205,22 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
                     ("totalLinesRemoved", "lines_removed"),
                 ],
             );
+        }
+        "claude" if event["sessionId"] == conversation && event["type"] == "system"
+            && event["subtype"] == "compact_boundary" => {
+            // A new summary replaces the prompt measured by earlier requests.
+            // Keep cumulative billing, but neither its old size nor cache TTL
+            // describes the compacted prompt. Do not invent a new warm cache.
+            state["context"].as_object_mut().unwrap().remove("used");
+            if let Some(tokens) = number(&event["compactMetadata"]["postTokens"]) {
+                state["context"]["used"] = json!(tokens);
+            }
+            state["prompt_cache"] = json!({"status":"unknown","source":"native_compaction",
+                "observed_at":search::timestamp(&event["timestamp"])});
+            state["compaction_at"] = json!(search::timestamp(&event["timestamp"]));
+            for key in ["cache_request_id", "cache_model"] {
+                state.as_object_mut().unwrap().remove(key);
+            }
         }
         "kimi" if ["", "main"].contains(&string(event, "agentId")) => {
             if ["profile.bind", "llm.request"].contains(&string(event, "type")) {
@@ -263,12 +281,12 @@ fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> R
         .unwrap_or(Value::Null);
     let mut offset = number(&state["offset"]).unwrap_or(0);
     let stamp = json!([meta.mtime(), meta.mtime_nsec()]);
-    if state["version"] != 3
+    if state["version"] != 4
         || state["fingerprint"] != fingerprint
         || offset > meta.len()
         || (state["size"] == meta.len() && state["stamp"] != stamp)
     {
-        state = json!({"version":3,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{}});
+        state = json!({"version":4,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{}});
         offset = 0;
         // Codex's last snapshot is cumulative; no need to replay its full log.
         if provider == "codex" && meta.len() > 8 * 1024 * 1024 {
@@ -394,6 +412,63 @@ pub(super) fn dsh(projections: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_compaction_replaces_context_and_invalidates_old_cache_evidence() {
+        let mut state = json!({"totals":{},"seen":{},"context":{"limit":1000000}});
+        let mut reply = json!({"type":"assistant","sessionId":"one","timestamp":"2026-10-11T05:00:00Z",
+            "message":{"id":"before","model":"fixture","usage":{"input_tokens":10,"cache_read_input_tokens":331000,
+                "cache_creation_input_tokens":200,"output_tokens":30,"cache_creation":{"ephemeral_1h_input_tokens":200}}}});
+        observe(&mut state,&reply,"claude","one");
+        let totals = state["totals"].clone();
+        assert_eq!(state["prompt_cache"]["status"],"warm");
+        let mut boundary = json!({"type":"system","subtype":"compact_boundary","sessionId":"other",
+            "timestamp":"2026-10-11T06:15:00Z","compactMetadata":{"trigger":"manual","preTokens":331210,"postTokens":23982}});
+        observe(&mut state,&boundary,"claude","one");
+        assert_eq!(state["context"]["used"],331210);
+        boundary["sessionId"]=json!("one");
+        observe(&mut state,&boundary,"claude","one");
+        assert_eq!(state["context"],json!({"limit":1000000,"used":23982}));
+        assert_eq!(state["prompt_cache"]["status"],"unknown");
+        assert!(state["prompt_cache"]["expires_at"].is_null());
+        assert_eq!(state["totals"],totals);
+        // Preserved pre-compaction snapshots cannot revive the old context.
+        observe(&mut state,&reply,"claude","one");
+        assert_eq!(state["context"]["used"],23982);
+        assert_eq!(state["prompt_cache"]["status"],"unknown");
+        reply["timestamp"]=json!("2026-10-11T06:16:00Z");
+        reply["message"]["id"]=json!("after");
+        reply["message"]["usage"]=json!({"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":24000,
+            "cache_creation":{"ephemeral_5m_input_tokens":24000},"output_tokens":20});
+        observe(&mut state,&reply,"claude","one");
+        assert_eq!(state["context"]["used"],24010);
+        assert_eq!(state["prompt_cache"]["ttl_seconds"],300);
+        boundary["timestamp"]=json!("2026-10-11T06:17:00Z");
+        boundary["compactMetadata"].as_object_mut().unwrap().remove("postTokens");
+        observe(&mut state,&boundary,"claude","one");
+        assert!(state["context"]["used"].is_null());
+        assert_eq!(state["context"]["limit"],1000000);
+        assert_eq!(state["prompt_cache"]["status"],"unknown");
+    }
+
+    #[test]
+    fn claude_compaction_upgrades_existing_incremental_usage_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transcript.jsonl");
+        let cache = temp.path().join("usage.json");
+        fs::write(&path,concat!(
+            "{\"type\":\"assistant\",\"sessionId\":\"one\",\"message\":{\"id\":\"before\",\"usage\":{\"input_tokens\":331000,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n",
+            "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"sessionId\":\"one\",\"timestamp\":\"2026-10-11T06:15:00Z\",\"compactMetadata\":{\"postTokens\":24000}}\n"
+        )).unwrap();
+        assert_eq!(scan(&path,&cache,"claude","one").unwrap()["context"]["used"],24000);
+        let mut old: Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+        old["version"]=json!(3); old["context"]["used"]=json!(331000);
+        fs::write(&cache,old.to_string()).unwrap();
+        let fresh = scan(&path,&cache,"claude","one").unwrap();
+        assert_eq!(fresh["context"]["used"],24000);
+        assert_eq!(fresh["prompt_cache"]["source"],"native_compaction");
+        assert_eq!(fresh["totals"]["input"],331000);
+    }
+
     #[test]
     fn cache_deadlines_use_reported_ttl_and_do_not_refresh_duplicate_responses() {
         let mut state=json!({});

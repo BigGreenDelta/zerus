@@ -1,5 +1,6 @@
 """Real Claude compaction with a localhost-only model and native completion hooks."""
 import json, subprocess, time, unittest, uuid
+from pathlib import Path
 import test_input
 from test_clear_context_native import NativeClearContext
 from test_claude_questions_native import CLAUDE
@@ -29,4 +30,24 @@ class NativeCompactContext(unittest.TestCase):
         self.assertEqual(current['conversation_id'],self.conversation_id)
         self.assertEqual(current['phase'],'idle')
         self.assertIn('compacted',self.screen().lower())
+        def compact_boundary():
+            history=[json.loads(line) for line in Path(current['transcript']).read_text().splitlines()]
+            return next((event for event in reversed(history) if event.get('subtype')=='compact_boundary'),None)
+        boundary=self.wait_for(compact_boundary)
+        fresh=self.inspect()['session_usage']
+        self.assertEqual(fresh['prompt_cache']['status'],'unknown')
+        self.assertEqual(fresh['prompt_cache']['source'],'native_compaction')
+        self.assertEqual(fresh.get('context',{}).get('used'),boundary['compactMetadata'].get('postTokens'))
+        # Completion authorizes exactly the captured message in this run.
+        message=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,
+                     expected_conversation_id=self.conversation_id,expected_compaction_id=payload['request_id'],
+                     text='Continue after the verified native compact.',attachments=[])
+        sent=subprocess.run([str(test_input.HGS),'send',self.name,'--json'],input=json.dumps(message),env=self.env,text=True,capture_output=True,timeout=12)
+        self.assertEqual(sent.returncode,0,sent.stderr+'\n'+self.screen())
+        self.wait_for(lambda:any(e.get('type')=='user' and e.get('message',{}).get('content')==message['text']
+            for e in map(json.loads,Path(current['transcript']).read_text().splitlines())))
+        replay=subprocess.run([str(test_input.HGS),'send',self.name,'--json'],input=json.dumps(message),env=self.env,text=True,capture_output=True,timeout=12)
+        self.assertEqual(replay.returncode,0,replay.stderr)
+        events=list(map(json.loads,Path(current['transcript']).read_text().splitlines()))
+        self.assertEqual(sum(e.get('type')=='user' and e.get('message',{}).get('content')==message['text'] for e in events),1)
 if __name__=='__main__':unittest.main()

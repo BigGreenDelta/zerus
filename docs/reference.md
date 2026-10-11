@@ -574,9 +574,10 @@ context and prompt-cache values are hidden until the new conversation reports
 native usage. The saved native identity changes only on the real hook, and an
 unconfirmed command does not reset counters.
 A stopped session offers **Start fresh…** instead, with the same confirmation, and
-keeps **Send** available: it asks whether to **Resume and send** with the full saved
-context or **Start fresh and send**, then delivers the unchanged draft once the new
-run accepts input. Switching sessions, a failed start, an
+keeps **Send** available: it offers **Resume and send** with the full saved context,
+**Resume, compact and send**, or **Start fresh and send**. The compact option waits
+for the restored conversation to accept input, then runs native compaction and
+delivers the unchanged message only after confirmed success. A failed start, an
 unexpected conversation or three minutes without readiness cancel that send and
 keep the draft.
 **Compact and continue** sends only after confirmed successful compaction with the same
@@ -586,7 +587,13 @@ and attachments visible and locks edits. The field still supports selection and
 copy. **Cancel send** restores editing and keeps the complete draft; it cancels
 the automatic message, while startup or compaction continues. **Stop** interrupts
 the agent. A GUI restart keeps the draft without resuming automatic submission.
+Switching dialogs, changing filters or closing the workspace keeps accepted sends
+pending on their original sessions. They continue in the background, verify the
+same run/conversation and compaction request, and never submit a second copy.
 Context metrics use native telemetry, without guessing a capacity from a model name.
+Claude's recorded compaction boundary replaces the earlier context size with its
+reported summary size. It invalidates the earlier prompt cache estimate; a new
+warm countdown requires fresh native usage with a reported TTL.
 
 **Tasks & agents**, **Details** and **Worktrees** occupy the resizable inspector.
 Its width, tab and open state are local; toggling it preserves Activity, drafts and
