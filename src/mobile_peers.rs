@@ -861,7 +861,7 @@ fn remembered(config: &Config, local: &str) -> BTreeMap<String, Verified> {
 
 /// Keep currently direct aliases and replace the identities verified just now.
 /// A removed or disabled edge forgets its identity. Writes happen only on a
-/// change, and a concurrent writer postpones this one instead of blocking.
+/// change; a writer that keeps the lock beyond a brief wait postpones this one.
 fn remember(
     config: &Config,
     local: &str,
@@ -891,8 +891,17 @@ fn remember(
         .write(true)
         .mode(0o600)
         .open(config.dir.join(REMEMBERED_LOCK))?;
-    if lock.try_lock_exclusive().is_err() {
-        return Ok(());
+    // A forked child can briefly share this descriptor's lock before its exec
+    // closes it; wait for moments, then let a long-held lock postpone the write.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while let Err(error) = lock.try_lock_exclusive() {
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(error.into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     let current = remembered(config, local);
     let next = merge(&current);
