@@ -730,12 +730,17 @@ presence ever received the owner is away, so connectors without these fields
 behave as before.
 
 A candidate is dropped when its session disappears, is archived, or changes run
-or conversation; when its attention signature changes or is marked read; for a
-candidate without a signature, only when the native need is resolved; or, for a
-completed turn, when that reply is read, a newer reply exists or the session is
-busy again. Otherwise it is delivered immediately, as soon as the owner is away,
-or after the chosen number of away minutes. Candidates expire after 24 hours
-and are capped at 1,000 per workspace.
+or conversation; when a read mark covers its attention signature or the
+session's current one, when the current signature is absent, or when the
+signature differs and the native need for its kind is gone; for a candidate
+without a signature, only when the native need is resolved; or, for a completed
+turn, when that reply is read, a newer reply exists or the session is busy
+again. A changed signature alone keeps the candidate, because `hgs` signatures
+also change on details that emit no relay event (subagent requests, request
+start times, unindexed questions); a genuine new need is a new event whose
+candidate replaces the held one. Otherwise it is delivered immediately, as soon
+as the owner is away, or after the chosen number of away minutes. Candidates
+expire after 24 hours and are capped at 1,000 per workspace.
 
 Evaluation runs inline on whichever relay worker accepted a changed snapshot or
 new presence. An advisory-elected maintenance pass rechecks the most overdue
@@ -748,8 +753,12 @@ event, so an alert is delivered once.
 A delivered candidate appends `{id, computer_id, session, kind: "alert",
 alert_kind, created_at}` to `GET /v1/events`, with `alert_kind` `attention`,
 `error` or `completed`, and coalesces one generic wake per registered phone.
-Ordinary events no longer wake phones themselves. Phones that know the feature
-create cards only from alert events.
+A wake job still being sent records the newer alert and is sent again. Ordinary
+events no longer wake phones themselves. Phones that know the feature create
+cards only from alert events: an `attention` or `error` alert announces the
+session's input or error card, whichever the phone shows; a posted input or
+error card follows detail changes of the same run silently; and a need the
+relay announced without an alert waits for its alert.
 
 Roll out `hgs`, the desktop and the connector first, then Android, then the
 relay. The connector retries without `presence` when an older relay rejects it,
