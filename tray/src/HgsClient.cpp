@@ -82,6 +82,8 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.created = static_cast<qint64>(obj.value(QStringLiteral("created")).toDouble());
     s.conversationId = obj.value("conversation_id").toString();
     s.replyId = obj.value("reply_id").toString(); s.replyAt = obj.value("reply_at").toDouble();
+    s.replyScheduled = obj.value("reply_scheduled").toBool();
+    s.recurringSchedules = obj.value("recurring_schedules").toInt(-1);
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();

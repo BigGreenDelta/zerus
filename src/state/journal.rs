@@ -194,6 +194,16 @@ pub(super) fn event_db() -> Result<Connection> {
     Ok(db)
 }
 
+// Kimi names what opened a turn: the person, a scheduled job, a task...
+fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
+    let origin = string(event, "origin_kind");
+    (string(record, "agent") == "kimi"
+        && string(event, "hook_event_name") == "TurnStarted"
+        && (1..=40).contains(&origin.len())
+        && origin.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    .then_some(origin)
+}
+
 pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     if string(event, "hook_event_name") == "SessionHeartbeat" {
         return Ok(());
@@ -211,6 +221,9 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
         && !["SubagentStart", "SubagentStop"].contains(&string(event, "hook_event_name"))
     {
         data["agent_id"] = json!("");
+    }
+    if let Some(origin) = turn_origin(record, event) {
+        data["turn_origin"] = json!(origin);
     }
     if let Some(question) = questions::from_hook(record, event) {
         data["question_request"] = question;
@@ -288,7 +301,40 @@ fn latest_reply(record: &Value) -> Result<Value> {
         return Ok(json!({}));
     };
     let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    Ok(json!({"reply_id":format!("{}:{}", seq, event["at"]), "reply_at":event["at"]}))
+    let scheduled = string(record, "agent") == "kimi"
+        && scheduled_turn(&db, record, seq).unwrap_or(false);
+    Ok(json!({"reply_id":format!("{}:{}", seq, event["at"]), "reply_at":event["at"],
+        "reply_scheduled":scheduled}))
+}
+
+// A scheduled job opens its turn without a prompt from the person. The latest
+// opening before the Stop decides: a prompt queued meanwhile is the person's.
+fn scheduled_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+    let mut statement = db
+        .prepare(
+            "SELECT json_extract(payload, '$.type'), json_extract(payload, '$.turn_origin') FROM events
+         WHERE name = ? AND conversation = ? AND seq < ?
+           AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
+           AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
+         ORDER BY seq DESC LIMIT 64",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(
+            params![journal_name(record), string(record, "conversation_id"), stop],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        match row.map_err(|e| e.to_string())? {
+            (Some(kind), _) if kind == "AgentMessage" => continue,
+            (Some(kind), origin) if kind == "TurnStarted" => {
+                return Ok(matches!(origin.as_deref(), Some("cron_job" | "cron_missed")))
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
@@ -1096,6 +1142,41 @@ mod attention_regressions {
         let (messages, _) = message_events(&db, "example", Some("conversation"), r#"["other"]"#).unwrap();
         assert_eq!(messages.iter().map(|m| m["detail"].as_str().unwrap()).collect::<Vec<_>>(),
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
+    }
+    #[test]
+    fn kimi_scheduled_turns_mark_replies_until_the_person_prompts() {
+        let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});
+        let started = |origin: Value| json!({"hook_event_name":"TurnStarted","agent_id":"main","origin_kind":origin});
+        assert_eq!(turn_origin(&kimi, &started(json!("cron_job"))), Some("cron_job"));
+        assert_eq!(turn_origin(&kimi, &started(json!("user"))), Some("user"));
+        for origin in [json!(""), json!("Cron"), json!(7), json!("x".repeat(41))] {
+            assert_eq!(turn_origin(&kimi, &started(origin)), None);
+        }
+        assert_eq!(turn_origin(&json!({"agent":"claude"}), &started(json!("cron_job"))), None);
+
+        let db = message_db();
+        let main = |event: Value| insert_message(&db, "example", Some("conversation"), event);
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":"Check the backup every 15 minutes"}));
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"user"}));
+        let prompted = main(json!({"type":"Stop","agent_id":""}));
+        assert!(!scheduled_turn(&db, &kimi, prompted).unwrap());
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_job"}));
+        main(json!({"type":"PreToolUse","agent_id":"","tool":"Bash"}));
+        main(json!({"type":"TurnStarted","agent_id":"child","turn_origin":"user"}));
+        main(json!({"type":"AgentMessage","agent_id":""}));
+        insert_message(&db, "example", Some("other"), json!({"type":"UserPromptSubmit","agent_id":""}));
+        insert_message(&db, "other", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":""}));
+        let tick = main(json!({"type":"Stop","agent_id":""}));
+        assert!(scheduled_turn(&db, &kimi, tick).unwrap());
+        // A prompt steered into a scheduled turn makes the reply the person's.
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_missed"}));
+        main(json!({"type":"UserPromptQueued","agent_id":"","detail":"Also check free space"}));
+        let steered = main(json!({"type":"Stop","agent_id":""}));
+        assert!(!scheduled_turn(&db, &kimi, steered).unwrap());
+        // Rows journaled before origins were recorded are not scheduled.
+        main(json!({"type":"TurnStarted","agent_id":""}));
+        let unknown = main(json!({"type":"Stop","agent_id":""}));
+        assert!(!scheduled_turn(&db, &kimi, unknown).unwrap());
     }
     #[test]
     fn message_window_limits_rows_and_actual_utf8_bytes_with_disclosure() {

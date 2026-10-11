@@ -242,8 +242,16 @@ Linux application badges and the macOS Dock show the attention count, hiding zer
 
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
-request; resolved notifications are removed. Main-agent replies and explicit child
-questions can notify; ordinary child results and errors stay with the parent.
+request; resolved notifications are removed. Main-agent reply banners wait until
+the session is idle and has no reported active children; intermediate replies
+remain unread in Activity while work continues. Routine replies from a turn the
+agent scheduled itself (Kimi `CronCreate`) also stay unread without a banner
+while a recurring job remains; the reply after the last job ends, a one-shot
+reminder and any reply to the person's prompt notify. Explicit input and approval
+requests still notify immediately. Ordinary child results and errors stay with
+the parent. While Zerus has application focus, session banners are suppressed and
+are not replayed when focus leaves. Unread replies and attention requests remain
+visible in the interface, including requests from other sessions and machines.
 Delivery failures show a reason and retry after a minute while still relevant.
 macOS uses Notification Center and needs its system permission; Focus and OS
 notification settings still apply. Notification Center looks up the icon by bundle
@@ -1373,6 +1381,13 @@ host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
+
+`reply_scheduled` is true when the latest reply ended a turn opened by the
+agent's own scheduled job rather than by the person; a prompt queued into that
+turn makes it false. Kimi sessions also report `recurring_schedules`, the number
+of recurring jobs still scheduled in the conversation as folded from the native
+cron journal, or `null` while unknown. Other providers report false and omit the
+count.
 
 ```sh
 printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |

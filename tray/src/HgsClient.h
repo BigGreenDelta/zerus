@@ -29,6 +29,10 @@ struct SessionInfo {
     QString accountId, accountHome;
     double replyAt = 0;
     bool unreadReply = false;
+    // The reply came from a provider-scheduled turn; recurring jobs still
+    // pending in that conversation, -1 when unknown or unsupported.
+    bool replyScheduled = false;
+    int recurringSchedules = -1;
     bool reviewLater = false, attentionAcknowledged = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
