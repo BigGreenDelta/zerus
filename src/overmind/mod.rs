@@ -5,5 +5,6 @@ mod blobs;
 mod fold;
 mod model;
 mod rank;
+mod refs;
 mod store;
 mod workflow;
