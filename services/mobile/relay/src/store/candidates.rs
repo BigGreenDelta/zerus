@@ -7,7 +7,7 @@ use crate::{
     alerts::{self, Candidate, Decision, Delivery, Presence},
     db::{f, Arg, Tx},
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 enum Action {
     Drop,
@@ -234,6 +234,56 @@ impl Store {
         }
         t.commit().await?;
         if published {
+            self.db.signal(topic);
+        }
+        Ok(())
+    }
+    /// Elected maintenance: expire old candidates and evaluate due ones in one
+    /// transaction, which keeps the election for the whole bounded pass.
+    /// Expired rows join their workspace's plan as drops, so candidate rows are
+    /// locked only after event locks and in ascending id per workspace.
+    pub(super) async fn maintain_alerts(&self, at: f64) -> Result<()> {
+        let batch = self.db.cfg.maintenance_batch;
+        let mut t = self.db.begin().await?;
+        if !Self::elected(&mut t, 735628114).await? {
+            return Ok(());
+        }
+        let due = t.all("SELECT DISTINCT workspace_id FROM (SELECT workspace_id FROM alert_candidates WHERE next_at<=? ORDER BY next_at,id LIMIT ?) due ORDER BY workspace_id LIMIT 32",args![at,batch]).await?;
+        let mut plans = BTreeMap::new();
+        for r in due {
+            let w = s(&r, "workspace_id").to_owned();
+            let plan = self.alert_plan(&mut t, &w, None, Some(at), at).await?;
+            plans.insert(w, plan);
+        }
+        for r in t.all("SELECT id,workspace_id FROM alert_candidates WHERE created<=? ORDER BY created,id LIMIT ?",args![at-alerts::CANDIDATE_TTL,batch]).await? {
+            let w = s(&r, "workspace_id").to_owned();
+            plans.entry(w).or_default().rows.push((r, Action::Drop));
+        }
+        for plan in plans.values_mut() {
+            // A row both due and expired is planned as a drop and dropped once.
+            plan.rows.sort_by_key(|(r, _)| i(r, "id"));
+            plan.rows
+                .dedup_by(|later, kept| later.0["id"] == kept.0["id"]);
+        }
+        let spaces: Vec<&str> = plans
+            .iter()
+            .filter(|(_, plan)| plan.deliveries() > 0)
+            .map(|(w, _)| w.as_str())
+            .collect();
+        if !spaces.is_empty() {
+            let deliveries = plans.values().map(AlertPlan::deliveries).sum();
+            self.event_locks(&mut t, &spaces, deliveries).await?;
+        }
+        let mut topics = vec![];
+        for (w, plan) in plans {
+            if self.apply_alerts(&mut t, &w, plan).await? {
+                let topic = format!("workspace:{w}");
+                t.notify(&topic).await?;
+                topics.push(topic);
+            }
+        }
+        t.commit().await?;
+        for topic in topics {
             self.db.signal(topic);
         }
         Ok(())

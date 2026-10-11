@@ -762,6 +762,160 @@ async fn older_connectors_forward_presence_inside_the_snapshot() {
     f.close().await;
 }
 #[tokio::test]
+async fn away_minutes_preference_waits_from_end_of_activity() {
+    let f = Fixture::new().await;
+    // Input stopped 200 s ago: away for 80 s, so `away_5` waits another 220 s.
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"away_5"}});
+    f.beat_with(&snapshot("working"), &presence(200.0, None))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(200.0, None))
+        .await;
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    let next = f
+        .store
+        .db
+        .one("SELECT next_at FROM alert_candidates", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(next["next_at"].as_f64().unwrap() <= now() + 15.0);
+    // Five away minutes later the maintenance pass delivers it.
+    f.store
+        .db
+        .exec("UPDATE nodes SET presence_until=presence_until-220", &[])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn stale_presence_keeps_last_activity_for_away_minutes() {
+    let f = Fixture::new().await;
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"away_10"}});
+    // The lid closes and locks the screen; then heartbeats stop.
+    f.beat_with(&snapshot("working"), &presence(0.0, Some(0.0)))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(0.0, Some(0.0)))
+        .await;
+    let five_minutes =
+        "UPDATE nodes SET presence_at=presence_at-300,presence_until=presence_until-300";
+    f.store.db.exec(five_minutes, &[]).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    // Stale presence is not present, but only five of ten away minutes have passed.
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    f.store.db.exec(five_minutes, &[]).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn maintenance_recovers_unevaluated_candidates() {
+    let f = Fixture::new().await;
+    f.beat(&json!({"sessions":[{"name":"example","run_id":"r","conversation_id":"c","phase":"input","activity":"busy","attention_id":"q1"}]})).await;
+    // A committed candidate whose post-snapshot evaluation never ran (worker exit or BUSY).
+    f.store.db.exec("INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)", args![&f.node.workspace, &f.node.id, now(), now()]).await.unwrap();
+    f.store.maintain(false).await.unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["alert_kind"], "attention");
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn revoked_computer_drops_held_candidate() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    f.beat_with(
+        &listing(session_row(
+            "working",
+            "busy",
+            "q1",
+            Some(&signature('1')),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&signature('1')),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    f.store.revoke_computer(&f.node.id).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn alert_candidates_are_bounded_and_expire() {
+    let f = Fixture::new().await;
+    let fleet = |phase: &str| json!({"sessions":(0..1001).map(|k| json!({"name":format!("s{k}"),"run_id":"r","conversation_id":"c","phase":phase})).collect::<Vec<_>>()});
+    f.beat_with(&fleet("working"), &presence(1.0, None)).await;
+    f.beat_with(&fleet("input"), &presence(1.0, None)).await;
+    assert_eq!(f.count("alert_candidates").await, 1000);
+    assert_eq!(f.count("alert_candidates WHERE session='s0'").await, 0);
+    assert_eq!(f.alert_count().await, 0);
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET created=created-86401", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(f.count("alert_candidates").await, 1000 - 256);
+    for _ in 0..3 {
+        f.store.maintain(false).await.unwrap();
+    }
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
 async fn snapshot_events_and_push_claims() {
     let f = Fixture::new().await;
     f.store
@@ -1148,6 +1302,95 @@ async fn postgres_cross_worker_contract() {
     second.revoke(Role::Device, &f.phone.id).await.unwrap();
     assert!(f.store.authorized(&f.phone).await.is_err());
     f.check_accounting().await;
+    second.db.close().await;
+    f.close().await;
+    sqlx::query(&format!("DROP DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    admin.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
+async fn postgres_cross_worker_single_alert() {
+    use sqlx::Connection;
+    let base =
+        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
+    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
+    let name = format!("relay_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&base).unwrap();
+    url.set_path(&name);
+    let cfg = Config {
+        database_url: Some(url.to_string()),
+        background: false,
+        ..Config::default()
+    };
+    let f = Fixture::config(cfg.clone()).await;
+    let second = Store::new(
+        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
+            .await
+            .unwrap(),
+    );
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let active = presence(1.0, None);
+    let question = |attention: &str, digit: char| {
+        listing(session_row(
+            "input",
+            "busy",
+            attention,
+            Some(&signature(digit)),
+            Value::Null,
+        ))
+    };
+    f.beat_with(
+        &listing(session_row("working", "busy", "q0", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(&question("q1", '1'), &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    // Both workers' maintenance passes race for one due candidate once presence is stale.
+    f.store
+        .db
+        .exec("UPDATE nodes SET presence_at=presence_at-121", &[])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(f.store.maintain(false), second.maintain(false));
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(f.alert_count().await, 1);
+    // Presence-only heartbeats on two workers race for the next candidate.
+    let waiting = question("q2", '2');
+    f.beat_with(&waiting, &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    let encoded = canonical(&waiting).unwrap();
+    let away = |idle: f64| json!({"snapshot":waiting,"presence":presence(idle, None)});
+    let (first, other) = (away(600.0), away(601.0));
+    let (a, b) = tokio::join!(
+        f.store.heartbeat(&f.node, &first, &encoded),
+        second.heartbeat(&f.node, &other, &encoded)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(
+        (f.alert_count().await, f.count("alert_candidates").await),
+        (2, 0)
+    );
+    // Both alerts coalesce into the device's single pending wake.
+    assert_eq!(f.count("push_jobs").await, 1);
     second.db.close().await;
     f.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))

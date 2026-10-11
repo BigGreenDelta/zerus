@@ -80,6 +80,25 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   shared payload accounting. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
   workspace, credential, then route/request; multi-workspace locks are sorted.
+  Heartbeats may carry `presence` beside the snapshot. The relay remembers each
+  machine's latest presence with its receipt time without rewriting an
+  unchanged snapshot; a heartbeat without presence keeps the remembered value.
+  The gateway snapshot's `preferences.mobile_delivery` is stored with it.
+- `alerts.rs` is the pure presence rule: preference parsing, owner away time
+  over every remembered presence, and candidate resolution from
+  `attention_signature`, `reply_id`, shared read marks and native need.
+  Missing or malformed information means away.
+- `store/candidates.rs` holds at most one alert candidate per computer, session
+  and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
+  state only. Changed snapshots and new presence evaluate candidates on the
+  worker that received the heartbeat; an elected maintenance pass (at most 32
+  workspaces, rechecking waiting candidates within 15 seconds) evaluates due
+  candidates and expires old ones. Plans come from unlocked reads, so several
+  workers may evaluate the same candidate. Deleting the candidate row in the
+  transaction that appends the `alert` event and coalesces device wakes is the
+  cross-worker single-delivery claim. Candidate rows are locked after any event
+  locks, in ascending id within a workspace; maintenance folds expired rows
+  into that order.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
   PostgreSQL startup never retires another worker's claims.
@@ -147,6 +166,16 @@ workers against the same authoritative database and existing configuration;
 verify readiness, a synthetic request/receipt and revocation. Keep native agents,
 connectors, tmux and DeepSeek hosts running. A Rust-to-Python rollback must use the
 same current database, never a snapshot predating newly accepted receipts.
+
+Presence alerts add the `alert_candidates` table and nullable columns
+(`nodes.presence_at`, `presence_until`, `mobile_delivery`,
+`computer_routes.presence_at`, `presence_until`, `events.alert_kind`); the
+schema version stays 1 and the Python reference ignores them. Deploy the relay
+after `hgs`, the desktop, the connector and Android. Replace all PostgreSQL
+workers together: an older worker would wake phones for every event, reject the
+`presence` field and serve `alert` rows without `alert_kind`. The offline
+SQLite-to-PostgreSQL migration does not carry candidates or `alert_kind`;
+phones ignore such migrated alert rows.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite

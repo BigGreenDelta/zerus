@@ -174,7 +174,7 @@ impl Store {
         }
         t.commit().await
     }
-    async fn elected(t: &mut Tx, key: i64) -> Result<bool> {
+    pub(super) async fn elected(t: &mut Tx, key: i64) -> Result<bool> {
         if !t.postgres {
             return Ok(true);
         }
@@ -353,6 +353,7 @@ impl Store {
         for l in leases {
             self.release_poll(s(&l, "id")).await?;
         }
-        Ok(())
+        // Last, so an alert failure never blocks request expiry or poll cleanup.
+        self.maintain_alerts(at).await
     }
 }
