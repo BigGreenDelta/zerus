@@ -19,6 +19,7 @@
 #include "WorkspaceFocus.h"
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
+#include "MessageBoxIcons.h"
 #endif
 
 #include <cstdio>
@@ -103,6 +104,9 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     ScrollbarTheme scrollbarTheme(app);
     WorkspaceFocus::install();
+#ifdef Q_OS_MACOS
+    MessageBoxIcons::install();
+#endif
     QCoreApplication::setOrganizationName(QStringLiteral("hgdev"));
     QCoreApplication::setApplicationName(QStringLiteral("hgs-tray"));
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
