@@ -1,6 +1,6 @@
 # Mobile architecture
 
-Status: Android pilot, protocol version 1. The Android client,
+Status: Android app, protocol version 1. The Android client,
 relay and computer connector live in this repository under the MIT license,
 except for attributed Apache-2.0 terminal adaptations from MuxPod. Their source
 headers identify the upstream revision, and the APK includes the complete
@@ -855,7 +855,7 @@ remain in Machines.
 
 ### Firebase diagnostics and usage analytics
 
-The managed Android pilot uses Firebase Crashlytics, Google Analytics for
+The published Android app uses Firebase Crashlytics, Google Analytics for
 Firebase and FCM. These are independent services: disabling usage analytics or
 crash reports must not disable push delivery or change session notification
 preferences. Builds without the optional Firebase configuration retain the
@@ -904,7 +904,7 @@ with the APK hash, source revision and build identifier. Crashlytics mapping
 upload must use that build's mapping; rebuilding an already published version
 does not recover its symbols. Mapping files are excluded from public release
 assets and update catalogs. A private test crash and subsequent application
-restart qualify upload and decoding before a Firebase-enabled pilot is
+restart qualify upload and decoding before a Firebase-enabled build is
 published.
 
 References: [Analytics collection controls](https://firebase.google.com/docs/analytics/android/configure-data-collection),
@@ -952,8 +952,8 @@ preserves durable drafts, and must not interrupt an unresolved mutation. A
 pending installer session is recovered by identity rather than committed again.
 The initial updater requests system confirmation; it does not promise silent
 installation. Distributed development builds use one durable private signing
-identity across machines, preserving upgrades from the pilot. They must not use
-an independently generated debug key on each build machine.
+identity across machines, preserving upgrades from earlier published APKs. They
+must not use an independently generated debug key on each build machine.
 
 Desktop installation ownership remains with the installer. Pacman-owned AUR
 packages use their actual installed package name/version and Arch version

@@ -37,14 +37,11 @@ android {
         keyPassword = checkNotNull(privateSigning.getProperty("keyPassword"))
     }
     buildTypes {
-        getByName("release") { if(privateSigningFile.isFile) signingConfig = signingConfigs.getByName("development") }
-        create("pilot") {
-            initWith(getByName("release"))
+        getByName("release") {
             isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
             if(privateSigningFile.isFile) signingConfig = signingConfigs.getByName("development")
-            matchingFallbacks += "release"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -53,7 +50,6 @@ android {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")
         sourceSets.getByName("debug").manifest.srcFile("src/firebase/AndroidManifest.xml")
         sourceSets.getByName("release").manifest.srcFile("src/firebase/AndroidManifest.xml")
-        sourceSets.getByName("pilot").manifest.srcFile("src/firebase/AndroidManifest.xml")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -63,7 +59,7 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
 gradle.taskGraph.whenReady {
-    if(allTasks.any { it.name in setOf("packagePilot","packageRelease","signPilotBundle","signReleaseBundle") })
+    if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })
         require(privateSigningFile.isFile) { "Distributable builds require private development signing configuration." }
 }
 dependencies {

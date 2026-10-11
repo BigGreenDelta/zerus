@@ -72,7 +72,7 @@ release. Keep the target equal to the candidate's disclosed source base:
 gh release create android-dev-0.1.8 artifacts/release/android-dev-0.1.8/* \
   --repo ufna/zerus \
   --target 0123456789abcdef0123456789abcdef01234567 \
-  --draft --prerelease --latest=false --title 'Android 0.1.8 development snapshot' \
+  --draft --prerelease --latest=false --title 'Android 0.1.8' \
   --notes-file artifacts/release/android-dev-0.1.8-notes.txt
 ```
 

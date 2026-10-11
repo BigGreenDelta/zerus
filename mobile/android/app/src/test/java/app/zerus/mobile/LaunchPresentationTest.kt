@@ -23,7 +23,7 @@ class LaunchPresentationTest {
         assertFalse(LaunchPresentation.absoluteFolder("/srv/new\nfolder"))
     }
     @Test fun nativeTagLimitsAreExplicitAndUtf8Bounded() {
-        assertEquals("",LaunchPresentation.nameError("mobile pilot"))
+        assertEquals("",LaunchPresentation.nameError("mobile launch"))
         assertNotEquals("",LaunchPresentation.nameError("../escape"))
         assertNotEquals("",LaunchPresentation.nameError(" example "))
         assertEquals("",LaunchPresentation.nameError("界".repeat(40)))

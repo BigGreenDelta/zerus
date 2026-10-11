@@ -96,7 +96,7 @@ class ProjectCatalogTests(unittest.TestCase):
         self.assertNotIn('/private/remote',str(result))
 
     def test_project_fields_and_existing_folder_intent_are_validated_before_mutation(self):
-        base={'request_id':'request','agent':'codex','directory':'/example/mobile','tag':'mobile pilot'}
+        base={'request_id':'request','agent':'codex','directory':'/example/mobile','tag':'mobile launch'}
         validate('launch',base,'request')
         for fields in ({'project_id':'logical'},{'swarm_id':'swarm','project_id':'x'*129,'add_folder':True},
                        {'swarm_id':'swarm','project_id':'logical','add_folder':'true'},

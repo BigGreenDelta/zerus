@@ -18,12 +18,12 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The debug APK is suitable for a private pilot. It is not a signed store release.
+The debug APK is for local development and testing. It is not a signed store release.
 Keep a production signing key outside the repository and retain it for upgrades.
-For a non-debuggable pilot with release performance, run
-`./gradlew assemblePilot lintPilot` and install
-`app/build/outputs/apk/pilot/app-pilot.apk`. This variant
-uses the same development signing key for pilot upgrades; it is not a store release.
+For a non-debuggable build with release performance, run
+`./gradlew assembleRelease lintRelease` and install
+`app/build/outputs/apk/release/app-release.apk`. This variant
+uses the same development signing key as published APKs; it is not a store release.
 The application ID is `app.zerus.mobile`; the minimum Android version is 8.0
 (API 26). The default build requires no Firebase account or private credentials.
 See [Android build details](../mobile/android/README.md) for optional FCM setup.

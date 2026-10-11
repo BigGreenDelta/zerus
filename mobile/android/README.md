@@ -221,17 +221,17 @@ checksum. Dependencies come from Google Maven and Maven Central. The debug APK
 uses the local Android debug signing key; public distribution requires an
 owner-controlled release key. Generated APKs and local configuration are ignored.
 
-For device performance validation, `./gradlew assemblePilot lintPilot` produces
-`app/build/outputs/apk/pilot/app-pilot.apk`. This build enables R8, resource
-shrinking, and release performance while using the same development signing key
-for pilot upgrades. Distributable pilot and release builds require a private
-signing Properties file selected by `-PzerusSigningProperties`,
-`ZERUS_ANDROID_SIGNING_PROPERTIES`, or the default
+For distribution and device performance validation, run
+`./gradlew assembleRelease lintRelease`. It produces
+`app/build/outputs/apk/release/app-release.apk` with R8 and resource shrinking,
+signed with the same development key, so published APKs upgrade one another.
+Release builds require a private signing Properties file selected by
+`-PzerusSigningProperties`, `ZERUS_ANDROID_SIGNING_PROPERTIES`, or the default
 `~/.config/hgs/mobile/dev-signing/signing.properties`. Its fields are `storeFile`,
 `storePassword`, `keyAlias`, and `keyPassword`; relative key paths resolve beside
 that file. Keep the file, key and backup outside the repository. Existing dev
 installations must keep their exact signing key. Ordinary debug builds use the
-local test key independently. Pilot is not a store production release.
+local test key independently. Release builds are not store production releases.
 
 ## Updates
 
@@ -328,7 +328,7 @@ workspace and computer, without archive fallback. The event schema does not
 identify historical runs, so optional completion alerts conservatively filter
 recent events against a previously observed matching current conversation.
 
-Firebase remains an optional build for Google-free installations; published development pilots include Crashlytics, Analytics and FCM. Create an Android
+Firebase remains an optional build for Google-free installations; published APKs include Crashlytics, Analytics and FCM. Create an Android
 Firebase project for `app.zerus.mobile`, place its private local configuration in
 `app/google-services.json`, and run:
 
@@ -370,7 +370,7 @@ activity lifecycle callbacks; automatic screen and advertising ID collection
 are disabled and advertising consent is denied. These controls do not provide
 an anonymous SDK installation.
 
-Minified pilot builds use the Crashlytics Gradle plugin for exact R8 mapping
+Minified release builds use the Crashlytics Gradle plugin for exact R8 mapping
 upload. Retain a private copy for every shipped APK by passing `--mapping` and
 `--diagnostics-output` to `scripts/prepare-mobile-release.py`. Diagnostics stay
 outside the public candidate directory; the sealer verifies the mapping ID
