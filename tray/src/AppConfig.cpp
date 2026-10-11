@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QStandardPaths>
 #include <QTextStream>
 
 namespace {
@@ -18,6 +19,21 @@ QString AppConfig::configPath()
     // QStandardPaths — hgs сам не смотрит ни на то, ни на другое (см. hgs:
     // HGS_CONFIG_DIR="$HOME/.config/hgs"), так что путь трея должен совпасть буквально.
     return QDir::homePath() + QStringLiteral("/.config/hgs/tray.conf");
+}
+
+QStringList AppConfig::hgsInstallDirs(const QString &home)
+{
+    // Same order in which hgs extends PATH for its children (src/platform.rs).
+    return {home + QStringLiteral("/.local/bin"), QStringLiteral("/opt/homebrew/bin"),
+            QStringLiteral("/usr/local/bin")};
+}
+
+QString AppConfig::fallbackHgsPath(const QString &pathEnv, const QStringList &installDirs)
+{
+    const QStringList path = pathEnv.split(QLatin1Char(':'), Qt::SkipEmptyParts);
+    if (!path.isEmpty() && !QStandardPaths::findExecutable(QStringLiteral("hgs"), path).isEmpty())
+        return {};
+    return QStandardPaths::findExecutable(QStringLiteral("hgs"), installDirs);
 }
 
 void AppConfig::setConfigPathOverrideForTests(const QString &path)
@@ -121,7 +137,9 @@ QString AppConfig::usage()
                "\n"
                "Usage: hgs-tray [options]\n"
                "\n"
-               "  --hgs <path>          path to the hgs binary; found in PATH by default\n"
+               "  --hgs <path>          path to the hgs binary; found in PATH by default,\n"
+               "                        then in ~/.local/bin, /opt/homebrew/bin and\n"
+               "                        /usr/local/bin\n"
                "  --local-poll <ms>     how often this box is polled  [default %1]\n"
                "  --peer-poll <ms>      how often peers are polled    [default %2]\n"
                "  --terminal <tmpl>     terminal launch template, {cmd} becomes the command\n"

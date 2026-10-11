@@ -2,6 +2,21 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+/// Repository secret launchers can leave these exact notices above a native
+/// startup panel. They never join the request identity; arbitrary output above
+/// a panel is never skipped to find a quoted dialog.
+pub(super) fn launcher_notices(rows: &[&str], agent: &str) -> bool {
+    let prelude = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let launch = format!("run_{agent}: secrets unlocked → launching {agent}");
+    let unlocked = "unlock: SOPS_AGE_KEY loaded for this session.";
+    [
+        format!("Bitwarden master password: {unlocked} {launch}"),
+        format!("? Master password: [hidden] {unlocked} {launch}"),
+        format!("run_{agent}: SOPS_AGE_KEY already set — reusing it. {launch}"),
+    ]
+    .contains(&prelude)
+}
+
 pub(super) fn capture(record: &Value) -> Result<String> {
     let out = tmux(
         &["capture-pane", "-p", "-t", string(record, "pane")].map(str::to_owned),

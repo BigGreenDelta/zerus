@@ -50,6 +50,14 @@ struct AppConfig {
     // ~/.config/hgs/tray.conf, формат "ключ=значение". Отсутствие файла — не ошибка.
     static QString configPath();
 
+    // Where installations put hgs, in search order: the per-user install, then
+    // Homebrew on Apple silicon and Intel.
+    static QStringList hgsInstallDirs(const QString &home);
+    // hgs for an app started without --hgs or hgs=. Finder, Dock and Spotlight
+    // start it with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which has no hgs. Empty
+    // keeps the PATH lookup when PATH provides hgs or nothing is installed.
+    static QString fallbackHgsPath(const QString &pathEnv, const QStringList &installDirs);
+
     // Записывает "ключ=значение" в configPath(), СОХРАНЯЯ файл дословно: чужие ключи,
     // комментарии, пустые строки и их порядок остаются как были — переписывается ровно
     // одна строка этого ключа (или дописывается в конец, если её не было). Обратная

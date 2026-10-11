@@ -1575,7 +1575,27 @@ else: print('{}')
     QCOMPARE(menuPayload["expected_run_id"].toString(),QString("new-run"));
     QCOMPARE(menuPayload["expected_conversation_id"].toString(),QString("conversation-one"));
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));QCOMPARE(tabs->currentIndex(),1);
-    QTRY_COMPARE(finished.size(),4);tabs->setCurrentIndex(0);
+    QTRY_COMPARE(finished.size(),4);QVERIFY(!menuPayload.contains("dismiss_prompt"));QVERIFY(QFile::remove(capture));
+    // While Claude shows a chooser, an explicit reset first dismisses it with Esc.
+    details["phase"]="input";details["activity"]="busy";details["clear_context_supported"]=false;
+    details["clear_context_dismiss"]=true;applyDetails();QTRY_VERIFY(menuClear->isEnabled());settle();
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));
+        QVERIFY(dialog->text().contains("Esc"));QVERIFY(dialog->text().contains("denied"));QVERIFY(dialog->text().contains("draft"));
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){
+            QCOMPARE(button->text(),QString("Dismiss and clear"));button->click();return;}
+        QFAIL("Missing dismissal confirmation");});
+    menuClear->trigger();QTRY_VERIFY(QFileInfo::exists(capture));QVERIFY(sent.open(QIODevice::ReadOnly));
+    const auto dismissPayload=QJsonDocument::fromJson(sent.readAll()).object();sent.close();
+    QCOMPARE(dismissPayload["dismiss_prompt"].toBool(),true);QCOMPARE(dismissPayload["expected_run_id"].toString(),QString("new-run"));
+    QTRY_COMPARE(finished.size(),5);QVERIFY(QFile::remove(capture));
+    // A chooser that closed before confirmation is not dismissed.
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        details["clear_context_dismiss"]=false;details["clear_context_supported"]=true;details["phase"]="idle";details["activity"]="idle";
+        applyDetails();settle();
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}});
+    menuClear->trigger();QTest::qWait(100);QVERIFY(!QFileInfo::exists(capture));
+    details["clear_context_supported"]=false;applyDetails();QVERIFY(!menuClear->isEnabled());tabs->setCurrentIndex(0);
     QTest::qWait(350);details["phase"]="compacting";details["activity"]="busy";details["clear_context_supported"]=false;details.remove("cache_hint");details["session_usage"]=QJsonObject{{"status","ok"},{"context",QJsonObject{{"used",215900},{"limit",258400}}}};
     applyDetails();settle();QTest::qWait(50);QVERIFY(!menuClear->isEnabled());
     auto *progress=window.findChild<ActivityView *>("mainActivity")->compactionIndicator();auto *context=window.findChild<QWidget *>("activityContext");
@@ -5471,6 +5491,7 @@ void TestSessionsWindow::automaticLaunchWorktree_data()
     QTest::addColumn<QString>("mode");QTest::addColumn<QString>("host");
     QTest::newRow("local-auto")<<QString("created")<<QString();
     QTest::newRow("remote-auto")<<QString("created")<<QString("mac");
+    QTest::newRow("outside-auto")<<QString("outside")<<QString("mac");
     QTest::newRow("no-worktree")<<QString("none")<<QString();
     QTest::newRow("ordinary-folder")<<QString("not_repo")<<QString();
     QTest::newRow("creation-failed")<<QString("failed")<<QString("mac");
@@ -5524,8 +5545,10 @@ elif args[0] == 'worktrees':
         return result;
     };
     SessionOrganization projects;const auto project=projects.createGroup("Launch");
-    projects.addFolder(project,host.isEmpty()?"arch":host,"/repo");
+    // An outside repository joins the project, never the worktree generated from it.
+    projects.addFolder(project,host.isEmpty()?"arch":host,mode=="outside"?"/unrelated":"/repo");
     NewSessionDialog dialog(program.fileName(),fleet(),host,"codex",project);dialog.setGroups(projects,project);dialog.show();
+    if(mode=="outside")dialog.selectPath("/repo");
     auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");
     auto *none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *start=dialog.findChild<QPushButton *>("primary");
@@ -5533,7 +5556,7 @@ elif args[0] == 'worktrees':
     auto *target=dialog.findChild<QLabel *>("launchWorktreeTarget");
     QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
     QTRY_VERIFY(start->isEnabled());
-    QCOMPARE(creations().size(),0);QVERIFY(dialog.findChild<QLabel *>("muted")->text().isEmpty());
+    QCOMPARE(creations().size(),0);QTRY_COMPARE(dialog.findChild<QLabel *>("muted")->property("outsideProject").toBool(),mode=="outside");
     auto *manage=dialog.findChild<QToolButton *>("manageLaunchProject");QVERIFY(manage->text().isEmpty());QVERIFY(!manage->icon().isNull());
     auto *agents=dialog.findChild<QComboBox *>("launchAgent");for(int i=0;i<agents->count();++i)QVERIFY(!agents->itemIcon(i).isNull());
     const auto generated=name->text();const auto destination="/repo-"+generated;
@@ -5547,7 +5570,7 @@ elif args[0] == 'worktrees':
     if(mode=="none")none->click();
     start->click();
     if(mode=="none"||mode=="not_repo"){
-        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QCOMPARE(creations().size(),0);return;
+        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QVERIFY(launched[0][7].toString().isEmpty());QCOMPARE(creations().size(),0);return;
     }
     QTRY_COMPARE(creations().size(),1);QVERIFY(!start->isEnabled());QVERIFY(!name->isEnabled());
     QVERIFY(!dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->isEnabled());
@@ -5562,10 +5585,10 @@ elif args[0] == 'worktrees':
     QCOMPARE(option("--branch"),generated);QCOMPARE(option("--base"),QString("HEAD"));QCOMPARE(option("--destination"),destination);
     QVERIFY(!QUuid(option("--request-id")).isNull());if(!host.isEmpty())QCOMPARE(args.first().toString(),"@"+host);
     releaseRequest();
-    if(mode=="created"){
+    if(mode=="created"||mode=="outside"){
         QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][2].toString(),destination);
         QCOMPARE(launched[0][3].toString(),QString("review-session"));QCOMPARE(launched[0][4].toString(),QString("native-codex"));
-        QCOMPARE(launched[0][5].toString(),project);QVERIFY(!launched[0][7].toBool());
+        QCOMPARE(launched[0][5].toString(),project);QCOMPARE(launched[0][7].toString(),mode=="outside"?QString("/repo"):QString());
     }else{
         QTRY_VERIFY(name->isEnabled());QVERIFY(!start->isEnabled());QCOMPARE(launched.size(),0);QVERIFY(dialog.isVisible());
         QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().isEmpty());QCOMPARE(name->text(),QString("review-session"));
@@ -5617,13 +5640,13 @@ void TestSessionsWindow::arbitraryFolderAndTerminalPreference()
     const auto preview=qEnvironmentVariable("HGS_NAVIGATION_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(40);QVERIFY(dialog.grab().save(preview+"/new-session-folder-"+theme+".png"));}
     QSignalSpy launches(&dialog,&NewSessionDialog::launchRequested);terminal->setChecked(true);QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launches.size(),1);
-    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(launches[0][7].toBool());
+    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(!launches[0][7].toString().isEmpty());QCOMPARE(launches[0][7].toString(),launches[0][2].toString());
     NewSessionDialog second(script(),fleet(),"mac");QVERIFY(second.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     second.setGroups(projects,id);QCOMPARE(second.findChild<QComboBox *>("launchProjectFolder")->count(),0);
     projects.addFolder(id,"mac","/remote/work tree");second.setGroups(projects,id);
     second.findChild<QCheckBox *>("launchOpenTerminal")->setChecked(false);
     QSignalSpy secondLaunch(&second,&NewSessionDialog::launchRequested);QTRY_VERIFY(second.findChild<QPushButton *>("primary")->isEnabled());second.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(secondLaunch.size(),1);
-    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(!secondLaunch[0][7].toBool());
+    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(secondLaunch[0][7].toString().isEmpty());
     NewSessionDialog third(script(),fleet());QVERIFY(!third.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     // Selecting a project folder explicitly replaces the earlier Browse choice.
     project->setCurrentIndex(project->findData(other));
