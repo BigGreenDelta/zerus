@@ -51,11 +51,12 @@ alone never launches a session or sends input.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
-The session header on desktop and Android shows its native **Session ID** in
-small, muted, selectable text. Before that ID is reported, **Run ID** identifies
-the current process run; it can change on resume. Child views also show their
-**Agent ID**. Search accepts complete IDs or parts of conversation, run, archive
-and reported child IDs; a child match identifies its parent conversation.
+Native conversation IDs appear only in **Details** on desktop and **Session
+details → Overview** on Android, where they can be selected and copied. Before
+that ID is reported, **Run ID** identifies the current process run; it can change
+on resume. Child details also show their agent ID. Search accepts complete IDs or
+parts of conversation, run, archive and reported child IDs; a child match
+identifies its parent conversation.
 Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
 

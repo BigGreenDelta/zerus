@@ -516,10 +516,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_machineBadge = new IdentityBadge(IdentityBadges::Machine); m_machineBadge->setObjectName("sessionMachineBadge");
     auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
     detail->addLayout(metadata);
-    m_sessionId = label({}, "sessionId");
-    m_sessionId->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    m_sessionId->setWordWrap(true); m_sessionId->setMinimumWidth(0);
-    detail->addWidget(m_sessionId);
     m_usageStore=new AccountUsageStore(hgsPath,this);
     m_usageStrip=new QWidget;m_usageStrip->setObjectName("sessionUsageStrip");m_usageStrip->setFixedHeight(22);m_usageStrip->hide();
     auto *usageLayout=new QHBoxLayout(m_usageStrip);usageLayout->setContentsMargins(0,0,0,0);usageLayout->setSpacing(4);
@@ -734,10 +730,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_subagentTitle = new QLabel; m_subagentTitle->setTextFormat(Qt::PlainText);
     m_subagentTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     subagentHeader->addWidget(m_subagentTitle, 1); subagentTop->addLayout(subagentHeader);
-    m_subagentIdLabel = label({}, "subagentId");
-    m_subagentIdLabel->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    m_subagentIdLabel->setWordWrap(true); m_subagentIdLabel->setMinimumWidth(0);
-    subagentTop->addWidget(m_subagentIdLabel);
     m_subagentHint = new QLabel; m_subagentHint->setTextFormat(Qt::PlainText); m_subagentHint->setWordWrap(true);
     subagentTop->addWidget(m_subagentHint);
     m_subagentView = new ActivityView; m_subagentView->setObjectName("subagentActivity"); m_subagentView->browser()->setObjectName("subagentJournal"); subagentLayout->addWidget(m_subagentView, 1);
@@ -1296,8 +1288,8 @@ void SessionsWindow::applyTheme()
         QLabel#heading { font-size:16px; font-weight:600; }
         QLabel#detailTitle { font-size:16px; font-weight:600; }
         QLabel#emptyTitle { font-size:21px; font-weight:600; margin-bottom:8px; }
-        QLabel#muted, QLabel#footnote, QLabel#sessionMeta, QLabel#sessionId, QLabel#subagentId, QLabel#listSummary { color:%6; }
-        QLabel#sessionMeta, QLabel#sessionId, QLabel#subagentId, QLabel#listSummary { font-size:11px; }
+        QLabel#muted, QLabel#footnote, QLabel#sessionMeta, QLabel#listSummary { color:%6; }
+        QLabel#sessionMeta, QLabel#listSummary { font-size:11px; }
         QLabel#footnote { font-size:11px; margin-top:12px; }
         QPushButton { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 13px; min-height:18px; }
         QPushButton:hover { background:%7; }
@@ -2499,7 +2491,6 @@ void SessionsWindow::openSubagent(const QString &id)
     m_subagentCwd = selectedDirectory();
     m_subagentTitle->setText(childName(roster.value(id).toObject(), id));
     m_subagentTitle->setToolTip(id);
-    m_subagentIdLabel->setText(tr("Agent ID: %1").arg(id));
     m_subagentHint->setText(tr("Loading subagent activity…"));
     m_subagentView->setSessionKey(m_selectedKey + '\n' + m_subagentConversation + '\n' + id);
     m_subagentView->setActivity({},{});
@@ -2598,7 +2589,6 @@ void SessionsWindow::renderDetails()
     if (!m_subagentId.isEmpty() && (!entry || (m_subagentConversation != m_details.value("conversation_id").toString(entry->session.conversationId))
         || !childRoster(*entry).contains(m_subagentId))) closeSubagent();
     if (!entry) {
-        m_sessionId->clear(); m_sessionId->hide();
         m_copyReference->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
@@ -2634,14 +2624,6 @@ void SessionsWindow::renderDetails()
     const QString state = terminating?tr("Terminating…"):status(s, entry->online);
     const auto *project = m_organization.group(m_organization.groupFor(entry->identity));
     m_fullTitle = project ? project->name + " / " + sessionLabel(s) : displayTitle(s); m_title->setToolTip(sessionTooltip({s.name}, 380).html);
-    const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
-    const auto run = m_details.value("run_id").toString(s.runId);
-    const auto identifier = !conversation.isEmpty() ? tr("Session ID: %1").arg(conversation)
-        : !run.isEmpty() ? tr("Run ID: %1").arg(run) : QString();
-    if (m_sessionId->text() != identifier) m_sessionId->setText(identifier);
-    m_sessionId->setVisible(!m_sessionId->text().isEmpty());
-    m_sessionId->setToolTip(conversation.isEmpty() ? tr("The native session ID has not been reported yet. This ID identifies the current run.")
-        : tr("Native conversation ID. Use all or part of this ID to find the session."));
     QString meta = entry->machine + QStringLiteral("  /  ") + s.cmd + QStringLiteral("  /  ") + projectContext(s);
     m_fullMeta = projectContext(s);
     m_providerBadge->setValue(s.cmd); m_machineBadge->setValue(entry->machine);
@@ -2902,11 +2884,14 @@ void SessionsWindow::renderDetails()
         m_forkAction->setEnabled(false); m_renameAction->setEnabled(false);
     } else { m_pause->show(); m_more->show(); }
     updateBrowser(m_children, children, m_childrenHtml);
+    const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
+    const auto run = m_details.value("run_id").toString(s.runId);
     QString info = QString("<h3>Session</h3><p>%1</p><h3>Conversation</h3><p>%2</p><h3>Directory</h3><p>%3</p><h3>Last recorded event</h3><p>%4</p><h3>History</h3><p>Activity stays on %5. Closing this window does not stop your agent.</p>")
-        .arg(htmlText(s.name), htmlText(m_details.value("conversation_id").toString(tr("Not confirmed"))),
+        .arg(htmlText(s.name), htmlText(conversation.isEmpty() ? tr("Not confirmed") : conversation),
              htmlText(s.cwd.isEmpty() ? tr("Not reported") : s.cwd),
              m_details.value("last_event_at").toDouble() ? QDateTime::fromSecsSinceEpoch(qint64(m_details.value("last_event_at").toDouble())).toLocalTime().toString("ddd, d MMM HH:mm:ss") : tr("No events yet"), htmlText(entry->machine));
     if (!m_model->text().isEmpty()) info += QString("<h3>Model</h3><p>%1</p>").arg(htmlText(m_model->text()));
+    if (conversation.isEmpty() && !run.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Run ID"), htmlText(run));
     if (!s.gitRoot.isEmpty()) info += QString("<h3>Git</h3><p>%1<br>%2</p>").arg(htmlText(projectContext(s)), htmlText(s.gitRoot));
     if (!m_subagentId.isEmpty()) info = QString("<h3>%1</h3><p>%2</p><h3>%3</h3><p>%4</p><h3>%5</h3><p>%6</p>")
         .arg(tr("Subagent"), htmlText(m_subagentId), tr("Parent session"), htmlText(s.name), tr("Directory"), htmlText(m_subagentCwd));

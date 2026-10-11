@@ -87,13 +87,6 @@ import org.json.JSONObject
             }
         }
     }
-    SelectionContainer {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            SessionReference.identifiers(target).forEach { identifier ->
-                Text(identifier, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
     model.pendingActionResult(target)?.let { action ->
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),verticalAlignment = Alignment.CenterVertically) {
             Text(model.actionResultNotice.ifBlank { "The machine confirmed this action. Its destination is available for verification." },Modifier.weight(1f),style = MaterialTheme.typography.bodySmall)
