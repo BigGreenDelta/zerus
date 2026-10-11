@@ -9,6 +9,7 @@ build-*/
 makepkg-builddir/
 *.pkg.tar.zst
 compile_commands.json
+.cache/
 __pycache__/
 /target/
 /artifacts/
