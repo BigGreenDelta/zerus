@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    alerts::{Delivery, Presence},
+    alerts::{Candidate, Delivery, Presence},
     db::{f, Arg, Tx},
     protocol::{self, MIB},
     registry,
@@ -86,10 +86,15 @@ impl Store {
             let mut t = self.db.begin().await?;
             if t.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await? != 0 {
                 // Unchanged content: remember presence without rewriting the snapshot.
+                let mut held = false;
                 if let Some(p) = presence {
                     Self::remember_presence(&mut t, None, &c.id, p).await?;
+                    held = t.one("SELECT id FROM alert_candidates WHERE workspace_id=? LIMIT 1",args![&c.workspace]).await?.is_some();
                 }
                 t.commit().await?;
+                if held && self.evaluate_workspace(&c.workspace, None).await.is_err() {
+                    eprintln!("relay alert evaluation deferred");
+                }
                 return Ok(());
             }
             // SQLite has one connection; release it before the full path.
@@ -102,7 +107,7 @@ impl Store {
             let changes = registry::event_changes(previous["snapshot"].as_str(), snapshot)?;
             let mut t = self.db.begin().await?;
             if !changes.is_empty() {
-                self.event_locks(&mut t, &c.workspace, changes.len())
+                self.event_locks(&mut t, &[c.workspace.as_str()], changes.len())
                     .await?;
             }
             // Changed event-free snapshots take only the node or route lock.
@@ -158,8 +163,21 @@ impl Store {
             if let Some(p) = presence {
                 Self::remember_presence(&mut t, peer.map(|(route, _)| route), &c.id, p).await?;
             }
+            let computer = s(&current, "computer_id").to_owned();
+            // Held candidates are re-evaluated with the presence and read state just stored.
+            let held = !changes.is_empty()
+                || t.one(
+                    "SELECT id FROM alert_candidates WHERE workspace_id=? LIMIT 1",
+                    args![&c.workspace],
+                )
+                .await?
+                .is_some();
             if !changes.is_empty() {
-                self.publish(&mut t, &c.workspace, s(&current, "computer_id"), &changes)
+                let candidates: Vec<_> = changes
+                    .iter()
+                    .map(|(session, kind)| Candidate::capture(snapshot, session, kind))
+                    .collect();
+                self.publish(&mut t, &c.workspace, &computer, &candidates)
                     .await?;
                 let topic = format!("workspace:{}", c.workspace);
                 t.notify(&topic).await?;
@@ -167,6 +185,15 @@ impl Store {
                 self.db.signal(topic);
             } else {
                 t.commit().await?;
+            }
+            // The snapshot is accepted; maintenance retries a failed evaluation.
+            if held
+                && self
+                    .evaluate_workspace(&c.workspace, Some((computer.as_str(), snapshot)))
+                    .await
+                    .is_err()
+            {
+                eprintln!("relay alert evaluation deferred");
             }
             return Ok(());
         }
@@ -191,7 +218,14 @@ impl Store {
         }
         Ok(())
     }
-    async fn event_locks(&self, t: &mut Tx, w: &str, count: usize) -> Result<()> {
+    /// Locks global event accounting, then every workspace that may gain an
+    /// event or wake job or lose its oldest one to a cap, in sorted order.
+    pub(super) async fn event_locks(
+        &self,
+        t: &mut Tx,
+        spaces: &[&str],
+        count: usize,
+    ) -> Result<()> {
         let fleet = t
             .one(
                 "SELECT events,push_jobs FROM global_usage WHERE id=1 FOR UPDATE",
@@ -199,7 +233,7 @@ impl Store {
             )
             .await?
             .ok_or(Error::BAD)?;
-        let mut workspaces = BTreeSet::from([w.to_string()]);
+        let mut workspaces: BTreeSet<String> = spaces.iter().map(|w| (*w).to_string()).collect();
         for r in t
             .all(
                 "SELECT workspace_id FROM events ORDER BY id LIMIT ?",
@@ -209,64 +243,80 @@ impl Store {
         {
             workspaces.insert(s(&r, "workspace_id").into());
         }
-        // At most 1000 registrations can create jobs during one event publication.
-        for r in t.all("SELECT d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT ?",args![(i(&fleet,"push_jobs")+1000-10000).max(0)]).await?{workspaces.insert(s(&r,"workspace_id").into());}
+        // At most 1000 registrations per workspace can create jobs during one publication.
+        let jobs = i(&fleet, "push_jobs") + 1000 * spaces.len() as i64 - 10000;
+        for r in t.all("SELECT d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT ?",args![jobs.max(0)]).await?{workspaces.insert(s(&r,"workspace_id").into());}
         for w in workspaces {
             self.db.usage(t, &w).await?;
         }
         Ok(())
     }
+    /// Ordinary events refresh phone state; their candidates decide phone wakes.
     async fn publish(
         &self,
         t: &mut Tx,
         w: &str,
         computer: &str,
-        changes: &[(String, String)],
+        candidates: &[Candidate],
     ) -> Result<()> {
-        let mut latest = None;
-        for (session, kind) in changes {
-            let usage = t
-                .one(
-                    "SELECT events FROM workspace_usage WHERE workspace_id=?",
-                    args![w],
-                )
-                .await?
-                .ok_or(Error::BAD)?;
-            let fleet = t
-                .one("SELECT events FROM global_usage WHERE id=1", &[])
-                .await?
-                .ok_or(Error::BAD)?;
-            let victim = if i(&usage, "events") >= 10000 {
-                t.one(
-                    "SELECT id,workspace_id FROM events WHERE workspace_id=? ORDER BY id LIMIT 1",
-                    args![w],
-                )
-                .await?
-            } else if i(&fleet, "events") >= 100000 {
-                t.one(
-                    "SELECT id,workspace_id FROM events ORDER BY id LIMIT 1",
-                    &[],
-                )
-                .await?
-            } else {
-                None
-            };
-            if let Some(v) = victim {
-                self.delete_event(t, &v).await?;
-            }
-            latest=t.one("INSERT INTO events(workspace_id,node_id,session,kind,created) VALUES(?,?,?,?,?) RETURNING id",args![w,computer,session,kind,now()]).await?;
-            t.exec(
-                "UPDATE workspace_usage SET events=events+1 WHERE workspace_id=?",
-                args![w],
-            )
-            .await?;
-            t.exec("UPDATE global_usage SET events=events+1 WHERE id=1", &[])
+        for c in candidates {
+            self.append_event(t, w, computer, &c.session, &c.kind, None)
                 .await?;
         }
-        let Some(event) = latest else {
-            return Ok(());
+        self.record_candidates(t, w, computer, candidates).await
+    }
+    /// Appends one event inside the workspace and fleet caps. The caller holds event locks.
+    pub(super) async fn append_event(
+        &self,
+        t: &mut Tx,
+        w: &str,
+        computer: &str,
+        session: &str,
+        kind: &str,
+        alert_kind: Option<&str>,
+    ) -> Result<Value> {
+        let usage = t
+            .one(
+                "SELECT events FROM workspace_usage WHERE workspace_id=?",
+                args![w],
+            )
+            .await?
+            .ok_or(Error::BAD)?;
+        let fleet = t
+            .one("SELECT events FROM global_usage WHERE id=1", &[])
+            .await?
+            .ok_or(Error::BAD)?;
+        let victim = if i(&usage, "events") >= 10000 {
+            t.one(
+                "SELECT id,workspace_id FROM events WHERE workspace_id=? ORDER BY id LIMIT 1",
+                args![w],
+            )
+            .await?
+        } else if i(&fleet, "events") >= 100000 {
+            t.one(
+                "SELECT id,workspace_id FROM events ORDER BY id LIMIT 1",
+                &[],
+            )
+            .await?
+        } else {
+            None
         };
-        let payload = canonical(&json!({"event_id":event["id"],"kind":"wake"}))?;
+        if let Some(v) = victim {
+            self.delete_event(t, &v).await?;
+        }
+        let event=t.one("INSERT INTO events(workspace_id,node_id,session,kind,alert_kind,created) VALUES(?,?,?,?,?,?) RETURNING id",args![w,computer,session,kind,alert_kind.map_or(Arg::Null,Arg::Text),now()]).await?.ok_or(Error::BAD)?;
+        t.exec(
+            "UPDATE workspace_usage SET events=events+1 WHERE workspace_id=?",
+            args![w],
+        )
+        .await?;
+        t.exec("UPDATE global_usage SET events=events+1 WHERE id=1", &[])
+            .await?;
+        Ok(event)
+    }
+    /// Coalesces one generic wake per registered device toward the newest alert.
+    pub(super) async fn wake_devices(&self, t: &mut Tx, w: &str, event_id: &Value) -> Result<()> {
+        let payload = canonical(&json!({"event_id":event_id,"kind":"wake"}))?;
         let registrations=t.all("SELECT p.device_id FROM pushes p JOIN devices d ON d.id=p.device_id WHERE d.workspace_id=? AND d.revoked=0 ORDER BY p.device_id LIMIT 1000",args![w]).await?;
         for reg in registrations {
             if let Some(j) = t
@@ -277,7 +327,7 @@ impl Store {
                 .await?
             {
                 if j["lease_until"].is_null() || f(&j, "lease_until") <= now() {
-                    t.exec("UPDATE push_jobs SET event_id=?,payload=?,next_at=CASE WHEN next_at<? THEN next_at ELSE ? END WHERE id=?",args![&event["id"],&payload,now(),now(),&j["id"]]).await?;
+                    t.exec("UPDATE push_jobs SET event_id=?,payload=?,next_at=CASE WHEN next_at<? THEN next_at ELSE ? END WHERE id=?",args![event_id,&payload,now(),now(),&j["id"]]).await?;
                 }
                 continue;
             }
@@ -302,7 +352,7 @@ impl Store {
             if let Some(j) = victim {
                 self.delete_job(t, &j).await?;
             }
-            t.exec("INSERT INTO push_jobs(device_id,event_id,payload,next_at,created) VALUES(?,?,?,?,?)",args![&reg["device_id"],&event["id"],&payload,now(),now()]).await?;
+            t.exec("INSERT INTO push_jobs(device_id,event_id,payload,next_at,created) VALUES(?,?,?,?,?)",args![&reg["device_id"],event_id,&payload,now(),now()]).await?;
             t.exec(
                 "UPDATE workspace_usage SET push_jobs=push_jobs+1 WHERE workspace_id=?",
                 args![w],
@@ -352,12 +402,16 @@ impl Store {
     pub async fn events(&self, c: &Credential, after: i64) -> Result<Value> {
         let mut t = self.db.begin().await?;
         self.authorized_tx(&mut t, c).await?;
-        let rows=t.all("SELECT id,node_id,session,kind,created FROM events WHERE workspace_id=? AND id>? ORDER BY id LIMIT 100",args![&c.workspace,after]).await?;
+        let rows=t.all("SELECT id,node_id,session,kind,alert_kind,created FROM events WHERE workspace_id=? AND id>? ORDER BY id LIMIT 100",args![&c.workspace,after]).await?;
         let mut used = crate::json::size(&json!({"events":[],"cursor":i64::MAX}), MIB)?;
         let mut events = vec![];
         let mut cursor = after;
         for r in rows {
-            let e = json!({"id":r["id"],"computer_id":r["node_id"],"session":r["session"],"kind":r["kind"],"created_at":r["created"]});
+            let mut e = json!({"id":r["id"],"computer_id":r["node_id"],"session":r["session"],"kind":r["kind"],"created_at":r["created"]});
+            // Ordinary events keep their released shape.
+            if r["kind"] == "alert" {
+                e["alert_kind"] = r["alert_kind"].clone();
+            }
             let size = crate::json::size(&e, MIB)? + 1;
             if used + size > MIB {
                 if events.is_empty() {

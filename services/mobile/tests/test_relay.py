@@ -223,7 +223,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await heartbeat({**question, "attention_id": "question-two"})
         await heartbeat({**session, "phase": "idle", "activity": "idle"})
         result = await self.call("GET", "/v1/events")
-        self.assertEqual([event["kind"] for event in result["events"]], ["attention", "attention", "completed"])
+        self.assertEqual([event["kind"] for event in result["events"] if event["kind"] != "alert"], ["attention", "attention", "completed"])
         self.assertNotIn("Private text", json.dumps(result))
         self.assertEqual((await self.call("GET", "/v1/events?after=" + str(result["cursor"])))["events"], [])
         computers = (await self.call("GET", "/v1/computers"))["computers"]
@@ -255,7 +255,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await send([first])  # An unchanged heartbeat is silent.
         await send([second])
         await send([])
-        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"]], ["attention", "attention"])
+        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"] if e["kind"] != "alert"], ["attention", "attention"])
 
     async def test_push_retired_unifiedpush_and_unavailable_fcm(self):
         self.assertEqual((await self.call("GET", "/v1/capabilities"))["push_providers"], [])

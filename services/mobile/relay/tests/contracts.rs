@@ -121,12 +121,73 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+    /// Counts the rows of a FROM clause, for example `alert_candidates WHERE session='s0'`.
+    async fn count(&self, from: &str) -> i64 {
+        i(
+            &self
+                .store
+                .db
+                .one(&format!("SELECT count(*) AS n FROM {from}"), &[])
+                .await
+                .unwrap()
+                .unwrap(),
+            "n",
+        )
+    }
+    async fn alert_count(&self) -> i64 {
+        self.count("events WHERE kind='alert'").await
+    }
+    async fn events_of(&self, kind: &str) -> Vec<Value> {
+        self.store.events(&self.phone, 0).await.unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == kind)
+            .cloned()
+            .collect()
+    }
     async fn close(self) {
         self.store.db.close().await;
     }
 }
 fn presence(idle: f64, locked: Option<f64>) -> Value {
     json!({"idle_seconds":idle,"locked":locked.is_some(),"locked_seconds":locked})
+}
+fn signature(digit: char) -> String {
+    digit.to_string().repeat(64)
+}
+fn session_row(
+    phase: &str,
+    activity: &str,
+    attention: &str,
+    signature: Option<&str>,
+    read: Value,
+) -> Value {
+    json!({"name":"example","run_id":"r","conversation_id":"c","phase":phase,"activity":activity,"attention_id":attention,"attention_signature":signature,"read":read})
+}
+fn listing(session: Value) -> Value {
+    json!({ "sessions": [session] })
+}
+async fn gateway_beat(f: &Fixture, root: &str, peers: &Value, snapshot: &Value) {
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot,"machine_id":root,"peers":peers,"presence":null}),
+            &canonical(snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+}
+async fn peer_beat(f: &Fixture, route: &str, machine: &str, snapshot: &Value, presence: &Value) {
+    f.store
+        .peer_heartbeat(
+            &f.node,
+            route,
+            &json!({"machine_id":machine,"snapshot":snapshot,"presence":presence}),
+            &canonical(snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
 }
 #[tokio::test]
 async fn claims_and_receipts_never_replay() {
@@ -514,6 +575,165 @@ async fn heartbeats_store_presence_outside_the_snapshot() {
     f.close().await;
 }
 #[tokio::test]
+async fn presence_holds_read_drops_and_lock_delivers_alert() {
+    let f = Fixture::new().await;
+    let features = protocol::capabilities(vec![])["features"].clone();
+    assert!(features
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "presence_alerts"));
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let active = presence(3.0, None);
+    let (first, second) = (signature('1'), signature('2'));
+    f.beat_with(
+        &listing(session_row("working", "busy", "", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&first),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.events_of("attention").await.len(), 1);
+    assert_eq!(
+        (
+            f.count("alert_candidates").await,
+            f.alert_count().await,
+            f.count("push_jobs").await
+        ),
+        (1, 0, 0)
+    );
+    // Reading the question on a desktop drops the held candidate.
+    let read = json!({"conversation_id":"c","reply_id":null,"attention_signature":first,"at":1.0});
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&first),
+            read.clone(),
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.count("alert_candidates").await, 0);
+    // A replacement question waits while the owner is active.
+    let waiting = listing(session_row("input", "busy", "q2", Some(&second), read));
+    f.beat_with(&waiting, &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    // Identical snapshot content: the lock alone arrives and delivers.
+    f.beat_with(&waiting, &presence(4.0, Some(2.0))).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        (
+            alerts[0]["alert_kind"].as_str(),
+            alerts[0]["session"].as_str(),
+            alerts[0]["computer_id"].as_str()
+        ),
+        (Some("attention"), Some("example"), Some(f.node.id.as_str()))
+    );
+    assert!(f
+        .events_of("attention")
+        .await
+        .iter()
+        .all(|e| e.get("alert_kind").is_none()));
+    let jobs = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(s(&jobs[0], "payload")).unwrap(),
+        json!({"event_id":alerts[0]["id"],"kind":"wake"})
+    );
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn immediate_preference_ignores_active_desktop() {
+    let f = Fixture::new().await;
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"immediate"}});
+    f.beat_with(&snapshot("working"), &presence(1.0, None))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(1.0, None)).await;
+    assert_eq!(
+        (f.alert_count().await, f.count("alert_candidates").await),
+        (1, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn completed_candidates_follow_reply_read_and_busy_state() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    let none = Value::Null;
+    let turn = |activity: &str, reply: &str, read: &Value| {
+        listing(
+            json!({"name":"example","run_id":"r","conversation_id":"c","phase":"idle","activity":activity,"reply_id":reply,"read":read}),
+        )
+    };
+    f.beat_with(&turn("busy", "rp0", &none), &active).await;
+    f.beat_with(&turn("idle", "rp1", &none), &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    f.beat_with(&turn("busy", "rp1", &none), &active).await; // busy again
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("idle", "rp2", &none), &active).await;
+    let read = json!({"conversation_id":"c","reply_id":"rp2","attention_signature":null,"at":1.0});
+    f.beat_with(&turn("idle", "rp2", &read), &active).await; // read on a desktop
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("busy", "rp2", &read), &active).await;
+    f.beat_with(&turn("idle", "rp3", &read), &active).await;
+    f.beat_with(&turn("idle", "rp4", &read), &active).await; // a newer reply supersedes it
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("busy", "rp4", &read), &active).await;
+    f.beat_with(&turn("idle", "rp5", &read), &active).await;
+    f.beat_with(&turn("idle", "rp5", &read), &presence(1.0, Some(0.0)))
+        .await;
+    let kinds: Vec<_> = f
+        .events_of("alert")
+        .await
+        .iter()
+        .map(|e| e["alert_kind"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(kinds, ["completed"]);
+    f.close().await;
+}
+#[tokio::test]
+async fn peer_desktop_presence_holds_gateway_alerts() {
+    let f = Fixture::new().await;
+    let (root, machine, route) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let caps = json!({"protocol_version":1,"operations":protocol::OPERATIONS,"features":["gateway_one_hop"]});
+    let peers = json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":true}]);
+    // The gateway GUI is closed (presence null); the owner works at the peer.
+    let gateway = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"mobile_capabilities":caps});
+    let peer = json!({"sessions":[],"mobile_capabilities":caps});
+    gateway_beat(&f, &root, &peers, &gateway("working")).await;
+    peer_beat(&f, &route, &machine, &peer, &presence(1.0, None)).await;
+    gateway_beat(&f, &root, &peers, &gateway("input")).await;
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    peer_beat(&f, &route, &machine, &peer, &presence(2.0, Some(1.0))).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["computer_id"], f.node.id);
+    f.close().await;
+}
+#[tokio::test]
 async fn older_connectors_forward_presence_inside_the_snapshot() {
     let f = Fixture::new().await;
     let with = |p: Value| json!({"sessions":[],"desktop_presence":p});
@@ -559,9 +779,16 @@ async fn snapshot_events_and_push_claims() {
             .await
             .unwrap();
     }
+    // A connector without presence counts as away: each transition alerts at once.
     let e = f.store.events(&f.phone, 0).await.unwrap();
-    assert_eq!(e["events"].as_array().unwrap().len(), 1);
-    assert_eq!(e["events"][0]["kind"], "attention");
+    let kinds: Vec<_> = e["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["attention", "alert"]);
+    assert_eq!(e["events"][1]["alert_kind"], "attention");
     let a = f.store.claim_push_jobs().await.unwrap();
     assert_eq!(a.len(), 1);
     assert!(f.store.claim_push_jobs().await.unwrap().is_empty());
@@ -587,7 +814,7 @@ async fn snapshot_events_and_push_claims() {
         .unwrap()
         .unwrap();
     assert_eq!(count["push_jobs"], 0);
-    assert_eq!(count["events"], 1);
+    assert_eq!(count["events"], 2);
     f.close().await;
 }
 #[tokio::test]
@@ -870,7 +1097,7 @@ async fn postgres_cross_worker_contract() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     let (a, b) = tokio::join!(f.store.claim_push_jobs(), second.claim_push_jobs());
     assert_eq!(a.unwrap().len() + b.unwrap().len(), 1);

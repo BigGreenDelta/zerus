@@ -63,7 +63,12 @@ pub const OPERATIONS: &[&str] = &[
     "worktree_create",
     "worktrees",
 ];
-pub const FEATURES: &[&str] = &["inspect_after", "inspect_agent", "send_agent"];
+pub const FEATURES: &[&str] = &[
+    "inspect_after",
+    "inspect_agent",
+    "presence_alerts",
+    "send_agent",
+];
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
