@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
@@ -318,6 +319,40 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(local['state'], 'completed')
             self.assertEqual(local['result']['machine'], LOCAL)
 
+    async def test_pre_gateway_relay_fallback_chain_and_presence_probe(self):
+        self.connector.fleet.supported = True
+        self.connector.presence = {'idle_seconds': 4.0, 'locked': False, 'locked_seconds': None}
+        calls = []
+
+        async def http(*args, **kwargs):
+            body = args[3]; calls.append(body)
+            # A real pre-gateway relay (and the strict Python reference) accepts only the plain shape.
+            if set(body) != {'snapshot'}: raise RelayError(400)
+            return {}
+
+        class Stop(Exception): pass
+
+        async def beat():
+            async def sleep(_): raise Stop
+            with patch.object(self.connector, 'http', http), patch('zerus_mobile.connector.asyncio.sleep', sleep):
+                with self.assertRaises(Stop):
+                    await self.connector.heartbeats(None)
+
+        def shape(body): return ('gateway' if 'machine_id' in body else 'snapshot') + ('+presence' if 'presence' in body else '')
+        await beat()
+        self.assertEqual([shape(body) for body in calls],
+                         ['gateway+presence', 'gateway', 'snapshot+presence', 'snapshot'])
+        self.assertNotIn('gateway_one_hop', calls[-1]['snapshot']['mobile_capabilities']['features'])
+        self.assertGreater(self.connector.presence_retry_at, time.monotonic() + 290)
+        calls.clear()
+        await beat()  # Within 300 s: no failing attempt repeats and no presence is sent.
+        self.assertEqual([shape(body) for body in calls], ['snapshot'])
+        calls.clear()
+        self.connector.presence_retry_at = time.monotonic() - 1  # The 300 s interval elapsed.
+        await beat()
+        self.assertEqual([shape(body) for body in calls], ['snapshot+presence', 'snapshot'])
+        self.assertGreater(self.connector.presence_retry_at, time.monotonic() + 290)
+
     async def test_old_native_never_probes_dispatch_and_old_relay_falls_back(self):
         self.connector.fleet.supported = False
         before = len(self.calls())
@@ -327,21 +362,6 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self.connector.execute(legacy)
         self.assertEqual(result['state'], 'completed')
         self.assertEqual(self.calls()[-1]['argv'], ['inspect', 'codex/example'])
-        self.connector.fleet.supported = True
-        calls = []
-        stop = asyncio.Event()
-        async def http(*args, **kwargs):
-            body = args[3]; calls.append(body)
-            if 'machine_id' in body: raise RelayError(400)  # A relay predating gateway fields.
-            stop.set()
-        with patch.object(self.connector, 'http', http):
-            task = asyncio.create_task(self.connector.heartbeats(None))
-            try: await asyncio.wait_for(stop.wait(), 1)
-            finally:
-                task.cancel(); await asyncio.gather(task, return_exceptions=True)
-        self.assertIn('machine_id', calls[0])
-        self.assertEqual(set(calls[-1]), {'snapshot', 'presence'})  # Presence survives the gateway fallback.
-        self.assertNotIn('gateway_one_hop', calls[-1]['snapshot']['mobile_capabilities']['features'])
 
     async def test_mark_read_reaches_only_the_selected_machine(self):
         for peer in (True, False):
