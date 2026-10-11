@@ -47,6 +47,14 @@ class MobileDeliveryTest {
         assertEquals("Check the previous change before choosing again.", MobileDelivery.reason(gateway, true, true, true))
         assertEquals("", MobileDelivery.reason(gateway, true, true, false))
     }
+    @Test fun withoutAConnectionTheChoiceNamesTheConnectionRatherThanAnUpdate() {
+        // An unavailable connection keeps last known machines but not their operations or relay capabilities.
+        val lastKnown = machine(gatewayId, online = false).copy(lastKnown = true)
+        assertEquals(gatewayId, MobileDelivery.gateway(listOf(lastKnown)) { false }?.id)
+        assertEquals("Desktop is offline. Try again when it is connected.", MobileDelivery.reason(lastKnown, false, false, false))
+        assertEquals("Desktop is offline. Try again when it is connected.", MobileDelivery.reason(machine(gatewayId).copy(lastKnown = true), false, true, false))
+        assertEquals("Desktop is offline. Try again when it is connected.", MobileDelivery.reason(machine(gatewayId, online = false), false, true, true))
+    }
     @Test fun onlyAnExactNativeAcknowledgementConfirmsTheChange() {
         val pending = action("away_10")
         assertEquals("completed", SessionActionPolicies.result(pending, receipt(JSONObject().put("ok", true).put("mobile_delivery", "away_10"))).status)
@@ -60,11 +68,26 @@ class MobileDeliveryTest {
     }
     @Test fun pendingAndJustConfirmedChoicesAreShownUntilTheSnapshotCatchesUp() {
         assertEquals("away_10", MobileDelivery.shown("away", action("away_10"), 2_000))
-        assertEquals("away_10", MobileDelivery.shown("away", action("away_10", "uncertain"), 2_000))
         assertEquals("away_10", MobileDelivery.shown("away", action("away_10", "completed"), 30_000))
         assertEquals("away", MobileDelivery.shown("away", action("away_10", "completed"), 120_000))
         assertEquals("away", MobileDelivery.shown("away", action("away_10", "failed"), 2_000))
         assertEquals("immediate", MobileDelivery.shown("immediate", null, 2_000))
+    }
+    @Test fun anUnconfirmedChoiceShowsTheReportedValueAsNotConfirmed() {
+        val uncertain = action("away_10", "uncertain")
+        assertEquals("away", MobileDelivery.shown("away", uncertain, 2_000))
+        assertEquals("away", MobileDelivery.shown("away", uncertain, 7_200_000))
+        assertEquals(MobileDelivery.UNCONFIRMED, MobileDelivery.status("Desktop", "away", uncertain, "", 2_000))
+        assertEquals("immediate", MobileDelivery.shown("immediate", uncertain.copy(status = "reviewed"), 2_000))
+    }
+    @Test fun anInlineErrorEndsWhenItsRequestIsReviewedOrConfirmed() {
+        val uncertain = action("away_10", "uncertain")
+        assertEquals("Choose a supported notification timing.", MobileDelivery.error("Choose a supported notification timing.", "", emptyList()))
+        assertEquals(MobileDelivery.UNCONFIRMED, MobileDelivery.error(MobileDelivery.UNCONFIRMED, "request", listOf(uncertain)))
+        assertEquals("", MobileDelivery.error(MobileDelivery.UNCONFIRMED, "request", listOf(uncertain.copy(status = "reviewed"))))
+        assertEquals("", MobileDelivery.error(MobileDelivery.UNCONFIRMED, "request", listOf(uncertain.copy(status = "completed"))))
+        assertEquals("gateway offline", MobileDelivery.error("gateway offline", "request", listOf(uncertain.copy(status = "failed"))))
+        assertEquals(MobileDelivery.UNCONFIRMED, MobileDelivery.error(MobileDelivery.UNCONFIRMED, "request", listOf(uncertain.copy(requestId = "other", status = "reviewed"), uncertain)))
     }
     @Test fun statusExplainsSubmittedConfirmedAndBlockedStates() {
         assertEquals("Saving on Desktop…", MobileDelivery.status("Desktop", "away", action("away_10"), "", 2_000))

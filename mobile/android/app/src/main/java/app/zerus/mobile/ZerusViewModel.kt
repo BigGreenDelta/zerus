@@ -766,7 +766,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchCatalogLoading by mutableStateOf(false);private set
     var launchDirectoryLoading by mutableStateOf(false);private set
     var launchError by mutableStateOf("");private set
-    var mobileDeliveryError by mutableStateOf("");private set
+    private var mobileDeliveryMessage by mutableStateOf("")
+    private var mobileDeliveryRequest by mutableStateOf("")
+    val mobileDeliveryError get() = MobileDelivery.error(mobileDeliveryMessage,mobileDeliveryRequest,sessionActions)
+    private fun showMobileDeliveryError(message:String,requestId:String="") { mobileDeliveryMessage=message;mobileDeliveryRequest=requestId }
     var launchSubmitting by mutableStateOf(false);private set
     private var launchGeneration=0L
     private var launchCatalogJob:Job?=null
@@ -933,17 +936,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             MobileDelivery.OPERATION in relayOperations[connectionId].orEmpty(),
             sessionActions.any { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending })
     }
-    fun dismissMobileDeliveryError() { mobileDeliveryError="" }
+    fun dismissMobileDeliveryError() { showMobileDeliveryError("") }
     /** A durable request with the usual receipt states. An unconfirmed change is checked, never repeated. */
     fun setMobileDelivery(connectionId:String,value:String) {
-        val reason=mobileDeliveryReason(connectionId);if(reason.isNotBlank()) { mobileDeliveryError=reason;return }
+        val reason=mobileDeliveryReason(connectionId);if(reason.isNotBlank()) { showMobileDeliveryError(reason);return }
         val gateway=mobileDeliveryGateway(connectionId) ?: return
-        if(gateway.mobileDelivery==value) { mobileDeliveryError="";return }
-        val args=try { MobileDelivery.arguments(value) } catch(e:Exception) { mobileDeliveryError=e.message.orEmpty();return }
+        if(MobileDelivery.shown(gateway.mobileDelivery,mobileDeliveryAction(connectionId),System.currentTimeMillis())==value) { showMobileDeliveryError("");return }
+        val args=try { MobileDelivery.arguments(value) } catch(e:Exception) { showMobileDeliveryError(e.message.orEmpty());return }
         val connection=connections.find { it.id==connectionId } ?: return
         val target=Target(gateway.id,"","","",connectionId)
         val action=SessionAction(UUID.randomUUID().toString(),target,MobileDelivery.OPERATION,args.toString())
-        mobileDeliveryError="";actionFlights+=action.requestId
+        showMobileDeliveryError("");actionFlights+=action.requestId
         viewModelScope.launch {
             var attempted=false;var rejected=false
             try {
@@ -954,13 +957,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
                 settleSessionAction(action,api.await(connection,initial))
                 val settled=messageState.sessionActions.find { it.requestId==action.requestId }
-                if(settled?.status=="completed") refresh() else mobileDeliveryError=settled?.error.orEmpty()
+                if(settled?.status=="completed") refresh() else showMobileDeliveryError(settled?.error.orEmpty(),action.requestId)
             } catch(e:Exception) {
                 val status=if(!attempted || rejected) "failed" else "uncertain"
                 try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { if(it.status in setOf("sending","uncertain")) state.action(it.copy(status=status,error=if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED)) else state } ?: state }) }
-                catch(_:Exception) { mobileDeliveryError="Could not save the change result. Its original request remains recoverable." }
+                catch(_:Exception) { showMobileDeliveryError("Could not save the change result. Its original request remains recoverable.",action.requestId) }
                 if(e is CancellationException) throw e
-                mobileDeliveryError=if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED
+                showMobileDeliveryError(if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED,action.requestId)
             } finally { actionFlights-=action.requestId }
         }
     }
