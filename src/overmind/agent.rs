@@ -2,7 +2,8 @@
 //! that would break the process; results carry a `note` with the next step.
 use super::commands::{
     check_project, check_text, created_payload, load, load_writable, next_rank, parse, prove, reference, refuse,
-    resolve, store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_FIELD,
+    resolve, store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_ATTACHMENTS,
+    MAX_ATTACHMENTS_TOTAL, MAX_FIELD,
 };
 use super::fold::{fold_many, project_workflow, Task};
 use super::model::*;
@@ -333,10 +334,14 @@ pub fn attach(ctx: &mut Ctx, request: Value) -> Result<Value> {
         if task.assignee.as_ref() != Some(&me) && task.reviewer.as_ref() != Some(&me) {
             return refuse("not_assigned", "this task is not assigned to your session");
         }
-        if task.attachments.len() >= 8 {
-            return Err(Refusal::field("invalid_field", "attachments", "invalid", "at most 8 images per task").into());
-        }
         let attachment = &stored[0];
+        if task.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(Refusal::field("invalid_field", "attachments", "invalid", format!("at most {MAX_ATTACHMENTS} images per task")).into());
+        }
+        let total = task.attachments.iter().map(|a| a.bytes).fold(attachment.bytes, u64::saturating_add);
+        if total > MAX_ATTACHMENTS_TOTAL as u64 {
+            return Err(Refusal::field("invalid_field", "attachments", "invalid", "the images of a task are limited to 20 MiB in total").into());
+        }
         let draft = |kind: &str, payload: Value| Draft { actor: actor.clone(), task: uuid.clone(), project: task.project.clone(), kind: kind.into(), base: String::new(), request_id: String::new(), payload };
         prove(tx, draft("attachment_added", json!({"attachment": attachment})))?;
         let text = format!("{} ({}, {} bytes){}", attachment.name, attachment.mime, attachment.bytes, if req.note.is_empty() { String::new() } else { format!("\n{}", req.note) });
@@ -560,6 +565,35 @@ mod tests {
         assert!(failed["task"]["labels"].as_array().unwrap().contains(&json!("review-failed")));
         let bad = review(&mut agent(&mut store, "w2", None), json!({"task": task, "verdict": "maybe", "report": "?"})).unwrap_err();
         assert_eq!(refusal(bad).field, "verdict");
+    }
+
+    #[test]
+    fn attach_respects_the_count_and_total_size_limits() {
+        let (_dir, mut store, task) = setup();
+        // Existing attachments are set as metadata; only their sizes matter here.
+        let existing = |store: &mut Store, sizes: &[u64]| {
+            let value: Vec<Value> = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| json!({"name": format!("{i}.png"), "mime": "image/png", "bytes": bytes, "sha256": "a".repeat(64)}))
+                .collect();
+            store.write(|tx| {
+                commands::prove(tx, Draft { actor: Actor::human(MACHINE), task: task.clone(), project: "p".into(), kind: "field_set".into(), base: String::new(), request_id: String::new(), payload: json!({"field": "attachments", "value": value}) })?;
+                Ok(())
+            }).unwrap();
+        };
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG");
+        let request = json!({"task": task, "name": "shot.png", "mime": "image/png", "data_base64": png});
+        existing(&mut store, &[1; 8]);
+        let full = refusal(attach(&mut agent(&mut store, "w1", None), request.clone()).unwrap_err());
+        assert_eq!((full.field.as_str(), full.state.as_str()), ("attachments", "invalid"));
+        let limit = MAX_ATTACHMENTS_TOTAL as u64;
+        existing(&mut store, &[limit - 3]);
+        let large = refusal(attach(&mut agent(&mut store, "w1", None), request.clone()).unwrap_err());
+        assert_eq!((large.field.as_str(), large.state.as_str()), ("attachments", "invalid"));
+        existing(&mut store, &[limit - 4]);
+        let fits = attach(&mut agent(&mut store, "w1", None), request).unwrap();
+        assert_eq!(fits["task"]["attachments"].as_array().unwrap().len(), 2);
     }
 
     #[test]

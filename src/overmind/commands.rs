@@ -19,9 +19,9 @@ use std::path::PathBuf;
 pub const MAX_PROMPT: usize = 64 * 1024;
 pub const MAX_TITLE: usize = 200;
 pub const MAX_FIELD: usize = 64 * 1024;
-const MAX_ATTACHMENTS: usize = 8;
+pub const MAX_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT: usize = 10 * 1024 * 1024;
-const MAX_ATTACHMENTS_TOTAL: usize = 20 * 1024 * 1024;
+pub const MAX_ATTACHMENTS_TOTAL: usize = 20 * 1024 * 1024;
 const RESERVED_LABELS: [&str; 4] = ["reviewed", "review-failed", "epic", "epic-ready"];
 
 pub struct Ctx<'a> {
