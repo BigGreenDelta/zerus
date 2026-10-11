@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Catalog replication through the real CLI, with isolated nodes and fake SSH."""
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = '''#!/usr/bin/env python3
-import os, pathlib, shlex, sys
+import json, os, pathlib, shlex, subprocess, sys
 root = pathlib.Path(os.environ['SWARM_TEST_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():
@@ -20,7 +21,21 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
-os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
+if not (root / ('old-' + alias)).exists():
+    os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
+# A member from before shared preferences: it rejects unknown fields and key
+# kinds and never advertises the kinds it accepts.
+request = sys.stdin.read()
+if args[1:] == ['exchange']:
+    data = json.loads(request)
+    if 'kinds' in data or any(op['key']['kind'] not in ('project', 'folder', 'session', 'machine') for op in data['operations']):
+        print('unknown field or variant from a newer member', file=sys.stderr); sys.exit(1)
+result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+sys.stderr.write(result.stderr)
+if result.returncode: sys.exit(result.returncode)
+output = json.loads(result.stdout)
+output.pop('kinds', None)
+print(json.dumps(output))
 '''
 
 
@@ -157,6 +172,45 @@ class Swarm(unittest.TestCase):
         finally:
             worker.terminate(); worker.communicate(timeout=5)
 
+    def test_worker_is_reported_and_isolated_directories_never_restart_services(self):
+        # Service-manager fakes record any attempt; hgs puts HOME/.local/bin first on PATH.
+        home = self.root / 'home'
+        (home / '.local/bin').mkdir(parents=True)
+        for directory in (home / '.local/bin', self.root / 'bin'):
+            for name in ('systemctl', 'launchctl'):
+                fake = directory / name
+                fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.root}/service-calls"\n'); fake.chmod(0o755)
+        self.env['HOME'] = str(home)
+        swarm = self.root / 'a/swarm'
+        self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
+        with (swarm / 'worker.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # A released worker holds the lock without recording its version.
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': False})
+            self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+            inventory = self.call('a', 'inventory')
+            self.call('a', 'exchange', data={'swarm_id': inventory['swarm_id'], 'known': [], 'operations': []})
+            (swarm / 'worker.json').write_text(json.dumps({'version': '0.0.1', 'pid': os.getpid(), 'started_at': 1}))
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': False})
+        # HGS_CONFIG_DIR is not the directory the service uses.
+        self.assertFalse((self.root / 'service-calls').exists())
+        self.assertFalse((swarm / 'worker-restart.json').exists())
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        worker = subprocess.Popen([str(HGS), 'swarm', 'worker'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while self.call('a', 'get')['worker'] != {'running': True, 'current': True} and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': True})
+            marker = json.loads((swarm / 'worker.json').read_text())
+            version = subprocess.run([str(HGS), '--version'], env=env, text=True, capture_output=True, check=True).stdout.split()[1]
+            self.assertEqual((marker['version'], marker['pid']), (version, worker.pid))
+            self.assertLessEqual(abs(marker['started_at'] - time.time()), 60)
+        finally:
+            worker.terminate(); worker.communicate(timeout=5)
+        self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
+        self.assertFalse((self.root / 'service-calls').exists())
+
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:
             before = self.call(node, 'get'); desired = copy.deepcopy(before['organization'])
@@ -167,6 +221,65 @@ class Swarm(unittest.TestCase):
         self.assertEqual(result['conflicts'], [])
         owner = next(p['id'] for p in result['organization']['projects'] if 'b\ncodex/shared/session' in p['sessions'])
         self.assertEqual(owner, 'b')
+
+    def test_concurrent_delivery_choices_converge_without_conflict_review(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+        self.call('c', 'preference', 'set', 'mobile_delivery', 'immediate', '--json')
+        snapshots = self.converge()
+        values = {self.call(node, 'preference', 'get', '--json')['mobile_delivery'] for node in 'abc'}
+        self.assertEqual(len(values), 1)
+        self.assertIn(values.pop(), {'away_5', 'immediate'})
+        for snapshot in snapshots:
+            self.assertEqual(snapshot['conflicts'], [])
+            self.assertEqual(snapshot['preferences'], snapshots[0]['preferences'])
+        self.call('b', 'preference', 'set', 'mobile_delivery', 'away_30', '--json')
+        self.converge()
+        self.assertEqual({self.call(node, 'preference', 'get', '--json')['mobile_delivery'] for node in 'abc'}, {'away_30'})
+
+    def test_joining_keeps_the_swarm_delivery_choice(self):
+        self.call('b', 'preference', 'set', 'mobile_delivery', 'immediate', '--json')
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+        self.join('a', 'b')
+        self.assertEqual(self.call('a', 'preference', 'get', '--json'), {'mobile_delivery': 'immediate'})
+        self.assertEqual(self.call('a', 'get')['conflicts'], [])
+        self.call('c', 'preference', 'set', 'mobile_delivery', 'away_30', '--json')
+        self.join('c', 'b')
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'immediate'})
+
+    def test_older_members_keep_project_sync_without_the_delivery_choice(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        (self.root / 'old-c').touch()  # c now answers b like a release without shared preferences
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_10', '--json')
+        for node in ('a', 'b', 'b'):
+            self.assertTrue(all(row['ok'] for row in self.call(node, 'sync').values()), node)
+        self.assertEqual(self.call('b', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away'})
+        before = self.call('b', 'get')
+        desired = copy.deepcopy(before['organization'])
+        next(p for p in desired['projects'] if p['id'] == 'b')['name'] = 'Renamed after the preference'
+        self.patch('b', before, desired)
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        projects = self.call('c', 'get')['organization']['projects']
+        self.assertEqual(next(p for p in projects if p['id'] == 'b')['name'], 'Renamed after the preference')
+        peers = self.call('b', 'get')['peers']
+        self.assertTrue(peers['c']['catalog_outdated'])
+        self.assertNotIn('catalog_outdated', peers['a'])
+        # An older hgs on b itself still reads b's catalog: peers keep their released fields.
+        stored = json.loads((self.root / 'b/swarm/catalog.json').read_text())
+        self.assertEqual({field for peer in stored['peers'].values() for field in peer}, {'node', 'last_sync', 'error'})
+        # A legacy requester omits accepted kinds and receives only legacy kinds.
+        inventory = self.call('b', 'inventory')
+        response = self.call('b', 'exchange', data={'swarm_id': inventory['swarm_id'], 'known': [], 'operations': []})
+        self.assertTrue(response['operations'])
+        self.assertNotIn('preference', {op['key']['kind'] for op in response['operations']})
+        # After the update the member receives the choice and the notice clears.
+        (self.root / 'old-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertNotIn('catalog_outdated', self.call('b', 'get')['peers']['c'])
 
 
 if __name__ == '__main__':

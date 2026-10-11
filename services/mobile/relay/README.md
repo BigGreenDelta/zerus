@@ -80,9 +80,36 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   shared payload accounting. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
   workspace, credential, then route/request; multi-workspace locks are sorted.
+  Heartbeats may carry `presence` beside the snapshot. The relay remembers each
+  machine's latest presence with its receipt time without rewriting an
+  unchanged snapshot; a heartbeat without presence keeps the remembered value.
+  The gateway snapshot's `preferences.mobile_delivery` is stored with it.
+- `alerts.rs` is the pure presence rule: preference parsing, owner away time
+  over every remembered presence, and candidate resolution from
+  `attention_signature`, `reply_id`, shared read marks and native need. A
+  changed signature drops an attention or error candidate only once the native
+  need is gone; a read mark of the captured or current signature drops it.
+  Missing or malformed information means away.
+- `store/candidates.rs` holds at most one alert candidate per computer, session
+  and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
+  state only. Changed snapshots and new presence evaluate candidates on the
+  worker that received the heartbeat. An elected maintenance pass evaluates the
+  due candidates of at most 32 workspaces, most overdue first, and drops the
+  oldest expired candidates of any workspace. Waiting candidates are rechecked
+  within 15 seconds while at most 32 × 15 / `maintenance_interval` workspaces
+  wait (480 at the 1-second default); beyond that, rechecks slow down
+  proportionally, still most overdue first. Plans come from unlocked reads, so
+  several workers may evaluate the same candidate. Deleting the candidate row
+  in the transaction that appends the `alert` event and coalesces device wakes
+  is the cross-worker single-delivery claim. Candidate rows are locked last,
+  after any event, credential and route/node locks, in ascending id;
+  maintenance visits workspaces in sorted order and folds expired rows into
+  that order.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
-  PostgreSQL startup never retires another worker's claims.
+  PostgreSQL startup never retires another worker's claims. A failing alert
+  pass at startup is logged and left to the background loop. A wake job that
+  receives a newer alert while leased is sent again instead of deleted.
 - `push.rs` sends generic wake hints through FCM HTTP v1. Provider requests run
   outside transactions and never target client-supplied URLs. FCM uses
   short-lived service-account OAuth tokens and an RS256 signature from `ring`;
@@ -147,6 +174,16 @@ workers against the same authoritative database and existing configuration;
 verify readiness, a synthetic request/receipt and revocation. Keep native agents,
 connectors, tmux and DeepSeek hosts running. A Rust-to-Python rollback must use the
 same current database, never a snapshot predating newly accepted receipts.
+
+Presence alerts add the `alert_candidates` table and nullable columns
+(`nodes.presence_at`, `presence_until`, `mobile_delivery`,
+`computer_routes.presence_at`, `presence_until`, `events.alert_kind`); the
+schema version stays 1 and the Python reference ignores them. Deploy the relay
+after `hgs`, the desktop, the connector and Android. Replace all PostgreSQL
+workers together: an older worker would wake phones for every event, reject the
+`presence` field and serve `alert` rows without `alert_kind`. The offline
+SQLite-to-PostgreSQL migration does not carry candidates or `alert_kind`;
+phones ignore such migrated alert rows.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite

@@ -129,6 +129,7 @@ object SessionActionPolicies {
     fun result(action: SessionAction, receipt: JSONObject): SessionAction {
         if(receipt.string("request_id") != action.requestId) return action.copy(status="uncertain",error="The receipt belongs to another request.")
         if(receipt.string("state") == "failed") return action.copy(status="failed",error=receipt.string("error").ifBlank { "The computer rejected this action." })
+        if(action.operation == MobileDelivery.OPERATION) return MobileDelivery.result(action,receipt)
         val native = receipt.optJSONObject("result")
         if(action.operation == "worktree_create") {
             val args=JSONObject(action.arguments)

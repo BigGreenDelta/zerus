@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
@@ -124,6 +125,19 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         changed['gateway_route']['route_id'] = None
         with self.assertRaisesRegex(ConnectorError, 'conflicts'):
             await self.connector.execute(changed)
+
+    async def test_peer_presence_travels_beside_its_snapshot(self):
+        presence = {'idle_seconds': 7.0, 'locked': True, 'locked_seconds': 3.0}
+        self.inventory['presence'] = {PEER: presence}
+        self.write_inventory()
+        self.connector.fleet.confirm_manifest(self.connector.fleet.heartbeat(await self.connector.snapshot()))
+        with patch.object(self.connector, 'http', AsyncMock(return_value={})) as http:
+            await self.connector.fleet.publish(None)
+        path, body = http.call_args.args[2], http.call_args.args[3]
+        self.assertEqual(path, f'/v1/node/peers/{self.identity}/heartbeat')
+        self.assertNotIn('desktop_presence', body['snapshot'])
+        self.assertEqual(body['presence'], presence)
+        self.assertIsNone(self.connector.presence)
 
     async def test_restart_claimed_mutation_does_not_replay_peer(self):
         request = self.request('send')
@@ -305,6 +319,40 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(local['state'], 'completed')
             self.assertEqual(local['result']['machine'], LOCAL)
 
+    async def test_pre_gateway_relay_fallback_chain_and_presence_probe(self):
+        self.connector.fleet.supported = True
+        self.connector.presence = {'idle_seconds': 4.0, 'locked': False, 'locked_seconds': None}
+        calls = []
+
+        async def http(*args, **kwargs):
+            body = args[3]; calls.append(body)
+            # A real pre-gateway relay (and the strict Python reference) accepts only the plain shape.
+            if set(body) != {'snapshot'}: raise RelayError(400)
+            return {}
+
+        class Stop(Exception): pass
+
+        async def beat():
+            async def sleep(_): raise Stop
+            with patch.object(self.connector, 'http', http), patch('zerus_mobile.connector.asyncio.sleep', sleep):
+                with self.assertRaises(Stop):
+                    await self.connector.heartbeats(None)
+
+        def shape(body): return ('gateway' if 'machine_id' in body else 'snapshot') + ('+presence' if 'presence' in body else '')
+        await beat()
+        self.assertEqual([shape(body) for body in calls],
+                         ['gateway+presence', 'gateway', 'snapshot+presence', 'snapshot'])
+        self.assertNotIn('gateway_one_hop', calls[-1]['snapshot']['mobile_capabilities']['features'])
+        self.assertGreater(self.connector.presence_retry_at, time.monotonic() + 290)
+        calls.clear()
+        await beat()  # Within 300 s: no failing attempt repeats and no presence is sent.
+        self.assertEqual([shape(body) for body in calls], ['snapshot'])
+        calls.clear()
+        self.connector.presence_retry_at = time.monotonic() - 1  # The 300 s interval elapsed.
+        await beat()
+        self.assertEqual([shape(body) for body in calls], ['snapshot+presence', 'snapshot'])
+        self.assertGreater(self.connector.presence_retry_at, time.monotonic() + 290)
+
     async def test_old_native_never_probes_dispatch_and_old_relay_falls_back(self):
         self.connector.fleet.supported = False
         before = len(self.calls())
@@ -314,18 +362,16 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self.connector.execute(legacy)
         self.assertEqual(result['state'], 'completed')
         self.assertEqual(self.calls()[-1]['argv'], ['inspect', 'codex/example'])
-        self.connector.fleet.supported = True
-        calls = []
-        stop = asyncio.Event()
-        async def http(*args, **kwargs):
-            body = args[3]; calls.append(body)
-            if len(calls) == 1: raise RelayError(400)
-            stop.set()
-        with patch.object(self.connector, 'http', http):
-            task = asyncio.create_task(self.connector.heartbeats(None))
-            try: await asyncio.wait_for(stop.wait(), 1)
-            finally:
-                task.cancel(); await asyncio.gather(task, return_exceptions=True)
-        self.assertIn('machine_id', calls[0])
-        self.assertEqual(set(calls[1]), {'snapshot'})
-        self.assertNotIn('gateway_one_hop', calls[1]['snapshot']['mobile_capabilities']['features'])
+
+    async def test_mark_read_reaches_only_the_selected_machine(self):
+        for peer in (True, False):
+            run = 'peer-run' if peer else 'local-run'
+            request = self.request('mark_read', peer=peer)
+            request['payload'] = {'run_id': run, 'conversation_id': 'peer-conversation' if peer else 'local-conversation',
+                                  'reply_id': 'reply-' + run, 'attention_signature': None}
+            result = await self.connector.execute(request)
+            self.assertEqual(result['state'], 'completed', result)
+            self.assertTrue(result['result']['applied']['reply_id'])
+        effects = [json.loads(row) for row in (self.root / 'native_effects.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['argv'], row['machine']) for row in effects if row['argv'][0] == 'read'],
+                         [(['read', 'codex/example', '--json'], PEER), (['read', 'codex/example', '--json'], LOCAL)])

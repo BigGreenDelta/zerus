@@ -533,9 +533,7 @@ impl App {
                 let b = self.body(req, budget.clone(), MIB).await?;
                 let (b, encoded) = self
                     .work(budget.clone(), move || {
-                        protocol::fields(&b, &["machine_id", "snapshot"], &[])?;
-                        protocol::uuid(&b["machine_id"], false)?;
-                        protocol::snapshot(&b["snapshot"])?;
+                        protocol::peer_heartbeat(&b)?;
                         let e = json::canonical(&b["snapshot"])?;
                         Ok((b, e))
                     })

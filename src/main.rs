@@ -8,6 +8,7 @@ mod mobile_peers;
 mod native_ui;
 mod session_reference;
 mod platform;
+mod presence;
 mod state;
 mod swarm;
 

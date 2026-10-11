@@ -170,6 +170,11 @@ partial evidence marks only loaded replies, and unknown, unavailable or offline
 rows without loaded evidence are skipped. Its result reports marked conversations, partial marks and skipped
 rows. Reminders without usable reply evidence remain. New replies arriving
 after the captured evidence remain unread; reading anchors and drafts stay put.
+When the computer advertises `mark_read`, reaching the newest reply (a fresh
+complete head read through on this phone), Mark read and Read all also send the
+exact run, conversation, reply and attention signature to the session's
+computer, which shares them with every desktop and phone. A reply or request read
+elsewhere is shown as read here. Review later stays on this phone.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -293,6 +298,18 @@ and one summary represents the remaining sessions. The summary opens Zerus;
 individual cards retain their exact workspace, computer and session destination.
 Cards refresh with events, settings changes and app startup. A resolved input
 request can remain until the next refresh when the relay emits no new event.
+
+When the relay advertises `presence_alerts`, a new card needs a relay `alert`
+event for the same workspace, computer and session: an attention or error alert
+for input, approvals or errors (the relay and the phone rank a session that
+both asks and fails differently), or completed for an opted-in finished turn.
+The relay sends it only while the item is unread and unresolved, and only when
+the owner is away from every Zerus desktop or chose immediate delivery. A card
+already shown stays without a new alert and follows detail changes of the same
+run silently, such as a failed recovery changing state. When an ordinary event
+announces a new question or error without an alert, the card is withdrawn until
+that alert arrives. Relays without the feature keep the behavior above, so this
+build ships before the relay.
 
 “Keep a live connection” starts an explicit foreground remote messaging service
 with a visible Stop action. It listens to the gateway event stream and follows

@@ -1,5 +1,6 @@
 use super::{
-    catalog::{Catalog, Key, Operation},
+    catalog::{self, Catalog, Key, Operation},
+    service,
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -28,6 +29,10 @@ pub struct Exchange {
     pub swarm_id: String,
     pub known: BTreeSet<String>,
     pub operations: Vec<Operation>,
+    /// Key kinds the requester parses. Older members neither send nor accept
+    /// this field; responses to them contain only legacy kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<BTreeSet<String>>,
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
@@ -122,7 +127,7 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
 pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     let mut store = LockedStore::load(config)?;
     store.save()?;
-    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported});
+    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::kinds()});
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
@@ -140,7 +145,9 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
         .catalog
         .operations
         .values()
-        .filter(|op| !request.known.contains(&op.id))
+        .filter(|op| {
+            !request.known.contains(&op.id) && catalog::accepted(request.kinds.as_ref(), &op.key)
+        })
         .cloned()
         .collect();
     store.save()?;
@@ -168,6 +175,19 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     local
         .data
         .bind(alias, identity["node_id"].as_str().unwrap())?;
+    // Older members reject unknown catalog kinds. They keep receiving the kinds
+    // they parse; Settings names them until they are updated.
+    let peer_kinds: Option<BTreeSet<String>> =
+        serde_json::from_value(identity["kinds"].clone()).ok();
+    if peer_kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains("preference"))
+    {
+        local.outdated.remove(alias);
+    } else {
+        let node = identity["node_id"].as_str().unwrap().to_owned();
+        local.outdated.insert(alias.into(), node);
+    }
     local.save()?;
     if identity["digest"] != local.data.catalog.digest() {
         drop(local);
@@ -192,9 +212,12 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
                 .catalog
                 .operations
                 .values()
-                .filter(|op| !known.contains(&op.id))
+                .filter(|op| {
+                    !known.contains(&op.id) && catalog::accepted(peer_kinds.as_ref(), &op.key)
+                })
                 .cloned()
                 .collect(),
+            kinds: peer_kinds.as_ref().map(|_| catalog::kinds()),
         };
         let node = peer.node.clone();
         drop(local);
@@ -276,7 +299,7 @@ pub fn bind(config: &Config, alias: &str) -> Result<Value> {
         .data
         .bind(alias, identity["node_id"].as_str().unwrap_or_default())?;
     local.save()?;
-    Ok(local.data.snapshot(config))
+    Ok(local.snapshot(config))
 }
 
 pub fn preview(config: &Config, alias: &str) -> Result<Value> {
@@ -346,6 +369,10 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
+            // The swarm's delivery choice wins over the joining machine's own.
+            if matches!(key, Key::Preference { .. }) && existing.contains_key(&key) {
+                continue;
+            }
             if request.prefer_peer_memberships
                 && matches!(key, Key::Session { .. })
                 && existing.get(&key).is_some_and(|v| !v.is_null())
@@ -400,11 +427,12 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
     // worker retries it; do not misleadingly report the join as rolled back.
     let exchange = sync(config)?;
     let local = LockedStore::load(config)?;
-    Ok(json!({"joined":true,"sync":exchange,"snapshot":local.data.snapshot(config)}))
+    Ok(json!({"joined":true,"sync":exchange,"snapshot":local.snapshot(config)}))
 }
 
 pub fn worker() -> Result<()> {
     let config = Config::load()?;
+    let executable = service::Executable::current();
     let mut initial = LockedStore::load(&config)?;
     initial.save()?;
     drop(initial);
@@ -413,10 +441,27 @@ pub fn worker() -> Result<()> {
         .truncate(false)
         .write(true)
         .open(config.dir.join("swarm/worker.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock).context("a swarm worker is already running")?;
+    // Commands checking for a stale worker probe the lock for an instant.
+    let mut attempts = 0;
+    while let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
+        attempts += 1;
+        if attempts == 20 {
+            return Err(error).context("a swarm worker is already running");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if let Err(error) = service::record(&config) {
+        eprintln!("hgs swarm: record the worker version: {error:#}");
+    }
     let mut schedule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut last_digest = String::new();
     loop {
+        // An upgrade replaced this program: exit so that the service manager
+        // starts the new version. Catalog errors never end the loop.
+        ensure!(
+            !executable.as_ref().is_some_and(service::Executable::replaced),
+            "the hgs executable was replaced; exiting so that the new version starts"
+        );
         match Config::load()
             .map_err(anyhow::Error::from)
             .and_then(|config| {

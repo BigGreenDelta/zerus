@@ -33,11 +33,14 @@ run = 'local-run' if machine == local else 'peer-run'
 conversation = 'local-conversation' if machine == local else 'peer-conversation'
 base = {'name': 'codex/example', 'run_id': run, 'conversation_id': conversation, 'machine': machine}
 if argv == ['--help']:
-    print('mobile-peers --json\nmobile-peer --json\nhistory <session> --json\n--launch-id\nswarm assign-launch --json\nMobile worktree ABI: worktrees-v1')
+    print('mobile-peers --json\nmobile-peer --json\nhistory <session> --json\n--launch-id\nswarm assign-launch --json\nMobile worktree ABI: worktrees-v1\nread <session> --json')
 elif argv[0] == 'ls':
     launch = root / ('launch-' + machine + '.json')
     sessions = [base] + ([json.loads(launch.read_text())] if launch.exists() else [])
-    print(json.dumps({'sessions': sessions, 'peers': [{'via': 'never-export-third-peer'}]}))
+    listing = {'sessions': sessions, 'peers': [{'via': 'never-export-third-peer'}]}
+    if isinstance(inventory.get('presence', {}).get(machine), dict):
+        listing['desktop_presence'] = inventory['presence'][machine]
+    print(json.dumps(listing))
 elif argv[0] == 'inspect':
     print(json.dumps({**base, 'events': [], 'pending_questions': []}))
 elif argv[:2] == ['account', 'ls']:
@@ -67,6 +70,12 @@ elif argv[0] == 'codex':
     print('Created')
 elif argv[0] == 'history':
     print(json.dumps({**base, 'request_id': payload['request_id'], 'events': [], 'history_epoch': run, 'head': {}}))
+elif argv[0] == 'read':
+    with (root / 'native_effects.jsonl').open('a') as log:
+        log.write(json.dumps({'argv': argv, 'machine': machine, 'payload': payload}) + '\n')
+    applied = {'reply_id': payload['reply_id'] == 'reply-' + run, 'attention_signature': False}
+    print(json.dumps({'ok': True, 'applied': applied, 'read': {'conversation_id': conversation,
+        'reply_id': payload['reply_id'], 'attention_signature': None, 'at': 1.0} if applied['reply_id'] else None}))
 else:
     with (root / 'native_effects.jsonl').open('a') as log:
         log.write(json.dumps({'argv': argv, 'machine': machine}) + '\n')

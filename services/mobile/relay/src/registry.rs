@@ -1,5 +1,6 @@
 //! Workspace-scoped physical computers and explicitly advertised one-hop routes.
 use crate::{
+    alerts::recovery_failed,
     args,
     db::{f, i, now, s, Db, Tx},
     error::{Error, Result},
@@ -427,13 +428,17 @@ pub async fn revoke_computer(db: &Db, t: &mut Tx, c: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// Archived rows never produce events or alerts.
+pub fn archived(v: &Value) -> bool {
+    v["archived"] == true || v["kind"] == "archive" || v["state"] == "archived"
+}
 pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(String, String)>> {
     let Some(previous) = previous else {
         return Ok(vec![]);
     };
     let previous = crate::json::parse(previous.as_bytes(), 32, 50000)?;
-    fn archived(v: &Value) -> bool {
-        v["archived"] == true || v["kind"] == "archive" || v["state"] == "archived"
+    fn questions(v: &Value) -> u64 {
+        v["pending_question_count"].as_u64().unwrap_or(0)
     }
     fn identity(v: &Value) -> (&Value, &Value) {
         (&v["run_id"], &v["conversation_id"])
@@ -468,13 +473,20 @@ pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(St
         let b = pending(before)?;
         let phase = s(v, "phase");
         let changed = identity(v) != identity(before) || question(v)? != question(before)?;
+        // Every condition a phone notifies on must surface as an event here.
         let kind = if !p.is_subset(&b)
             || (!p.is_empty() && identity(v) != identity(before))
             || (["approval", "input"].contains(&phase)
                 && (v["phase"] != before["phase"] || changed))
+            || (questions(v) > 0 && (questions(v) > questions(before) || changed))
         {
             "attention"
-        } else if phase == "error" && (before["phase"] != "error" || changed) {
+        } else if (phase == "error" && (before["phase"] != "error" || changed))
+            || (recovery_failed(v)
+                && (!recovery_failed(before)
+                    || v["recovery"]["request_id"] != before["recovery"]["request_id"]
+                    || changed))
+        {
             "error"
         } else if v["activity"] == "idle"
             && before["activity"] == "busy"

@@ -150,14 +150,17 @@ impl Store {
         self.db.usage(&mut t, s(&device, "workspace_id")).await?;
         let Some(mut current) = t
             .one(
-                "SELECT id,attempts FROM push_jobs WHERE id=? AND lease_token=? FOR UPDATE",
+                "SELECT id,event_id,attempts FROM push_jobs WHERE id=? AND lease_token=? FOR UPDATE",
                 args![&job["id"], &job["lease_token"]],
             )
             .await?
         else {
             return Ok(());
         };
-        if delivered || invalid || registration.is_none() || i(&current, "attempts") >= 4 {
+        if current["event_id"] != job["event_id"] && !invalid && registration.is_some() {
+            // An alert arrived during the send: wake again for it as a new job would.
+            t.exec("UPDATE push_jobs SET attempts=0,next_at=?,lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?",args![now(),&job["id"],&job["lease_token"]]).await?;
+        } else if delivered || invalid || registration.is_none() || i(&current, "attempts") >= 4 {
             current["workspace_id"] = device["workspace_id"].clone();
             self.delete_job(&mut t, &current).await?;
             if invalid {
@@ -174,7 +177,7 @@ impl Store {
         }
         t.commit().await
     }
-    async fn elected(t: &mut Tx, key: i64) -> Result<bool> {
+    pub(super) async fn elected(t: &mut Tx, key: i64) -> Result<bool> {
         if !t.postgres {
             return Ok(true);
         }
@@ -202,11 +205,29 @@ impl Store {
     }
     pub async fn maintain(&self, restart: bool) -> Result<()> {
         let at = now();
+        if self.maintain_records(restart, at).await? {
+            // Last, so an alert failure never blocks request expiry or poll cleanup.
+            self.maintain_alerts(at).await?;
+        }
+        Ok(())
+    }
+    /// Maintenance before serving. Record stages stay fatal; an alert pass
+    /// failure is only logged, and the background loop evaluates again.
+    pub async fn maintain_at_startup(&self, restart: bool) -> Result<()> {
+        let at = now();
+        if self.maintain_records(restart, at).await? && self.maintain_alerts(at).await.is_err() {
+            eprintln!("relay alert maintenance deferred");
+        }
+        Ok(())
+    }
+    /// Request, event, rate and poll maintenance. False when another worker
+    /// holds a stage's election, which also skips the alert pass.
+    async fn maintain_records(&self, restart: bool, at: f64) -> Result<bool> {
         let batch = self.db.cfg.maintenance_batch;
         {
             let mut t = self.db.begin().await?;
             if !Self::elected(&mut t, 735628110).await? {
-                return Ok(());
+                return Ok(false);
             }
             let mut candidates = vec![];
             for (predicate, threshold) in [
@@ -245,7 +266,7 @@ impl Store {
         {
             let mut t = self.db.begin().await?;
             if !Self::elected(&mut t, 735628111).await? {
-                return Ok(());
+                return Ok(false);
             }
             let mut rows = vec![];
             for (predicate, threshold) in [
@@ -300,7 +321,7 @@ impl Store {
         {
             let mut t = self.db.begin().await?;
             if !Self::elected(&mut t, 735628112).await? {
-                return Ok(());
+                return Ok(false);
             }
             t.one("SELECT id FROM global_usage WHERE id=1 FOR UPDATE", &[])
                 .await?;
@@ -326,7 +347,7 @@ impl Store {
         {
             let mut t = self.db.begin().await?;
             if !Self::elected(&mut t, 735628113).await? {
-                return Ok(());
+                return Ok(false);
             }
             t.all("SELECT id FROM rate_control ORDER BY id FOR UPDATE", &[])
                 .await?;
@@ -353,6 +374,6 @@ impl Store {
         for l in leases {
             self.release_poll(s(&l, "id")).await?;
         }
-        Ok(())
+        Ok(true)
     }
 }

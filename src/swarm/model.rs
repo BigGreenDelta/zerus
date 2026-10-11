@@ -362,6 +362,9 @@ impl Store {
             .catalog
             .heads()
             .into_iter()
+            // Concurrent preference edits resolve to the newest head and the
+            // next choice on any device supersedes them; nothing to review.
+            .filter(|(key, _)| !matches!(key, Key::Preference { .. }))
             .filter_map(|(key, heads)| {
                 let variants: BTreeSet<_> = heads.iter().map(|o| o.value.to_string()).collect();
                 if variants.len() <= 1 {
@@ -378,6 +381,6 @@ impl Store {
         }).collect();
         json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
             "organization":{"version":2,"default_project":"ungrouped","projects":projects.into_values().collect::<Vec<_>>()},
-            "versions":self.catalog.versions(),"conflicts":conflicts,"machines":machines,"peers":self.peers})
+            "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
     }
 }

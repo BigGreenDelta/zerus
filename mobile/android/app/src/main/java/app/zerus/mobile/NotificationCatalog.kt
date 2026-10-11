@@ -52,6 +52,11 @@ object NotificationCatalogParser {
         Character.isISOControl(it) || Character.getType(it) == Character.FORMAT.toInt()
     }.take(256).ifBlank { fallback }
 
+    private val alertKinds = setOf("attention", "error", "completed")
+    /** Relay capability that makes alert rows the only source of new cards. */
+    fun presenceAlerts(capabilities: JSONObject) = capabilities.optJSONArray("features")?.let { features ->
+        (0 until features.length()).any { features.optString(it) == "presence_alerts" } } == true
+
     fun events(raw: JSONObject): List<NotificationEvent> {
         val values = raw.getJSONArray("events")
         require(values.length() <= 100)
@@ -62,7 +67,9 @@ object NotificationCatalogParser {
             val at = row.getDouble("created_at")
             require(id > 0 && computer.length in 1..512 && session.length in 1..1024 &&
                 session.none { Character.isISOControl(it) } && at.isFinite() && at > 0)
-            NotificationEvent(id, computer, session, row.getString("kind"), at)
+            val kind = row.getString("kind")
+            // Unknown alert kinds stay plain refresh rows instead of failing the page.
+            NotificationEvent(id, computer, session, kind, at, row.string("alert_kind").takeIf { kind == "alert" && it in alertKinds })
         }.also { events -> require(events.zipWithNext().all { (a, b) -> a.id < b.id }) }
     }
 }

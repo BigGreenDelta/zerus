@@ -594,8 +594,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ProviderBadge(session.agent, Modifier.size(24.dp))
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
-                                session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"))?.let { unread ->
+                            // A reply read on another device needs no badge here.
+                            (if (SharedReadPolicies.replyRead(session)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
+                                session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply")))?.let { unread ->
                                 Surface(color = Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
                                     Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Background,
                                         style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)

@@ -6,12 +6,20 @@ CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clea
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
 TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
 LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktree_create"})
-OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", *CONTEXT_COMMANDS})
+COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
+MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
+OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history"})
-READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history')"
+READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read"})
+READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"
 CAPABILITY_OPERATIONS = OPERATIONS - {"inspect", "send", "answer", "interrupt"}
 IDENTITY_FIELDS = frozenset({"request_id", "expected_run_id", "expected_conversation_id"})
+
+
+def validate_mobile_delivery(payload):
+    """The shared delivery choice targets the gateway computer and carries only its value."""
+    if not isinstance(payload, dict) or set(payload) != {"value"} or payload["value"] not in MOBILE_DELIVERY:
+        raise ValueError("invalid phone notification timing")
 
 
 def validate_context(payload, request_id):
@@ -121,3 +129,31 @@ def validate_lifecycle(operation, payload, request_id):
         value = bounded(payload["tag"], 120)
         if len(value.encode()) > 120 or value.strip() != value or any(c in value for c in "/:."):
             raise ValueError("invalid native fork tag")
+
+
+MARK_READ_FIELDS = frozenset({"run_id", "conversation_id", "reply_id", "attention_signature"})
+
+
+def validate_mark_read(payload):
+    """C4: exact identity and two nullable marks; native hgs decides what is current."""
+    if not isinstance(payload, dict) or set(payload) != MARK_READ_FIELDS:
+        raise ValueError("mark_read requires exactly run, conversation, reply and attention fields")
+    bounded(payload["run_id"], 128)
+    bounded(payload["conversation_id"], 256)
+    if payload["reply_id"] is not None:
+        bounded(payload["reply_id"], 256)
+    signature = payload["attention_signature"]
+    if signature is not None and (not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature)):
+        raise ValueError("invalid attention signature")
+
+
+def mark_read_result(result, payload):
+    """Only a native `hgs read` answer for this conversation is a receipt."""
+    if result == {"ok": False, "error": "not_found"}:
+        return True
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    applied, read = result.get("applied"), result.get("read")
+    return (isinstance(applied, dict) and set(applied) == {"reply_id", "attention_signature"}
+            and all(type(value) is bool for value in applied.values())
+            and (read is None or isinstance(read, dict) and read.get("conversation_id") == payload["conversation_id"]))

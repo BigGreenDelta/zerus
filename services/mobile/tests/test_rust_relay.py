@@ -79,6 +79,27 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before, self.store.db.execute('SELECT body_hash FROM requests WHERE id=?',
             (self.legacy['request_id'],)).fetchone()[0])
 
+    async def test_presence_alerts_http_contract(self):
+        # The database was created by the Python store, so this also covers the in-place upgrade.
+        self.assertIn("presence_alerts", (await self.call("GET", "/v1/capabilities"))["features"])
+        row = {"name": "codex/project/alert", "run_id": "r", "conversation_id": "c", "phase": "working", "activity": "busy"}
+
+        async def heartbeat(session, idle):
+            await self.call("POST", "/v1/node/heartbeat", {"snapshot": {"sessions": [session]},
+                "presence": {"idle_seconds": idle, "locked": False, "locked_seconds": None}}, node=True)
+
+        await heartbeat(row, 1.0)
+        question = {**row, "phase": "input", "attention_id": "q1", "attention_signature": "a" * 64}
+        await heartbeat(question, 1.0)
+        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"]], ["attention"])
+        await heartbeat(question, 600.0)  # Same snapshot; only presence changes.
+        events = (await self.call("GET", "/v1/events"))["events"]
+        self.assertEqual([e["kind"] for e in events], ["attention", "alert"])
+        self.assertNotIn("alert_kind", events[0])
+        self.assertEqual(set(events[1]), {"id", "computer_id", "session", "kind", "alert_kind", "created_at"})
+        self.assertEqual((events[1]["alert_kind"], events[1]["session"], events[1]["computer_id"]),
+                         ("attention", "codex/project/alert", self.node["node_id"]))
+
     headers = test_relay.RelayTests.headers
     call = test_relay.RelayTests.call
     command = test_relay.RelayTests.command
@@ -96,5 +117,6 @@ for name in (
     'old_read_history_does_not_consume_mutation_tombstones', 'long_poll_rechecks_revocation',
     'heartbeat_events_baseline_transition_and_privacy', 'body_cap_nonfinite_and_poll_bounds',
     'async_question_fingerprints_add_change_remove', 'push_retired_unifiedpush_and_unavailable_fcm',
+    'mark_read_is_exact_and_capability_gated', 'set_mobile_delivery_request_validation', 'mark_read_is_read_class_and_pruned_like_reads',
 ):
     setattr(RustHttpContracts, 'test_' + name, getattr(test_relay.RelayTests, 'test_' + name))

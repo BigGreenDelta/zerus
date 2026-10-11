@@ -5,7 +5,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
 endif()
 
-project(hgs-tray VERSION 0.37.0 LANGUAGES CXX)
+project(hgs-tray VERSION 0.38.0 LANGUAGES CXX)
 set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -29,6 +29,8 @@ if(LINUX)
     # Native StatusNotifier activation and a panel-hosted DBusMenu on Wayland.
     find_package(KF6StatusNotifierItem REQUIRED)
     find_package(KF6WindowSystem REQUIRED)
+    # Input idle time where org.freedesktop.ScreenSaver has none (Plasma on Wayland).
+    find_package(KF6IdleTime REQUIRED)
 endif()
 
 add_library(hgs-window-layer STATIC src/WindowLayer.cpp)
@@ -50,6 +52,7 @@ add_executable(hgs-tray
     src/HgsClient.cpp
     src/ProcessRunner.cpp
     src/FleetState.cpp
+    src/ReadMarkSync.cpp
     src/IconFactory.cpp
     src/CommandBackend.cpp
     # Буфер обмена есть везде -- в отличие от Konsole и Terminal.app, этот бэкенд не
@@ -74,6 +77,7 @@ add_executable(hgs-tray
     src/TrayMenu.cpp
     src/TrayAgent.cpp
     src/AttentionTracker.cpp
+    src/DesktopPresence.cpp
     src/AttentionNotifier.h
     # Декоратор над иконкой трея (см. QuietTrayIcon.h). Платформенного в нём ничего нет,
     # собирается везде; надевается на иконку только на маке -- см. makeTrayIcon() в
@@ -112,6 +116,7 @@ if(LINUX)
     target_sources(hgs-tray PRIVATE src/SniTrayIcon.cpp)
     target_sources(hgs-tray PRIVATE src/LinuxAttentionNotifier.cpp)
     target_sources(hgs-tray PRIVATE src/LinuxApplicationBadge.cpp)
+    target_sources(hgs-tray PRIVATE src/LinuxPresenceSource.cpp)
 else()
     target_sources(hgs-tray PRIVATE src/QtTrayIcon.cpp)
 endif()
@@ -125,15 +130,16 @@ if(APPLE)
     target_sources(hgs-tray PRIVATE src/MacAttentionNotifier.mm)
     target_sources(hgs-tray PRIVATE src/MacAppVisibility.mm)
     target_sources(hgs-tray PRIVATE src/MacApplicationBadge.mm)
+    target_sources(hgs-tray PRIVATE src/MacPresenceSource.cpp)
     set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(hgs-tray PRIVATE "-framework AppKit" "-framework UserNotifications")
+    target_link_libraries(hgs-tray PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
 endif()
 target_compile_definitions(hgs-tray PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
 # QLocalServer/QLocalSocket (single-instance guard in main.cpp) live in QtNetwork, not
 # QtWidgets — the plan's dependency list missed this; noted in the Task 1 report.
 target_link_libraries(hgs-tray PRIVATE Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
 if(LINUX)
-    target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem)
+    target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
 target_link_libraries(hgs-tray PRIVATE hgs-updates)

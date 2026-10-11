@@ -1,5 +1,6 @@
 //! Durable queue and accounting. Side effects stop at the committed database.
 mod background;
+mod candidates;
 mod requests;
 pub use requests::Submission;
 mod snapshots;

@@ -250,12 +250,16 @@ def main():
     args = sys.argv[1:]
     if args[:2] == ["__state", "worktrees"]: args=args[1:]
     if args == ["--help"]:
-        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1")
+        print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read\nhgs swarm preference set mobile_delivery VALUE --json")
         return
     if args == ["ls", "--json", "--local"]:
         summaries = [{key: value for key, value in row.items()
                       if key not in ("events", "provider_messages", "pending_questions", "attachment_messages")} for row in [record, *states] if not row.get("fixture_forgotten")]
-        result = {"host": "Integration fixture", "ok": True, "projects": {}, "sessions": summaries}
+        result = {"host": "Integration fixture", "ok": True, "projects": {}, "sessions": summaries,
+                  "preferences": json.loads((root / "preferences.json").read_text()) if (root / "preferences.json").exists() else {"mobile_delivery": "away"}}
+        for key in ("desktop_presence", "preferences"):  # Phase 2 listing fields, synthetic here.
+            if isinstance(fixture_config.get(key), dict):
+                result[key] = fixture_config[key]
     elif args == ["swarm", "get"]:
         node_id = "11111111-1111-4111-8111-111111111111"
         result = {"schema": 1, "initialized": True, "node_id": node_id,
@@ -284,6 +288,10 @@ def main():
                     if not any(folder["id"] == placement["folder_id"] for folder in group["folders"]):
                         group["folders"].append({"id": placement["folder_id"], "machine_id": node_id,
                             "machine_name": "Integration fixture", "name": "Added folder", "path": placement["directory"]})
+    elif args[:4] == ["swarm", "preference", "set", "mobile_delivery"] and len(args) == 6 and args[5] == "--json":
+        assert args[4] in ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
+        (root / "preferences.json").write_text(json.dumps({"mobile_delivery": args[4]}))
+        result = {"ok": True, "mobile_delivery": args[4]}
     elif args == ["swarm", "assign-launch", "--json"]:
         payload = json.load(sys.stdin)
         created = next(row for row in [record, *states] if row["name"] == payload["name"])
@@ -533,6 +541,27 @@ def main():
         persist(path, record)
         result = {"request_id": payload["request_id"], "status": "submitted", "run_id": record["run_id"],
                   "conversation_id": record["conversation_id"], "submitted_at": at if args[0] == "send" else time.time(), "text": payload.get("text", "")}
+    elif len(args) == 3 and args[0] == "read" and args[2] == "--json":
+        payload = json.load(sys.stdin)
+        row = next((row for row in [record, *states] if row["name"] == args[1] and row.get("state") != "archived"), None)
+        if row is None or fixture_config.get("read_not_found"):
+            print(json.dumps({"ok": False, "error": "not_found"}))
+            raise SystemExit(1)
+        current = {**row, **fixture_config.get("read_current", {})}
+        same = payload["run_id"] == row["run_id"] and payload["conversation_id"] == row["conversation_id"]
+        applied = {field: same and payload[field] is not None and payload[field] == current.get(field)
+                   for field in ("reply_id", "attention_signature")}
+        with (root / "mutations.jsonl").open("a") as output:
+            output.write(json.dumps({"operation": "read", "name": args[1], "payload": payload}) + "\n")
+        result = {"ok": True, "applied": applied, "read": {
+            "conversation_id": row["conversation_id"],
+            "reply_id": payload["reply_id"] if applied["reply_id"] else None,
+            "attention_signature": payload["attention_signature"] if applied["attention_signature"] else None,
+            "at": time.time()} if any(applied.values()) else None}
+        if fixture_config.get("read_success_exit"):
+            # A broken native that prints a success receipt but fails.
+            print(json.dumps(result))
+            raise SystemExit(fixture_config["read_success_exit"])
     else:
         raise SystemExit("unsupported fixture operation")
     if args and args[0] == "inspect":

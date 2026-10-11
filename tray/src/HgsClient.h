@@ -30,6 +30,10 @@ struct SessionInfo {
     double replyAt = 0;
     bool unreadReply = false;
     bool reviewLater = false, attentionAcknowledged = false;
+    // Shared read state from the session's host. sharedRead is false for hosts
+    // whose hgs predates `hgs read`; those keep this device's own marks.
+    bool sharedRead = false;
+    QString attentionSignature, readReplyId, readAttentionSignature;
     double archivedAt = 0;
     bool resumable = false;
     QString activity;
@@ -116,6 +120,9 @@ public:
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
+    // `hgs presence set --json`. At most one write runs; while it does, only the
+    // newest sample waits, so a slow CLI never builds a queue of stale samples.
+    void setPresence(double idleSeconds, bool locked);
     void setupMachine(const QString &alias, const QString &source = {});
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
@@ -157,6 +164,9 @@ public:
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
                                   const QJsonObject &question, const QJsonArray &answers);
+    // `hgs [@host] read <session> --json`: the host applies each field only while
+    // it is current. A JSON answer, including not_found, is delivered.
+    quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
     static BoxState parseBox(const QByteArray &json, QString *error);
@@ -204,12 +214,14 @@ signals:
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
     void swarmFailed(quint64 request, const QString &error);
+    void presenceFinished(const QString &error); // Empty on success.
     void machineSetupOutput(const QString &text);
     void machineSetupFinished(bool ok, const QString &error);
     void questionAnswered(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void questionAnswerSubmitted(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void questionAnswerFailed(quint64 request, const QString &host, const QString &name,
                               const QString &detail, bool deliveryUncertain);
+    void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
@@ -285,5 +297,8 @@ private:
     quint64 m_sessionActionRequest = 0;
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
+    quint64 m_readRequest = 0;
+    bool m_presenceInFlight = false, m_presencePending = false;
+    QPair<double, bool> m_pendingPresence;
     QSet<QString> m_answersInFlight;
 };

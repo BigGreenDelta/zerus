@@ -3,7 +3,9 @@
 #include <QFileDevice>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QThread>
 #include <atomic>
 #include <csignal>
@@ -16,6 +18,8 @@ class TestHgsClient : public QObject {
     Q_OBJECT
 private slots:
     void parsesBox();
+    void parsesSharedReadState();
+    void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
     void parsesActivityMetadata();
@@ -35,6 +39,7 @@ private slots:
     void missingBinaryEmitsFailed();
     void duplicatePeerRequestIsIgnoredWhileInFlight();
     void localPollingReportsStartAndRecoversFromFailure();
+    void presenceWritesAreCoalescedAndReportFailures();
     void sessionCommands();
     void inspectionCursorAndFailures();
     void remoteFoldersAndProjects();
@@ -1217,9 +1222,93 @@ void TestHgsClient::rejectsGarbageProjects()
     QVERIFY(ps.isEmpty());
 }
 
+void TestHgsClient::parsesSharedReadState()
+{
+    const QString signature(64, 'a');
+    const QJsonObject current{{"name", "codex/p/a"}, {"conversation_id", "c1"}, {"reply_id", "7:100.5"},
+        {"attention_signature", signature}, {"read", QJsonObject{{"conversation_id", "c1"}, {"reply_id", "7:100.5"},
+        {"attention_signature", QJsonValue()}, {"at", 1.0}}}};
+    const QJsonObject otherConversation{{"name", "codex/p/b"}, {"conversation_id", "c2"}, {"attention_signature", QJsonValue()},
+        {"read", QJsonObject{{"conversation_id", "old"}, {"reply_id", "1:1.0"}, {"attention_signature", QJsonValue()}, {"at", 1.0}}}};
+    const QJsonObject olderHost{{"name", "codex/p/c"}, {"conversation_id", "c3"}};
+    QString error;
+    const auto box = HgsClient::parseBox(QJsonDocument(QJsonObject{{"host", "arch"}, {"ok", true},
+        {"sessions", QJsonArray{current, otherConversation, olderHost}}}).toJson(), &error);
+    QVERIFY(error.isEmpty());
+    QVERIFY(box.sessions[0].sharedRead); QCOMPARE(box.sessions[0].attentionSignature, signature);
+    QCOMPARE(box.sessions[0].readReplyId, QString("7:100.5")); QVERIFY(box.sessions[0].readAttentionSignature.isEmpty());
+    QVERIFY(box.sessions[1].sharedRead); QVERIFY(box.sessions[1].readReplyId.isEmpty());
+    QVERIFY(!box.sessions[2].sharedRead);
+}
+
+void TestHgsClient::readMarksUseStdinAndAcceptOnlyHostAnswers()
+{
+    QTemporaryDir directory; QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json,pathlib,sys
+p=json.load(sys.stdin)
+pathlib.Path(__file__).with_name('read.json').write_text(json.dumps({'argv':sys.argv[1:],'payload':p}))
+mode=p['reply_id']
+if mode=='missing': print(json.dumps({'ok':False,'error':'not_found'}));sys.exit(1)
+if mode=='offline': print('ssh: connect to host mac port 22: Connection refused',file=sys.stderr);sys.exit(255)
+if mode=='garbage': print('not json');sys.exit(0)
+read={'conversation_id':'other' if mode=='wrong' else p['conversation_id'],'reply_id':p['reply_id'],'attention_signature':None,'at':1.0}
+print(json.dumps({'ok':True,'applied':{'reply_id':True,'attention_signature':False},'read':read}))
+)");
+    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    HgsClient client(script.fileName()); QSignalSpy done(&client, &HgsClient::readFinished);
+    const auto payload = [](const QString &reply) {
+        return QJsonObject{{"run_id", "run-1"}, {"conversation_id", "conversation-1"}, {"reply_id", reply}, {"attention_signature", QJsonValue()}};
+    };
+    const QString name = "codex/project '$HOME' `literal`";
+    const auto id = client.requestRead("mac", name, payload("7:100.5"));
+    QTRY_COMPARE(done.size(), 1); QCOMPARE(done[0][0].toULongLong(), id); QVERIFY(done[0][1].toBool());
+    QFile log(directory.filePath("read.json")); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto call = QJsonDocument::fromJson(log.readAll()).object();
+    QCOMPARE(call.value("argv").toArray(), QJsonArray({"@mac", "read", name, "--json"}));
+    QCOMPARE(call.value("payload").toObject(), payload("7:100.5"));
+    client.requestRead({}, "codex/project", payload("missing")); QTRY_COMPARE(done.size(), 2);
+    QVERIFY(done[1][1].toBool()); QCOMPARE(done[1][2].toJsonObject(), (QJsonObject{{"ok", false}, {"error", "not_found"}}));
+    for (const char *mode : {"offline", "garbage", "wrong"}) {
+        const int before = done.size(); client.requestRead({}, "codex/project", payload(mode));
+        QTRY_COMPARE(done.size(), before + 1); QVERIFY(!done.last()[1].toBool()); QVERIFY(!done.last()[3].toString().isEmpty());
+    }
+}
+
 // APPLESS хватало на чистые parseBox/parseFleet, но missingBinaryEmitsFailed() гоняет
 // настоящий QProcess и ждёт сигнал через QSignalSpy::wait() — для этого нужен реально
 // работающий диспетчер событий. GUILESS даёт QCoreApplication без дисплея (тест
 // по-прежнему должен работать по ssh без X/Wayland).
+void TestHgsClient::presenceWritesAreCoalescedAndReportFailures()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString path = dir.filePath("hgs");
+    QFile script(path); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+payload = json.load(sys.stdin)
+with (root / 'calls').open('a') as file: file.write(json.dumps([sys.argv[1:], payload]) + '\n')
+time.sleep(0.2)
+if (root / 'fail').exists(): print('presence unavailable', file=sys.stderr); sys.exit(1)
+print('{"ok":true}')
+)");
+    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    HgsClient client(path); QSignalSpy finished(&client, &HgsClient::presenceFinished);
+    client.setPresence(1, false); client.setPresence(2, false); client.setPresence(-3, true);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+    QFile calls(dir.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto lines = calls.readAll().trimmed().split('\n'); QCOMPARE(lines.size(), 2);
+    const auto first = QJsonDocument::fromJson(lines[0]).array(), last = QJsonDocument::fromJson(lines[1]).array();
+    QCOMPARE(first[0].toArray(), (QJsonArray{"presence", "set", "--json"}));
+    QCOMPARE(first[1].toObject(), (QJsonObject{{"idle_seconds", 1}, {"locked", false}}));
+    QCOMPARE(last[1].toObject(), (QJsonObject{{"idle_seconds", 0}, {"locked", true}})); // newest only, clamped
+    QVERIFY(finished[0][0].toString().isEmpty()); QVERIFY(finished[1][0].toString().isEmpty());
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.close();
+    client.setPresence(5, false);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 3, 10000);
+    QVERIFY(finished[2][0].toString().contains("presence unavailable"));
+}
+
 QTEST_GUILESS_MAIN(TestHgsClient)
 #include "test_hgsclient.moc"

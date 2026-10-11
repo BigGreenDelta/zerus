@@ -362,6 +362,9 @@ impl Db {
                         ("machine_id", "TEXT"),
                         ("manifest_hash", "TEXT"),
                         ("snapshot_hash", "TEXT"),
+                        ("presence_at", "DOUBLE PRECISION"),
+                        ("presence_until", "DOUBLE PRECISION"),
+                        ("mobile_delivery", "TEXT"),
                     ],
                 ),
                 (
@@ -388,6 +391,14 @@ impl Db {
                     "push_jobs",
                     vec![("lease_token", "TEXT"), ("lease_until", "DOUBLE PRECISION")],
                 ),
+                ("events", vec![("alert_kind", "TEXT")]),
+                (
+                    "computer_routes",
+                    vec![
+                        ("presence_at", "DOUBLE PRECISION"),
+                        ("presence_until", "DOUBLE PRECISION"),
+                    ],
+                ),
             ] {
                 let existing = t.all(&format!("PRAGMA table_info({table})"), &[]).await?;
                 if !existing.is_empty() {
@@ -407,7 +418,7 @@ impl Db {
         };
         // SQLite new tables need route columns before the common registry backfill.
         let schema = if !self.postgres {
-            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
+            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,mobile_delivery TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
         } else {
             schema.into()
         };

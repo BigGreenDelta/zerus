@@ -2,7 +2,7 @@
 //! than wall clocks, decide which edits supersede others. Deletions are retained.
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -14,6 +14,7 @@ pub enum Key {
     Folder { id: String },
     Session { machine: String, session: String },
     Machine { id: String, field: String },
+    Preference { field: String },
 }
 
 impl Key {
@@ -30,6 +31,21 @@ impl Key {
         Self::Machine {
             id: id.into(),
             field: field.into(),
+        }
+    }
+    pub fn preference(field: &str) -> Self {
+        Self::Preference {
+            field: field.into(),
+        }
+    }
+    /// The serde tag. Exchanges use it to omit kinds an older member rejects.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Project { .. } => "project",
+            Self::Folder { .. } => "folder",
+            Self::Session { .. } => "session",
+            Self::Machine { .. } => "machine",
+            Self::Preference { .. } => "preference",
         }
     }
     fn validate(&self, value: &Value) -> Result<()> {
@@ -87,6 +103,16 @@ impl Key {
                     "invalid shared machine field"
                 );
             }
+            Self::Preference { field } => {
+                ensure!(
+                    match field.as_str() {
+                        "mobile_delivery" =>
+                            value.as_str().is_some_and(|s| MOBILE_DELIVERY.contains(&s)),
+                        _ => false,
+                    },
+                    "invalid shared preference"
+                );
+            }
         }
         Ok(())
     }
@@ -97,6 +123,35 @@ pub fn uuid(value: &str) -> bool {
 }
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+/// When the phone notifies: at once, or after the owner is away from every
+/// Zerus desktop for the given number of minutes.
+pub const MOBILE_DELIVERY: [&str; 6] = [
+    "immediate",
+    "away",
+    "away_5",
+    "away_10",
+    "away_15",
+    "away_30",
+];
+pub const DEFAULT_MOBILE_DELIVERY: &str = "away";
+pub fn default_preferences() -> Value {
+    json!({"mobile_delivery": DEFAULT_MOBILE_DELIVERY})
+}
+/// Key kinds every member parses. Members from before shared preferences reject
+/// any other kind, so exchanges with them omit newer kinds.
+pub const LEGACY_KINDS: [&str; 4] = ["project", "folder", "session", "machine"];
+pub fn kinds() -> BTreeSet<String> {
+    ["project", "folder", "session", "machine", "preference"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+/// Whether a member advertising `kinds` (or nothing, if older) accepts `key`.
+pub fn accepted(kinds: Option<&BTreeSet<String>>, key: &Key) -> bool {
+    kinds.map_or(LEGACY_KINDS.contains(&key.kind()), |kinds| {
+        kinds.contains(key.kind())
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -287,6 +342,18 @@ impl Catalog {
             .filter_map(|(k, h)| Self::selected(&k, &h).map(|o| (k, o.value.clone())))
             .collect()
     }
+    /// Shared preferences with defaults. Concurrent edits resolve to the newest
+    /// head on every replica; the next choice on any device supersedes them all.
+    /// An unvalidated (hand-edited) value reports the default.
+    pub fn preferences(&self) -> Value {
+        let key = Key::preference("mobile_delivery");
+        let heads = self.raw_heads(&key);
+        let value = Self::selected(&key, &heads)
+            .and_then(|op| op.value.as_str())
+            .filter(|s| MOBILE_DELIVERY.contains(s))
+            .unwrap_or(DEFAULT_MOBILE_DELIVERY);
+        json!({"mobile_delivery": value})
+    }
     pub fn versions(&self) -> BTreeMap<String, Vec<String>> {
         self.heads()
             .into_iter()
@@ -430,5 +497,74 @@ mod tests {
             json!({"schema":1,"swarm_id":swarm,"operations":{},"credentials":"no"})
         )
         .is_err());
+    }
+    #[test]
+    fn delivery_preference_validates_merges_and_defaults() {
+        let (a, b) = (new_id(), new_id());
+        let key = Key::preference("mobile_delivery");
+        let mut first = Catalog::default();
+        assert_eq!(first.preferences(), json!({"mobile_delivery": "away"}));
+        assert!(first.set(&a, key.clone(), json!("later")).is_err());
+        assert!(first.set(&a, key.clone(), json!(5)).is_err());
+        assert!(first
+            .set(&a, Key::preference("theme"), json!("away"))
+            .is_err());
+        let mut second = first.clone();
+        first.set(&a, key.clone(), json!("away_5")).unwrap();
+        second.set(&b, key.clone(), json!("immediate")).unwrap();
+        merge(&mut first, &second);
+        merge(&mut second, &first);
+        assert_eq!(first.heads()[&key].len(), 2);
+        assert_eq!(first.preferences(), second.preferences());
+        first.set(&a, key.clone(), json!("away_30")).unwrap();
+        merge(&mut second, &first);
+        assert_eq!(second.heads()[&key].len(), 1);
+        assert_eq!(second.preferences(), json!({"mobile_delivery": "away_30"}));
+    }
+    #[test]
+    fn preference_keys_use_their_wire_tag_as_kind() {
+        let key = Key::preference("mobile_delivery");
+        assert_eq!(
+            serde_json::to_value(&key).unwrap(),
+            json!({"kind": "preference", "field": "mobile_delivery"})
+        );
+        for key in [
+            Key::project("p", "name"),
+            Key::Folder { id: "f".into() },
+            Key::Session {
+                machine: new_id(),
+                session: "s".into(),
+            },
+            Key::machine(&new_id(), "name"),
+            key,
+        ] {
+            assert_eq!(serde_json::to_value(&key).unwrap()["kind"], key.kind());
+        }
+    }
+    #[test]
+    fn legacy_members_receive_only_kinds_they_parse() {
+        let preference = Key::preference("mobile_delivery");
+        assert!(accepted(None, &Key::project("p", "name")));
+        assert!(accepted(None, &Key::Folder { id: "f".into() }));
+        assert!(!accepted(None, &preference));
+        assert!(accepted(Some(&kinds()), &preference));
+        let older: BTreeSet<String> = LEGACY_KINDS.iter().map(|k| (*k).to_owned()).collect();
+        assert!(!accepted(Some(&older), &preference));
+    }
+    #[test]
+    fn preferences_report_the_default_for_an_unvalidated_invalid_choice() {
+        // The lock-free listing reads the store without validating it.
+        let mut catalog = Catalog::default();
+        let op = Operation {
+            id: new_id(),
+            actor: new_id(),
+            clock: 1,
+            key: Key::preference("mobile_delivery"),
+            parents: vec![],
+            value: json!("later"),
+        };
+        catalog.operations.insert(op.id.clone(), op);
+        assert!(catalog.validate().is_err());
+        assert_eq!(catalog.preferences(), json!({"mobile_delivery": "away"}));
     }
 }

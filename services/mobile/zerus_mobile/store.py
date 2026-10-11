@@ -109,13 +109,14 @@ class Store:
         CREATE TRIGGER IF NOT EXISTS push_count_delete AFTER DELETE ON push_jobs BEGIN UPDATE relay_usage SET push_count=push_count-1 WHERE id=1; END;
         CREATE INDEX IF NOT EXISTS push_device ON push_jobs(device_id,id);
         """)
+        self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at) WHERE state='queued' AND expires_at IS NOT NULL")
         self.db.execute("CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,operation,state)")
         self.db.execute("CREATE INDEX IF NOT EXISTS event_expiry ON events(created)")
         self.db.execute("CREATE INDEX IF NOT EXISTS push_expiry ON push_jobs(created)")
         self.db.execute("CREATE INDEX IF NOT EXISTS invitation_expiry ON invitations(expires)")
-        self.db.execute(f"CREATE INDEX IF NOT EXISTS read_history_v2 ON requests(updated) WHERE operation IN {READ_SQL} AND state IN ('completed','failed','uncertain')")
+        self.db.execute(f"CREATE INDEX IF NOT EXISTS read_history_v3 ON requests(updated) WHERE operation IN {READ_SQL} AND state IN ('completed','failed','uncertain')")
         request_columns = {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}
         with self.db:
             if "reserved_bytes" not in request_columns:

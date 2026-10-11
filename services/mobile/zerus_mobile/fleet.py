@@ -90,7 +90,7 @@ class Fleet:
             await asyncio.gather(*(context.accounts.close() for context in removed))
 
     def callback(self, identity, machine):
-        async def native(argv, payload=None, *, timeout=None, json_output=True):
+        async def native(argv, payload=None, *, timeout=None, json_output=True, failure_json=False):
             budget = self.connector.timeout if timeout is None else timeout
             async def invoke():
                 async with self.native_slots:
@@ -100,7 +100,7 @@ class Fleet:
                     envelope = {"schema": 1, "via": row["via"], "target_machine_id": machine,
                                 "argv": argv, "payload": payload}
                     return await self.connector._native(["swarm", "mobile-peer", "--json"], envelope,
-                        timeout=budget, json_output=json_output,
+                        timeout=budget, json_output=json_output, failure_json=failure_json,
                         max_output_bytes=MAX_PEER_SNAPSHOT if argv == ["ls", "--json", "--local"] else None)
             try:
                 return await asyncio.wait_for(invoke(), budget)
@@ -156,7 +156,8 @@ class Fleet:
                 current = self.routes.get(identity)
                 if current != row or (identity, row["machine_id"]) not in self.published:
                     return
-                await self.connector.http(client, "POST", f"/v1/node/peers/{identity}/heartbeat", body)
+                await self.connector.post_with_presence(client, f"/v1/node/peers/{identity}/heartbeat",
+                                                        body, self.contexts[identity].presence)
             except self.error as error:
                 # Missing routes are ordinary withdrawal/revocation races. Only
                 # an unsupported POST method identifies endpoint incompatibility;

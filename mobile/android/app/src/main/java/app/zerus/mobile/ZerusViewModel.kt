@@ -102,6 +102,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var readPositionReady by mutableStateOf(false);private set
     var firstUnreadEventId by mutableStateOf("");private set
     private var unreadBoundaryCaptured=false
+    // Marks submitted by this process; a failed submission is forgotten so the next view retries.
+    private val sharedReadsSent=mutableSetOf<String>()
+    private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
         if(selected?.target != target || activeFrame?.target != target || conversationEvents.none { it.id == eventId }) return
@@ -122,7 +125,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target != target || activeFrame?.target != target) return
         val incoming=conversationEvents.filter { it.id in eventIds && ConversationReadPolicies.incoming(it) }
         if(incoming.isEmpty()) return
-        readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention()
+        readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention();shareRead(target)
     }
     fun loadedUnreadCount(target:Target):Int? {
         val record=readState.record(target)
@@ -301,6 +304,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         else if(page.indexing) historyIndexing=true
                     }
                     historySnapshotHints[ConversationReadPolicies.key(target)]=candidates.first { it.first==target }.second
+                    adoptSharedReads();if(selected?.target==target) shareRead(target)
                 }
                 historyHeadScheduler.result(target,android.os.SystemClock.elapsedRealtime(),result.isSuccess)
             }
@@ -329,7 +333,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun markRead(target:Target,evidence:ReadAttentionEvidence) {
         if(evidence.target!=target || !readTrackingReady || captureReadAttention(target)!=evidence) { error="The displayed reply evidence changed. Review it before marking read.";return }
-        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();flushDrafts()
+        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();shareRead(target);flushDrafts()
     }
     private fun readAllEvidence(target:Target):ReadAttentionEvidence? {
         if(!readTrackingReady || readWriter==null || demo || target.run.isBlank() || target.conversation.isBlank() ||
@@ -353,6 +357,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         var result=ReadAllResult(skipped=distinct.size)
         readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,current).also { result=it.result }.state }
         refreshReadAttention();writer.flushAsync()
+        // One mark_read at a time, after any earlier Read all, so a large scope never floods the
+        // relay or the computer's queue ahead of the person's own requests.
+        val previous=readAllShares
+        readAllShares=viewModelScope.launch {
+            previous?.join()
+            SharedReadPolicies.inOrder(distinct,{ target -> sharedReadRequest(target,false)?.takeIf { sharedReadsSent.add(it.key) } }) { sendSharedRead(it) }
+        }
         return result
     }
     fun reviewLater(target:Target,evidence:ReadAttentionEvidence) {
@@ -362,10 +373,46 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshReadAttention() {
         sessions=sessions.map { row ->
             val later=reviewLater(row.target)
-            val unread=(unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
-            if(row.raw.optBoolean("mobile_review_later")==later && row.raw.optBoolean("mobile_unread_reply")==unread) row
-            else row.copy(raw=JSONObject(row.raw.toString()).put("mobile_review_later",later).put("mobile_unread_reply",unread))
+            // A reply or request read on another device is read here too.
+            val unread=!SharedReadPolicies.replyRead(row) && (unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
+            val acknowledged=SharedReadPolicies.attentionAcknowledged(row)
+            if(row.raw.optBoolean("mobile_review_later")==later && row.raw.optBoolean("mobile_unread_reply")==unread &&
+                row.raw.optBoolean("attention_acknowledged")==acknowledged) row
+            else row.copy(raw=JSONObject(row.raw.toString()).put("mobile_review_later",later).put("mobile_unread_reply",unread)
+                .put("attention_acknowledged",acknowledged))
         }
+    }
+    private class SharedReadRequest(val connection:Connection,val target:Target,val payload:JSONObject,val key:String)
+    /** The C4 `mark_read` this phone may send now; [acknowledge] also covers the current request. */
+    private fun sharedReadRequest(target:Target,acknowledge:Boolean):SharedReadRequest? {
+        if(demo || !readTrackingReady) return null
+        val row=sessions.find { it.target==target } ?: return null
+        if("mark_read" !in relayOperations[target.connectionId].orEmpty() ||
+            "mark_read" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return null
+        val payload=SharedReadPolicies.payload(row,readAllEvidence(target)?.authoritative==true,unreadCount(target),acknowledge) ?: return null
+        val connection=connections.find { it.id==target.connectionId } ?: return null
+        return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
+    }
+    private suspend fun sendSharedRead(request:SharedReadRequest) {
+        val completed=try { api.markRead(request.connection,request.target,request.payload).string("state")=="completed" }
+            catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(request.key);throw e };false }
+        if(!completed) sharedReadsSent.remove(request.key)
+    }
+    /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
+    private fun shareRead(target:Target) {
+        val request=sharedReadRequest(target,true) ?: return
+        if(!sharedReadsSent.add(request.key)) return
+        viewModelScope.launch { sendSharedRead(request) }
+    }
+    /** A reply read on another device advances this phone's watermark, using only a fresh exact head. */
+    private fun adoptSharedReads() {
+        val writer=readWriter ?: return
+        if(demo || !readTrackingReady) return
+        val captured=sessions.filter { SharedReadPolicies.replyRead(it) && (unreadCount(it.target) ?: 0)>0 }
+            .mapNotNull { row -> readAllEvidence(row.target)?.takeIf { it.authoritative }?.let { ReadAllCapture(row.target,it) } }
+        if(captured.isEmpty()) return
+        readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,captured).state }
+        refreshReadAttention()
     }
     private var preparingTargets by mutableStateOf<Set<String>>(emptySet())
     var attachmentPreparing by mutableStateOf(false); private set
@@ -719,6 +766,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchCatalogLoading by mutableStateOf(false);private set
     var launchDirectoryLoading by mutableStateOf(false);private set
     var launchError by mutableStateOf("");private set
+    private var mobileDeliveryMessage by mutableStateOf("")
+    private var mobileDeliveryRequest by mutableStateOf("")
+    val mobileDeliveryError get() = MobileDelivery.error(mobileDeliveryMessage,mobileDeliveryRequest,sessionActions)
+    private fun showMobileDeliveryError(message:String,requestId:String="") { mobileDeliveryMessage=message;mobileDeliveryRequest=requestId }
     var launchSubmitting by mutableStateOf(false);private set
     private var launchGeneration=0L
     private var launchCatalogJob:Job?=null
@@ -870,6 +921,50 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(e is CancellationException) throw e
                 launchError=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt before creating another session."
             } finally { actionFlights-=action.requestId;launchSubmitting=false }
+        }
+    }
+    fun mobileDeliveryGateway(connectionId:String)=MobileDelivery.gateway(machines.filter { it.connectionId==connectionId }) {
+        MobileDelivery.OPERATION in machineOperations[MachineKey(it.connectionId,it.id)].orEmpty()
+    }
+    fun mobileDeliveryAction(connectionId:String)=sessionActions.lastOrNull { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.status!="reviewed" }
+    fun mobileDeliveryReason(connectionId:String):String {
+        if(demo || !storageReady) return "Connect a workspace to change this setting."
+        if(updateInstallPreparing) return "Saving drafts for an app update."
+        val gateway=mobileDeliveryGateway(connectionId)
+        return MobileDelivery.reason(gateway,
+            gateway!=null && MobileDelivery.OPERATION in machineOperations[MachineKey(connectionId,gateway.id)].orEmpty(),
+            MobileDelivery.OPERATION in relayOperations[connectionId].orEmpty(),
+            sessionActions.any { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending })
+    }
+    fun dismissMobileDeliveryError() { showMobileDeliveryError("") }
+    /** A durable request with the usual receipt states. An unconfirmed change is checked, never repeated. */
+    fun setMobileDelivery(connectionId:String,value:String) {
+        val reason=mobileDeliveryReason(connectionId);if(reason.isNotBlank()) { showMobileDeliveryError(reason);return }
+        val gateway=mobileDeliveryGateway(connectionId) ?: return
+        if(MobileDelivery.shown(gateway.mobileDelivery,mobileDeliveryAction(connectionId),System.currentTimeMillis())==value) { showMobileDeliveryError("");return }
+        val args=try { MobileDelivery.arguments(value) } catch(e:Exception) { showMobileDeliveryError(e.message.orEmpty());return }
+        val connection=connections.find { it.id==connectionId } ?: return
+        val target=Target(gateway.id,"","","",connectionId)
+        val action=SessionAction(UUID.randomUUID().toString(),target,MobileDelivery.OPERATION,args.toString())
+        showMobileDeliveryError("");actionFlights+=action.requestId
+        viewModelScope.launch {
+            var attempted=false;var rejected=false
+            try {
+                durable({ state -> check(state.sessionActions.none { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending });state.action(action) },
+                    { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
+                attempted=true
+                val initial=try { api.submit(connection,target,MobileDelivery.OPERATION,JSONObject(args.toString()),action.requestId) }
+                    catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+                settleSessionAction(action,api.await(connection,initial))
+                val settled=messageState.sessionActions.find { it.requestId==action.requestId }
+                if(settled?.status=="completed") refresh() else showMobileDeliveryError(settled?.error.orEmpty(),action.requestId)
+            } catch(e:Exception) {
+                val status=if(!attempted || rejected) "failed" else "uncertain"
+                try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { if(it.status in setOf("sending","uncertain")) state.action(it.copy(status=status,error=if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED)) else state } ?: state }) }
+                catch(_:Exception) { showMobileDeliveryError("Could not save the change result. Its original request remains recoverable.",action.requestId) }
+                if(e is CancellationException) throw e
+                showMobileDeliveryError(if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED,action.requestId)
+            } finally { actionFlights-=action.requestId }
         }
     }
     var terminalState by mutableStateOf<JSONObject?>(null);private set
@@ -1405,7 +1500,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             newProjects += projects.filter { it.key.connectionId in unavailable }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
-            refreshReadAttention()
+            refreshReadAttention();adoptSharedReads()
             val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }
             projects = newProjects; projectWarnings = warnings

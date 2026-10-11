@@ -40,6 +40,7 @@ mod codex_questions;
 mod codex_trust;
 mod codex_hooks_trust;
 mod codex_update;
+mod read_marks;
 mod recipes;
 mod rename;
 mod resume_input;
@@ -194,6 +195,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
     archive::reconcile()?;
     let snapshot = live()?;
     let archived = archive::records()?;
+    let marks = read_marks::load();
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -208,6 +210,8 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
             .ok_or("invalid session")?
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
+    // Bounds question indexing for the whole listing.
+    let budget = read_marks::question_budget();
     for record in records()? {
         if archive::equivalent(&record, &archived) {
             continue;
@@ -225,6 +229,8 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                     .as_object_mut()
                     .ok_or("invalid session")?
                     .extend(summary.as_object().ok_or("invalid summary")?.clone());
+                let questions = read_marks::pending_questions(&record, session, true, budget);
+                read_marks::enrich(session, &marks, journal::journal_name(&record), questions.as_deref());
             }
             continue;
         }
@@ -247,6 +253,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                 .unwrap()
                 .clone(),
         );
+        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
         sessions.push(session);
     }
     for record in archived {
@@ -262,9 +269,18 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                 .unwrap()
                 .clone(),
         );
+        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
+    // DeepSeek and untracked live sessions are owned by their names.
+    for session in sessions.iter_mut() {
+        if session.get("attention_signature").is_none() {
+            let owner = string(session, "name").to_owned();
+            read_marks::enrich(session, &marks, &owner, Some(&[]));
+        }
+    }
+
     workspace::enrich(sessions, &workspace::pane_cwds());
     Ok(box_value)
 }
@@ -453,6 +469,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "recovery" {
         return recovery::dispatch(args);
     }
+    if command == "read" { return read_marks::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
     if command == "session-action" { return session_action::dispatch(args); }

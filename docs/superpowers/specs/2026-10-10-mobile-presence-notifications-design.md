@@ -111,14 +111,21 @@ creation. They expire after 24 hours and are bounded per workspace like events.
 ### Evaluation
 
 Candidates are re-evaluated on every accepted snapshot (which carries presence,
-read marks and the preference) and on a maintenance tick about every 15 s.
-Exactly one worker evaluates a workspace at a time (existing advisory election).
+read marks and the preference) and on a maintenance tick about every 15 s. The
+relay worker that accepted a changed snapshot or new presence evaluates that
+workspace inline; an advisory-elected maintenance pass rechecks due candidates.
+Several workers may evaluate the same candidate: deleting the candidate row in
+the transaction that appends its `alert` event delivers it once.
 
 1. Drop the candidate when:
    - the session is gone or archived, or its run or conversation changed;
-   - attention/error: the current `attention_signature` differs from the
-     candidate (resolved or replaced; a replacement has its own candidate) or
-     equals `read.attention_signature`;
+   - attention/error: `read.attention_signature` equals the candidate's or the
+     current `attention_signature`, the current signature is absent, or it
+     differs and the native need for the candidate's kind is gone. A different
+     signature alone does not drop it: `hgs` signatures also change on details
+     the relay never announces (subagent requests, request start times,
+     unindexed or removed questions), while a genuine replacement is a new
+     event whose candidate replaces this one;
    - completed: `read.reply_id` equals the candidate reply, a newer reply exists,
      or the session is busy again.
    - A candidate without an attention signature (for example recovery-only
@@ -184,8 +191,12 @@ today with `away` and nobody present.
   computer, session, run, conversation, `reply_id` and `attention_signature`.
   It is idempotent; stale marks are ignored by `hgs`.
 - With `presence_alerts`, notifications are created only from `alert` events.
-  Per-type switches, card replacement, privacy and tap targets stay unchanged.
-  Without the feature the app keeps today's behavior.
+  An `attention` or `error` alert announces the session's input or error card,
+  whichever the phone shows. A posted input or error card follows detail
+  changes of the same run silently; a need the relay announced without an
+  alert waits for its alert. Per-type switches, card replacement, privacy and
+  tap targets stay unchanged. Without the feature the app keeps today's
+  behavior.
 
 ## Failure handling
 

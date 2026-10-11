@@ -1,0 +1,321 @@
+"""Shared read marks on the session's host: `hgs ls --json` fields and `hgs read`."""
+import fcntl
+import hashlib
+import json
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import time
+import unittest
+import uuid
+
+import test_input as fixtures
+
+HGS = fixtures.HGS
+HEX = re.compile(r'[0-9a-f]{64}')
+
+
+class ReadMarks(unittest.TestCase):
+    setUp = fixtures.InputTransport.setUp
+    tearDown = fixtures.InputTransport.tearDown
+    script = fixtures.InputTransport.script
+    tmux = fixtures.InputTransport.tmux
+    wait_for = fixtures.InputTransport.wait_for
+    write_record = fixtures.InputTransport.write_record
+
+    def listing(self):
+        result = subprocess.run([str(HGS), 'ls', '--json', '--local'], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return next(row for row in json.loads(result.stdout)['sessions'] if row['name'] == self.name)
+
+    def reply(self, at):
+        db = sqlite3.connect(self.state / 'events.sqlite3')
+        with db:
+            db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT)')
+            db.execute('INSERT INTO events(name, conversation, payload) VALUES (?, ?, ?)',
+                       (self.name, self.conversation_id, json.dumps({'type': 'Stop', 'agent_id': '', 'at': at})))
+        db.close()
+        return self.listing()['reply_id']
+
+    def waiting(self, tool='call-1'):
+        self.record.update(phase='input', activity='busy',
+                           active_tools={tool: dict(name='request_user_input', started=1.0, detail='')})
+        self.write_record()
+
+    def test_idle_session_lists_null_read_and_signature(self):
+        row = self.listing()
+        self.assertIn('read', row)
+        self.assertIsNone(row['read'])
+        self.assertIsNone(row['attention_signature'])
+
+    def test_signature_ignores_status_updates_and_changes_for_a_new_request(self):
+        self.waiting()
+        first = self.listing()['attention_signature']
+        self.assertRegex(first, HEX)
+        self.record.update(last_event_at=self.record['last_event_at'] + 50, prompt='A different status line',
+                           subagents={'worker': dict(state='working', name='Worker', updated=5.0)})
+        self.write_record()
+        self.assertEqual(self.listing()['attention_signature'], first)
+        self.waiting('call-2')
+        second = self.listing()['attention_signature']
+        self.assertRegex(second, HEX)
+        self.assertNotEqual(second, first)
+        self.record.update(phase='working', active_tools={})
+        self.write_record()
+        self.assertIsNone(self.listing()['attention_signature'])
+
+    def test_repeated_identity_less_errors_have_distinct_signatures(self):
+        self.record.update(phase='error', activity='attention', active_tools={}, turn_started=100.0)
+        self.write_record()
+        first = self.listing()['attention_signature']
+        self.assertRegex(first, HEX)
+        self.record.update(phase='working', activity='busy', turn_started=200.0)
+        self.write_record()
+        self.assertIsNone(self.listing()['attention_signature'])
+        self.record.update(phase='error', activity='attention')
+        self.write_record()
+        second = self.listing()['attention_signature']
+        self.assertRegex(second, HEX)
+        self.assertNotEqual(second, first)
+
+    def read(self, name=None, remote=False, **fields):
+        payload = {'run_id': self.run_id, 'conversation_id': self.conversation_id,
+                   'reply_id': None, 'attention_signature': None, **fields}
+        return subprocess.run([str(HGS), *(['@remote'] if remote else []), 'read', name or self.name, '--json'],
+                              input=json.dumps(payload), env=self.env, text=True, capture_output=True, timeout=10)
+
+    def mark(self, **fields):
+        result = self.read(**fields)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_mark_applies_only_current_values_and_old_marks_stay_stale(self):
+        first = self.reply(100.5)
+        result = self.mark(reply_id=first)
+        self.assertEqual(result['ok'], True)
+        self.assertEqual(result['applied'], {'reply_id': True, 'attention_signature': False})
+        self.assertEqual(set(result['read']), {'conversation_id', 'reply_id', 'attention_signature', 'at'})
+        self.assertEqual(self.listing()['read']['reply_id'], first)
+        second = self.reply(200.5)
+        self.assertEqual(self.mark(reply_id=first)['applied'], {'reply_id': False, 'attention_signature': False})
+        row = self.listing()
+        self.assertEqual((row['reply_id'], row['read']['reply_id']), (second, first))
+        self.assertFalse(self.mark(reply_id=second, run_id='another-run')['applied']['reply_id'])
+        self.assertFalse(self.mark(reply_id=second, conversation_id='another-conversation')['applied']['reply_id'])
+        self.assertEqual(self.listing()['read']['reply_id'], first)
+
+    def test_waiting_old_reader_preserves_a_newer_writer_mark(self):
+        first = self.reply(100.5)
+        self.mark(reply_id=first)
+        lock_path = self.state / 'read-marks.lock'
+        payload = dict(run_id=self.run_id, conversation_id=self.conversation_id,
+                       reply_id=first, attention_signature=None)
+        with lock_path.open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            reader = subprocess.Popen([str(HGS), 'read', self.name, '--json'], env=self.env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            def cleanup():
+                if reader.poll() is None:
+                    reader.terminate()
+                reader.wait(timeout=5)
+            self.addCleanup(cleanup)
+            reader.stdin.write(json.dumps(payload))
+            reader.stdin.close()
+            reader.stdin = None
+            def waiting_on_writer():
+                self.assertIsNone(reader.poll())
+                descriptors = Path(f'/proc/{reader.pid}/fd')
+                if descriptors.is_dir():
+                    return any(fd.resolve() == lock_path.resolve() for fd in descriptors.iterdir())
+                # macOS exposes the same open-file evidence through lsof.
+                files = subprocess.run(['lsof', '-a', '-p', str(reader.pid), '-Fn'],
+                                       capture_output=True, text=True, timeout=5).stdout.splitlines()
+                return any(line.startswith('n') and Path(line[1:]).resolve() == lock_path.resolve() for line in files)
+            self.wait_for(waiting_on_writer)
+            # The writer holding this lock observes a newer reply and stores
+            # its mark before releasing the waiting reader.
+            second = self.reply(200.5)
+            path = self.state / 'read-marks.json'
+            marks = json.loads(path.read_text())
+            mark = next(iter(marks['sessions'].values()))[self.conversation_id]
+            mark.update(reply_id=second, at=time.time())
+            path.write_text(json.dumps(marks))
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        output, error = reader.communicate(timeout=10)
+        self.assertEqual(reader.returncode, 0, error)
+        self.assertFalse(json.loads(output)['applied']['reply_id'])
+        self.assertEqual(self.listing()['read']['reply_id'], second)
+
+    def test_attention_mark_holds_across_status_updates_until_a_new_request(self):
+        self.waiting()
+        signature = self.listing()['attention_signature']
+        self.assertTrue(self.mark(attention_signature=signature)['applied']['attention_signature'])
+        self.record.update(last_event_at=self.record['last_event_at'] + 10)
+        self.write_record()
+        row = self.listing()
+        self.assertEqual(row['read']['attention_signature'], row['attention_signature'])
+        self.waiting('call-2')
+        row = self.listing()
+        self.assertNotEqual(row['read']['attention_signature'], row['attention_signature'])
+
+    def test_second_identity_less_error_is_unacknowledged(self):
+        self.record.update(phase='error', activity='attention', active_tools={}, turn_started=100.0)
+        self.write_record()
+        self.mark(attention_signature=self.listing()['attention_signature'])
+        self.record.update(phase='working', activity='busy', turn_started=200.0)
+        self.write_record()
+        self.record.update(phase='error', activity='attention')
+        self.write_record()
+        row = self.listing()
+        self.assertNotEqual(row['attention_signature'], row['read']['attention_signature'])
+
+    def hook(self, kind, session_id=None, **fields):
+        event = dict(session_id=session_id or self.conversation_id, hook_event_name=kind, **fields)
+        result = subprocess.run([str(HGS), '__state', 'hook'], input=json.dumps(event), text=True, capture_output=True,
+                                env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id), timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def acknowledged(self):
+        row = self.listing()
+        self.assertRegex(row['attention_signature'], HEX)
+        return row['attention_signature'] == (row['read'] or {}).get('attention_signature')
+
+    def acknowledge(self):
+        self.assertTrue(self.mark(attention_signature=self.listing()['attention_signature'])['applied']['attention_signature'])
+        self.assertTrue(self.acknowledged())
+
+    def test_second_identity_less_approval_is_unacknowledged(self):
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.acknowledge()
+        # A child's progress is a status-only update for the pending request.
+        self.hook('SubagentStart', agent_id='worker', agent_type='helper')
+        self.assertTrue(self.acknowledged())
+        self.hook('PostToolUse', tool_name='Bash')
+        self.assertIsNone(self.listing()['attention_signature'])
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.assertFalse(self.acknowledged())
+        # Also when the next prompt follows without a working state in between.
+        self.acknowledge()
+        self.hook('PermissionRequest', tool_name='Bash')
+        self.assertFalse(self.acknowledged())
+
+    def test_second_input_of_a_tool_keyed_by_name_is_unacknowledged(self):
+        self.hook('PreToolUse', tool_name='request_user_input')
+        self.assertEqual(self.listing()['attention_id'], 'request_user_input')
+        self.acknowledge()
+        self.hook('PostToolUse', tool_name='request_user_input')
+        self.hook('PreToolUse', tool_name='request_user_input')
+        row = self.listing()
+        self.assertEqual((row['phase'], row['attention_id']), ('input', 'request_user_input'))
+        self.assertFalse(self.acknowledged())
+
+    def test_second_child_approval_is_unacknowledged(self):
+        child = 'session_' + str(uuid.uuid4())
+        self.hook('SessionStart', session_id=child)
+        self.hook('PermissionRequest', session_id=child, tool_name='Shell')
+        children = self.listing()['subagents']
+        self.assertEqual([c['display_state'] for c in children.values()], ['approval'])
+        self.acknowledge()
+        self.hook('PostToolUse', session_id=child, tool_name='Shell')
+        self.assertIsNone(self.listing()['attention_signature'])
+        self.hook('PermissionRequest', session_id=child, tool_name='Shell')
+        self.assertFalse(self.acknowledged())
+
+    def codex_question(self):
+        """A Codex rollout with one accepted optional question that is still unanswered."""
+        rollout = self.root / '.codex/sessions' / f'rollout-2026-10-11T00-00-00-{self.conversation_id}.jsonl'
+        rollout.parent.mkdir(parents=True)
+        call = dict(type='function_call', name='request_user_input_async', call_id='call-question',
+                    arguments=json.dumps({'questions': [{'title': 'Keep the fixture?', 'options': ['Yes', 'No']}]}))
+        accepted = dict(type='function_call_output', call_id='call-question', output=json.dumps({'accepted': True}))
+        lines = [dict(type='session_meta', payload=dict(id=self.conversation_id)),
+                 dict(type='response_item', timestamp='2026-10-11T00:00:01Z', payload=call),
+                 dict(type='response_item', timestamp='2026-10-11T00:00:02Z', payload=accepted)]
+        rollout.write_text(''.join(json.dumps(line) + '\n' for line in lines))
+        self.record.update(transcript=str(rollout), phase='working', activity='busy')
+        self.write_record()
+
+    def test_unindexed_questions_are_never_acknowledged(self):
+        self.codex_question()
+        known = self.listing()['attention_signature']
+        self.assertRegex(known, HEX)  # The pending question needs attention.
+        self.assertTrue(self.mark(attention_signature=known)['applied']['attention_signature'])
+        # Another process holds the question index for longer than a listing's budget.
+        digest = hashlib.sha256(json.dumps([None, self.conversation_id], separators=(',', ':')).encode()).hexdigest()
+        lock = (self.state / 'codex_questions' / f'{digest}.lock').open('a')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        started = time.monotonic()
+        row = self.listing()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertRegex(row['attention_signature'], HEX)
+        self.assertNotIn(row['attention_signature'], (known, row['read']['attention_signature']))
+        # `hgs read` cannot index it either and never acknowledges an unknown state.
+        self.assertFalse(self.mark(attention_signature=row['attention_signature'])['applied']['attention_signature'])
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        row = self.listing()
+        self.assertEqual((row['attention_signature'], row['read']['attention_signature']), (known, known))
+
+    def test_unknown_session_reports_not_found(self):
+        result = self.read(name='codex/missing-session', reply_id='1:1.0')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'not_found'})
+
+    def test_malformed_marks_change_nothing(self):
+        reply = self.reply(100.5)
+        for fields in (dict(run_id=''), dict(reply_id=7), dict(attention_signature='A' * 64),
+                       dict(attention_signature='a' * 63), dict(request_id='fixture')):
+            result = self.read(**{'reply_id': reply, **fields})
+            self.assertEqual(result.returncode, 1, fields)
+            self.assertEqual(result.stdout, '', fields)
+        self.assertIsNone(self.listing()['read'])
+        self.assertFalse((self.state / 'read-marks.json').exists())
+
+    def test_concurrent_writers_keep_both_fields(self):
+        reply = self.reply(100.5)
+        self.waiting()
+        signature = self.listing()['attention_signature']
+        base = {'run_id': self.run_id, 'conversation_id': self.conversation_id, 'reply_id': None, 'attention_signature': None}
+        writers = []
+        for fields in (dict(reply_id=reply), dict(attention_signature=signature)):
+            process = subprocess.Popen([str(HGS), 'read', self.name, '--json'], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, text=True)
+            writers.append((process, json.dumps({**base, **fields})))
+        for process, payload in writers:
+            _, error = process.communicate(payload, timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+        read = self.listing()['read']
+        self.assertEqual((read['reply_id'], read['attention_signature']), (reply, signature))
+
+    def test_marks_follow_a_renamed_session(self):
+        reply = self.reply(100.5)
+        self.mark(reply_id=reply)
+        subprocess.run([str(HGS), 'rename', self.name, 'codex/input-test/renamed'], env=self.env,
+                       text=True, capture_output=True, check=True, timeout=10)
+        self.name = 'codex/input-test/renamed'
+        row = self.listing()
+        self.assertEqual((row['reply_id'], row['read']['reply_id']), (reply, reply))
+
+    def test_remote_mark_forwards_stdin_without_a_terminal(self):
+        self.script('ssh', """#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['INPUT_FIXTURE'], 'ssh-args').write_text(json.dumps(sys.argv[1:]))
+os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
+""")
+        reply = self.reply(100.5)
+        result = self.read(remote=True, reply_id=reply)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)['applied']['reply_id'])
+        args = json.loads((self.root / 'ssh-args').read_text())
+        self.assertNotIn('-t', args)
+        self.assertIn('BatchMode=yes', args)
+        self.assertEqual(args[-1], '~/.local/bin/hgs read codex/input-test --json')
+        missing = self.read(remote=True, name='codex/missing-session', reply_id=reply)
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(json.loads(missing.stdout), {'ok': False, 'error': 'not_found'})
+
+
+if __name__ == '__main__':
+    unittest.main()

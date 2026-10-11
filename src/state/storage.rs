@@ -72,6 +72,26 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     Ok(guard)
 }
 
+/// An exclusive lock on an auxiliary file, or None when another process still
+/// holds it at `deadline`. Never use it for the default state lock.
+pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
+    private_dir(path.parent().ok_or("invalid lock path")?)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(Some(Guard(file))),
+            Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error.to_string()),
+            Err(_) if std::time::Instant::now() >= deadline => return Ok(None),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+}
+
 pub(super) fn legacy_record_path(name: &str) -> PathBuf {
     root().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
 }

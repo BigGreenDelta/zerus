@@ -212,6 +212,8 @@ for compatibility. Windows, notifications, the tray, `--version` and the Linux l
 show Zerus. On macOS, a localized display name shows Zerus in the Dock, Finder,
 Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
+Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
+
 The tray has two counters: all sessions and **Needs attention**. Attention includes
 input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
@@ -228,6 +230,13 @@ ID, so a stale per-user IconServices entry can keep an earlier icon after update
 while Finder and the Dock show the current one. Remove
 `$(getconf DARWIN_USER_CACHE_DIR)com.apple.iconservices/store.index`, then run
 `killall iconservicesagent NotificationCenter`; both restart on demand.
+
+While Zerus runs, even with its window closed, it records keyboard/mouse idle time
+and screen lock for phone notifications. macOS uses CoreGraphics without a
+permission prompt. Linux uses the desktop's screen-saver and idle interfaces (KDE
+Plasma, GNOME and other compositors with Wayland idle notifications). When none
+is available only input in Zerus windows counts, which can only cause extra phone
+notifications.
 
 **Sessions**, **Projects**, **Machines** and **Accounts** share the navigation rail;
 click the logo for **Overview**. Overview shows attention, work in progress,
@@ -325,9 +334,12 @@ reasoning and system instructions are excluded.
 
 **New reply** stays unread until its latest result is visible in an active window
 or an attached Terminal at the bottom. Background windows and old search results
-do not clear it. Read state survives rename and resume on this device. Viewing
-never answers an approval. **Mark as read** clears the current reminder without
-answering the agent; **Mark needs attention** creates a local review reminder.
+do not clear it. Read state is kept on the session's host: a reply or request
+read on any desktop or phone is read everywhere after the next poll and its
+notification is withdrawn; it survives rename and resume. Hosts with an older
+`hgs` keep read state on each device. Viewing never answers an approval. **Mark
+as read** clears the current reminder without answering the agent; **Mark needs
+attention** creates a local review reminder.
 Opening the conversation does not clear an explicit review reminder.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
@@ -666,11 +678,12 @@ changes. One configured SSH connection is enough for exchange in both directions
 the other side needs no reverse SSH connection. Learning a machine ID through the
 catalog does not create local transport access to it.
 
-Shared fields are machine IDs/names, project IDs/names/colors, folder locations and
-session membership. SSH hosts, users, ports, keys, proxies, credentials, transport
-bindings, local order, filters, collapse/appearance and the default project stay
-local. File contents and agent history are not copied. Offline hosts do not hide
-projects with locally configured access.
+Shared fields are machine IDs/names, project IDs/names/colors, folder locations,
+session membership and the phone notification timing. SSH hosts, users, ports,
+keys, proxies, credentials, transport bindings, local order, filters,
+collapse/appearance and the default project stay local. File contents and agent
+history are not copied. Offline hosts do not hide projects with locally configured
+access.
 
 The catalog and local bindings live in `~/.config/hgs/swarm/catalog.json`; do not
 copy that complete file between machines because it contains node identity and
@@ -685,6 +698,20 @@ on failure. Zerus reads the local catalog every five seconds without SSH. Offlin
 members catch up later. Independent fields merge; conflicts remain in the Swarm
 review UI. Deletion records prevent old replicas from resurrecting data; this
 version does not prune old journal records.
+
+The worker records its version and process in `~/.config/hgs/swarm/worker.json`
+and exits when an upgrade replaces its executable, so `Restart=always` or launchd
+`KeepAlive` starts the new version. A worker started before this mechanism keeps
+running after an upgrade and cannot read a catalog that holds the phone
+notification timing. `hgs swarm get`, `preference`, `sync`, `join` and inbound
+`exchange` restart such a worker, or one from an older version:
+`systemctl --user try-restart hgs-swarm.service`, or
+`launchctl kickstart -k gui/$UID/com.hgdev.hgs-swarm` on macOS. They try at most
+once every ten minutes and only for the default configuration directory, never
+under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
+`hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
+running worker stays outdated, Settings → Mobile connection asks you to restart the
+sync service.
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
@@ -708,6 +735,31 @@ Disconnect stops outbound exchange through that connection while retaining the
 catalog and session access. It does not deny inbound exchange from an existing
 member; SSH controls transport access. `HGS_SWARM_SERVICE=0 ./install.sh` skips
 worker installation.
+
+### Phone notification timing
+
+`hgs swarm preference get --json` prints `{"mobile_delivery": "away"}`;
+`hgs swarm preference set mobile_delivery away_10 --json` changes it for every
+member. Values are `immediate`, `away` (default), `away_5`, `away_10`, `away_15`
+and `away_30`. Concurrent changes settle on one value without a review; the next
+change from any computer or the phone replaces them. A machine joining a swarm
+adopts the swarm's existing choice. Without a swarm the local catalog keeps it the
+same way.
+
+Members running an older hgs keep synchronizing projects, folders and sessions but
+do not receive this choice; Settings → Mobile connection names the computers this
+one synchronizes with directly until they are updated. A member reached only
+through another computer is named in Settings on the computer that connects to it.
+An older machine cannot preview or join a swarm whose catalog already contains the
+choice; update it first.
+
+An older member does not relay the choice either: a machine that synchronizes only
+through it receives the choice after that member is updated. Each synchronization
+with an older member exchanges the full inventory, because its catalog never
+matches a catalog that holds the choice.
+
+Once a delivery choice exists, an older hgs on the same machine cannot read the
+swarm catalog, and leaves it untouched, until hgs is updated again.
 
 ### Legacy CLI folder aliases
 
@@ -1209,6 +1261,51 @@ Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.
 Archives add `archive_id` and `archived_at`; missing state remains compatible with
 older live-session snapshots. `ok: false` indicates an unavailable host.
+
+A running Zerus desktop records input idle time and screen lock with
+`hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every
+30 seconds and when the screen locks, unlocks or the owner returns. The listing then
+adds `desktop_presence: {idle_seconds, locked, locked_seconds}`, aged to the moment
+of listing. It is omitted when the record is more than two minutes old (Zerus
+closed, crashed or the machine slept) or written by a clock that has since moved
+back. The record is `desktop-presence.json` in the hgs state directory and holds
+no other desktop information. The listing also includes
+`preferences: {mobile_delivery}` from the shared catalog, or the default when the
+catalog is missing or unreadable.
+
+Every session also has `attention_signature` and `read`, either of which may be
+`null`. `attention_signature` is a lowercase hex SHA-256 of what currently needs
+the owner: run, conversation, the phase when it is `approval`, `input` or
+`error`, the attention identity, pending question identities (the IDs and hashes
+the mobile connector publishes as `mobile_attention`) and actionable subagent
+requests. An approval or input request also contributes `attention_started`, the
+time it began, so requests without a native ID (a permission prompt without a
+tool call, a tool known only by name) stay distinct; each external child approval
+carries its own `attention_id`. It is `null` when nothing needs attention and
+does not change on status-only updates. A listing indexes Codex question
+transcripts within a shared one-second budget (and a short slice per session),
+saving its progress so the next listing resumes; it never scans a long
+transcript unbounded. While that index is incomplete, or held by another
+process, the signature includes an explicit "questions unknown" component: it is
+non-null, never equals an acknowledged signature, and `hgs read` does not
+acknowledge it, so an unknown state never hides a question. `read` is the
+host's mark for the current conversation:
+`{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
+`reply_id` differs from `read.reply_id`; attention is unacknowledged while a
+non-null signature differs from `read.attention_signature`.
+
+```sh
+printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |
+  hgs @mac read codex/sample-project/review --json
+```
+
+`hgs [@host] read` applies each non-null field only while it equals the session's
+current value in the same run and conversation; other fields are reported as not
+applied and the mark does not change. It prints `{"ok": true, "applied":
+{"reply_id": …, "attention_signature": …}, "read": …}`; an unknown session prints
+`{"ok": false, "error": "not_found"}` and exits with status 1. Marks live in
+`read-marks.json` in the hgs state directory, at most eight conversations per
+session, and follow `hgs rename`.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances

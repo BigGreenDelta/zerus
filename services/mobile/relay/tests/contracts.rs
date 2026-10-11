@@ -89,9 +89,105 @@ impl Fixture {
         assert_eq!(active["n"], usage["active"]);
         t.commit().await.unwrap();
     }
+    /// A heartbeat from a connector that never sends presence.
+    async fn beat(&self, snapshot: &Value) {
+        self.store
+            .heartbeat(
+                &self.node,
+                &json!({ "snapshot": snapshot }),
+                &canonical(snapshot).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    async fn beat_with(&self, snapshot: &Value, presence: &Value) {
+        self.store
+            .heartbeat(
+                &self.node,
+                &json!({"snapshot":snapshot,"presence":presence}),
+                &canonical(snapshot).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    async fn node_row(&self, columns: &str) -> Value {
+        self.store
+            .db
+            .one(
+                &format!("SELECT {columns} FROM nodes WHERE id=?"),
+                args![&self.node.id],
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    /// Counts the rows of a FROM clause, for example `alert_candidates WHERE session='s0'`.
+    async fn count(&self, from: &str) -> i64 {
+        i(
+            &self
+                .store
+                .db
+                .one(&format!("SELECT count(*) AS n FROM {from}"), &[])
+                .await
+                .unwrap()
+                .unwrap(),
+            "n",
+        )
+    }
+    async fn alert_count(&self) -> i64 {
+        self.count("events WHERE kind='alert'").await
+    }
+    async fn events_of(&self, kind: &str) -> Vec<Value> {
+        self.store.events(&self.phone, 0).await.unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == kind)
+            .cloned()
+            .collect()
+    }
     async fn close(self) {
         self.store.db.close().await;
     }
+}
+fn presence(idle: f64, locked: Option<f64>) -> Value {
+    json!({"idle_seconds":idle,"locked":locked.is_some(),"locked_seconds":locked})
+}
+fn signature(digit: char) -> String {
+    digit.to_string().repeat(64)
+}
+fn session_row(
+    phase: &str,
+    activity: &str,
+    attention: &str,
+    signature: Option<&str>,
+    read: Value,
+) -> Value {
+    json!({"name":"example","run_id":"r","conversation_id":"c","phase":phase,"activity":activity,"attention_id":attention,"attention_signature":signature,"read":read})
+}
+fn listing(session: Value) -> Value {
+    json!({ "sessions": [session] })
+}
+async fn gateway_beat(f: &Fixture, root: &str, peers: &Value, snapshot: &Value) {
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot,"machine_id":root,"peers":peers,"presence":null}),
+            &canonical(snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+}
+async fn peer_beat(f: &Fixture, route: &str, machine: &str, snapshot: &Value, presence: &Value) {
+    f.store
+        .peer_heartbeat(
+            &f.node,
+            route,
+            &json!({"machine_id":machine,"snapshot":snapshot,"presence":presence}),
+            &canonical(snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
 }
 #[tokio::test]
 async fn claims_and_receipts_never_replay() {
@@ -137,6 +233,45 @@ async fn claims_and_receipts_never_replay() {
     f.store.maintain(false).await.unwrap();
     assert_eq!(f.submit(&b).await.unwrap()["state"], "completed");
     assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
+async fn mark_read_is_read_class_and_pruned_like_reads() {
+    assert!(protocol::READS.contains(&"mark_read"));
+    assert!(protocol::READ_SQL.contains("'mark_read'"));
+    let f = Fixture::new().await;
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["mark_read"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut b = f.command("mark_read");
+    b["payload"] = json!({"run_id":"run","conversation_id":"conversation","reply_id":"7:100.5","attention_signature":null});
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let result = json!({"state":"completed","result":{"ok":true},"error":null});
+    let e = canonical(&result["result"]).unwrap();
+    f.store
+        .result(&f.node, s(&b, "request_id"), &result, Some(&e))
+        .await
+        .unwrap();
+    f.check_accounting().await;
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 3601.0, &b["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    // A pruned read identity is new again; a mutation would return its completed receipt.
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
     f.check_accounting().await;
     f.close().await;
 }
@@ -192,6 +327,32 @@ async fn sqlite_restart_keeps_claim_uncertain() {
     f.store.maintain(true).await.unwrap();
     assert_eq!(f.submit(&b).await.unwrap()["state"], "uncertain");
     f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
+async fn startup_defers_alert_pass_failure_but_not_record_maintenance() {
+    let f = Fixture::new().await;
+    let b = f.command("send");
+    f.submit(&b).await.unwrap();
+    f.store.claim(&f.node, false).await.unwrap();
+    // A failing alert pass (here its table is gone) must not stop a worker from starting.
+    f.store
+        .db
+        .exec("DROP TABLE alert_candidates", &[])
+        .await
+        .unwrap();
+    assert!(f.store.maintain(false).await.is_err());
+    f.store.maintain_at_startup(true).await.unwrap();
+    // The record stages before it still ran: the SQLite restart retired the claim.
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "uncertain");
+    f.check_accounting().await;
+    // Record maintenance failures stay fatal at startup.
+    f.store
+        .db
+        .exec("DROP TABLE rate_limits", &[])
+        .await
+        .unwrap();
+    assert!(f.store.maintain_at_startup(false).await.is_err());
     f.close().await;
 }
 #[tokio::test]
@@ -385,6 +546,521 @@ async fn one_hop_routes_freeze_and_withdraw() {
     f.close().await;
 }
 #[tokio::test]
+async fn heartbeats_store_presence_outside_the_snapshot() {
+    let empty = json!({"sessions":[]});
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":null})).is_ok());
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":presence(1.0, None)})).is_ok());
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":"idle"})).is_err());
+    let machine = Uuid::new_v4().to_string();
+    assert!(protocol::peer_heartbeat(
+        &json!({"machine_id":machine,"snapshot":empty,"presence":presence(1.0, None)})
+    )
+    .is_ok());
+    assert!(protocol::peer_heartbeat(
+        &json!({"machine_id":machine,"snapshot":empty,"presence":[]})
+    )
+    .is_err());
+    let f = Fixture::new().await;
+    let snapshot = json!({"sessions":[],"preferences":{"mobile_delivery":"away_10"}});
+    let before = now();
+    f.beat_with(&snapshot, &presence(30.0, None)).await;
+    let row = f
+        .node_row("presence_at,presence_until,mobile_delivery")
+        .await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!(at >= before && at <= now());
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 30.0 + 120.0)).abs() < 1e-6);
+    assert_eq!(row["mobile_delivery"], "away_10");
+    // A presence-only change is remembered without rewriting the unchanged snapshot.
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot='{}' WHERE id=?",
+            args![&f.node.id],
+        )
+        .await
+        .unwrap();
+    f.beat_with(&snapshot, &presence(5.0, Some(1.0))).await;
+    let row = f.node_row("snapshot,presence_at,presence_until").await;
+    assert_eq!(row["snapshot"], "{}");
+    let locked = row["presence_at"].as_f64().unwrap();
+    assert!(
+        locked >= at && (row["presence_until"].as_f64().unwrap() - (locked - 1.0)).abs() < 1e-6
+    );
+    // Null, absent and malformed presence keep the remembered value.
+    let remembered = f.node_row("presence_at,presence_until").await;
+    f.beat_with(&snapshot, &Value::Null).await;
+    f.beat(&snapshot).await;
+    f.beat_with(
+        &json!({"sessions":[],"preferences":{"mobile_delivery":"away_45"}}),
+        &json!({"idle_seconds":"5","locked":false}),
+    )
+    .await;
+    assert_eq!(f.node_row("presence_at,presence_until").await, remembered);
+    assert!(f.node_row("mobile_delivery").await["mobile_delivery"].is_null());
+    f.close().await;
+}
+#[tokio::test]
+async fn presence_holds_read_drops_and_lock_delivers_alert() {
+    let f = Fixture::new().await;
+    let features = protocol::capabilities(vec![])["features"].clone();
+    assert!(features
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "presence_alerts"));
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let active = presence(3.0, None);
+    let (first, second) = (signature('1'), signature('2'));
+    f.beat_with(
+        &listing(session_row("working", "busy", "", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&first),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.events_of("attention").await.len(), 1);
+    assert_eq!(
+        (
+            f.count("alert_candidates").await,
+            f.alert_count().await,
+            f.count("push_jobs").await
+        ),
+        (1, 0, 0)
+    );
+    // Reading the question on a desktop drops the held candidate.
+    let read = json!({"conversation_id":"c","reply_id":null,"attention_signature":first,"at":1.0});
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&first),
+            read.clone(),
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.count("alert_candidates").await, 0);
+    // A replacement question waits while the owner is active.
+    let waiting = listing(session_row("input", "busy", "q2", Some(&second), read));
+    f.beat_with(&waiting, &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    // Identical snapshot content: the lock alone arrives and delivers.
+    f.beat_with(&waiting, &presence(4.0, Some(2.0))).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        (
+            alerts[0]["alert_kind"].as_str(),
+            alerts[0]["session"].as_str(),
+            alerts[0]["computer_id"].as_str()
+        ),
+        (Some("attention"), Some("example"), Some(f.node.id.as_str()))
+    );
+    assert!(f
+        .events_of("attention")
+        .await
+        .iter()
+        .all(|e| e.get("alert_kind").is_none()));
+    let jobs = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(s(&jobs[0], "payload")).unwrap(),
+        json!({"event_id":alerts[0]["id"],"kind":"wake"})
+    );
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn unannounced_signature_change_keeps_held_candidate() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    let question = session_row("input", "busy", "q1", Some(&signature('1')), Value::Null);
+    f.beat_with(
+        &listing(session_row("working", "busy", "", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(&listing(question.clone()), &active).await;
+    // A subagent asks too: hgs changes the signature, the relay emits nothing.
+    let mut changed = question;
+    changed["subagents"] = json!({"a1":{"state":"approval","attention_id":"sub1"}});
+    changed["attention_signature"] = json!(signature('2'));
+    f.beat_with(&listing(changed.clone()), &active).await;
+    assert_eq!(f.events_of("attention").await.len(), 1);
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    f.beat_with(&listing(changed), &presence(2.0, Some(1.0)))
+        .await;
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn immediate_preference_ignores_active_desktop() {
+    let f = Fixture::new().await;
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"immediate"}});
+    f.beat_with(&snapshot("working"), &presence(1.0, None))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(1.0, None)).await;
+    assert_eq!(
+        (f.alert_count().await, f.count("alert_candidates").await),
+        (1, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn completed_candidates_follow_reply_read_and_busy_state() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    let none = Value::Null;
+    let turn = |activity: &str, reply: &str, read: &Value| {
+        listing(
+            json!({"name":"example","run_id":"r","conversation_id":"c","phase":"idle","activity":activity,"reply_id":reply,"read":read}),
+        )
+    };
+    f.beat_with(&turn("busy", "rp0", &none), &active).await;
+    f.beat_with(&turn("idle", "rp1", &none), &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    f.beat_with(&turn("busy", "rp1", &none), &active).await; // busy again
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("idle", "rp2", &none), &active).await;
+    let read = json!({"conversation_id":"c","reply_id":"rp2","attention_signature":null,"at":1.0});
+    f.beat_with(&turn("idle", "rp2", &read), &active).await; // read on a desktop
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("busy", "rp2", &read), &active).await;
+    f.beat_with(&turn("idle", "rp3", &read), &active).await;
+    f.beat_with(&turn("idle", "rp4", &read), &active).await; // a newer reply supersedes it
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.beat_with(&turn("busy", "rp4", &read), &active).await;
+    f.beat_with(&turn("idle", "rp5", &read), &active).await;
+    f.beat_with(&turn("idle", "rp5", &read), &presence(1.0, Some(0.0)))
+        .await;
+    let kinds: Vec<_> = f
+        .events_of("alert")
+        .await
+        .iter()
+        .map(|e| e["alert_kind"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(kinds, ["completed"]);
+    f.close().await;
+}
+#[tokio::test]
+async fn peer_desktop_presence_holds_gateway_alerts() {
+    let f = Fixture::new().await;
+    let (root, machine, route) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let caps = json!({"protocol_version":1,"operations":protocol::OPERATIONS,"features":["gateway_one_hop"]});
+    let peers = json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":true}]);
+    // The gateway GUI is closed (presence null); the owner works at the peer.
+    let gateway = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"mobile_capabilities":caps});
+    let peer = json!({"sessions":[],"mobile_capabilities":caps});
+    gateway_beat(&f, &root, &peers, &gateway("working")).await;
+    peer_beat(&f, &route, &machine, &peer, &presence(1.0, None)).await;
+    gateway_beat(&f, &root, &peers, &gateway("input")).await;
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    peer_beat(&f, &route, &machine, &peer, &presence(2.0, Some(1.0))).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["computer_id"], f.node.id);
+    f.close().await;
+}
+#[tokio::test]
+async fn older_connectors_forward_presence_inside_the_snapshot() {
+    let f = Fixture::new().await;
+    let with = |p: Value| json!({"sessions":[],"desktop_presence":p});
+    let before = now();
+    f.beat(&with(presence(30.0, None))).await;
+    let row = f.node_row("presence_at,presence_until,snapshot").await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!(at >= before && at <= now());
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 30.0 + 120.0)).abs() < 1e-6);
+    // The stored snapshot stays verbatim.
+    assert!(row["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("desktop_presence"));
+    // Malformed embedded presence keeps the previous values.
+    let remembered = f.node_row("presence_at,presence_until").await;
+    f.beat(&with(json!({"idle_seconds":"5","locked":false})))
+        .await;
+    assert_eq!(f.node_row("presence_at,presence_until").await, remembered);
+    // A valid heartbeat field wins over the embedded fallback.
+    f.beat_with(&with(presence(30.0, None)), &presence(5.0, Some(1.0)))
+        .await;
+    let row = f.node_row("presence_at,presence_until").await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 1.0)).abs() < 1e-6);
+    f.close().await;
+}
+#[tokio::test]
+async fn away_minutes_preference_waits_from_end_of_activity() {
+    let f = Fixture::new().await;
+    // Input stopped 200 s ago: away for 80 s, so `away_5` waits another 220 s.
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"away_5"}});
+    f.beat_with(&snapshot("working"), &presence(200.0, None))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(200.0, None))
+        .await;
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    let next = f
+        .store
+        .db
+        .one("SELECT next_at FROM alert_candidates", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(next["next_at"].as_f64().unwrap() <= now() + 15.0);
+    // Five away minutes later the maintenance pass delivers it.
+    f.store
+        .db
+        .exec("UPDATE nodes SET presence_until=presence_until-220", &[])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn stale_presence_keeps_last_activity_for_away_minutes() {
+    let f = Fixture::new().await;
+    let snapshot = |phase: &str| json!({"sessions":[session_row(phase,"busy","q1",Some(&signature('1')),Value::Null)],"preferences":{"mobile_delivery":"away_10"}});
+    // The lid closes and locks the screen; then heartbeats stop.
+    f.beat_with(&snapshot("working"), &presence(0.0, Some(0.0)))
+        .await;
+    f.beat_with(&snapshot("input"), &presence(0.0, Some(0.0)))
+        .await;
+    let five_minutes =
+        "UPDATE nodes SET presence_at=presence_at-300,presence_until=presence_until-300";
+    f.store.db.exec(five_minutes, &[]).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    // Stale presence is not present, but only five of ten away minutes have passed.
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 0)
+    );
+    f.store.db.exec(five_minutes, &[]).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn maintenance_recovers_unevaluated_candidates() {
+    let f = Fixture::new().await;
+    f.beat(&json!({"sessions":[{"name":"example","run_id":"r","conversation_id":"c","phase":"input","activity":"busy","attention_id":"q1"}]})).await;
+    // A committed candidate whose post-snapshot evaluation never ran (worker exit or BUSY).
+    f.store.db.exec("INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)", args![&f.node.workspace, &f.node.id, now(), now()]).await.unwrap();
+    f.store.maintain(false).await.unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["alert_kind"], "attention");
+    assert_eq!(f.count("alert_candidates").await, 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn revoked_computer_drops_held_candidate() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    f.beat_with(
+        &listing(session_row(
+            "working",
+            "busy",
+            "q1",
+            Some(&signature('1')),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    f.beat_with(
+        &listing(session_row(
+            "input",
+            "busy",
+            "q1",
+            Some(&signature('1')),
+            Value::Null,
+        )),
+        &active,
+    )
+    .await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    f.store.revoke_computer(&f.node.id).await.unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn alert_candidates_are_bounded_and_expire() {
+    let f = Fixture::new().await;
+    let fleet = |phase: &str| json!({"sessions":(0..1001).map(|k| json!({"name":format!("s{k}"),"run_id":"r","conversation_id":"c","phase":phase})).collect::<Vec<_>>()});
+    f.beat_with(&fleet("working"), &presence(1.0, None)).await;
+    f.beat_with(&fleet("input"), &presence(1.0, None)).await;
+    assert_eq!(f.count("alert_candidates").await, 1000);
+    assert_eq!(f.count("alert_candidates WHERE session='s0'").await, 0);
+    assert_eq!(f.alert_count().await, 0);
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET created=created-86401", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(f.count("alert_candidates").await, 1000 - 256);
+    for _ in 0..3 {
+        f.store.maintain(false).await.unwrap();
+    }
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 0)
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn maintenance_rechecks_most_overdue_workspaces_first() {
+    let f = Fixture::new().await;
+    // More waiting workspaces than one pass takes (32): owners at their desks
+    // keep 33 of them waiting, so every pass is full.
+    let mut spaces = vec![];
+    for _ in 0..35 {
+        let c = f
+            .store
+            .provision("Example workspace", "Example computer")
+            .await
+            .unwrap();
+        spaces.push((
+            s(&c, "workspace_id").to_owned(),
+            s(&c, "node_id").to_owned(),
+        ));
+    }
+    spaces.sort();
+    let (expired, asleep) = (&spaces[33], &spaces[34]);
+    let at = now();
+    let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)";
+    for (w, node) in &spaces[..33] {
+        f.store
+            .db
+            .exec(
+                "UPDATE nodes SET presence_at=?,presence_until=? WHERE id=?",
+                args![at, at + 600.0, node],
+            )
+            .await
+            .unwrap();
+        f.store
+            .db
+            .exec(insert, args![w, node, at, at - 15.0])
+            .await
+            .unwrap();
+    }
+    // The highest workspace id is the most overdue and its machine sleeps; the
+    // next one holds only an expired candidate that is not due.
+    f.store
+        .db
+        .exec(insert, args![&asleep.0, &asleep.1, at, at - 30.0])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec(
+            insert,
+            args![&expired.0, &expired.1, at - 86401.0, at + 600.0],
+        )
+        .await
+        .unwrap();
+    let mut rechecked = std::collections::BTreeSet::new();
+    for pass in 0..2 {
+        let before = now();
+        f.store.maintain(false).await.unwrap();
+        if pass == 0 {
+            let alert = format!("events WHERE kind='alert' AND workspace_id='{}'", asleep.0);
+            assert_eq!((f.count(&alert).await, f.alert_count().await), (1, 1));
+            assert_eq!(
+                f.count(&format!(
+                    "alert_candidates WHERE workspace_id='{}'",
+                    expired.0
+                ))
+                .await,
+                0
+            );
+        }
+        let mut t = f.store.db.begin().await.unwrap();
+        for r in t
+            .all(
+                "SELECT workspace_id FROM alert_candidates WHERE next_at>?",
+                args![before],
+            )
+            .await
+            .unwrap()
+        {
+            rechecked.insert(s(&r, "workspace_id").to_owned());
+        }
+        t.commit().await.unwrap();
+        // Fifteen seconds pass for every waiting candidate.
+        f.store
+            .db
+            .exec("UPDATE alert_candidates SET next_at=next_at-15", &[])
+            .await
+            .unwrap();
+    }
+    // Every waiting workspace was rechecked within two full passes.
+    assert_eq!(rechecked.len(), 33);
+    f.close().await;
+}
+#[tokio::test]
 async fn snapshot_events_and_push_claims() {
     let f = Fixture::new().await;
     f.store
@@ -402,9 +1078,16 @@ async fn snapshot_events_and_push_claims() {
             .await
             .unwrap();
     }
+    // A connector without presence counts as away: each transition alerts at once.
     let e = f.store.events(&f.phone, 0).await.unwrap();
-    assert_eq!(e["events"].as_array().unwrap().len(), 1);
-    assert_eq!(e["events"][0]["kind"], "attention");
+    let kinds: Vec<_> = e["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["attention", "alert"]);
+    assert_eq!(e["events"][1]["alert_kind"], "attention");
     let a = f.store.claim_push_jobs().await.unwrap();
     assert_eq!(a.len(), 1);
     assert!(f.store.claim_push_jobs().await.unwrap().is_empty());
@@ -430,7 +1113,87 @@ async fn snapshot_events_and_push_claims() {
         .unwrap()
         .unwrap();
     assert_eq!(count["push_jobs"], 0);
-    assert_eq!(count["events"], 1);
+    assert_eq!(count["events"], 2);
+    f.close().await;
+}
+#[tokio::test]
+async fn alert_during_an_in_flight_wake_wakes_again() {
+    let f = Fixture::new().await;
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let reg = f
+        .store
+        .push_registration(&f.phone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let question = |attention: &str, digit: char| {
+        listing(session_row(
+            "input",
+            "busy",
+            attention,
+            Some(&signature(digit)),
+            Value::Null,
+        ))
+    };
+    let wake = |job: &Value| serde_json::from_str::<Value>(s(job, "payload")).unwrap();
+    // Without presence the owner is away, so every question alerts at once.
+    f.beat(&listing(session_row(
+        "working",
+        "busy",
+        "",
+        None,
+        Value::Null,
+    )))
+    .await;
+    f.beat(&question("q1", '1')).await;
+    let first = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(first.len(), 1);
+    // The next alert commits while the first wake is being sent.
+    f.beat(&question("q2", '2')).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 2);
+    f.store
+        .finish_push(&first[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    let second = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        wake(&second[0]),
+        json!({"event_id":alerts[1]["id"],"kind":"wake"})
+    );
+    // A failed send with a newer alert is due again at once, as a new job would be.
+    f.beat(&question("q3", '3')).await;
+    f.store
+        .finish_push(&second[0], false, false, Some(&reg))
+        .await
+        .unwrap();
+    let third = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(third.len(), 1);
+    assert_eq!(
+        (
+            wake(&third[0])["event_id"].clone(),
+            i(&third[0], "attempts")
+        ),
+        (f.events_of("alert").await[2]["id"].clone(), 0)
+    );
+    // Without a newer alert the delivered job is finished.
+    f.store
+        .finish_push(&third[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    assert_eq!(f.count("push_jobs").await, 0);
+    let usage = f
+        .store
+        .db
+        .one("SELECT push_jobs FROM global_usage WHERE id=1", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage["push_jobs"], 0);
     f.close().await;
 }
 #[tokio::test]
@@ -713,10 +1476,39 @@ async fn postgres_cross_worker_contract() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     let (a, b) = tokio::join!(f.store.claim_push_jobs(), second.claim_push_jobs());
     assert_eq!(a.unwrap().len() + b.unwrap().len(), 1);
+    // An active desktop reschedules the held candidate; the lock alone then
+    // delivers on the other worker from the stored snapshot.
+    let held = json!({"sessions":[session_row("input","busy","q2",Some(&signature('2')),Value::Null)],"mobile_capabilities":next["mobile_capabilities"]});
+    let beat = |p: Value| json!({"snapshot":held,"machine_id":heartbeat["machine_id"],"peers":[],"presence":p});
+    second
+        .heartbeat(
+            &f.node,
+            &beat(presence(1.0, None)),
+            &canonical(&held).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 1)
+    );
+    assert_eq!(f.count("alert_candidates WHERE next_at>created").await, 1);
+    f.store
+        .heartbeat(
+            &f.node,
+            &beat(presence(1.0, Some(0.0))),
+            &canonical(&held).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 2)
+    );
     // Simulate losing only this fixture database's LISTEN sockets. Durable
     // commands must remain visible while listeners reconnect and wake waiters.
     let mut wake = second.db.wake.subscribe();
@@ -735,6 +1527,125 @@ async fn postgres_cross_worker_contract() {
     second.revoke(Role::Device, &f.phone.id).await.unwrap();
     assert!(f.store.authorized(&f.phone).await.is_err());
     f.check_accounting().await;
+    second.db.close().await;
+    f.close().await;
+    sqlx::query(&format!("DROP DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    admin.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
+async fn postgres_cross_worker_single_alert() {
+    use sqlx::Connection;
+    let base =
+        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
+    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
+    let name = format!("relay_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&base).unwrap();
+    url.set_path(&name);
+    let cfg = Config {
+        database_url: Some(url.to_string()),
+        background: false,
+        ..Config::default()
+    };
+    let f = Fixture::config(cfg.clone()).await;
+    let second = Store::new(
+        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
+            .await
+            .unwrap(),
+    );
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let active = presence(1.0, None);
+    let question = |attention: &str, digit: char| {
+        listing(session_row(
+            "input",
+            "busy",
+            attention,
+            Some(&signature(digit)),
+            Value::Null,
+        ))
+    };
+    f.beat_with(
+        &listing(session_row("working", "busy", "q0", None, Value::Null)),
+        &active,
+    )
+    .await;
+    f.beat_with(&question("q1", '1'), &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    // Both workers' maintenance passes race for one due candidate once presence is stale.
+    f.store
+        .db
+        .exec("UPDATE nodes SET presence_at=presence_at-121", &[])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(f.store.maintain(false), second.maintain(false));
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(f.alert_count().await, 1);
+    // Presence-only heartbeats on two workers race for the next candidate.
+    let waiting = question("q2", '2');
+    f.beat_with(&waiting, &active).await;
+    assert_eq!(f.count("alert_candidates").await, 1);
+    let encoded = canonical(&waiting).unwrap();
+    let away = |idle: f64| json!({"snapshot":waiting,"presence":presence(idle, None)});
+    let (first, other) = (away(600.0), away(601.0));
+    let (a, b) = tokio::join!(
+        f.store.heartbeat(&f.node, &first, &encoded),
+        second.heartbeat(&f.node, &other, &encoded)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(
+        (f.alert_count().await, f.count("alert_candidates").await),
+        (2, 0)
+    );
+    // Both alerts coalesce into the device's single pending wake.
+    assert_eq!(f.count("push_jobs").await, 1);
+    // An alert committed on one worker while the other sends the wake is sent again.
+    let leased = second.claim_push_jobs().await.unwrap();
+    assert_eq!(leased.len(), 1);
+    let next = question("q3", '3');
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":next,"presence":presence(600.0, None)}),
+            &canonical(&next).unwrap(),
+        )
+        .await
+        .unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 3);
+    let reg = f
+        .store
+        .push_registration(&f.phone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    second
+        .finish_push(&leased[0], true, false, Some(&reg))
+        .await
+        .unwrap();
+    let resent = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(resent.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(s(&resent[0], "payload")).unwrap(),
+        json!({"event_id":alerts[2]["id"],"kind":"wake"})
+    );
     second.db.close().await;
     f.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))
@@ -897,5 +1808,92 @@ async fn http_rejects_bad_content_before_mutation_and_recovers_from_disconnect()
     assert_eq!(result, Some(reqwest::StatusCode::ACCEPTED));
     stop.cancel();
     server.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn mark_read_payload_is_exact_and_capability_gated() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let payload = json!({"run_id":"run","conversation_id":"conversation","reply_id":"7:100.5","attention_signature":"a".repeat(64)});
+    let body = json!({"request_id":id,"computer_id":f.node.id,"operation":"mark_read","session":"codex/example/tag","payload":payload});
+    // A computer that does not advertise the operation keeps rejecting it.
+    assert_eq!(f.submit(&body).await.unwrap_err().0.as_u16(), 409);
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["mark_read"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.submit(&body).await.unwrap()["state"], "queued");
+    let changes = [
+        json!({"reply_id":7}),
+        json!({"attention_signature":"A".repeat(64)}),
+        json!({"attention_signature":"a".repeat(63)}),
+        json!({"run_id":""}),
+        json!({"reply_id":"bad\u{7}"}),
+        json!({"request_id":id}),
+    ];
+    for change in changes {
+        let mut invalid = body.clone();
+        invalid["request_id"] = json!(Uuid::new_v4().to_string());
+        for (key, value) in change.as_object().unwrap() {
+            invalid["payload"][key] = value.clone();
+        }
+        assert!(zerus_relay::store::Submission::new(invalid).is_err());
+    }
+    let mut missing = body.clone();
+    missing["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reply_id");
+    assert!(zerus_relay::store::Submission::new(missing).is_err());
+    let mut nulls = body.clone();
+    nulls["request_id"] = json!(Uuid::new_v4().to_string());
+    nulls["payload"]["reply_id"] = Value::Null;
+    nulls["payload"]["attention_signature"] = Value::Null;
+    assert!(zerus_relay::store::Submission::new(nulls).is_ok());
+    assert!(protocol::capabilities(vec![])["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "mark_read"));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn mobile_delivery_is_computer_scoped_and_capability_gated() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let b = json!({"request_id":id,"computer_id":f.node.id,"operation":"set_mobile_delivery","session":"","payload":{"value":"away_10"}});
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["set_mobile_delivery"],"features":[]}});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    assert!(protocol::OPERATIONS.contains(&"set_mobile_delivery"));
+    for (field, value) in [
+        ("session", json!("codex/example/tag")),
+        ("payload", json!({"value":"later"})),
+        ("payload", json!({})),
+        ("payload", json!({"value":"away","request_id":id})),
+    ] {
+        let mut invalid = b.clone();
+        invalid["request_id"] = json!(Uuid::new_v4().to_string());
+        invalid[field] = value;
+        assert!(matches!(
+            zerus_relay::store::Submission::new(invalid),
+            Err(e) if e.0.as_u16() == 400
+        ));
+    }
     f.close().await;
 }

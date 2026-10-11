@@ -77,6 +77,26 @@ class NotificationCatalogTest {
         assertEquals(SessionAlertKind.Error, parse(listOf(machine(listOf(row)))).sessions.single().kind)
     }
 
+    @Test fun presenceAlertsKeepPostedErrorCardAcrossFailedRecoveryStates() {
+        // The relay emits no event when a failed recovery request only changes its failed state.
+        val row = session().put("phase", "working").put("recovery", JSONObject().put("state", "uncertain").put("request_id", "retry-1"))
+        val uncertain = parse(listOf(machine(listOf(row)))).sessions.single()
+        row.getJSONObject("recovery").put("state", "exhausted")
+        val exhausted = parse(listOf(machine(listOf(row)))).sessions.single()
+        assertEquals(listOf(SessionAlertKind.Error, SessionAlertKind.Error), listOf(uncertain.kind, exhausted.kind))
+        assertNotEquals(uncertain.identity, exhausted.identity)
+        fun plan(state: NotificationState, current: NotificationCurrent, event: NotificationEvent?, at: Double) =
+            NotificationPolicy.plan(state, listOf(current), listOfNotNull(event).map { current.slot to it },
+                NotificationPreferences(), at, alertsOnly = true)
+        val alerted = plan(NotificationState(bootstrap = false, settingsGeneration = 0), uncertain,
+            NotificationEvent(2, computer, "raw/session/opaque", "alert", 1_000.0, "error"), 1_000.0)
+        val posted = NotificationPolicy.reserve(alerted.state, alerted.desired.single(), true, 10_000)
+        val later = plan(posted, exhausted, null, 1_030.0)
+        assertEquals(setOf(exhausted.slot.key), later.retained)
+        assertEquals(SessionAlertKind.Error, later.desired.single().kind)
+        assertFalse(later.desired.single().fresh)
+    }
+
     @Test fun displayTextIsBoundedAndControlsCannotSpoofNotificationLines() {
         val row = session().put("tag", "Review\n\u202erequested" + "x".repeat(300))
         val current = parse(listOf(machine(listOf(row)))).sessions.single()
@@ -95,5 +115,16 @@ class NotificationCatalogTest {
         val invalid = raw(listOf(1))
         invalid.getJSONArray("events").getJSONObject(0).put("session", "review\nspoof")
         assertThrows(IllegalArgumentException::class.java) { NotificationCatalogParser.events(invalid) }
+    }
+
+    @Test fun alertRowsCarryOnlyKnownKindsAndCapabilitiesEnableAlertMode() {
+        fun row(id: Int, kind: String, alertKind: String? = null) = JSONObject().put("id", id).put("computer_id", computer)
+            .put("session", "review").put("kind", kind).put("created_at", 1_000.0).apply { alertKind?.let { put("alert_kind", it) } }
+        val events = NotificationCatalogParser.events(JSONObject().put("events", JSONArray(listOf(
+            row(1, "attention"), row(2, "alert", "completed"), row(3, "alert", "future"), row(4, "attention", "error")))))
+        assertEquals(listOf(null, "completed", null, null), events.map { it.alertKind })
+        assertTrue(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after", "presence_alerts")))))
+        assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after")))))
+        assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject()))
     }
 }

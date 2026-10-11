@@ -12,13 +12,14 @@ CREATE INDEX IF NOT EXISTS device_workspace ON devices(workspace_id) WHERE revok
 CREATE TABLE IF NOT EXISTS invitations(code_hash text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),expires double precision NOT NULL);
 CREATE INDEX IF NOT EXISTS invitation_expiry ON invitations(expires);
 CREATE TABLE IF NOT EXISTS requests(id text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),device_id text NOT NULL REFERENCES devices(id),node_id text NOT NULL REFERENCES nodes(id),operation text NOT NULL,body_hash text NOT NULL,body_bytes bigint NOT NULL,body text NOT NULL,state text NOT NULL,result text,error text,created double precision NOT NULL,claimed double precision,updated double precision NOT NULL,expires_at double precision,result_read double precision,result_bytes bigint NOT NULL DEFAULT 0,reserved_bytes bigint NOT NULL DEFAULT 0);
+DROP INDEX IF EXISTS read_history_v2;
 CREATE INDEX IF NOT EXISTS request_queue ON requests(node_id,created,id) WHERE state='queued';
 CREATE INDEX IF NOT EXISTS request_queue_expiry ON requests(created,id) WHERE state='queued';
 CREATE INDEX IF NOT EXISTS request_claim_expiry ON requests(claimed,id) WHERE state='claimed';
 CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at,id) WHERE state='queued' AND expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS terminal_history ON requests(updated,id) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS request_history ON requests(updated,id) WHERE body!='' AND state IN ('completed','failed','uncertain');
-CREATE INDEX IF NOT EXISTS read_history_v2 ON requests(updated,id) WHERE operation IN ('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees') AND state IN ('completed','failed','uncertain');
+CREATE INDEX IF NOT EXISTS read_history_v3 ON requests(updated,id) WHERE operation IN ('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read') AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,state);
 CREATE TABLE IF NOT EXISTS workspace_usage(workspace_id text PRIMARY KEY REFERENCES workspaces(id),payload_bytes bigint NOT NULL DEFAULT 0,active bigint NOT NULL DEFAULT 0,reads bigint NOT NULL DEFAULT 0,mutations bigint NOT NULL DEFAULT 0,events bigint NOT NULL DEFAULT 0,push_jobs bigint NOT NULL DEFAULT 0,active_polls bigint NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS payload_shards(id integer PRIMARY KEY,payload_bytes bigint NOT NULL DEFAULT 0);

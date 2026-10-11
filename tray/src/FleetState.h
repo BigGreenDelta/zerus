@@ -5,6 +5,7 @@
 #include <QString>
 
 #include "HgsClient.h"
+#include "ReadMarks.h"
 
 // Состояние флота: свой бокс плюс пиры, каждый со временем последнего успешного опроса.
 //
@@ -38,6 +39,14 @@ public:
     QJsonObject attentionMarks() const { return m_attentionMarks; }
     bool markSessionRead(const QString &host, const SessionInfo &expected);
     bool setReviewLater(const QString &host, const SessionInfo &expected, bool marked);
+    // Shared read state. Hosts with `hgs read` own unread/acknowledged state;
+    // marks this GUI queued but no snapshot shows yet keep the UI read.
+    void setPendingReads(const QJsonObject &pending);
+    QJsonObject pendingReads() const { return m_pendingReads; }
+    QList<ReadMark> takeNewReadMarks();       // queued by mark*Read since the last call
+    QList<ReadMark> takeSettledReadMarks();   // shown by a snapshot or no longer current
+    QList<ReadMark> legacyReadMarks(const QString &host) const;   // one-time QSettings migration
+    bool supportsSharedRead(const QString &host) const;
     int totalSessions() const;
     int attentionSessions(qint64 nowMs) const;
     bool isStale(qint64 nowMs) const;            // хоть один объявленный пир протух
@@ -50,6 +59,9 @@ public:
 
 private:
     void updateUnread(const QString &host, BoxState &box);
+    void queueRead(const QString &host, const SessionInfo &s, bool reply, bool attention);
+    QJsonObject m_pendingReads;
+    QList<ReadMark> m_newReads, m_settledReads;
     QJsonObject m_readReplies;
     QJsonObject m_attentionMarks;
     SessionInfo *matchingSession(const QString &host, const SessionInfo &expected);

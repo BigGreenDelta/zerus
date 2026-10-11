@@ -23,7 +23,12 @@ data class NotificationSlot(val connection: String, val computer: String, val se
     val key get() = JSONArray(listOf(connection, computer, session)).toString()
     val tag get() = "zerus:session:v2:$key"
 }
-data class NotificationEvent(val id: Long, val computer: String, val session: String, val kind: String, val at: Double)
+data class NotificationEvent(val id: Long, val computer: String, val session: String, val kind: String, val at: Double,
+    val alertKind: String? = null) {
+    /** The transition this row announces; relay alert rows carry it in alert_kind. */
+    val signal get() = if (kind == "alert") alertKind.orEmpty() else kind
+    val isAlert get() = kind == "alert" && alertKind != null
+}
 data class NotificationCurrent(val slot: NotificationSlot, val target: String, val title: String,
     val machine: String, val kind: SessionAlertKind?, val identity: String, val idle: Boolean,
     val online: Boolean = true, val live: Boolean = true)
@@ -35,7 +40,7 @@ data class NotificationRecord(val slot: NotificationSlot, val target: String, va
 data class NotificationState(val cursor: Long = 0, val bootstrap: Boolean = true, val draining: Boolean = false,
     val batchActive: Boolean = false, val batchSoundUsed: Boolean = false, val lastSoundElapsed: Long = -1,
     val settingsGeneration: Long = -1, val pending: List<NotificationEvent> = emptyList(),
-    val records: List<NotificationRecord> = emptyList(), val pendingPosts: Set<String> = emptySet(), val truncated: Boolean = false, val deliveryNeeded: Boolean = false, val overflowKinds: Set<SessionAlertKind> = emptySet(), val pendingRestoreKinds: Set<SessionAlertKind> = emptySet())
+    val records: List<NotificationRecord> = emptyList(), val pendingPosts: Set<String> = emptySet(), val truncated: Boolean = false, val deliveryNeeded: Boolean = false, val overflowKinds: Set<SessionAlertKind> = emptySet(), val pendingRestoreKinds: Set<SessionAlertKind> = emptySet(), val presenceAlerts: Boolean = false)
 data class SessionNotice(val current: NotificationCurrent, val kind: SessionAlertKind, val fingerprint: String,
     val fresh: Boolean, val eventId: Long = 0, val eventAt: Double = 0.0) {
     val body get() = "${when (kind) {
@@ -58,13 +63,18 @@ object NotificationPolicy {
     fun fingerprint(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
+    // Each alert kind survives both other alerts and ordinary refresh rows.
+    private fun pendingKey(event: NotificationEvent) = JSONArray(if (event.kind == "alert")
+        listOf(event.computer, event.session, "alert", event.alertKind)
+        else listOf(event.computer, event.session)).toString()
+
     fun ingest(state: NotificationState, events: List<NotificationEvent>): NotificationPage {
         if (events.isEmpty()) return NotificationPage(state.copy(draining = false), false, true)
-        val pending = state.pending.associateByTo(linkedMapOf()) { JSONArray(listOf(it.computer, it.session)).toString() }
+        val pending = state.pending.associateByTo(linkedMapOf()) { pendingKey(it) }
         var cursor = state.cursor
         for (event in events) {
             if (event.id <= cursor) continue
-            val key = JSONArray(listOf(event.computer, event.session)).toString()
+            val key = pendingKey(event)
             if (key !in pending && pending.size >= maxPending) return NotificationPage(
                 state.copy(cursor = cursor, pending = pending.values.toList(), draining = true,
                     batchActive = true, batchSoundUsed = if (state.batchActive) state.batchSoundUsed else false), true, false)
@@ -77,9 +87,15 @@ object NotificationPolicy {
     }
 
     fun plan(state: NotificationState, current: List<NotificationCurrent>, events: List<Pair<NotificationSlot, NotificationEvent>>,
-        preferences: NotificationPreferences, now: Double, active: Set<String> = emptySet()): NotificationPlan {
+        preferences: NotificationPreferences, now: Double, active: Set<String> = emptySet(), alertsOnly: Boolean = false): NotificationPlan {
         val old = state.records.associateBy { it.slot.key }
-        val candidates = events.groupBy { it.first.key }.mapValues { (_, rows) -> rows.maxBy { it.second.id }.second }
+        // With presence alerts only relay alert rows announce; other rows refresh state.
+        val announcing = events.filter { (_, event) -> if (alertsOnly) event.isAlert else event.kind != "alert" }
+        val candidates = announcing.groupBy { it.first.key }
+        // Relay and phone order input and error differently, so either need alert announces either card.
+        val needs = setOf("attention", "error")
+        val alerted = events.filter { (_, event) -> event.isAlert && event.signal in needs }.map { it.first.key }.toSet()
+        val transitions = events.filter { (_, event) -> event.kind in needs }.map { it.first.key }.toSet()
         val reconcile = preferences.generation != state.settingsGeneration
         val restoreKinds = (state.pendingRestoreKinds + SessionAlertKind.entries.filter {
             preferences.enabledAt(it) > state.settingsGeneration }).filter(preferences::allows).toSet()
@@ -96,13 +112,16 @@ object NotificationPolicy {
                     previous.copy(postedFingerprint = "", postedKind = null) else previous
                 continue
             }
-            val event = candidates[session.slot.key]
+            val event = candidates[session.slot.key]?.filter { (_, event) -> !alertsOnly ||
+                if (session.kind == SessionAlertKind.Input || session.kind == SessionAlertKind.Error)
+                    event.signal in needs else event.signal == "completed"
+            }?.maxByOrNull { it.second.id }?.second
             val recent = event != null && event.at <= now && event.at >= now - 120
             var kind = session.kind
             var freshCompletion = false
             var identity = kind?.let { fingerprint(JSONArray(listOf(session.target, it.name, session.identity)).toString()) }.orEmpty()
             if (kind == null && session.idle && !state.bootstrap) {
-                if (preferences.finished && event?.kind == "completed" && recent && previous != null &&
+                if (preferences.finished && event?.signal == "completed" && recent && previous != null &&
                     session.target.isNotBlank() && previous.target == session.target && event.at > previous.observedAt) {
                     kind = SessionAlertKind.Finished
                     freshCompletion = true
@@ -117,7 +136,18 @@ object NotificationPolicy {
                     identity = previous.postedFingerprint
                 }
             }
-            val freshTransition = recent && identity != previous?.observedFingerprint
+            var detailOnly = false
+            if (alertsOnly && (kind == SessionAlertKind.Input || kind == SessionAlertKind.Error) &&
+                previous?.postedFingerprint != identity && session.slot.key !in alerted) {
+                // A posted input or error card follows detail changes silently, as without
+                // presence alerts. A need the relay announced without an alert, or one never
+                // posted, was observed while the owner was at a computer: no card until it alerts.
+                detailOnly = previous != null && previous.postedFingerprint.isNotBlank() &&
+                    (previous.postedKind == SessionAlertKind.Input || previous.postedKind == SessionAlertKind.Error) &&
+                    previous.postedTarget == session.target && session.slot.key !in transitions
+                if (!detailOnly) { kind = null; identity = "" }
+            }
+            val freshTransition = recent && !detailOnly && identity != previous?.observedFingerprint
             val summaryOnly = previous?.summaryOnly?.let { it && !freshTransition } ?: state.truncated
             val observed = previous ?: NotificationRecord(session.slot, session.target, now)
             val recoveringCompletion = kind == SessionAlertKind.Finished && !freshCompletion
@@ -125,7 +155,8 @@ object NotificationPolicy {
                 else event?.id ?: previous?.eventId ?: 0
             val finishedEventAt = if (recoveringCompletion) previous?.candidateEventAt?.takeIf { it > 0 } ?: previous?.eventAt ?: 0.0
                 else event?.at ?: previous?.eventAt ?: 0.0
-            records += observed.copy(target = session.target, observedAt = now, observedFingerprint = identity,
+            records += observed.copy(target = session.target, observedAt = now,
+                observedFingerprint = if (detailOnly) observed.observedFingerprint else identity,
                 candidateFingerprint = if (kind == SessionAlertKind.Finished) identity else "",
                 candidateTarget = if (kind == SessionAlertKind.Finished) session.target else "",
                 candidateEventId = if (kind == SessionAlertKind.Finished) finishedEventId else 0,
@@ -176,13 +207,13 @@ object NotificationStateCodec {
         .put("bootstrap", state.bootstrap).put("draining", state.draining).put("batch", state.batchActive)
         .put("batch_sound", state.batchSoundUsed).put("sound_elapsed", state.lastSoundElapsed).put("settings", state.settingsGeneration)
         .put("pending", JSONArray(state.pending.map { JSONObject().put("id", it.id).put("computer", it.computer)
-            .put("session", it.session).put("kind", it.kind).put("at", it.at) }))
+            .put("session", it.session).put("kind", it.kind).put("at", it.at).put("alert_kind", it.alertKind) }))
         .put("records", JSONArray(state.records.map { JSONObject().put("slot", JSONArray(listOf(it.slot.connection, it.slot.computer, it.slot.session)))
             .put("target", it.target).put("observed", it.observedAt).put("fingerprint", it.observedFingerprint)
             .put("posted", it.postedFingerprint).put("kind", it.postedKind?.name).put("posted_target", it.postedTarget)
             .put("event", it.eventId).put("at", it.eventAt).put("summary_only", it.summaryOnly).put("candidate", it.candidateFingerprint)
             .put("candidate_target", it.candidateTarget).put("candidate_event", it.candidateEventId).put("candidate_at", it.candidateEventAt).put("restored", it.restoredAt) }))
-        .put("posting", JSONArray(state.pendingPosts.toList())).put("truncated", state.truncated).put("delivery_needed", state.deliveryNeeded).put("overflow_kinds", JSONArray(state.overflowKinds.map { it.name })).put("restore_kinds", JSONArray(state.pendingRestoreKinds.map { it.name }))
+        .put("posting", JSONArray(state.pendingPosts.toList())).put("truncated", state.truncated).put("delivery_needed", state.deliveryNeeded).put("overflow_kinds", JSONArray(state.overflowKinds.map { it.name })).put("restore_kinds", JSONArray(state.pendingRestoreKinds.map { it.name })).put("presence_alerts", state.presenceAlerts)
 
     fun decode(raw: JSONObject): NotificationState {
         require(raw.optInt("schema") == 1)
@@ -192,7 +223,7 @@ object NotificationStateCodec {
         require(pending.size <= NotificationPolicy.maxPending && records.size <= NotificationPolicy.maxRecords && posting.length() <= 24)
         return NotificationState(raw.optLong("cursor").coerceAtLeast(0), raw.optBoolean("bootstrap", true), raw.optBoolean("draining"),
             raw.optBoolean("batch"), raw.optBoolean("batch_sound"), raw.optLong("sound_elapsed", -1), raw.optLong("settings", -1),
-            pending.map { NotificationEvent(it.getLong("id"), it.getString("computer"), it.getString("session"), it.getString("kind"), it.getDouble("at")) },
+            pending.map { NotificationEvent(it.getLong("id"), it.getString("computer"), it.getString("session"), it.getString("kind"), it.getDouble("at"), it.string("alert_kind").ifEmpty { null }) },
             records.map { row -> val slot = row.getJSONArray("slot")
                 NotificationRecord(NotificationSlot(slot.getString(0), slot.getString(1), slot.getString(2)), row.getString("target"),
                     row.getDouble("observed"), row.string("fingerprint"), row.string("posted"),
@@ -201,6 +232,6 @@ object NotificationStateCodec {
             (0 until posting.length()).map { posting.getString(it) }.toSet(), raw.optBoolean("truncated"), raw.optBoolean("delivery_needed"), raw.optJSONArray("overflow_kinds")?.let { kinds ->
                 (0 until kinds.length()).mapNotNull { runCatching { SessionAlertKind.valueOf(kinds.getString(it)) }.getOrNull() }.toSet() }.orEmpty(),
             raw.optJSONArray("restore_kinds")?.let { kinds -> (0 until kinds.length()).mapNotNull {
-                runCatching { SessionAlertKind.valueOf(kinds.getString(it)) }.getOrNull() }.toSet() }.orEmpty())
+                runCatching { SessionAlertKind.valueOf(kinds.getString(it)) }.getOrNull() }.toSet() }.orEmpty(), raw.optBoolean("presence_alerts"))
     }
 }

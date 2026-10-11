@@ -14,6 +14,15 @@ static BoxState box(const QString &host, bool ok, int sessions)
     return b;
 }
 
+static SessionInfo shared(const QString &reply = "7:100.5", const QString &signature = {})
+{
+    SessionInfo s; s.name = "codex/project/review"; s.cmd = "codex"; s.state = "running"; s.runId = "run-1";
+    s.conversationId = "conversation-1"; s.created = 100; s.replyId = reply; s.sharedRead = true;
+    s.attentionSignature = signature;
+    if (!signature.isEmpty()) { s.phase = "input"; s.attentionId = "call-1"; }
+    return s;
+}
+
 class TestFleetState : public QObject {
     Q_OBJECT
 private slots:
@@ -29,6 +38,12 @@ private slots:
     void peerNeverSeenAliveCountsAsZero();
     void tooltipShowsPollAgeForOfflinePeer();
     void tooltipAgeIsMinuteGrained();
+    void sharedReadComesFromTheSessionHost();
+    void sharedMarksApplyAtOnceAndSettleFromSnapshots();
+    void queuedMarksNeverHideNewerRepliesOrRequests();
+    void legacyMarksMigrateOnlyCurrentValues();
+    void olderHostsKeepLocalReadStateAndQueueNothing();
+    void recoveryAttentionWithoutSignatureStaysLocal();
 };
 
 void TestFleetState::attentionMarksFollowConversationAndRejectStaleActions()
@@ -208,6 +223,104 @@ void TestFleetState::tooltipAgeIsMinuteGrained()
              qPrintable(f.tooltip(1000 + 90000)));
     QVERIFY2(f.tooltip(1000 + 150000).contains(QStringLiteral("2m ago")),
              qPrintable(f.tooltip(1000 + 150000)));
+}
+
+void TestFleetState::sharedReadComesFromTheSessionHost()
+{
+    BoxState local = box("arch", true, 0); local.sessions = {shared()};
+    FleetState f; f.setReadReplies({{"[\"\",\"codex\",\"conversation-1\"]", "7:100.5"}}); // an old local mark
+    f.setLocal(local, 1000);
+    QVERIFY(f.local().sessions[0].unreadReply); // the host has no mark: unread on every device
+    local.sessions[0].readReplyId = "7:100.5"; f.setLocal(local, 2000);
+    QVERIFY(!f.local().sessions[0].unreadReply);
+    auto peer = local; peer.host = "mac"; peer.sessions[0].readReplyId.clear(); f.setPeer(peer, 2000);
+    QVERIFY(f.peer("mac")->sessions[0].unreadReply);
+}
+
+void TestFleetState::sharedMarksApplyAtOnceAndSettleFromSnapshots()
+{
+    const QString signature(64, 'a');
+    BoxState local = box("arch", true, 0); local.sessions = {shared("7:100.5", signature)};
+    FleetState f; f.setLocal(local, 1000);
+    const auto displayed = f.local().sessions[0];
+    QVERIFY(displayed.needsAttention());
+    QVERIFY(f.markSessionRead({}, displayed));
+    QVERIFY(!f.local().sessions[0].needsAttention());
+    QVERIFY(!f.takeNewReadMarks().isEmpty()); QVERIFY(f.takeNewReadMarks().isEmpty());
+    const ReadMark key{{}, displayed.name, {}, displayed.conversationId, {}, {}};
+    const auto queued = ReadMark::fromJson(f.pendingReads().value(key.key()).toObject());
+    QCOMPARE(queued.runId, QString("run-1")); QCOMPARE(queued.replyId, QString("7:100.5"));
+    QCOMPARE(queued.attentionSignature, signature);
+    QCOMPARE(queued.payload(), (QJsonObject{{"run_id", "run-1"}, {"conversation_id", "conversation-1"},
+        {"reply_id", "7:100.5"}, {"attention_signature", signature}}));
+    // The host has not stored it yet: the queued mark keeps the session read.
+    f.setLocal(local, 2000); QVERIFY(!f.local().sessions[0].needsAttention()); QVERIFY(f.takeSettledReadMarks().isEmpty());
+    FleetState restarted; restarted.setPendingReads(f.pendingReads()); restarted.setLocal(local, 3000);
+    QVERIFY(!restarted.local().sessions[0].needsAttention());
+    // Once the host shows the mark, the queue entry is finished.
+    local.sessions[0].readReplyId = "7:100.5"; local.sessions[0].readAttentionSignature = signature; f.setLocal(local, 4000);
+    QCOMPARE(f.takeSettledReadMarks().size(), 1); QVERIFY(f.pendingReads().isEmpty());
+    QVERIFY(!f.local().sessions[0].needsAttention());
+}
+
+void TestFleetState::queuedMarksNeverHideNewerRepliesOrRequests()
+{
+    const QString first(64, 'a'), second(64, 'b');
+    BoxState local = box("arch", true, 0); local.sessions = {shared("7:100.5", first)};
+    FleetState f; f.setLocal(local, 1000); const auto displayed = f.local().sessions[0];
+    // A newer request arrived after the user opened the menu.
+    local.sessions[0].attentionSignature = second; f.setLocal(local, 1500);
+    QVERIFY(!f.markSessionRead({}, displayed)); QVERIFY(f.takeNewReadMarks().isEmpty());
+    local.sessions[0].attentionSignature = first; f.setLocal(local, 1600);
+    QVERIFY(f.markSessionRead({}, f.local().sessions[0]));
+    local.sessions[0].replyId = "8:200.5"; local.sessions[0].attentionSignature = second; local.sessions[0].attentionId = "call-2";
+    f.setLocal(local, 2000);
+    QVERIFY(f.local().sessions[0].unreadReply); QVERIFY(!f.local().sessions[0].attentionAcknowledged);
+    QCOMPARE(f.takeSettledReadMarks().size(), 1); // the host would report both fields stale
+    // Marks for a session the host no longer lists are finished too.
+    f.setLocal(local, 2100); QVERIFY(f.markReplyRead({}, local.sessions[0].name, "conversation-1", "8:200.5"));
+    local.sessions.clear(); f.setLocal(local, 2200);
+    QCOMPARE(f.takeSettledReadMarks().size(), 1); QVERIFY(f.pendingReads().isEmpty());
+}
+
+void TestFleetState::legacyMarksMigrateOnlyCurrentValues()
+{
+    const QString signature(64, 'a');
+    BoxState local = box("arch", true, 0); local.sessions = {shared("7:100.5", signature)};
+    auto other = shared("3:30.5"); other.name = "codex/project/old"; other.conversationId = "conversation-2";
+    local.sessions << other;
+    auto unshared = local; for (auto &s : unshared.sessions) s.sharedRead = false;
+    unshared.sessions[1].replyId = "2:20.5"; // the old GUI read an earlier reply
+    FleetState before; before.setLocal(unshared, 1000);
+    QVERIFY(before.markSessionRead({}, before.local().sessions[0]));
+    QVERIFY(before.markReplyRead({}, other.name, other.conversationId, "2:20.5"));
+    QVERIFY(before.takeNewReadMarks().isEmpty()); // older hosts never get shared marks
+    FleetState f; f.setReadReplies(before.readReplies()); f.setAttentionMarks(before.attentionMarks()); f.setLocal(local, 2000);
+    QVERIFY(f.supportsSharedRead({})); QVERIFY(!f.supportsSharedRead("mac"));
+    const auto marks = f.legacyReadMarks({});
+    QCOMPARE(marks.size(), 1);
+    QCOMPARE(marks[0].name, local.sessions[0].name); QCOMPARE(marks[0].runId, QString("run-1"));
+    QCOMPARE(marks[0].replyId, QString("7:100.5")); QCOMPARE(marks[0].attentionSignature, signature);
+}
+
+void TestFleetState::olderHostsKeepLocalReadStateAndQueueNothing()
+{
+    BoxState local = box("arch", true, 0); auto s = shared(); s.sharedRead = false; local.sessions = {s};
+    FleetState f; f.setLocal(local, 1000); QVERIFY(f.local().sessions[0].unreadReply);
+    QVERIFY(f.markReplyRead({}, s.name, s.conversationId, s.replyId));
+    QVERIFY(!f.local().sessions[0].unreadReply);
+    QVERIFY(f.takeNewReadMarks().isEmpty()); QVERIFY(f.pendingReads().isEmpty());
+    QVERIFY(!f.supportsSharedRead({}));
+}
+
+void TestFleetState::recoveryAttentionWithoutSignatureStaysLocal()
+{
+    BoxState local = box("arch", true, 0); auto s = shared(); s.phase = "working"; s.recovery = {{"state", "blocked"}};
+    local.sessions = {s}; FleetState f; f.setLocal(local, 1000);
+    QVERIFY(f.local().sessions[0].needsAction());
+    QVERIFY(f.markSessionRead({}, f.local().sessions[0]));
+    QVERIFY(f.local().sessions[0].attentionAcknowledged);
+    f.setLocal(local, 2000); QVERIFY(f.local().sessions[0].attentionAcknowledged);
 }
 
 QTEST_APPLESS_MAIN(TestFleetState)

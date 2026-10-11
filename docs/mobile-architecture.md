@@ -459,9 +459,14 @@ time. Retry now and Cancel retry pin its UUID and exact current session identity
 Retry now changes the native schedule; it does not claim that a provider request
 has already been sent. The existing native worker retains its delivery checks.
 
-Mark read and Review later are private phone state. They capture the displayed
-message evidence and never answer a question or authorize a native action. With
-partial history, Mark loaded replies read acknowledges only that loaded subset.
+Review later is private phone state. Mark read and automatic read progress also
+send `mark_read` when the computer advertises it, so the session's host marks the
+exact reply and request read for every device. Read all marks replies only, one
+`mark_read` at a time: like the desktop's Mark all read, it leaves pending
+approvals, questions and errors highlighted until the session is viewed. Every
+mark captures the displayed message evidence and never answers a question or
+authorizes a native action. With partial history, Mark loaded replies read
+acknowledges only that loaded subset.
 
 ### Read-only Accounts
 
@@ -637,7 +642,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | --- | --- | --- |
 | `GET /healthz` | Public | Health and protocol version |
 | `POST /v1/pair` | Invitation | `{code, device_name}` → `{device_id, device_token, workspace_id, workspace_name}` |
-| `GET /v1/capabilities` | Device | Protocol version, operations, inspect extensions, push providers and attachment limits |
+| `GET /v1/capabilities` | Device | Protocol version, operations, features (inspect extensions, `presence_alerts`), push providers and attachment limits |
 | `GET /v1/computers` | Device | `{computers: [{id, name, online, last_seen_at, snapshot}]}` |
 | `POST /v1/requests` | Device | `{request_id, computer_id, operation, session, payload}` → request envelope |
 | `GET /v1/requests/{id}` | Owning device | Request envelope |
@@ -645,7 +650,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/push` | Device | `{provider: "fcm", token}`; other providers return 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
-| `POST /v1/node/heartbeat` | Computer | `{snapshot}` using local `hgs ls --json --local` output |
+| `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |
 | `GET /v1/node/requests?wait=25` | Computer | `{requests: [{request_id, operation, session, payload}]}` |
 | `POST /v1/node/requests/{id}/result` | Computer | `{state, result, error}` |
 
@@ -655,7 +660,16 @@ are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 `compact_context`, `clear_context`, `send_now`, `settings`, `process_output`
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
 `terminal_input`, `history`, `catalog`, `dirs`, `launch`, `worktrees`,
-`worktree_create` and `recovery_action`.
+`worktree_create`, `recovery_action`, `mark_read` and `set_mobile_delivery`.
+
+`set_mobile_delivery` is computer-scoped: an empty session and payload
+`{value}` with `immediate`, `away`, `away_5`, `away_10`, `away_15` or `away_30`.
+The gateway connector runs `hgs swarm preference set mobile_delivery VALUE --json`
+and returns its `{ok, mobile_delivery}` object. Only a gateway whose hgs lists that
+command advertises the operation; direct peers never do. Snapshots report the
+current value as `preferences.mobile_delivery`, and each machine's desktop activity
+as `desktop_presence`.
+
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
@@ -688,9 +702,73 @@ reported as partial rather than a completed conversation.
 ## Notifications
 
 The relay detects attention, failure and completion transitions from computer
-snapshots. An initial baseline is silent. Push payloads contain only generic
-wake information, never conversation text, project names or credentials. Opening
-a notification refreshes the authenticated session state.
+snapshots, including failed recovery and counted native questions, so every
+condition a phone notifies on has an event. An initial baseline is silent. Each
+transition is stored as an ordinary event, which refreshes phone state, and as
+an alert candidate. Push payloads contain only generic wake information, never
+conversation text, project names or credentials. Opening a notification
+refreshes the authenticated session state.
+
+### Presence-aware delivery
+
+Relays advertising the `presence_alerts` feature hold candidates while the
+owner works at a Zerus desktop. The connector sends each machine's
+`desktop_presence` (`idle_seconds`, `locked`, `locked_seconds`) as `presence`
+beside the snapshot, so changing idle time never rewrites snapshots; the relay
+remembers the latest presence per machine with its own receipt time. When a
+heartbeat carries no valid `presence`, the relay falls back to
+`snapshot.desktop_presence`, which older connectors still forward inside the
+snapshot. Idle time is aged by the time since the relay received it, which is
+stricter than reading idle at receipt and errs toward extra alerts.
+
+The delivery choice is `preferences.mobile_delivery` of the most recently seen
+gateway snapshot that carries a valid value: `immediate`, `away` (the default),
+or `away_5`, `away_10`, `away_15` and `away_30`. With no such snapshot the
+choice is `away`. The owner is active while a machine whose presence is at most
+120 seconds old is unlocked with less than 120 seconds of input idle time. Away
+time counts from the end of the latest activity over every remembered machine,
+or the earlier lock time; a machine that stopped reporting (lid closed, asleep)
+cannot keep the owner active but still marks when activity ended. With no
+presence ever received the owner is away, so connectors without these fields
+behave as before.
+
+A candidate is dropped when its session disappears, is archived, or changes run
+or conversation; when a read mark covers its attention signature or the
+session's current one, when the current signature is absent, or when the
+signature differs and the native need for its kind is gone; for a candidate
+without a signature, only when the native need is resolved; or, for a completed
+turn, when that reply is read, a newer reply exists or the session is busy
+again. A changed signature alone keeps the candidate, because `hgs` signatures
+also change on details that emit no relay event (subagent requests, request
+start times, unindexed questions); a genuine new need is a new event whose
+candidate replaces the held one. Otherwise it is delivered immediately, as soon
+as the owner is away, or after the chosen number of away minutes. Candidates
+expire after 24 hours and are capped at 1,000 per workspace.
+
+Evaluation runs inline on whichever relay worker accepted a changed snapshot or
+new presence. An advisory-elected maintenance pass rechecks the most overdue
+workspaces first, 32 per pass, so waiting candidates are re-evaluated within
+about 15 seconds; at the default 1 second interval that holds up to about 480
+waiting workspaces. Several workers may evaluate the same candidate, but a
+candidate row is deleted in the same transaction that appends its `alert`
+event, so an alert is delivered once.
+
+A delivered candidate appends `{id, computer_id, session, kind: "alert",
+alert_kind, created_at}` to `GET /v1/events`, with `alert_kind` `attention`,
+`error` or `completed`, and coalesces one generic wake per registered phone.
+A wake job still being sent records the newer alert and is sent again. Ordinary
+events no longer wake phones themselves. Phones that know the feature create
+cards only from alert events: an `attention` or `error` alert announces the
+session's input or error card, whichever the phone shows; a posted input or
+error card follows detail changes of the same run silently; and a need the
+relay announced without an alert waits for its alert.
+
+Roll out `hgs`, the desktop and the connector first, then Android, then the
+relay. The connector retries without `presence` when an older relay rejects it,
+and Android alert-only mode starts only when the relay advertises the feature.
+Android builds released before this change keep only the newest event per
+session in a batch, so an alert following a completion can hide their opt-in
+completion card.
 
 Android notification preferences distinguish input and approvals, errors, and
 turn completion. Input and errors are enabled by default; completion is opt-in.
@@ -740,6 +818,14 @@ Android supports two delivery paths:
   for builds without Firebase and phones without Google Play services. This needs no third-party
   account. It consumes an ongoing connection and does not promise FCM-equivalent
   behavior under Doze, vendor battery restrictions or force-stop.
+
+Machines → Notifications offers "When I'm not at a computer, send notifications to
+my phone" for each paired workspace, with the same six choices as desktop
+Settings. It shows the gateway computer's reported value. A change is a durable
+`set_mobile_delivery` request to that gateway: it shows as saving, then as shared
+once the gateway confirms it; an unconfirmed change appears in Drafts for a
+receipt check and is never repeated. Older gateways or relays show the value
+read-only with the reason.
 
 Android 13 and later require notification permission. Force-stopping the app
 and disabling notifications cannot be bypassed by the relay. Provider status

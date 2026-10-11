@@ -345,7 +345,7 @@ Generate `.SRCINFO` with `makepkg --printsrcinfo`; never edit it manually.
 
 | Class | Packages | Reason |
 | --- | --- | --- |
-| Desktop runtime | `qt6-base`, `qt6-webengine`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `hicolor-icon-theme` | Widgets, embedded web UI, SVG plugin, tray/window integration and icons |
+| Desktop runtime | `qt6-base`, `qt6-webengine`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `kidletime`, `hicolor-icon-theme` | Widgets, embedded web UI, SVG plugin, tray/window integration, idle detection and icons |
 | CLI/runtime tools | `tmux>=3.7`, `openssh`, `python`, `curl`, `procps-ng`, `bash`, `tar` | Persistent sessions, remote access, compatibility helper, account HTTP, process inspection, installers and remote source transfer |
 | Native library runtime | `glibc`, `libgcc`, `libstdc++` | Dynamically linked CLI/desktop binaries |
 | Source build only | `rust`, `cmake`, `ninja`; additionally `git` for `zerus-git` | Locked Rust and production Qt builds; Git source/version discovery |
@@ -390,8 +390,8 @@ accounts, credentials or configuration. Package installation does not start or
 stop services, edit user homes or replace the user's tmux configuration.
 
 The product package version currently follows the desktop version: `VERSION`
-and `tray/CMakeLists.txt` are **0.37.0** for the first public release. The independently versioned compatible
-CLI remains **1.46.1**. CI rejects a product/desktop version mismatch; packaging
+and `tray/CMakeLists.txt` are **0.38.0**. The independently versioned compatible
+CLI is **1.47.0**. CI rejects a product/desktop version mismatch; packaging
 records both versions in `build-info.json`, with the source commit when built
 from Git. For source-archive builds, the release manifest and archive SHA-256
 provide the commit provenance.
@@ -438,6 +438,17 @@ and verify `systemctl --user show hgs-tray.service -p KillMode`. Package upgrade
 do not perform a restart. Review the old unit's kill policy before restarting an existing
 installation; never use a broad process kill or restart all native clients.
 
+The swarm worker is the exception: it holds no agents. A current `hgs-swarm`
+exits when an upgrade replaces its executable and `Restart=always` starts the new
+version. A worker started by an earlier release keeps running and cannot read a
+catalog that holds the phone notification timing, so the next `hgs swarm get`
+(Zerus reads it every five seconds), `hgs swarm preference` or inbound swarm
+exchange runs `systemctl --user try-restart hgs-swarm.service`, at most once
+every ten minutes and only for the default `~/.config/hgs`. It never restarts
+`hgs-tray`, `hgs-recovery`, agents, tmux servers or DeepSeek hosts. If Settings
+still reports an outdated sync service, run
+`systemctl --user restart hgs-swarm.service`.
+
 ## Manual build and publication
 
 The public upstream is [ufna/zerus](https://github.com/ufna/zerus). There are two
@@ -453,9 +464,9 @@ binary archives, rebuilds both stable recipes, runs namcap and seals the result.
 
 ```sh
 # Only when the owner requests a hosted build:
-gh workflow run release.yml --ref main -f version=0.37.0
+gh workflow run release.yml --ref main -f version=0.38.0
 # After this manual run succeeds:
-gh run download RUN_ID --name zerus-0.37.0-candidate --dir /tmp/zerus-candidate
+gh run download RUN_ID --name zerus-0.38.0-candidate --dir /tmp/zerus-candidate
 cd /tmp/zerus-candidate
 sha256sum -c SHA256SUMS
 ```
@@ -492,7 +503,7 @@ one Ubuntu runner, does no compilation and allocates no Arch/macOS runners:
 ```sh
 # Only after review and an explicit owner publication request:
 gh workflow run publish.yml --ref main \
-  -f version=0.37.0 -f candidate_run=RUN_ID
+  -f version=0.38.0 -f candidate_run=RUN_ID
 ```
 
 The publisher verifies the same-repository manual run came from `main`, succeeded,

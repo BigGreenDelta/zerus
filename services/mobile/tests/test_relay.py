@@ -13,6 +13,7 @@ import uuid
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from zerus_mobile.context import OPERATIONS
 from zerus_mobile.server import Config, PUSH_WORKER, create_app
 from zerus_mobile.store import Store, digest
 
@@ -189,6 +190,20 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         # Repeating an expired inspect is safe: it cannot mutate native agents.
         await self.call("POST", "/v1/requests", command, expected=202)
 
+    async def test_mark_read_is_read_class_and_pruned_like_reads(self):
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["mark_read"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        command = self.command("mark_read")
+        command["payload"] = {"run_id": "example-run", "conversation_id": "example-conversation",
+                              "reply_id": "7:100.5", "attention_signature": None}
+        await self.call("POST", "/v1/requests", command, expected=202)
+        with self.store.db:
+            self.store.db.execute("UPDATE requests SET state='completed',updated=? WHERE id=?", (time.time() - 3601, command["request_id"]))
+        self.store.maintain()
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (command["request_id"],)).fetchone())
+        # Marks are idempotent and forward-only, so a pruned identity may be repeated.
+        await self.call("POST", "/v1/requests", command, expected=202)
+
     async def test_long_poll_rechecks_revocation(self):
         task = asyncio.create_task(self.client.get("/v1/node/requests?wait=1", headers=self.headers(node=True)))
         await asyncio.sleep(0.05)
@@ -208,7 +223,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await heartbeat({**question, "attention_id": "question-two"})
         await heartbeat({**session, "phase": "idle", "activity": "idle"})
         result = await self.call("GET", "/v1/events")
-        self.assertEqual([event["kind"] for event in result["events"]], ["attention", "attention", "completed"])
+        self.assertEqual([event["kind"] for event in result["events"] if event["kind"] != "alert"], ["attention", "attention", "completed"])
         self.assertNotIn("Private text", json.dumps(result))
         self.assertEqual((await self.call("GET", "/v1/events?after=" + str(result["cursor"])))["events"], [])
         computers = (await self.call("GET", "/v1/computers"))["computers"]
@@ -240,7 +255,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await send([first])  # An unchanged heartbeat is silent.
         await send([second])
         await send([])
-        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"]], ["attention", "attention"])
+        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"] if e["kind"] != "alert"], ["attention", "attention"])
 
     async def test_push_retired_unifiedpush_and_unavailable_fcm(self):
         self.assertEqual((await self.call("GET", "/v1/capabilities"))["push_providers"], [])
@@ -308,6 +323,38 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await worker.deliver("fcm", "example-token", {"event_id": 1, "kind": "wake"}), (False, True))
         finally:
             worker.fcm = None
+
+    async def test_mark_read_is_exact_and_capability_gated(self):
+        value = self.command("mark_read")
+        value["payload"] = {"run_id": "example-run", "conversation_id": "example-conversation",
+                            "reply_id": "7:100.5", "attention_signature": "a" * 64}
+        await self.call("POST", "/v1/requests", value, expected=409)
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["mark_read"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        self.assertEqual((await self.call("POST", "/v1/requests", value, expected=202))["state"], "queued")
+        for change in ({"reply_id": 7}, {"attention_signature": "A" * 64}, {"attention_signature": "a" * 63},
+                       {"run_id": ""}, {"request_id": value["request_id"]}):
+            invalid = self.command("mark_read")
+            invalid["payload"] = {**value["payload"], **change}
+            await self.call("POST", "/v1/requests", invalid, expected=400)
+        delivered = await self.call("GET", "/v1/node/requests", node=True)
+        self.assertEqual(delivered["requests"][0]["payload"], value["payload"])
+        self.assertEqual(set((await self.call("GET", "/v1/capabilities"))["operations"]), OPERATIONS)
+
+    async def test_set_mobile_delivery_request_validation(self):
+        value = {"request_id": str(uuid.uuid4()), "computer_id": self.node["node_id"],
+                 "operation": "set_mobile_delivery", "session": "", "payload": {"value": "away_10"}}
+        self.assertIn("set_mobile_delivery", (await self.call("GET", "/v1/capabilities"))["operations"])
+        await self.call("POST", "/v1/requests", value, expected=409)
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": ["set_mobile_delivery"], "features": []}}
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+        self.assertEqual((await self.call("POST", "/v1/requests", value, expected=202))["state"], "queued")
+        delivered = (await self.call("GET", "/v1/node/requests", node=True))["requests"][0]
+        self.assertEqual((delivered["operation"], delivered["session"], delivered["payload"]),
+                         ("set_mobile_delivery", "", {"value": "away_10"}))
+        for change in ({"session": "codex/project/deep/tag"}, {"payload": {"value": "later"}}, {"payload": {}},
+                       {"payload": {"value": "away", "request_id": value["request_id"]}}):
+            await self.call("POST", "/v1/requests", {**value, "request_id": str(uuid.uuid4()), **change}, expected=400)
 
 
 class FilesystemTests(unittest.TestCase):

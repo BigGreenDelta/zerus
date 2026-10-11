@@ -87,6 +87,7 @@ private slots:
     void initTestCase();
     void copySessionReferencePreservesSelectionAndDraft();
     void updatesEntryOpensExactSettingsPage();
+    void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void init() { QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
@@ -102,6 +103,7 @@ private slots:
     void windowLayerControlsKeepFocusAndLayout();
     void unreadRepliesNeedAnActiveVisibleResult();
     void markAllReadIgnoresFiltersAndKeepsCurrentDraft();
+    void sharedReadsQueueOnTheSessionHost();
     void unsentDraftBecomesARowStatus();
     void compactWorkspaceGeometry();
     void worktreeFilterKeepsConversationDraftAndSearchScope();
@@ -1129,6 +1131,9 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = list->currentItem()->data(SessionRoles::Key);
     auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
     QVERIFY(action->text().contains("(5)"));
+    // Marks are shared through each session's host, not kept on this device.
+    QCOMPARE(action->toolTip(), QString("Mark current replies across all machines as read, including hidden sessions. "
+                                        "Pending approvals, questions and errors stay highlighted."));
     auto *context = window.findChild<QMenu *>("sessionProjectsMenu"); QVERIFY(context); QVERIFY(context->actions().contains(action));
     auto *batch = window.findChild<QPushButton *>("batchActions")->menu(); QMetaObject::invokeMethod(batch, "aboutToShow");
     QVERIFY(batch->actions().contains(action));
@@ -1141,6 +1146,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
         window.setFleet(state);
     });
     action->trigger(); QCOMPARE(seen.size(), 1); QCOMPARE(seen[0][0].toJsonObject().size(), 5);
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("5 replies marked as read."));
     QVERIFY(!action->isEnabled()); QVERIFY(state.unreadReplies().isEmpty()); QCOMPARE(writes.size(), 0);
     QCOMPARE(list->currentItem()->data(SessionRoles::Key), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
     // Overview renders when shown.
@@ -1154,7 +1160,30 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     box.sessions[0].replyId = "11:101"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QVERIFY(action->isEnabled()); QVERIFY(action->text().contains("(1)")); // Even when that session is hidden by search.
     action->trigger(); QCOMPARE(seen.size(), 2); QCOMPARE(seen[1][0].toJsonObject().size(), 1); QVERIFY(!action->isEnabled());
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("1 reply marked as read."));
     QSettings().remove("attention/readReplies");
+}
+
+void TestSessionsWindow::sharedReadsQueueOnTheSessionHost()
+{
+    QSettings().remove("attention/pendingReads");
+    auto state = fleet(); auto box = state.local();
+    box.sessions[0].runId = "run-local"; box.sessions[0].conversationId = "shared-local";
+    box.sessions[0].replyId = "10:100"; box.sessions[0].sharedRead = true;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto remote = *state.peer("mac");
+    remote.sessions[0].runId = "run-remote"; remote.sessions[0].conversationId = "shared-remote";
+    remote.sessions[0].replyId = "20:200"; remote.sessions[0].sharedRead = true;
+    state.setPeer(remote, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
+    action->trigger();
+    const auto pending = ReadMarkStore::load();
+    const auto local = ReadMark::fromJson(pending.value(ReadMark{{}, box.sessions[0].name, {}, "shared-local", {}, {}}.key()).toObject());
+    QCOMPARE(local.runId, QString("run-local")); QCOMPARE(local.replyId, QString("10:100"));
+    const auto peer = ReadMark::fromJson(pending.value(ReadMark{"mac", remote.sessions[0].name, {}, "shared-remote", {}, {}}.key()).toObject());
+    QCOMPARE(peer.runId, QString("run-remote")); QCOMPARE(peer.replyId, QString("20:200"));
+    QSettings().remove("attention/pendingReads");
 }
 
 void TestSessionsWindow::compactWorkspaceGeometry()
@@ -5908,6 +5937,13 @@ void TestSessionsWindow::worktreePreview()
         QTimer::singleShot(0,&launch,[&]{auto *picker=launch.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTest::qWait(100);QVERIFY(picker->grab().save(destination+(dark?"/picker-dark.png":"/picker-light.png")));picker->reject();});launch.findChild<QPushButton *>("chooseLaunchWorktree")->click();launch.reject();
     }
     qApp->setPalette(original);
+}
+
+void TestSessionsWindow::mobileConnectionSettingsOfferTheSharedDeliveryChoice(){
+    SessionsWindow window(script()); window.show();
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *choice=window.findChild<QComboBox *>("mobileDelivery"); QVERIFY(choice); QCOMPARE(choice->count(),6);
+    QVERIFY(window.findChild<QWidget *>("relaySettings"));
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){

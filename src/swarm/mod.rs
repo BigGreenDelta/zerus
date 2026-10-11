@@ -1,8 +1,10 @@
-//! Shared metadata only. Transport credentials and presentation preferences never
-//! enter the catalog. All commands use one locked, atomically replaced store.
+//! Shared metadata only. Transport credentials and per-device presentation stay
+//! local; the swarm-wide phone delivery choice is shared. All commands use one
+//! locked, atomically replaced store.
 mod catalog;
 mod launch_project;
 mod model;
+mod service;
 mod store;
 mod transport;
 
@@ -11,6 +13,41 @@ use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
+
+pub(crate) use catalog::MOBILE_DELIVERY;
+
+/// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
+/// replaced atomically and listings never wait for a sync. A missing or
+/// unreadable catalog reports the defaults.
+pub(crate) fn preferences(config: &Config) -> Value {
+    std::fs::read(config.dir.join("swarm/catalog.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<store::Store>(&bytes).ok())
+        .map_or_else(catalog::default_preferences, |store| {
+            store.catalog.preferences()
+        })
+}
+
+fn preference(config: &Config, args: &[String]) -> Result<Value> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let args = args.strip_suffix(&["--json"]).unwrap_or(&args[..]);
+    match args {
+        ["get"] => Ok(LockedStore::load(config)?.data.catalog.preferences()),
+        ["set", field, value] => {
+            let mut store = LockedStore::load(config)?;
+            let actor = store.data.node_id.clone();
+            store
+                .data
+                .catalog
+                .set(&actor, catalog::Key::preference(field), json!(value))?;
+            store.save()?;
+            let mut result = store.data.catalog.preferences();
+            result["ok"] = json!(true);
+            Ok(result)
+        }
+        _ => bail!("usage: hgs swarm preference get --json | set mobile_delivery VALUE --json"),
+    }
+}
 
 /// Persist and return the machine identity without retaining the catalog lock.
 pub(crate) fn local_node_id(config: &Config) -> Result<String> {
@@ -59,11 +96,15 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             .map(String::as_str)
             .ok_or_else(|| anyhow::anyhow!("choose a configured machine"))
     };
+    // Commands that read or write preferences restart a worker too old to read them.
+    let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
+        .then(|| service::supervise(config));
     match action {
         "assign-launch" => {
             ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm assign-launch --json");
             Ok(launch_project::execute(config, input()?))
         }
+        "preference" => preference(config, &args[1..]),
         "worker" => { transport::worker()?; Ok(Value::Null) }
         "hello" | "inventory" => transport::hello(config,action == "inventory"),
         "preview" => transport::preview(config,alias()?),
@@ -93,7 +134,8 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             }
             store.save()?;
             if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
-            let mut snapshot = store.data.snapshot(config);
+            let mut snapshot = store.snapshot(config);
+            snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {
                 written.entry(store.data.catalog.canonical_key(&op.key).token()).or_default().push(op.id.clone());
@@ -101,6 +143,6 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             snapshot["written"] = json!(written);
             Ok(snapshot)
         }
-        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER"),
+        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set"),
     }
 }

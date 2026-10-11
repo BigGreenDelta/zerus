@@ -579,6 +579,34 @@ now preserves `not_before`; `scheduled` means the job was rescheduled, not that
 input was delivered. Durable UUID receipts prevent replay. Global recovery
 policies, archived targets and child recovery controls are excluded.
 
+`mark_read` targets one exact session and carries only `run_id`,
+`conversation_id`, `reply_id` and `attention_signature` (`null` for a field that
+is not being marked; the signature is lowercase hex SHA-256). The connector
+advertises it only when native help lists `read <session> --json` and runs
+`hgs read <session> --json` on the owning computer, locally or through the
+guarded peer route. The result is the native answer: `{"ok": true, "applied":
+…, "read": …}` or `{"ok": false, "error": "not_found"}`. Marks are idempotent
+and forward-only on the host, so a phone may send a newer mark under a new
+request ID. The operation is read-class, so the relay prunes it within the
+read retention window like `inspect`. Within that window the journal replays
+the receipt for an existing request ID; after pruning, a repeated ID may run
+again, which is safe because marks are idempotent and forward-only.
+
+`set_mobile_delivery` changes the swarm-wide phone notification timing. It is a
+computer-scoped gateway request: the session is `""` and the payload is exactly
+`{"value": ...}` with `immediate`, `away`, `away_5`, `away_10`, `away_15` or
+`away_30`. The connector runs
+`hgs swarm preference set mobile_delivery <value> --json` on its gateway computer
+and returns the native `{"ok": true, "mobile_delivery": ...}` object; any other
+answer is not a confirmation. A gateway connector advertises the operation for
+its own computer only when native help lists that command; direct peers never
+advertise it, and the relay returns 409 until the computer's snapshot does. The
+operation is mutation-class: its request UUID is a permanent tombstone, so a
+repeated ID returns the original receipt and never runs the command again, and an
+error or unverified acknowledgement after the native command started is
+uncertain. Replaying an old change could revert a newer choice, so every new
+choice uses a new request ID.
+
 Synthetic paging QA uses `history_count` up to 5,000 for history pages while
 ordinary inspect remains capped at 500 fixture rows. Set `history_indexing:true`
 for a stable incomplete head, `history_gap:true` for permanent partial source

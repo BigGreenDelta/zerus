@@ -184,6 +184,31 @@ fn scoped(payload: &Option<Value>) -> Result<()> {
     Ok(())
 }
 
+/// C1 stdin: exactly the run/conversation identity and two nullable marks.
+fn read_mark(payload: &Option<Value>) -> Result<()> {
+    let value = payload.as_ref().context("read mark payload is required")?;
+    let object = value.as_object().context("native payload must be an object")?;
+    ensure!(
+        object.len() == 4
+            && ["run_id", "conversation_id", "reply_id", "attention_signature"]
+                .iter()
+                .all(|key| object.contains_key(*key)),
+        "invalid read mark fields"
+    );
+    ensure!(
+        value["run_id"].as_str().is_some_and(|v| text(v, 128, false))
+            && value["conversation_id"].as_str().is_some_and(|v| text(v, 256, false)),
+        "native run and conversation identity are required"
+    );
+    for key in ["reply_id", "attention_signature"] {
+        ensure!(
+            value[key].is_null() || value[key].as_str().is_some_and(|v| text(v, 256, false)),
+            "invalid read mark value"
+        );
+    }
+    Ok(())
+}
+
 /// Validate complete argv shapes before calling the CLI's permissive legacy dispatcher.
 /// Session operations retain their native scoped-payload validation and receipts.
 fn validate(request: &LocalRequest) -> Result<()> {
@@ -233,6 +258,15 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 );
                 // The local native ABI validates project/swarm/folder identity,
                 // exact launch UUID and its durable metadata receipt as one action.
+            } else if rest.len() == 5
+                && rest[0] == "preference"
+                && rest[1] == "set"
+                && rest[2] == "mobile_delivery"
+                && crate::swarm::MOBILE_DELIVERY.contains(&rest[3].as_str())
+                && rest[4] == "--json"
+            {
+                // The gateway connector changes the swarm-wide delivery choice.
+                no_payload()?;
             } else {
                 ensure!(
                     rest.len() == 1 && matches!(rest[0].as_str(), "get" | "hello"),
@@ -349,6 +383,13 @@ fn validate(request: &LocalRequest) -> Result<()> {
                     .is_some_and(session),
                 "invalid native session"
             );
+        }
+        "read" => {
+            ensure!(
+                rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
+                "native read requires scoped JSON"
+            );
+            read_mark(&request.payload)?;
         }
         "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" => {
@@ -1030,6 +1071,21 @@ mod tests {
     }
 
     #[test]
+    fn shared_delivery_setting_accepts_only_exact_known_values() {
+        let set = ["swarm", "preference", "set", "mobile_delivery", "away_10", "--json"];
+        assert!(validate(&request(&set, None)).is_ok());
+        assert!(validate(&request(&set, Some(json!({})))).is_err());
+        for argv in [
+            vec!["swarm", "preference", "set", "mobile_delivery", "later", "--json"],
+            vec!["swarm", "preference", "set", "theme", "away", "--json"],
+            vec!["swarm", "preference", "set", "mobile_delivery", "away"],
+            vec!["swarm", "preference", "get", "--json"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
     fn worktree_operations_are_exact_and_creation_is_bounded() {
         let read = ["worktrees", "--path", "/repo", "--refresh", "--json"];
         assert!(validate(&request(&read, None)).is_ok());
@@ -1123,5 +1179,20 @@ mod tests {
         ] {
             assert!(!alias(route));
         }
+    }
+
+    #[test]
+    fn read_marks_require_an_exact_scoped_payload() {
+        let mark = json!({"run_id":"run","conversation_id":"conversation","reply_id":null,"attention_signature":"a".repeat(64)});
+        assert!(validate(&request(&["read", "codex/project", "--json"], Some(mark.clone()))).is_ok());
+        assert!(validate(&request(&["read", "codex/project", "--json"], None)).is_err());
+        assert!(validate(&request(&["read", "@peer", "--json"], Some(mark.clone()))).is_err());
+        assert!(validate(&request(&["read", "codex/project"], Some(mark.clone()))).is_err());
+        let mut extra = mark.clone();
+        extra["request_id"] = json!(ID);
+        assert!(validate(&request(&["read", "codex/project", "--json"], Some(extra))).is_err());
+        let mut empty = mark;
+        empty["run_id"] = json!("");
+        assert!(validate(&request(&["read", "codex/project", "--json"], Some(empty))).is_err());
     }
 }

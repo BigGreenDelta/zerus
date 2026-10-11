@@ -2,8 +2,10 @@ package app.zerus.mobile
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -116,4 +118,30 @@ class RelaySafetyTest {
         }
     }
 
+
+    @Test fun markReadSubmitsExactSessionScopedPayload() = runBlocking {
+        MockWebServer().use { server ->
+            var envelope = JSONObject()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    envelope = JSONObject(request.body.readUtf8())
+                    return MockResponse().setBody(JSONObject().put("request_id", envelope.getString("request_id")).put("state", "completed")
+                        .put("result", JSONObject().put("ok", true)).put("error", JSONObject.NULL).toString())
+                }
+            }
+            server.start()
+            val connection = Connection("gateway", "Test", server.url("/").toString().trimEnd('/'), "token")
+            val target = Target("machine", "codex/project/review", "exact-run", "exact-conversation", "gateway")
+            val payload = JSONObject().put("run_id", "exact-run").put("conversation_id", "exact-conversation")
+                .put("reply_id", "7:100.5").put("attention_signature", JSONObject.NULL)
+            assertEquals("completed", RelayApi().markRead(connection, target, payload).getString("state"))
+            assertEquals("mark_read", envelope.getString("operation"))
+            assertEquals("machine", envelope.getString("computer_id"))
+            assertEquals("codex/project/review", envelope.getString("session"))
+            val sent = envelope.getJSONObject("payload")
+            assertEquals(4, sent.length())
+            for (key in listOf("run_id", "conversation_id", "reply_id", "attention_signature")) assertEquals(payload.opt(key), sent.opt(key))
+            assertTrue(runCatching { RelayApi().markRead(connection, target.copy(agentId = "child"), payload) }.isFailure)
+        }
+    }
 }

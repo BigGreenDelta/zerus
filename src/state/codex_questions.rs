@@ -142,6 +142,13 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
     }
 }
 fn read_cache(record: &Value) -> Result<Value> {
+    index(record, &cache_path(record)?, None)?.ok_or_else(|| "question index incomplete".into())
+}
+/// Bring the question cache up to date with the transcript. With a deadline,
+/// indexing stops once it passes (after at least one line) and saves its
+/// progress, so the next call resumes; the cache is returned only when it is
+/// complete. None also when another process holds the cache past the deadline.
+fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result<Option<Value>> {
     let path = PathBuf::from(string(record, "transcript"));
     let id = string(record, "conversation_id");
     if uuid::Uuid::parse_str(id).is_err()
@@ -151,10 +158,16 @@ fn read_cache(record: &Value) -> Result<Value> {
             .file_name()
             .is_some_and(|n| n.to_string_lossy().contains(id))
     {
-        return Ok(json!({"items":{}}));
+        return Ok(Some(json!({"items":{}})));
     }
-    let cache_path = cache_path(record)?;
-    let _guard = lock(Some(&cache_path.with_extension("lock")))?;
+    let lock_path = cache_path.with_extension("lock");
+    let _guard = match deadline {
+        None => lock(Some(&lock_path))?,
+        Some(deadline) => match lock_until(&lock_path, deadline)? {
+            Some(guard) => guard,
+            None => return Ok(None),
+        },
+    };
     let file = File::open(&path).map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
@@ -168,7 +181,7 @@ fn read_cache(record: &Value) -> Result<Value> {
     if header["type"] != "session_meta" || header["payload"]["id"] != id {
         return Err("Conversation transcript identity mismatch".into());
     }
-    let mut cache: Value = fs::read_to_string(&cache_path)
+    let mut cache: Value = fs::read_to_string(cache_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({"items":{}}));
@@ -193,6 +206,7 @@ fn read_cache(record: &Value) -> Result<Value> {
         line.clear();
         reader.read_line(&mut line).map_err(|e| e.to_string())?;
     }
+    let mut complete = true;
     loop {
         let before = reader.stream_position().map_err(|e| e.to_string())?;
         line.clear();
@@ -223,20 +237,40 @@ fn read_cache(record: &Value) -> Result<Value> {
                 observe(record, &mut cache, &event);
             }
         }
+        // Lines appended while indexing do not count against the deadline.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            && cache["offset"].as_u64().unwrap_or(0) < meta.len()
+        {
+            complete = false;
+            break;
+        }
     }
-    recover_submissions(record, &mut cache)?;
+    if complete {
+        recover_submissions(record, &mut cache)?;
+    }
+    // The offset is at a line boundary, also after a partial scan.
     cache["initialized"] = json!(true);
     let serialized = cache.to_string();
-    if fs::read_to_string(&cache_path).ok().as_deref() != Some(&serialized) {
-        atomic(&cache_path, &serialized)?;
+    if fs::read_to_string(cache_path).ok().as_deref() != Some(&serialized) {
+        atomic(cache_path, &serialized)?;
     }
-    Ok(cache)
+    Ok(complete.then_some(cache))
 }
 pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
     if string(record, "agent") != "codex" {
         return Ok(vec![]);
     }
-    Ok(read_cache(record)?["items"]
+    Ok(pending(record, &read_cache(record)?))
+}
+/// Pending questions, or None when the index is not complete by `deadline`.
+pub(super) fn current_until(record: &Value, deadline: Instant) -> Result<Option<Vec<Value>>> {
+    if string(record, "agent") != "codex" {
+        return Ok(Some(vec![]));
+    }
+    Ok(index(record, &cache_path(record)?, Some(deadline))?.map(|cache| pending(record, &cache)))
+}
+fn pending(record: &Value, cache: &Value) -> Vec<Value> {
+    cache["items"]
         .as_object()
         .into_iter()
         .flat_map(|o| o.values())
@@ -251,7 +285,7 @@ pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
             card.as_object_mut().unwrap().remove("delivery");
             card
         })
-        .collect())
+        .collect()
 }
 pub(super) fn messages(record: &Value) -> Result<Vec<Value>> {
     if string(record, "agent") != "codex" {
@@ -613,6 +647,42 @@ mod tests {
             cache["items"]["codex-async:call_one:1"]["questions"][0]["options"],
             json!([])
         );
+    }
+    #[test]
+    fn bounded_index_saves_its_progress_and_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let transcript = dir.path().join(format!("rollout-{id}.jsonl"));
+        let accepted = json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}});
+        let mut lines = vec![json!({"type":"session_meta","payload":{"id":id}}), request(), accepted];
+        lines.extend((0..5).map(|i| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":format!("call-{i}"),"output":"x"}})));
+        fs::write(&transcript, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let record = json!({"agent":"codex","run_id":"run","conversation_id":id,"transcript":transcript});
+        let cache = dir.path().join("cache.json");
+        let meta = fs::metadata(&transcript).unwrap();
+        // Skip the one-time submission recovery, which reads the hgs state directory.
+        fs::write(&cache, json!({"items":{},"offset":0,"inode":[meta.dev(),meta.ino()],"scan_version":2,
+            "initialized":true,"submission_scan_run":"run"}).to_string()).unwrap();
+        // An expired deadline still indexes one line per call and keeps it.
+        let expired = Instant::now();
+        let mut offsets = Vec::new();
+        let complete = loop {
+            assert!(offsets.len() < lines.len(), "indexing made no progress");
+            if let Some(cache) = index(&record, &cache, Some(expired)).unwrap() {
+                break cache;
+            }
+            let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+            offsets.push(saved["offset"].as_u64().unwrap());
+        };
+        // Every line but the last one ended a call, the header included.
+        assert_eq!(offsets.len(), lines.len() - 1);
+        assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(complete["offset"], json!(meta.len()));
+        assert_eq!(pending(&record, &complete).len(), 2);
+        assert_eq!(index(&record, &cache, None).unwrap(), Some(complete));
+        // A cache held by another process past the deadline is unknown, not empty.
+        let _held = lock(Some(&cache.with_extension("lock"))).unwrap();
+        assert_eq!(index(&record, &cache, Some(Instant::now() + Duration::from_millis(30))).unwrap(), None);
     }
     #[test]
     fn only_complete_native_question_panels_accept_input() {

@@ -17,10 +17,21 @@ pub const READS: &[&str] = &[
     "catalog",
     "dirs",
     "worktrees",
+    "mark_read",
 ];
 pub const READ_SQL: &str =
-    "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees')";
+    "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
+/// Computer-scoped: no session, delivered to the gateway computer itself.
+pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
+pub const MOBILE_DELIVERY: &[&str] = &[
+    "immediate",
+    "away",
+    "away_5",
+    "away_10",
+    "away_15",
+    "away_30",
+];
 pub const OPERATIONS: &[&str] = &[
     "answer",
     "archive",
@@ -34,6 +45,7 @@ pub const OPERATIONS: &[&str] = &[
     "inspect",
     "interrupt",
     "launch",
+    "mark_read",
     "pause",
     "process_output",
     "process_stop",
@@ -43,6 +55,7 @@ pub const OPERATIONS: &[&str] = &[
     "resume",
     "send",
     "send_now",
+    "set_mobile_delivery",
     "settings",
     "terminal_input",
     "terminal_snapshot",
@@ -50,7 +63,12 @@ pub const OPERATIONS: &[&str] = &[
     "worktree_create",
     "worktrees",
 ];
-pub const FEATURES: &[&str] = &["inspect_after", "inspect_agent", "send_agent"];
+pub const FEATURES: &[&str] = &[
+    "inspect_after",
+    "inspect_agent",
+    "presence_alerts",
+    "send_agent",
+];
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
@@ -143,12 +161,21 @@ pub fn request(v: &Value) -> Result<()> {
     if !p.is_object() {
         return Err(Error::BAD);
     }
-    text(&v["session"], 1024, LAUNCH.contains(&op))?;
+    text(
+        &v["session"],
+        1024,
+        LAUNCH.contains(&op) || COMPUTER.contains(&op),
+    )?;
     if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
         launch(op, p, id)?;
+    } else if COMPUTER.contains(&op) {
+        fields(p, &["value"], &[])?;
+        if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
+            return Err(Error::BAD);
+        }
     } else if op == "inspect" {
         fields(
             p,
@@ -186,6 +213,26 @@ pub fn request(v: &Value) -> Result<()> {
         }
         if p.get("archive_id").is_some() {
             uuid(&p["archive_id"], false)?;
+        }
+    } else if op == "mark_read" {
+        // C4: exact host read-mark identity; the host decides what is current.
+        fields(
+            p,
+            &[
+                "run_id",
+                "conversation_id",
+                "reply_id",
+                "attention_signature",
+            ],
+            &[],
+        )?;
+        text(&p["run_id"], 128, false)?;
+        text(&p["conversation_id"], 256, false)?;
+        if !p["reply_id"].is_null() {
+            text(&p["reply_id"], 256, false)?;
+        }
+        if !p["attention_signature"].is_null() {
+            hex(&p["attention_signature"])?;
         }
     } else {
         let extras: &[&str] = match op {
@@ -602,9 +649,30 @@ pub fn snapshot(v: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub fn heartbeat(v: &Value) -> Result<()> {
-    fields(v, &["snapshot"], &["machine_id", "peers"])?;
+/// Optional desktop presence beside a snapshot. The alert rule reads its
+/// fields; a malformed object only counts as missing presence.
+pub fn presence(v: &Value) -> Result<()> {
+    if v.is_null() || v.as_object().is_some_and(|o| o.len() <= 16) {
+        Ok(())
+    } else {
+        Err(Error::BAD)
+    }
+}
+pub fn peer_heartbeat(v: &Value) -> Result<()> {
+    fields(v, &["machine_id", "snapshot"], &["presence"])?;
+    uuid(&v["machine_id"], false)?;
     snapshot(&v["snapshot"])?;
+    if let Some(p) = v.get("presence") {
+        presence(p)?;
+    }
+    Ok(())
+}
+pub fn heartbeat(v: &Value) -> Result<()> {
+    fields(v, &["snapshot"], &["machine_id", "peers", "presence"])?;
+    snapshot(&v["snapshot"])?;
+    if let Some(p) = v.get("presence") {
+        presence(p)?;
+    }
     if let Some(m) = v.get("machine_id") {
         uuid(m, false)?;
     }

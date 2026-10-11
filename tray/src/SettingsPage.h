@@ -5,6 +5,7 @@
 #include "WorkspaceIcons.h"
 #include "UpdatesWidget.h"
 #include "RelaySettings.h"
+#include "MobileDeliverySettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -91,7 +92,9 @@ public:
         timing("loadingSeconds",tr("Show loading indicator after"),ProcessSettings::loadingMs(),0,5);
         auto *processHint=new QLabel(tr("Off by default. When disabled, the tab is hidden and processes are not polled. Enable it to inspect running shells and background commands, read recorded output and stop selected processes. Only the selected session is inspected; opening Processes refreshes immediately. Output is read only while the tab is visible. Timings apply to this Zerus. Background refresh also controls session inspection while Terminal or Native UI is open; session overview and account limits refresh separately."));processHint->setWordWrap(true);processes->addWidget(processHint);processes->addStretch();
         auto *updates=makePage(tr("Updates"));updates->addWidget(new UpdatesWidget);updates->addStretch();
-        auto *mobile=new RelaySettings::Panel;mobile->setMaximumWidth(850);addPage(mobile);
+        // This computer's connector configuration, then the timing every computer and the phone share.
+        auto *mobile=new QWidget;mobile->setMaximumWidth(850);auto *mobileLayout=new QVBoxLayout(mobile);mobileLayout->setContentsMargins(0,0,0,0);mobileLayout->setSpacing(28);
+        mobileLayout->addWidget(new RelaySettings::Panel);mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         auto *about=makePage(tr("About"));about->addWidget(new QLabel(tr("Zerus %1").arg(QCoreApplication::applicationVersion())));
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");
         cliVersion->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);about->addWidget(cliVersion);
@@ -109,7 +112,8 @@ public:
     void openUpdates(){nav->setCurrentRow(4);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}
-    void refresh(){sync->refresh();if(nav->currentRow()==6)refreshCliVersion();}
+    void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==6)refreshCliVersion();}
+    void setSwarmSnapshot(const QJsonObject &snapshot){mobileDelivery->setSwarmSnapshot(snapshot);}
     // Activity's column edges and menu change the same preference.
     void syncActivityWidth(){
         const QSignalBlocker width(activityWidth),full(activityFullWidth);
@@ -119,7 +123,7 @@ public:
     }
 private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
-    HgsClient *versionClient;QLabel *cliVersion;
+    HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus
     // moves to the slider first: a focused button that hides itself would
