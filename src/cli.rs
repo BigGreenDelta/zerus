@@ -68,6 +68,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
+       hgs [@host] overmind <command> [--json]   Overmind tasks (see hgs overmind --help)
        hgs machine ls | set <alias> --json <profile> | remove <alias> | reset <alias>
        hgs machine resolve <alias>          effective SSH settings (no connection)
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
@@ -361,6 +362,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         "machine" => crate::machines::dispatch(&config, args, dry),
         "presence" => crate::presence::dispatch(&config, args, dry),
         "swarm" => crate::swarm::dispatch(&config, args, dry),
+        "overmind" => crate::overmind::dispatch(&config, args, dry),
         "account" => crate::accounts::dispatch(&config, args, dry),
         "project" => project(&config, args, dry),
         _ => launch(&config, command, args, &client, dry),
@@ -562,7 +564,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "overmind" | "read" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
