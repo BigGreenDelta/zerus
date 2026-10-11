@@ -5,7 +5,7 @@ use super::commands::{self, Ctx};
 use super::model::Refusal;
 use super::store::Store;
 use crate::{cli, config::Config};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::Read;
 
@@ -79,17 +79,20 @@ fn read_stdin() -> Result<Value> {
 }
 
 fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
-    let command = args.first().map(String::as_str).unwrap_or("--help");
+    // `--json` may appear anywhere; it says that the request comes on stdin.
+    let json_flag = args.iter().any(|a| a == "--json");
+    let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+    let command = words.first().copied().unwrap_or("--help");
     if matches!(command, "-h" | "--help" | "help") {
         print!("{}", usage());
         return Ok(None);
     }
     let machine = crate::swarm::local_node_id(config)?;
     let (actor, cwd) = super::identity::caller(&machine)?;
-    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
-    let json_flag = rest.last() == Some(&"--json");
-    let positional: Vec<&str> = rest.iter().copied().filter(|a| *a != "--json").collect();
-    let request = if json_flag { read_stdin()? } else { json!({}) };
+    let positional: Vec<&str> = words[1..].to_vec();
+    // `show <ref>` names its task on the command line and never reads stdin.
+    let reads_request = json_flag && !(command == "show" && !positional.is_empty());
+    let request = if reads_request { read_stdin()? } else { json!({}) };
     let mut store = Store::open(&config.state.join("overmind"), &machine)?;
     let mut ctx = Ctx { store: &mut store, actor, cwd };
     let value = match (command, positional.as_slice()) {
@@ -118,7 +121,7 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("file", []) => agent::file(&mut ctx, request)?,
         ("attach", []) => agent::attach(&mut ctx, request)?,
         ("review", []) => agent::review(&mut ctx, request)?,
-        _ => bail!("unknown overmind command; see hgs overmind --help"),
+        _ => return Err(Refusal::new("unknown_command", "unknown overmind command; see hgs overmind --help").into()),
     };
     Ok(Some(value))
 }

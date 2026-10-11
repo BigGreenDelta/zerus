@@ -22,6 +22,7 @@ pub const MAX_FIELD: usize = 64 * 1024;
 pub const MAX_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT: usize = 10 * 1024 * 1024;
 pub const MAX_ATTACHMENTS_TOTAL: usize = 20 * 1024 * 1024;
+const MAX_LABELS: usize = 32;
 const RESERVED_LABELS: [&str; 4] = ["reviewed", "review-failed", "epic", "epic-ready"];
 
 pub struct Ctx<'a> {
@@ -69,6 +70,28 @@ fn check_label(label: &str) -> Result<(), Refusal> {
     let rest = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ":_./-".contains(c));
     if !first || !rest || label.len() > 64 {
         return Err(Refusal::field("invalid_field", "labels", "invalid", format!("invalid label {label:?}")));
+    }
+    Ok(())
+}
+
+fn check_reserved(label: &str) -> Result<(), Refusal> {
+    if RESERVED_LABELS.contains(&label) {
+        return Err(Refusal::new("reserved_label", format!("`{label}` is set by workflow actions")));
+    }
+    Ok(())
+}
+
+/// A session reference names a machine by UUID (empty for this machine) and a session.
+fn check_session(field: &str, session: &SessionRef) -> Result<(), Refusal> {
+    let machine = session.machine.is_empty() || uuid::Uuid::parse_str(&session.machine).is_ok();
+    let length = session.name.chars().count();
+    if !machine || !(1..=256).contains(&length) || session.name.chars().any(char::is_control) {
+        return Err(Refusal::field(
+            "invalid_field",
+            field,
+            "invalid",
+            format!("`{field}` needs a machine UUID (or empty for this machine) and a session name of 1 to 256 characters"),
+        ));
     }
     Ok(())
 }
@@ -306,6 +329,9 @@ pub fn store_attachments(store: &Store, items: &[NewAttachment]) -> Result<Vec<A
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(item.data_base64.as_bytes())
             .map_err(|_| bad("attachment data is not base64".into()))?;
+        if bytes.is_empty() {
+            return Err(bad(format!("attachment {} is empty", item.name)));
+        }
         total += bytes.len();
         if bytes.len() > MAX_ATTACHMENT || total > MAX_ATTACHMENTS_TOTAL {
             return Err(bad("images are limited to 10 MiB each and 20 MiB in total".into()));
@@ -369,8 +395,8 @@ pub fn created_payload(
     if priority > 4 {
         return Err(Refusal::field("invalid_field", "priority", "invalid", "priority is 0 (highest) to 4").into());
     }
-    if labels.len() > 32 {
-        return Err(Refusal::field("invalid_field", "labels", "invalid", "at most 32 labels").into());
+    if labels.len() > MAX_LABELS {
+        return Err(Refusal::field("invalid_field", "labels", "invalid", format!("at most {MAX_LABELS} labels")).into());
     }
     for label in labels {
         check_label(label)?;
@@ -392,13 +418,17 @@ fn task_uuid(request_id: &str) -> String {
         .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
 }
 
-fn local_session(session: Option<SessionRef>, machine: &str) -> Option<SessionRef> {
-    session.map(|mut s| {
-        if s.machine.is_empty() {
-            s.machine = machine.into();
-        }
-        s
-    })
+/// Validates a session reference and fills in this machine when none is named.
+fn local_session(field: &str, session: Option<SessionRef>, machine: &str) -> Result<Option<SessionRef>, Refusal> {
+    let Some(mut session) = session else {
+        return Ok(None);
+    };
+    check_session(field, &session)?;
+    session.machine = match uuid::Uuid::parse_str(&session.machine) {
+        Ok(id) => id.hyphenated().to_string(),
+        Err(_) => machine.into(),
+    };
+    Ok(Some(session))
 }
 
 pub fn rev(ctx: &mut Ctx) -> Result<Value> {
@@ -493,7 +523,10 @@ pub fn create(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let mut req: CreateRequest = parse(&request)?;
     req.prompt = normalize(&req.prompt);
     check_project(&req.project)?;
-    let pinned = local_session(req.pinned.clone(), ctx.store.machine());
+    for label in &req.labels {
+        check_reserved(label)?;
+    }
+    let pinned = local_session("pinned", req.pinned.clone(), ctx.store.machine())?;
     if pinned.is_none() && req.project.is_empty() {
         return Err(Refusal::field("missing_field", "project", "missing", "choose a project or pin the task to a session").into());
     }
@@ -721,7 +754,7 @@ struct PinRequest {
 pub fn pin(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: PinRequest = parse(&request)?;
-    let session = local_session(req.session.clone(), ctx.store.machine());
+    let session = local_session("session", req.session.clone(), ctx.store.machine())?;
     write(ctx, "pin", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
@@ -744,12 +777,13 @@ pub fn label(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: LabelRequest = parse(&request)?;
     check_label(&req.label)?;
-    if RESERVED_LABELS.contains(&req.label.as_str()) {
-        return refuse("reserved_label", format!("`{}` is set by workflow actions", req.label));
-    }
+    check_reserved(&req.label)?;
     write(ctx, "label", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
+        if req.present && !task.labels.contains(&req.label) && task.labels.len() >= MAX_LABELS {
+            return Err(Refusal::field("invalid_field", "labels", "invalid", format!("a task has at most {MAX_LABELS} labels")).into());
+        }
         simple(tx, actor, &task, "label_set", json!({"label": req.label, "present": req.present}), &req.request_id)?;
         task_result(tx, &uuid)
     })
@@ -1178,6 +1212,29 @@ mod tests {
     }
 
     #[test]
+    fn labels_and_session_references_are_checked() {
+        let (_dir, mut store) = store();
+        let reserved = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "labels": ["epic"]})).unwrap_err();
+        assert_eq!(refusal(reserved).code, "reserved_label");
+        let labels: Vec<String> = (0..32).map(|i| format!("l{i}")).collect();
+        let full = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "labels": labels})).unwrap();
+        let uuid = full["task"]["uuid"].as_str().unwrap().to_owned();
+        let more = label(&mut human(&mut store), json!({"task": uuid, "label": "extra", "present": true})).unwrap_err();
+        assert_eq!(refusal(more).field, "labels");
+        label(&mut human(&mut store), json!({"task": uuid, "label": "l0", "present": true})).unwrap();
+        label(&mut human(&mut store), json!({"task": uuid, "label": "l0", "present": false})).unwrap();
+        label(&mut human(&mut store), json!({"task": uuid, "label": "extra", "present": true})).unwrap();
+        for session in [json!({"machine": "not-a-uuid", "name": "w1"}), json!({"machine": "", "name": ""}), json!({"machine": "", "name": "a\u{7}b"}), json!({"machine": "", "name": "n".repeat(257)})] {
+            let pinned = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "pinned": session})).unwrap_err();
+            assert_eq!(refusal(pinned).field, "pinned");
+            let pinned = pin(&mut human(&mut store), json!({"task": uuid, "session": session})).unwrap_err();
+            assert_eq!(refusal(pinned).field, "session");
+        }
+        let upper = pin(&mut human(&mut store), json!({"task": uuid, "session": {"machine": MACHINE.to_uppercase(), "name": "w1"}})).unwrap();
+        assert_eq!(upper["task"]["pinned"]["machine"], MACHINE);
+    }
+
+    #[test]
     fn attachments_are_stored_by_digest_within_limits() {
         let (_dir, mut store) = store();
         let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG");
@@ -1186,6 +1243,8 @@ mod tests {
         assert!(blobs::path(store.dir(), &sha).unwrap().exists());
         let text = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": [{"name": "a.txt", "mime": "text/plain", "data_base64": png}]})).unwrap_err();
         assert_eq!(refusal(text).field, "attachments");
+        let empty = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": [{"name": "a.png", "mime": "image/png", "data_base64": ""}]})).unwrap_err();
+        assert_eq!(refusal(empty).field, "attachments");
     }
 
     #[test]

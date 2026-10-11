@@ -1,7 +1,7 @@
 //! Commands for agents in Zerus sessions. Each one is narrow and refuses moves
 //! that would break the process; results carry a `note` with the next step.
 use super::commands::{
-    check_project, check_text, created_payload, load, load_writable, next_rank, parse, prove, reference, refuse,
+    check_project, check_text, created_payload, load, load_writable, next_rank, normalize, parse, prove, reference, refuse,
     resolve, store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_ATTACHMENTS,
     MAX_ATTACHMENTS_TOTAL, MAX_FIELD,
 };
@@ -109,37 +109,56 @@ struct AdvanceRequest {
     root_cause: Option<String>,
 }
 
+/// An advance that passed every check except the evidence one.
+struct Advance {
+    task: Task,
+    to_role: Role,
+    fields: BTreeMap<String, String>,
+    /// The evidence must be a commit when the session works in a Git repository.
+    git_evidence: bool,
+}
+
+fn check_advance(tx: &Tx, actor: &Actor, req: &AdvanceRequest) -> Result<Advance> {
+    let uuid = resolve(tx, &req.task)?;
+    let task = load_writable(tx, &uuid)?;
+    let wf = workflow(tx, &task.project)?;
+    let to_role = wf.role(&req.to).ok_or_else(|| Refusal::new("unknown_stage", format!("unknown stage {}", req.to)))?;
+    let fields = fields(&[("spec", &req.spec), ("worklog", &req.worklog), ("evidence", &req.evidence), ("root_cause", &req.root_cause)]);
+    wf.allow(Action::Advance, Some(&task.stage), &req.to, actor.kind, &fields)?;
+    if to_role == Role::Review {
+        for predecessor in &task.follows {
+            let before = match load(tx, predecessor) {
+                Ok(before) => before,
+                Err(error) => match error.downcast_ref::<Refusal>() {
+                    Some(r) if r.code == "unknown_task" => continue,
+                    _ => return Err(error),
+                },
+            };
+            let role = workflow(tx, &before.project)?.role(&before.stage);
+            if !matches!(role, Some(Role::Review) | Some(Role::Done)) {
+                return refuse("predecessor_open", format!("{} must reach review first", reference(tx, predecessor)?));
+            }
+        }
+    }
+    let git_evidence = to_role == Role::Review && wf.evidence == Evidence::GitShaOrText;
+    Ok(Advance { task, to_role, fields, git_evidence })
+}
+
 pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
     agent_only(&ctx.actor)?;
     let req: AdvanceRequest = parse(&request)?;
-    let cwd = ctx.cwd.clone();
-    write(ctx, "advance", &request, |tx, actor| {
-        let uuid = resolve(tx, &req.task)?;
-        let task = load_writable(tx, &uuid)?;
-        let wf = workflow(tx, &task.project)?;
-        let to_role = wf.role(&req.to).ok_or_else(|| Refusal::new("unknown_stage", format!("unknown stage {}", req.to)))?;
-        let fields = fields(&[("spec", &req.spec), ("worklog", &req.worklog), ("evidence", &req.evidence), ("root_cause", &req.root_cause)]);
-        wf.allow(Action::Advance, Some(&task.stage), &req.to, actor.kind, &fields)?;
-        if to_role == Role::Review {
-            for predecessor in &task.follows {
-                let before = match load(tx, predecessor) {
-                    Ok(before) => before,
-                    Err(error) => match error.downcast_ref::<Refusal>() {
-                        Some(r) if r.code == "unknown_task" => continue,
-                        _ => return Err(error),
-                    },
-                };
-                let role = workflow(tx, &before.project)?.role(&before.stage);
-                if !matches!(role, Some(Role::Review) | Some(Role::Done)) {
-                    return refuse("predecessor_open", format!("{} must reach review first", reference(tx, predecessor)?));
-                }
-            }
-            if wf.evidence == Evidence::GitShaOrText {
-                if let (Some(cwd), Some(evidence)) = (&cwd, &req.evidence) {
-                    verify_evidence(cwd, evidence)?;
-                }
-            }
+    // Git runs before the write transaction so that it never holds the store.
+    // Refusals of the other checks come from the write itself, in their order.
+    if let (Some(cwd), Some(evidence)) = (ctx.cwd.clone(), req.evidence.clone()) {
+        let actor = ctx.actor.clone();
+        let git_evidence = ctx.store.read(|tx| Ok(check_advance(tx, &actor, &req).is_ok_and(|a| a.git_evidence)))?;
+        if git_evidence {
+            verify_evidence(&cwd, &evidence)?;
         }
+    }
+    write(ctx, "advance", &request, |tx, actor| {
+        let Advance { task, to_role, fields, .. } = check_advance(tx, actor, &req)?;
+        let uuid = task.uuid.clone();
         transition(tx, actor, &task, Action::Advance, &req.to, fields, None, vec![], &req.request_id)?;
         let note = if to_role == Role::Review {
             "Done from your side: the task waits for review. Take your next task."
@@ -216,8 +235,11 @@ struct DecomposeRequest {
 pub fn decompose(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let me = agent_only(&ctx.actor)?;
     let req: DecomposeRequest = parse(&request)?;
-    if req.subtasks.len() < 2 || req.subtasks.len() > 20 {
+    if req.subtasks.len() < 2 {
         return refuse("too_few_subtasks", "decompose into 2 to 20 subtasks");
+    }
+    if req.subtasks.len() > 20 {
+        return refuse("too_many_subtasks", "decompose into 2 to 20 subtasks");
     }
     write(ctx, "decompose", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
@@ -258,7 +280,7 @@ struct FileRequest {
     request_id: String,
     prompt: String,
     #[serde(default)]
-    breaks: String,
+    breaks: Option<String>,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -296,9 +318,10 @@ pub fn file(ctx: &mut Ctx, request: Value) -> Result<Value> {
             }
         };
         let backlog = workflow(tx, &project)?.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default();
+        // The workflow says whether `breaks` arrived missing or empty.
         let mut fields = BTreeMap::new();
-        if !req.breaks.trim().is_empty() {
-            fields.insert("breaks".to_string(), req.breaks.clone());
+        if let Some(breaks) = &req.breaks {
+            fields.insert("breaks".to_string(), breaks.clone());
         }
         let rank = next_rank(tx, &project, &backlog)?;
         let related_set: BTreeSet<String> = if related.is_empty() { BTreeSet::new() } else { BTreeSet::from([related.clone()]) };
@@ -325,7 +348,8 @@ struct AttachRequest {
 
 pub fn attach(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let me = agent_only(&ctx.actor)?;
-    let req: AttachRequest = parse(&request)?;
+    let mut req: AttachRequest = parse(&request)?;
+    req.note = normalize(&req.note);
     check_text("note", &req.note, MAX_FIELD, true)?;
     let stored = store_attachments(ctx.store, &[NewAttachment { name: req.name.clone(), mime: req.mime.clone(), data_base64: req.data_base64.clone() }])?;
     write(ctx, "attach", &request, |tx, actor| {
@@ -495,6 +519,9 @@ mod tests {
         git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"]);
         let head = String::from_utf8(Command::new("git").arg("-C").arg(repo.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_owned();
         let cwd = Some(repo.path().to_path_buf());
+        // The workflow rule is checked before the evidence.
+        let jump = advance(&mut agent(&mut store, "w1", cwd.clone()), json!({"task": task, "to": "Review", "worklog": "did", "evidence": "trust me"})).unwrap_err();
+        assert_eq!(refusal(jump).code, "transition_not_allowed");
         advance(&mut agent(&mut store, "w1", cwd.clone()), json!({"task": task, "to": "Build", "spec": "plan"})).unwrap();
         let text = advance(&mut agent(&mut store, "w1", cwd.clone()), json!({"task": task, "to": "Review", "worklog": "did", "evidence": "trust me"})).unwrap_err();
         assert_eq!((refusal(text).field.as_str()), "evidence");
@@ -526,8 +553,10 @@ mod tests {
         let filed = file(&mut agent(&mut store, "w1", None), json!({"prompt": "Flaky test", "breaks": "CI fails randomly", "related": task})).unwrap();
         assert_eq!(filed["task"]["stage"], "Backlog");
         assert_eq!(filed["task"]["journal"][0]["marker"], "[filed-by-agent]");
-        let no_breaks = file(&mut agent(&mut store, "w1", None), json!({"prompt": "x", "related": task})).unwrap_err();
-        assert_eq!(refusal(no_breaks).field, "breaks");
+        let no_breaks = refusal(file(&mut agent(&mut store, "w1", None), json!({"prompt": "x", "related": task})).unwrap_err());
+        assert_eq!((no_breaks.field.as_str(), no_breaks.state.as_str()), ("breaks", "missing"));
+        let blank = refusal(file(&mut agent(&mut store, "w1", None), json!({"prompt": "x", "breaks": "  ", "related": task})).unwrap_err());
+        assert_eq!((blank.field.as_str(), blank.state.as_str()), ("breaks", "empty"));
     }
 
     #[test]
@@ -542,14 +571,21 @@ mod tests {
         assert_eq!(children[1]["follows"], json!([children[0]["uuid"]]));
         let one = decompose(&mut agent(&mut store, "w2", None), json!({"task": task, "subtasks": [{"prompt": "a"}, {"prompt": "b"}]})).unwrap_err();
         assert_eq!(refusal(one).code, "not_assigned");
+        let few = decompose(&mut agent(&mut store, "w1", None), json!({"task": task, "subtasks": [{"prompt": "a"}]})).unwrap_err();
+        assert_eq!(refusal(few).code, "too_few_subtasks");
+        let subtasks: Vec<Value> = (0..21).map(|i| json!({"prompt": format!("part {i}")})).collect();
+        let many = decompose(&mut agent(&mut store, "w1", None), json!({"task": task, "subtasks": subtasks})).unwrap_err();
+        assert_eq!(refusal(many).code, "too_many_subtasks");
     }
 
     #[test]
     fn attach_and_review_need_the_right_session() {
         let (_dir, mut store, task) = setup();
         let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG");
-        let attached = attach(&mut agent(&mut store, "w1", None), json!({"task": task, "name": "shot.png", "mime": "image/png", "data_base64": png, "note": "after"})).unwrap();
+        let attached = attach(&mut agent(&mut store, "w1", None), json!({"task": task, "name": "shot.png", "mime": "image/png", "data_base64": png, "note": "after\r\nfix"})).unwrap();
         assert_eq!(attached["task"]["attachments"][0]["name"], "shot.png");
+        let entry = attached["task"]["journal"].as_array().unwrap().iter().find(|j| j["marker"] == "[attach]").unwrap().clone();
+        assert!(entry["text"].as_str().unwrap().ends_with("\nafter\nfix"), "{entry}");
         assert_eq!(refusal(attach(&mut agent(&mut store, "w2", None), json!({"task": task, "name": "x.png", "mime": "image/png", "data_base64": png})).unwrap_err()).code, "not_assigned");
         advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "s"})).unwrap();
         advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();

@@ -37,8 +37,8 @@ class Overmind(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return json.loads(result.stdout)
 
-    def refused(self, *args, data=None):
-        result = self.run_hgs(*args, data=data)
+    def refused(self, *args, data=None, env=None):
+        result = self.run_hgs(*args, data=data, env=env)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertTrue(result.stderr.startswith('hgs: '), result.stderr)
         body = json.loads(result.stdout)
@@ -88,15 +88,26 @@ class Overmind(unittest.TestCase):
         result = self.run_hgs('--help')
         self.assertEqual(result.returncode, 0)
         self.assertIn('workflow set', result.stdout)
-        unknown = self.run_hgs('frobnicate')
-        self.assertEqual(unknown.returncode, 1)
-        self.assertIn('unknown overmind command', unknown.stderr)
+        unknown = self.refused('frobnicate')
+        self.assertEqual(unknown['code'], 'unknown_command')
+        self.assertIn('unknown overmind command', unknown['message'])
+
+    def test_json_flag_anywhere_and_show_by_reference(self):
+        ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})['task']['ref']
+        self.assertEqual(self.ok('workflow', '--json', 'get', data={'project': 'demo'})['project'], 'demo')
+        self.assertEqual(self.ok('--json', 'board', data={'project': 'demo'})['tasks'][0]['ref'], ref)
+        # `show <ref>` never reads stdin, even with --json.
+        result = subprocess.run([str(HGS), 'overmind', 'show', ref, '--json'], input='{', env=self.env,
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)['task']['ref'], ref)
 
     def test_session_environment_must_match_a_live_session(self):
-        env = dict(self.env, HGS_SESSION='claude/demo/w1', HGS_RUN_ID='run-that-does-not-exist')
-        result = self.run_hgs('mine', env=env)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('does not match a live Zerus session', result.stderr)
+        for extra in ({'HGS_SESSION': 'claude/demo/w1', 'HGS_RUN_ID': 'run-that-does-not-exist'},
+                      {'HGS_SESSION': 'claude/demo/w1'}, {'HGS_RUN_ID': 'run-that-does-not-exist'}):
+            error = self.refused('mine', env=dict(self.env, **extra))
+            self.assertEqual(error['code'], 'session_mismatch', extra)
+            self.assertIn('does not match a live Zerus session', error['message'])
 
     def test_agents_cannot_reach_another_machine(self):
         marker = self.root / 'ssh-called'

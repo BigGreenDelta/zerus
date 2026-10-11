@@ -120,10 +120,13 @@ pub(crate) struct CallerSession {
 /// None outside a session. A session environment that does not match a live
 /// session is an error, never a person.
 pub(crate) fn caller_session() -> Result<Option<CallerSession>> {
-    let (Some(name), Some(run_id)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID")) else {
-        return Ok(None);
-    };
     let mismatch = || "this session environment does not match a live Zerus session".to_string();
+    let (name, run_id) = match (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID")) {
+        (Some(name), Some(run_id)) => (name, run_id),
+        (None, None) => return Ok(None),
+        // Half a session environment is never a person.
+        _ => return Err(mismatch()),
+    };
     let _guard = lock(None)?;
     let record = read_run(&name, &run_id)?.ok_or_else(mismatch)?;
     if !matches(&record, live()?.get(string(&record, "name"))) {

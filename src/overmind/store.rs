@@ -15,9 +15,10 @@ use std::time::Duration;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events(
+  n INTEGER PRIMARY KEY AUTOINCREMENT,
   origin TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL UNIQUE,
   lamport INTEGER NOT NULL, task TEXT NOT NULL, project TEXT NOT NULL,
-  kind TEXT NOT NULL, raw TEXT NOT NULL, PRIMARY KEY(origin, seq));
+  kind TEXT NOT NULL, raw TEXT NOT NULL, UNIQUE(origin, seq));
 CREATE INDEX IF NOT EXISTS events_task ON events(task);
 CREATE INDEX IF NOT EXISTS events_project ON events(project);
 CREATE INDEX IF NOT EXISTS events_lamport ON events(lamport);
@@ -142,14 +143,14 @@ impl Store {
         task_ids(&self.conn)
     }
 
-    /// Local insertion position; increases with every stored event.
+    /// Local insertion position (`n`); increases with every stored event.
     pub fn cursor(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |row| row.get(0))?)
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(n), 0) FROM events", [], |row| row.get(0))?)
     }
 
     /// Tasks with events stored after `cursor`. The empty string stands for shared events.
     pub fn touched_since(&self, cursor: i64) -> Result<BTreeSet<String>> {
-        let mut statement = self.conn.prepare("SELECT DISTINCT task FROM events WHERE rowid > ?1")?;
+        let mut statement = self.conn.prepare("SELECT DISTINCT task FROM events WHERE n > ?1")?;
         let tasks = statement
             .query_map(params![cursor], |row| row.get(0))?
             .collect::<rusqlite::Result<BTreeSet<String>>>()?;
@@ -430,6 +431,27 @@ mod tests {
         }
         let (first, more) = store.missing(&BTreeMap::new(), 1).unwrap();
         assert_eq!((first.len(), more), (1, true));
+    }
+
+    #[test]
+    fn the_cursor_counts_local_insertions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        assert_eq!(store.cursor().unwrap(), 0);
+        store.write(|tx| tx.append(&draft("a"))).unwrap();
+        let cursor = store.cursor().unwrap();
+        store.write(|tx| tx.append(&draft("b"))).unwrap();
+        assert_eq!(store.cursor().unwrap(), cursor + 1);
+        assert_eq!(store.touched_since(cursor).unwrap(), BTreeSet::from(["b".to_string()]));
+        let columns: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('events')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(columns[0], "n");
     }
 
     #[test]
