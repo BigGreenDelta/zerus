@@ -96,6 +96,22 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn("actions/cache@", text)
                 self.assertNotRegex(text, r"(?m)^    cache-mode:")
 
+    def test_candidate_verification_has_a_read_only_reusable_chain(self):
+        for name in ("release.yml", "nightly.yml"):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                verify = job(text, "verify")
+                self.assertEqual(field(verify, "cache-mode"), "read")
+                self.assertEqual(field(verify, "uses"), "./.github/workflows/checks.yml")
+                checks = (ROOT / ".github/workflows/checks.yml").read_text()
+                # GitHub validates nested permissions even for skipped jobs.
+                # A candidate must never request publication write permissions.
+                self.assertNotRegex(checks, r"(?m)^\s*contents:\s*write\s*$")
+                self.assertNotIn("./.github/workflows/dev.yml", checks)
+                self.assertIn("run_linux: true", verify)
+                self.assertIn("run_arch: true", verify)
+                self.assertIn("run_macos:", verify)
+
 
 if __name__ == "__main__":
     unittest.main()

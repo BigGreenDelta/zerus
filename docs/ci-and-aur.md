@@ -461,6 +461,9 @@ GitHub releases or a schedule.
 one exact commit. macOS can be explicitly disabled. It consumes that run's
 Arch package, verifies its embedded version/source commit, assembles source and
 binary archives, rebuilds both stable recipes, runs namcap and seals the result.
+Stable and nightly candidates call the common `checks.yml` workflow directly
+with read-only cache access. Their verification never includes the main-push dev
+publisher or requests its tag-writing permissions.
 
 ```sh
 # Only when the owner requests a hosted build:
