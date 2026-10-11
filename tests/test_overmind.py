@@ -92,6 +92,17 @@ class Overmind(unittest.TestCase):
         self.assertEqual(unknown.returncode, 1)
         self.assertIn('unknown overmind command', unknown.stderr)
 
+    def test_session_environment_must_match_a_live_session(self):
+        env = dict(self.env, HGS_SESSION='claude/demo/w1', HGS_RUN_ID='run-that-does-not-exist')
+        result = self.run_hgs('mine', env=env)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('does not match a live Zerus session', result.stderr)
+
+    def test_people_cannot_use_agent_commands(self):
+        created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})
+        error = self.refused('advance', '--json', data={'task': created['task']['ref'], 'to': 'Build', 'spec': 's'})
+        self.assertEqual(error['code'], 'agent_only')
+
 
 if __name__ == '__main__':
     unittest.main()

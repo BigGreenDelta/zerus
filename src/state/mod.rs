@@ -109,6 +109,29 @@ fn account_binding(record: &Value) -> Value {
     json!({"provider":provider,"id":id,"home":agent_home,"run_id":record["run_id"]})
 }
 
+/// The Zerus session a CLI call comes from, verified like hook events.
+#[allow(dead_code)] // run_id is kept for callers that bind work to a run.
+pub(crate) struct CallerSession {
+    pub name: String,
+    pub run_id: String,
+    pub cwd: String,
+}
+
+/// None outside a session. A session environment that does not match a live
+/// session is an error, never a person.
+pub(crate) fn caller_session() -> Result<Option<CallerSession>> {
+    let (Some(name), Some(run_id)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID")) else {
+        return Ok(None);
+    };
+    let mismatch = || "this session environment does not match a live Zerus session".to_string();
+    let _guard = lock(None)?;
+    let record = read_run(&name, &run_id)?.ok_or_else(mismatch)?;
+    if !matches(&record, live()?.get(string(&record, "name"))) {
+        return Err(mismatch());
+    }
+    Ok(Some(CallerSession { name: string(&record, "name").to_owned(), run_id, cwd: string(&record, "cwd").to_owned() }))
+}
+
 pub(super) fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }

@@ -1,7 +1,8 @@
 //! `hgs overmind`: JSON in, JSON out. Refusals are printed as JSON on stdout
 //! so that the desktop, the phone and MCP can show their fields.
+use super::agent;
 use super::commands::{self, Ctx};
-use super::model::{Actor, ActorKind, Refusal};
+use super::model::Refusal;
 use super::store::Store;
 use crate::{cli, config::Config};
 use anyhow::{bail, Result};
@@ -39,11 +40,11 @@ const AGENT_USAGE: &str = "usage: hgs overmind <command> --json   (JSON request 
 You can never move a task to Done: a person signs it off.
 ";
 
-fn usage(actor: &Actor) -> &'static str {
-    if actor.kind == ActorKind::Agent {
-        AGENT_USAGE
-    } else {
-        HUMAN_USAGE
+/// Agent help only inside a verified session; anything else gets the human help.
+fn usage() -> &'static str {
+    match crate::state::caller_session() {
+        Ok(Some(_)) => AGENT_USAGE,
+        _ => HUMAN_USAGE,
     }
 }
 
@@ -80,12 +81,11 @@ fn read_stdin() -> Result<Value> {
 fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     let command = args.first().map(String::as_str).unwrap_or("--help");
     if matches!(command, "-h" | "--help" | "help") {
-        print!("{}", usage(&Actor::human("")));
+        print!("{}", usage());
         return Ok(None);
     }
     let machine = crate::swarm::local_node_id(config)?;
-    let actor = Actor::human(&machine);
-    let cwd = None;
+    let (actor, cwd) = super::identity::caller(&machine)?;
     let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
     let json_flag = rest.last() == Some(&"--json");
     let positional: Vec<&str> = rest.iter().copied().filter(|a| *a != "--json").collect();
@@ -110,6 +110,14 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("delete", []) => commands::delete(&mut ctx, request)?,
         ("workflow", ["get"]) => commands::workflow_get(&mut ctx, request)?,
         ("workflow", ["set"]) => commands::workflow_set(&mut ctx, request)?,
+        ("mine", []) => agent::mine(&mut ctx)?,
+        ("advance", []) => agent::advance(&mut ctx, request)?,
+        ("call-human", []) => agent::call_human(&mut ctx, request)?,
+        ("return", []) => agent::return_task(&mut ctx, request)?,
+        ("decompose", []) => agent::decompose(&mut ctx, request)?,
+        ("file", []) => agent::file(&mut ctx, request)?,
+        ("attach", []) => agent::attach(&mut ctx, request)?,
+        ("review", []) => agent::review(&mut ctx, request)?,
         _ => bail!("unknown overmind command; see hgs overmind --help"),
     };
     Ok(Some(value))
