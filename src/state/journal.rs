@@ -8,6 +8,34 @@ use std::sync::OnceLock;
 /// them from the journal once the provider transcript window has moved on.
 pub(super) const REPLY_LIMIT: usize = 32_000;
 
+/// Claude records text pasted into its prompt as
+/// `<pasted_content id="…">\n…\n</pasted_content id="…">`. The person sent only
+/// the inner text, which is also what HGS delivery receipts recorded.
+pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "<pasted_content id=\"";
+    if !text.contains(OPEN) {
+        return text.into();
+    }
+    let (mut result, mut rest) = (String::with_capacity(text.len()), text);
+    while let Some(start) = rest.find(OPEN) {
+        let Some((id, body)) = rest[start + OPEN.len()..].split_once("\">") else { break };
+        if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+            break;
+        }
+        let close = format!("</pasted_content id=\"{id}\">");
+        let Some(end) = body.find(&close) else { break };
+        let inner = body[..end].strip_prefix('\n').unwrap_or(&body[..end]);
+        result.push_str(&rest[..start]);
+        result.push_str(inner.strip_suffix('\n').unwrap_or(inner));
+        rest = &body[end + close.len()..];
+    }
+    if rest.len() == text.len() {
+        return text.into();
+    }
+    result.push_str(rest);
+    result.into()
+}
+
 pub(super) fn clipped(value: &Value, limit: usize) -> String {
     let Some(value) = value.as_str() else {
         return String::new();
@@ -1098,6 +1126,18 @@ pub(super) fn repair_kimi_main(record: &mut Value) {
 #[cfg(test)]
 mod attention_regressions {
     use super::*;
+
+    #[test]
+    fn claude_pasted_content_keeps_only_the_text_the_person_sent() {
+        let sent = "Activity misses replies\n\nInspect the attached image at \"/private/one.png\"";
+        assert_eq!(pasted_text(&format!("<pasted_content id=\"1b93\">\n{sent}\n</pasted_content id=\"1b93\">")), sent);
+        assert_eq!(pasted_text("See <pasted_content id=\"a\">\none\n</pasted_content id=\"a\"> and <pasted_content id=\"b\">two</pasted_content id=\"b\">."),
+            "See one and two.");
+        for unchanged in ["plain text", "<pasted_content id=\"a\">\nopen only", "<pasted_content id=\"a\">x</pasted_content id=\"b\">",
+            "<pasted_content id=\"a b\">x</pasted_content id=\"a b\">"] {
+            assert!(matches!(pasted_text(unchanged), std::borrow::Cow::Borrowed(text) if text == unchanged));
+        }
+    }
     fn message_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY,name TEXT,conversation TEXT,payload TEXT);

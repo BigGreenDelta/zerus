@@ -237,7 +237,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         olderJob=viewModelScope.launch {
             var published=false
             try {
-                val result=HistoryReadPaths.read(target,network={ historyOnce(target,direction,cursor) },cached={ pageCache.read(target,direction,cursor) })
+                val cursorEpoch=when(direction) { "before","after" -> historyWindows[target.key]?.epoch;"around" -> readState.record(target)?.viewport?.epoch;else -> null }
+                val reopened=HistoryReadPaths.reopening(cursorEpoch,{ HistoryReadPaths.read(target,network={ historyOnce(target,direction,cursor) },cached={ pageCache.read(target,direction,cursor) }) }) { historyOnce(target,"","") }
+                val result=reopened.result;val mode=if(reopened.head) "" else direction
                 val page=result.page;val verifiedPage=result.verified
                 if(!verifiedPage) currentHistoryHeads-=ConversationReadPolicies.key(target)
                 val knownIds=readState.record(target)?.let { it.seen.toSet()+it.viewport?.eventId.orEmpty()+firstUnreadEventId }.orEmpty()
@@ -245,7 +247,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(aliases.isNotEmpty()) readWriter?.let { readState=it.edit { state -> state.supersede(target,aliases) } }
                 observeHistoryHead(page,verifiedPage)
                 if(selected?.target != target || navigationId != navigation) return@launch
-                if(direction=="" && verifiedPage && !page.complete) {
+                if(mode=="" && verifiedPage && !page.complete) {
                     androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                         historyIndexing=page.indexing;historyComplete=false;olderLoading=false;readPositionReady=true
                         captureUnreadBoundary(target,conversationEvents)
@@ -257,7 +259,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val saved=marker?.viewport
                 val noSavedAnchor=saved==null || saved.epoch!=page.epoch || saved.cursor.isBlank()
                 val unreadBeforePage=page.latestIncoming!=null && marker!=null && page.latestIncoming>marker.readThrough && page.hasBefore && (earliest==null || earliest>marker.readThrough+1)
-                if(direction=="" && verifiedPage && page.complete && marker?.established==true && noSavedAnchor && unreadBeforePage && !unreadBoundaryCaptured) {
+                if(mode=="" && verifiedPage && page.complete && marker?.established==true && noSavedAnchor && unreadBeforePage && !unreadBoundaryCaptured) {
                     readPositionReady=false
                     val unread=historyOnce(target,"unread",JSONArray(listOf(page.epoch,marker!!.readThrough)).toString())
                     observeHistoryHead(unread)
@@ -267,7 +269,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val old=historyWindows[target.key]
-                val window=withContext(Dispatchers.Default) { if(direction in setOf("before","after") && old?.epoch==page.epoch) old.merge(page,direction) else HistoryWindow.from(page) }
+                val window=withContext(Dispatchers.Default) { if(mode in setOf("before","after") && old?.epoch==page.epoch) old.merge(page,mode) else HistoryWindow.from(page) }
                 publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId]);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
             } catch(e:CancellationException) { throw e }
             catch(e:Exception) { if(selected?.target==target && navigationId==navigation) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
@@ -323,6 +325,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 historyHeadScheduler.result(target,android.os.SystemClock.elapsedRealtime(),result.isSuccess)
             }
         }
+        // Continue with the next stale chats now instead of two per catalog refresh.
+        // The scheduler spaces each chat, so this ends once every candidate was tried.
+        if(priority==null) historyHeadJob?.invokeOnCompletion { cause -> if(cause==null) viewModelScope.launch { watchHistoryHeads() } }
     }
     private fun restoreHistory(target:Target) {
         if(historyNetworkReason(target).isNotBlank() || olderLoading) return
