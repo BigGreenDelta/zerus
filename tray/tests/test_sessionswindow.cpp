@@ -3880,7 +3880,10 @@ void TestSessionsWindow::nativeGoalIsIndependentOfTurnState()
 
 void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
 {
-    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); QTest::qWait(80);
+    // Polls during the first dialog re-inspect the session; they must keep its workspace.
+    const auto fixture = programInspecting("file-reference-hgs", {{"tracked", true}, {"conversation_id", "conversation-one"},
+        {"events", QJsonArray{}}, {"cursor", 0}, {"cwd", "/local/project"}}); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(fixture); window.setFleet(fleet()); window.show(); QTest::qWait(80);
     auto *client = window.findChild<HgsClient *>();
     auto *activity = window.findChild<ActivityView *>("mainActivity");
     QSignalSpy copied(&window, &SessionsWindow::copyTextRequested);
