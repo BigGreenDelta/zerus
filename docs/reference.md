@@ -554,6 +554,9 @@ folder/MCP trust. These can appear before a conversation exists, but only with
 verified startup identity.
 Claude workspace trust preserves its full permissions warning; Kimi includes the
 visible MCP commands, and also asks for folders without project MCP targets.
+Codex folder access shows its native disclosure verbatim. In a Git subdirectory
+or worktree the card names the repository root that Codex will trust; other
+unfamiliar native notes keep the exact choices and text without Zerus descriptions.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
