@@ -13,7 +13,7 @@
   <a href="#features">Features</a> &nbsp; | &nbsp;
   <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
-  <sub>Linux and macOS &nbsp; | &nbsp; Android pilot &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
+  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows (TBD) &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
 </p>
 
 <p align="center">
@@ -96,7 +96,7 @@ interfaces serve the desktop and other clients.
 
 ### Your fleet from your phone
 
-The **Android pilot** brings your projects and agents to your phone:
+The **Android app** brings your projects and agents to your phone:
 
 - **Conversations and tasks.** Read replies, follow goals, task lists and subagents,
   answer questions and approvals, and send messages with files and images.
@@ -173,8 +173,21 @@ hgs ls                                # sessions here and on connected machines
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 
-**On Android:** [download the pilot APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true),
+**On Android:** [download the APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
 **Try demo** lets you explore the interface before connecting a computer.
+
+## Other platforms
+
+Ready-made packages currently exist only for Arch Linux x86_64. Other Linux
+distributions and macOS [build from source](docs/installation.md#local-installation)
+with the same installer. Zerus is open source: Homebrew, apt, dnf and other
+packages are welcome as pull requests.
+
+**Windows** is not supported yet, but it has an approved plan: first a native
+control console for your Linux and macOS machines, then a native session host on
+ConPTY, without WSL. Contributions that follow the plan are welcome.
+
+[Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 
 [Command and settings reference](docs/reference.md) | [CI and Arch packages](docs/ci-and-aur.md) | [MIT](LICENSE)
