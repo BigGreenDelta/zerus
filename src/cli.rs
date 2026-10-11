@@ -307,6 +307,16 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return crate::native_ui::open(&config, &target, &args[0], dry);
     }
     if !target.is_empty() && !config.is_self(&target) {
+        // A session environment is never a person, and the remote side cannot verify it.
+        if command == "overmind"
+            && (env::var("HGS_SESSION").is_ok_and(|s| !s.is_empty())
+                || env::var("HGS_RUN_ID").is_ok_and(|s| !s.is_empty()))
+        {
+            return Err(Error::new(
+                1,
+                "agents use hgs overmind on their own machine; @host is for people",
+            ));
+        }
         return remote(&config, &target, command, args, dry);
     }
     match command.as_str() {

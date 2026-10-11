@@ -98,6 +98,18 @@ class Overmind(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('does not match a live Zerus session', result.stderr)
 
+    def test_agents_cannot_reach_another_machine(self):
+        marker = self.root / 'ssh-called'
+        ssh = self.root / 'bin/ssh'
+        ssh.write_text(f'#!/bin/sh\ntouch {marker}\nexit 255\n')
+        ssh.chmod(0o755)
+        env = dict(self.env, HGS_SESSION='claude/demo/w1', HGS_PEERS='example-peer')
+        result = subprocess.run([str(HGS), '@example-peer', 'overmind', 'board', '--json'], input='{}', env=env,
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('agents use hgs overmind on their own machine; @host is for people', result.stderr)
+        self.assertFalse(marker.exists())
+
     def test_people_cannot_use_agent_commands(self):
         created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})
         error = self.refused('advance', '--json', data={'task': created['task']['ref'], 'to': 'Build', 'spec': 's'})
