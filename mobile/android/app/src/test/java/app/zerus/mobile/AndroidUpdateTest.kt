@@ -128,6 +128,14 @@ class AndroidUpdateTest {
         assertFalse(UpdateInstallGuard.ownsCallback(7,"nonce",8,"nonce"));assertFalse(UpdateInstallGuard.ownsCallback(7,"nonce",7,"other"))
         assertFalse(UpdateInstallGuard.ownsCallback(7,"",7,""))
     }
+    @Test fun installTapOpensAndroidConfirmationOnlyForItsOwnPendingSession() {
+        assertTrue(UpdateInstallGuard.opensConfirmation(7,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(-1,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(-1,-1,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(6,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(7,7,"installing",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(7,7,"confirmation",false))
+    }
     @Test fun preparationWaitsForMessagesQuestionsTerminalAndContextActionsButAllowsSavedDrafts() {
         val target=Target("computer","session","run","conversation","workspace")
         val draft=Draft(target,"Private unsent text")
