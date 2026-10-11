@@ -592,6 +592,21 @@ read retention window like `inspect`. Within that window the journal replays
 the receipt for an existing request ID; after pruning, a repeated ID may run
 again, which is safe because marks are idempotent and forward-only.
 
+`set_mobile_delivery` changes the swarm-wide phone notification timing. It is a
+computer-scoped gateway request: the session is `""` and the payload is exactly
+`{"value": ...}` with `immediate`, `away`, `away_5`, `away_10`, `away_15` or
+`away_30`. The connector runs
+`hgs swarm preference set mobile_delivery <value> --json` on its gateway computer
+and returns the native `{"ok": true, "mobile_delivery": ...}` object; any other
+answer is not a confirmation. A gateway connector advertises the operation for
+its own computer only when native help lists that command; direct peers never
+advertise it, and the relay returns 409 until the computer's snapshot does. The
+operation is mutation-class: its request UUID is a permanent tombstone, so a
+repeated ID returns the original receipt and never runs the command again, and an
+error or unverified acknowledgement after the native command started is
+uncertain. Replaying an old change could revert a newer choice, so every new
+choice uses a new request ID.
+
 Synthetic paging QA uses `history_count` up to 5,000 for history pages while
 ordinary inspect remains capped at 500 fixture rows. Set `history_indexing:true`
 for a stable incomplete head, `history_gap:true` for permanent partial source

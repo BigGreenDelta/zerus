@@ -666,6 +666,7 @@ and returns its `{ok, mobile_delivery}` object. Only a gateway whose hgs lists t
 command advertises the operation; direct peers never do. Snapshots report the
 current value as `preferences.mobile_delivery`, and each machine's desktop activity
 as `desktop_presence`.
+
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
