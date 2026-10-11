@@ -153,6 +153,20 @@ pub fn load(tx: &Tx, uuid: &str) -> Result<Task> {
     }
 }
 
+fn read_only() -> Refusal {
+    Refusal::new("read_only", "this task was written by a newer version of hgs; update hgs on this machine to change it")
+}
+
+/// Like `load`, for commands that write to the task: a task that holds events
+/// from a newer version is shown but never changed.
+pub fn load_writable(tx: &Tx, uuid: &str) -> Result<Task> {
+    let task = load(tx, uuid)?;
+    if task.read_only {
+        return Err(read_only().into());
+    }
+    Ok(task)
+}
+
 /// Appends `draft` only if folding accepts it.
 pub fn prove(tx: &mut Tx, draft: Draft) -> Result<Event> {
     let event = tx.preview(&draft)?;
@@ -554,7 +568,7 @@ pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
             changes.push(("attachments", json!(attachments)));
         }
         for (field, value) in changes {
-            let task = load(tx, &uuid)?;
+            let task = load_writable(tx, &uuid)?;
             simple(tx, actor, &task, "field_set", json!({"field": field, "value": value}), &req.request_id)?;
         }
         task_result(tx, &uuid)
@@ -582,7 +596,7 @@ fn move_to(
     let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
     write(ctx, command, request, |tx, actor| {
         let uuid = resolve(tx, task_ref)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
         let to = target(&wf, &task)?;
         let from_role = wf.role(&task.stage).unwrap_or(Role::Backlog);
@@ -639,7 +653,7 @@ pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: ReorderRequest = parse(&request)?;
     write(ctx, "reorder", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         // The other tasks of the column, in display order.
         let mut column: Vec<Task> = board_tasks(tx, &task.project)?
             .into_iter()
@@ -662,6 +676,9 @@ pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let mut rank = place(&column, position);
         if rank.is_none() {
             // Ties or exhausted ranks: renumber the column evenly, keeping its order.
+            if column.iter().any(|t| t.read_only) {
+                return Err(read_only().into());
+            }
             let fresh_ranks = rank::spread(column.len());
             for (other, fresh) in column.iter_mut().zip(fresh_ranks) {
                 simple(tx, actor, other, "rank_set", json!({"rank": checked_rank(fresh.clone())?}), "")?;
@@ -707,7 +724,7 @@ pub fn pin(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let session = local_session(req.session.clone(), ctx.store.machine());
     write(ctx, "pin", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         simple(tx, actor, &task, "pin_set", json!({"session": session}), &req.request_id)?;
         task_result(tx, &uuid)
     })
@@ -732,7 +749,7 @@ pub fn label(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     write(ctx, "label", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         simple(tx, actor, &task, "label_set", json!({"label": req.label, "present": req.present}), &req.request_id)?;
         task_result(tx, &uuid)
     })
@@ -761,7 +778,7 @@ pub fn link(ctx: &mut Ctx, request: Value) -> Result<Value> {
         if target == uuid {
             return Err(Refusal::field("invalid_field", "target", "invalid", "a task cannot refer to itself").into());
         }
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         simple(tx, actor, &task, "relation_set", json!({"relation": req.relation, "target": target, "present": req.present}), &req.request_id)?;
         task_result(tx, &uuid)
     })
@@ -785,7 +802,7 @@ pub fn comment(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     write(ctx, "comment", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         if actor.kind == ActorKind::Agent {
             let me = actor.session_ref();
             if me.is_none() || (me != task.assignee && me != task.reviewer) {
@@ -802,7 +819,7 @@ pub fn delete(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: TaskRequest = parse(&request)?;
     write(ctx, "delete", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         simple(tx, actor, &task, "task_deleted", json!({}), &req.request_id)?;
         Ok(json!({"ok": true, "deleted": uuid}))
     })
@@ -952,6 +969,33 @@ mod tests {
         let reused = delete(&mut human(&mut store), json!({"request_id": id, "task": task})).unwrap_err();
         assert_eq!(refusal(reused).code, "request_reused");
         assert_eq!(show(&mut human(&mut store), json!({"task": task})).unwrap()["task"]["uuid"], task);
+    }
+
+    #[test]
+    fn tasks_with_events_from_a_newer_version_refuse_writes() {
+        let (_dir, mut store) = store();
+        let task = new_task(&mut store, "Queue");
+        store
+            .write(|tx| {
+                let mut event = tx.preview(&Draft {
+                    actor: Actor::human(MACHINE),
+                    task: task.clone(),
+                    project: "p".into(),
+                    kind: "field_set".into(),
+                    base: String::new(),
+                    request_id: String::new(),
+                    payload: json!({"field": "title", "value": "x"}),
+                })?;
+                event.v = EVENT_VERSION + 1;
+                tx.insert(&event)
+            })
+            .unwrap();
+        let commented = comment(&mut human(&mut store), json!({"task": task, "text": "note"})).unwrap_err();
+        assert_eq!(refusal(commented).code, "read_only");
+        let moved = move_task(&mut human(&mut store), json!({"task": task, "to": "Backlog"})).unwrap_err();
+        assert_eq!(refusal(moved).code, "read_only");
+        let shown = show(&mut human(&mut store), json!({"task": task})).unwrap();
+        assert_eq!((shown["task"]["read_only"].as_bool(), shown["task"]["stage"].as_str()), (Some(true), Some("Queue")));
     }
 
     #[test]

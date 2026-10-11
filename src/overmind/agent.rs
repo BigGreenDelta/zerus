@@ -1,8 +1,8 @@
 //! Commands for agents in Zerus sessions. Each one is narrow and refuses moves
 //! that would break the process; results carry a `note` with the next step.
 use super::commands::{
-    check_project, check_text, created_payload, load, next_rank, parse, prove, reference, refuse, resolve,
-    store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_FIELD,
+    check_project, check_text, created_payload, load, load_writable, next_rank, parse, prove, reference, refuse,
+    resolve, store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_FIELD,
 };
 use super::fold::{fold_many, Task};
 use super::model::*;
@@ -101,7 +101,7 @@ pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let cwd = ctx.cwd.clone();
     write(ctx, "advance", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
         let to_role = wf.role(&req.to).ok_or_else(|| Refusal::new("unknown_stage", format!("unknown stage {}", req.to)))?;
         let fields = fields(&[("spec", &req.spec), ("worklog", &req.worklog), ("evidence", &req.evidence), ("root_cause", &req.root_cause)]);
@@ -150,7 +150,7 @@ pub fn call_human(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: QuestionRequest = parse(&request)?;
     write(ctx, "call-human", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         let to = workflow(tx, &task.project)?.first(Role::NeedsHuman).map(|s| s.name.clone()).unwrap_or_default();
         let fields = BTreeMap::from([("question".to_string(), req.question.clone())]);
         transition(tx, actor, &task, Action::CallHuman, &to, fields, None, vec![], &req.request_id)?;
@@ -172,7 +172,7 @@ pub fn return_task(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: ReasonRequest = parse(&request)?;
     write(ctx, "return", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         let to = workflow(tx, &task.project)?.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default();
         let fields = BTreeMap::from([("reason".to_string(), req.reason.clone())]);
         transition(tx, actor, &task, Action::Return, &to, fields, None, vec![], &req.request_id)?;
@@ -207,7 +207,7 @@ pub fn decompose(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     write(ctx, "decompose", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         if task.assignee.as_ref() != Some(&me) {
             return refuse("not_assigned", "this task is not assigned to your session");
         }
@@ -313,7 +313,7 @@ pub fn attach(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let stored = store_attachments(ctx.store, &[NewAttachment { name: req.name.clone(), mime: req.mime.clone(), data_base64: req.data_base64.clone() }])?;
     write(ctx, "attach", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         if task.assignee.as_ref() != Some(&me) && task.reviewer.as_ref() != Some(&me) {
             return refuse("not_assigned", "this task is not assigned to your session");
         }
@@ -349,7 +349,7 @@ pub fn review(ctx: &mut Ctx, request: Value) -> Result<Value> {
     };
     write(ctx, "review", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
-        let task = load(tx, &uuid)?;
+        let task = load_writable(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
         let to = if action == Action::Approve {
             task.stage.clone()
@@ -542,6 +542,21 @@ mod tests {
         advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "plan"})).unwrap();
         let ok = advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();
         assert_eq!(ok["task"]["stage"], "Review");
+    }
+
+    #[test]
+    fn agents_cannot_change_read_only_tasks() {
+        let (_dir, mut store, task) = setup();
+        store.write(|tx| {
+            let draft = Draft { actor: Actor::human(MACHINE), task: task.clone(), project: "p".into(), kind: "future_kind".into(), base: String::new(), request_id: String::new(), payload: json!({}) };
+            let mut event = tx.preview(&draft)?;
+            event.v = EVENT_VERSION + 1;
+            tx.insert(&event)
+        }).unwrap();
+        let err = advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "s"})).unwrap_err();
+        assert_eq!(refusal(err).code, "read_only");
+        let err = commands::comment(&mut agent(&mut store, "w1", None), json!({"task": task, "text": "x"})).unwrap_err();
+        assert_eq!(refusal(err).code, "read_only");
     }
 
     #[test]
