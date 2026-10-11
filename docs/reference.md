@@ -1249,6 +1249,9 @@ and installs it under `~/Applications/hgs-tray.app` with
 for the tray. Signing precedes bundle replacement; matching code hashes avoid
 unnecessary replacement. Ad-hoc signing is not a Developer ID distribution
 signature. LaunchAgent crash recovery is independent of native agent engines.
+Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
+and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
+the standard install directories listed under **Desktop option** below.
 
 ```sh
 launchctl list | grep com.hgdev.hgs-tray
@@ -1264,7 +1267,7 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable, normally discovered through PATH |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
