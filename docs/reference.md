@@ -189,6 +189,8 @@ Repeated launch raises the existing window. Closing it leaves the tray and agent
 running. The installed application and service names remain `hgs-tray` for
 compatibility; the title is `hgs zerus`.
 
+Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers whose hgs is too old to receive it are named there.
+
 The tray has two counters: all sessions and **Needs attention**. Attention includes
 input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.

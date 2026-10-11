@@ -85,6 +85,7 @@ class TestSessionsWindow : public QObject {
 private slots:
     void initTestCase();
     void updatesEntryOpensExactSettingsPage();
+    void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void init() { QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
@@ -5840,6 +5841,13 @@ void TestSessionsWindow::worktreePreview()
         QTimer::singleShot(0,&launch,[&]{auto *picker=launch.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTest::qWait(100);QVERIFY(picker->grab().save(destination+(dark?"/picker-dark.png":"/picker-light.png")));picker->reject();});launch.findChild<QPushButton *>("chooseLaunchWorktree")->click();launch.reject();
     }
     qApp->setPalette(original);
+}
+
+void TestSessionsWindow::mobileConnectionSettingsOfferTheSharedDeliveryChoice(){
+    SessionsWindow window(script()); window.show();
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *choice=window.findChild<QComboBox *>("mobileDelivery"); QVERIFY(choice); QCOMPARE(choice->count(),6);
+    QVERIFY(window.findChild<QWidget *>("relaySettings"));
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){

@@ -1015,6 +1015,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
+    connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
         m_processes->applyPreferences();m_processPollAge.invalidate();

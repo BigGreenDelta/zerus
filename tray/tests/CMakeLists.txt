@@ -329,3 +329,9 @@ add_executable(test_desktoppresence test_desktoppresence.cpp ../src/DesktopPrese
 target_include_directories(test_desktoppresence PRIVATE ../src)
 target_link_libraries(test_desktoppresence PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME desktoppresence COMMAND test_desktoppresence)
+
+add_executable(test_mobiledeliverysettings test_mobiledeliverysettings.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
+target_include_directories(test_mobiledeliverysettings PRIVATE ../src)
+target_link_libraries(test_mobiledeliverysettings PRIVATE Qt6::Test Qt6::Widgets)
+add_test(NAME mobiledeliverysettings COMMAND test_mobiledeliverysettings)
+set_tests_properties(mobiledeliverysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
