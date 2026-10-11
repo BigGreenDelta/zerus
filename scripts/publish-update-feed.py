@@ -2,11 +2,13 @@
 """Pull verified GitHub assets; dry-run unless --execute is supplied."""
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import zipfile
 
 from update_feed import (ChannelMismatch, GitHub, candidates, check_previous,
                          private_root, publish, require, validate_and_fetch)
@@ -59,28 +61,48 @@ def synchronize(client,root,channels,execute=False,max_bytes=20*1024**3):
     return reports
 
 
+def load_dev_publisher():
+    spec = importlib.util.spec_from_file_location('dev_mirror', Path(__file__).with_name('publish-dev-feed.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def synchronize_channels(root, channels, dev_platforms, execute, max_bytes, credential):
+    reports = synchronize(GitHub(credential), root, channels, execute, max_bytes)
+    if dev_platforms:
+        from dev_updates import DevGitHub
+        reports.extend(load_dev_publisher().synchronize(
+            DevGitHub(credential), root, dev_platforms, execute, max_bytes))
+    return reports
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True,type=Path,help='Dedicated absolute static-content directory')
     parser.add_argument('--channel',action='append',choices=sorted(CHANNELS),required=True)
+    parser.add_argument('--dev-platform', action='append', choices=['desktop', 'android'], default=[],
+                        help='Also synchronize the tagged CI Dev channel using the same root and lock')
     parser.add_argument('--execute',action='store_true',help='Publish immutable assets and atomic catalogs')
     parser.add_argument('--max-mirror-bytes',type=int,default=20*1024**3,help='Retained disk budget; no automatic deletion')
     args=parser.parse_args()
     try:
         require(args.root.is_absolute() and not args.root.is_symlink(),'Dedicated absolute mirror root required')
         require(args.max_mirror_bytes>0,'Invalid mirror disk budget')
-        client=GitHub(token())
+        credential=token()
+        channels=list(dict.fromkeys(args.channel))
+        dev_platforms=list(dict.fromkeys(args.dev_platform))
         if args.execute:
             root=private_root(args.root)
             lock=root/'.mirror.lock';require(not lock.is_symlink(),'Symlinked mirror lock')
             with lock.open('a') as handle:
                 fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                reports=synchronize(client,root,list(dict.fromkeys(args.channel)),True,args.max_mirror_bytes)
-        else:reports=synchronize(client,args.root,list(dict.fromkeys(args.channel)),False,args.max_mirror_bytes)
+                reports=synchronize_channels(root,channels,dev_platforms,True,args.max_mirror_bytes,credential)
+        else:reports=synchronize_channels(args.root,channels,dev_platforms,False,args.max_mirror_bytes,credential)
         print(json.dumps({'results':reports},sort_keys=True));return 0
     except BlockingIOError:
         print('Mirror already running',file=sys.stderr);return 1
-    except (ValueError,OSError,KeyError,TypeError,UnicodeError):
+    except (ValueError,OSError,KeyError,TypeError,UnicodeError,zipfile.BadZipFile):
         # Never print exceptions from network/subprocesses: signed CDN URLs and
         # credential context do not belong in a scheduled job's logs.
         print('Mirror validation or transport failed; previous catalogs retained',file=sys.stderr);return 1

@@ -97,15 +97,15 @@ eligible automatically; missing required inputs fail publication.
 
 Install `dev_updates.py`, `publish-dev-feed.py` and the adjacent existing mirror
 modules on the public host. Supply a read-only Actions credential through the
-existing systemd credential mechanism and run both platforms on the site's
-ordinary fifteen-minute timer. Use the same mirror root/lock and serve `updates/v2`
+systemd credential mechanism and extend the site's existing fifteen-minute jobs
+with `--dev-platform`. Use the same mirror root/lock and serve `updates/v2`
 with the same revalidation behavior as `updates/v1`:
 
 ```sh
-python3 /opt/zerus-updates/publish-dev-feed.py \
-  --root /var/lib/zerus-updates --platform desktop --execute
-python3 /opt/zerus-updates/publish-dev-feed.py \
-  --root /var/lib/zerus-updates --platform android --execute
+python3 /opt/zerus-updates/publish-update-feed.py \
+  --root /var/lib/zerus-updates --channel desktop/stable --dev-platform desktop --execute
+python3 /opt/zerus-updates/publish-update-feed.py \
+  --root /var/lib/zerus-updates --channel android/dev --dev-platform android --execute
 ```
 
 Without `--execute`, validation downloads only into temporary staging and changes

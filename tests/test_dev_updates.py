@@ -1,5 +1,6 @@
 """Dev candidates, channel advancement and retention on isolated synthetic data."""
 import copy
+import contextlib
 import datetime as dt
 import importlib.util
 import hashlib
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import dev_updates as dev
@@ -94,6 +96,49 @@ class DevUpdateTests(unittest.TestCase):
         apk = next(a for a in self.client.info['artifacts'] if a['kind'] == 'apk')
         self.assertEqual(apk['packageName'], 'app.zerus.mobile')
         self.assertEqual(apk['signingCertSha256'], 'b'*64)
+    def test_existing_publisher_runs_legacy_and_dev_under_one_lock(self):
+        import fcntl
+        self.client = FakeGitHub(self.base, 'android')
+        legacy_client = object()
+        legacy_report = {'channel': 'android/dev', 'version': '0.1.28', 'mode': 'published'}
+        def check_lock():
+            with (self.root / '.mirror.lock').open('a') as handle:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        def legacy(client, root, channels, execute, max_bytes):
+            self.assertIs(client, legacy_client)
+            self.assertEqual((root, channels, execute), (self.root, ['android/dev'], True))
+            check_lock()
+            return [legacy_report]
+        original_candidate = self.client.candidate
+        def dev_candidate(*args):
+            check_lock()
+            return original_candidate(*args)
+        self.client.candidate = dev_candidate
+        output = io.StringIO()
+        argv = ['publisher', '--root', str(self.root), '--channel', 'android/dev',
+                '--dev-platform', 'android', '--execute']
+        with patch.object(sys, 'argv', argv), patch.object(publisher.mirror, 'token', return_value='fixture-read-credential'), \
+             patch.object(publisher.mirror, 'GitHub', return_value=legacy_client) as release_api, \
+             patch.object(publisher.mirror, 'synchronize', side_effect=legacy), \
+             patch.object(publisher.mirror, 'load_dev_publisher', return_value=publisher), \
+             patch.object(dev, 'DevGitHub', return_value=self.client) as dev_api, contextlib.redirect_stdout(output):
+            self.assertEqual(publisher.mirror.main(), 0)
+        release_api.assert_called_once_with('fixture-read-credential')
+        dev_api.assert_called_once_with('fixture-read-credential')
+        reports = json.loads(output.getvalue())['results']
+        self.assertEqual(reports[0], legacy_report)
+        self.assertEqual(reports[1]['buildId'], 101)
+        self.assertEqual(json.loads((self.root / 'updates/v2/android/dev.json').read_text()), self.client.info)
+        self.assertNotIn('fixture-read-credential', output.getvalue())
+    def test_existing_legacy_job_does_not_load_dev_modules(self):
+        argv = ['publisher', '--root', str(self.root), '--channel', 'android/dev']
+        with patch.object(sys, 'argv', argv), patch.object(publisher.mirror, 'token', return_value=None), \
+             patch.object(publisher.mirror, 'synchronize', return_value=[]), \
+             patch.object(publisher.mirror, 'load_dev_publisher', side_effect=AssertionError('Dev is not selected')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(publisher.mirror.main(), 0)
+        self.assertFalse(self.root.exists())
     def test_current_public_seal_remains_available_after_actions_artifact_expiry(self):
         self.root.mkdir()
         self.sync(True)

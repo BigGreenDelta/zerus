@@ -721,3 +721,39 @@ version. The upgrade retained an existing isolated tmux server, terminal process
 session identity and user links. Installed-package checks passed again; all files
 expected under the container's pacman extraction policy were present, and the
 downloaded archive's build manifest matched the exact verified source commit.
+
+### Stable release 0.41.0 and Android 0.1.29
+
+On **2026-10-11**, the owner requested a new release from main and updates to the
+installed clients, including macOS. The [release candidate](https://github.com/ufna/zerus/actions/runs/38160427346)
+pins `39018336bfed70d57af148ecb0310c08384ed385` and passed the complete
+Linux/Arch/macOS matrix, including the pinned keyless native Codex contracts,
+relay PostgreSQL/memory qualification and both stable package rebuilds. Review
+verified the Actions artifact digest, source contents against `git archive`,
+embedded binary provenance, library floors, dependency notices and sealed assets.
+The [protected publisher](https://github.com/ufna/zerus/actions/runs/38162077178)
+published [v0.41.0](https://github.com/ufna/zerus/releases/tag/v0.41.0) as the latest
+stable release. All seven immutable asset digests and the three anonymous AUR Git
+recipes match the candidate; the VCS recipe retains its seed for version-only changes.
+
+Existing Linux and macOS source installations now run **Zerus 0.41.0 / hgs
+1.50.0** from that exact revision. On both machines, focused composer,
+question-form and update tests passed, installed/running artifact hashes match
+the qualified builds, and the managed GUI claimed its socket before activation.
+Updates preserved native process identities, existing settings and drafts, with
+private rollback backups. The Mac bundle uses the existing ad-hoc source-install
+signature; this release does not provide a notarized public macOS installer.
+Background draft persistence is installed, but full input responsiveness under
+general macOS computer load still requires workload verification.
+
+[Android 0.1.29](https://github.com/ufna/zerus/releases/tag/android-dev-0.1.29)
+(version code **30**) uses the same source, package and published signing
+certificate. Firebase-enabled Debug and Release each passed 597 unit tests;
+release lint passed. Its exact minified APK, source archive, metadata and checksums
+were verified anonymously after publication, while APK-bound R8 diagnostics remain
+private. Scheduled synchronization published the new desktop and Android catalogs;
+their anonymous downloads match the sealed candidates. No physical Android device
+was connected for installation. The existing Android signer and Firebase inputs
+are now provisioned in the protected release environment. Continuous main-build
+Dev activation still requires the Actions-aware mirror and its read credential;
+the same-app channel selector alone does not activate that pipeline.
