@@ -2,11 +2,14 @@ package app.zerus.mobile
 
 import android.content.Context
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,4 +83,35 @@ object NotificationSettings {
     }
     if (error) Text("Notification choices could not be saved. Try again.", style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.error)
+}
+
+/** One shared choice per workspace; the gateway computer's hgs stores it for every swarm desktop. */
+@Composable internal fun MobileDeliverySettings(model: ZerusViewModel) {
+    if (model.connections.isEmpty()) return
+    Text("When I'm not at a computer, send notifications to my phone", Modifier.padding(start = 16.dp))
+    model.connections.forEach { connection ->
+        val gateway = model.mobileDeliveryGateway(connection.id)
+        val action = model.mobileDeliveryAction(connection.id)
+        val reason = model.mobileDeliveryReason(connection.id)
+        val now = System.currentTimeMillis()
+        val selected = MobileDelivery.shown(gateway?.mobileDelivery.orEmpty(), action, now)
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp).selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (model.connections.size > 1) Text(connection.displayName, style = MaterialTheme.typography.labelLarge)
+            MobileDelivery.values.forEach { value ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected = value == selected, enabled = reason.isBlank(),
+                    role = Role.RadioButton, onClick = { model.setMobileDelivery(connection.id, value) }),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = value == selected, onClick = null, enabled = reason.isBlank())
+                    Spacer(Modifier.width(8.dp))
+                    Text(MobileDelivery.label(value))
+                }
+            }
+            Text(MobileDelivery.status(gateway?.name.orEmpty(), gateway?.mobileDelivery.orEmpty(), action, reason, now),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    if (model.mobileDeliveryError.isNotBlank()) Row(Modifier.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(model.mobileDeliveryError, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        TextButton(onClick = { model.dismissMobileDeliveryError() }) { Text("Dismiss") }
+    }
 }

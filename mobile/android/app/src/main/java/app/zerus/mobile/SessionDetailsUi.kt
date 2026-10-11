@@ -225,7 +225,7 @@ import org.json.JSONObject
 @Composable internal fun SessionActionRecoveryCard(model: ZerusViewModel, action: SessionAction) {
     var review by remember(action.requestId) { mutableStateOf(false) }
     Card { Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(if(action.needsProjectReview) action.resultTarget?.session.orEmpty() else action.target.session,fontWeight = FontWeight.SemiBold)
+        Text(sessionActionTitle(action),fontWeight = FontWeight.SemiBold)
         Text(if(action.needsProjectReview) "Session created / Project assignment needs review" else actionLabel(action.operation) + " / " + sessionActionStatus(action),style = MaterialTheme.typography.labelMedium)
         if(action.error.isNotBlank()) Text(action.error,style = MaterialTheme.typography.bodySmall)
         Text("The original request is saved. It is never repeated automatically.",style = MaterialTheme.typography.bodySmall)
@@ -243,7 +243,7 @@ import org.json.JSONObject
     } }
     if(review) AlertDialog(onDismissRequest = { review = false },title = { Text("Review native action?") },
         text = { Text(if(action.needsProjectReview) "${action.resultTarget?.session}\nThe session was created. Review its project placement before dismissing this notice. Marking reviewed never creates another session."
-            else "${action.target.session}\nThis action may already have changed the machine. Check its original receipt and native state first. Marking it reviewed does not undo or repeat it.") },
+            else "${sessionActionTitle(action)}\nThis action may already have changed the machine. Check its original receipt and native state first. Marking it reviewed does not undo or repeat it.") },
         confirmButton = { TextButton(onClick = { model.reviewSessionAction(action); review = false }) { Text("Mark reviewed") } },
         dismissButton = { TextButton(onClick = { review = false }) { Text("Cancel") } })
 }
@@ -343,8 +343,11 @@ import org.json.JSONObject
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
-    "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
+    "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
 }
+/** Computer-scoped actions such as set_mobile_delivery have no session, so the operation names the card. */
+internal fun sessionActionTitle(action: SessionAction) =
+    if(action.needsProjectReview) action.resultTarget?.session.orEmpty() else action.target.session.ifBlank { actionLabel(action.operation) }
 internal fun sessionActionStatus(action: SessionAction) = when(action.status) {
     "sending" -> "Sending"; "uncertain" -> "Outcome unknown"; "failed" -> "Not applied"; "scheduled" -> "Pending on machine"
     "applied" -> "Applied"; "completed" -> if(action.operation == "process_stop") "Stop requested" else "Completed"

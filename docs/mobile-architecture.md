@@ -751,6 +751,14 @@ Android supports two delivery paths:
   account. It consumes an ongoing connection and does not promise FCM-equivalent
   behavior under Doze, vendor battery restrictions or force-stop.
 
+Machines → Notifications offers "When I'm not at a computer, send notifications to
+my phone" for each paired workspace, with the same six choices as desktop
+Settings. It shows the gateway computer's reported value. A change is a durable
+`set_mobile_delivery` request to that gateway: it shows as saving, then as shared
+once the gateway confirms it; an unconfirmed change appears in Drafts for a
+receipt check and is never repeated. Older gateways or relays show the value
+read-only with the reason.
+
 Android 13 and later require notification permission. Force-stopping the app
 and disabling notifications cannot be bypassed by the relay. Provider status
 must be shown honestly in the app and deployment verification.

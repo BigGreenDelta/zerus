@@ -74,4 +74,11 @@ class MobileDeliveryTest {
         assertEquals("Desktop is offline. Try again when it is connected.", MobileDelivery.status("Desktop", "away", null, "Desktop is offline. Try again when it is connected.", 2_000))
         assertEquals("Not reported by Desktop yet.", MobileDelivery.status("Desktop", "", null, "", 2_000))
     }
+
+    @Test fun recoveryCardNamesAComputerScopedActionWithoutASession() {
+        assertEquals("Phone notification timing", sessionActionTitle(action("away_10", "uncertain")))
+        assertEquals("Phone notification timing", actionLabel(MobileDelivery.OPERATION))
+        val session = action("away").copy(operation = "pause", target = Target(gatewayId, "a/b", "", "", "workspace"))
+        assertEquals("a/b", sessionActionTitle(session))
+    }
 }

@@ -933,6 +933,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             MobileDelivery.OPERATION in relayOperations[connectionId].orEmpty(),
             sessionActions.any { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending })
     }
+    fun dismissMobileDeliveryError() { mobileDeliveryError="" }
     /** A durable request with the usual receipt states. An unconfirmed change is checked, never repeated. */
     fun setMobileDelivery(connectionId:String,value:String) {
         val reason=mobileDeliveryReason(connectionId);if(reason.isNotBlank()) { mobileDeliveryError=reason;return }

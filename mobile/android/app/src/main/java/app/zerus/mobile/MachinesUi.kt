@@ -51,6 +51,7 @@ private val Muted = Color(0xFF9AACB2)
         Text("Notifications", style = MaterialTheme.typography.titleLarge)
         Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Session alerts"); Text("Choose which session updates can alert you.", style = MaterialTheme.typography.bodySmall, color = Muted) }; Switch(model.notifications, onNotifications) }
         NotificationTypeSettings(model.notifications)
+        MobileDeliverySettings(model)
         Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Keep a live connection"); Text("For phones without Firebase push. Uses an ongoing notification; Android may delay alerts during battery saving.", style = MaterialTheme.typography.bodySmall, color = Muted) }; Switch(live, onLive, enabled = model.connections.isNotEmpty()) }
     }
     coloring?.let { machine ->
