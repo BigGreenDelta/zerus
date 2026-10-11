@@ -24,6 +24,11 @@ private slots:
     void nativeDropPlacement();
     void pinningRestoresPreviousGroup();
     void projectsShareFoldersButOwnSessions();
+    void folderTransfersPreserveCatalogIdentity_data();
+    void folderTransfersPreserveCatalogIdentity();
+    void folderTransfersReuseExistingLinks_data();
+    void folderTransfersReuseExistingLinks();
+    void folderTransfersRejectInvalidTargets();
     void defaultProjectCanBeRenamedAndReplaced();
     void keyboardFocusFollowsInput();
     void activityAnimationOnlyRunsForVisibleWorkingRows();
@@ -337,6 +342,108 @@ void TestWorkspace::projectsShareFoldersButOwnSessions()
     SessionOrganization restored(model.toJson()); QCOMPARE(restored.group(a)->folders[0].id,one);
     restored.removeGroup(b); QCOMPARE(restored.groupFor("arch\nsession"),QString("ungrouped"));
     QCOMPARE(restored.group(a)->folders.size(),2);
+}
+
+void TestWorkspace::folderTransfersPreserveCatalogIdentity_data()
+{
+    QTest::addColumn<bool>("copy");
+    QTest::newRow("move") << false;
+    QTest::newRow("copy") << true;
+}
+
+void TestWorkspace::folderTransfersPreserveCatalogIdentity()
+{
+    QFETCH(bool, copy);
+    SessionOrganization model;
+    const auto source = model.createGroup("Sources"), target = model.createGroup("Destination");
+    const auto original = model.addFolder(source, "remote", "/workspace/plain folder", "Shared sources");
+    model.addFolder(source, "local", "/workspace/keep");
+    model.moveSession(model.observe("remote", "agent/session", "run-1"), source);
+    model.setColor(source, "#123456"); model.setCollapsed(source, true);
+    auto data = model.toJson(); auto projects = data["projects"].toArray();
+    for (int i = 0; i < projects.size(); ++i) {
+        auto project = projects[i].toObject();
+        if (project["id"].toString() != source) continue;
+        auto folders = project["folders"].toArray(); auto folder = folders[0].toObject();
+        folder["machine_id"] = "machine-remote"; folder["machine_name"] = "Offline workstation";
+        folders[0] = folder; project["folders"] = folders; projects[i] = project;
+    }
+    data["projects"] = projects; model = SessionOrganization(data);
+    const auto result = copy ? model.copyFolder(source, original, target) : model.moveFolder(source, original, target);
+    QVERIFY(!result.isEmpty());
+    if (copy) QVERIFY(result != original); else QCOMPARE(result, original);
+    QCOMPARE(model.group(source)->folders.size(), copy ? 2 : 1);
+    QCOMPARE(model.group(target)->folders.size(), 1);
+    const auto folder = model.group(target)->folders.first();
+    QCOMPARE(folder.id, result); QCOMPARE(folder.machine, QString("remote"));
+    QCOMPARE(folder.machineId, QString("machine-remote")); QCOMPARE(folder.machineName, QString("Offline workstation"));
+    QCOMPARE(folder.path, QString("/workspace/plain folder")); QCOMPARE(folder.name, QString("Shared sources"));
+    QCOMPARE(model.groupFor("remote\nagent/session"), source);
+    QCOMPARE(model.group(source)->color, QString("#123456")); QVERIFY(model.group(source)->collapsed);
+    QCOMPARE(model.toJson()["runs"], data["runs"]); QCOMPARE(model.toJson()["default_project"], data["default_project"]);
+    QCOMPARE(SessionOrganization(model.toJson()).toJson(), model.toJson());
+    // Separate IDs allow either copied link to be edited/removed independently.
+    QVERIFY(model.editFolder(target, result, "remote", "/workspace/renamed", "Renamed"));
+    if (copy) QCOMPARE(model.group(source)->folders.first().path, QString("/workspace/plain folder"));
+    model.removeFolder(target, result); QVERIFY(model.group(target)->folders.isEmpty());
+    QCOMPARE(model.group(source)->folders.size(), copy ? 2 : 1);
+}
+
+void TestWorkspace::folderTransfersReuseExistingLinks_data()
+{
+    QTest::addColumn<bool>("copy"); QTest::addColumn<bool>("stableIdentity");
+    QTest::newRow("move-alias") << false << false;
+    QTest::newRow("copy-alias") << true << false;
+    QTest::newRow("move-stable-machine-id") << false << true;
+    QTest::newRow("copy-stable-machine-id") << true << true;
+}
+
+void TestWorkspace::folderTransfersReuseExistingLinks()
+{
+    QFETCH(bool, copy); QFETCH(bool, stableIdentity);
+    SessionOrganization model; const auto source = model.createGroup("Source"), target = model.createGroup("Target");
+    const auto original = model.addFolder(source, "remote", "/workspace/shared", "Source label");
+    const auto existing = model.addFolder(target, stableIdentity ? "other-alias" : "remote", "/workspace/shared", "Target label");
+    model.addFolder(target, "local", "/workspace/shared", "Same path, other computer");
+    if (stableIdentity) {
+        auto data = model.toJson(); auto projects = data["projects"].toArray();
+        for (int i = 0; i < projects.size(); ++i) {
+            auto project = projects[i].toObject(); auto folders = project["folders"].toArray();
+            for (int j = 0; j < folders.size(); ++j) {
+                auto folder = folders[j].toObject();
+                if (folder["id"] != original && folder["id"] != existing) continue;
+                folder["machine_id"] = "machine-remote"; folders[j] = folder;
+            }
+            project["folders"] = folders; projects[i] = project;
+        }
+        data["projects"] = projects; model = SessionOrganization(data);
+    }
+    const auto before = model.toJson();
+    QCOMPARE(copy ? model.copyFolder(source, original, target) : model.moveFolder(source, original, target), existing);
+    QCOMPARE(model.group(target)->folders.size(), 2);
+    QCOMPARE(model.group(target)->folders.first().id, existing);
+    QCOMPARE(model.group(target)->folders.first().name, QString("Target label"));
+    QCOMPARE(model.group(target)->folders.first().machine, stableIdentity ? QString("other-alias") : QString("remote"));
+    QCOMPARE(model.group(source)->folders.size(), copy ? 1 : 0);
+    if (copy) QCOMPARE(model.toJson(), before);
+}
+
+void TestWorkspace::folderTransfersRejectInvalidTargets()
+{
+    SessionOrganization model; const auto source = model.createGroup("Source"), target = model.createGroup("Target");
+    const auto folder = model.addFolder(source, "local", "/workspace/plain");
+    const auto before = model.toJson();
+    for (const bool copy : {false, true}) {
+        const auto transfer = [&](const QString &from, const QString &id, const QString &to) {
+            return copy ? model.copyFolder(from, id, to) : model.moveFolder(from, id, to);
+        };
+        QVERIFY(transfer(source, folder, source).isEmpty());
+        QVERIFY(transfer("missing", folder, target).isEmpty());
+        QVERIFY(transfer(source, folder, "missing").isEmpty());
+        QVERIFY(transfer(source, "missing", target).isEmpty());
+        QVERIFY(transfer(source, {}, target).isEmpty());
+        QCOMPARE(model.toJson(), before);
+    }
 }
 
 void TestWorkspace::keyboardFocusFollowsInput()

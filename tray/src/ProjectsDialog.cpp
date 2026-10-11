@@ -362,6 +362,35 @@ void ProjectsDialog::removeFolder(const QString &projectId, const QString &id)
     if(id.isEmpty()||!m_projects->group(projectId))return;
     m_projects->removeFolder(projectId,id);changed();
 }
+void ProjectsDialog::transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,
+                                    const QString &destination, bool copy)
+{
+    const auto *source = m_projects->group(projectId);
+    bool present = false;
+    if (source) for (const auto &current : source->folders)
+        if (current.id == folder.id && current.machine == folder.machine && current.path == folder.path
+            && current.name == folder.name && current.machineId == folder.machineId && current.machineName == folder.machineName) {
+            present = true;
+            break;
+        }
+    if (!present) { m_status->setText(tr("This project folder changed. Select it again.")); return; }
+    const auto *target = m_projects->group(destination);
+    if (!target || destination == projectId || (!target->accessible && !m_allProjects->isChecked())) {
+        m_status->setText(tr("The destination project is no longer available. Select it again."));
+        return;
+    }
+    const auto name = target->name;
+    const auto before = m_projects->toJson();
+    const auto id = copy ? m_projects->copyFolder(projectId, folder.id, destination)
+                         : m_projects->moveFolder(projectId, folder.id, destination);
+    if (id.isEmpty()) { m_status->setText(tr("Could not transfer this project folder.")); return; }
+    if (before == m_projects->toJson()) {
+        m_status->setText(tr("This folder is already in %1.").arg(name));
+        return;
+    }
+    changed();
+    m_status->setText(copy ? tr("Folder copied to %1.").arg(name) : tr("Folder moved to %1.").arg(name));
+}
 SessionOrganization::Folder ProjectsDialog::selectedFolder() const
 {
     if(m_folders->selectedItems().isEmpty())return {};
@@ -443,6 +472,25 @@ void ProjectsDialog::showFolderMenu(const QPoint &position)
         connect(open,&QAction::triggered,this,[this,folder]{openFolder(folder);});
         auto *copy=menu->addAction(tr("Copy folder path"));copy->setObjectName("contextCopyProjectFolder");
         connect(copy,&QAction::triggered,this,[folder]{QApplication::clipboard()->setText(folder.path);});
+        menu->addSeparator();
+        for (const bool copyFolder : {false, true}) {
+            auto *targets = menu->addMenu(copyFolder ? tr("Copy to") : tr("Move to"));
+            targets->setObjectName(copyFolder ? "copyProjectFolderTo" : "moveProjectFolderTo");
+            targets->setToolTipsVisible(true);
+            for (const auto &target : m_projects->groups()) {
+                if (target.id == project || (!target.accessible && !m_allProjects->isChecked())) continue;
+                auto label = target.name;
+                label.replace('&', "&&");
+                auto *action = targets->addAction(workspaceIcon("projects", QColor(target.color)), label);
+                action->setData(target.id);
+                action->setToolTip(copyFolder ? tr("Add this folder to %1 on the same computer.").arg(target.name)
+                                            : tr("Move this folder link to %1 on the same computer.").arg(target.name));
+                connect(action, &QAction::triggered, this, [this, project, folder, destination = target.id, copyFolder] {
+                    transferFolder(project, folder, destination, copyFolder);
+                });
+            }
+            targets->setEnabled(!targets->actions().isEmpty());
+        }
         menu->addSeparator();
         auto *edit=menu->addAction(tr("Edit folder…"));edit->setObjectName("contextEditProjectFolder");
         connect(edit,&QAction::triggered,this,[this,project,folder]{editFolder(folder.id,project);});

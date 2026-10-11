@@ -50,6 +50,8 @@ private:
     void addFolder();
     void editFolder(const QString &id, const QString &projectId = {});
     void removeFolder(const QString &projectId, const QString &id);
+    void transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,
+                        const QString &destination, bool copy);
     SessionOrganization::Folder selectedFolder() const;
     QString folderOpenProblem(const SessionOrganization::Folder &folder) const;
     void openFolder(const SessionOrganization::Folder &folder);

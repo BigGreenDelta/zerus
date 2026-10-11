@@ -152,6 +152,47 @@ class Swarm(unittest.TestCase):
         self.assertEqual(self.call('a', 'get')['organization']['projects'][0]['folders'], [])
         self.assertEqual(self.call('b', 'get')['organization']['projects'][0]['folders'], [])
 
+    def test_move_and_copy_folder_links_replicate_without_moving_sessions(self):
+        self.join('a', 'b')
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        source = next(p for p in desired['projects'] if p['id'] == 'a')
+        target = next(p for p in desired['projects'] if p['id'] == 'b')
+        source['sessions'] = ['a\ncodex/example/session']
+        original = copy.deepcopy(source['folders'][0])
+        session_addresses = {'a\ncodex/example/session', original['machine_id'] + '\ncodex/example/session'}
+        duplicate = copy.deepcopy(original); duplicate['id'] = 'copied-folder'
+        target['folders'].append(duplicate)
+        destination = project('destination', 'Destination', 'a', '/unused')
+        destination['folders'] = []; desired['projects'].append(destination)
+        self.patch('a', before, desired); self.call('a', 'sync')
+        for node in ('a', 'b'):
+            groups = {p['id']: p for p in self.call(node, 'get')['organization']['projects']}
+            self.assertEqual([f['id'] for f in groups['a']['folders']], [original['id']])
+            copied = next(f for f in groups['b']['folders'] if f['id'] == 'copied-folder')
+            self.assertEqual((copied['machine_id'], copied['path'], copied['name']),
+                             (original['machine_id'], original['path'], original['name']))
+            self.assertEqual(len(groups['a']['sessions']), 1)
+            self.assertIn(groups['a']['sessions'][0], session_addresses)
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        groups = {p['id']: p for p in desired['projects']}
+        groups['destination']['folders'] = groups['a']['folders']; groups['a']['folders'] = []
+        self.patch('a', before, desired); self.call('a', 'sync')
+        for node in ('a', 'b'):
+            groups = {p['id']: p for p in self.call(node, 'get')['organization']['projects']}
+            self.assertEqual(groups['a']['folders'], [])
+            self.assertEqual([f['id'] for f in groups['destination']['folders']], [original['id']])
+            self.assertEqual(len(groups['a']['sessions']), 1)
+            self.assertIn(groups['a']['sessions'][0], session_addresses)
+            self.assertEqual(len(groups['b']['folders']), 2)
+        # Removing the moved link must leave its copied sibling intact on both nodes.
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        next(p for p in desired['projects'] if p['id'] == 'destination')['folders'] = []
+        self.patch('a', before, desired); self.call('a', 'sync')
+        for node in ('a', 'b'):
+            groups = {p['id']: p for p in self.call(node, 'get')['organization']['projects']}
+            self.assertEqual(groups['destination']['folders'], [])
+            self.assertEqual({f['id'] for f in groups['b']['folders']}, {'folder-b', 'copied-folder'})
+
     def test_worker_syncs_without_a_gui_or_reverse_connection(self):
         self.join('a', 'b')
         self.assertEqual(self.call('b', 'get')['peers'], {})

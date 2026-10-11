@@ -673,6 +673,12 @@ the sort. Sorting preserves the selected folder and does not reorder the shared
 catalog. The divider below the list adjusts the folder/worktree heights and
 remembers that choice locally; additional window height goes to the folders.
 Worktree actions share its heading row, leaving more space for the folder list.
+Right-click a folder and choose **Move to** or **Copy to**, then the destination
+project. Move transfers its catalog link; Copy keeps the original and adds a link
+to the other project. The computer, path and label are preserved, including for
+offline computers. If the destination already has that folder, its existing link
+is reused. Files and session project assignments stay in place. These catalog
+changes use the normal Swarm synchronization.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer

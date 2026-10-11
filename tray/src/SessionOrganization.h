@@ -28,6 +28,9 @@ public:
     QString addFolder(const QString &project, const QString &machine, const QString &path, const QString &name = {});
     bool editFolder(const QString &project, const QString &folder, const QString &machine, const QString &path, const QString &name);
     void removeFolder(const QString &project, const QString &folder);
+    // Transfer catalog links only; copying creates a distinct shared folder ID.
+    QString moveFolder(const QString &project, const QString &folder, const QString &destination);
+    QString copyFolder(const QString &project, const QString &folder, const QString &destination);
     bool hasImported(const QString &machine) const { return m_imported.contains(machine); }
     void markImported(const QString &machine) { if (!m_imported.contains(machine)) m_imported.append(machine); }
     void renameSession(const QString &oldId, const QString &newId);
@@ -36,6 +39,7 @@ public:
                     const QString &archive = {});
     QJsonObject toJson() const;
 private:
+    QString transferFolder(const QString &project, const QString &folder, const QString &destination, bool copy);
     QList<Group> m_groups;
     QJsonObject m_runs;
     QStringList m_imported;

@@ -182,6 +182,45 @@ void SessionOrganization::removeFolder(const QString &project, const QString &fo
     for (auto &g : m_groups) if (g.id == project) for (int i = 0; i < g.folders.size(); ++i)
         if (g.folders[i].id == folder) { g.folders.removeAt(i); return; }
 }
+QString SessionOrganization::moveFolder(const QString &project, const QString &folder, const QString &destination)
+{
+    return transferFolder(project, folder, destination, false);
+}
+QString SessionOrganization::copyFolder(const QString &project, const QString &folder, const QString &destination)
+{
+    return transferFolder(project, folder, destination, true);
+}
+QString SessionOrganization::transferFolder(const QString &project, const QString &id, const QString &destination, bool copy)
+{
+    if (project == destination || id.isEmpty()) return {};
+    int from = -1, to = -1;
+    for (int i = 0; i < m_groups.size(); ++i) {
+        if (m_groups[i].id == project) from = i;
+        if (m_groups[i].id == destination) to = i;
+    }
+    if (from < 0 || to < 0) return {};
+    int index = -1;
+    for (int i = 0; i < m_groups[from].folders.size(); ++i)
+        if (m_groups[from].folders[i].id == id) { index = i; break; }
+    if (index < 0) return {};
+    auto folder = m_groups[from].folders[index];
+    QString targetId;
+    for (const auto &existing : m_groups[to].folders) {
+        const bool sameMachine = !folder.machineId.isEmpty() && !existing.machineId.isEmpty()
+            ? folder.machineId == existing.machineId : folder.machine == existing.machine;
+        if (sameMachine && QDir::cleanPath(folder.path) == QDir::cleanPath(existing.path)) {
+            targetId = existing.id;
+            break;
+        }
+    }
+    if (targetId.isEmpty()) {
+        if (copy) folder.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        targetId = folder.id;
+        m_groups[to].folders.append(folder);
+    }
+    if (!copy) m_groups[from].folders.removeAt(index);
+    return targetId;
+}
 QJsonObject SessionOrganization::toJson() const
 {
     QJsonArray projects;

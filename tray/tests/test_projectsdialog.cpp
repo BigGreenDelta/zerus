@@ -1,6 +1,9 @@
 #include <QtTest>
 #include "ProjectsDialog.h"
 #include <QInputDialog>
+#include <QCheckBox>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include <QListWidget>
 #include <QMenu>
 #include <QSettings>
@@ -15,6 +18,11 @@ class TestProjectsDialog : public QObject {
 private slots:
     void emptyListContextCreatesProject();
     void sortingKeepsFolderIdentityAndLaunchTarget();
+    void folderTransfersKeepMenuTargetsAndPersist_data();
+    void folderTransfersKeepMenuTargetsAndPersist();
+    void folderTransferMenusRejectStaleChanges_data();
+    void folderTransferMenusRejectStaleChanges();
+    void folderTransferMenusRespectVisibleProjects();
     void folderSplitPrioritizesListAndRemembersAdjustment();
     void acceptsPlainName();
     void rejectsSlashAndSpace();
@@ -22,6 +30,125 @@ private slots:
     void warnsOnDotOrColon();
     void nameDefaultsToBasename();
 };
+
+static QMenu *folderMenu(ProjectsDialog &dialog, const QString &id)
+{
+    auto *table = dialog.findChild<QTableWidget *>("projectFolders");
+    for (int row = 0; row < table->rowCount(); ++row) if (table->item(row, 0)->data(Qt::UserRole).toString() == id) {
+        table->customContextMenuRequested(table->visualItemRect(table->item(row, 0)).center());
+        return dialog.findChild<QMenu *>("projectFolderMenu");
+    }
+    return nullptr;
+}
+
+static QAction *folderTarget(QMenu *menu, const QString &destination, bool copy)
+{
+    auto *targets = menu->findChild<QMenu *>(copy ? "copyProjectFolderTo" : "moveProjectFolderTo");
+    if (targets) for (auto *action : targets->actions()) if (action->data().toString() == destination) return action;
+    return nullptr;
+}
+
+void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist_data()
+{
+    QTest::addColumn<bool>("copy"); QTest::addColumn<QString>("machine");
+    QTest::newRow("move-local") << false << QString("local");
+    QTest::newRow("copy-local") << true << QString("local");
+    QTest::newRow("move-offline-remote") << false << QString("remote");
+    QTest::newRow("copy-offline-remote") << true << QString("remote");
+}
+
+void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist()
+{
+    QFETCH(bool, copy); QFETCH(QString, machine);
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-folder-transfer-test"); QCoreApplication::setApplicationName("projects");
+    const auto path = directory.path() + "/plain folder"; QVERIFY(QDir().mkpath(path));
+    SessionOrganization projects; const auto source = projects.createGroup("Source"), target = projects.createGroup("Work & docs");
+    const auto original = projects.addFolder(source, machine, path, "Transfer this");
+    const auto keep = projects.addFolder(source, machine, "/workspace/keep", "Keep this");
+    projects.moveSession(projects.observe(machine, "agent/session", "run-1"), source);
+    QSettings().setValue("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client); dialog.selectProject(source); dialog.show();
+    auto *menu = folderMenu(dialog, original); QVERIFY(menu);
+    QVERIFY(!folderTarget(menu, source, copy));
+    auto *action = folderTarget(menu, target, copy); QVERIFY(action); QCOMPARE(action->text(), QString("Work && docs"));
+    // A later selection and project navigation must not retarget the open menu.
+    auto *table = dialog.findChild<QTableWidget *>("projectFolders");
+    for (int row = 0; row < table->rowCount(); ++row)
+        if (table->item(row, 0)->data(Qt::UserRole).toString() == keep) table->setCurrentCell(row, 0);
+    dialog.selectProject(target);
+    QSignalSpy changed(&dialog, &ProjectsDialog::organizationChanged); action->trigger(); QCOMPARE(changed.size(), 1);
+    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    QCOMPARE(saved.group(source)->folders.size(), copy ? 2 : 1); QCOMPARE(saved.group(target)->folders.size(), 1);
+    const auto transferred = saved.group(target)->folders.first();
+    QCOMPARE(transferred.machine, machine); QCOMPARE(transferred.path, path); QCOMPARE(transferred.name, QString("Transfer this"));
+    if (copy) QVERIFY(transferred.id != original); else QCOMPARE(transferred.id, original);
+    QCOMPARE(saved.groupFor(machine + "\nagent/session"), source); QVERIFY(QDir(path).exists());
+    QCOMPARE(table->rowCount(), 1); QCOMPARE(table->item(0, 0)->data(Qt::UserRole).toString(), transferred.id);
+    delete menu;
+}
+
+void TestProjectsDialog::folderTransferMenusRejectStaleChanges_data()
+{
+    QTest::addColumn<QString>("change"); QTest::addColumn<bool>("copy");
+    for (const auto &change : {"edited-folder", "removed-folder", "removed-source", "removed-destination", "hidden-destination"}) {
+        QTest::newRow((QByteArray("move-") + change).constData()) << QString(change) << false;
+        QTest::newRow((QByteArray("copy-") + change).constData()) << QString(change) << true;
+    }
+}
+
+void TestProjectsDialog::folderTransferMenusRejectStaleChanges()
+{
+    QFETCH(QString, change); QFETCH(bool, copy);
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-folder-stale-test"); QCoreApplication::setApplicationName("projects");
+    SessionOrganization projects; const auto source = projects.createGroup("Source"), target = projects.createGroup("Target");
+    const auto original = projects.addFolder(source, "offline", "/workspace/folder", "Original");
+    HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    dialog.selectProject(source); dialog.show(); auto *menu = folderMenu(dialog, original); QVERIFY(menu);
+    auto *action = folderTarget(menu, target, copy); QVERIFY(action);
+    if (change == "edited-folder") QVERIFY(projects.editFolder(source, original, "offline", "/workspace/changed", "Changed"));
+    else if (change == "removed-folder") projects.removeFolder(source, original);
+    else if (change == "removed-source") QVERIFY(projects.removeGroup(source));
+    else if (change == "removed-destination") QVERIFY(projects.removeGroup(target));
+    else {
+        auto data = projects.toJson(); auto groups = data["projects"].toArray();
+        for (int i = 0; i < groups.size(); ++i) {
+            auto group = groups[i].toObject();
+            if (group["id"] == target) { group["accessible"] = false; groups[i] = group; }
+        }
+        data["projects"] = groups; projects = SessionOrganization(data);
+    }
+    const auto before = projects.toJson(); QSignalSpy changed(&dialog, &ProjectsDialog::organizationChanged);
+    action->trigger(); QCOMPARE(changed.size(), 0); QCOMPARE(projects.toJson(), before); delete menu;
+}
+
+void TestProjectsDialog::folderTransferMenusRespectVisibleProjects()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-folder-targets-test"); QCoreApplication::setApplicationName("projects");
+    QJsonObject source{{"id", "source"}, {"name", "Source"}, {"folders", QJsonArray{QJsonObject{
+        {"id", "folder"}, {"machine", "offline"}, {"path", "/workspace/folder"}}}}};
+    const QJsonObject hidden{{"id", "hidden"}, {"name", "Hidden"}, {"accessible", false}};
+    SessionOrganization projects({{"default_project", "source"}, {"projects", QJsonArray{source, hidden}}});
+    HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    dialog.selectProject("source"); dialog.show(); auto *menu = folderMenu(dialog, "folder"); QVERIFY(menu);
+    QVERIFY(!menu->findChild<QMenu *>("moveProjectFolderTo")->isEnabled());
+    QVERIFY(!menu->findChild<QMenu *>("copyProjectFolderTo")->isEnabled()); delete menu;
+    dialog.findChild<QCheckBox *>("allSwarmProjects")->setChecked(true);
+    menu = folderMenu(dialog, "folder"); QVERIFY(menu); QVERIFY(folderTarget(menu, "hidden", false));
+    folderTarget(menu, "hidden", true)->trigger(); QCOMPARE(projects.group("source")->folders.size(), 1);
+    QCOMPARE(projects.group("hidden")->folders.size(), 1);
+    // Repeating Copy reuses the target and does not publish a redundant catalog edit.
+    QSignalSpy changed(&dialog, &ProjectsDialog::organizationChanged);
+    folderTarget(menu, "hidden", true)->trigger(); QCOMPARE(changed.size(), 0);
+    folderTarget(menu, "hidden", false)->trigger(); QCOMPARE(changed.size(), 1);
+    QVERIFY(projects.group("source")->folders.isEmpty()); QCOMPARE(projects.group("hidden")->folders.size(), 1);
+    delete menu;
+}
 
 void TestProjectsDialog::sortingKeepsFolderIdentityAndLaunchTarget()
 {
