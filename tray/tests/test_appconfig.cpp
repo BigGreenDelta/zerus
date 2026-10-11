@@ -653,6 +653,9 @@ QString makeBundle(const QString &root, const QString &bundle, bool withHgs, boo
 
 void TestAppConfig::bundledHgsIsFoundNextToMacBundleExecutable()
 {
+#ifdef Q_OS_WIN
+    QSKIP("Windows has no executable bit for the bundle's extensionless hgs");
+#endif
     QTemporaryDir dir;
     const QString macos = makeBundle(dir.path(), QStringLiteral("Zerus.app"), true, true);
     QCOMPARE(AppConfig::bundledHgsPath(macos + QStringLiteral("/hgs-tray"), AppConfig::Platform::Mac),
