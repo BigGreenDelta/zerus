@@ -1,10 +1,8 @@
 //! Repair hook jobs whose exact native completion fell outside the recent window.
 //! Scan incrementally; retain only terminal receipts for existing job identities.
 use super::*;
-use fs2::FileExt;
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 
 const SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const LINE_BYTES: u64 = 1024 * 1024;
@@ -50,16 +48,15 @@ fn recover(record: &Value, jobs: &mut Jobs, directory: &Path, budget: u64) -> Re
         Sha256::digest(json!([path, conversation]).to_string())
     );
     let cache_path = directory.join(format!("{key}.json"));
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(directory.join(format!("{key}.lock")))
-        .map_err(|e| e.to_string())?;
-    if lock.try_lock_exclusive().is_err() {
+    // Explicitly unlock on drop: a concurrent fork may inherit the descriptor,
+    // keeping a close-only flock alive until the child executes or exits.
+    let Some(_guard) = lock_until(
+        &directory.join(format!("{key}.lock")),
+        std::time::Instant::now(),
+    )?
+    else {
         return Ok(());
-    }
+    };
     let mut cache: Value = open_regular(&cache_path)
         .ok()
         .and_then(|f| serde_json::from_reader(f.take(8 * 1024 * 1024)).ok())
