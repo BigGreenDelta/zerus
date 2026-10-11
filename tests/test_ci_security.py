@@ -266,7 +266,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             name, version = requirement[:-2].split("==")
             self.assertNotIn(name, pins)
             pins[name] = version
-        self.assertEqual((pins.get("aqtinstall"), pins.get("py7zr")), ("3.3.0", "1.1.0"))
+        self.assertEqual((pins.get("aqtinstall"), pins.get("py7zr")), ("3.3.0", "1.1.3"))
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
