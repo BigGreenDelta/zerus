@@ -77,6 +77,19 @@ class WorkflowSecurityTests(unittest.TestCase):
                 with self.subTest(key=key,result=result):
                     self.assertFalse(self.dev_selected(workflow,'channel',{**passed,key:result}))
 
+    def test_dev_passes_only_required_android_secrets_to_protected_build(self):
+        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
+        names = {'ANDROID_KEYSTORE_BASE64','ANDROID_STORE_PASSWORD','ANDROID_KEY_ALIAS',
+                 'ANDROID_KEY_PASSWORD','ANDROID_GOOGLE_SERVICES_JSON'}
+        caller = job(self.ci,'dev')
+        passed = dict(re.findall(r'(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$',caller))
+        self.assertEqual(passed,{name:name for name in names})
+        self.assertNotIn('secrets: inherit',caller)
+        header = workflow.split('\npermissions:',1)[0]
+        declared = set(re.findall(r'(?m)^      (\w+):\n        required: true$',header))
+        self.assertEqual(declared,names)
+        self.assertEqual(field(job(workflow,'android'),'environment'),'release')
+
     def test_dev_main_build_finishes_while_newer_main_waits(self):
         expression = re.search(r'(?m)^  cancel-in-progress: \$\{\{ (.*) \}\}$', self.ci)[1]
         expression = expression.replace('&&', ' and ')

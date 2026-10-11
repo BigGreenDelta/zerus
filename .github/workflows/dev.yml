@@ -2,6 +2,17 @@ name: Dev candidates
 
 on:
   workflow_call:
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_STORE_PASSWORD:
+        required: true
+      ANDROID_KEY_ALIAS:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+      ANDROID_GOOGLE_SERVICES_JSON:
+        required: true
 
 permissions:
   contents: read
