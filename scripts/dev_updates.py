@@ -204,7 +204,7 @@ class DevGitHub(GitHub):
         digest = hashlib.sha256()
         with tempfile.TemporaryFile() as archive:
             for block in self.stream('https://api.github.com' + url, MAX_BYTES,
-                                     api=True, accept='application/octet-stream'):
+                                     api=True, download=True):
                 digest.update(block)
                 archive.write(block)
             require(artifact.get('digest') == 'sha256:' + digest.hexdigest(),

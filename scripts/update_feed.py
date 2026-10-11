@@ -61,7 +61,7 @@ class GitHub:
         self.token=token
         self.opener=urllib.request.build_opener(NoRedirect)
 
-    def stream(self,url,limit,*,api=False,accept='application/vnd.github+json'):
+    def stream(self,url,limit,*,api=False,accept='application/vnd.github+json',download=False):
         allowed={'api.github.com'} if api else {'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'}
         if api:https(url,allowed)
         else:self.asset_origin(url)
@@ -80,9 +80,10 @@ class GitHub:
                 require(location,'Missing download redirect')
                 url=urllib.parse.urljoin(url,location)
                 # No authentication survives an asset redirect, even if it points
-                # back to the API. JSON API responses do not redirect at all.
-                require(accept=='application/octet-stream','Unexpected API redirect')
-                api=False;self.asset_origin(url)
+                # back to the API. Actions archive requests use the JSON media
+                # type but explicitly allow downloads; metadata never redirects.
+                require(download or accept=='application/octet-stream','Unexpected API redirect')
+                api=False;self.asset_origin(url);accept='application/octet-stream'
                 continue
             except (OSError,urllib.error.URLError):raise ValueError('GitHub transport unavailable') from None
             with response:

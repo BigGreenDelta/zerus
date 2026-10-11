@@ -11,7 +11,9 @@ import shutil
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
+from email.message import Message
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -319,6 +321,64 @@ class DevUpdateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.asset_origin('https://untrusted.blob.core.windows.net/file')
 
+    def test_actions_archive_uses_json_accept_and_strips_credentials_on_redirects(self):
+        client = dev.DevGitHub('private-token')
+        requests = []
+        targets = ['https://productionresultssa10.blob.core.windows.net/actions/file',
+                   'https://objects.githubusercontent.com/archive']
+        class Response(io.BytesIO):
+            headers = {'Content-Length': '2'}
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                if len(requests) == 1:
+                    # The live Actions ZIP endpoint rejects octet-stream.
+                    if request.get_header('Accept') != 'application/vnd.github+json':
+                        raise urllib.error.HTTPError(request.full_url, 415, 'media type', Message(), None)
+                if len(requests) <= len(targets):
+                    headers = Message()
+                    headers['Location'] = targets[len(requests)-1]
+                    raise urllib.error.HTTPError(request.full_url, 302, 'redirect', headers, None)
+                return Response(b'ok')
+        client.opener = Opener()
+        self.assertEqual(b''.join(client.stream(
+            'https://api.github.com/repos/ufna/zerus/actions/artifacts/123/zip',
+            2, api=True, download=True)), b'ok')
+        self.assertEqual(requests[0].get_header('Authorization'), 'Bearer private-token')
+        for request in requests[1:]:
+            self.assertIsNone(request.get_header('Authorization'))
+            self.assertEqual(request.get_header('Accept'), 'application/octet-stream')
+
+    def test_actions_download_rejects_untrusted_and_api_redirect_targets(self):
+        for target in ('https://untrusted.blob.core.windows.net/file',
+                       'https://api.github.com/repos/ufna/zerus/actions/artifacts/123/zip'):
+            with self.subTest(target=target):
+                client = dev.DevGitHub('private-token')
+                requests = []
+                class Opener:
+                    def open(self, request, timeout):
+                        requests.append(request)
+                        headers = Message()
+                        headers['Location'] = target
+                        raise urllib.error.HTTPError(request.full_url, 302, 'redirect', headers, None)
+                client.opener = Opener()
+                with self.assertRaises(ValueError):
+                    b''.join(client.stream(
+                        'https://api.github.com/repos/ufna/zerus/actions/artifacts/123/zip',
+                        2, api=True, download=True))
+                self.assertEqual(len(requests), 1)
+
+    def test_metadata_api_still_rejects_redirects(self):
+        client = dev.DevGitHub('private-token')
+        class Opener:
+            def open(self, request, timeout):
+                headers = Message()
+                headers['Location'] = 'https://objects.githubusercontent.com/archive'
+                raise urllib.error.HTTPError(request.full_url, 302, 'redirect', headers, None)
+        client.opener = Opener()
+        with self.assertRaisesRegex(ValueError, 'Unexpected API redirect'):
+            client.api('/repos/ufna/zerus/actions/runs/101')
+
     def test_collection_and_dry_run_reject_symlinked_parent_paths(self):
         self.root.mkdir()
         outside = self.base / 'outside'
@@ -350,6 +410,7 @@ class DevUpdateTests(unittest.TestCase):
             def api(self, path):
                 return rows
             def stream(self, url, *args, **kwargs):
+                assert kwargs == {'api': True, 'download': True}
                 self.downloaded = url
                 yield data
         client = Client()
