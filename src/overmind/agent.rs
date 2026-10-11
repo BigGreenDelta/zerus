@@ -4,10 +4,10 @@ use super::commands::{
     check_project, check_text, created_payload, load, load_writable, next_rank, parse, prove, reference, refuse,
     resolve, store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_FIELD,
 };
-use super::fold::{fold_many, Task};
+use super::fold::{fold_many, project_workflow, Task};
 use super::model::*;
 use super::store::{Filter, Tx};
-use super::workflow::{Action, Evidence, Role};
+use super::workflow::{Action, Evidence, Role, Workflow};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -34,13 +34,26 @@ fn fields(pairs: &[(&str, &Option<String>)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Tasks still in play: not deleted and not in a Done or parked stage.
+fn open_tasks(events: &[Event]) -> Vec<Task> {
+    let refs: Vec<&Event> = events.iter().collect();
+    let mut workflows: BTreeMap<String, Workflow> = BTreeMap::new();
+    fold_many(events)
+        .into_values()
+        .filter(|t| {
+            let wf = workflows.entry(t.project.clone()).or_insert_with(|| project_workflow(&refs, &t.project));
+            !t.deleted && !matches!(wf.role(&t.stage), Some(Role::Done | Role::Parked))
+        })
+        .collect()
+}
+
 pub fn mine(ctx: &mut Ctx) -> Result<Value> {
     let me = agent_only(&ctx.actor)?;
     let events = ctx.store.load(&Filter::All)?;
     let names = super::refs::refs(&ctx.store.task_ids()?);
-    let tasks: Vec<Value> = fold_many(&events)
-        .into_values()
-        .filter(|t| !t.deleted && (t.assignee.as_ref() == Some(&me) || t.reviewer.as_ref() == Some(&me)))
+    let tasks: Vec<Value> = open_tasks(&events)
+        .into_iter()
+        .filter(|t| t.assignee.as_ref() == Some(&me) || t.reviewer.as_ref() == Some(&me))
         .map(|t| {
             let mut v = view(&t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false);
             v["role"] = json!(if t.reviewer.as_ref() == Some(&me) { "reviewer" } else { "assignee" });
@@ -253,9 +266,10 @@ struct FileRequest {
     project: Option<String>,
 }
 
+/// Open tasks assigned to the session.
 fn my_tasks(tx: &Tx, me: &SessionRef) -> Result<Vec<Task>> {
     let events = tx.load(&Filter::All)?;
-    Ok(fold_many(&events).into_values().filter(|t| !t.deleted && t.assignee.as_ref() == Some(me)).collect())
+    Ok(open_tasks(&events).into_iter().filter(|t| t.assignee.as_ref() == Some(me)).collect())
 }
 
 pub fn file(ctx: &mut Ctx, request: Value) -> Result<Value> {
@@ -271,11 +285,13 @@ pub fn file(ctx: &mut Ctx, request: Value) -> Result<Value> {
             (Some(project), _) => project.to_owned(),
             (None, false) => load(tx, &related)?.project,
             (None, true) => {
-                let mut own = my_tasks(tx, &me)?;
-                if own.len() != 1 {
+                // The one project the session works in, if its open tasks agree.
+                let projects: BTreeSet<String> =
+                    my_tasks(tx, &me)?.into_iter().map(|t| t.project).filter(|p| !p.is_empty()).collect();
+                if projects.len() != 1 {
                     return Err(Refusal::field("missing_field", "project", "missing", "name the project or the related task").into());
                 }
-                own.remove(0).project
+                projects.into_iter().next().unwrap_or_default()
             }
         };
         let backlog = workflow(tx, &project)?.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default();
@@ -419,6 +435,39 @@ mod tests {
         let board = commands::board(&mut Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None }, json!({"project": "p"})).unwrap();
         let build: Vec<&str> = board["tasks"].as_array().unwrap().iter().filter(|t| t["stage"] == "Build").map(|t| t["uuid"].as_str().unwrap()).collect();
         assert_eq!(build, vec![other.as_str(), task.as_str()]);
+    }
+
+    #[test]
+    fn mine_leaves_out_done_and_parked_tasks() {
+        let (_dir, mut store, task) = setup();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "s"})).unwrap();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();
+        assert_eq!(mine(&mut agent(&mut store, "w1", None)).unwrap()["tasks"].as_array().unwrap().len(), 1);
+        commands::done(&mut Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None }, json!({"task": task})).unwrap();
+        assert!(mine(&mut agent(&mut store, "w1", None)).unwrap()["tasks"].as_array().unwrap().is_empty());
+        let (_dir, mut store, task) = setup();
+        commands::move_task(&mut Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None }, json!({"task": task, "to": "Icebox"})).unwrap();
+        assert!(mine(&mut agent(&mut store, "w1", None)).unwrap()["tasks"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_infers_the_one_project_of_open_tasks() {
+        let (_dir, mut store, _task) = setup();
+        let claim = |store: &mut Store, project: &str| {
+            let mut human = Ctx { store, actor: Actor::human(MACHINE), cwd: None };
+            let uuid = commands::create(&mut human, json!({"project": project, "prompt": "More", "stage": "Queue"})).unwrap()["task"]["uuid"].as_str().unwrap().to_owned();
+            store.write(|tx| {
+                let current = commands::load(tx, &uuid)?;
+                commands::transition(tx, &Actor::human(MACHINE), &current, Action::Claim, "Design", BTreeMap::new(), Some(SessionRef { machine: MACHINE.into(), name: "w1".into() }), vec![], "")?;
+                Ok(())
+            }).unwrap();
+        };
+        claim(&mut store, "p");
+        let filed = file(&mut agent(&mut store, "w1", None), json!({"prompt": "a", "breaks": "b"})).unwrap();
+        assert_eq!(filed["task"]["project"], "p");
+        claim(&mut store, "q");
+        let unclear = file(&mut agent(&mut store, "w1", None), json!({"prompt": "a", "breaks": "b"})).unwrap_err();
+        assert_eq!(refusal(unclear).field, "project");
     }
 
     #[test]
