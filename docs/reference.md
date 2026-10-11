@@ -32,8 +32,8 @@ can run through `hgs`; native lifecycle and Activity functions require an adapte
 
 ### Session references
 
-**Copy session reference** beside the desktop session title and in its context
-menu copies a `zerus://session?...` URI. Android offers the same action in the
+**Copy session reference** in the desktop session context menu copies a
+`zerus://session?...` URI. Android offers the same action in the
 session toolbar and menu. It contains the stable computer UUID, a native machine
 name for routing, the session name and exact conversation identity; child and
 archive references include their explicit identities. It contains no credentials.
@@ -53,10 +53,13 @@ guards ensure a copy action still addresses the selected conversation.
 
 Native conversation IDs appear only in **Details** on desktop and **Session
 details → Overview** on Android, labeled **Session ID** with a dedicated copy
-button beside the exact identifier. The button copies the ID as plain text;
-**Copy session reference** continues to copy the portable URI. Before
-that ID is reported, **Run ID** identifies the current process run; it can change
-on resume. Child details also show their agent ID. Search accepts complete IDs or
+icon immediately after the exact identifier. The desktop icon uses the same
+borderless style as header actions. The ID stays on one line whenever the pane
+has room. The icon copies the ID as plain text;
+**Copy session reference** remains in the desktop session context menu and copies
+the portable URI. Before that ID is reported, **Run ID** identifies the current
+process run; it can change on resume. Child details also show their agent ID.
+Search accepts complete IDs or
 parts of conversation, run, archive and reported child IDs; a child match
 identifies its parent conversation.
 Machine, project and state filters still apply. Desktop ID results show the

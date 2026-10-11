@@ -97,6 +97,18 @@ namespace {
 
 enum Roles { KeyRole = SessionRoles::Key, TitleRole, MetaRole, StatusRole, DetailRole, AgentRole, HostRole, ChildrenRole };
 
+class SessionIdentityLabel : public QLabel {
+public:
+    using QLabel::QLabel;
+    QSize sizeHint() const override {
+        // QLabel's wrapped size hint may prefer two lines even when one fits.
+        // Prefer the complete ID; heightForWidth still handles a narrower pane.
+        const auto insets = contentsMargins();
+        return {fontMetrics().horizontalAdvance(text()) + insets.left() + insets.right() + 2 * margin(),
+                fontMetrics().height() + insets.top() + insets.bottom() + 2 * margin()};
+    }
+};
+
 class StatusMessage : public QLabel {
 public:
     StatusMessage() {
@@ -472,9 +484,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *badges = new QHBoxLayout; badges->setSpacing(4);
     m_title = label({}, "detailTitle"); m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_title->setMinimumWidth(70);
     badges->addWidget(m_title, 1);
-    m_copyReference = iconButton("copy", tr("Copy session reference"), "copySessionReferenceAction");
-    connect(m_copyReference, &QPushButton::clicked, this, [this]{ if(const auto *entry=selected()) copySessionReference(*entry,m_subagentId); });
-    badges->addWidget(m_copyReference);
     connect(&m_client,&HgsClient::sessionReferenceReady,this,[this](const QString &uri){emit copyTextRequested(uri);showNotice(tr("Session reference copied"));});
     connect(&m_client,&HgsClient::sessionReferenceFailed,this,[this](const QString &error){showNotice(error,true);});
     m_badge = label({}, "badge"); m_badge->setFixedHeight(24);
@@ -490,7 +499,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_pause, &QPushButton::clicked, this, &SessionsWindow::changeSession);
     badges->addWidget(m_fileManager); badges->addWidget(m_shell); badges->addWidget(m_open); badges->addWidget(m_pause);
     m_more = iconButton("more", tr("Session actions"), "more");
-    for (auto *button : {m_copyReference, m_fileManager, m_shell, m_open, m_pause, m_more}) {
+    for (auto *button : {m_fileManager, m_shell, m_open, m_pause, m_more}) {
         button->setProperty("sessionHeaderAction", true);
         configureWorkspaceIconButton(button, button->property("glyph").toString(), button->toolTip(), m_dark);
     }
@@ -921,18 +930,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *identityLayout = new QVBoxLayout(identity); identityLayout->setContentsMargins(4,8,4,2); identityLayout->setSpacing(4);
     m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); identityLayout->addWidget(m_detailsIdTitle);
     auto *identityRow = new QHBoxLayout;
-    m_detailsIdValue = label(tr("Not confirmed"), "detailsIdentityValue"); m_detailsIdValue->setWordWrap(true);
-    m_detailsIdValue->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
+    m_detailsIdValue = new SessionIdentityLabel(tr("Not confirmed"));
+    m_detailsIdValue->setObjectName("detailsIdentityValue"); m_detailsIdValue->setTextFormat(Qt::PlainText);
+    m_detailsIdValue->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
+    m_detailsIdValue->setWordWrap(true);
     m_detailsIdValue->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    identityRow->addWidget(m_detailsIdValue, 1);
+    identityRow->addWidget(m_detailsIdValue);
     m_copySessionId = iconButton("copy", tr("Copy session ID"), "copySessionIdAction"); m_copySessionId->setAutoDefault(false);
+    m_copySessionId->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
     connect(m_copySessionId, &QPushButton::clicked, this, [this] {
         const auto value = m_detailsIdValue->property("copyValue").toString();
         if (!selected() || value.isEmpty()) return;
         emit copyTextRequested(value); showNotice(tr("%1 copied").arg(m_detailsIdTitle->text()));
     });
-    identityRow->addWidget(m_copySessionId); identityLayout->addLayout(identityRow);
+    identityRow->addWidget(m_copySessionId); identityRow->addStretch(); identityLayout->addLayout(identityRow);
     detailsLayout->addWidget(identity); detailsLayout->addWidget(m_info,1);
     auto *contextRow=new QHBoxLayout;m_detailsContext=new QLabel;m_detailsContext->setObjectName("detailsContext");m_detailsContext->setWordWrap(true);
     m_detailsClear=new QPushButton(tr("Clear session"));m_detailsClear->setObjectName("clearSessionFromDetails");m_detailsClear->setAutoDefault(false);
@@ -2609,13 +2621,11 @@ void SessionsWindow::renderDetails()
     if (!entry) {
         m_detailsIdValue->setText(tr("Not confirmed")); m_detailsIdValue->setProperty("copyValue", QString());
         m_copySessionId->setEnabled(false);
-        m_copyReference->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     auto s = entry->session;
-    m_copyReference->setEnabled(entry->online && !s.runId.isEmpty());
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
         s.phase = m_details.value("phase").toString(s.phase); s.activity = m_details.value("activity").toString(s.activity);

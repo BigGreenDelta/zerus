@@ -3175,16 +3175,26 @@ void TestSessionsWindow::copySessionReferencePreservesSelectionAndDraft()
     SessionsWindow window(program);window.setFleet(state);window.show();window.showSession({},box.sessions[0].name);
     auto *composer=window.findChild<MessageComposer *>("messageComposer");composer->editor()->setPlainText("Keep this draft");
     QSignalSpy copied(&window,&SessionsWindow::copyTextRequested),activated(&window,&SessionsWindow::sessionActivated);
-    auto *button=window.findChild<QPushButton *>("copySessionReferenceAction");QVERIFY(button);QVERIFY(button->isEnabled());button->click();
+    QVERIFY(!window.findChild<QPushButton *>("copySessionReferenceAction"));
+    auto *list=window.findChild<QListWidget *>("sessionList");
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu");QVERIFY(menu);
+    const auto referenceAction=[&]() {
+        const QPoint point=list->visualItemRect(list->currentItem()).center();
+        QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(list->viewport(),&event);
+        return menu->findChild<QAction *>("contextCopyReference");
+    };
+    auto *action=referenceAction();QVERIFY(action);QVERIFY(action->isEnabled());action->trigger();menu->hide();
     QTRY_COMPARE(copied.size(),1);QCOMPARE(copied[0][0].toString(),uri);QCOMPARE(activated.size(),0);QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
     QFile args(program+".args");QVERIFY(args.open(QIODevice::ReadOnly));QCOMPARE(args.readAll(),QByteArray("reference\ncodex/hgs/dashboard\n--json\n--run\nrun\n--conversation\nconversation-one\n"));
-    box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(!button->isEnabled());
+    box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    action=referenceAction();QVERIFY(action);QVERIFY(!action->isEnabled());menu->hide();
 }
 void TestSessionsWindow::sessionIdentifiersRemainInDetailsAcrossNavigation()
 {
     QSettings().setValue("workspace/inspectorVisible", true); QSettings().setValue("workspace/inspectorTab", 1);
     auto state = fleet(); auto box = state.local();
-    box.ok = false; box.sessions[0].conversationId = "11111111-1111-4111-8111-111111111111";
+    box.ok = false; box.sessions[0].conversationId = "12345678-9abc-4def-8123-456789abcdef";
     box.sessions[1].conversationId.clear(); box.sessions[1].runId = "unconfirmed-run";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(script()); window.resize(820, 700); window.setFleet(state); window.show();
@@ -3199,6 +3209,10 @@ void TestSessionsWindow::sessionIdentifiersRemainInDetailsAcrossNavigation()
             if (!parent->rect().contains(QRect(copy->mapTo(parent, QPoint()), copy->size()))) return false;
         return true;
     };
+    QTRY_VERIFY(copyFits());
+    window.resize(1280, 700);
+    window.findChild<QSplitter *>("sessionWorkSplitter")->setSizes({600, 420});
+    QTRY_VERIFY(value->width() >= value->fontMetrics().horizontalAdvance(value->text()));
     QTRY_VERIFY(copyFits());
     QCOMPARE(title->text(), QString("Session ID")); QCOMPARE(value->text(), box.sessions[0].conversationId);
     QVERIFY(value->textInteractionFlags().testFlag(Qt::TextSelectableByMouse));
