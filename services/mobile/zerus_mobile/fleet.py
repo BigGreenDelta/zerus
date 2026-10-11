@@ -156,7 +156,8 @@ class Fleet:
                 current = self.routes.get(identity)
                 if current != row or (identity, row["machine_id"]) not in self.published:
                     return
-                await self.connector.http(client, "POST", f"/v1/node/peers/{identity}/heartbeat", body)
+                await self.connector.post_with_presence(client, f"/v1/node/peers/{identity}/heartbeat",
+                                                        body, self.contexts[identity].presence)
             except self.error as error:
                 # Missing routes are ordinary withdrawal/revocation races. Only
                 # an unsupported POST method identifies endpoint incompatibility;

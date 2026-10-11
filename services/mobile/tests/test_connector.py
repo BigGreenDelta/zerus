@@ -66,6 +66,31 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.connector.journal.close()
         self.temp.cleanup()
 
+    async def test_desktop_presence_travels_beside_the_snapshot_with_old_relay_fallback(self):
+        presence = {'idle_seconds': 4.0, 'locked': False, 'locked_seconds': None}
+        self.hgs.write_text(FAKE_HGS.replace("'hgs_version': '9.8.7', ", "'hgs_version': '9.8.7', 'desktop_presence': %r, " % presence))
+        snapshot = await self.connector.snapshot()
+        self.assertNotIn('desktop_presence', snapshot)
+        self.assertEqual(self.connector.presence, presence)
+        sent = []
+
+        async def http(client, method, path, body=None):
+            sent.append(body)
+            if 'presence' in body and len(sent) == 1:
+                raise RelayError(400)  # A relay predating the additive field.
+            return {'ok': True}
+
+        self.connector.http = http
+        for _ in range(2):
+            await self.connector.post_with_presence(None, '/v1/node/heartbeat', {'snapshot': snapshot}, self.connector.presence)
+        self.assertEqual([sorted(body) for body in sent], [['presence', 'snapshot'], ['snapshot'], ['snapshot']])
+        self.connector.presence_retry_at = 0.0  # The periodic probe found a newer relay.
+        await self.connector.post_with_presence(None, '/v1/node/heartbeat', {'snapshot': snapshot}, None)
+        self.assertEqual(sent[-1], {'snapshot': snapshot, 'presence': None})
+        self.hgs.write_text(FAKE_HGS)  # The desktop GUI stopped reporting presence.
+        await self.connector.snapshot()
+        self.assertIsNone(self.connector.presence)
+
     async def test_cli_version_survives_enrichment_and_legacy_snapshots_remain_supported(self):
         snapshot = await self.connector.snapshot()
         self.assertEqual(snapshot['hgs_version'], '9.8.7')

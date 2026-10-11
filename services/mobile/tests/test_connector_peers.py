@@ -125,6 +125,19 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ConnectorError, 'conflicts'):
             await self.connector.execute(changed)
 
+    async def test_peer_presence_travels_beside_its_snapshot(self):
+        presence = {'idle_seconds': 7.0, 'locked': True, 'locked_seconds': 3.0}
+        self.inventory['presence'] = {PEER: presence}
+        self.write_inventory()
+        self.connector.fleet.confirm_manifest(self.connector.fleet.heartbeat(await self.connector.snapshot()))
+        with patch.object(self.connector, 'http', AsyncMock(return_value={})) as http:
+            await self.connector.fleet.publish(None)
+        path, body = http.call_args.args[2], http.call_args.args[3]
+        self.assertEqual(path, f'/v1/node/peers/{self.identity}/heartbeat')
+        self.assertNotIn('desktop_presence', body['snapshot'])
+        self.assertEqual(body['presence'], presence)
+        self.assertIsNone(self.connector.presence)
+
     async def test_restart_claimed_mutation_does_not_replay_peer(self):
         request = self.request('send')
         import hashlib
@@ -319,7 +332,7 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         stop = asyncio.Event()
         async def http(*args, **kwargs):
             body = args[3]; calls.append(body)
-            if len(calls) == 1: raise RelayError(400)
+            if 'machine_id' in body: raise RelayError(400)  # A relay predating gateway fields.
             stop.set()
         with patch.object(self.connector, 'http', http):
             task = asyncio.create_task(self.connector.heartbeats(None))
@@ -327,8 +340,8 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
         self.assertIn('machine_id', calls[0])
-        self.assertEqual(set(calls[1]), {'snapshot'})
-        self.assertNotIn('gateway_one_hop', calls[1]['snapshot']['mobile_capabilities']['features'])
+        self.assertEqual(set(calls[-1]), {'snapshot', 'presence'})  # Presence survives the gateway fallback.
+        self.assertNotIn('gateway_one_hop', calls[-1]['snapshot']['mobile_capabilities']['features'])
 
     async def test_mark_read_reaches_only_the_selected_machine(self):
         for peer in (True, False):

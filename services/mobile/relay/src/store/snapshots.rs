@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    db::{f, Tx},
+    alerts::{Delivery, Presence},
+    db::{f, Arg, Tx},
     protocol::{self, MIB},
     registry,
 };
@@ -46,7 +47,8 @@ impl Store {
             t.commit().await?;
             self.db.signal(topic);
         }
-        self.snapshot(c, None, &b["snapshot"], encoded).await
+        self.snapshot(c, None, &b["snapshot"], &b["presence"], encoded)
+            .await
     }
     pub async fn peer_heartbeat(
         &self,
@@ -59,6 +61,7 @@ impl Store {
             c,
             Some((route, s(b, "machine_id"))),
             &b["snapshot"],
+            &b["presence"],
             encoded,
         )
         .await
@@ -68,13 +71,30 @@ impl Store {
         c: &Credential,
         peer: Option<(&str, &str)>,
         snapshot: &Value,
+        presence: &Value,
         encoded: &str,
     ) -> Result<()> {
         if encoded.len() > MIB {
             return Err(Error::LARGE);
         }
         let hash = digest(encoded);
-        if peer.is_none() && self.db.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await?!=0{return Ok(());}
+        // Older connectors forward the desktop's presence inside the snapshot.
+        let received = now();
+        let presence = Presence::from_value(presence, received)
+            .or_else(|| Presence::from_value(&snapshot["desktop_presence"], received));
+        if peer.is_none() {
+            let mut t = self.db.begin().await?;
+            if t.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await? != 0 {
+                // Unchanged content: remember presence without rewriting the snapshot.
+                if let Some(p) = presence {
+                    Self::remember_presence(&mut t, None, &c.id, p).await?;
+                }
+                t.commit().await?;
+                return Ok(());
+            }
+            // SQLite has one connection; release it before the full path.
+            drop(t);
+        }
         for _ in 0..3 {
             let previous=if let Some((route,_))=peer {
                 self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0",args![&c.id,route]).await?
@@ -131,11 +151,12 @@ impl Store {
             if let Some((route, _)) = peer {
                 t.exec("UPDATE computer_routes SET snapshot=?,snapshot_hash=?,last_seen=? WHERE gateway_id=? AND route_id=?",args![encoded,&hash,now(),&c.id,route]).await?;
             } else {
-                t.exec(
-                    "UPDATE nodes SET snapshot=?,snapshot_hash=?,last_seen=? WHERE id=?",
-                    args![encoded, &hash, now(), &c.id],
-                )
-                .await?;
+                let delivery =
+                    Delivery::from_snapshot(snapshot).map_or(Arg::Null, |d| Arg::Text(d.name()));
+                t.exec("UPDATE nodes SET snapshot=?,snapshot_hash=?,last_seen=?,mobile_delivery=? WHERE id=?",args![encoded,&hash,now(),delivery,&c.id]).await?;
+            }
+            if let Some(p) = presence {
+                Self::remember_presence(&mut t, peer.map(|(route, _)| route), &c.id, p).await?;
             }
             if !changes.is_empty() {
                 self.publish(&mut t, &c.workspace, s(&current, "computer_id"), &changes)
@@ -150,6 +171,25 @@ impl Store {
             return Ok(());
         }
         Err(Error::CONFLICT)
+    }
+    /// Remembers a machine's latest presence with its receipt time. A heartbeat
+    /// without valid presence keeps the stored value, which then goes stale.
+    async fn remember_presence(
+        t: &mut Tx,
+        route: Option<&str>,
+        gateway: &str,
+        p: Presence,
+    ) -> Result<()> {
+        if let Some(route) = route {
+            t.exec("UPDATE computer_routes SET presence_at=?,presence_until=? WHERE gateway_id=? AND route_id=?",args![p.received,p.away_since,gateway,route]).await?;
+        } else {
+            t.exec(
+                "UPDATE nodes SET presence_at=?,presence_until=? WHERE id=?",
+                args![p.received, p.away_since, gateway],
+            )
+            .await?;
+        }
+        Ok(())
     }
     async fn event_locks(&self, t: &mut Tx, w: &str, count: usize) -> Result<()> {
         let fleet = t

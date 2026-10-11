@@ -37,7 +37,10 @@ if argv == ['--help']:
 elif argv[0] == 'ls':
     launch = root / ('launch-' + machine + '.json')
     sessions = [base] + ([json.loads(launch.read_text())] if launch.exists() else [])
-    print(json.dumps({'sessions': sessions, 'peers': [{'via': 'never-export-third-peer'}]}))
+    listing = {'sessions': sessions, 'peers': [{'via': 'never-export-third-peer'}]}
+    if isinstance(inventory.get('presence', {}).get(machine), dict):
+        listing['desktop_presence'] = inventory['presence'][machine]
+    print(json.dumps(listing))
 elif argv[0] == 'inspect':
     print(json.dumps({**base, 'events': [], 'pending_questions': []}))
 elif argv[:2] == ['account', 'ls']:

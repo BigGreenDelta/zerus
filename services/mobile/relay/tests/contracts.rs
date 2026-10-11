@@ -89,9 +89,44 @@ impl Fixture {
         assert_eq!(active["n"], usage["active"]);
         t.commit().await.unwrap();
     }
+    /// A heartbeat from a connector that never sends presence.
+    async fn beat(&self, snapshot: &Value) {
+        self.store
+            .heartbeat(
+                &self.node,
+                &json!({ "snapshot": snapshot }),
+                &canonical(snapshot).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    async fn beat_with(&self, snapshot: &Value, presence: &Value) {
+        self.store
+            .heartbeat(
+                &self.node,
+                &json!({"snapshot":snapshot,"presence":presence}),
+                &canonical(snapshot).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    async fn node_row(&self, columns: &str) -> Value {
+        self.store
+            .db
+            .one(
+                &format!("SELECT {columns} FROM nodes WHERE id=?"),
+                args![&self.node.id],
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
     async fn close(self) {
         self.store.db.close().await;
     }
+}
+fn presence(idle: f64, locked: Option<f64>) -> Value {
+    json!({"idle_seconds":idle,"locked":locked.is_some(),"locked_seconds":locked})
 }
 #[tokio::test]
 async fn claims_and_receipts_never_replay() {
@@ -421,6 +456,89 @@ async fn one_hop_routes_freeze_and_withdraw() {
         "uncertain"
     );
     f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
+async fn heartbeats_store_presence_outside_the_snapshot() {
+    let empty = json!({"sessions":[]});
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":null})).is_ok());
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":presence(1.0, None)})).is_ok());
+    assert!(protocol::heartbeat(&json!({"snapshot":empty,"presence":"idle"})).is_err());
+    let machine = Uuid::new_v4().to_string();
+    assert!(protocol::peer_heartbeat(
+        &json!({"machine_id":machine,"snapshot":empty,"presence":presence(1.0, None)})
+    )
+    .is_ok());
+    assert!(protocol::peer_heartbeat(
+        &json!({"machine_id":machine,"snapshot":empty,"presence":[]})
+    )
+    .is_err());
+    let f = Fixture::new().await;
+    let snapshot = json!({"sessions":[],"preferences":{"mobile_delivery":"away_10"}});
+    let before = now();
+    f.beat_with(&snapshot, &presence(30.0, None)).await;
+    let row = f
+        .node_row("presence_at,presence_until,mobile_delivery")
+        .await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!(at >= before && at <= now());
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 30.0 + 120.0)).abs() < 1e-6);
+    assert_eq!(row["mobile_delivery"], "away_10");
+    // A presence-only change is remembered without rewriting the unchanged snapshot.
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot='{}' WHERE id=?",
+            args![&f.node.id],
+        )
+        .await
+        .unwrap();
+    f.beat_with(&snapshot, &presence(5.0, Some(1.0))).await;
+    let row = f.node_row("snapshot,presence_at,presence_until").await;
+    assert_eq!(row["snapshot"], "{}");
+    let locked = row["presence_at"].as_f64().unwrap();
+    assert!(
+        locked >= at && (row["presence_until"].as_f64().unwrap() - (locked - 1.0)).abs() < 1e-6
+    );
+    // Null, absent and malformed presence keep the remembered value.
+    let remembered = f.node_row("presence_at,presence_until").await;
+    f.beat_with(&snapshot, &Value::Null).await;
+    f.beat(&snapshot).await;
+    f.beat_with(
+        &json!({"sessions":[],"preferences":{"mobile_delivery":"away_45"}}),
+        &json!({"idle_seconds":"5","locked":false}),
+    )
+    .await;
+    assert_eq!(f.node_row("presence_at,presence_until").await, remembered);
+    assert!(f.node_row("mobile_delivery").await["mobile_delivery"].is_null());
+    f.close().await;
+}
+#[tokio::test]
+async fn older_connectors_forward_presence_inside_the_snapshot() {
+    let f = Fixture::new().await;
+    let with = |p: Value| json!({"sessions":[],"desktop_presence":p});
+    let before = now();
+    f.beat(&with(presence(30.0, None))).await;
+    let row = f.node_row("presence_at,presence_until,snapshot").await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!(at >= before && at <= now());
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 30.0 + 120.0)).abs() < 1e-6);
+    // The stored snapshot stays verbatim.
+    assert!(row["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("desktop_presence"));
+    // Malformed embedded presence keeps the previous values.
+    let remembered = f.node_row("presence_at,presence_until").await;
+    f.beat(&with(json!({"idle_seconds":"5","locked":false})))
+        .await;
+    assert_eq!(f.node_row("presence_at,presence_until").await, remembered);
+    // A valid heartbeat field wins over the embedded fallback.
+    f.beat_with(&with(presence(30.0, None)), &presence(5.0, Some(1.0)))
+        .await;
+    let row = f.node_row("presence_at,presence_until").await;
+    let at = row["presence_at"].as_f64().unwrap();
+    assert!((row["presence_until"].as_f64().unwrap() - (at - 1.0)).abs() < 1e-6);
     f.close().await;
 }
 #[tokio::test]

@@ -644,9 +644,30 @@ pub fn snapshot(v: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub fn heartbeat(v: &Value) -> Result<()> {
-    fields(v, &["snapshot"], &["machine_id", "peers"])?;
+/// Optional desktop presence beside a snapshot. The alert rule reads its
+/// fields; a malformed object only counts as missing presence.
+pub fn presence(v: &Value) -> Result<()> {
+    if v.is_null() || v.as_object().is_some_and(|o| o.len() <= 16) {
+        Ok(())
+    } else {
+        Err(Error::BAD)
+    }
+}
+pub fn peer_heartbeat(v: &Value) -> Result<()> {
+    fields(v, &["machine_id", "snapshot"], &["presence"])?;
+    uuid(&v["machine_id"], false)?;
     snapshot(&v["snapshot"])?;
+    if let Some(p) = v.get("presence") {
+        presence(p)?;
+    }
+    Ok(())
+}
+pub fn heartbeat(v: &Value) -> Result<()> {
+    fields(v, &["snapshot"], &["machine_id", "peers", "presence"])?;
+    snapshot(&v["snapshot"])?;
+    if let Some(p) = v.get("presence") {
+        presence(p)?;
+    }
     if let Some(m) = v.get("machine_id") {
         uuid(m, false)?;
     }

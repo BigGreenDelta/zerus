@@ -274,6 +274,7 @@ class Connector:
         self._init_machine_context(binding)
         from .fleet import Fleet
         self.fleet = Fleet(self, ConnectorError)
+        self.presence_retry_at = 0.0  # Relays predating `presence` reject it; probe again later.
 
     def _init_machine_context(self, fallback_id: str) -> None:
         """Initialize only machine caches; never open another durable journal."""
@@ -296,6 +297,7 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.capabilities_next_poll = 0.0
+        self.presence = None  # Latest listing desktop_presence; sent beside, never inside, the snapshot.
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
                                      errors=(ConnectorError, ValueError, RuntimeError, UnicodeError))
 
@@ -443,6 +445,10 @@ class Connector:
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
             raise ConnectorError("native snapshot has invalid format")
         snapshot.pop("peers", None)  # Native SSH aliases and peer-of-peer inventory stay local.
+        # Presence ages on every listing; keeping it out of the snapshot preserves
+        # the relay's unchanged-snapshot shortcut.
+        presence = snapshot.pop("desktop_presence", None)
+        self.presence = presence if isinstance(presence, dict) else None
         self.sessions = {row["name"] for row in snapshot["sessions"]
                          if isinstance(row, dict) and isinstance(row.get("name"), str)
                          and not is_archived(row)}
@@ -1105,14 +1111,14 @@ class Connector:
                 snapshot = await self.snapshot()
                 body = self.fleet.heartbeat(snapshot)
                 try:
-                    await self.http(client, "POST", "/v1/node/heartbeat", body)
+                    await self.post_with_presence(client, "/v1/node/heartbeat", body, self.presence)
                 except RelayError as error:
                     if len(body) == 1 or error.status not in {400, 404, 422}:
                         raise
                     self.fleet.relay_supported = False
                     snapshot["mobile_capabilities"]["features"] = [feature for feature in
                         snapshot["mobile_capabilities"]["features"] if feature != "gateway_one_hop"]
-                    await self.http(client, "POST", "/v1/node/heartbeat", {"snapshot": snapshot})
+                    await self.post_with_presence(client, "/v1/node/heartbeat", {"snapshot": snapshot}, self.presence)
                 else:
                     self.fleet.confirm_manifest(body)
                 delay = self.interval
@@ -1120,6 +1126,21 @@ class Connector:
                 LOG.warning("Heartbeat: %s", error)
                 delay = min(60, max(self.interval, delay * 2))
             await asyncio.sleep(delay)
+
+    async def post_with_presence(self, client: aiohttp.ClientSession, path: str, body: dict, presence) -> None:
+        """Send presence beside a snapshot. An older relay rejects the additive
+        field with 400/422; retry without it and probe again after five minutes."""
+        if time.monotonic() < self.presence_retry_at:
+            await self.http(client, "POST", path, body)
+            return
+        try:
+            await self.http(client, "POST", path, {**body, "presence": presence})
+        except RelayError as error:
+            if error.status not in {400, 422}:
+                raise
+            await self.http(client, "POST", path, body)
+            # Only a plain success proves the field, not other body content, was refused.
+            self.presence_retry_at = time.monotonic() + 300
 
     async def requests(self, client: aiohttp.ClientSession) -> None:
         delay = 1
