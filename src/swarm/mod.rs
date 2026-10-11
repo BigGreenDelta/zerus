@@ -4,6 +4,7 @@
 mod catalog;
 mod launch_project;
 mod model;
+mod service;
 mod store;
 mod transport;
 
@@ -95,6 +96,9 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             .map(String::as_str)
             .ok_or_else(|| anyhow::anyhow!("choose a configured machine"))
     };
+    // Commands that read or write preferences restart a worker too old to read them.
+    let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
+        .then(|| service::supervise(config));
     match action {
         "assign-launch" => {
             ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm assign-launch --json");
@@ -131,6 +135,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             store.save()?;
             if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
             let mut snapshot = store.snapshot(config);
+            snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {
                 written.entry(store.data.catalog.canonical_key(&op.key).token()).or_default().push(op.id.clone());

@@ -1,5 +1,6 @@
 use super::{
     catalog::{self, Catalog, Key, Operation},
+    service,
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -431,6 +432,7 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
 
 pub fn worker() -> Result<()> {
     let config = Config::load()?;
+    let executable = service::Executable::current();
     let mut initial = LockedStore::load(&config)?;
     initial.save()?;
     drop(initial);
@@ -439,10 +441,27 @@ pub fn worker() -> Result<()> {
         .truncate(false)
         .write(true)
         .open(config.dir.join("swarm/worker.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock).context("a swarm worker is already running")?;
+    // Commands checking for a stale worker probe the lock for an instant.
+    let mut attempts = 0;
+    while let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
+        attempts += 1;
+        if attempts == 20 {
+            return Err(error).context("a swarm worker is already running");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if let Err(error) = service::record(&config) {
+        eprintln!("hgs swarm: record the worker version: {error:#}");
+    }
     let mut schedule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut last_digest = String::new();
     loop {
+        // An upgrade replaced this program: exit so that the service manager
+        // starts the new version. Catalog errors never end the loop.
+        ensure!(
+            !executable.as_ref().is_some_and(service::Executable::replaced),
+            "the hgs executable was replaced; exiting so that the new version starts"
+        );
         match Config::load()
             .map_err(anyhow::Error::from)
             .and_then(|config| {

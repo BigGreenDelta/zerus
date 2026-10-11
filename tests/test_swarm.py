@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Catalog replication through the real CLI, with isolated nodes and fake SSH."""
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -170,6 +171,45 @@ class Swarm(unittest.TestCase):
                 self.fail('headless worker did not replicate the change')
         finally:
             worker.terminate(); worker.communicate(timeout=5)
+
+    def test_worker_is_reported_and_isolated_directories_never_restart_services(self):
+        # Service-manager fakes record any attempt; hgs puts HOME/.local/bin first on PATH.
+        home = self.root / 'home'
+        (home / '.local/bin').mkdir(parents=True)
+        for directory in (home / '.local/bin', self.root / 'bin'):
+            for name in ('systemctl', 'launchctl'):
+                fake = directory / name
+                fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.root}/service-calls"\n'); fake.chmod(0o755)
+        self.env['HOME'] = str(home)
+        swarm = self.root / 'a/swarm'
+        self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
+        with (swarm / 'worker.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # A released worker holds the lock without recording its version.
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': False})
+            self.call('a', 'preference', 'set', 'mobile_delivery', 'away_5', '--json')
+            inventory = self.call('a', 'inventory')
+            self.call('a', 'exchange', data={'swarm_id': inventory['swarm_id'], 'known': [], 'operations': []})
+            (swarm / 'worker.json').write_text(json.dumps({'version': '0.0.1', 'pid': os.getpid(), 'started_at': 1}))
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': False})
+        # HGS_CONFIG_DIR is not the directory the service uses.
+        self.assertFalse((self.root / 'service-calls').exists())
+        self.assertFalse((swarm / 'worker-restart.json').exists())
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        worker = subprocess.Popen([str(HGS), 'swarm', 'worker'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while self.call('a', 'get')['worker'] != {'running': True, 'current': True} and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertEqual(self.call('a', 'get')['worker'], {'running': True, 'current': True})
+            marker = json.loads((swarm / 'worker.json').read_text())
+            version = subprocess.run([str(HGS), '--version'], env=env, text=True, capture_output=True, check=True).stdout.split()[1]
+            self.assertEqual((marker['version'], marker['pid']), (version, worker.pid))
+            self.assertLessEqual(abs(marker['started_at'] - time.time()), 60)
+        finally:
+            worker.terminate(); worker.communicate(timeout=5)
+        self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
+        self.assertFalse((self.root / 'service-calls').exists())
 
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:

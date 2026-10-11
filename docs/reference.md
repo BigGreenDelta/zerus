@@ -189,7 +189,7 @@ Repeated launch raises the existing window. Closing it leaves the tray and agent
 running. The installed application and service names remain `hgs-tray` for
 compatibility; the title is `hgs zerus`.
 
-Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers whose hgs is too old to receive it are named there.
+Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
 The tray has two counters: all sessions and **Needs attention**. Attention includes
 input, approvals, errors and unread main-agent replies. An offline host retains
@@ -200,13 +200,6 @@ Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent replies and explicit child
 questions can notify; ordinary child results and errors stay with the parent.
-
-While Zerus runs, even with its window closed, it records keyboard/mouse idle time
-and screen lock for phone notifications. macOS uses CoreGraphics without a
-permission prompt. Linux uses the desktop's screen-saver and idle interfaces (KDE
-Plasma, GNOME and other compositors with Wayland idle notifications). When none
-is available only input in Zerus windows counts, which can only cause extra phone
-notifications.
 Delivery failures show a reason and retry after a minute while still relevant.
 macOS uses Notification Center and needs its system permission; Focus and OS
 notification settings still apply. Notification Center looks up the icon by bundle
@@ -214,6 +207,13 @@ ID, so a stale per-user IconServices entry can keep an earlier icon after update
 while Finder and the Dock show the current one. Remove
 `$(getconf DARWIN_USER_CACHE_DIR)com.apple.iconservices/store.index`, then run
 `killall iconservicesagent NotificationCenter`; both restart on demand.
+
+While Zerus runs, even with its window closed, it records keyboard/mouse idle time
+and screen lock for phone notifications. macOS uses CoreGraphics without a
+permission prompt. Linux uses the desktop's screen-saver and idle interfaces (KDE
+Plasma, GNOME and other compositors with Wayland idle notifications). When none
+is available only input in Zerus windows counts, which can only cause extra phone
+notifications.
 
 **Sessions**, **Projects**, **Machines** and **Accounts** share the navigation rail;
 click the logo for **Overview**. Overview shows attention, work in progress,
@@ -641,6 +641,20 @@ members catch up later. Independent fields merge; conflicts remain in the Swarm
 review UI. Deletion records prevent old replicas from resurrecting data; this
 version does not prune old journal records.
 
+The worker records its version and process in `~/.config/hgs/swarm/worker.json`
+and exits when an upgrade replaces its executable, so `Restart=always` or launchd
+`KeepAlive` starts the new version. A worker started before this mechanism keeps
+running after an upgrade and cannot read a catalog that holds the phone
+notification timing. `hgs swarm get`, `preference`, `sync`, `join` and inbound
+`exchange` restart such a worker, or one from an older version:
+`systemctl --user try-restart hgs-swarm.service`, or
+`launchctl kickstart -k gui/$UID/com.hgdev.hgs-swarm` on macOS. They try at most
+once every ten minutes and only for the default configuration directory, never
+under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
+`hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
+running worker stays outdated, Settings → Mobile connection asks you to restart the
+sync service.
+
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
 the temporary display choice; it does not mean the conflict has been resolved.
@@ -675,9 +689,11 @@ adopts the swarm's existing choice. Without a swarm the local catalog keeps it t
 same way.
 
 Members running an older hgs keep synchronizing projects, folders and sessions but
-do not receive this choice; Settings → Mobile connection names them until they are
-updated. An older machine cannot preview or join a swarm whose catalog already
-contains the choice; update it first.
+do not receive this choice; Settings → Mobile connection names the computers this
+one synchronizes with directly until they are updated. A member reached only
+through another computer is named in Settings on the computer that connects to it.
+An older machine cannot preview or join a swarm whose catalog already contains the
+choice; update it first.
 
 An older member does not relay the choice either: a machine that synchronizes only
 through it receives the choice after that member is updated. Each synchronization

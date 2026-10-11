@@ -91,8 +91,32 @@ else:
             {"peers", QJsonObject{{"mac", QJsonObject{{"node", "n1"}, {"catalog_outdated", true}}}, {"build", QJsonObject{{"node", "n2"}}}}}});
         QCOMPARE(choice->currentData().toString(), QString("away_30")); QVERIFY(choice->isEnabled());
         QVERIFY(!outdated->isHidden()); QVERIFY(outdated->text().contains("mac")); QVERIFY(!outdated->text().contains("build"));
+        // Only members this computer exchanges with report their version.
+        QVERIFY(outdated->text().startsWith("Update Zerus on mac, a computer this one synchronizes with directly."));
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away_30"}}},
+            {"peers", QJsonObject{{"mac", QJsonObject{{"catalog_outdated", true}}}, {"build", QJsonObject{{"catalog_outdated", true}}}}}});
+        QVERIFY(outdated->text().startsWith("Update Zerus on these computers this one synchronizes with directly: build, mac."));
         settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "unknown"}}}, {"peers", QJsonObject{}}});
         QCOMPARE(choice->currentData().toString(), QString("away_30")); QVERIFY(outdated->isHidden());
+    }
+    void anOutdatedSyncServiceIsNamedOnlyWhileItPersists() {
+        qint64 now = 1000;
+        MobileDeliverySettings settings(m_hgs, nullptr, [&now] { return now; });
+        auto *worker = settings.findChild<QLabel *>("mobileDeliveryWorker"); QVERIFY(worker);
+        const auto snapshot = [](bool running, bool current) {
+            return QJsonObject{{"preferences", QJsonObject{{"mobile_delivery", "away"}}}, {"peers", QJsonObject{}},
+                               {"worker", QJsonObject{{"running", running}, {"current", current}}}};
+        };
+        settings.setSwarmSnapshot(snapshot(true, false)); QVERIFY(worker->isHidden()); // the read restarts it first
+        now += MobileDeliverySettings::WorkerNoticeMs - 1; settings.setSwarmSnapshot(snapshot(true, false)); QVERIFY(worker->isHidden());
+        now += 1; settings.setSwarmSnapshot(snapshot(true, false)); QVERIFY(!worker->isHidden());
+        QVERIFY(worker->text().contains("outdated and must be restarted"));
+        settings.setSwarmSnapshot({{"preferences", QJsonObject{{"mobile_delivery", "away"}}}}); // an older hgs reports no worker
+        QVERIFY(!worker->isHidden());
+        settings.setSwarmSnapshot(snapshot(true, true)); QVERIFY(worker->isHidden());
+        settings.setSwarmSnapshot(snapshot(true, false)); now += MobileDeliverySettings::WorkerNoticeMs;
+        settings.setSwarmSnapshot(snapshot(false, false)); QVERIFY(worker->isHidden()); // no worker is not an outdated one
+        settings.setSwarmSnapshot(snapshot(true, false)); QVERIFY(worker->isHidden()); // a new episode starts its own delay
     }
     void lateSnapshotDoesNotRevertAConfirmedSave() {
         MobileDeliverySettings settings(m_hgs); auto *choice = settings.findChild<QComboBox *>("mobileDelivery");

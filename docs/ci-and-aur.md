@@ -428,6 +428,17 @@ and verify `systemctl --user show hgs-tray.service -p KillMode`. Package upgrade
 do not perform a restart. Review the old unit's kill policy before restarting an existing
 installation; never use a broad process kill or restart all native clients.
 
+The swarm worker is the exception: it holds no agents. A current `hgs-swarm`
+exits when an upgrade replaces its executable and `Restart=always` starts the new
+version. A worker started by an earlier release keeps running and cannot read a
+catalog that holds the phone notification timing, so the next `hgs swarm get`
+(Zerus reads it every five seconds), `hgs swarm preference` or inbound swarm
+exchange runs `systemctl --user try-restart hgs-swarm.service`, at most once
+every ten minutes and only for the default `~/.config/hgs`. It never restarts
+`hgs-tray`, `hgs-recovery`, agents, tmux servers or DeepSeek hosts. If Settings
+still reports an outdated sync service, run
+`systemctl --user restart hgs-swarm.service`.
+
 ## Manual build and publication
 
 The public upstream is [ufna/zerus](https://github.com/ufna/zerus). There are two

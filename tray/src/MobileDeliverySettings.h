@@ -8,6 +8,7 @@
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <functional>
 #include <utility>
 
 // When the phone notifies. hgs stores the choice in the shared swarm catalog;
@@ -19,7 +20,11 @@ public:
                 {"away_5", tr("After 5 minutes away")}, {"away_10", tr("After 10 minutes away")},
                 {"away_15", tr("After 15 minutes away")}, {"away_30", tr("After 30 minutes away")}};
     }
-    explicit MobileDeliverySettings(const QString &executable, QWidget *parent = nullptr) : QWidget(parent), client(executable, this) {
+    // A stale worker is normally restarted by the next hgs swarm read.
+    static constexpr qint64 WorkerNoticeMs = 30000;
+    explicit MobileDeliverySettings(const QString &executable, QWidget *parent = nullptr, std::function<qint64()> now = {})
+        : QWidget(parent), client(executable, this), clock(std::move(now)) {
+        if (!clock) { monotonic.start(); clock = [this] { return monotonic.elapsed(); }; }
         setObjectName("mobileDeliverySettings");
         auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 12, 0); layout->setSpacing(10);
         auto *heading = new QLabel(tr("Phone notifications")); heading->setObjectName("heading"); layout->addWidget(heading);
@@ -29,6 +34,14 @@ public:
         choice->setEnabled(false); question->setBuddy(choice); layout->addWidget(choice, 0, Qt::AlignLeft);
         status = new QLabel; status->setObjectName("mobileDeliveryStatus"); status->setWordWrap(true); layout->addWidget(status);
         outdated = new QLabel; outdated->setObjectName("mobileDeliveryOutdated"); outdated->setWordWrap(true); outdated->hide(); layout->addWidget(outdated);
+#ifdef Q_OS_MACOS
+        const QString restart = "launchctl kickstart -k gui/$(id -u)/com.hgdev.hgs-swarm";
+#else
+        const QString restart = "systemctl --user restart hgs-swarm.service";
+#endif
+        worker = new QLabel(tr("The sync service on this computer is outdated and must be restarted (%1, or sign out and back in). Until then this computer may stop syncing projects and this choice.").arg(restart));
+        worker->setObjectName("mobileDeliveryWorker"); worker->setWordWrap(true); worker->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        worker->hide(); layout->addWidget(worker);
         auto *hint = new QLabel(tr("You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice."));
         hint->setWordWrap(true); layout->addWidget(hint);
         connect(choice, &QComboBox::activated, this, [this](int index) { save(choice->itemData(index).toString()); });
@@ -40,8 +53,16 @@ public:
     // Settings calls this when it opens; nothing runs while it stays closed.
     void refresh() { if (!setRequest) getRequest = client.requestSwarm({"preference", "get", "--json"}); }
     // The 5-second swarm read keeps the value current and names members whose
-    // hgs is too old to receive it.
+    // hgs is too old to receive it, or a local sync service that stays outdated.
     void setSwarmSnapshot(const QJsonObject &snapshot) {
+        // Reads from an older hgs report no worker and leave the notice unchanged.
+        if (snapshot.value("worker").isObject()) {
+            const auto state = snapshot.value("worker").toObject();
+            const bool stale = state.value("running").toBool() && !state.value("current").toBool();
+            if (!stale) staleWorkerSince = -1;
+            else if (staleWorkerSince < 0) staleWorkerSince = clock();
+            worker->setVisible(staleWorkerSince >= 0 && clock() - staleWorkerSince >= WorkerNoticeMs);
+        }
         const auto value = snapshot.value("preferences").toObject().value("mobile_delivery").toString();
         // A snapshot requested before a confirmed save may arrive after it; it
         // must not put the old value back. Differing values are ignored until one
@@ -58,8 +79,12 @@ public:
         const auto peers = snapshot.value("peers").toObject();
         for (auto it = peers.begin(); it != peers.end(); ++it)
             if (it.value().toObject().value("catalog_outdated").toBool()) names << it.key();
+        // Only direct connections report their version; indirect members are
+        // named on the computer that connects to them.
         outdated->setVisible(!names.isEmpty());
-        outdated->setText(tr("Update Zerus on %1. Until then it keeps syncing projects but does not receive this choice.").arg(names.join(", ")));
+        outdated->setText(names.size() == 1
+            ? tr("Update Zerus on %1, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice.").arg(names.first())
+            : tr("Update Zerus on these computers this one synchronizes with directly: %1. Until then they keep syncing projects but do not receive this choice.").arg(names.join(", ")));
     }
 private:
     void save(const QString &value) {
@@ -97,7 +122,10 @@ private:
         choice->setEnabled(!setRequest && index >= 0);
     }
     HgsClient client;
-    QComboBox *choice; QLabel *status, *outdated;
+    std::function<qint64()> clock;
+    QElapsedTimer monotonic;
+    qint64 staleWorkerSince = -1;
+    QComboBox *choice; QLabel *status, *outdated, *worker;
     QString current;
     quint64 getRequest = 0, setRequest = 0;
     QString confirmed;
