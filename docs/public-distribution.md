@@ -95,10 +95,25 @@ Leave it unset until the signer and publisher are provisioned, so ordinary full
 CI keeps working during rollout. Once enabled, every successful main push is
 eligible automatically; missing required inputs fail publication.
 
-Install `dev_updates.py`, `publish-dev-feed.py` and the adjacent existing mirror
-modules on the public host. Supply a read-only Actions credential through the
-systemd credential mechanism and extend the site's existing fifteen-minute jobs
-with `--dev-platform`. Use the same mirror root/lock and serve `updates/v2`
+Install `dev_updates.py`, `publish-dev-feed.py`, `receive-dev-token.py` and the
+adjacent existing mirror modules on the public host. The protected `Publish Dev`
+workflow follows successful upstream main CI and uses its automatically issued
+`GITHUB_TOKEN` with only Actions/Contents read permission. Its restricted SSH key,
+target and pinned host key belong in the main-only `release` environment as
+`DEV_MIRROR_SSH_KEY`, `DEV_MIRROR_TARGET` and `DEV_MIRROR_KNOWN_HOSTS`.
+The SSH forced command permits only the bounded, preinstalled receiver as the
+existing unprivileged mirror user. It accepts a run ID and job token through
+standard input, verifies the completed main run and selected tag, and calls the
+same publisher. It never stores the token, executes candidate code or accepts a
+caller-selected command. The token expires when its CI job ends; no personal PAT
+or broad owner credential is required on the server.
+
+Extend the site's existing fifteen-minute jobs with `--dev-platform`. These jobs
+can verify the retained public catalog anonymously after CI publication, without
+downloading expired Actions artifacts. A race with a newer tagged run may retain
+the previous catalog until its protected publisher completes. Sites using a
+separate persistent read credential can alternatively supply it through systemd
+`LoadCredential`/`GITHUB_TOKEN_FILE`. Use the same mirror root/lock and serve `updates/v2`
 with the same revalidation behavior as `updates/v1`:
 
 ```sh

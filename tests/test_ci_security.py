@@ -33,6 +33,37 @@ class WorkflowSecurityTests(unittest.TestCase):
     def setUp(self):
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
 
+    def test_dev_publisher_accepts_only_successful_main_events_or_main_retry(self):
+        workflow = (ROOT / '.github/workflows/publish-dev.yml').read_text()
+        expression = field(job(workflow, 'publish'), 'if').replace('&&', ' and ').replace('||', ' or ')
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        fixtures = [
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, True),
+            ('workflow_run', 'push', 'failure', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'cancelled', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'pull_request', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'feature', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'example/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', '', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', True, False),
+            ('workflow_dispatch', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, True),
+            ('workflow_dispatch', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/feature', 'true', False, False),
+            ('pull_request', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+        ]
+        for event, source_event, conclusion, branch, repository, ref, enabled, private, allowed in fixtures:
+            source = SimpleNamespace(event=source_event, conclusion=conclusion, head_branch=branch,
+                                     head_repository=SimpleNamespace(full_name=repository))
+            github = SimpleNamespace(repository='ufna/zerus', ref=ref, event_name=event,
+                                     event=SimpleNamespace(repository=SimpleNamespace(private=private), workflow_run=source))
+            with self.subTest(event=event, source=source, ref=ref, enabled=enabled, private=private):
+                self.assertEqual(bool(eval(expression, {'__builtins__': {}}, {
+                    'github': github, 'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled)})), allowed)
+        self.assertEqual(field(job(workflow, 'publish'), 'environment'), 'release')
+        self.assertIn('actions: read', workflow)
+        self.assertIn('contents: read', workflow)
+        self.assertNotRegex(workflow, r'(?m)^\s*(actions|contents): write')
+        self.assertEqual(re.search(r'(?m)^cache-mode: (.*)$', workflow)[1], 'none')
+
     def selected(self, name, event, ref="refs/heads/main", test_ref="", repository="ufna/zerus"):
         # These are the actual committed conditions, evaluated over synthetic
         # event fixtures. No user strings become executable test expressions.

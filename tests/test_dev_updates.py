@@ -16,6 +16,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import dev_updates as dev
+RECEIVER_SPEC = importlib.util.spec_from_file_location('dev_token_receiver', Path(__file__).resolve().parents[1] / 'scripts/receive-dev-token.py')
+receiver = importlib.util.module_from_spec(RECEIVER_SPEC)
+RECEIVER_SPEC.loader.exec_module(receiver)
 spec = importlib.util.spec_from_file_location('dev_publisher', Path(dev.__file__).with_name('publish-dev-feed.py'))
 publisher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publisher)
@@ -96,6 +99,61 @@ class DevUpdateTests(unittest.TestCase):
         apk = next(a for a in self.client.info['artifacts'] if a['kind'] == 'apk')
         self.assertEqual(apk['packageName'], 'app.zerus.mobile')
         self.assertEqual(apk['signingCertSha256'], 'b'*64)
+    def test_job_token_receiver_checks_main_run_and_uses_shared_publisher(self):
+        self.client.api = lambda path: self.client.run if path.endswith('/101') else self.fail('Unexpected API path')
+        request = json.dumps({'runId': 101, 'token': 'fixture-ephemeral-read-token'}).encode()
+        def publish(client, root, platforms, execute, max_bytes):
+            import fcntl
+            self.assertIs(client, self.client)
+            self.assertEqual((root, platforms, execute), (self.root, ['desktop', 'android'], True))
+            with (root / '.mirror.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return [{'buildId': 101, 'mode': 'published'}]
+        with patch.object(receiver, 'DevGitHub', return_value=self.client) as api, \
+             patch.object(receiver, 'publisher', return_value=publisher), \
+             patch.object(publisher, 'synchronize', side_effect=publish):
+            result = receiver.receive(request, self.root)
+        api.assert_called_once_with('fixture-ephemeral-read-token')
+        self.assertEqual(result, [{'buildId': 101, 'mode': 'published'}])
+        self.assertEqual([p.name for p in self.root.iterdir()], ['.mirror.lock'])
+    def test_job_token_receiver_refuses_foreign_failed_and_wrong_run_evidence(self):
+        request = json.dumps({'runId': 101, 'token': 'fixture-ephemeral-read-token'}).encode()
+        for key, value in [('head_repository', {'full_name': 'example/zerus'}),
+                           ('head_branch', 'feature'), ('conclusion', 'failure'),
+                           ('event', 'pull_request'), ('id', 102)]:
+            evidence = copy.deepcopy(self.client.run)
+            evidence[key] = value
+            self.client.api = lambda path: evidence
+            with self.subTest(key=key), patch.object(receiver, 'DevGitHub', return_value=self.client), \
+                 patch.object(receiver, 'publisher', side_effect=AssertionError('Must not publish')):
+                with self.assertRaises(ValueError):
+                    receiver.receive(request, self.root)
+            self.assertFalse(self.root.exists())
+    def test_job_token_receiver_skips_superseded_tag_and_rejects_oversized_request(self):
+        self.client.api = lambda path: self.client.run
+        self.client.commit = 'c'*40
+        request = json.dumps({'runId': 101, 'token': 'fixture-ephemeral-read-token'}).encode()
+        with patch.object(receiver, 'DevGitHub', return_value=self.client), \
+             patch.object(receiver, 'publisher', side_effect=AssertionError('Must not publish')):
+            self.assertEqual(receiver.receive(request, self.root), [{'buildId': 101, 'mode': 'superseded'}])
+            with self.assertRaises(ValueError):
+                receiver.receive(b'x'*8193, self.root)
+        self.assertEqual([p.name for p in self.root.iterdir()], ['.mirror.lock'])
+    def test_job_receiver_failure_logs_exclude_token_and_provider_error(self):
+        credential = 'fixture-ephemeral-read-token'
+        request = json.dumps({'runId': 101, 'token': credential}).encode()
+        self.client.api = lambda path: (_ for _ in ()).throw(ValueError(credential + ' private transport detail'))
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['receiver', '--root', str(self.root)]), \
+             patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(request))), \
+             patch.object(receiver, 'DevGitHub', return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(receiver.main(), 1)
+        self.assertIn('previous catalogs retained', output.getvalue())
+        self.assertNotIn(credential, output.getvalue())
+        self.assertNotIn('private transport detail', output.getvalue())
+        self.assertFalse(self.root.exists())
     def test_existing_publisher_runs_legacy_and_dev_under_one_lock(self):
         import fcntl
         self.client = FakeGitHub(self.base, 'android')

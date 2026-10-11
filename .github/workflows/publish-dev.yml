@@ -1,0 +1,77 @@
+name: Publish Dev
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Retry the same successful main CI candidate without rebuilding
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+cache-mode: none
+
+concurrency:
+  group: dev-mirror-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == 'ufna/zerus'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - name: Verify and publish through the existing mirror with a temporary read token
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id || github.event.workflow_run.id }}
+          GH_TOKEN: ${{ github.token }}
+          DEV_MIRROR_SSH_KEY: ${{ secrets.DEV_MIRROR_SSH_KEY }}
+          DEV_MIRROR_TARGET: ${{ secrets.DEV_MIRROR_TARGET }}
+          DEV_MIRROR_KNOWN_HOSTS: ${{ secrets.DEV_MIRROR_KNOWN_HOSTS }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, tempfile, time
+          run_id = os.environ['CI_RUN_ID']
+          target = os.environ['DEV_MIRROR_TARGET']
+          if not run_id.isdecimal() or not 0 < int(run_id) < 2**53:
+              raise SystemExit('Expected a positive CI run ID.')
+          if not re.fullmatch(r'zerus-dev-publisher@[A-Za-z0-9.-]+', target):
+              raise SystemExit('Provision the existing mirror target in release.')
+          if any(not os.environ.get(name) for name in ('GH_TOKEN', 'DEV_MIRROR_SSH_KEY', 'DEV_MIRROR_KNOWN_HOSTS')):
+              raise SystemExit('Provision restricted mirror publication access in release.')
+          print('::add-mask::' + target.split('@', 1)[1], flush=True)
+          # SSH and the forced command receive only data. No candidate code or
+          # caller-controlled remote command is sent to the production server.
+          payload = json.dumps({'runId': int(run_id), 'token': os.environ['GH_TOKEN']})
+          with tempfile.TemporaryDirectory(prefix='zerus-dev-publish-', dir=os.environ['RUNNER_TEMP']) as temp:
+              root = pathlib.Path(temp)
+              for name, value in (('key', os.environ['DEV_MIRROR_SSH_KEY']), ('known_hosts', os.environ['DEV_MIRROR_KNOWN_HOSTS'])):
+                  with os.fdopen(os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as out:
+                      out.write(value.rstrip() + '\n')
+              command = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+                         '-o', 'ClearAllForwardings=yes', '-o', 'StrictHostKeyChecking=yes',
+                         '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30',
+                         '-o', 'ServerAliveCountMax=2', '-o', 'UserKnownHostsFile=' + str(root / 'known_hosts'),
+                         '-i', str(root / 'key'), target]
+              for attempt in range(8):
+                  result = subprocess.run(command, input=payload, text=True)
+                  if result.returncode != 75:
+                      break
+                  if attempt < 7:
+                      time.sleep(30)
+              if result.returncode:
+                  raise SystemExit('Dev mirror publication failed; retry the same CI candidate.')
+          PY
