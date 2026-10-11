@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The newest event payload version this build understands.
+/// The newest event payload version this build understands. Any change in how
+/// an existing event kind folds requires a new event version: a machine that
+/// meets a newer version keeps the event and shows the task read-only.
 pub const EVENT_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

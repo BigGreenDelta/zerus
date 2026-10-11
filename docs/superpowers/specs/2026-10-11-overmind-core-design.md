@@ -192,6 +192,13 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
 - Deletion is an event. Tasks and their events are not purged in stage 1; blobs
   of deleted tasks are removed when nothing references them.
 
+### Compatibility
+
+Every machine must fold the same events into the same state. Any change in how
+an existing event kind folds requires a new event version; a machine that meets
+a newer version keeps the event, shows the task read-only and refuses to write
+to it.
+
 ### Who writes what
 
 Any machine writes task edits, transitions allowed to its actor and journal

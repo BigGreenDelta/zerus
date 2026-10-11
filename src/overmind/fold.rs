@@ -288,6 +288,8 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
             task.journal("[unclaim]", text("reason"), event);
         }
         Action::Advance => {
+            // Any re-entry clears verdicts, including the one into Review.
+            task.clear_verdicts();
             if to_role == Role::Review {
                 if task.labels.contains("bug") && text("root_cause").is_empty() {
                     return Err(Refusal::field(
@@ -303,7 +305,6 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
                 }
                 task.journal("[worklog]", body, event);
             } else {
-                task.clear_verdicts();
                 task.journal("[spec]", text("spec"), event);
             }
         }
@@ -500,7 +501,13 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
             let target = text("target");
             let present = p.get("present").and_then(Value::as_bool).unwrap_or(false);
             match text("relation").as_str() {
-                "parent" => task.parent = if present { target } else { String::new() },
+                "parent" => {
+                    if present {
+                        task.parent = target;
+                    } else if task.parent == target {
+                        task.parent.clear();
+                    }
+                }
                 "follows" => {
                     if present {
                         task.follows.insert(target);
@@ -909,6 +916,32 @@ mod tests {
         let junk = ev(A, 3, 3, human(), "transition", &claim.id, json!({"action": "move", "to": "Icebox", "rank": "no rank"}));
         let task = run(&[c, claim, junk]);
         assert_eq!((task.stage.as_str(), task.rank.as_str()), ("Icebox", "k"));
+    }
+
+    #[test]
+    fn removing_a_parent_needs_the_current_parent() {
+        let c = created("Queue");
+        let set = ev(A, 2, 2, human(), "relation_set", "", json!({"relation": "parent", "target": "x", "present": true}));
+        let other = ev(A, 3, 3, human(), "relation_set", "", json!({"relation": "parent", "target": "y", "present": false}));
+        assert_eq!(run(&[c.clone(), set.clone(), other]).parent, "x");
+        let clear = ev(A, 3, 3, human(), "relation_set", "", json!({"relation": "parent", "target": "x", "present": false}));
+        assert_eq!(run(&[c, set, clear]).parent, "");
+    }
+
+    #[test]
+    fn advancing_into_review_clears_earlier_verdicts() {
+        let (c, claim) = claimed();
+        let spec = transition(A, 3, 3, agent("w1"), &claim.id, "advance", "Build", json!({"spec": "s"}), Value::Null);
+        let review = transition(A, 4, 4, agent("w1"), &spec.id, "advance", "Review", json!({"worklog": "w", "evidence": "e"}), Value::Null);
+        let failed = transition(A, 5, 5, human(), &review.id, "needs_work", "Build", json!({"report": "r"}), Value::Null);
+        let again = transition(A, 6, 6, agent("w1"), &failed.id, "advance", "Review", json!({"worklog": "w", "evidence": "e"}), Value::Null);
+        let events = [c, claim, spec, review, failed];
+        assert!(run(&events).labels.contains("review-failed"));
+        let mut all = events.to_vec();
+        all.push(again);
+        let task = run(&all);
+        assert_eq!(task.stage, "Review");
+        assert!(!task.labels.contains("review-failed"));
     }
 
     #[test]
