@@ -101,6 +101,9 @@ struct Transition {
     session: Option<SessionRef>,
     #[serde(default)]
     children: Vec<String>,
+    /// The task's rank in the target stage, so that it joins the end of that column.
+    #[serde(default)]
+    rank: String,
 }
 
 #[derive(Deserialize)]
@@ -199,7 +202,7 @@ fn create(uuid: &str, event: &Event, wf: &Workflow) -> Option<Task> {
         attachments: payload.attachments,
         stage: payload.stage.clone(),
         priority: payload.priority.min(4),
-        rank: payload.rank,
+        rank: if rank::valid(&payload.rank) { payload.rank } else { String::new() },
         labels: payload.labels,
         pinned: payload.pinned,
         assignee: None,
@@ -361,6 +364,9 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
     }
     task.stage = to;
     task.head = event.id.clone();
+    if rank::valid(&p.rank) {
+        task.rank = p.rank;
+    }
     Ok(())
 }
 
@@ -888,6 +894,21 @@ mod tests {
         assert_eq!(task.rank, "W");
         assert!(task.related.contains("x"));
         assert_eq!(run(&[c, bad]).rank, "V");
+    }
+
+    #[test]
+    fn created_ranks_are_validated_and_accepted_transitions_carry_ranks() {
+        let bad = ev(A, 1, 1, human(), "task_created", "", json!({"title": "T", "prompt": "p", "stage": "Queue", "rank": "a b"}));
+        assert_eq!(run(&[bad]).rank, "");
+        let c = created("Queue");
+        let claim = ev(A, 2, 2, human(), "transition", &c.id, json!({"action": "claim", "to": "Design", "session": session("w1"), "rank": "k"}));
+        assert_eq!(run(&[c.clone(), claim.clone()]).rank, "k");
+        let stale = ev(A, 3, 3, human(), "transition", &c.id, json!({"action": "move", "to": "Icebox", "rank": "m"}));
+        let task = run(&[c.clone(), claim.clone(), stale.clone()]);
+        assert_eq!((task.rank.as_str(), task.rejections[&stale.id].code.as_str()), ("k", "stale"));
+        let junk = ev(A, 3, 3, human(), "transition", &claim.id, json!({"action": "move", "to": "Icebox", "rank": "no rank"}));
+        let task = run(&[c, claim, junk]);
+        assert_eq!((task.stage.as_str(), task.rank.as_str()), ("Icebox", "k"));
     }
 
     #[test]

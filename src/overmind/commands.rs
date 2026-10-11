@@ -171,6 +171,12 @@ pub fn transition(
     for (name, value) in &fields {
         check_text(name, value, MAX_FIELD, true)?;
     }
+    let mut payload = json!({"action": action, "to": to, "fields": fields, "session": session, "children": children});
+    // A task that changes stage joins the end of its new column.
+    let target = if action == Action::Answer { task.resume_stage.as_str() } else { to };
+    if target != task.stage {
+        payload["rank"] = json!(checked_rank(next_rank(tx, &task.project, target)?)?);
+    }
     prove(
         tx,
         Draft {
@@ -180,7 +186,7 @@ pub fn transition(
             kind: "transition".into(),
             base: task.head.clone(),
             request_id: request_id.into(),
-            payload: json!({"action": action, "to": to, "fields": fields, "session": session, "children": children}),
+            payload,
         },
     )
 }
@@ -296,6 +302,8 @@ fn board_tasks(tx: &Tx, project: &str) -> Result<Vec<Task>> {
     Ok(fold_many(&events).into_values().filter(|t| t.project == project).collect())
 }
 
+/// The rank at the end of a column. It never writes: when the column's ranks
+/// are exhausted, it ties with the last task, and the tie orders by UUID.
 pub fn next_rank(tx: &Tx, project: &str, stage: &str) -> Result<String> {
     let max = board_tasks(tx, project)?
         .iter()
@@ -303,7 +311,14 @@ pub fn next_rank(tx: &Tx, project: &str, stage: &str) -> Result<String> {
         .map(|t| t.rank.clone())
         .max()
         .unwrap_or_default();
-    Ok(rank::between(&max, None))
+    let next = rank::after(&max);
+    Ok(if rank::valid(&next) { next } else { max })
+}
+
+/// Ranks are computed by commands; an invalid one is a bug and is never written.
+fn checked_rank(rank: String) -> Result<String> {
+    anyhow::ensure!(rank::valid(&rank), "internal error: computed an invalid rank {rank:?}");
+    Ok(rank)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -340,6 +355,7 @@ pub fn created_payload(
     for (name, value) in &fields {
         check_text(name, value, MAX_FIELD, true)?;
     }
+    let rank = checked_rank(rank)?;
     Ok(json!({
         "title": title, "prompt": prompt, "stage": stage, "priority": priority, "rank": rank,
         "labels": labels, "pinned": pinned, "parent": parent, "follows": follows, "related": related,
@@ -609,11 +625,12 @@ pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
     write(ctx, &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
-        let column: Vec<Task> = board_tasks(tx, &task.project)?
+        // The other tasks of the column, in display order.
+        let mut column: Vec<Task> = board_tasks(tx, &task.project)?
             .into_iter()
             .filter(|t| !t.deleted && t.stage == task.stage && t.uuid != uuid)
             .collect();
-        let mut column = column;
+        column.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.uuid.cmp(&b.uuid)));
         let mut target = match &req.before {
             Some(before) => Some(load(tx, &resolve(tx, before)?)?.uuid),
             None => None,
@@ -621,35 +638,42 @@ pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
         if target.as_deref() == Some(uuid.as_str()) {
             target = None;
         }
-        if let Some(before) = &target {
-            if !column.iter().any(|t| &t.uuid == before) {
-                return Err(Refusal::field("invalid_field", "before", "invalid", "`before` must be a task in the same stage").into());
-            }
-        }
-        let place = |column: &[Task], target: &Option<String>| -> String {
-            match target.as_ref().and_then(|u| column.iter().find(|t| &t.uuid == u)) {
-                None => rank::between(&column.iter().map(|t| t.rank.clone()).max().unwrap_or_default(), None),
-                Some(before) => {
-                    let previous = column.iter().map(|t| t.rank.clone()).filter(|r| *r < before.rank).max().unwrap_or_default();
-                    rank::between(&previous, Some(&before.rank))
-                }
-            }
+        let position = match &target {
+            Some(before) => Some(column.iter().position(|t| &t.uuid == before).ok_or_else(|| {
+                Refusal::field("invalid_field", "before", "invalid", "`before` must be a task in the same stage")
+            })?),
+            None => None,
         };
-        let mut rank = place(&column, &target);
-        if !rank::valid(&rank) {
-            column.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.uuid.cmp(&b.uuid)));
-            let mut previous = String::new();
-            for other in column.iter_mut() {
-                let fresh = rank::between(&previous, None);
-                simple(tx, actor, other, "rank_set", json!({"rank": fresh}), "")?;
-                other.rank = fresh.clone();
-                previous = fresh;
+        let mut rank = place(&column, position);
+        if rank.is_none() {
+            // Ties or exhausted ranks: renumber the column evenly, keeping its order.
+            let fresh_ranks = rank::spread(column.len());
+            for (other, fresh) in column.iter_mut().zip(fresh_ranks) {
+                simple(tx, actor, other, "rank_set", json!({"rank": checked_rank(fresh.clone())?}), "")?;
+                other.rank = fresh;
             }
-            rank = place(&column, &target);
+            rank = place(&column, position);
         }
+        let rank = checked_rank(rank.unwrap_or_default())?;
         simple(tx, actor, &task, "rank_set", json!({"rank": rank}), &req.request_id)?;
         task_result(tx, &uuid)
     })
+}
+
+/// The rank that puts a task before `column[position]`, or at the end of the
+/// column. None when ties or exhausted ranks need the column renumbered first.
+fn place(column: &[Task], position: Option<usize>) -> Option<String> {
+    let Some(i) = position else {
+        let next = rank::after(column.last().map_or("", |t| t.rank.as_str()));
+        return rank::valid(&next).then_some(next);
+    };
+    if column.windows(2).any(|pair| pair[0].rank >= pair[1].rank) {
+        return None;
+    }
+    let previous = if i == 0 { "" } else { column[i - 1].rank.as_str() };
+    let next = column[i].rank.as_str();
+    let rank = rank::between(previous, Some(next));
+    (rank::valid(&rank) && previous < rank.as_str() && rank.as_str() < next).then_some(rank)
 }
 
 #[derive(Deserialize)]
@@ -842,6 +866,16 @@ mod tests {
     fn refusal(error: anyhow::Error) -> Refusal {
         error.downcast::<Refusal>().unwrap()
     }
+    fn column(store: &mut Store, stage: &str) -> Vec<String> {
+        let board_now = board(&mut human(store), json!({"project": "p"})).unwrap();
+        board_now["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["stage"] == stage)
+            .map(|t| t["uuid"].as_str().unwrap().to_owned())
+            .collect()
+    }
 
     #[test]
     fn create_defaults_title_stage_priority_and_rank() {
@@ -957,6 +991,52 @@ mod tests {
         for t in board_all["tasks"].as_array().unwrap() {
             assert!(rank::valid(t["rank"].as_str().unwrap()));
         }
+    }
+
+    #[test]
+    fn moving_into_a_column_puts_the_task_at_its_end() {
+        let (_dir, mut store) = store();
+        let a = new_task(&mut store, "Queue");
+        let b = new_task(&mut store, "Queue");
+        let first = new_task(&mut store, "Backlog");
+        let moved = new_task(&mut store, "Backlog");
+        // Its Backlog rank now sorts below every Queue rank.
+        reorder(&mut human(&mut store), json!({"task": moved, "before": first})).unwrap();
+        move_task(&mut human(&mut store), json!({"task": moved, "to": "Queue"})).unwrap();
+        assert_eq!(column(&mut store, "Queue"), vec![a, b, moved]);
+    }
+
+    #[test]
+    fn reorder_honours_the_drop_target_when_ranks_tie() {
+        let (_dir, mut store) = store();
+        let mut tied: Vec<String> = (0..3).map(|_| new_task(&mut store, "Queue")).collect();
+        let moved = new_task(&mut store, "Queue");
+        store
+            .write(|tx| {
+                for uuid in &tied {
+                    let task = load(tx, uuid)?;
+                    simple(tx, &Actor::human(MACHINE), &task, "rank_set", json!({"rank": "V"}), "")?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        tied.sort(); // Tied ranks show in UUID order.
+        assert_eq!(column(&mut store, "Queue"), vec![tied[0].clone(), tied[1].clone(), tied[2].clone(), moved.clone()]);
+        reorder(&mut human(&mut store), json!({"task": moved, "before": tied[1]})).unwrap();
+        assert_eq!(column(&mut store, "Queue"), vec![tied[0].clone(), moved.clone(), tied[1].clone(), tied[2].clone()]);
+        let board_now = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        let ranks: Vec<&str> = board_now["tasks"].as_array().unwrap().iter().map(|t| t["rank"].as_str().unwrap()).collect();
+        assert!(ranks.iter().all(|r| rank::valid(r)));
+        assert!(ranks.windows(2).all(|pair| pair[0] < pair[1]), "{ranks:?}");
+    }
+
+    #[test]
+    fn many_creations_in_one_column_keep_valid_ranks_and_their_order() {
+        let (_dir, mut store) = store();
+        let created: Vec<String> = (0..400).map(|_| new_task(&mut store, "Queue")).collect();
+        let board_now = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        assert!(board_now["tasks"].as_array().unwrap().iter().all(|t| rank::valid(t["rank"].as_str().unwrap())));
+        assert_eq!(column(&mut store, "Queue"), created);
     }
 
     #[test]

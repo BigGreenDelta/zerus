@@ -404,6 +404,24 @@ mod tests {
     }
 
     #[test]
+    fn advancing_puts_the_task_at_the_end_of_the_next_column() {
+        let (_dir, mut store, task) = setup();
+        let mut human = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        let other = commands::create(&mut human, json!({"project": "p", "prompt": "Other", "stage": "Queue"})).unwrap()["task"]["uuid"].as_str().unwrap().to_owned();
+        store.write(|tx| {
+            let current = commands::load(tx, &other)?;
+            commands::transition(tx, &Actor::human(MACHINE), &current, Action::Claim, "Design", BTreeMap::new(), Some(SessionRef { machine: MACHINE.into(), name: "w2".into() }), vec![], "")?;
+            Ok(())
+        }).unwrap();
+        // The later task reaches Build first; the earlier one then joins the end.
+        advance(&mut agent(&mut store, "w2", None), json!({"task": other, "to": "Build", "spec": "plan"})).unwrap();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "plan"})).unwrap();
+        let board = commands::board(&mut Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None }, json!({"project": "p"})).unwrap();
+        let build: Vec<&str> = board["tasks"].as_array().unwrap().iter().filter(|t| t["stage"] == "Build").map(|t| t["uuid"].as_str().unwrap()).collect();
+        assert_eq!(build, vec![other.as_str(), task.as_str()]);
+    }
+
+    #[test]
     fn advance_through_build_to_review_outside_git() {
         let (_dir, mut store, task) = setup();
         let outside = tempfile::tempdir().unwrap();
