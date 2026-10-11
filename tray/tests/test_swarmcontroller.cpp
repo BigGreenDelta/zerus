@@ -80,6 +80,22 @@ print(json.dumps(result))
         const auto result=SwarmController::presentation(remote,local);const auto p=result["projects"].toArray()[0].toObject();
         QCOMPARE(p["name"].toString(),"Renamed");QVERIFY(p["collapsed"].toBool());QCOMPARE(p["sessions"].toArray(),QJsonArray({"b","a","new"}));QCOMPARE(result["runs"],local["runs"]);
     }
+    void unchangedRefreshDoesNotRewriteSettings() {
+        HgsClient client(m_program); SwarmController controller(&client);
+        controller.start(organization("Original")); QTRY_VERIFY(controller.settled());
+        const auto settingsPath = QSettings().fileName();
+        const auto checkpoint = QDateTime::fromSecsSinceEpoch(946684800, QTimeZone::UTC);
+        QFile settingsFile(settingsPath); QVERIFY(settingsFile.open(QIODevice::ReadWrite));
+        QVERIFY(settingsFile.setFileTime(checkpoint, QFileDevice::FileModificationTime)); settingsFile.close();
+        controller.refresh(); QTRY_COMPARE(requests().size(), 2); QTRY_VERIFY(controller.settled());
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(QFileInfo(settingsPath).lastModified(), checkpoint);
+        response("Changed catalog"); controller.refresh();
+        QTRY_COMPARE(requests().size(), 3); QTRY_VERIFY(controller.settled());
+        QVERIFY(QFileInfo(settingsPath).lastModified() > checkpoint);
+        const auto saved = QJsonDocument::fromJson(QSettings().value("swarm/observedOrganization").toByteArray()).object();
+        QCOMPARE(saved["projects"].toArray()[0].toObject()["name"].toString(), "Changed catalog");
+    }
     void editDuringRefreshUsesVersionsTheUserSaw() {
         HgsClient client(m_program);SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         write("hold",{});response("Remote change");controller.refresh();QTRY_COMPARE(requests().size(),2);

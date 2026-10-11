@@ -2,6 +2,8 @@
 #include "WorkspaceList.h"
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QPersistentModelIndex>
+#include <QRegion>
 
 namespace SessionRoles {
 enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Children,
@@ -19,6 +21,7 @@ public:
     void syncActivityAnimation();
     bool activityAnimationRunning() const { return m_activityTimer.isActive(); }
     bool elapsedTimerRunning() const { return m_elapsedTimer.isActive(); }
+    const QRegion &currentPaintRegion() const { return m_paintRegion; }
     bool dragging() const { return m_dragging; }
     bool bulkSelecting() const { return m_bulkSelecting; }
     void clearBulkSelection();
@@ -51,6 +54,10 @@ protected:
     bool viewportEvent(QEvent *) override;
 private:
     QRect childrenControlRect(const QListWidgetItem *item) const;
+    QStyleOptionViewItem animationOption(const QModelIndex &index) const;
+    QList<QPersistentModelIndex> m_visibleWorkingRows;
+    QHash<QPersistentModelIndex, QRegion> m_animationRegions;
+    QRegion m_paintRegion;
     QTimer m_activityTimer, m_elapsedTimer;
     QElapsedTimer m_activityClock;
     bool m_animateActivity = true;

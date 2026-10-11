@@ -1,5 +1,8 @@
 #include <QtTest>
 #include <QTemporaryDir>
+#include <QSemaphore>
+#include <QScopeGuard>
+#include <QThread>
 #include "AttachmentViewer.h"
 
 class TestAttachmentViewer : public QObject {
@@ -9,7 +12,7 @@ private slots:
     void capture(const QUrl &url){m_opened.append(url);}
     void initTestCase(){QStandardPaths::setTestModeEnabled(true);}
     void init(){m_opened.clear();QDesktopServices::setUrlHandler("file",this,"capture");}
-    void cleanup(){QDesktopServices::unsetUrlHandler("file");}
+    void cleanup(){AttachmentFiles::setIoObserver({}); QVERIFY(AttachmentFiles::pool().waitForDone(5000)); QDesktopServices::unsetUrlHandler("file");}
     void cachedImageHasThumbnailAndOpensInDefaultAppWithoutDialog() {
         HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);
         QImage image(320,200,QImage::Format_RGB32);image.fill(Qt::blue);
@@ -34,18 +37,115 @@ private slots:
         QTemporaryFile file;QVERIFY(file.open());QVERIFY(AttachmentFiles::cached({{"local_path",file.fileName()}}).isEmpty());
     }
     void thumbnailAndOpenShareRequestButConversationsDoNot() {
-        HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);int done=0;
+        HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);int done=0,firstConversation=0;
         const QJsonObject file{{"name","image.png"},{"mime","image/png"},{"request_id","request-one"},{"index",0}};
         QString path;
-        loader.fetch("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QVERIFY(error.isEmpty());path=p;++done;});
-        loader.open("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QCOMPARE(p,path);QVERIFY(error.isEmpty());++done;});
+        loader.fetch("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QVERIFY(error.isEmpty());path=p;++firstConversation;++done;});
+        loader.open("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QCOMPARE(p,path);QVERIFY(error.isEmpty());++firstConversation;++done;});
         loader.fetch("mac","session","two",{}, {},file,[&](const QString &p,const QString &error){QVERIFY(p.isEmpty());QVERIFY(!error.isEmpty());++done;});
         client.attachmentReady(1,{{"name","image.png"}},"fixture bytes");
-        QCOMPARE(done,2);QCOMPARE(m_opened.size(),1);
+        QTRY_COMPARE(firstConversation,2);QCOMPARE(m_opened.size(),1);
         client.attachmentFailed(2,"No such file in the other conversation");QCOMPARE(done,3);
         loader.fetch("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QCOMPARE(p,path);QVERIFY(error.isEmpty());++done;});
         QTRY_COMPARE(done,4);QCOMPARE(m_opened.size(),1);QFile::remove(path);
     }
+    void snapshotsAndRecoveryPreserveMetadataAndBytes() {
+        const QList<MessageAttachment> attachments{{"../../example.txt","text/plain","synthetic text","[File #1]"},
+            {"image.png","image/png","synthetic image","[Image #2]"}};
+        QJsonArray files;QString error;bool done=false;
+        AttachmentFiles::prepareAsync(attachments,this,[&](const QJsonArray &result,const QString &failure){files=result;error=failure;done=true;});
+        QTRY_VERIFY(done);QVERIFY(error.isEmpty());QCOMPARE(files.size(),2);
+        for(int i=0;i<2;++i) {
+            const auto file=files[i].toObject();QCOMPARE(file.value("name").toString(),attachments[i].name);
+            QCOMPARE(file.value("mime").toString(),attachments[i].mime);QCOMPARE(file.value("reference").toString(),attachments[i].reference);
+            QCOMPARE(file.value("bytes").toInteger(),attachments[i].data.size());QVERIFY(!AttachmentFiles::cached(file).isEmpty());
+        }
+        QList<MessageAttachment> restored;done=false;
+        AttachmentFiles::readAsync(files,this,[&](const QList<MessageAttachment> &result,const QString &failure){restored=result;error=failure;done=true;});
+        QTRY_VERIFY(done);QVERIFY(error.isEmpty());QCOMPARE(restored.size(),attachments.size());
+        for(int i=0;i<restored.size();++i) {
+            QCOMPARE(restored[i].name,attachments[i].name);QCOMPARE(restored[i].mime,attachments[i].mime);
+            QCOMPARE(restored[i].reference,attachments[i].reference);QCOMPARE(restored[i].data,attachments[i].data);
+            QFile::remove(files[i].toObject().value("local_path").toString());
+        }
+    }
+    void blockedIoKeepsHeartbeatAndCallbacksOnOwnerThread() {
+        struct Gate { QSemaphore entered,release; };auto gate=std::make_shared<Gate>();
+        auto unblock=qScopeGuard([&]{gate->release.release(2);});
+        AttachmentFiles::setIoObserver([gate]{gate->entered.release();gate->release.acquire();});
+        bool prepared=false;bool read=false;bool heartbeat=false;QJsonArray files;
+        AttachmentFiles::prepareAsync({{"example.txt","text/plain","heartbeat fixture","[File #1]"}},this,
+            [&](const QJsonArray &result,const QString &error){QCOMPARE(QThread::currentThread(),thread());QVERIFY(error.isEmpty());files=result;prepared=true;});
+        QTRY_VERIFY(gate->entered.available()==1);
+        QTimer::singleShot(0,this,[&]{heartbeat=true;});QTRY_VERIFY(heartbeat);QVERIFY(!prepared);
+        gate->entered.acquire();gate->release.release();QTRY_VERIFY(prepared);heartbeat=false;
+        AttachmentFiles::readAsync(files,this,[&](const QList<MessageAttachment> &result,const QString &error){
+            QCOMPARE(QThread::currentThread(),thread());QVERIFY(error.isEmpty());QCOMPARE(result.first().data,QByteArray("heartbeat fixture"));read=true;
+        });
+        QTRY_VERIFY(gate->entered.available()==1);
+        QTimer::singleShot(0,this,[&]{heartbeat=true;});QTRY_VERIFY(heartbeat);QVERIFY(!read);
+        gate->release.release();QTRY_VERIFY(read);QFile::remove(files.first().toObject().value("local_path").toString());
+    }
+    void destroyedOwnerDropsCallbacksAndPoolBoundsConcurrentWork() {
+        struct Gate { QSemaphore entered,release; };auto gate=std::make_shared<Gate>();
+        auto unblock=qScopeGuard([&]{gate->release.release(8);});
+        AttachmentFiles::setIoObserver([gate]{gate->entered.release();gate->release.acquire();});
+        auto *owner=new QObject;bool stale=false;int completed=0;
+        AttachmentFiles::prepareAsync({{"owner.txt","text/plain","owner lifecycle fixture",{}}},owner,[&](const QJsonArray &,const QString &){stale=true;});
+        QTRY_VERIFY(gate->entered.available()==1);delete owner;gate->entered.acquire();
+        for(int i=0;i<5;++i)AttachmentFiles::prepareAsync({{"owner.txt","text/plain","owner lifecycle fixture",{}}},this,[&](const QJsonArray &files,const QString &error){QVERIFY(error.isEmpty());QFile::remove(files.first().toObject().value("local_path").toString());++completed;});
+        QTRY_VERIFY(gate->entered.available()==1);QCOMPARE(AttachmentFiles::pool().activeThreadCount(),2);
+        int emptyCompleted=0;
+        AttachmentFiles::prepareAsync({},this,[&](const QJsonArray &files,const QString &error){QVERIFY(files.isEmpty());QVERIFY(error.isEmpty());++emptyCompleted;});
+        AttachmentFiles::readAsync({},this,[&](const QList<MessageAttachment> &files,const QString &error){QVERIFY(files.isEmpty());QVERIFY(error.isEmpty());++emptyCompleted;});
+        bool heartbeat=false;QTimer::singleShot(0,this,[&]{heartbeat=true;});QTRY_VERIFY(heartbeat);QTRY_COMPARE(emptyCompleted,2);QCOMPARE(completed,0);
+        gate->release.release(6);QTRY_COMPARE(completed,5);QVERIFY(!stale);
+    }
+    void preparationCapturesCacheRootBeforeWorkerStarts() {
+        struct Gate { QSemaphore entered,release; };auto gate=std::make_shared<Gate>();
+        auto unblock=qScopeGuard([&]{gate->release.release();});
+        const auto application=QCoreApplication::applicationName();auto restore=qScopeGuard([&]{QCoreApplication::setApplicationName(application);});
+        const auto originalRoot=AttachmentFiles::root();
+        AttachmentFiles::setIoObserver([gate]{gate->entered.release();gate->release.acquire();});
+        QJsonArray files;bool done=false;
+        AttachmentFiles::prepareAsync({{"captured.txt","text/plain","captured cache root",{}}},this,
+            [&](const QJsonArray &result,const QString &error){QVERIFY(error.isEmpty());files=result;done=true;});
+        QTRY_VERIFY(gate->entered.available()==1);QCoreApplication::setApplicationName(application+"-other");
+        QVERIFY(AttachmentFiles::root()!=originalRoot);gate->release.release();QTRY_VERIFY(done);
+        const auto path=files.first().toObject().value("local_path").toString();QVERIFY(path.startsWith(originalRoot+'/'));QFile::remove(path);
+    }
+    void invalidSnapshotsAndLimitViolationsCannotBecomeRetryPayloads() {
+        const QByteArray data="integrity fixture";const auto path=AttachmentFiles::store("integrity.txt",data);QVERIFY(!path.isEmpty());
+        const QJsonObject valid{{"name","integrity.txt"},{"mime","text/plain"},{"reference","[File #1]"},{"bytes",data.size()},{"local_path",path}};
+        const auto rejected=[&](const QJsonArray &files) {
+            bool done=false;QString error;QList<MessageAttachment> result;
+            AttachmentFiles::readAsync(files,this,[&](const QList<MessageAttachment> &value,const QString &failure){result=value;error=failure;done=true;});
+            QTRY_VERIFY(done);QVERIFY(result.isEmpty());QVERIFY(!error.isEmpty());
+        };
+        auto wrongSize=valid;wrongSize["bytes"]=data.size()+1;rejected({wrongSize});wrongSize.remove("bytes");rejected({wrongSize});wrongSize["bytes"]="17";rejected({wrongSize});rejected({42});
+        QTemporaryFile outside;QVERIFY(outside.open());outside.write(data);outside.flush();auto escaped=valid;escaped["local_path"]=outside.fileName();rejected({escaped});
+        auto linkPath=QFileInfo(path).dir().filePath("outside.txt");QVERIFY(QFile::link(outside.fileName(),linkPath));
+        escaped["local_path"]=linkPath;rejected({escaped});QFile::remove(linkPath);
+        QFile corrupted(path);QVERIFY(corrupted.open(QIODevice::WriteOnly));QCOMPARE(corrupted.write(QByteArray(data.size(),'x')),qint64(data.size()));corrupted.close();rejected({valid});
+        QVERIFY(corrupted.open(QIODevice::WriteOnly));QVERIFY(corrupted.resize(HgsClient::MaximumAttachmentBytes+1));corrupted.close();rejected({valid});QFile::remove(path);
+        QJsonArray tooMany;for(int i=0;i<HgsClient::MaximumAttachments+1;++i)tooMany.append(valid);rejected(tooMany);
+        const auto rejectPreparation=[&](const QList<MessageAttachment> &attachments) {
+            bool done=false;QString error;QJsonArray files;
+            AttachmentFiles::prepareAsync(attachments,this,[&](const QJsonArray &result,const QString &failure){files=result;error=failure;done=true;});
+            QTRY_VERIFY(done);QVERIFY(files.isEmpty());QVERIFY(!error.isEmpty());
+        };
+        rejectPreparation({{"empty.txt","text/plain",{}, {}}});
+        rejectPreparation({{"large.txt","text/plain",QByteArray(HgsClient::MaximumAttachmentBytes+1,'x'), {}}});
+        QList<MessageAttachment> tooManyAttachments;for(int i=0;i<HgsClient::MaximumAttachments+1;++i)tooManyAttachments.append({"example.txt","text/plain","x",{}});
+        rejectPreparation(tooManyAttachments);
+        const QByteArray maximum(HgsClient::MaximumAttachmentBytes,'m');
+        rejectPreparation({{"one.txt","text/plain",maximum,{}},{"two.txt","text/plain",maximum,{}},{"three.txt","text/plain","x",{}}});
+        const auto maxPath=AttachmentFiles::store("maximum.txt",maximum);QVERIFY(!maxPath.isEmpty());
+        const auto smallPath=AttachmentFiles::store("small.txt","x");QVERIFY(!smallPath.isEmpty());
+        rejected({QJsonObject{{"local_path",maxPath},{"bytes",maximum.size()}},QJsonObject{{"local_path",maxPath},{"bytes",maximum.size()}},QJsonObject{{"local_path",smallPath},{"bytes",1}}});
+        QFile::remove(maxPath);QFile::remove(smallPath);
+    }
+
 };
 QTEST_MAIN(TestAttachmentViewer)
 #include "test_attachmentviewer.moc"

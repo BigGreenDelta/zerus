@@ -95,6 +95,24 @@
 
 namespace {
 
+QJsonObject sendEvidence(const QJsonObject &data)
+{
+    QJsonObject result;
+    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint"})
+        result.insert(QString::fromLatin1(field), data.value(QString::fromLatin1(field)));
+    result.insert("session_usage", QJsonObject{{"prompt_cache", data.value("session_usage").toObject().value("prompt_cache")}});
+    return result;
+}
+
+bool observedIdentityMatches(const SessionInfo &current, const SessionInfo &original,
+                             const QString &run, const QString &conversation)
+{
+    // Inspection is authoritative and may precede the next fleet refresh.
+    // Accept that refresh catching up, while refusing a third incarnation.
+    return (current.runId == original.runId && current.conversationId == original.conversationId)
+        || (current.runId == run && current.conversationId == conversation);
+}
+
 enum Roles { KeyRole = SessionRoles::Key, TitleRole, MetaRole, StatusRole, DetailRole, AgentRole, HostRole, ChildrenRole };
 
 class SessionIdentityLabel : public QLabel {
@@ -749,10 +767,27 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const auto *entry = selected();
             if (!entry || m_subagentId.isEmpty() || key != childKey(*entry, m_subagentId)
                 || !entry->online || !m_subagentDetails.value("send_supported").toBool() || m_subagentComposer->isSending(key)) return;
-            if (!m_subagentComposer->setSending(key)) return;
-            const auto request = m_client.requestSendMessage(entry->host, entry->session.name, text, files,
-                m_details.value("run_id").toString(), m_subagentConversation, m_subagentId);
-            m_childMessages.insert(request, key);
+            const Entry target = *entry;
+            const QString run = m_details.value("run_id").toString(), parentConversation = m_details.value("conversation_id").toString();
+            const QString conversation = m_subagentConversation, agent = m_subagentId;
+            beginSendEvidence(target.key, m_details);
+            m_subagentComposer->prepareSendingAsync(key, false, [this, target, key, text, files, run, parentConversation, conversation, agent](bool okay) {
+                if (!okay) { finishSendEvidence(target.key); return; }
+                const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == target.key; });
+                const auto evidence = m_pendingSendEvidence.value(target.key);
+                finishSendEvidence(target.key);
+                const bool inspectingChild = m_selectedKey == target.key && m_subagentId == agent;
+                if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                    || current->session.created != target.session.created
+                    || !observedIdentityMatches(current->session, target.session, run, parentConversation) || !current->online || isTerminating(*current)
+                    || m_pending || !m_renameKey.isEmpty()
+                    || (!evidence.isEmpty() && (evidence.value("run_id").toString() != run || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"))
+                    || (inspectingChild && (m_subagentConversation != conversation || !m_subagentDetails.value("send_supported").toBool()))) {
+                    m_subagentComposer->deliveryFinished(key, false, tr("The agent changed. Your draft was kept without sending.")); return;
+                }
+                const auto request = m_client.requestSendMessage(target.host, target.session.name, text, files, run, conversation, agent);
+                m_childMessages.insert(request, key);
+            });
         });
     connect(m_subagentView, &ActivityView::fileReferenceActivated, this, openFileReference);
     auto *attachments=new AttachmentLoader(&m_client,this);
@@ -844,6 +879,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(m_selectedKey==m_interruptKey)inspect();
         renderDetails();
     });
+    connect(m_question, &QuestionCard::draftRestored, this, [this] { renderDetails(); });
     connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key,const QString &text,const QList<MessageAttachment> &files){sendMessage(key,text,files);});
     // An unsent draft becomes the row's status (see SessionDelegate::statusOf).
     const auto draftChanged = [this](const QString &key) {
@@ -2581,9 +2617,27 @@ void SessionsWindow::closeSubagent()
     if (wasOpen && !m_rebuilding) QTimer::singleShot(0, this, [this]{ rebuild(); });
 }
 
+void SessionsWindow::beginSendEvidence(const QString &key, const QJsonObject &data)
+{
+    ++m_pendingEvidenceUsers[key];
+    if (!data.isEmpty()) m_pendingSendEvidence.insert(key, sendEvidence(data));
+    else if (!m_pendingSendEvidence.contains(key)) m_pendingSendEvidence.insert(key, {});
+}
+
+void SessionsWindow::finishSendEvidence(const QString &key)
+{
+    if (--m_pendingEvidenceUsers[key] > 0) return;
+    m_pendingEvidenceUsers.remove(key); m_pendingSendEvidence.remove(key);
+}
+
 void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId)
 {
-    if (archiveId.isEmpty()) { continueAfterCompact(host, name, data); continueAfterStart(host, name, data); }
+    if (archiveId.isEmpty()) {
+        for (const auto &entry : m_entries)
+            if (entry.host == host && entry.session.name == name && entry.session.archiveId.isEmpty())
+                if (m_pendingSendEvidence.contains(entry.key)) m_pendingSendEvidence.insert(entry.key, sendEvidence(data));
+        continueAfterCompact(host, name, data); continueAfterStart(host, name, data);
+    }
     if (!m_pending && !m_renameKey.isEmpty()) return;
     const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
     // A confirmed clear continues the same Activity timeline, and its global
@@ -3120,22 +3174,50 @@ void SessionsWindow::messageAction(const QString &id,const QString &action)
         if(action!="retry" || message.value("uncertain").toBool() || m_composer->isSending(m_selectedKey))return;
         if(message.value("run_id")!=m_details.value("run_id") || message.value("conversation_id")!=m_details.value("conversation_id"))return;
         const auto reason=messageBlockReason(*entry);if(!reason.isEmpty()){showNotice(reason,true);return;}
-        QList<MessageAttachment> files;
-        for(const auto &value:message.value("attachments").toArray()) {
-            const auto metadata=value.toObject();const auto path=AttachmentFiles::cached(metadata);QFile file(path);
-            if(path.isEmpty() || !file.open(QIODevice::ReadOnly)){showNotice(tr("An attachment is no longer available. Attach it again before retrying."),true);return;}
-            const auto bytes=file.readAll();if(bytes.size()!=metadata.value("bytes").toInteger()
-                || QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex()!=QFileInfo(path).dir().dirName().toLatin1()){
-                showNotice(tr("An attachment changed. Attach it again before retrying."),true);return;
-            }
-            files.append({metadata.value("name").toString(),metadata.value("mime").toString(),bytes,metadata.value("reference").toString()});
-        }
-        sendMessage(m_selectedKey,message.value("text").toString(),files,id);return;
+        const QString key = m_selectedKey;
+        if (m_retryReads.contains(key)) return;
+        const Entry target = *entry;
+        const QString run = message.value("run_id").toString();
+        const QString conversation = message.value("conversation_id").toString();
+        const auto cacheEvidence = sendEvidence(m_details);
+        m_retryReads.insert(key);
+        beginSendEvidence(key, cacheEvidence);
+        AttachmentFiles::readAsync(message.value("attachments").toArray(), this,
+            [this, key, target, message, id, run, conversation, cacheEvidence](const QList<MessageAttachment> &files, const QString &error) {
+                m_retryReads.remove(key);
+                const auto evidence = m_pendingSendEvidence.value(key, cacheEvidence);
+                finishSendEvidence(key);
+                if (!error.isEmpty()) { showNotice(error, true); return; }
+                const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+                if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                    || current->session.created != target.session.created || m_composer->isSending(key)
+                    || !observedIdentityMatches(current->session, target.session, run, conversation)
+                    || !current->online || isTerminating(*current)
+                    || evidence.value("run_id").toString() != run || evidence.value("conversation_id").toString() != conversation
+                    || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"
+                    || m_pending || !m_renameKey.isEmpty() || m_startSend.key == key || m_compacts.contains(key)
+                    || (key == m_clearKey && m_clearRequest) || (key == m_settingsKey && m_settingsRequest)) return;
+                bool retained = false;
+                for (const auto &value : m_localMessages.value(key)) if (value.toObject() == message) { retained = true; break; }
+                if (!retained) return;
+                if (key == m_selectedKey) {
+                    if (m_details.value("run_id").toString() != run || m_details.value("conversation_id").toString() != conversation) return;
+                    sendMessage(key, message.value("text").toString(), files, id);
+                } else {
+                    // An accepted warm retry stays with its original session.
+                    // A cold retry still needs the foreground consent dialog.
+                    if (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)) return;
+                    deliverMessage(key, target.host, target.session.name, run, conversation,
+                                   message.value("text").toString(), files, id, {}, false, evidence);
+                }
+            });
+        return;
     }
 }
 
 void SessionsWindow::cancelCompactContinuation(const QString &key, const QString &reason)
 {
+    m_waitingPreparations.remove(key);
     if (!m_compacts.remove(key)) return;
     if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key,false,reason);
@@ -3144,14 +3226,31 @@ void SessionsWindow::cancelCompactContinuation(const QString &key, const QString
 void SessionsWindow::compactToSend(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
                                  const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId)
 {
-    if (m_compacts.contains(key) || !m_composer->draftMatches(key,text,attachments)
-        || !m_composer->setWaitingToSend(key, tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."))) return;
+    if (m_compacts.contains(key) || !m_composer->draftMatches(key, text, attachments)) return;
     CompactContinuation pending;
     pending.key=key; pending.host=host; pending.name=name; pending.run=run; pending.conversation=conversation;
     pending.text=text; pending.attachments=attachments; pending.retryId=retryId;
     pending.started=QDateTime::currentMSecsSinceEpoch();
-    pending.request=m_client.requestCompactContext(host,name,run,conversation);
     m_compacts.insert(key,pending); m_compactTimer.start();
+    const auto serial = ++m_waitingPreparationSerial; m_waitingPreparations.insert(key, serial);
+    beginSendEvidence(key, key == m_selectedKey ? m_details : QJsonObject());
+    m_composer->prepareWaitingToSendAsync(key,
+        tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."),
+        [this, key, host, name, run, conversation, serial](bool okay) {
+            const auto evidence = key == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(key);
+            finishSendEvidence(key);
+            if (m_waitingPreparations.value(key) != serial || !m_compacts.contains(key)) return;
+            m_waitingPreparations.remove(key);
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+            if (!okay || entry == m_entries.cend() || entry->host != host || entry->session.name != name
+                || !entry->online || isTerminating(*entry) || m_pending || !m_renameKey.isEmpty()
+                || (!evidence.isEmpty() && (evidence.value("run_id").toString() != run || evidence.value("conversation_id").toString() != conversation))
+                || (key == m_selectedKey && (m_details.value("run_id").toString() != run || m_details.value("conversation_id").toString() != conversation))) {
+                cancelCompactContinuation(key, tr("Compaction was cancelled. Your draft was kept without sending.")); return;
+            }
+            m_compacts[key].request = m_client.requestCompactContext(host, name, run, conversation);
+            if (key == m_selectedKey) renderDetails();
+        });
 }
 
 void SessionsWindow::pollCompactContinuations()
@@ -3183,6 +3282,7 @@ void SessionsWindow::pollCompactContinuations()
 void SessionsWindow::continueAfterCompact(const QString &host, const QString &name, const QJsonObject &data)
 {
     for (const auto &key : m_compacts.keys()) {
+        if (m_waitingPreparations.contains(key)) continue;
         const auto pending = m_compacts.value(key);
         if (pending.host != host || pending.name != name) continue;
         if (data.value("run_id") != pending.run || data.value("conversation_id") != pending.conversation) {
@@ -3210,7 +3310,7 @@ void SessionsWindow::continueAfterCompact(const QString &host, const QString &na
         // never submit it twice. The CLI also verifies the compaction UUID.
         m_compacts.remove(key);
         if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
-        deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId);
+        deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId,true,data);
         return;
     }
 }
@@ -3311,22 +3411,41 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
         showNotice(tr("The session changed. Your draft was kept without sending."), true); return;
     }
     if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
-    if (!m_composer->setWaitingToSend(key, compactFirst
-        ? tr("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit.")
-        : tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."))) return;
     m_startSend = {key, entry->host, entry->session.name, entry->session.runId, entry->session.conversationId,
         text, attachments, startFresh, compactFirst, QDateTime::currentMSecsSinceEpoch()};
     m_compactTimer.start();
-    m_pending = true; m_restoreKey.clear();
-    if (startFresh) m_client.startFreshSession(entry->host, entry->session.name, entry->session.runId);
-    else m_client.resumeSession(entry->host, entry->session.name);
+    const Entry target = *entry;
+    const auto serial = ++m_waitingPreparationSerial; m_waitingPreparations.insert(key, serial);
+    beginSendEvidence(key, m_details);
+    m_composer->prepareWaitingToSendAsync(key, compactFirst
+        ? tr("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit.")
+        : tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."),
+        [this, key, target, startFresh, serial](bool okay) {
+            const auto evidence = key == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(key);
+            finishSendEvidence(key);
+            if (m_waitingPreparations.value(key) != serial || m_startSend.key != key) return;
+            m_waitingPreparations.remove(key);
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+            if (!okay || current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                || current->session.created != target.session.created || current->session.runId != target.session.runId
+                || current->session.conversationId != target.session.conversationId || !current->online || isTerminating(*current)
+                || (!evidence.isEmpty() && (evidence.value("run_id").toString() != target.session.runId
+                    || evidence.value("conversation_id").toString() != target.session.conversationId))
+                || current->session.state == "running" || m_pending || !m_renameKey.isEmpty()) {
+                cancelStartContinuation(tr("Starting was cancelled. Your draft was kept without sending.")); return;
+            }
+            m_pending = true; m_restoreKey.clear();
+            if (startFresh) m_client.startFreshSession(target.host, target.session.name, target.session.runId);
+            else m_client.resumeSession(target.host, target.session.name);
+            renderDetails();
+        });
     renderDetails();
 }
 
 void SessionsWindow::cancelStartContinuation(const QString &reason)
 {
     if (m_startSend.key.isEmpty()) return;
-    const auto key = m_startSend.key; m_startSend = {};
+    const auto key = m_startSend.key; m_startSend = {}; m_waitingPreparations.remove(key);
     if (m_compacts.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key, false, reason);
 }
@@ -3335,6 +3454,7 @@ void SessionsWindow::cancelStartContinuation(const QString &reason)
 // its conversation; a fresh start must never reopen the replaced one.
 void SessionsWindow::continueAfterStart(const QString &host, const QString &name, const QJsonObject &data)
 {
+    if (m_waitingPreparations.contains(m_startSend.key)) return;
     if (m_startSend.key.isEmpty() || m_startSend.host != host || m_startSend.name != name) return;
     if (!m_composer->draftMatches(m_startSend.key, m_startSend.text, m_startSend.attachments)) {
         cancelStartContinuation(tr("Draft changed. Send it when you are ready.")); return;
@@ -3357,7 +3477,7 @@ void SessionsWindow::continueAfterStart(const QString &host, const QString &name
     if (pending.compact && (conversation.isEmpty() || !data.value("compact_context_supported").toBool())) return;
     m_startSend = {};
     if (pending.compact) compactToSend(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments);
-    else deliverMessage(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments,{},{});
+    else deliverMessage(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments,{},{},true,data);
     if (m_compacts.isEmpty()) m_compactTimer.stop();
 }
 
@@ -3370,6 +3490,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
     if (!reason.isEmpty()) { m_composer->deliveryFinished(key, false, reason); return; }
     const QString runId = m_details.value("run_id").toString();
     const QString conversationId = m_details.value("conversation_id").toString();
+    bool fullContextConsent = contextChosen || !compactionId.isEmpty();
     // Resume and send already chose the full saved context.
     if(compactionId.isEmpty() && !contextChosen && CacheStatus::expired(m_details)) {
         const auto host=entry->host,name=entry->session.name;
@@ -3391,31 +3512,80 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
             compactToSend(key,host,name,runId,conversationId,text,attachments,retryId);
             renderDetails(); return;
         }
+        fullContextConsent = true;
         const auto currentProblem=messageBlockReason(*entry);if(!currentProblem.isEmpty()){showNotice(currentProblem,true);return;}
     }
-    deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId);
+    deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId,fullContextConsent);
 }
 
 void SessionsWindow::deliverMessage(const QString &key, const QString &host, const QString &name, const QString &runId, const QString &conversationId,
-                                   const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId)
+                                   const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId, bool fullContextConsent, const QJsonObject &inspectionEvidence)
 {
-    if (m_composer->isSending(key) || !m_composer->setSending(key,!retryId.isEmpty() && !m_composer->draftMatches(key,text,attachments))) return;
-    const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
-    m_pendingMessages.insert(request, {key, runId, conversationId});
-    QJsonArray files;
-    for (const auto &file : attachments) files.append(QJsonObject{{"name",file.name},{"mime",file.mime},{"bytes",file.data.size()},{"reference",file.reference},
-        {"local_path",AttachmentFiles::store(file.name,file.data)}});
-    auto &messages = m_localMessages[key];
-    for(int i=messages.size();i-- >0;) {
-        const auto previous=messages[i].toObject();
-        if(previous.value("status")=="error" && (previous.value("id").toString()==retryId
-            || (previous.value("text").toString()==text && previous.value("attachments").toArray()==files)))messages.removeAt(i);
+    if (m_composer->isSending(key)) return;
+    const auto original = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) { return entry.key == key && entry.host == host && entry.session.name == name; });
+    if (original == m_entries.cend()) return;
+    const Entry target = *original;
+    QJsonObject retryMessage;
+    if (!retryId.isEmpty()) {
+        for (const auto &value : m_localMessages.value(key)) {
+            const auto message = value.toObject();
+            if (message.value("id").toString() == retryId && message.value("status") == "error" && !message.value("uncertain").toBool()) {
+                retryMessage = message; break;
+            }
+        }
+        if (retryMessage.isEmpty()) return;
     }
-    messages.append(QJsonObject{{"id", QString::number(request)}, {"text", text}, {"status", "sending"},
-        {"attachments", files}, {"run_id", runId}, {"conversation_id", conversationId},
-        {"submitted_at", QDateTime::currentMSecsSinceEpoch() / 1000.0}});
-    while (messages.size() > 50) messages.removeFirst();
-    if (key == m_selectedKey) { renderDetails(); m_activityView->jumpToLatest(); }
+    const QJsonObject cacheEvidence = !inspectionEvidence.isEmpty() ? sendEvidence(inspectionEvidence)
+        : key == m_selectedKey ? sendEvidence(m_details) : QJsonObject();
+    beginSendEvidence(key, cacheEvidence);
+    const bool preserve = !retryId.isEmpty() && !m_composer->draftMatches(key, text, attachments);
+    m_composer->prepareSendingAsync(key, preserve, [this, target, key, host, name, runId, conversationId, text, attachments, retryId, retryMessage, compactionId, fullContextConsent, cacheEvidence](bool okay) {
+        if (!okay) { finishSendEvidence(key); return; }
+        const auto stillValid = [this, target, key, host, name, runId, conversationId, retryId, retryMessage, fullContextConsent, cacheEvidence] {
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) { return entry.key == key; });
+            const auto evidence = m_pendingSendEvidence.value(key, cacheEvidence);
+            if (!fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence))) return false;
+            if (current == m_entries.cend() || current->host != host || current->session.name != name
+                || current->session.created != target.session.created
+                || !observedIdentityMatches(current->session, target.session, runId, conversationId)
+                || !current->online || isTerminating(*current)) return false;
+            if (!evidence.isEmpty() && (evidence.value("run_id").toString() != runId
+                || evidence.value("conversation_id").toString() != conversationId
+                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running")) return false;
+            if (m_pending || !m_renameKey.isEmpty() || (key == m_clearKey && m_clearRequest)
+                || (key == m_settingsKey && m_settingsRequest)) return false;
+            if (!retryId.isEmpty()) {
+                bool retained = false;
+                for (const auto &value : m_localMessages.value(key)) if (value.toObject() == retryMessage) { retained = true; break; }
+                if (!retained) return false;
+            }
+            if (key == m_selectedKey && (m_details.value("run_id").toString() != runId
+                || m_details.value("conversation_id").toString() != conversationId || !messageBlockReason(*current).isEmpty()
+                || (CacheStatus::expired(m_details) && !fullContextConsent))) return false;
+            return true;
+        };
+        if (!stillValid()) { finishSendEvidence(key); m_composer->deliveryFinished(key, false, tr("The session changed. Your draft was kept without sending.")); return; }
+        AttachmentFiles::prepareAsync(attachments, this,
+            [this, stillValid, key, host, name, runId, conversationId, text, attachments, retryId, compactionId](const QJsonArray &files, const QString &error) {
+                const bool valid = stillValid(); finishSendEvidence(key);
+                if (!error.isEmpty() || !valid || !m_composer->isSending(key)) {
+                    m_composer->deliveryFinished(key, false, error.isEmpty() ? tr("The session changed. Your draft was kept without sending.") : error); return;
+                }
+                const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
+                m_pendingMessages.insert(request, {key, runId, conversationId});
+                auto &messages = m_localMessages[key];
+                for(int i=messages.size();i-- >0;) {
+                    const auto previous=messages[i].toObject();
+                    if(previous.value("status")=="error" && (previous.value("id").toString()==retryId
+                        || (previous.value("text").toString()==text && previous.value("attachments").toArray()==files)))messages.removeAt(i);
+                }
+                messages.append(QJsonObject{{"id", QString::number(request)}, {"text", text}, {"status", "sending"},
+                    {"attachments", files}, {"run_id", runId}, {"conversation_id", conversationId},
+                    {"submitted_at", QDateTime::currentMSecsSinceEpoch() / 1000.0}});
+                while (messages.size() > 50) messages.removeFirst();
+                if (key == m_selectedKey) { renderDetails(); m_activityView->jumpToLatest(); }
+            });
+    });
 }
 
 void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error, bool uncertain)
@@ -3590,6 +3760,7 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
     };
     const auto question = actionableQuestion(true);
     if (question.isEmpty()) return;
+    bool fullContextConsent = false;
     if (CacheStatus::expired(m_details)) {
         const Entry original = *selected();
         const auto run = m_details.value("run_id"), conversation = m_details.value("conversation_id");
@@ -3617,12 +3788,40 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
             showNotice(tr("The question or your answers changed. Your draft was kept; review it before submitting again."), true);
             return;
         }
+        fullContextConsent = true;
     }
     const auto *entry = selected();
-    if (!entry || !m_question->setSending(targetKey, targetQuestionId)) return;
-    const auto request = m_client.requestAnswerQuestion(entry->host, entry->session.name, question, requestedAnswers);
-    m_pendingAnswers.insert(request, {targetKey, targetQuestionId, question.value("question_hash").toString()});
-    renderDetails();
+    if (!entry) return;
+    const Entry target = *entry;
+    const auto pinnedIdentity = consentIdentity(question);
+    const QJsonObject cacheEvidence = sendEvidence(m_details);
+    beginSendEvidence(targetKey, cacheEvidence);
+    m_question->prepareSendingAsync(targetKey, targetQuestionId,
+        [this, target, targetKey, targetQuestionId, question, requestedAnswers, pinnedIdentity, skipping, consentIdentity, fullContextConsent, cacheEvidence](bool okay) {
+            if (!okay) { finishSendEvidence(targetKey); return; }
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == targetKey; });
+            const auto evidence = targetKey == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(targetKey, cacheEvidence);
+            finishSendEvidence(targetKey);
+            QJsonObject refreshed;
+            for (const auto &value : evidence.value("pending_questions").toArray())
+                if (value.toObject().value("question_id").toString() == targetQuestionId) { refreshed = value.toObject(); break; }
+            if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                || current->session.created != target.session.created
+                || !observedIdentityMatches(current->session, target.session, question.value("run_id").toString(), question.value("conversation_id").toString())
+                || !current->online || current->session.state != "running" || isTerminating(*current)
+                || m_pending || !m_renameKey.isEmpty() || (targetKey == m_selectedKey && !m_inspectError.isEmpty())
+                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"
+                || evidence.value("run_id") != question.value("run_id") || evidence.value("conversation_id") != question.value("conversation_id")
+                || consentIdentity(refreshed) != pinnedIdentity
+                || (!fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)))
+                || !(skipping ? refreshed.value("can_skip").toBool() : refreshed.value("can_answer").toBool())
+                || m_question->hasSubmittedAnswer(targetKey, refreshed)) {
+                m_question->setError(targetKey, targetQuestionId, tr("The question changed. Your answers were kept without submitting.")); return;
+            }
+            const auto request = m_client.requestAnswerQuestion(target.host, target.session.name, question, requestedAnswers);
+            m_pendingAnswers.insert(request, {targetKey, targetQuestionId, question.value("question_hash").toString()});
+            renderDetails();
+        });
 }
 
 void SessionsWindow::finishQuestion(quint64 request, bool ok, const QString &error, bool uncertain, bool submitted)

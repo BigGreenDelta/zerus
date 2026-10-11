@@ -57,9 +57,21 @@ void SwarmController::send(const QString &action)
 }
 void SwarmController::persist()
 {
+    if (!m_ready) return;
+    const auto organization = QJsonDocument(m_base).toJson(QJsonDocument::Compact);
+    const auto versions = QJsonDocument(m_versions).toJson(QJsonDocument::Compact);
+    // Polls arrive even when the shared catalog is unchanged. Rewriting its
+    // settings would synchronously wait for storage on the GUI thread each
+    // time. Remember only successful checkpoints, so a failed write is retried.
+    if (organization == m_persistedOrganization && versions == m_persistedVersions) return;
     QSettings settings;
-    if(m_ready){settings.setValue("swarm/observedOrganization",QJsonDocument(m_base).toJson(QJsonDocument::Compact));settings.setValue("swarm/observedVersions",QJsonDocument(m_versions).toJson(QJsonDocument::Compact));}
+    settings.setValue("swarm/observedOrganization", organization);
+    settings.setValue("swarm/observedVersions", versions);
     settings.sync();
+    if (settings.status() == QSettings::NoError) {
+        m_persistedOrganization = organization;
+        m_persistedVersions = versions;
+    }
 }
 QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local)
 {
