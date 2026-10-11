@@ -766,6 +766,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchCatalogLoading by mutableStateOf(false);private set
     var launchDirectoryLoading by mutableStateOf(false);private set
     var launchError by mutableStateOf("");private set
+    var mobileDeliveryError by mutableStateOf("");private set
     var launchSubmitting by mutableStateOf(false);private set
     private var launchGeneration=0L
     private var launchCatalogJob:Job?=null
@@ -917,6 +918,49 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(e is CancellationException) throw e
                 launchError=if(status=="failed") e.message.orEmpty() else "Launch is unconfirmed. Check its original receipt before creating another session."
             } finally { actionFlights-=action.requestId;launchSubmitting=false }
+        }
+    }
+    fun mobileDeliveryGateway(connectionId:String)=MobileDelivery.gateway(machines.filter { it.connectionId==connectionId }) {
+        MobileDelivery.OPERATION in machineOperations[MachineKey(it.connectionId,it.id)].orEmpty()
+    }
+    fun mobileDeliveryAction(connectionId:String)=sessionActions.lastOrNull { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.status!="reviewed" }
+    fun mobileDeliveryReason(connectionId:String):String {
+        if(demo || !storageReady) return "Connect a workspace to change this setting."
+        if(updateInstallPreparing) return "Saving drafts for an app update."
+        val gateway=mobileDeliveryGateway(connectionId)
+        return MobileDelivery.reason(gateway,
+            gateway!=null && MobileDelivery.OPERATION in machineOperations[MachineKey(connectionId,gateway.id)].orEmpty(),
+            MobileDelivery.OPERATION in relayOperations[connectionId].orEmpty(),
+            sessionActions.any { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending })
+    }
+    /** A durable request with the usual receipt states. An unconfirmed change is checked, never repeated. */
+    fun setMobileDelivery(connectionId:String,value:String) {
+        val reason=mobileDeliveryReason(connectionId);if(reason.isNotBlank()) { mobileDeliveryError=reason;return }
+        val gateway=mobileDeliveryGateway(connectionId) ?: return
+        if(gateway.mobileDelivery==value) { mobileDeliveryError="";return }
+        val args=try { MobileDelivery.arguments(value) } catch(e:Exception) { mobileDeliveryError=e.message.orEmpty();return }
+        val connection=connections.find { it.id==connectionId } ?: return
+        val target=Target(gateway.id,"","","",connectionId)
+        val action=SessionAction(UUID.randomUUID().toString(),target,MobileDelivery.OPERATION,args.toString())
+        mobileDeliveryError="";actionFlights+=action.requestId
+        viewModelScope.launch {
+            var attempted=false;var rejected=false
+            try {
+                durable({ state -> check(state.sessionActions.none { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending });state.action(action) },
+                    { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
+                attempted=true
+                val initial=try { api.submit(connection,target,MobileDelivery.OPERATION,JSONObject(args.toString()),action.requestId) }
+                    catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+                settleSessionAction(action,api.await(connection,initial))
+                val settled=messageState.sessionActions.find { it.requestId==action.requestId }
+                if(settled?.status=="completed") refresh() else mobileDeliveryError=settled?.error.orEmpty()
+            } catch(e:Exception) {
+                val status=if(!attempted || rejected) "failed" else "uncertain"
+                try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { if(it.status in setOf("sending","uncertain")) state.action(it.copy(status=status,error=if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED)) else state } ?: state }) }
+                catch(_:Exception) { mobileDeliveryError="Could not save the change result. Its original request remains recoverable." }
+                if(e is CancellationException) throw e
+                mobileDeliveryError=if(status=="failed") e.message.orEmpty() else MobileDelivery.UNCONFIRMED
+            } finally { actionFlights-=action.requestId }
         }
     }
     var terminalState by mutableStateOf<JSONObject?>(null);private set
