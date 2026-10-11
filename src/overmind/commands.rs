@@ -73,7 +73,7 @@ fn check_label(label: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn check_project(project: &str) -> Result<(), Refusal> {
+pub fn check_project(project: &str) -> Result<(), Refusal> {
     if project.len() > 128 || project.chars().any(char::is_control) {
         return Err(Refusal::field("invalid_field", "project", "invalid", "invalid project id"));
     }

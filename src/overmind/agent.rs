@@ -1,7 +1,7 @@
 //! Commands for agents in Zerus sessions. Each one is narrow and refuses moves
 //! that would break the process; results carry a `note` with the next step.
 use super::commands::{
-    check_text, created_payload, load, next_rank, parse, prove, reference, refuse, resolve,
+    check_project, check_text, created_payload, load, next_rank, parse, prove, reference, refuse, resolve,
     store_attachments, transition, view, workflow, write, Ctx, NewAttachment, MAX_FIELD,
 };
 use super::fold::{fold_many, Task};
@@ -48,7 +48,7 @@ pub fn mine(ctx: &mut Ctx) -> Result<Value> {
         })
         .collect();
     Ok(json!({"ok": true, "tasks": tasks,
-        "note": "Work on one task at a time. Read it with `show`, then advance it; call_human when a decision is not yours to make."}))
+        "note": "Work on one task at a time. Read it with `show`, then advance it; use call-human (MCP: call_human) when a decision is not yours to make. You can never move a task to Done; a person signs it off."}))
 }
 
 fn verify_evidence(cwd: &Path, evidence: &str) -> Result<()> {
@@ -104,9 +104,17 @@ pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let task = load(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
         let to_role = wf.role(&req.to).ok_or_else(|| Refusal::new("unknown_stage", format!("unknown stage {}", req.to)))?;
+        let fields = fields(&[("spec", &req.spec), ("worklog", &req.worklog), ("evidence", &req.evidence), ("root_cause", &req.root_cause)]);
+        wf.allow(Action::Advance, Some(&task.stage), &req.to, actor.kind, &fields)?;
         if to_role == Role::Review {
             for predecessor in &task.follows {
-                let before = load(tx, predecessor)?;
+                let before = match load(tx, predecessor) {
+                    Ok(before) => before,
+                    Err(error) => match error.downcast_ref::<Refusal>() {
+                        Some(r) if r.code == "unknown_task" => continue,
+                        _ => return Err(error),
+                    },
+                };
                 let role = workflow(tx, &before.project)?.role(&before.stage);
                 if !matches!(role, Some(Role::Review) | Some(Role::Done)) {
                     return refuse("predecessor_open", format!("{} must reach review first", reference(tx, predecessor)?));
@@ -118,12 +126,11 @@ pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
                 }
             }
         }
-        let fields = fields(&[("spec", &req.spec), ("worklog", &req.worklog), ("evidence", &req.evidence), ("root_cause", &req.root_cause)]);
         transition(tx, actor, &task, Action::Advance, &req.to, fields, None, vec![], &req.request_id)?;
         let note = if to_role == Role::Review {
             "Done from your side: the task waits for review. Take your next task."
         } else {
-            "Implement the spec, then advance to Review with a worklog and evidence (the commit SHA in a Git repository)."
+            "Continue the task; when it is finished, advance it to Review with a worklog and evidence (the commit SHA in a Git repository)."
         };
         result(tx, &uuid, note)
     })
@@ -255,9 +262,13 @@ pub fn file(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let me = agent_only(&ctx.actor)?;
     let req: FileRequest = parse(&request)?;
     write(ctx, &request, |tx, actor| {
+        let explicit = req.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        if let Some(project) = explicit {
+            check_project(project)?;
+        }
         let related = if req.related.is_empty() { String::new() } else { resolve(tx, &req.related)? };
-        let project = match (&req.project, related.is_empty()) {
-            (Some(project), _) => project.clone(),
+        let project = match (explicit, related.is_empty()) {
+            (Some(project), _) => project.to_owned(),
             (None, false) => load(tx, &related)?.project,
             (None, true) => {
                 let mut own = my_tasks(tx, &me)?;
@@ -481,5 +492,49 @@ mod tests {
         assert!(failed["task"]["labels"].as_array().unwrap().contains(&json!("review-failed")));
         let bad = review(&mut agent(&mut store, "w2", None), json!({"task": task, "verdict": "maybe", "report": "?"})).unwrap_err();
         assert_eq!(refusal(bad).field, "verdict");
+    }
+
+    #[test]
+    fn file_validates_and_resolves_the_project() {
+        let (_dir, mut store, task) = setup();
+        let filed = file(&mut agent(&mut store, "w1", None), json!({"prompt": "a", "breaks": "b", "project": "  ", "related": task})).unwrap();
+        assert_eq!(filed["task"]["project"], "p");
+        let alone = file(&mut agent(&mut store, "w1", None), json!({"prompt": "a", "breaks": "b", "project": ""})).unwrap();
+        assert_eq!(alone["task"]["project"], "p");
+        let bad = file(&mut agent(&mut store, "w1", None), json!({"prompt": "a", "breaks": "b", "project": "x\u{7}y"})).unwrap_err();
+        assert_eq!(refusal(bad).field, "project");
+    }
+
+    #[test]
+    fn illegal_jump_reports_the_rule_and_reviewed_predecessor_unblocks() {
+        let (_dir, mut store, task) = setup();
+        let jump = advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap_err();
+        assert_eq!(refusal(jump).code, "transition_not_allowed");
+        let mut human = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        let before = commands::create(&mut human, json!({"project": "p", "prompt": "First", "stage": "Queue"})).unwrap()["task"]["uuid"].as_str().unwrap().to_owned();
+        commands::link(&mut human, json!({"task": task, "relation": "follows", "target": before, "present": true})).unwrap();
+        store.write(|tx| {
+            let current = commands::load(tx, &before)?;
+            commands::transition(tx, &Actor::human(MACHINE), &current, Action::Claim, "Design", BTreeMap::new(), Some(SessionRef { machine: MACHINE.into(), name: "w2".into() }), vec![], "")?;
+            Ok(())
+        }).unwrap();
+        advance(&mut agent(&mut store, "w2", None), json!({"task": before, "to": "Build", "spec": "s"})).unwrap();
+        advance(&mut agent(&mut store, "w2", None), json!({"task": before, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "plan"})).unwrap();
+        let ok = advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();
+        assert_eq!(ok["task"]["stage"], "Review");
+    }
+
+    #[test]
+    fn agents_cannot_touch_done_tasks() {
+        let (_dir, mut store, task) = setup();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "s"})).unwrap();
+        advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Review", "worklog": "w", "evidence": "e"})).unwrap();
+        let mut human = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        commands::done(&mut human, json!({"task": task})).unwrap();
+        let err = attach(&mut agent(&mut store, "w1", None), json!({"task": task, "name": "x.png", "mime": "image/png", "data_base64": "iVBO"})).unwrap_err();
+        assert_eq!(refusal(err).code, "task_closed");
+        let err = advance(&mut agent(&mut store, "w1", None), json!({"task": task, "to": "Build", "spec": "s"})).unwrap_err();
+        assert!(matches!(refusal(err).code.as_str(), "task_closed" | "transition_not_allowed"));
     }
 }

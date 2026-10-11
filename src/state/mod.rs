@@ -110,7 +110,7 @@ fn account_binding(record: &Value) -> Value {
 }
 
 /// The Zerus session a CLI call comes from, verified like hook events.
-#[allow(dead_code)] // run_id is kept for callers that bind work to a run.
+#[allow(dead_code)] // run_id is part of the caller identity contract; read by plan 1b (send).
 pub(crate) struct CallerSession {
     pub name: String,
     pub run_id: String,
