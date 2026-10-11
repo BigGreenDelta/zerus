@@ -303,6 +303,9 @@ Installation saves private drafts first and waits for active deliveries or
 commands. Android's install-source permission and confirmation remain required;
 the updater explicitly requests user action through
 [PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
+Install is the consent to that prompt: it opens directly for the session the tap
+committed while Updates stays open in the foreground. Continue Android
+confirmation remains only when the prompt could not open then.
 An installer session is recorded before commit and never recommitted after
 interruption. A lost confirmation screen requires explicit cancellation before
 another attempt. Success is shown only after the installed package version is
