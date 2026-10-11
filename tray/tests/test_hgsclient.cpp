@@ -24,6 +24,7 @@ private slots:
     void parsesSavedSessions();
     void parsesActivityMetadata();
     void providerFailuresRequireAttentionAndPreserveSpecificStatus();
+    void scheduledAgentsShowTheirNextRunInsteadOfReady();
     void questionReplyPreviews_data();
     void questionReplyPreviews();
     void unrecognizedQuestionPreviewsStayLiteral();
@@ -199,6 +200,35 @@ void TestHgsClient::unrecognizedQuestionPreviewsStayLiteral()
         session.activitySummary.clear();session.activityDetail.clear();
         QCOMPARE(SessionPresentation::currentAction(session),"Working: "+prompt);
     }
+}
+
+void TestHgsClient::scheduledAgentsShowTheirNextRunInsteadOfReady()
+{
+    const auto next = QDateTime::currentDateTime().addSecs(600);
+    QString error;
+    auto box=HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","local"},{"sessions",QJsonArray{QJsonObject{
+        {"name","kimi/project/watch"},{"tracked",true},{"activity","idle"},{"phase","idle"},{"process_state","running"},
+        {"schedules",QJsonObject{{"count",2},{"recurring",1},{"next_at",double(next.toSecsSinceEpoch())}}}}}}}).toJson(),&error);
+    QVERIFY(error.isEmpty());
+    auto session=box.sessions.first();
+    QCOMPARE((QList<int>{session.scheduledJobs,session.recurringSchedules}),(QList<int>{2,1}));
+    const auto time=SessionPresentation::nextScheduledRun(session);
+    QVERIFY(!time.isEmpty());
+    QCOMPARE(SessionPresentation::status(session),"Scheduled · "+time);
+    QCOMPARE(SessionPresentation::currentAction(session),"Next run at "+time);
+    QVERIFY(SessionPresentation::scheduled(session)); QVERIFY(SessionPresentation::active(session));
+    QVERIFY(!SessionPresentation::working(session)); QVERIFY(!SessionPresentation::needsAttention(session));
+    QVERIFY(!SessionPresentation::scheduled(session,false)); QCOMPARE(SessionPresentation::status(session,false),QString("Offline"));
+    session.nextScheduledAt=QDateTime::currentSecsSinceEpoch()-5;
+    QCOMPARE(SessionPresentation::status(session),QString("Scheduled · due"));
+    QCOMPARE(SessionPresentation::currentAction(session),QString("Next run due"));
+    session.nextScheduledAt=0;
+    QCOMPARE(SessionPresentation::status(session),QString("Scheduled"));
+    // A question or work outranks the schedule; no jobs or an unknown journal is Ready.
+    session.phase="input"; QCOMPARE(SessionPresentation::status(session),QString("Needs input")); session.phase="idle";
+    session.activity="busy"; QCOMPARE(SessionPresentation::status(session),QString("Working")); session.activity="idle";
+    session.scheduledJobs=0; QCOMPARE(SessionPresentation::status(session),QString("Ready"));
+    session.scheduledJobs=-1; QCOMPARE(SessionPresentation::status(session),QString("Ready")); QVERIFY(!SessionPresentation::active(session));
 }
 
 void TestHgsClient::providerFailuresRequireAttentionAndPreserveSpecificStatus()

@@ -121,7 +121,7 @@ pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool
 /// While routine ticks of a recurring job are skipped, a reply already read
 /// stays current: moving back to an older reply would make it unread again.
 fn keep_read_reply(session: &mut Value, mark: &Value) {
-    if !session["recurring_schedules"].as_u64().is_some_and(|count| count > 0) {
+    if !session["schedules"]["recurring"].as_u64().is_some_and(|count| count > 0) {
         return;
     }
     let journaled = |id: &Value| {
@@ -318,20 +318,20 @@ mod tests {
     #[test]
     fn skipped_ticks_never_move_a_read_reply_back() {
         let mark = json!({"conversation_id":"conversation-1","reply_id":"14053:1791743453.98","attention_signature":null,"at":1.0});
-        let mut session = json!({"recurring_schedules":1,"reply_id":"13956:1791742557.19","reply_at":1791742557.19});
+        let mut session = json!({"schedules":{"recurring":1},"reply_id":"13956:1791742557.19","reply_at":1791742557.19});
         keep_read_reply(&mut session, &mark);
         assert_eq!((session["reply_id"].clone(), session["reply_at"].clone()), (json!("14053:1791743453.98"), json!(1791743453.98)));
         // A newer reply from the person stays unread; no schedule changes nothing.
-        let mut newer = json!({"recurring_schedules":1,"reply_id":"14100:1791744000.5"});
+        let mut newer = json!({"schedules":{"recurring":1},"reply_id":"14100:1791744000.5"});
         keep_read_reply(&mut newer, &mark);
         assert_eq!(newer["reply_id"], "14100:1791744000.5");
-        let mut ended = json!({"recurring_schedules":0,"reply_id":"13956:1791742557.19"});
+        let mut ended = json!({"schedules":{"recurring":0},"reply_id":"13956:1791742557.19"});
         keep_read_reply(&mut ended, &mark);
         assert_eq!(ended["reply_id"], "13956:1791742557.19");
-        let mut none = json!({"recurring_schedules":2});
+        let mut none = json!({"schedules":{"recurring":2}});
         keep_read_reply(&mut none, &mark);
         assert_eq!(none["reply_id"], "14053:1791743453.98");
-        let mut unread = json!({"recurring_schedules":1,"reply_id":"13956:1791742557.19"});
+        let mut unread = json!({"schedules":{"recurring":1},"reply_id":"13956:1791742557.19"});
         keep_read_reply(&mut unread, &json!(null));
         assert_eq!(unread["reply_id"], "13956:1791742557.19");
     }

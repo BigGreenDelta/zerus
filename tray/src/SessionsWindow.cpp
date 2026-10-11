@@ -138,6 +138,7 @@ using SessionPresentation::sessionLabel;
 using SessionPresentation::projectContext;
 using SessionPresentation::currentActivity;
 using SessionPresentation::currentAction;
+using SessionPresentation::scheduled;
 using SessionPresentation::childCount;
 
 
@@ -2266,6 +2267,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::ParentKey, row.entry >= 0 ? visible[row.entry].key : QString());
         item->setData(SessionRoles::LaunchId, row.launch);
         item->setData(SessionRoles::WorkingSince, 0.0);
+        item->setData(SessionRoles::Scheduled, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
         item->setData(SessionRoles::BranchIcon, false);
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
@@ -2358,6 +2360,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Unread, !terminating && s.unreadReply);
         item->setData(SessionRoles::Working, !isTerminating(e) && currentActivity(s, e.online) && s.activity == "busy" && !s.needsAction());
         item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+        item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));

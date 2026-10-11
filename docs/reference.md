@@ -297,7 +297,10 @@ cannot show a green check.
 
 **Ready** means a reply ended, not that a long-running task is complete. Working
 and compacting timers use native start evidence and update locally without extra
-host requests. Theme, density, animation and machine/project label appearance are
+host requests. An idle agent with pending jobs it scheduled for itself (Kimi
+`CronCreate`) is **Scheduled**: its badge and detail show the next run time
+instead of a timer, or "due" once that time has passed. A question, approval or
+error still takes precedence, and work shows as Working. Theme, density, animation and machine/project label appearance are
 local preferences. **Settings → Appearance → Content scale** adjusts Activity,
 questions, the message field and Terminal from 75% to 200% in 5% steps, with 100%
 as the default; the session list, the side panel, the session header and its tabs
@@ -329,7 +332,7 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
-The **Active** filter combines sessions currently working, those in
+The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership
 rules; drafts remain local to each device. Drafts for visible subagents also keep
@@ -1386,13 +1389,18 @@ host's mark for the current conversation:
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
 
-Kimi sessions report `recurring_schedules`, the number of recurring jobs still
-scheduled in the conversation as folded from the native cron journal, or `null`
-while unknown. While it is positive, turns opened by those jobs without a prompt
-from the person do not advance `reply_id`; a prompt queued into such a turn makes
-its reply the person's. `reply_scheduled` is true when the reported reply ended a
-scheduled turn, which happens once no recurring job remains or while the count
-is unknown. Other providers report false and omit the count.
+Kimi sessions report `schedules: {count, recurring, next_at}` folded from the
+native cron journal: pending jobs the agent scheduled for itself, how many of them
+recur, and the earliest next run in seconds since the epoch (`null` when no
+expression can be evaluated). The next run is the first local-time minute matching
+a job's five-field expression after its last fire or creation; Kimi's small jitter
+is not modeled, and the value never depends on the time of the listing. The object
+is `null` while the journal cannot be read. While `schedules.recurring` is
+positive, turns opened by those jobs without a prompt from the person do not
+advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
+`reply_scheduled` is true when the reported reply ended a scheduled turn, which
+happens once no recurring job remains or while the count is unknown. Other
+providers report false and omit `schedules`.
 
 ```sh
 printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |

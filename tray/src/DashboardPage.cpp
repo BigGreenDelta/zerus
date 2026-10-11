@@ -177,6 +177,7 @@ public:
         set(SessionRoles::Working, working(session, online));
         set(SessionRoles::Draft, draft);
         set(SessionRoles::WorkingSince, session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
+        set(SessionRoles::Scheduled, scheduled(session, online));
         set(SessionRoles::Children, childCount(session, false, online, includeCompleted));
         // Overview cards navigate to a session; the roster opens in its list.
         set(SessionRoles::HasChildren, false);

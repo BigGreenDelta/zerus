@@ -97,11 +97,11 @@ fn native_summary(record: &Value) -> Value {
         Err(_) => json!({"goal":null,"goal_source":"unavailable"}),
     };
     if string(record, "agent") == "kimi" {
-        // Recurring provider jobs open future turns without the person; null
-        // while unknown. One-shot and expiring jobs are deleted as they fire.
-        summary["recurring_schedules"] = json!(kimi_wire
-            .and_then(|path| replay_goal(&path, "kimi_cron_v1").ok())
-            .map(|jobs| jobs.as_object().map_or(0, |jobs| jobs.len())));
+        // Jobs the agent scheduled open future turns without the person; null
+        // while the journal cannot be read.
+        summary["schedules"] = kimi_wire
+            .and_then(|path| replay_goal(&path, "kimi_cron_v2").ok())
+            .map_or(Value::Null, |jobs| schedules::summary(&jobs));
     }
     summary
 }
@@ -178,14 +178,14 @@ fn replay_goal_at(path: &Path, source: &str, cache_path: &Path) -> Result<Value>
             "kimi_goal_v1" => {
                 line.windows(5).any(|v| v == b"goal.") || line.windows(6).any(|v| v == b"forked")
             }
-            "kimi_cron_v1" => line.windows(6).any(|v| v == b"\"cron."),
+            "kimi_cron_v2" => line.windows(6).any(|v| v == b"\"cron."),
             _ => line.windows(11).any(|v| v == b"goal_status"),
         };
         if relevant {
             if let Ok(event) = serde_json::from_slice::<Value>(&line) {
                 match source {
                     "kimi_goal_v1" => reduce_kimi(&mut goal, &event),
-                    "kimi_cron_v1" => reduce_kimi_cron(&mut goal, &event),
+                    "kimi_cron_v2" => schedules::reduce_kimi(&mut goal, &event),
                     _ => reduce_claude(&mut goal, &event),
                 }
             }
@@ -258,35 +258,6 @@ fn reduce_kimi(goal: &mut Value, event: &Value) {
     copy_number(goal, event, "time", "updated_at", 1000.0);
     // Only recorded usage: adding wall time here would incorrectly count time
     // while Kimi is closed, paused, or disconnected.
-}
-
-// Fold the durable cron journal as Kimi does: add, delete, and the wire wins.
-fn reduce_kimi_cron(jobs: &mut Value, event: &Value) {
-    if !jobs.is_object() {
-        *jobs = json!({});
-    }
-    let jobs = jobs.as_object_mut().unwrap();
-    match string(event, "type") {
-        "cron.add" => {
-            let task = &event["task"];
-            if string(task, "id").is_empty() || !task["cron"].is_string()
-                || !task["prompt"].is_string() || !task["createdAt"].is_number()
-            {
-                return;
-            }
-            if task["recurring"] == false {
-                jobs.remove(string(task, "id"));
-            } else {
-                jobs.insert(string(task, "id").to_owned(), json!(true));
-            }
-        }
-        "cron.delete" => {
-            for id in event["ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                jobs.remove(id);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn reduce_claude(goal: &mut Value, event: &Value) {
@@ -364,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_recurring_schedules_follow_the_durable_cron_journal() {
+    fn kimi_schedules_replay_incrementally_from_the_durable_cron_journal() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("wire.jsonl");
         let cache = temp.path().join("cache.json");
@@ -373,7 +344,7 @@ mod tests {
             if !recurring.is_null() { task["recurring"] = recurring; }
             json!({"type":"cron.add","task":task}).to_string() + "\n"
         };
-        let count = || replay_goal_at(&path, "kimi_cron_v1", &cache).unwrap().as_object().map_or(0, |jobs| jobs.len());
+        let count = || schedules::summary(&replay_goal_at(&path, "kimi_cron_v2", &cache).unwrap())["recurring"].as_u64().unwrap();
         fs::write(&path, add("watch", Value::Null) + &add("once", json!(false))
             + &json!({"type":"cron.add","task":{"id":"invalid","cron":"* * * * *"}}).to_string() + "\n"
             + &json!({"type":"context.append_message","text":"\"cron.add\" in a message"}).to_string() + "\n").unwrap();

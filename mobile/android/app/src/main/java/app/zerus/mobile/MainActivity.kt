@@ -357,6 +357,7 @@ class MainActivity : ComponentActivity() {
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Neutral -> Unit
                 }
                 Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall)

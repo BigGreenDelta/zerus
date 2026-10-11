@@ -37,6 +37,24 @@ object SessionFilters {
     }
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
         session.raw.string("activity") == "busy" && !needsAction(session)
+    /** Jobs the agent scheduled for itself start its next turns: neither Ready nor Working (SessionPresentation::scheduledIdle). */
+    fun scheduledIdle(session: Session): Boolean {
+        val jobs = session.raw.optJSONObject("schedules")?.opt("count") as? Number
+        return session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && (jobs?.toInt() ?: 0) > 0
+    }
+    fun scheduled(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
+        !needsAction(session) && scheduledIdle(session)
+    /** The next run as a time of day, "due" once it has passed, or empty if unknown. */
+    fun nextScheduledRun(session: Session, now: Long = System.currentTimeMillis(), locale: Locale = Locale.getDefault(),
+        zone: TimeZone = TimeZone.getDefault()): String {
+        val seconds = (session.raw.optJSONObject("schedules")?.opt("next_at") as? Number)?.toDouble() ?: return ""
+        if (!seconds.isFinite() || seconds <= 0) return ""
+        val next = (seconds * 1000).toLong()
+        if (next <= now) return "due"
+        val day = java.text.SimpleDateFormat("yyyyMMdd", locale).apply { timeZone = zone }
+        val sameDay = day.format(Date(next)) == day.format(Date(now))
+        return java.text.SimpleDateFormat(if (sameDay) "HH:mm" else "d MMM HH:mm", locale).apply { timeZone = zone }.format(Date(next))
+    }
     fun needsAttention(session: Session, online: Boolean): Boolean {
         if (archived(session)) return false
         if (session.raw.optBoolean("review_later") || session.raw.optBoolean("mobile_review_later")) return true
@@ -60,7 +78,7 @@ object SessionFilters {
         } }.mapTo(mutableSetOf()) { it.target.key }
     }
     fun active(session: Session, online: Boolean, hasDraft: Boolean = false) =
-        !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online))
+        !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online) || scheduled(session, online))
     fun matches(session: Session, filter: SessionFilter, online: Boolean, hasDraft: Boolean = false): Boolean = when (filter) {
         SessionFilter.All -> !archived(session)
         SessionFilter.Attention -> needsAttention(session, online)
@@ -101,6 +119,7 @@ object SessionFilters {
             raw.string("phase") == "starting" -> "Starting"
             raw.string("phase") == "tool" -> "Using a tool"
             raw.string("activity") == "busy" -> "Working"
+            scheduledIdle(session) -> nextScheduledRun(session).let { if (it.isEmpty()) "Scheduled" else "Scheduled · $it" }
             raw.string("activity") == "idle" -> "Ready"
             raw.string("activity") in listOf("ended", "unknown") -> "Status unknown"
             else -> "Connecting"

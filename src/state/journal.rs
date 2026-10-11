@@ -362,7 +362,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         .as_object_mut()
         .unwrap()
         .extend(goals::summary(record).as_object().unwrap().clone());
-    if let Ok(reply) = latest_reply(record, output["recurring_schedules"].as_u64()) {
+    if let Ok(reply) = latest_reply(record, output["schedules"]["recurring"].as_u64()) {
         output
             .as_object_mut()
             .unwrap()

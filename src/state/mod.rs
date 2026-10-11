@@ -45,6 +45,7 @@ mod recipes;
 mod rename;
 mod resume_input;
 mod scan_cache;
+mod schedules;
 mod search;
 mod storage;
 mod subagents;
