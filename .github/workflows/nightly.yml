@@ -22,6 +22,7 @@ jobs:
       run_linux: true
       run_arch: true
       run_macos: true
+      run_windows: true
   assemble:
     needs: verify
     runs-on: ubuntu-24.04
@@ -39,6 +40,10 @@ jobs:
         with:
           name: arch-x86_64-${{ github.sha }}
           path: artifacts/arch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-x86_64-${{ github.sha }}
+          path: artifacts/windows
       - name: Arch packaging dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git python qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh curl procps-ng hicolor-icon-theme namcap desktop-file-utils
@@ -52,8 +57,11 @@ jobs:
         run: |
           set -euo pipefail
           packages=(artifacts/arch/*.pkg.tar.zst)
+          portables=(artifacts/windows/*.zip)
           test "${#packages[@]}" = 1
+          test "${#portables[@]}" = 1
           runuser -u user -- python3 scripts/prepare-nightly.py --package "${packages[0]}" \
+            --windows-zip "${portables[0]}" \
             --run-id "$NIGHTLY_RUN_ID" --run-number "$NIGHTLY_RUN_NUMBER" --output dist
           runuser -u user -- bash scripts/check-nightly-package.sh dist
           pacman -U --noconfirm dist/*.pkg.tar.zst

@@ -16,6 +16,9 @@ on:
       run_macos:
         type: boolean
         default: false
+      run_windows:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,6 +34,7 @@ jobs:
       run_linux: ${{ steps.revision.outputs.run_linux }}
       run_arch: ${{ steps.revision.outputs.run_arch }}
       run_macos: ${{ steps.revision.outputs.run_macos }}
+      run_windows: ${{ steps.revision.outputs.run_windows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,6 +46,7 @@ jobs:
           RUN_LINUX: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
           RUN_ARCH: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
           RUN_MACOS: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
+          RUN_WINDOWS: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
         run: |
           commit=$(git rev-parse HEAD)
           {
@@ -49,9 +54,10 @@ jobs:
             echo "run_linux=$RUN_LINUX"
             echo "run_arch=$RUN_ARCH"
             echo "run_macos=$RUN_MACOS"
+            echo "run_windows=$RUN_WINDOWS"
           } >> "$GITHUB_OUTPUT"
-          printf '### CI coverage\n\nCommit: %s\n\nQuick checks: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n' \
-            "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" >> "$GITHUB_STEP_SUMMARY"
+          printf '### CI coverage\n\nCommit: %s\n\nQuick checks: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n\nWindows client/desktop/portable zip: %s\n' \
+            "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
       - run: python3 scripts/ci/check-source.py
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
@@ -262,10 +268,110 @@ jobs:
           path: artifacts/test-results
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
 
+  windows-desktop:
+    name: Windows client, desktop and portable zip
+    needs: source
+    if: needs.source.outputs.run_windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Line tables keep test backtraces readable and bound the cached target size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: 0
+      ZERUS_BUILD_JOBS: 4
+    steps:
+      # Before checkout: the runner's Git converts text files to CRLF by default,
+      # which changes fixtures, scripts and embedded text.
+      - name: Check out text files unchanged
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      # One exact interpreter for every Python step; the runner image's default
+      # changes with the image.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13.15'
+      - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.85.0 --profile minimal --component clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cli-${{ runner.arch }}-stable-${{ hashFiles('Cargo.lock') }}
+      # The runner gives every step a synchronous pipe as stdin. Windows OpenSSH
+      # (and the fake client, which refuses it) must never inherit it, so steps
+      # that start hgs, ssh or the desktop app read from /dev/null.
+      - name: Rust client tests, Rust 1.85 lints and release build
+        run: |
+          mkdir -p artifacts/test-results
+          cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
+          # Pinned like the relay lints, so a new stable release cannot fail an
+          # unchanged commit. Windows-only code is compiled nowhere else, so this
+          # also checks it against Rust 1.85.
+          cargo +1.85.0 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
+          cargo build --release --locked
+          cargo build --locked --example fake_ssh
+      - name: Windows client integration tests
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
+          export HGS_TEST_BIN HGS_TEST_FAKE_SSH
+          python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
+      # The cache follows the caller's token: PR and manual runs restore it but
+      # cannot save it. The key covers the Qt release, modules and installer lock.
+      - name: Restore Qt 6.10.3 for MSVC with WebEngine
+        id: qt-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-${{ hashFiles('scripts/ci/aqt-requirements.txt') }}
+      # aqtinstall 3.3.0 cannot resolve the split repository layout of Qt 6.11+
+      # for Windows yet. It and its dependencies come only from the hash-locked
+      # wheels, in an environment of their own that later steps never use.
+      - name: Install Qt 6.10.3 with the hash-locked aqtinstall
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m venv "$RUNNER_TEMP/aqt"
+          aqt_python=$(cygpath -u "$RUNNER_TEMP/aqt/Scripts/python.exe")
+          "$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes --only-binary :all: \
+            -r scripts/ci/aqt-requirements.txt </dev/null
+          "$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
+            -m qtwebengine qtwebchannel qtpositioning --outputdir "$RUNNER_TEMP/Qt" </dev/null
+          rm -rf "$(cygpath -u "$RUNNER_TEMP/aqt")"
+      - name: Use Qt 6.10.3
+        run: |
+          qt=$(cygpath -w "$RUNNER_TEMP/Qt/6.10.3/msvc2022_64")
+          test -f "$(cygpath -u "$qt")/bin/windeployqt.exe"
+          echo "QT_ROOT_DIR=$qt" >> "$GITHUB_ENV"
+      - name: Desktop build and offscreen Qt suites
+        run: bash scripts/ci/gui.sh </dev/null
+      - name: Portable zip from the tested executables
+        run: |
+          python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
+            --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
+          python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
+            </dev/null 2>&1 | tee artifacts/test-results/portable.log
+      # Nightly assembly downloads this artifact from the same run.
+      - name: Retain Windows portable zip and test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-x86_64-${{ needs.source.outputs.commit }}
+          path: artifacts
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+          compression-level: 0
+
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, relay, cli, arch, mac-desktop]
+    needs: [source, relay, cli, arch, mac-desktop, windows-desktop]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -273,6 +379,7 @@ jobs:
       RUN_CLI: ${{ needs.source.outputs.run_linux == 'true' || needs.source.outputs.run_macos == 'true' }}
       RUN_ARCH: ${{ needs.source.outputs.run_arch == 'true' }}
       RUN_MACOS: ${{ needs.source.outputs.run_macos == 'true' }}
+      RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}
     steps:
       - run: |
           python3 - <<'PY'
@@ -284,6 +391,7 @@ jobs:
               'cli': json.loads(os.environ['RUN_CLI']),
               'arch': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),
+              'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
           }
           for name, enabled in selected.items():
               expected = 'success' if enabled else 'skipped'

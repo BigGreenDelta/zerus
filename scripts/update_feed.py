@@ -151,6 +151,10 @@ def release_assets(release):
     return rows
 
 
+def windows_portable(version):
+    return f'zerus-{version}-windows-x86_64.zip'
+
+
 def checksums(raw):
     require(len(raw)<=256*1024,'Checksum list exceeds bounds')
     result={}
@@ -214,6 +218,10 @@ def build_feed(release,info,files,sums,package_versions,commit):
             require(actual.rsplit('-',1)[0]==version,'Package/product version mismatch')
             expected.add(f'{package}-{actual}-x86_64.pkg.tar.zst')
         if channel=='stable':expected.add(f'zerus-{version}-source.tar.gz')
+        portable=info.get('windows_portable')
+        if channel=='nightly' and portable is not None:
+            # Linked from GitHub only; deployed GUIs reject unknown feed artifact kinds.
+            require(portable==windows_portable(version),'Unexpected Windows portable asset');expected.add(portable)
         require(set(sums)==expected,'Unexpected desktop asset family')
     artifacts=[]
     declared=info.get('artifacts') if platform=='android' else None
@@ -289,8 +297,16 @@ def validate_and_fetch(client,release,directory,expected_platform,expected_chann
     require(isinstance(info,dict),'Invalid sealed release metadata')
     if info.get('platform','desktop')!=expected_platform or info.get('channel','stable')!=expected_channel:
         raise ChannelMismatch('Selected release belongs to another channel')
+    portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel=='nightly' else None
     for name,digest in sums.items():
-        if name not in files:fetch(name,digest)
+        if name in files:continue
+        if isinstance(portable,str) and name==portable and name.endswith('-windows-x86_64.zip'):
+            # Not mirrored (the mirror never deletes and has a fixed disk budget)
+            # and not a feed artifact; build_feed checks its sealed name.
+            declared=assets[name].get('digest')
+            require(declared is None or declared=='sha256:'+digest,'GitHub asset digest mismatch')
+            continue
+        fetch(name,digest)
     packages={}
     if expected_platform=='desktop':
         aur=[path for name,path in files.items() if name.endswith('-aur.tar.gz')];require(len(aur)==1,'Expected sealed AUR metadata archive');packages=aur_versions(aur[0])

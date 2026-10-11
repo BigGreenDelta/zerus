@@ -99,6 +99,16 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid checksum"):
             common.validate_candidate(directory, VERSION)
 
+    def test_stable_candidate_has_no_windows_zip_even_when_sealed(self):
+        # finish_candidate seals nightly zips; a stable release keeps its Arch-only family.
+        directory = self.candidate()
+        self.assertEqual(len(common.validate_candidate(directory, VERSION)[1]), 6)
+        (directory / f"zerus-{VERSION}-windows-x86_64.zip").write_bytes(b"portable")
+        common.finish_candidate(directory)
+        self.assertIn(f"zerus-{VERSION}-windows-x86_64.zip", (directory / "SHA256SUMS").read_text())
+        with self.assertRaisesRegex(ValueError, "Unexpected/missing release assets"):
+            common.validate_candidate(directory, VERSION)
+
     def test_wrong_package_architecture_fails(self):
         directory = self.candidate()
         path = directory / "aur/zerus/.SRCINFO"

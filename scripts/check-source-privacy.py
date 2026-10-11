@@ -17,6 +17,9 @@ PRIVATE_KEY = re.compile(rb'-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----')
 EMAIL = re.compile(r'(?<![\w.+-])[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,}')
 # The owner explicitly approved this public maintainer address for AUR/Git.
 PUBLIC_CONTACTS = {'ufna@ufna.dev'}
+# Vendored third-party code and verbatim license texts keep their authors'
+# contact addresses.
+THIRD_PARTY = ('tray/vendor/', 'packaging/windows/licenses/')
 # Beads attributes records to the Git identities the team works with; the owner
 # accepted those addresses there. Free text in the same records is still checked.
 BEADS_ATTRIBUTION = {'owner', 'created_by', 'assignee', 'author'}
@@ -51,7 +54,7 @@ def findings(name, text):
                 problems.append((line_no, 'non-example absolute home path'))
         if re.search(r'(?<![A-Za-z0-9])/' + 'w/', line):
             problems.append((line_no, 'absolute workspace path'))
-        if not name.startswith('tray/vendor/'):
+        if not name.startswith(THIRD_PARTY):
             for address in EMAIL.findall(addresses):
                 domain = address.rsplit('@', 1)[1].lower()
                 if address in PUBLIC_CONTACTS | {'git@github.com', 'aur@aur.archlinux.org'} or domain.endswith(('.png', '.svg', '.icns')):

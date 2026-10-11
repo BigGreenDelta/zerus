@@ -32,7 +32,7 @@ def archive(packages):
 
 
 class FakeGitHub:
-    def __init__(self,android=False,nightly=False):
+    def __init__(self,android=False,nightly=False,windows=False):
         self.calls=[];self.commit=COMMIT;self.rows=[];self.blobs={}
         if android:
             tag='android-dev-1';version='0.1.7';package=b'checked apk fixture';source=b'checked source fixture'
@@ -46,6 +46,8 @@ class FakeGitHub:
             self.info={'schema':1,'version':version,'source_commit':COMMIT,'architecture':'x86_64','distribution':'Arch Linux','native_agents_bundled':False,'aur_packages':list(packages)}
             if nightly:self.info.update(channel='nightly',product_version='0.37.0',revision_count=123,workflow_run_id=1234,workflow_run_number=5,release_tag=tag)
             payload={f'zerus-{version}-aur.tar.gz':archive(packages),f'zerus-{version}-arch-x86_64.tar.gz':b'binary tar'}
+            if windows:
+                self.info['windows_portable']=f'zerus-{version}-windows-x86_64.zip';payload[self.info['windows_portable']]=b'portable zip'
             if not nightly:payload[f'zerus-{version}-source.tar.gz']=b'source tar'
             for name,actual in packages.items():
                 if name!='zerus-git':payload[f'{name}-{actual}-x86_64.pkg.tar.zst']=b'package '+name.encode()
@@ -113,6 +115,25 @@ class MirrorTest(unittest.TestCase):
         self.client=FakeGitHub(nightly=True);self.run_mirror(False,'desktop/nightly')
         self.client.info['workflow_run_number']=6;self.client.seal()
         with self.assertRaises(ValueError):self.run_mirror(False,'desktop/nightly')
+    def test_nightly_windows_zip_stays_on_github_and_out_of_the_v1_feed(self):
+        self.client=FakeGitHub(nightly=True,windows=True);name=self.client.info['windows_portable']
+        self.root.mkdir();self.run_mirror(True,'desktop/nightly')
+        published=json.loads((self.root/'updates/v1/desktop/nightly.json').read_text())
+        # Deployed GUIs reject unknown artifact kinds; the zip is neither listed nor mirrored.
+        self.assertEqual({row['kind'] for row in published['artifacts']},{'linux-archive','arch-package'})
+        self.assertNotIn(name,self.client.calls)
+        self.assertFalse((self.root/'downloads/nightly-1234'/name).exists())
+        self.assertTrue((self.root/'downloads/nightly-1234/SHA256SUMS').is_file())
+    def test_windows_zip_digest_and_family_are_still_verified(self):
+        self.client=FakeGitHub(nightly=True,windows=True);name=self.client.info['windows_portable']
+        row=next(asset for asset in self.client.release['assets'] if asset['name']==name);row['digest']='sha256:'+'0'*64
+        with self.assertRaisesRegex(ValueError,'digest mismatch'):self.run_mirror(False,'desktop/nightly')
+        for info,selector in (({'windows_portable':'zerus-windows.zip'},'desktop/nightly'),({'windows_portable':None},'desktop/nightly')):
+            self.client=FakeGitHub(nightly=True,windows=True);self.client.info.update(info);self.client.seal()
+            with self.subTest(info=info),self.assertRaisesRegex(ValueError,'Unexpected'):self.run_mirror(False,selector)
+        # Stable releases have no Windows asset yet: a zip there still fails closed.
+        self.client=FakeGitHub(windows=True)
+        with self.assertRaisesRegex(ValueError,'Unexpected desktop asset family'):self.run_mirror(False)
     def test_android_dirty_source_required_same_code_replacement_forbidden(self):
         self.client=FakeGitHub(android=True);self.root.mkdir();self.run_mirror(True,'android/dev')
         self.client.release['id']=11;self.client.release['published_at']='2026-10-10T12:00:00Z'

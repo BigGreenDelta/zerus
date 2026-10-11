@@ -80,7 +80,9 @@ def finish_candidate(directory, packages=PACKAGES):
                     member.mtime = 0
                     with path.open("rb") as content:
                         bundled.addfile(member, content)
-    assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), directory / "release-info.json"])
+    # A stray zip in a stable candidate is sealed too, and validate_candidate rejects it.
+    assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), *directory.glob("*.zip"),
+                     directory / "release-info.json"])
     (directory / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in assets))
 
 

@@ -5,10 +5,15 @@ import re
 import tarfile
 
 from release_common import BINARY_LIBRARIES, metadata, retains_description_update, require, sha256
+import windows_portable
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "zerus-ade-nightly-bin"
 PACKAGES = (PACKAGE,)
+
+
+def windows_asset(version):
+    return f"zerus-{version}-windows-x86_64.zip"
 
 
 def nightly_version(product, count, commit, number):
@@ -53,6 +58,12 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     version = info["version"]
     expected_files = {f"zerus-{version}-arch-x86_64.tar.gz", f"zerus-{version}-aur.tar.gz",
                       f"{PACKAGE}-{version}-1-x86_64.pkg.tar.zst", "release-info.json"}
+    # Nightlies built before the Windows job have no portable zip; retrying their
+    # publication must keep working. A manifest that names the zip requires it.
+    windows = info.get("windows_portable")
+    if windows is not None:
+        require(windows == windows_asset(version), "Invalid Windows nightly asset.")
+        expected_files.add(windows)
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.+-]+)", line)
@@ -66,6 +77,12 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     require(set(sums) == expected_files and
             {path.name for path in directory.iterdir()} == expected_files | {"aur", "SHA256SUMS"},
             "Unsealed/missing nightly assets.")
+    if windows is not None:
+        # Bounded reads of the zip directory and build-info.json; nothing is extracted or run.
+        manifest = windows_portable.inspect(directory / windows)
+        require(manifest["source_commit"] == info["source_commit"] and
+                manifest["version"] == info["product_version"],
+                "Windows portable bundle belongs to another commit/version.")
     members_expected = {f"aur/{PACKAGE}/{name}" for name in ("PKGBUILD", ".SRCINFO")}
     with tarfile.open(directory / f"zerus-{version}-aur.tar.gz", "r:gz") as archive:
         members = archive.getmembers()
