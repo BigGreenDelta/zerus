@@ -9,10 +9,11 @@ class ScreenSaver : public QObject, protected QDBusContext {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.ScreenSaver")
 public:
-    bool active = false, idleSupported = true; uint idle = 0;
+    bool active = false, idleSupported = true; uint idle = 0; int idleCalls = 0;
 public slots:
     bool GetActive() { return active; }
     uint GetSessionIdleTime() {
+        ++idleCalls;
         if (!idleSupported) sendErrorReply(QDBusError::NotSupported, "GetSessionIdleTime is not supported on this platform");
         return idle;
     }
@@ -24,6 +25,12 @@ public:
     quint64 idle = 0;
 public slots:
     quint64 GetIdletime() { return idle; }
+};
+class SignedMutterIdle : public QObject {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.gnome.Mutter.IdleMonitor")
+public slots:
+    qint64 GetIdletime() { return -5000; }
 };
 class GnomeScreenSaver : public QObject {
     Q_OBJECT
@@ -53,12 +60,29 @@ private slots:
     void cleanup() {
         for (const auto *name : {"fake-screensaver", "fake-mutter", "fake-gnome"}) QDBusConnection::disconnectFromBus(name);
     }
-    void x11ScreenSaverReportsIdleSecondsAndLock() {
+    void x11ReadsIdleInProcessBeforeTheScreenSaver() {
+        ScreenSaver saver; saver.idle = 7; saver.active = true;
+        serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
+        LinuxPresenceSource source(QDBusConnection::sessionBus(), {}, [] { return std::optional<qint64>(90500); });
+        const auto result = sample(source); QVERIFY(result);
+        QVERIFY(result->available); QCOMPARE(result->idleSeconds, 90.5); QVERIFY(result->locked);
+        QCOMPARE(saver.idleCalls, 0);
+    }
+    void screenSaverFallbackUsesSecondsOutsideKde() {
         ScreenSaver saver; saver.idle = 42; saver.active = true;
         serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
         LinuxPresenceSource source(QDBusConnection::sessionBus());
         const auto result = sample(source); QVERIFY(result);
         QVERIFY(result->available); QCOMPARE(result->idleSeconds, 42.0); QVERIFY(result->locked);
+    }
+    void kdeScreenSaverFallbackUsesMilliseconds() {
+        // kscreenlocker answers GetSessionIdleTime with KIdleTime's milliseconds.
+        ScreenSaver saver; saver.idle = 42000;
+        auto bus = serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
+        QVERIFY(bus.registerService("org.kde.screensaver"));
+        LinuxPresenceSource source(QDBusConnection::sessionBus(), {}, [] { return std::optional<qint64>(); });
+        const auto result = sample(source); QVERIFY(result);
+        QVERIFY(result->available); QCOMPARE(result->idleSeconds, 42.0);
     }
     void waylandIdleNeedsVerifiedThresholdEvents() {
         ScreenSaver saver; saver.idleSupported = false;
@@ -72,6 +96,15 @@ private slots:
         source.resumed();
         result = sample(source); QVERIFY(result && result->available); QCOMPARE(result->idleSeconds, 0.0);
     }
+    void earlyThresholdsStillReportIdle() {
+        ScreenSaver saver; saver.idleSupported = false;
+        serve("fake-screensaver", "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", &saver);
+        qint64 now = 0; // the default monotonic clock also starts at zero
+        LinuxPresenceSource source(QDBusConnection::sessionBus(), [&now] { return now; });
+        now = 5000; source.thresholdReached();
+        const auto result = sample(source); QVERIFY(result && result->available);
+        QCOMPARE(result->idleSeconds, 10.0);
+    }
     void gnomeUsesMutterMillisecondsAndItsLock() {
         MutterIdle mutter; mutter.idle = 90500; GnomeScreenSaver gnome; gnome.active = true;
         serve("fake-mutter", "org.gnome.Mutter.IdleMonitor", "/org/gnome/Mutter/IdleMonitor/Core", &mutter);
@@ -79,6 +112,13 @@ private slots:
         LinuxPresenceSource source(QDBusConnection::sessionBus());
         const auto result = sample(source); QVERIFY(result);
         QVERIFY(result->available); QCOMPARE(result->idleSeconds, 90.5); QVERIFY(result->locked);
+    }
+    void negativeIdleRepliesAreRejected() {
+        SignedMutterIdle mutter;
+        serve("fake-mutter", "org.gnome.Mutter.IdleMonitor", "/org/gnome/Mutter/IdleMonitor/Core", &mutter);
+        LinuxPresenceSource source(QDBusConnection::sessionBus());
+        const auto result = sample(source); QVERIFY(result);
+        QVERIFY(!result->available);
     }
     void missingServicesReportUnavailable() {
         LinuxPresenceSource source(QDBusConnection::sessionBus());
