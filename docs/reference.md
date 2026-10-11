@@ -245,9 +245,10 @@ including remote or renamed sessions. Polling and restarts do not repeat the sam
 request; resolved notifications are removed. Main-agent reply banners wait until
 the session is idle and has no reported active children; intermediate replies
 remain unread in Activity while work continues. Routine replies from a turn the
-agent scheduled itself (Kimi `CronCreate`) also stay unread without a banner
-while a recurring job remains; the reply after the last job ends, a one-shot
-reminder and any reply to the person's prompt notify. Explicit input and approval
+agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
+job remains: they appear in Activity without an unread mark, badge or banner. The
+reply after the last job ends, a one-shot reminder and any reply to the person's
+prompt notify as usual. Explicit input and approval
 requests still notify immediately. Ordinary child results and errors stay with
 the parent. While Zerus has application focus, session banners are suppressed and
 are not replayed when focus leaves. Unread replies and attention requests remain
@@ -1382,12 +1383,13 @@ host's mark for the current conversation:
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
 
-`reply_scheduled` is true when the latest reply ended a turn opened by the
-agent's own scheduled job rather than by the person; a prompt queued into that
-turn makes it false. Kimi sessions also report `recurring_schedules`, the number
-of recurring jobs still scheduled in the conversation as folded from the native
-cron journal, or `null` while unknown. Other providers report false and omit the
-count.
+Kimi sessions report `recurring_schedules`, the number of recurring jobs still
+scheduled in the conversation as folded from the native cron journal, or `null`
+while unknown. While it is positive, turns opened by those jobs without a prompt
+from the person do not advance `reply_id`; a prompt queued into such a turn makes
+its reply the person's. `reply_scheduled` is true when the reported reply ended a
+scheduled turn, which happens once no recurring job remains or while the count
+is unknown. Other providers report false and omit the count.
 
 ```sh
 printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |

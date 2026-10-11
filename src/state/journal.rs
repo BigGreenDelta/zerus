@@ -281,12 +281,20 @@ pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
 // A durable Stop event identifies a response, even if busy/idle transitions were
 // missed between polls. Child stops and initial SessionStart are not replies.
 // Reading the retained journal also covers sessions created before this feature.
-fn latest_reply(record: &Value) -> Result<Value> {
+fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
     let conversation = string(record, "conversation_id");
     if conversation.is_empty() {
         return Ok(json!({}));
     }
     let db = event_db()?;
+    let reply = |seq: i64, at: Value, scheduled: bool| {
+        json!({"reply_id":format!("{}:{}", seq, at), "reply_at":at, "reply_scheduled":scheduled})
+    };
+    if string(record, "agent") == "kimi" {
+        let skip = recurring_schedules.is_some_and(|count| count > 0);
+        return Ok(kimi_reply(&db, record, skip)?
+            .map_or(json!({}), |(seq, at, scheduled)| reply(seq, at, scheduled)));
+    }
     let result: Option<(i64, String)> = db
         .query_row(
             "SELECT seq, payload FROM events WHERE name = ? AND conversation = ?
@@ -301,40 +309,50 @@ fn latest_reply(record: &Value) -> Result<Value> {
         return Ok(json!({}));
     };
     let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    let scheduled = string(record, "agent") == "kimi"
-        && scheduled_turn(&db, record, seq).unwrap_or(false);
-    Ok(json!({"reply_id":format!("{}:{}", seq, event["at"]), "reply_at":event["at"],
-        "reply_scheduled":scheduled}))
+    Ok(reply(seq, event["at"].clone(), false))
 }
 
-// A scheduled job opens its turn without a prompt from the person. The latest
-// opening before the Stop decides: a prompt queued meanwhile is the person's.
-fn scheduled_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+// A scheduled job opens its turn without a prompt from the person; the latest
+// opening before a Stop decides, so a prompt queued meanwhile is the person's.
+// While a recurring job remains, its routine ticks are not replies: they would
+// mark the conversation unread every few minutes. Returns (seq, at, scheduled).
+fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<Option<(i64, Value, bool)>> {
     let mut statement = db
         .prepare(
-            "SELECT json_extract(payload, '$.type'), json_extract(payload, '$.turn_origin') FROM events
-         WHERE name = ? AND conversation = ? AND seq < ?
+            "SELECT seq, json_extract(payload, '$.type'), json_extract(payload, '$.turn_origin'), payload FROM events
+         WHERE name = ? AND conversation = ?
            AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
            AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
-         ORDER BY seq DESC LIMIT 64",
+         ORDER BY seq DESC LIMIT 4000",
         )
         .map_err(|e| e.to_string())?;
     let rows = statement
         .query_map(
-            params![journal_name(record), string(record, "conversation_id"), stop],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            params![journal_name(record), string(record, "conversation_id")],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
         )
         .map_err(|e| e.to_string())?;
+    let mut stop: Option<(i64, Value)> = None;
     for row in rows {
-        match row.map_err(|e| e.to_string())? {
-            (Some(kind), _) if kind == "AgentMessage" => continue,
-            (Some(kind), origin) if kind == "TurnStarted" => {
-                return Ok(matches!(origin.as_deref(), Some("cron_job" | "cron_missed")))
+        let (seq, kind, origin, payload) = row.map_err(|e| e.to_string())?;
+        match (kind.as_deref(), stop.take()) {
+            (Some("AgentMessage"), pending) => stop = pending,
+            (Some("Stop"), None) => {
+                let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                stop = Some((seq, event["at"].clone()));
             }
-            _ => return Ok(false),
+            (Some("TurnStarted"), Some((seq, at))) => {
+                let scheduled = matches!(origin.as_deref(), Some("cron_job" | "cron_missed"));
+                if !scheduled || !skip_scheduled {
+                    return Ok(Some((seq, at, scheduled)));
+                }
+            }
+            (_, Some((seq, at))) => return Ok(Some((seq, at, false))),
+            (_, None) => {}
         }
     }
-    Ok(false)
+    Ok(stop.map(|(seq, at)| (seq, at, false)))
 }
 
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
@@ -344,7 +362,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         .as_object_mut()
         .unwrap()
         .extend(goals::summary(record).as_object().unwrap().clone());
-    if let Ok(reply) = latest_reply(record) {
+    if let Ok(reply) = latest_reply(record, output["recurring_schedules"].as_u64()) {
         output
             .as_object_mut()
             .unwrap()
@@ -1144,7 +1162,7 @@ mod attention_regressions {
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
     }
     #[test]
-    fn kimi_scheduled_turns_mark_replies_until_the_person_prompts() {
+    fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
         let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});
         let started = |origin: Value| json!({"hook_event_name":"TurnStarted","agent_id":"main","origin_kind":origin});
         assert_eq!(turn_origin(&kimi, &started(json!("cron_job"))), Some("cron_job"));
@@ -1156,27 +1174,38 @@ mod attention_regressions {
 
         let db = message_db();
         let main = |event: Value| insert_message(&db, "example", Some("conversation"), event);
+        let reply = |skip: bool| kimi_reply(&db, &kimi, skip).unwrap().map(|(seq, _, scheduled)| (seq, scheduled));
+        assert_eq!(reply(true), None);
         main(json!({"type":"UserPromptSubmit","agent_id":"","detail":"Check the backup every 15 minutes"}));
         main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"user"}));
-        let prompted = main(json!({"type":"Stop","agent_id":""}));
-        assert!(!scheduled_turn(&db, &kimi, prompted).unwrap());
+        let prompted = main(json!({"type":"Stop","agent_id":"","at":1.5}));
+        assert_eq!(reply(false), Some((prompted, false)));
+        assert_eq!(kimi_reply(&db, &kimi, false).unwrap().unwrap().1, json!(1.5));
         main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_job"}));
         main(json!({"type":"PreToolUse","agent_id":"","tool":"Bash"}));
         main(json!({"type":"TurnStarted","agent_id":"child","turn_origin":"user"}));
         main(json!({"type":"AgentMessage","agent_id":""}));
         insert_message(&db, "example", Some("other"), json!({"type":"UserPromptSubmit","agent_id":""}));
         insert_message(&db, "other", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":""}));
-        let tick = main(json!({"type":"Stop","agent_id":""}));
-        assert!(scheduled_turn(&db, &kimi, tick).unwrap());
-        // A prompt steered into a scheduled turn makes the reply the person's.
+        main(json!({"type":"Stop","agent_id":""}));
         main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_missed"}));
+        let missed = main(json!({"type":"Stop","agent_id":""}));
+        // Ticks are replies once no recurring job remains; until then the
+        // person's last reply stays current.
+        assert_eq!(reply(false), Some((missed, true)));
+        assert_eq!(reply(true), Some((prompted, false)));
+        // A prompt steered into a scheduled turn makes the reply the person's.
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_job"}));
         main(json!({"type":"UserPromptQueued","agent_id":"","detail":"Also check free space"}));
         let steered = main(json!({"type":"Stop","agent_id":""}));
-        assert!(!scheduled_turn(&db, &kimi, steered).unwrap());
-        // Rows journaled before origins were recorded are not scheduled.
+        assert_eq!(reply(true), Some((steered, false)));
+        // Rows journaled before origins were recorded, or a Stop without its
+        // opening in the journal, are not scheduled.
         main(json!({"type":"TurnStarted","agent_id":""}));
         let unknown = main(json!({"type":"Stop","agent_id":""}));
-        assert!(!scheduled_turn(&db, &kimi, unknown).unwrap());
+        assert_eq!(reply(true), Some((unknown, false)));
+        let orphan = main(json!({"type":"Stop","agent_id":""}));
+        assert_eq!(reply(true), Some((orphan, false)));
     }
     #[test]
     fn message_window_limits_rows_and_actual_utf8_bytes_with_disclosure() {

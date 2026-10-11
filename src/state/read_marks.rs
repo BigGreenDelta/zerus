@@ -118,9 +118,28 @@ pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool
     questions::current_until(record, deadline).unwrap_or(Some(Vec::new()))
 }
 
+/// While routine ticks of a recurring job are skipped, a reply already read
+/// stays current: moving back to an older reply would make it unread again.
+fn keep_read_reply(session: &mut Value, mark: &Value) {
+    if !session["recurring_schedules"].as_u64().is_some_and(|count| count > 0) {
+        return;
+    }
+    let journaled = |id: &Value| {
+        let (seq, at) = id.as_str()?.split_once(':')?;
+        Some((seq.parse::<i64>().ok()?, at.parse::<f64>().ok()?))
+    };
+    if let Some((read, at)) = journaled(&mark["reply_id"]) {
+        if journaled(&session["reply_id"]).is_none_or(|(current, _)| read > current) {
+            session["reply_id"] = mark["reply_id"].clone();
+            session["reply_at"] = json!(at);
+        }
+    }
+}
+
 /// Add the C1 fields to one `hgs ls --json` session object.
 pub(super) fn enrich(session: &mut Value, marks: &Value, owner: &str, questions: Option<&[Value]>) {
     let mark = record(marks, owner, string(session, "conversation_id")).clone();
+    keep_read_reply(session, &mark);
     let digest = signature(session, questions);
     session["attention_signature"] = json!(digest);
     session["read"] = mark;
@@ -269,6 +288,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     };
     let mut sessions = load();
     let existing = record(&sessions, &owner, &request.conversation).clone();
+    let mut view = view;
+    keep_read_reply(&mut view, &existing);
     let (reply, attention, next) = apply(&view, questions.as_deref(), &request, &existing, now());
     if reply || attention {
         let owners: std::collections::BTreeSet<String> = records()?
@@ -293,6 +314,27 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skipped_ticks_never_move_a_read_reply_back() {
+        let mark = json!({"conversation_id":"conversation-1","reply_id":"14053:1791743453.98","attention_signature":null,"at":1.0});
+        let mut session = json!({"recurring_schedules":1,"reply_id":"13956:1791742557.19","reply_at":1791742557.19});
+        keep_read_reply(&mut session, &mark);
+        assert_eq!((session["reply_id"].clone(), session["reply_at"].clone()), (json!("14053:1791743453.98"), json!(1791743453.98)));
+        // A newer reply from the person stays unread; no schedule changes nothing.
+        let mut newer = json!({"recurring_schedules":1,"reply_id":"14100:1791744000.5"});
+        keep_read_reply(&mut newer, &mark);
+        assert_eq!(newer["reply_id"], "14100:1791744000.5");
+        let mut ended = json!({"recurring_schedules":0,"reply_id":"13956:1791742557.19"});
+        keep_read_reply(&mut ended, &mark);
+        assert_eq!(ended["reply_id"], "13956:1791742557.19");
+        let mut none = json!({"recurring_schedules":2});
+        keep_read_reply(&mut none, &mark);
+        assert_eq!(none["reply_id"], "14053:1791743453.98");
+        let mut unread = json!({"recurring_schedules":1,"reply_id":"13956:1791742557.19"});
+        keep_read_reply(&mut unread, &json!(null));
+        assert_eq!(unread["reply_id"], "13956:1791742557.19");
+    }
 
     fn waiting() -> Value {
         json!({"name":"codex/project/review","run_id":"run-1","conversation_id":"conversation-1",

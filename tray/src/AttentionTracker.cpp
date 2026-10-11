@@ -77,8 +77,9 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             // before posting a banner. Retain delivered identities below so
             // a working/idle cycle cannot notify again for the same reply.
             const bool idle = s.activity == "idle" && s.phase == "idle" && s.subagentActiveCount == 0 && !s.needsAction();
-            // Routine ticks of a recurring scheduled job stay unread without a
-            // banner; the reply after the schedule ends notifies as usual.
+            // Hosts do not report routine ticks of a recurring scheduled job as
+            // replies; consume any that arrive. The reply after the schedule
+            // ends, or once its count is known, notifies as usual.
             if (idle && s.replyScheduled && s.recurringSchedules > 0)
                 notice(s, key, "reply", s.replyId, {}, true, true);
             else if (idle && (!s.replyScheduled || s.recurringSchedules == 0))
