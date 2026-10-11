@@ -4,7 +4,7 @@ use super::commands::{self, Ctx};
 use super::model::{Actor, ActorKind, Refusal};
 use super::store::Store;
 use crate::{cli, config::Config};
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::io::Read;
 
@@ -70,19 +70,22 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
 fn read_stdin() -> Result<Value> {
     let mut bytes = Vec::new();
     std::io::stdin().take(MAX_REQUEST + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_REQUEST, "the overmind request exceeds 29 MiB");
-    Ok(serde_json::from_slice(&bytes)?)
+    if bytes.len() as u64 > MAX_REQUEST {
+        return Err(Refusal::new("invalid_request", "the overmind request exceeds 29 MiB").into());
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Refusal::new("invalid_request", format!("the request is not valid JSON: {e}")).into())
 }
 
 fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
+    let command = args.first().map(String::as_str).unwrap_or("--help");
+    if matches!(command, "-h" | "--help" | "help") {
+        print!("{}", usage(&Actor::human("")));
+        return Ok(None);
+    }
     let machine = crate::swarm::local_node_id(config)?;
     let actor = Actor::human(&machine);
     let cwd = None;
-    let command = args.first().map(String::as_str).unwrap_or("--help");
-    if matches!(command, "-h" | "--help" | "help") {
-        print!("{}", usage(&actor));
-        return Ok(None);
-    }
     let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
     let json_flag = rest.last() == Some(&"--json");
     let positional: Vec<&str> = rest.iter().copied().filter(|a| *a != "--json").collect();

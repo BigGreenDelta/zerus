@@ -68,6 +68,19 @@ class Overmind(unittest.TestCase):
         self.assertEqual(self.ok('create', '--json', data=request), first)
         self.assertEqual(self.refused('create', '--json', data={**request, 'prompt': 'y'})['code'], 'request_reused')
 
+    def test_malformed_json_is_a_refusal(self):
+        result = subprocess.run([str(HGS), 'overmind', 'create', '--json'], input='{', env=self.env,
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        body = json.loads(result.stdout)
+        self.assertFalse(body['ok'])
+        self.assertEqual(body['error']['code'], 'invalid_request')
+        self.assertTrue(result.stderr.startswith('hgs: '))
+
+    def test_help_creates_no_state(self):
+        self.assertEqual(self.run_hgs('--help').returncode, 0)
+        self.assertFalse(self.state.exists())
+
     def test_invalid_requests_and_help(self):
         self.assertEqual(self.refused('create', '--json', data={'project': 'demo', 'prompt': 'x', 'unknown': 1})['code'],
                          'invalid_request')

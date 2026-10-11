@@ -47,6 +47,11 @@ pub fn human_only(actor: &Actor) -> Result<()> {
     Ok(())
 }
 
+/// Turns CRLF and lone CR into LF so pasted text from any platform is accepted.
+pub fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub fn check_text(name: &str, value: &str, max: usize, multiline: bool) -> Result<(), Refusal> {
     if value.len() > max {
         return Err(Refusal::field("too_long", name, "invalid", format!("`{name}` is longer than {max} bytes")));
@@ -162,6 +167,7 @@ pub fn transition(
     children: Vec<String>,
     request_id: &str,
 ) -> Result<Event> {
+    let fields: BTreeMap<String, String> = fields.into_iter().map(|(k, v)| (k, normalize(&v))).collect();
     for (name, value) in &fields {
         check_text(name, value, MAX_FIELD, true)?;
     }
@@ -227,6 +233,7 @@ fn default_title(prompt: &str) -> String {
         .unwrap_or_default()
         .chars()
         .take(MAX_TITLE)
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
 
@@ -259,12 +266,12 @@ pub fn store_attachments(store: &Store, items: &[NewAttachment]) -> Result<Vec<A
         return Err(bad(format!("at most {MAX_ATTACHMENTS} images per task")));
     }
     let mut total = 0;
-    let mut out = Vec::new();
+    let mut decoded = Vec::new();
     for item in items {
         if item.name.is_empty() || item.name.len() > 255 || item.name.contains('/') || item.name.chars().any(char::is_control) {
             return Err(bad("invalid attachment name".into()));
         }
-        if !item.mime.starts_with("image/") || item.mime.len() > 100 {
+        if !item.mime.starts_with("image/") || item.mime.len() <= "image/".len() || item.mime.len() > 100 {
             return Err(bad("attachments must be images".into()));
         }
         let bytes = base64::engine::general_purpose::STANDARD
@@ -274,6 +281,10 @@ pub fn store_attachments(store: &Store, items: &[NewAttachment]) -> Result<Vec<A
         if bytes.len() > MAX_ATTACHMENT || total > MAX_ATTACHMENTS_TOTAL {
             return Err(bad("images are limited to 10 MiB each and 20 MiB in total".into()));
         }
+        decoded.push(bytes);
+    }
+    let mut out = Vec::new();
+    for (item, bytes) in items.iter().zip(decoded) {
         let sha256 = blobs::put(store.dir(), &bytes)?;
         out.push(Attachment { name: item.name.clone(), mime: item.mime.clone(), bytes: bytes.len() as u64, sha256 });
     }
@@ -310,6 +321,9 @@ pub fn created_payload(
     fields: BTreeMap<String, String>,
     rank: String,
 ) -> Result<Value> {
+    let prompt = normalize(prompt);
+    let prompt = prompt.as_str();
+    let fields: BTreeMap<String, String> = fields.into_iter().map(|(k, v)| (k, normalize(&v))).collect();
     check_prompt(prompt)?;
     let title = if title.trim().is_empty() { default_title(prompt) } else { title.trim().to_owned() };
     check_title(&title)?;
@@ -377,7 +391,7 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
         .into_values()
         .filter(|t| t.project == req.project)
         .filter(|t| shared_changed || touched.as_ref().map_or(true, |set| set.contains(&t.uuid)))
-        .filter(|t| touched.is_some() || !t.deleted)
+        .filter(|t| !t.deleted || touched.as_ref().is_some_and(|set| set.contains(&t.uuid)))
         .collect();
     let position = |stage: &str| wf.stages.iter().position(|s| s.name == stage).unwrap_or(usize::MAX);
     tasks.sort_by(|a, b| {
@@ -437,7 +451,8 @@ struct CreateRequest {
 
 pub fn create(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
-    let req: CreateRequest = parse(&request)?;
+    let mut req: CreateRequest = parse(&request)?;
+    req.prompt = normalize(&req.prompt);
     check_project(&req.project)?;
     let pinned = local_session(req.pinned.clone(), ctx.store.machine());
     if pinned.is_none() && req.project.is_empty() {
@@ -483,7 +498,8 @@ struct EditRequest {
 
 pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
-    let req: EditRequest = parse(&request)?;
+    let mut req: EditRequest = parse(&request)?;
+    req.prompt = req.prompt.map(|p| normalize(&p));
     let attachments = match &req.attachments {
         Some(items) => Some(store_attachments(ctx.store, items)?),
         None => None,
@@ -529,14 +545,14 @@ struct MoveRequest {
     to: String,
 }
 
-fn move_to(ctx: &mut Ctx, request: &Value, task_ref: &str, target: impl Fn(&Workflow) -> Option<String>) -> Result<Value> {
+fn move_to(ctx: &mut Ctx, request: &Value, task_ref: &str, target: impl Fn(&Workflow, &Task) -> Result<String>) -> Result<Value> {
     human_only(&ctx.actor)?;
     let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
     write(ctx, request, |tx, actor| {
         let uuid = resolve(tx, task_ref)?;
         let task = load(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
-        let to = target(&wf).ok_or_else(|| Refusal::new("unknown_stage", "unknown stage"))?;
+        let to = target(&wf, &task)?;
         let from_role = wf.role(&task.stage).unwrap_or(Role::Backlog);
         let to_role = wf.role(&to).ok_or_else(|| Refusal::new("unknown_stage", format!("unknown stage {to}")))?;
         let action = match (from_role, to_role) {
@@ -556,19 +572,24 @@ pub fn move_task(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: MoveRequest = parse(&request)?;
     let to = req.to.clone();
-    move_to(ctx, &request, &req.task, move |_| Some(to.clone()))
+    move_to(ctx, &request, &req.task, move |_, _| Ok(to.clone()))
 }
 
 pub fn done(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: TaskRequest = parse(&request)?;
-    move_to(ctx, &request, &req.task, |wf| wf.first(Role::Done).map(|s| s.name.clone()))
+    move_to(ctx, &request, &req.task, |wf, _| wf.first(Role::Done).map(|s| s.name.clone()).ok_or_else(|| Refusal::new("unknown_stage", "the workflow has no Done stage").into()))
 }
 
 pub fn reopen(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: TaskRequest = parse(&request)?;
-    move_to(ctx, &request, &req.task, |wf| wf.first(Role::Ready).map(|s| s.name.clone()))
+    move_to(ctx, &request, &req.task, |wf, task| {
+        if wf.role(&task.stage) != Some(Role::Done) {
+            return Err(Refusal::new("transition_not_allowed", "only a finished task can be reopened").into());
+        }
+        wf.first(Role::Ready).map(|s| s.name.clone()).ok_or_else(|| Refusal::new("unknown_stage", "the workflow has no Ready stage").into())
+    })
 }
 
 #[derive(Deserialize)]
@@ -598,6 +619,11 @@ pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
         };
         if target.as_deref() == Some(uuid.as_str()) {
             target = None;
+        }
+        if let Some(before) = &target {
+            if !column.iter().any(|t| &t.uuid == before) {
+                return Err(Refusal::field("invalid_field", "before", "invalid", "`before` must be a task in the same stage").into());
+            }
         }
         let place = |column: &[Task], target: &Option<String>| -> String {
             match target.as_ref().and_then(|u| column.iter().find(|t| &t.uuid == u)) {
@@ -711,7 +737,8 @@ struct CommentRequest {
 }
 
 pub fn comment(ctx: &mut Ctx, request: Value) -> Result<Value> {
-    let req: CommentRequest = parse(&request)?;
+    let mut req: CommentRequest = parse(&request)?;
+    req.text = normalize(&req.text);
     check_text("text", &req.text, MAX_FIELD, true)?;
     if req.text.trim().is_empty() {
         return Err(Refusal::field("missing_field", "text", "empty", "write the comment").into());
@@ -949,6 +976,36 @@ mod tests {
         let mut ctx = Ctx { store: &mut store, actor: agent, cwd: None };
         let error = comment(&mut ctx, json!({"task": uuid, "text": "late note"})).unwrap_err();
         assert_eq!(refusal(error).code, "task_closed");
+    }
+
+    #[test]
+    fn crlf_text_is_normalized_and_accepted() {
+        let (_dir, mut store) = store();
+        let made = create(&mut human(&mut store), json!({"project": "p", "prompt": "Title\r\nbody\rend"})).unwrap();
+        assert_eq!(made["task"]["prompt"], "Title\nbody\nend");
+        let uuid = made["task"]["uuid"].as_str().unwrap().to_owned();
+        comment(&mut human(&mut store), json!({"task": uuid, "text": "a\r\nb"})).unwrap();
+        let tab = create(&mut human(&mut store), json!({"project": "p", "prompt": "a\tb\nc"})).unwrap();
+        assert_eq!(tab["task"]["title"], "a b");
+    }
+
+    #[test]
+    fn reorder_reopen_and_attachments_validate_up_front() {
+        let (_dir, mut store) = store();
+        let a = new_task(&mut store, "Queue");
+        let b = new_task(&mut store, "Backlog");
+        let other = refusal(reorder(&mut human(&mut store), json!({"task": a, "before": b})).unwrap_err());
+        assert_eq!(other.field, "before");
+        reorder(&mut human(&mut store), json!({"task": a, "before": a})).unwrap();
+        let reopened = refusal(reopen(&mut human(&mut store), json!({"task": a})).unwrap_err());
+        assert_eq!(reopened.code, "transition_not_allowed");
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG");
+        let bad = json!({"project": "p", "prompt": "x", "attachments": [
+            {"name": "a.png", "mime": "image/png", "data_base64": png},
+            {"name": "b.png", "mime": "image/", "data_base64": png}]});
+        assert_eq!(refusal(create(&mut human(&mut store), bad).unwrap_err()).field, "attachments");
+        let sha = format!("{:x}", Sha256::digest(b"\x89PNG"));
+        assert!(!blobs::path(store.dir(), &sha).unwrap().exists());
     }
 
     #[test]
