@@ -12,6 +12,8 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val devBuildNumber = providers.gradleProperty("zerusDevBuildNumber").orNull?.toInt()?.also { require(it > 0) }
+val updateVersionCode = providers.gradleProperty("zerusVersionCode").orNull?.toInt()?.also { require(it in 1..2_100_000_000) }
 if (firebaseEnabled) {
     require(file("google-services.json").isFile) { "Optional Firebase builds require a private app/google-services.json." }
     apply(plugin = "com.google.gms.google-services")
@@ -24,8 +26,8 @@ android {
         applicationId = "app.zerus.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.1.28"
+        versionCode = updateVersionCode ?: 29
+        versionName = "0.1.28" + (devBuildNumber?.let { "-dev.$it" } ?: "")
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

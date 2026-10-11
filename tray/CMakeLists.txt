@@ -46,6 +46,20 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_GIT_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=normal
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_SOURCE_CHANGES RESULT_VARIABLE ZERUS_GIT_STATUS ERROR_QUIET)
+get_filename_component(ZERUS_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
+string(LENGTH "${ZERUS_SOURCE_COMMIT}" ZERUS_SOURCE_COMMIT_LENGTH)
+if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUAL 40
+   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0
+   AND ZERUS_SOURCE_CHANGES STREQUAL "")
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+endif()
 
 add_executable(hgs-tray
     resources.qrc

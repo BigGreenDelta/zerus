@@ -1,7 +1,7 @@
 # Public release catalogs and mirrors
 
-GitHub Releases are the provenance origin. The static website mirrors verified
-release bytes and serves anonymous catalogs at:
+GitHub Releases are the provenance origin for the legacy schema 1 catalogs.
+The static website mirrors verified release bytes and serves anonymous catalogs at:
 
 - `https://zerus.dev/updates/v1/android/dev.json`
 - `https://zerus.dev/updates/v1/desktop/stable.json`
@@ -10,6 +10,117 @@ release bytes and serves anonymous catalogs at:
 The schema is specified in [mobile architecture](mobile-architecture.md#public-distribution-and-update-channels).
 These catalogs do not use relay credentials. The mirror does not build, publish
 to GitHub/AUR, dispatch hosted CI, or install anything on a client.
+
+## Verified main dev channel
+
+Dev is a channel in the existing application, with the same Android package ID
+and signing certificate as stable. Settings selects Stable or Dev on Android,
+and Stable, Nightly or Dev on desktop. Changing channels never installs another
+application, clears pairing/drafts, or downgrades Android. Downloads and installation
+remain explicit; desktop continues to provide notifications and instructions.
+
+For dev, the provenance origin is successful upstream-main **CI artifacts** plus
+the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
+`ci.yml` invokes `dev.yml` only after its complete Linux/Arch/macOS gate succeeds,
+and only on an upstream main push. Dev assembly reuses the checked Arch package,
+builds/tests a signed Android APK, and includes exact `git archive` source bytes.
+The final main-only release-environment job advances `refs/tags/dev` to that
+commit using a fast-forward update. A late older build cannot move the tag back;
+diverged history requires explicit review. Stable `v*` and immutable nightly tags
+retain their existing publication contracts.
+
+Candidate artifact names include the CI attempt. A failed-job retry can reuse
+the earlier successful platform's artifact without overwriting it. Once a build
+is public, retry its publisher with the original candidate; rebuilding that run
+cannot replace the published seal or APK version code. A new source change gets
+a new CI run and Android version code.
+
+`publish-dev-feed.py` verifies the tag against a successful main CI run, the
+workflow identity, GitHub artifact digest, exact source/run metadata and every
+candidate file. It treats archives as bounded data and executes no candidate
+code. Public catalogs are separate from the legacy release feeds:
+
+- `https://zerus.dev/updates/v2/android/dev.json`
+- `https://zerus.dev/updates/v2/desktop/dev.json`
+
+Schema 2 records `channelTag: dev`, `buildId`, `buildNumber`, `buildUrl` (the exact
+GitHub Actions run), `sourceCommit`, `publishedAt`, version and sealed artifacts.
+Files have immutable `/downloads/dev-<platform>-<buildId>/<name>` URLs. An existing
+build ID cannot acquire different bytes or metadata. Desktop compares exact source
+identity rather than treating an unchanged semantic version as proof of freshness;
+a local build of unknown provenance can be told a dev build is available without
+claiming that it is older. Android still checks package, signer, SDK, advertised
+APK identity, byte size/hash and a strictly newer `versionCode` before installation.
+
+The same signing configuration builds stable and dev APKs; no dev-specific
+application ID or generated replacement signer is used. `-PzerusVersionCode=N`
+sets the shared Android version sequence; CI dev uses `10000 + CI run_number`.
+All subsequent stable APKs must use a code larger than already distributed dev
+APKs. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
+channel with an older version leaves the current app/data installed until a newer
+compatible APK is published. Do not reset the version-code sequence when changing
+workflow names or channels.
+
+Automatic dev discovery is throttled to fifteen minutes. Android WorkManager
+checks remain subject to system scheduling and battery restrictions; checks do not
+require a paired workspace. Its settings badge and one silent replaceable system
+notice advertise verified updates, with persistent per-channel deduplication and
+existing Android notification permission. Desktop keeps its explicit automatic
+check opt-out and one fresh verified notice per build. Stable desktop retains its
+24-hour throttle; stable Android retains its six-hour throttle.
+
+The publisher retains three recent dev builds per platform. Older builds are
+marked retired only after they leave the protected current catalog and receive
+a further 72-hour download grace. Collection is restricted to validated dev-owned
+directories, preserves stable/nightly content and fails closed on symlinks or
+missing ownership evidence. The shared 20 GiB disk budget can stop new publication
+while grace-period assets are still retained. Actions candidates expire after
+three days. No existing GitHub Release or tag is deleted by this workflow.
+The unchanged current catalog is revalidated against its retained seal/bytes
+without downloading Actions again, so it remains served after its CI artifact
+expires. A missing or changed retained seal stops synchronization.
+
+### Rollout prerequisites
+
+Source support alone does not enable the live channel. Before enabling the main
+workflow, provision the **existing** signer in the main-only `release`
+environment as `ANDROID_KEYSTORE_BASE64`, `ANDROID_STORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, and the existing private
+`ANDROID_GOOGLE_SERVICES_JSON`. The Firebase input is required so automated APKs
+do not silently remove current FCM/crash reporting. Missing inputs fail the dev
+candidate, retain the previous channel and never generate a new signing identity.
+No private signing input or R8 mapping is included in public candidates.
+The CI job is opt-in through repository variable `DEV_UPDATES_ENABLED=true`.
+Leave it unset until the signer and publisher are provisioned, so ordinary full
+CI keeps working during rollout. Once enabled, every successful main push is
+eligible automatically; missing required inputs fail publication.
+
+Install `dev_updates.py`, `publish-dev-feed.py` and the adjacent existing mirror
+modules on the public host. Supply a read-only Actions credential through the
+existing systemd credential mechanism and run both platforms on the site's
+ordinary fifteen-minute timer. Use the same mirror root/lock and serve `updates/v2`
+with the same revalidation behavior as `updates/v1`:
+
+```sh
+python3 /opt/zerus-updates/publish-dev-feed.py \
+  --root /var/lib/zerus-updates --platform desktop --execute
+python3 /opt/zerus-updates/publish-dev-feed.py \
+  --root /var/lib/zerus-updates --platform android --execute
+```
+
+Without `--execute`, validation downloads only into temporary staging and changes
+no mirror content. Keep API credentials off artifact/CDN redirects. A bootstrap
+client upgrade is required: older Android clients retain their legacy v1 dev
+feed and cannot parse schema 2. Continue that legacy feed during the rollout;
+never repoint it to incompatible schema 2 data.
+
+The initial desktop dev candidate contains an Arch x86_64 package and source.
+macOS clients can discover source updates, but an installable signed macOS dev
+bundle is still dependent on the macOS distribution/signing work. This workflow
+does not claim that Linux binaries are macOS installers. Stable Android may remain
+unpublished initially; selecting it reports an unavailable catalog without
+changing the installed app. Public deployment, key provisioning and bootstrap
+publication are separate from local source validation.
 
 ## Seal an Android development release
 

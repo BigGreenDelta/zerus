@@ -147,6 +147,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_skip->setToolTip(tr("Dismiss this optional question without sending an answer. The agent can continue."));
     connect(m_skip,&QPushButton::clicked,this,[this]{
         if(!m_skip->isEnabled())return;
+        if(!saveDraft(m_key)) { updateControls(); return; }
         QJsonArray result;for(const auto &form:m_forms)result.append(QJsonObject{{"question_id",form.id},{"skip",true}});
         emit answerRequested(m_session,m_id,result);
     });
@@ -156,6 +157,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     footer->addWidget(m_deny);footer->addWidget(m_approve);
     for(auto *button:{m_approve,m_deny})connect(button,&QPushButton::clicked,this,[this,button]{
         if(!button->isEnabled()||!m_question.value("approval").toBool())return;
+        if(!saveDraft(m_key)) { updateControls(); return; }
         const auto question=m_question.value("questions").toArray().first().toObject();
         emit answerRequested(m_session,m_id,QJsonArray{QJsonObject{{"question_id",question.value("id")},
             {"selected_option_ids",QJsonArray{button==m_approve?"allow":"deny"}},{"text",""}}});
@@ -174,7 +176,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     connect(m_submit, &QPushButton::clicked, this, &QuestionCard::submit);
     connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
         m_pages->setCurrentIndex(index);
-        if (!m_loading && !m_key.isEmpty()) { m_drafts[m_key].page = index; saveDraft(m_key); }
+        if (!m_loading && !m_key.isEmpty()) { m_drafts[m_key].page = index; saveDraft(m_key, true); }
         updateControls();
     });
     connect(m_retry, &QPushButton::clicked, this, [this] {
@@ -184,7 +186,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     auto *retrySave = new QTimer(this); retrySave->setInterval(2000);
     connect(retrySave, &QTimer::timeout, this, [this] {
         const auto pending = m_failedSaves;
-        for (const auto &key : pending) saveDraft(key);
+        for (const auto &key : pending) saveDraft(key, true);
         if (!pending.isEmpty()) updateControls();
     }); retrySave->start();
     setTheme(true); hide();
@@ -434,6 +436,8 @@ void QuestionCard::rebuild()
     m_loading = false;
 }
 
+QuestionCard::~QuestionCard() { ComposerDraftStore::flushWrites(); }
+
 void QuestionCard::capture()
 {
     if (m_loading || m_key.isEmpty()) return;
@@ -444,7 +448,7 @@ void QuestionCard::capture()
         answer.other = form.other && form.other->isChecked();
         if (form.text) answer.text = form.text->text();
     }
-    saveDraft(m_key); updateControls();
+    saveDraft(m_key, true); updateControls();
 }
 
 QuestionCard::Draft QuestionCard::loadDraft(const QString &key) const
@@ -465,7 +469,7 @@ QuestionCard::Draft QuestionCard::loadDraft(const QString &key) const
     return draft;
 }
 
-bool QuestionCard::saveDraft(const QString &key)
+bool QuestionCard::saveDraft(const QString &key, bool asynchronous)
 {
     if (key.isEmpty()) return true;
     auto &draft = m_drafts[key]; ComposerDraft saved;
@@ -480,6 +484,16 @@ bool QuestionCard::saveDraft(const QString &key)
     }
     if (!draft.answered && !draft.submitted) saved.text = text.join('\n');
     saved.formState = {{"answers", draft.answered ? QJsonArray() : answers}, {"page", draft.page}, {"answered", draft.answered}, {"submitted", draft.submitted}};
+    const auto revision = ++m_saveRevision[key];
+    if (asynchronous) {
+        m_draftStore.saveAsync("question\n" + key, saved, this, [this, key, revision](bool okay, const ComposerDraft &written) {
+            if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) return;
+            m_drafts[key].storageError = written.storageError;
+            if (okay) m_failedSaves.remove(key); else m_failedSaves.insert(key);
+            if (key == m_key) updateControls();
+        });
+        return true;
+    }
     const bool ok = m_draftStore.save("question\n" + key, saved); draft.storageError = saved.storageError;
     if (ok) m_failedSaves.remove(key); else m_failedSaves.insert(key);
     return ok;
@@ -646,6 +660,7 @@ void QuestionCard::submit()
     if (!broader.isEmpty() && m_drafts[m_key].confirm != broader) {
         m_drafts[m_key].confirm = broader; updateControls(); return;
     }
+    if (!saveDraft(m_key)) { updateControls(); return; }
     emit answerRequested(m_session, m_id, result);
 }
 

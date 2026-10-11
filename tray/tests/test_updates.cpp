@@ -32,6 +32,31 @@ class TestUpdates : public QObject {
     }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
+    void devCatalogAndNotificationsUseBuildIdentity(){
+        auto value=raw();value["schemaVersion"]=2;value["channel"]="dev";value["channelTag"]="dev";value["buildId"]=12345;value["buildNumber"]=50;value.remove("releaseId");value.remove("releaseUrl");value["buildUrl"]="https://github.com/ufna/zerus/actions/runs/12345";value.remove("packages");
+        value["artifacts"]=QJsonArray{
+            QJsonObject{{"kind","arch-package"},{"name","zerus.pkg.tar.zst"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}},
+            QJsonObject{{"kind","source"},{"name","zerus-source.tar.gz"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus-source.tar.gz"},{"sha256",QString(64,'c')},{"size",100},{"os","any"},{"arch","source"}}};
+        auto feed=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");QVERIFY(feed.valid);QCOMPARE(feed.buildNumber,50);QCOMPARE(feed.releaseId,12345);
+        QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);
+        QVERIFY(UpdateController::devBuildIsNewer(feed,49,QString(40,'d')));
+        QVERIFY(!UpdateController::devBuildIsNewer(feed,51,QString(40,'d')));
+        QVERIFY(!UpdateController::devBuildIsNewer(feed,0,QString(40,'a')));
+        QVERIFY(UpdateController::devBuildIsNewer(feed,0,{}));
+        QVERIFY(UpdateController::isUpdateToken("zerus-update:v2:dev:12345"));
+        QVERIFY(!UpdateController::isUpdateToken("zerus-update:v1:dev:12345"));
+        QVERIFY(!UpdateController::isUpdateToken("zerus-update:v2:stable:12345"));
+        QCOMPARE(UpdateController::automaticInterval("dev"),15*60);QCOMPARE(UpdateController::automaticInterval("stable"),24*60*60);
+        DesktopInstallation installation{"package","zerus-ade-bin","0.39.0-1",true,"yay"};QVERIFY(UpdateController::updateCommand(installation,"dev").isEmpty());
+        for(QString key:{"buildId","buildNumber","channelTag","buildUrl","sourceCommit"}){auto bad=value;bad[key]="bad";QVERIFY(!UpdateController::parseFeed(QJsonDocument(bad).toJson(),"dev").valid);}
+        value["sourceDirty"]=false;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev").valid);
+    }
+    void devChannelPersistsAndChecksItsIndependentFeed(){
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QString requested;
+        UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &request){requested=request.url().toString();auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply]{reply->finish("{}");});return reply;});
+        controller.setChannel("dev");QCOMPARE(controller.channel(),QString("dev"));controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QString("https://zerus.dev/updates/v2/desktop/dev.json"));
+        UpdateController restored(nullptr,dir.path()+"/missing");QCOMPARE(restored.channel(),QString("dev"));
+    }
     void initTestCase(){QCoreApplication::setOrganizationName("zerus-update-test");QCoreApplication::setApplicationName("isolated");QSettings::setDefaultFormat(QSettings::IniFormat);}
     void validCatalog(){auto value=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(value.valid);QCOMPARE(value.version,QString("0.37.0"));QCOMPARE(value.packages["zerus-git"].toString(),QString("0.37.0.r10.gaaaaaaa-1"));}
     void maliciousCatalog(){

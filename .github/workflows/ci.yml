@@ -91,3 +91,10 @@ jobs:
           if conclusions != ['skipped', 'success']:
               raise SystemExit(f'Exactly one selected check workflow must succeed: {conclusions}')
           PY
+  dev:
+    name: Verified main dev candidates
+    needs: [gate, automatic]
+    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dev.yml

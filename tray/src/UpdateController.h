@@ -12,6 +12,9 @@ struct DesktopUpdateFeed {
     QJsonObject packages;
     bool valid=false;
     qint64 releaseId=0;
+    qint64 buildNumber=0;
+    QString sourceCommit;
+    QString sourceUrl, packageUrl;
 };
 struct DesktopInstallation {
     QString kind="checking", package, version;
@@ -28,6 +31,8 @@ public:
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
     static bool plainStableIsNewer(const QString &installed,const QString &released);
+    static bool devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit);
+    static int automaticInterval(const QString &channel);
     static bool claimNotification(const QString &token);
     static bool isUpdateToken(const QString &token);
     static QString comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared);

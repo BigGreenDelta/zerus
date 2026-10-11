@@ -430,6 +430,16 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Ordinary text, cursor and question-form edits save through one ordered background
+writer. Waiting edits coalesce to the latest snapshot per draft, so typing does
+not wait for disk commits. The editor shows **Saving draft** until its latest
+checkpoint completes; a crash before that checkpoint can lose pending edits.
+Graceful close drains outstanding writes. Sending, renaming and delivery-state
+changes use durable barriers, and an older queued save cannot replace a later
+checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
+immutable. Save failures remain visible and block sending until persistence
+succeeds.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
 from ended or missing sessions into the current session. Copying keeps the dialog
 open; restoring never sends anything and replacing an existing draft requires

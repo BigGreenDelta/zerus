@@ -23,6 +23,7 @@ class QuestionCard : public QWidget {
     Q_OBJECT
 public:
     explicit QuestionCard(QWidget *parent = nullptr);
+    ~QuestionCard() override;
     void setQuestion(const QString &sessionKey, const QJsonObject &question, int pendingQuestions = 0);
     void setQueueNavigation(int index, int count);
     void setAvailability(bool available, const QString &reason = {});
@@ -65,7 +66,7 @@ private:
     };
     void rebuild();
     void capture();
-    bool saveDraft(const QString &key);
+    bool saveDraft(const QString &key, bool asynchronous = false);
     Draft loadDraft(const QString &key) const;
     void ensureDraft(const QString &key, const QString &sessionKey);
     void updateControls();
@@ -82,6 +83,7 @@ private:
 
     QHash<QString, Draft> m_drafts;
     ComposerDraftStore m_draftStore;
+    QHash<QString, quint64> m_saveRevision;
     QSet<QString> m_failedSaves;
     QHash<QString, QString> m_latestKeys, m_sendingKeys;
     QString m_session, m_id, m_key, m_unavailableReason;

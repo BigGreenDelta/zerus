@@ -20,6 +20,7 @@
 #include <QKeySequence>
 #include <QInputMethodEvent>
 #include <QLabel>
+#include <QJsonDocument>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QLineEdit>
@@ -30,12 +31,16 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QSignalSpy>
+#include <QSemaphore>
+#include <QThread>
 #include <QScopeGuard>
 #include <QTest>
 #include <QTimer>
 #include <QStyleOptionComboBox>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <atomic>
+#include <thread>
 #include <QToolTip>
 #include <QVBoxLayout>
 
@@ -102,6 +107,8 @@ private slots:
     void draftReplacementRequiresConfirmation();
     void renameCollisionKeepsBothDrafts();
     void typingDoesNotRewriteAttachmentSnapshots();
+    void slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestState();
+    void submitSignalWaitsForDurableLatestSnapshot();
     void isolatesDraftsAcrossSessions();
     void enterSendsShiftEnterAddsLine();
     void sendingKeepsEditorFocus_data();
@@ -226,13 +233,13 @@ void TestMessageComposer::storageFailureKeepsDraftAndBlocksDispatch()
     QFile blocker(ComposerDraftStore::directory()); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close();
     MessageComposer composer; composer.setSessionKey("one"); composer.setAvailability(true);
     composer.editor()->setPlainText("Still editable");
-    QVERIFY(status(composer)->text().contains("not saved"));
+    QTRY_VERIFY(status(composer)->text().contains("not saved"));
     QVERIFY(!composer.setWaitingToSend("one", "Waiting for compaction."));
     QVERIFY(!composer.isWaitingToSend("one")); QVERIFY(!composer.editor()->isReadOnly());
     QVERIFY(!composer.setSending("one")); QVERIFY(!composer.editor()->isReadOnly());
     QCOMPARE(composer.editor()->toPlainText(), "Still editable");
     QVERIFY(blocker.remove()); composer.editor()->insertPlainText("X");
-    QVERIFY(status(composer)->text().contains("saved locally"));
+    QTRY_VERIFY(status(composer)->text().contains("saved locally"));
     MessageComposer restored; restored.setSessionKey("one"); QCOMPARE(restored.editor()->toPlainText(), composer.editor()->toPlainText());
 }
 
@@ -297,6 +304,65 @@ void TestMessageComposer::typingDoesNotRewriteAttachmentSnapshots()
     MessageComposer restored; restored.setSessionKey("one"); QCOMPARE(restored.editor()->toPlainText(), before);
     QVERIFY(restored.addAttachment("third.bin", "application/octet-stream", "third"));
     QVERIFY(restored.editor()->toPlainText().contains("[File #3]"));
+}
+
+void TestMessageComposer::slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestState()
+{
+    MessageComposer composer; composer.setSessionKey("slow\nexact"); composer.setAvailability(true);
+    QSemaphore entered, release;
+    std::atomic<int> writes = 0;
+    QThread *writer = nullptr;
+    ComposerDraftStore::setWriteObserver([&] {
+        writer = QThread::currentThread();
+        if (++writes == 1) { entered.release(); release.acquire(); }
+    });
+    auto cleanup = qScopeGuard([&] {
+        release.release(); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({});
+    });
+    composer.editor()->setPlainText("First");
+    QVERIFY(entered.tryAcquire(1, 3000));
+    QVERIFY(writer != QThread::currentThread());
+    composer.editor()->moveCursor(QTextCursor::End);
+    // The writer stays stalled throughout these real editor events.
+    QTest::keyClicks(composer.editor(), " latest edits");
+    const auto latest = composer.editor()->toPlainText();
+    QVERIFY(latest.endsWith(" latest edits"));
+    bool heartbeat = false;
+    QTimer::singleShot(0, &composer, [&] { heartbeat = true; });
+    QTRY_VERIFY(heartbeat);
+    release.release(); ComposerDraftStore::flushWrites();
+    QCOMPARE(ComposerDraftStore().load("slow\nexact").text, latest);
+    QVERIFY(writes <= 2); // At most the in-flight and coalesced latest edit.
+    QVERIFY(composer.setSending("slow\nexact"));
+    QVERIFY(ComposerDraftStore().load("slow\nexact").uncertain);
+    composer.deliveryFinished("slow\nexact", true, {});
+    QCoreApplication::processEvents(); // Obsolete async acknowledgements cannot restore the text.
+    QVERIFY(ComposerDraftStore().load("slow\nexact").text.isEmpty());
+    QVERIFY(composer.editor()->toPlainText().isEmpty());
+}
+
+void TestMessageComposer::submitSignalWaitsForDurableLatestSnapshot()
+{
+    MessageComposer composer; composer.setSessionKey("submit\nexact"); composer.setAvailability(true);
+    QSemaphore entered, release; std::atomic<int> writes = 0;
+    ComposerDraftStore::setWriteObserver([&] { if (++writes == 1) { entered.release(); release.acquire(); } });
+    auto cleanup = qScopeGuard([&] {
+        release.release(); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({});
+    });
+    composer.editor()->setPlainText("Latest payload");
+    QVERIFY(entered.tryAcquire(1, 3000));
+    bool checkpoint = false; int submissions = 0;
+    connect(&composer, &MessageComposer::sendRequested, &composer, [&](const QString &, const QString &text, const QList<MessageAttachment> &) {
+        ++submissions;
+        const auto folders = QDir(ComposerDraftStore::directory()).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        if (folders.size() != 1) return;
+        QFile manifest(ComposerDraftStore::directory() + '/' + folders[0] + "/draft.json");
+        if (manifest.open(QIODevice::ReadOnly)) checkpoint = QJsonDocument::fromJson(manifest.readAll()).object().value("text").toString() == text;
+    });
+    std::thread unblock([&] { QThread::msleep(50); release.release(); });
+    auto joined = qScopeGuard([&] { unblock.join(); });
+    sendButton(composer)->click();
+    QCOMPARE(submissions, 1); QVERIFY(checkpoint);
 }
 
 void TestMessageComposer::contentScaleEnlargesOnlyTheMessageField()
@@ -1077,6 +1143,7 @@ int main(int argc, char **argv)
         if (!original.remove()) return 2;
         composer->editor()->moveCursor(QTextCursor::End); composer->editor()->insertPlainText(QString::fromUtf8(" я\nsecond line"));
         auto cursor = composer->editor()->textCursor(); cursor.setPosition(3); cursor.setPosition(8, QTextCursor::KeepAnchor); composer->editor()->setTextCursor(cursor);
+        ComposerDraftStore::flushWrites(); // Acknowledge the actual durable checkpoint before SIGKILL.
         QFile output; if (!output.open(stdout, QIODevice::WriteOnly)) return 2;
         output.write("saved\n"); output.flush();
         return app.exec(); // Parent sends SIGKILL, so no destructor/close handler runs.

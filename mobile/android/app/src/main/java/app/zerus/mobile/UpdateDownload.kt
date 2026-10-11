@@ -30,8 +30,8 @@ class UpdateDownload(private val client: OkHttpClient = OkHttpClient.Builder().f
         try { call.execute().use { read(it) } }
         finally { withContext(NonCancellable) { cancellation.cancelAndJoin() } }
     }
-    suspend fun feed(): String = withContext(Dispatchers.IO) {
-        request(client.newBuilder().callTimeout(30,TimeUnit.SECONDS).build(),Request.Builder().url(UpdatePolicy.FEED_URL).header("Accept","application/json").build()) { response ->
+    suspend fun feed(channel: String = "dev"): String = withContext(Dispatchers.IO) {
+        request(client.newBuilder().callTimeout(30,TimeUnit.SECONDS).build(),Request.Builder().url(UpdatePolicy.feedUrl(channel)).header("Accept","application/json").build()) { response ->
             check(response.code == 200) { "Update check is unavailable. Try again later." }
             val body = checkNotNull(response.body)
             require(body.contentLength() <= UpdatePolicy.MAX_FEED_BYTES)

@@ -107,6 +107,7 @@ private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, sec
 class MainActivity : ComponentActivity() {
     private val model: ZerusViewModel by viewModels()
     private var invitation by mutableStateOf<PairingInvite?>(null)
+    private var updateRequest by mutableIntStateOf(0)
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) SessionNotifications.initialize(this)
     }
@@ -127,7 +128,7 @@ class MainActivity : ComponentActivity() {
         readIntent(intent)
         model.pickerId.takeIf { it.isNotBlank() }?.let { fileLauncher(it) }
         setContent { MaterialTheme(colorScheme = Scheme) {
-            ZerusApp(model, invitation, onInvitationUsed = { invitation = null }, onNotifications = {
+            ZerusApp(model, invitation, updateRequest, onInvitationUsed = { invitation = null }, onNotifications = {
                 if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             }, onLive = { enabled ->
                 val service = Intent(this, LiveConnectionService::class.java)
@@ -148,9 +149,11 @@ class MainActivity : ComponentActivity() {
         // Analytics lifecycle must never see pairing URIs or campaign/referrer extras.
         val retained = Bundle()
         listOf("session", "computer", "connection").forEach { key -> intent.getStringExtra(key)?.let { retained.putString(key, it) } }
+        if(intent.getBooleanExtra("open_updates", false)) retained.putBoolean("open_updates", true)
         intent.replaceExtras(retained)
     }
     private fun readIntent(intent: Intent) {
+        if(intent.getBooleanExtra("open_updates", false)) { updateRequest++;intent.removeExtra("open_updates") }
         intent.data?.toString()?.let { PairingInvite.parse(it) }?.let { invitation = it;intent.data = null }
         val session = intent.getStringExtra("session")
         val computer = intent.getStringExtra("computer")
@@ -158,17 +161,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun ZerusApp(model: ZerusViewModel, invitation: PairingInvite?, onInvitationUsed: () -> Unit,
+@Composable private fun ZerusApp(model: ZerusViewModel, invitation: PairingInvite?, updateRequest: Int, onInvitationUsed: () -> Unit,
     onNotifications: () -> Unit, onLive: (Boolean) -> Unit, onAttach: (Target) -> Unit) {
     val obscuration = remember { ConversationObscuration() }
     CompositionLocalProvider(LocalConversationObscuration provides obscuration) {
-        ZerusAppContent(model,invitation,onInvitationUsed,onNotifications,onLive,onAttach)
+        ZerusAppContent(model,invitation,updateRequest,onInvitationUsed,onNotifications,onLive,onAttach)
         AttachmentViewerHost(model.attachments)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun ZerusAppContent(model: ZerusViewModel, invitation: PairingInvite?, onInvitationUsed: () -> Unit,
+@Composable private fun ZerusAppContent(model: ZerusViewModel, invitation: PairingInvite?, updateRequest: Int, onInvitationUsed: () -> Unit,
     onNotifications: () -> Unit, onLive: (Boolean) -> Unit, onAttach: (Target) -> Unit) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var handledReturnSequence by remember(model) { mutableLongStateOf(model.returnToSessionsSequence) }
@@ -178,6 +181,7 @@ class MainActivity : ComponentActivity() {
         handledReturnSequence = sequence
     }
     var settings by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(updateRequest) { if(updateRequest > 0) settings = true }
     val updater: AndroidUpdateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val updateState by updater.state.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
