@@ -7,7 +7,7 @@ import unittest
 import uuid
 
 import test_input as fixtures
-from test_questions import Questions
+from test_questions import Questions, terminal_only
 
 FAKE = r'''
 import os,pathlib,signal,sys,termios,tty
@@ -122,7 +122,7 @@ class FolderTrust(unittest.TestCase):
     def test_changed_folder_and_run_reject_without_input(self):
         self.answer(self.payload(expected_run_id='other'),success=False)
         self.redraw('folder','/other/folder','/other/folder')
-        self.assertEqual(self.inspect()['pending_questions'],[])
+        terminal_only(self,'Trust this folder?')
         self.answer(self.payload(),success=False)
         self.assertEqual(self.received(),b'')
 
@@ -141,7 +141,7 @@ class FolderTrust(unittest.TestCase):
 
     def test_unrelated_output_above_panel_is_not_answerable(self):
         self.redraw('prelude', 'agent said:', 'agent said:')
-        self.assertEqual(self.inspect()['pending_questions'], [])
+        self.assertNotIn('agent said', terminal_only(self, 'Trust this folder?')['questions'][0]['body'])
         self.answer(self.payload(), success=False)
         self.assertEqual(self.received(), b'')
 

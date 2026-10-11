@@ -562,16 +562,22 @@ Supported startup prompts include Claude workspace trust and auto-mode consent,
 Codex folder access, **Hooks need review** and **Update available**, and Kimi
 folder/MCP trust. These can appear before a conversation exists, but only with
 verified startup identity.
-Claude workspace trust preserves its full permissions warning; Kimi includes the
-visible MCP commands, and also asks for folders without project MCP targets.
-Codex folder access shows its native disclosure verbatim. In a Git subdirectory
-or worktree the card names the repository root that Codex will trust; other
-unfamiliar native notes keep the exact choices and text without Zerus descriptions.
+A recognized panel must show its native title, folder, exact choices and key
+hint. Its explanation is shown verbatim and pinned to the answer, so changed
+native wording stays answerable: Claude workspace trust preserves its full
+permissions warning, Kimi includes the visible MCP commands, and Claude's
+auto-mode and resume panels keep their explanation and cost warning. Zerus adds
+descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
+folder access names the repository root that Codex will trust.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
 Keychain notice. These notices do not change the request identity or appear in
-its disclosure; unrelated terminal output remains unsupported.
+its disclosure.
+Any other chooser before a conversation exists, such as a renamed option, an
+unreviewed update command, a panel for another folder or unrelated output above
+it, appears read-only with its visible text and **Open Terminal**. Zerus never
+answers it, and messages wait until it is answered in Terminal.
 
 Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
 abbreviations that match the verified launch directory. It remains answerable

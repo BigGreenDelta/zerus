@@ -1281,6 +1281,7 @@ fn apply_settings(
     receipt_path: &Path,
     receipt: &mut Value,
 ) -> Result<Value> {
+    let _driving = startup_choice::driving(name)?;
     let mut record = checked(name, request, true)?;
     let current = settings(&record, true);
     receipt["status"] = json!("in_progress");

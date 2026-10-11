@@ -429,53 +429,35 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     resume_input::enrich(record, &mut output, live_pane);
     provider_errors::enrich(record, &mut output, live_pane);
     if live_pane {
-        if let Some(question) = claude_resume::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for your conversation resume choice");
+        // Native startup choosers have no hook. A later recognized panel wins;
+        // an unrecognized chooser before a conversation stays visible read-only.
+        type Current = fn(&Value) -> Option<Value>;
+        let choosers: [(Current, &str, &str); 8] = [
+            (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
+            (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
+            (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
+            (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
+            (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
+            (codex_update::current, "input", "Codex is waiting for an update choice"),
+            (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
+            (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
+        ];
+        let mut recognized = false;
+        for (current, phase, detail) in choosers {
+            if let Some(question) = current(record) {
+                recognized = true;
+                output["activity"] = json!("busy");
+                output["phase"] = json!(phase);
+                output["attention_id"] = question["question_id"].clone();
+                output["status_detail"] = json!(detail);
+            }
         }
-        if let Some(question) = claude_permission::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for your default permission mode choice");
-        }
-        if let Some(question) = claude_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for folder trust approval");
-        }
-        if let Some(question) = codex_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for folder trust approval");
-        }
-        if let Some(question) = codex_hooks_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for hook trust review");
-        }
-        if let Some(question) = codex_update::current(record) {
+        let fallback = if recognized { None } else { startup_choice::current(record) };
+        if let Some(question) = fallback {
             output["activity"] = json!("busy");
             output["phase"] = json!("input");
             output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for an update choice");
-        }
-        if let Some(question) = kimi_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Kimi is waiting for folder trust approval");
-        }
-        if let Some(question) = kimi_cache_hint::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("input");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Kimi is waiting for your context choice");
+            output["status_detail"] = json!(startup_choice::detail(record));
         }
     }
     recovery::enrich(record, &mut output);
