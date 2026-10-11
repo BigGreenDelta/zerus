@@ -38,6 +38,9 @@ class Terminal(fixtures.InputTransport):
         self.assertNotIn('hgs-terminal-',self.tmux('list-buffers'))
 
     def test_canonical_interactive_shell_accepts_explicit_literal_command(self):
+        # Killing the only session makes the server exit, and a new-session client
+        # queued on its socket meanwhile fails with "server exited unexpectedly".
+        self.tmux('set-option','-s','exit-empty','off')
         self.tmux('kill-session','-t',self.name)
         self.tmux('new-session','-d','-s',self.name,'-x','100','-y','30','/bin/bash','--noprofile','--norc','-i')
         self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()

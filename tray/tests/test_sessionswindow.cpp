@@ -1630,7 +1630,7 @@ if a[0].startswith('@'):a=a[1:]
 if a[0]=='resume':
  with open(root/'resume.log','a') as log:log.write(json.dumps(a)+'\n')
 elif a[0] in ['send','compact-context']:
- p=json.load(sys.stdin);(root/(a[0]+'.json')).write_text(json.dumps(p))
+ p=json.load(sys.stdin);staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
  print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],first_message=not p['expected_conversation_id'],status='submitted')))
 elif a[0]=='inspect':print((root/'details.json').read_text() if a[1]=='codex/website/navigation' and (root/'details.json').exists() else '{}')
 else:print('{}')
@@ -1646,7 +1646,17 @@ else:print('{}')
     {QFile initial(temp.filePath("details.json"));QVERIFY(initial.open(QIODevice::WriteOnly));initial.write(QJsonDocument(details).toJson());}
     SessionsWindow window(program);window.setFleet(state);window.show();window.showSession({},name);QTest::qWait(100);
     auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
-    const auto apply=[&]{QFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());data.close();client->inspectionReady({},name,details);};apply();
+    // The window polls a starting or compacting session on its own, and each reply
+    // carries details.json as it was when that inspection started. HgsClient runs one
+    // inspection per session: once ours starts after the write, a stale reply cannot
+    // arrive after the new details and cancel the continuation as another run.
+    const auto settle=[&]{QSignalSpy replies(client,&HgsClient::inspectionReady);qsizetype issued=-1;
+        const auto ours=[&]{qsizetype count=0;for(const auto &reply:replies)count+=reply.at(1).toString()==name;return count;};
+        QTRY_VERIFY(issued>=0 || (client->requestInspection({},name) && (issued=ours(),true)));
+        QTRY_VERIFY(ours()>issued);};
+    // The test and the fixture both replace files atomically: a polled file is never read empty.
+    const auto apply=[&]{QSaveFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());QVERIFY(data.commit());
+        settle();client->inspectionReady({},name,details);};apply();
     const auto resumes=[&]{QFile log(temp.filePath("resume.log"));return log.open(QIODevice::ReadOnly)?QString::fromUtf8(log.readAll()).split('\n',Qt::SkipEmptyParts):QStringList();};
     const QString freshArgs=R"(["resume", "codex/website/navigation", "--fresh", "--expected-run-id", "run-old", "-d"])";
     // A stopped agent cannot clear natively; the header offers a confirmed fresh start.
@@ -1740,7 +1750,7 @@ root=pathlib.Path(__file__).parent
 a=sys.argv[1:]
 if a[0].startswith('@'):a=a[1:]
 if a[0] in ['compact-context','send']:
- p=json.load(sys.stdin);(root/(a[0]+'.json')).write_text(json.dumps(p))
+ p=json.load(sys.stdin);staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
  if a[0]=='send':
   with (root/'send-targets.txt').open('a') as log:log.write(a[1]+'\n')
  print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
@@ -3591,7 +3601,10 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     for(int i=0;i<bar->count();++i)QVERIFY2(bar->tabRect(i).width()>=bar->fontMetrics().horizontalAdvance(QString(bar->tabText(i)).replace("&&","&"))+12,qPrintable(QString("%1 rect=%2 text=%3").arg(bar->tabText(i)).arg(bar->tabRect(i).width()).arg(bar->fontMetrics().horizontalAdvance(QString(bar->tabText(i)).replace("&&","&")))));
     for(int i=0;i<bar->count();++i){QVERIFY(bar->tabRect(i).left()>=0);QVERIFY(bar->tabRect(i).right()<bar->width());}
     QVERIFY(bar->geometry().right()<restored->cornerWidget()->geometry().left());
-    QVERIFY(restoredPanel->mapTo(&reopened,restoredPanel->rect().topRight()).x()<reopened.width());
+    // Larger tabs raise the panel's minimum width; a slow runner may apply that relayout after a fixed wait.
+    QTRY_VERIFY2(restoredPanel->mapTo(&reopened,restoredPanel->rect().topRight()).x()<reopened.width(),
+        qPrintable(QString("panel right=%1 window width=%2 window minimum=%3").arg(restoredPanel->mapTo(&reopened,restoredPanel->rect().topRight()).x())
+            .arg(reopened.width()).arg(reopened.minimumSizeHint().width())));
     const auto inspectorPreview=qEnvironmentVariable("HGS_INSPECTOR_PREVIEW");if(!inspectorPreview.isEmpty())QVERIFY(reopened.grab().save(inspectorPreview));
     reopened.showSession({}, "kimi/docs/research"); QTest::qWait(50);
     QVERIFY(!reopened.findChild<QTextBrowser *>("subagents")->toPlainText().contains("Implement right panel"));
