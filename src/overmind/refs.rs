@@ -95,6 +95,15 @@ mod tests {
     }
 
     #[test]
+    fn digest_matches_its_known_answer() {
+        // References are shared between machines, so the digest must never change.
+        assert_eq!(
+            digest("00000000-0000-4000-8000-000000000001"),
+            "chszj5ebswgbbyybluf7ard2elygrkfgi72hlxyvzywhvnfy6pyq"
+        );
+    }
+
+    #[test]
     fn refs_are_unique_and_at_least_five_characters() {
         let all = ids(2000);
         let map = refs(&all);

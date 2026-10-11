@@ -96,7 +96,7 @@ events. Only sending a task into a session runs on the session's host.
 | `attachments` | Up to 8 images, 10 MiB each, 20 MiB total, stored by SHA-256. |
 | `stage` | A stage of the project workflow. |
 | `priority` | P0–P4, default P2. |
-| `rank` | Manual order inside a stage (fractional index string; ranks use the characters 0-9A-Za-z and compare as bytes; a column is renumbered when a rank would exceed 64 characters). |
+| `rank` | Manual order inside a stage (fractional index string of at most 64 characters 0-9A-Za-z, compared as bytes). A task keeps the order of its column when it changes stage: the transition carries a rank at the end of the target column. A column whose ranks tie or run out is renumbered evenly when a person reorders it. |
 | `labels` | Plain labels (`ui`) and requirement labels (`agent:codex`, `machine:<name>`). Reserved: `blocked`, `epic`, `epic-ready`, `bug`, `reviewed`, `review-failed`. |
 | `pinned` | Session the task is reserved for: machine uuid + session name. Follows renames. |
 | `assignee` | Session that took the task into an active stage. |
@@ -133,9 +133,11 @@ security boundary: an agent that strips its environment is not stopped.
 `<state root>/overmind/` (`$HGS_STATE_DIR/overmind`, by default `~/.local/state/hgs/sessions/overmind`), mode 0700:
 
 - `overmind.sqlite3` (0600, WAL):
-  - `events` — append-only log, primary key `(origin, seq)`, unique `id`;
+  - `events` — append-only log, unique `(origin, seq)` and `id`, with a local
+    insertion counter `n` that serves as the change cursor;
   - task, workflow and settings caches — derived, rebuilt from `events` at any time;
-  - `receipts` — `request_id` → body hash and result, for idempotent writes;
+  - `receipts` — `request_id` → hash of the command and its body, and the
+    result, for idempotent writes;
 - `blobs/<aa>/<sha256>` (0600, immutable) — attachment bytes;
 - `rev` — a small file replaced atomically after every committed change; the
   desktop watches it.
@@ -152,14 +154,16 @@ security boundary: an agent that strips its environment is not stopped.
 
 `lamport` is the maximum seen plus one, so a causally later event always sorts
 later. Kinds: `task_created`, `field_set`, `transition`, `journal`, `rank_set`,
-`label_set`, `relation_set`, `pin_set`, `flag_set`, `workflow_set`,
-`settings_set`, `session_renamed`, `task_deleted`.
+`label_set`, `relation_set`, `pin_set`, `reviewer_set`, `flag_set`,
+`attachment_added`, `workflow_set`, `settings_set`, `session_renamed`,
+`task_deleted`.
 
 ### Folding events into state
 
 Events of a task are applied in the total order `(lamport, origin, seq)`.
 
-- `field_set`, `rank_set`, `pin_set`: last writer wins per field.
+- `field_set`, `rank_set`, `pin_set`: last writer wins per field. An accepted
+  transition that changes the stage also sets the rank it carries.
 - `journal`: appended; order is the total order.
 - `transition`: compare-and-set. `base` is the last accepted transition the
   writer saw. A transition is accepted only if `base` equals the current head
@@ -224,10 +228,11 @@ The engine knows stage roles, not stage names: `backlog`, `ready`, `active`,
  "session_wip": 1}
 ```
 
-Reviewer independence is a fixed invariant, not a setting. Rules may not name unknown actor kinds. `@resume` targets are allowed only on `answer` rules from `needs_human` stages. Stage names are 1–40 printable characters without leading or trailing spaces.
+Reviewer independence is a fixed invariant, not a setting. Rules may not name unknown actor kinds. `@resume` targets are allowed only on `answer` rules from `needs_human` stages. Stage names are 1–40 printable characters without leading or trailing spaces and do not start with `@`.
 
 Validation: exactly one `done` stage, at least one stage for each of `backlog`,
-`ready`, `active`, `review`, `needs_human`; every stage reachable from `backlog`.
+`ready`, `active`, `review`, `needs_human`; every stage is reachable from a
+task-creation target.
 A change that removes a stage holding tasks must name a stage to move them to.
 
 ### Default workflow
@@ -281,7 +286,11 @@ Rules carried over from vikunja-mcp:
 ### CLI
 
 `hgs [@host] overmind <command> [--json]`. Write commands take JSON on stdin,
-carry a `request_id` and are idempotent through `receipts`. Commands are flat. Commands accept CRLF text and store it with LF. Malformed or oversized requests are refusals with code `invalid_request`.
+carry a `request_id` and are idempotent through `receipts`, which are keyed by
+the command and its request: the same `request_id` with another command or body
+is refused. `@host` is for people: inside a session environment
+`hgs @host overmind` is refused, and agents use `hgs overmind` on their own
+machine. Commands are flat. Commands accept CRLF text and store it with LF. Malformed or oversized requests are refusals with code `invalid_request`.
 
 Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`, `review-send`,
@@ -296,8 +305,9 @@ prefix. A `ref` can grow longer as tasks arrive, so an older, shorter `ref` that
 became ambiguous returns `ambiguous` with the candidates instead of guessing.
 
 `hgs overmind --help` inside a session with a valid agent identity lists only
-the agent commands. An agent may act only on tasks assigned to its session,
-except `file` and `review` on a task sent to it for review.
+the agent commands. An agent may act only on tasks assigned to its session; the
+session a task was sent to for review may also comment on it, attach images to
+it and record its verdict, and `file` records a new task.
 
 Results are JSON. Agent-facing text is English. Responses to agents may carry a
 `note` with the next expected step, because guidance at the moment of use works

@@ -1300,8 +1300,10 @@ parked work. Only a person can move a task to Done.
 `--json`; replies are JSON. A refusal exits 1 and prints
 `{"ok": false, "error": {"code", "message", "field", "state"}}`, where `state`
 says whether a field was missing, empty or invalid. A write that carries a
-`request_id` UUID can be repeated safely: the same request returns the first
-result, a different request with the same ID is refused.
+`request_id` UUID can be repeated safely: the same command with the same request
+returns the first result; another command or request with the same ID is
+refused. A task that holds events from a newer version of hgs is shown
+read-only and refuses changes until hgs is updated.
 
 Tasks are referenced by `om-` plus at least five characters, or by UUID. A
 reference grows when needed to stay unambiguous.
@@ -1309,8 +1311,11 @@ reference grows when needed to stay unambiguous.
 Agents in Zerus sessions use their own commands (`mine`, `show`, `comment`,
 `advance`, `call-human`, `return`, `decompose`, `file`, `attach`, `review`).
 Their session is verified like hook events: `HGS_SESSION` and `HGS_RUN_ID` must
-name a live session. An agent may act only on tasks assigned to its session;
-in a Git repository, the evidence for review is a commit that exists there.
+name a live session, and a session environment that does not verify is refused.
+An agent acts on tasks assigned to its session; the session a task was sent to
+for review may also comment on it, attach images to it and record its verdict.
+In a Git repository, the evidence for review is a commit that exists there.
+Agents use `hgs overmind` on their own machine; `@host` is for people.
 
 Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
 blobs by SHA-256 and a `rev` file that changes with every write). Replication
