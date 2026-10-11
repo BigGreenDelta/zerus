@@ -99,7 +99,7 @@ pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
     agent_only(&ctx.actor)?;
     let req: AdvanceRequest = parse(&request)?;
     let cwd = ctx.cwd.clone();
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "advance", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
@@ -148,7 +148,7 @@ struct QuestionRequest {
 pub fn call_human(ctx: &mut Ctx, request: Value) -> Result<Value> {
     agent_only(&ctx.actor)?;
     let req: QuestionRequest = parse(&request)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "call-human", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         let to = workflow(tx, &task.project)?.first(Role::NeedsHuman).map(|s| s.name.clone()).unwrap_or_default();
@@ -170,7 +170,7 @@ struct ReasonRequest {
 pub fn return_task(ctx: &mut Ctx, request: Value) -> Result<Value> {
     agent_only(&ctx.actor)?;
     let req: ReasonRequest = parse(&request)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "return", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         let to = workflow(tx, &task.project)?.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default();
@@ -205,7 +205,7 @@ pub fn decompose(ctx: &mut Ctx, request: Value) -> Result<Value> {
     if req.subtasks.len() < 2 || req.subtasks.len() > 20 {
         return refuse("too_few_subtasks", "decompose into 2 to 20 subtasks");
     }
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "decompose", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         if task.assignee.as_ref() != Some(&me) {
@@ -261,7 +261,7 @@ fn my_tasks(tx: &Tx, me: &SessionRef) -> Result<Vec<Task>> {
 pub fn file(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let me = agent_only(&ctx.actor)?;
     let req: FileRequest = parse(&request)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "file", &request, |tx, actor| {
         let explicit = req.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
         if let Some(project) = explicit {
             check_project(project)?;
@@ -311,7 +311,7 @@ pub fn attach(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: AttachRequest = parse(&request)?;
     check_text("note", &req.note, MAX_FIELD, true)?;
     let stored = store_attachments(ctx.store, &[NewAttachment { name: req.name.clone(), mime: req.mime.clone(), data_base64: req.data_base64.clone() }])?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "attach", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         if task.assignee.as_ref() != Some(&me) && task.reviewer.as_ref() != Some(&me) {
@@ -347,7 +347,7 @@ pub fn review(ctx: &mut Ctx, request: Value) -> Result<Value> {
         "needs_work" => Action::NeedsWork,
         _ => return Err(Refusal::field("invalid_field", "verdict", "invalid", "verdict is approve or needs_work").into()),
     };
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "review", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;

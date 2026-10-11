@@ -80,17 +80,26 @@ pub fn check_project(project: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn request_digest(request: &Value) -> String {
-    format!("{:x}", Sha256::digest(request.to_string().as_bytes()))
+/// Receipts are keyed by the command and its request, so a request_id never
+/// replays the result of a different command.
+fn request_digest(command: &str, request: &Value) -> String {
+    let keyed = json!({"command": command, "request": request});
+    format!("{:x}", Sha256::digest(keyed.to_string().as_bytes()))
 }
 
 /// Runs a write with receipt replay when the request carries a `request_id`.
-pub fn write(ctx: &mut Ctx, request: &Value, f: impl FnOnce(&mut Tx, &Actor) -> Result<Value>) -> Result<Value> {
+/// `command` is the CLI command name.
+pub fn write(
+    ctx: &mut Ctx,
+    command: &str,
+    request: &Value,
+    f: impl FnOnce(&mut Tx, &Actor) -> Result<Value>,
+) -> Result<Value> {
     let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
     if !request_id.is_empty() && uuid::Uuid::parse_str(&request_id).is_err() {
         return refuse("invalid_request", "request_id must be a UUID");
     }
-    let digest = request_digest(request);
+    let digest = request_digest(command, request);
     let actor = ctx.actor.clone();
     ctx.store.write(|tx| {
         if !request_id.is_empty() {
@@ -476,7 +485,7 @@ pub fn create(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     check_prompt(&req.prompt)?;
     let attachments = store_attachments(ctx.store, &req.attachments)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "create", &request, |tx, actor| {
         let wf = workflow(tx, &req.project)?;
         let stage = if req.stage.is_empty() {
             wf.first(Role::Backlog).map(|s| s.name.clone()).unwrap_or_default()
@@ -520,7 +529,7 @@ pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
         Some(items) => Some(store_attachments(ctx.store, items)?),
         None => None,
     };
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "edit", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let mut changes: Vec<(&str, Value)> = Vec::new();
         if let Some(title) = &req.title {
@@ -562,10 +571,16 @@ struct MoveRequest {
     to: String,
 }
 
-fn move_to(ctx: &mut Ctx, request: &Value, task_ref: &str, target: impl Fn(&Workflow, &Task) -> Result<String>) -> Result<Value> {
+fn move_to(
+    ctx: &mut Ctx,
+    command: &str,
+    request: &Value,
+    task_ref: &str,
+    target: impl Fn(&Workflow, &Task) -> Result<String>,
+) -> Result<Value> {
     human_only(&ctx.actor)?;
     let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
-    write(ctx, request, |tx, actor| {
+    write(ctx, command, request, |tx, actor| {
         let uuid = resolve(tx, task_ref)?;
         let task = load(tx, &uuid)?;
         let wf = workflow(tx, &task.project)?;
@@ -589,19 +604,19 @@ pub fn move_task(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: MoveRequest = parse(&request)?;
     let to = req.to.clone();
-    move_to(ctx, &request, &req.task, move |_, _| Ok(to.clone()))
+    move_to(ctx, "move", &request, &req.task, move |_, _| Ok(to.clone()))
 }
 
 pub fn done(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: TaskRequest = parse(&request)?;
-    move_to(ctx, &request, &req.task, |wf, _| wf.first(Role::Done).map(|s| s.name.clone()).ok_or_else(|| Refusal::new("unknown_stage", "the workflow has no Done stage").into()))
+    move_to(ctx, "done", &request, &req.task, |wf, _| wf.first(Role::Done).map(|s| s.name.clone()).ok_or_else(|| Refusal::new("unknown_stage", "the workflow has no Done stage").into()))
 }
 
 pub fn reopen(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: TaskRequest = parse(&request)?;
-    move_to(ctx, &request, &req.task, |wf, task| {
+    move_to(ctx, "reopen", &request, &req.task, |wf, task| {
         if wf.role(&task.stage) != Some(Role::Done) {
             return Err(Refusal::new("transition_not_allowed", "only a finished task can be reopened").into());
         }
@@ -622,7 +637,7 @@ struct ReorderRequest {
 pub fn reorder(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: ReorderRequest = parse(&request)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "reorder", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         // The other tasks of the column, in display order.
@@ -690,7 +705,7 @@ pub fn pin(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: PinRequest = parse(&request)?;
     let session = local_session(req.session.clone(), ctx.store.machine());
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "pin", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         simple(tx, actor, &task, "pin_set", json!({"session": session}), &req.request_id)?;
@@ -715,7 +730,7 @@ pub fn label(ctx: &mut Ctx, request: Value) -> Result<Value> {
     if RESERVED_LABELS.contains(&req.label.as_str()) {
         return refuse("reserved_label", format!("`{}` is set by workflow actions", req.label));
     }
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "label", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         simple(tx, actor, &task, "label_set", json!({"label": req.label, "present": req.present}), &req.request_id)?;
@@ -740,7 +755,7 @@ pub fn link(ctx: &mut Ctx, request: Value) -> Result<Value> {
     if !matches!(req.relation.as_str(), "parent" | "follows" | "related") {
         return Err(Refusal::field("invalid_field", "relation", "invalid", "relation is parent, follows or related").into());
     }
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "link", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let target = resolve(tx, &req.target)?;
         if target == uuid {
@@ -768,7 +783,7 @@ pub fn comment(ctx: &mut Ctx, request: Value) -> Result<Value> {
     if req.text.trim().is_empty() {
         return Err(Refusal::field("missing_field", "text", "empty", "write the comment").into());
     }
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "comment", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         if actor.kind == ActorKind::Agent {
@@ -785,7 +800,7 @@ pub fn comment(ctx: &mut Ctx, request: Value) -> Result<Value> {
 pub fn delete(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: TaskRequest = parse(&request)?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "delete", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         simple(tx, actor, &task, "task_deleted", json!({}), &req.request_id)?;
@@ -825,7 +840,7 @@ pub fn workflow_set(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let wf: Workflow = serde_json::from_value(req.workflow.clone())
         .map_err(|e| Refusal::new("invalid_workflow", format!("invalid workflow: {e}")))?;
     wf.validate().map_err(|e| Refusal::new("invalid_workflow", format!("{e:#}")))?;
-    write(ctx, &request, |tx, actor| {
+    write(ctx, "workflow set", &request, |tx, actor| {
         for task in board_tasks(tx, &req.project)?.iter().filter(|t| !t.deleted) {
             if wf.stage(&task.stage).is_none() && !req.moves.get(&task.stage).is_some_and(|to| wf.stage(to).is_some()) {
                 return refuse("moves_required", format!("stage {} still holds tasks; say where to move them in `moves`", task.stage));
@@ -926,6 +941,17 @@ mod tests {
         let reused = create(&mut human(&mut store), json!({"request_id": id, "project": "p", "prompt": "y"})).unwrap_err();
         assert_eq!(refusal(reused).code, "request_reused");
         assert_eq!(store.task_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_request_id_never_replays_another_command() {
+        let (_dir, mut store) = store();
+        let task = new_task(&mut store, "Queue");
+        let id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        pin(&mut human(&mut store), json!({"request_id": id, "task": task})).unwrap();
+        let reused = delete(&mut human(&mut store), json!({"request_id": id, "task": task})).unwrap_err();
+        assert_eq!(refusal(reused).code, "request_reused");
+        assert_eq!(show(&mut human(&mut store), json!({"task": task})).unwrap()["task"]["uuid"], task);
     }
 
     #[test]
