@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request { request_id: String, expected_run_id: String, expected_conversation_id: String }
+struct Request { request_id: String, expected_run_id: String, expected_conversation_id: String,
+    #[serde(default)] dismiss_prompt: bool }
 
 pub(super) fn observe_start(record: &mut Value, event: &Value) {
     let previous = string(record, "conversation_id").to_owned();
@@ -148,6 +149,41 @@ pub(super) fn available(record: &Value, live: bool) -> bool {
         && !awaiting_start(record)
         && !compact_context::pending(record)
 }
+/// Claude waits in a chooser that hides its composer. Only an explicit request
+/// dismisses it, with one Esc that answers it as in Terminal.
+pub(super) fn dismissable(record: &Value, live: bool) -> bool {
+    live && record["agent"]=="claude"
+        && !string(record,"conversation_id").is_empty()
+        && ["input","approval"].contains(&string(record,"phase"))
+        && !pause_active(record) && string(record,"error").is_empty()
+        && string(record,"expected_id").is_empty()
+        && !record["clear_context_request"].is_object()
+        && !awaiting_start(record)
+        && !compact_context::pending(record)
+}
+const STARTUP_CHOICES: [&str; 3] = ["claude_resume", "claude_permission_mode", "claude_folder_trust"];
+/// Esc can end a launch at a startup chooser; Activity answers those instead.
+pub(super) fn startup_choice(cards: &Value) -> bool {
+    cards.as_array().into_iter().flatten().any(|card| STARTUP_CHOICES.contains(&string(card,"source")))
+}
+fn checked_chooser(name: &str, request: &Request) -> Result<Value> {
+    let record=read(name)?;
+    if string(&record,"run_id")!=request.expected_run_id || string(&record,"conversation_id")!=request.expected_conversation_id {
+        return Err("session identity changed; refresh before clearing".into());
+    }
+    if !matches(&record,live()?.get(name)) || !process_alive(&record) {
+        return Err("the exact agent process is no longer running; resume it explicitly".into());
+    }
+    if !dismissable(&record,true) {return Err("Claude is no longer waiting in a chooser; refresh before clearing".into());}
+    if claude_resume::current(&record).is_some() || claude_permission::current(&record).is_some() || claude_trust::current(&record).is_some() {
+        return Err("Answer Claude's startup choice in Activity or Terminal before clearing".into());
+    }
+    input::checked_terminal(&record,false)?;
+    if !claude_approval::chooser_visible(&kimi_tui_choice::capture(&record)?) {
+        return Err("Claude's chooser is no longer visible; refresh before clearing".into());
+    }
+    Ok(record)
+}
 fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
     let before=row.chars().take(x).collect::<String>();
     let after=row.chars().skip(x).collect::<String>();
@@ -174,10 +210,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let name=&args[0];
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
-    let guard=lock(None)?;
-    let mut record=input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?;
-    if !available(&record,true) {return Err("Wait for the agent to become idle before clearing context".into());}
-    input::checked_terminal(&record,true)?;
+    let mut guard=Some(lock(None)?);
+    let dismiss=request.dismiss_prompt && !available(&read(name)?,true);
+    let mut record=if dismiss {checked_chooser(name,&request)?} else {
+        let record=input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?;
+        if !available(&record,true) {return Err("Wait for the agent to become idle before clearing context".into());}
+        input::checked_terminal(&record,true)?;
+        record
+    };
     if record["pending_settings"].is_object() {return Err("Wait for the pending model settings before clearing context".into());}
     let path=absolute_root()?.join("clear_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This clear was already attempted. Check Terminal before trying again".into());}
@@ -185,8 +225,24 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     record["clear_context_request"]=json!({"request_id":request.request_id,"conversation_id":request.expected_conversation_id,"at":now()});
     write(&mut record)?;
     atomic(&path,&json!({"status":"in_progress","run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id}).to_string())?;
-    // No Ctrl-U/Escape: never discard a native draft or dismiss a live approval.
+    // No Ctrl-U: never discard a native draft. Escape only on explicit request.
     let result=(|| {
+        if dismiss {
+            // One Esc answers the chooser as in Terminal: an approval is denied,
+            // a question stays unanswered. It is never repeated.
+            tmux(&["send-keys","-t",string(&record,"pane"),"Escape"].map(str::to_owned),true)?;
+            guard=None; // Hooks reporting the dismissal must be able to commit.
+            let deadline=Instant::now()+Duration::from_secs(3);
+            loop {
+                let current=kimi_tui_choice::identity(&record)?;
+                if !claude_approval::chooser_visible(&kimi_tui_choice::capture(&current)?)
+                    && input::checked_terminal(&current,true).is_ok() {break;}
+                if Instant::now()>=deadline {return Err("Claude's chooser did not close after Esc".into());}
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            guard=Some(lock(None)?);
+            input::checked_terminal(&kimi_tui_choice::identity(&record)?,true)?;
+        }
         tmux(&["send-keys","-t",string(&record,"pane"),"-l","/clear"].map(str::to_owned),true)?;
         let deadline=Instant::now()+Duration::from_secs(3);
         loop {
@@ -195,7 +251,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             if Instant::now()>=deadline {return Err("Native /clear input could not be verified".into());}
             std::thread::sleep(Duration::from_millis(40));
         }
-        let current=input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?;
+        let current=if dismiss {kimi_tui_choice::identity(&record)?}
+            else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
         if !ready(&current,"/clear")? {return Err("The native input changed before /clear".into());}
@@ -341,6 +398,27 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&format!("{header}{body}{footer}"), "/fixture"), "{body}");
         }
         assert!(!codex_reset_panel(&format!("{header}{logo}{footer}"), "/other"));
+    }
+    #[test] fn only_a_waiting_claude_chooser_can_be_dismissed_for_a_clear() {
+        let waiting=json!({"agent":"claude","conversation_id":"conversation","activity":"busy","phase":"input"});
+        assert!(dismissable(&waiting,true));assert!(!dismissable(&waiting,false));
+        let mut approval=waiting.clone();approval["phase"]=json!("approval");assert!(dismissable(&approval,true));
+        for (key,value) in [("agent",json!("codex")),("phase",json!("idle")),("phase",json!("working")),
+            ("conversation_id",json!("")),("error",json!("failed")),("expected_id",json!("next")),
+            ("clear_context_request",json!({"request_id":"pending"}))] {
+            let mut other=waiting.clone();other[key]=value;assert!(!dismissable(&other,true),"{key}");
+        }
+        // Esc can end a launch at a startup chooser; only Activity answers those.
+        assert!(startup_choice(&json!([{"source":"claude_resume"}])));
+        assert!(startup_choice(&json!([{"source":"hook"},{"source":"claude_folder_trust"}])));
+        assert!(!startup_choice(&json!([{"source":"claude_terminal_choice"},{"source":"claude_tool_approval"}])));
+    }
+    #[test] fn dismissal_is_an_explicit_optional_request_field() {
+        let base=json!({"request_id":"r","expected_run_id":"run","expected_conversation_id":"c"});
+        assert!(!serde_json::from_value::<Request>(base.clone()).unwrap().dismiss_prompt);
+        let mut forced=base.clone();forced["dismiss_prompt"]=json!(true);
+        assert!(serde_json::from_value::<Request>(forced).unwrap().dismiss_prompt);
+        let mut unknown=base;unknown["force"]=json!(true);assert!(serde_json::from_value::<Request>(unknown).is_err());
     }
     #[test] fn exact_command_only() {
         assert!(command_row("codex","› /clear",8,"/clear"));

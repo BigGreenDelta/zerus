@@ -1575,7 +1575,27 @@ else: print('{}')
     QCOMPARE(menuPayload["expected_run_id"].toString(),QString("new-run"));
     QCOMPARE(menuPayload["expected_conversation_id"].toString(),QString("conversation-one"));
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));QCOMPARE(tabs->currentIndex(),1);
-    QTRY_COMPARE(finished.size(),4);tabs->setCurrentIndex(0);
+    QTRY_COMPARE(finished.size(),4);QVERIFY(!menuPayload.contains("dismiss_prompt"));QVERIFY(QFile::remove(capture));
+    // While Claude shows a chooser, an explicit reset first dismisses it with Esc.
+    details["phase"]="input";details["activity"]="busy";details["clear_context_supported"]=false;
+    details["clear_context_dismiss"]=true;applyDetails();QTRY_VERIFY(menuClear->isEnabled());settle();
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));
+        QVERIFY(dialog->text().contains("Esc"));QVERIFY(dialog->text().contains("denied"));QVERIFY(dialog->text().contains("draft"));
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){
+            QCOMPARE(button->text(),QString("Dismiss and clear"));button->click();return;}
+        QFAIL("Missing dismissal confirmation");});
+    menuClear->trigger();QTRY_VERIFY(QFileInfo::exists(capture));QVERIFY(sent.open(QIODevice::ReadOnly));
+    const auto dismissPayload=QJsonDocument::fromJson(sent.readAll()).object();sent.close();
+    QCOMPARE(dismissPayload["dismiss_prompt"].toBool(),true);QCOMPARE(dismissPayload["expected_run_id"].toString(),QString("new-run"));
+    QTRY_COMPARE(finished.size(),5);QVERIFY(QFile::remove(capture));
+    // A chooser that closed before confirmation is not dismissed.
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        details["clear_context_dismiss"]=false;details["clear_context_supported"]=true;details["phase"]="idle";details["activity"]="idle";
+        applyDetails();settle();
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}});
+    menuClear->trigger();QTest::qWait(100);QVERIFY(!QFileInfo::exists(capture));
+    details["clear_context_supported"]=false;applyDetails();QVERIFY(!menuClear->isEnabled());tabs->setCurrentIndex(0);
     QTest::qWait(350);details["phase"]="compacting";details["activity"]="busy";details["clear_context_supported"]=false;details.remove("cache_hint");details["session_usage"]=QJsonObject{{"status","ok"},{"context",QJsonObject{{"used",215900},{"limit",258400}}}};
     applyDetails();settle();QTest::qWait(50);QVERIFY(!menuClear->isEnabled());
     auto *progress=window.findChild<ActivityView *>("mainActivity")->compactionIndicator();auto *context=window.findChild<QWidget *>("activityContext");

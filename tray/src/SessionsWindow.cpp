@@ -2608,7 +2608,7 @@ void SessionsWindow::renderDetails()
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
         && !m_clearRequest && !m_composer->isSending(m_selectedKey) && m_inspectError.isEmpty()
         && !m_details.value("run_id").toString().isEmpty() && !m_details.value("conversation_id").toString().isEmpty()
-        && m_details.value("clear_context_supported").toBool();
+        && (m_details.value("clear_context_supported").toBool() || m_details.value("clear_context_dismiss").toBool());
     m_detailsClear->setEnabled(canClear);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     // A live agent clears natively; a stopped one starts fresh instead.
@@ -3181,17 +3181,22 @@ void SessionsWindow::continueAfterCompact(const QString &host, const QString &na
 void SessionsWindow::clearContext()
 {
     const auto *entry=selected();
+    // A Claude chooser hides the native composer: clearing first dismisses it.
+    const bool dismiss=!m_details.value("clear_context_supported").toBool();
     if(!entry || !entry->online || m_clearRequest || m_composer->isSending(m_selectedKey)
-        || !m_details.value("clear_context_supported").toBool())return;
+        || (dismiss && !m_details.value("clear_context_dismiss").toBool()))return;
     if(findChild<QMessageBox *>("clearSessionConfirm"))return;
     const auto key=m_selectedKey,host=entry->host,name=entry->session.name;
     const auto run=m_details.value("run_id").toString(),conversation=m_details.value("conversation_id").toString();
     if(run.isEmpty() || conversation.isEmpty() || !m_inspectError.isEmpty())return;
-    QMessageBox dialog(QMessageBox::Warning,tr("Clear session?"),
-        tr("Clear the conversation context in %1 on %2?\n\nThis runs the agent’s native clear command. Future messages will start without the current conversation context. Your unsent draft will be kept.")
-            .arg(name,entry->machine),QMessageBox::NoButton,this);
+    const QString text=dismiss
+        ? tr("Claude in %1 on %2 is waiting for a choice in Terminal. Dismiss it and clear the conversation context?\n\n"
+             "This presses Esc once, as in Terminal: a pending approval is denied and a question stays unanswered. "
+             "Then the agent’s native clear command runs. Your unsent draft will be kept.")
+        : tr("Clear the conversation context in %1 on %2?\n\nThis runs the agent’s native clear command. Future messages will start without the current conversation context. Your unsent draft will be kept.");
+    QMessageBox dialog(QMessageBox::Warning,tr("Clear session?"),text.arg(name,entry->machine),QMessageBox::NoButton,this);
     dialog.setObjectName("clearSessionConfirm");dialog.setTextFormat(Qt::PlainText);
-    auto *confirm=dialog.addButton(tr("Clear session"),QMessageBox::DestructiveRole);
+    auto *confirm=dialog.addButton(dismiss?tr("Dismiss and clear"):tr("Clear session"),QMessageBox::DestructiveRole);
     auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);
     dialog.exec();
     if(dialog.clickedButton()!=confirm)return;
@@ -3199,10 +3204,11 @@ void SessionsWindow::clearContext()
     if(!entry || !entry->online || m_selectedKey!=key || entry->host!=host || entry->session.name!=name
         || m_details.value("run_id")!=run || m_details.value("conversation_id")!=conversation
         || m_clearRequest || m_composer->isSending(key) || !m_inspectError.isEmpty()
-        || !m_details.value("clear_context_supported").toBool())return;
+        || m_details.value("clear_context_supported").toBool()==dismiss
+        || (dismiss && !m_details.value("clear_context_dismiss").toBool()))return;
     m_clearKey=key;
     if(m_detailTabs->currentIndex()==0)m_composer->editor()->setFocus(Qt::OtherFocusReason);
-    m_clearRequest=m_client.requestClearContext(host,name,run,conversation);
+    m_clearRequest=m_client.requestClearContext(host,name,run,conversation,dismiss);
     renderDetails();
 }
 

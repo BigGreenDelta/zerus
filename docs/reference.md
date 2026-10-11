@@ -593,7 +593,13 @@ the current settings without retrying the stale request or showing a failure.
 
 Native clear/compact operations are capability-gated and require exact identity.
 **Clear session** requires confirmation naming the session and host, preserves
-unsent drafts and rechecks identity. DeepSeek context reset is unavailable until
+unsent drafts and rechecks identity. While Claude shows an approval, question or
+another chooser, **Clear session** asks for a separate **Dismiss and clear**
+confirmation: Zerus presses Esc once, as in Terminal, so an approval is denied and
+a question stays unanswered. It runs `/clear` only after the chooser closed and the
+empty native prompt is verified, and never repeats an uncertain attempt. Startup
+choices such as resume, permission mode and folder trust are answered in Activity
+instead. DeepSeek context reset is unavailable until
 its native Session Controller provides the supported operation. A confirmed clear
 adds an amber **Session cleared** boundary to Activity and keeps the earlier local
 timeline above it: the agent no longer sees that history, but you can still read
