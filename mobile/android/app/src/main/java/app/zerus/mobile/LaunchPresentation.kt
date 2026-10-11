@@ -7,7 +7,47 @@ data class LaunchAccount(val id: String,val provider: String,val label: String,v
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
 data class LaunchProject(val id:String,val name:String,val color:String,val folders:List<LaunchProjectFolder>)
+/** Everything that can keep New session from starting; [LaunchPresentation.disabledReason] explains the first problem. */
+data class LaunchReadiness(val machineReason:String="",val catalogLoading:Boolean=false,val catalogAvailable:Boolean=true,val catalogChanged:Boolean=false,
+    val projectRequired:Boolean=false,val projectChosen:Boolean=true,val projectHasFolder:Boolean=true,val folderChosen:Boolean=true,
+    val folderLoading:Boolean=false,val folderVerified:Boolean=true,val repositoryLoading:Boolean=false,val providers:Int=1,val providerChosen:Boolean=true,
+    val accounts:Int=1,val accountChosen:Boolean=true,val nameError:String="",val automatic:Boolean=false,val automaticFailed:Boolean=false,val automaticUsed:Boolean=false,
+    val worktreeReason:String="",val confirmed:Boolean=false)
 object LaunchPresentation {
+    /** Catalog order is kept; the query matches project names and this computer's folder names and paths. */
+    fun filterProjects(projects:List<LaunchProject>,query:String):List<LaunchProject> {
+        val needle=query.trim()
+        if(needle.isEmpty()) return projects
+        return projects.filter { project -> project.name.contains(needle,true) ||
+            project.folders.any { it.name.contains(needle,true) || it.path.contains(needle,true) } }
+    }
+    fun folderSummary(project:LaunchProject):String = when(project.folders.size) {
+        0 -> "No folder on this computer"
+        1 -> project.folders.single().path
+        else -> "${project.folders.size} folders"
+    }
+    /** One concise reason for a disabled Create session action, or "" when it can start. */
+    fun disabledReason(form:LaunchReadiness):String = when {
+        form.confirmed -> "This session was already created."
+        form.machineReason.isNotBlank() -> form.machineReason
+        form.catalogLoading -> "Loading agents and projects…"
+        !form.catalogAvailable -> "Agents and projects are unavailable. Close and try again."
+        form.catalogChanged -> "Creation choices changed. Review them first."
+        form.projectRequired && !form.projectChosen -> "Choose a project."
+        !form.folderChosen -> if(form.projectHasFolder) "Choose a folder." else "Browse to choose a folder."
+        form.folderLoading -> "Checking folder…"
+        !form.folderVerified -> "Check this folder again or browse to it."
+        form.repositoryLoading -> "Checking repository…"
+        form.providers == 0 -> "No agents are installed on this computer."
+        !form.providerChosen -> "Choose an agent."
+        form.accounts == 0 -> "No account is available for this agent on this computer."
+        !form.accountChosen -> "Choose an account."
+        form.nameError.isNotBlank() -> form.nameError
+        form.automatic && form.automaticFailed -> "Automatic worktree creation failed. Choose None or another worktree."
+        form.automatic && form.automaticUsed -> "This form already created its worktree. Choose None to start there."
+        form.automatic && form.worktreeReason.isNotBlank() -> form.worktreeReason
+        else -> ""
+    }
     fun agents(raw: JSONObject?): List<String> = raw?.optJSONArray("agents")?.let { array ->
         (0 until array.length()).mapNotNull { array.opt(it) as? String }.filter { it in setOf("codex","claude","kimi","dsh") }.distinct()
     }.orEmpty()

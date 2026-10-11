@@ -23,10 +23,35 @@ const QStringList packages={"zerus","zerus-git","zerus-ade-bin","zerus-ade-night
 bool matches(const QString &s,const char *pattern){return QRegularExpression(QString::fromLatin1(pattern)).match(s).hasMatch();}
 bool integer(const QJsonValue &v,qint64 low,qint64 high){double n=v.toDouble(-1);return v.isDouble()&&std::isfinite(n)&&std::floor(n)==n&&n>=low&&n<=high;}
 bool safe(const QString &s){return matches(s,"\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,179}\\z")&&!s.contains("..");}
-QString configuredChannel(){QString c=QSettings().value("updates/channel","stable").toString();return c=="nightly"?c:"stable";}
+QString configuredChannel(){QString c=QSettings().value("updates/channel","stable").toString();return c=="nightly"||c=="dev"?c:"stable";}
+DesktopUpdateFeed parseDev(const QByteArray &data){
+    DesktopUpdateFeed result;
+    if(data.size()>256*1024)return result;
+    QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);
+    if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
+    auto raw=doc.object();
+    if(!integer(raw["schemaVersion"],2,2)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!="dev"||raw["channelTag"]!="dev"||raw.contains("sourceDirty")||!integer(raw["buildId"],1,9007199254740991LL)||!integer(raw["buildNumber"],1,9007199254740991LL))return result;
+    auto id=raw["buildId"].toInteger();auto commit=raw["sourceCommit"].toString();auto version=raw["versionName"].toString();
+    if(!matches(commit,"\\A[a-f0-9]{40}\\z")||version.size()>120||!matches(version,"\\A[0-9]+\\.[0-9]+\\.[0-9]+(?:-dev\\.[0-9]+)?\\z")||raw["buildUrl"].toString()!=QString("https://github.com/ufna/zerus/actions/runs/%1").arg(id))return result;
+    auto published=raw["publishedAt"].toString();auto at=QDateTime::fromString(published,Qt::ISODateWithMs);if(!at.isValid())at=QDateTime::fromString(published,Qt::ISODate);
+    if(published.size()>40||!matches(published,"(?:Z|[+-][0-9]{2}:[0-9]{2})\\z")||!at.isValid()||!raw["artifacts"].isArray())return result;
+    auto artifacts=raw["artifacts"].toArray();if(artifacts.isEmpty()||artifacts.size()>16)return result;
+    QStringList seen;int sources=0,packages=0;
+    for(auto value:artifacts){
+        if(!value.isObject())return result;auto item=value.toObject();auto name=item["name"].toString();auto kind=item["kind"].toString();
+        if(!safe(name)||seen.contains(name)||item["url"].toString()!=QString("https://zerus.dev/downloads/dev-desktop-%1/%2").arg(id).arg(name)||!matches(item["sha256"].toString(),"\\A[a-f0-9]{64}\\z")||!integer(item["size"],1,512*1024*1024))return result;
+        seen<<name;
+        if(kind=="source"){if(item["os"]!="any"||item["arch"]!="source"||!name.endsWith("-source.tar.gz"))return result;result.sourceUrl=item["url"].toString();++sources;}
+        else if(kind=="arch-package"){if(item["os"]!="linux"||item["arch"]!="x86_64"||!name.endsWith(".pkg.tar.zst"))return result;result.packageUrl=item["url"].toString();++packages;}
+        else return result;
+    }
+    if(sources!=1||packages!=1)return result;
+    result.valid=true;result.releaseId=id;result.buildNumber=raw["buildNumber"].toInteger();result.sourceCommit=commit;result.releaseUrl=raw["buildUrl"].toString();result.version=version+QString(" (dev %1)").arg(result.buildNumber);return result;
+}
 }
 
 DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QString &channel){
+    if(channel=="dev")return parseDev(data);
     DesktopUpdateFeed result;
     if(data.size()>256*1024||!(channel=="stable"||channel=="nightly"))return result;
     QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
@@ -68,6 +93,7 @@ bool UpdateController::isArchLinux(const QByteArray &osRelease){
     return values.value("ID")=="arch"||values.value("ID_LIKE").split(' ').contains("arch");
 }
 QString UpdateController::updateCommand(const DesktopInstallation &installation,const QString &channel){
+    if(channel=="dev")return {};
     if(installation.helper!="yay"&&installation.helper!="paru")return {};
     if(installation.kind=="package"){
         if(!packages.contains(installation.package))return {};
@@ -88,7 +114,12 @@ bool UpdateController::portableUpdateAvailable(const QString &appVersion,const D
     auto nightly=QRegularExpression("\\A([0-9]+\\.[0-9]+\\.[0-9]+)\\.r[0-9]+\\.g[a-f0-9]{7}\\.n[0-9]+\\z").match(feed.version);
     return nightly.hasMatch()&&plainStableIsNewer(appVersion,nightly.captured(1));
 }
-bool UpdateController::isUpdateToken(const QString &token){return matches(token,"\\Azerus-update:v1:(?:stable|nightly):[1-9][0-9]{0,15}\\z");}
+bool UpdateController::devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit){
+    if(!feed.valid||feed.buildNumber<=0||feed.sourceCommit==installedCommit)return false;
+    return installedBuild<=0||feed.buildNumber>installedBuild;
+}
+int UpdateController::automaticInterval(const QString &channel){return channel=="dev"?15*60:24*60*60;}
+bool UpdateController::isUpdateToken(const QString &token){return matches(token,"\\Azerus-update:(?:v1:(?:stable|nightly)|v2:dev):[1-9][0-9]{0,15}\\z");}
 bool UpdateController::claimNotification(const QString &token){
     if(!isUpdateToken(token))return false;QSettings settings;QString key="updates/notified/"+token;
     if(settings.value(key,false).toBool())return false;settings.setValue(key,true);settings.sync();return settings.status()==QSettings::NoError;
@@ -98,10 +129,12 @@ QString UpdateController::comparisonMessage(const DesktopInstallation &installat
     // Windows Phase 1: a portable zip without an installer or self-update, and
     // only nightly releases carry it.
     if(installation.kind=="portable"){
+        if(feed.buildNumber>0)return tr("Dev builds do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds.");
         if(matches(feed.version,"\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))return tr("Stable releases do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds.");
         return portableUpdateAvailable(appVersion,feed)?tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version)
                                                        :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
     }
+    if(feed.buildNumber>0)return tr("Verified main build %1 is published. Use its source or platform package to update this installation.").arg(feed.buildNumber);
 #ifdef Q_OS_MACOS
     Q_UNUSED(installation);Q_UNUSED(appVersion);Q_UNUSED(comparison);Q_UNUSED(compared);
     return tr("No macOS installer is published. See release or source build instructions.");
@@ -129,7 +162,7 @@ UpdateController::UpdateController(QObject *parent,QString executable,std::funct
     connect(this,&UpdateController::changed,this,[this]{if(m_startCheck&&m_installation.kind!="checking"){m_startCheck=false;checkAutomatically();}});
 }
 QString UpdateController::channel() const{return configuredChannel();}
-void UpdateController::setChannel(const QString &value){if(value!="stable"&&value!="nightly")return;++m_checkGeneration;m_automaticInFlight=false;if(m_activeReply)m_activeReply->abort();QSettings().setValue("updates/channel",value);m_freshForNotification=false;m_feed={};m_notice.clear();m_error.clear();m_comparison.clear();m_lastSuccess=0;m_cached=false;m_available=false;m_message="Updates have not been checked for this channel.";restoreCatalog();++m_checkGeneration;m_busy=false;emit changed();compare();checkAutomatically();}
+void UpdateController::setChannel(const QString &value){if(value!="stable"&&value!="nightly"&&value!="dev")return;++m_checkGeneration;m_automaticInFlight=false;if(m_activeReply)m_activeReply->abort();QSettings().setValue("updates/channel",value);m_freshForNotification=false;m_feed={};m_notice.clear();m_error.clear();m_comparison.clear();m_lastSuccess=0;m_cached=false;m_available=false;m_message="Updates have not been checked for this channel.";restoreCatalog();++m_checkGeneration;m_busy=false;emit changed();compare();checkAutomatically();}
 bool UpdateController::automaticChecks() const{return QSettings().value("updates/automatic",true).toBool();}
 void UpdateController::setAutomaticChecks(bool enabled){
     QSettings().setValue("updates/automatic",enabled);
@@ -138,10 +171,12 @@ void UpdateController::setAutomaticChecks(bool enabled){
 }
 void UpdateController::checkOnStart(){if(!automaticChecks())return;m_startCheck=true;if(m_installation.kind!="checking")emit changed();}
 void UpdateController::checkAutomatically(){
-    if(!automaticChecks())return;if(m_installation.kind=="checking"){m_startCheck=true;return;}auto now=QDateTime::currentSecsSinceEpoch();auto last=QSettings().value("updates/lastAttempt/"+channel(),0).toLongLong();if(last<=0||last>now||now-last>=24*60*60)startCheck(true);
+    if(!automaticChecks())return;if(m_installation.kind=="checking"){m_startCheck=true;return;}auto now=QDateTime::currentSecsSinceEpoch();auto last=QSettings().value("updates/lastAttempt/"+channel(),0).toLongLong();
+    // Dev builds carry no Windows zip: a portable build has nothing to poll for.
+    const int interval=m_installation.kind=="portable"?automaticInterval("stable"):automaticInterval(channel());if(last<=0||last>now||now-last>=interval)startCheck(true);
 }
 QString UpdateController::lastChecked() const{return m_lastSuccess>0?QLocale().toString(QDateTime::fromSecsSinceEpoch(m_lastSuccess).toLocalTime(),QLocale::ShortFormat):tr("Never");}
-QString UpdateController::updateToken() const{return m_available&&m_feed.valid?"zerus-update:v1:"+channel()+":"+QString::number(m_feed.releaseId):QString();}
+QString UpdateController::updateToken() const{return m_available&&m_feed.valid?(channel()=="dev"?"zerus-update:v2:":"zerus-update:v1:")+channel()+":"+QString::number(m_feed.releaseId):QString();}
 void UpdateController::run(const QString &program,const QStringList &arguments,std::function<void(bool,QString)> done){
     auto *process=new QProcess(this);auto *deadline=new QTimer(process);deadline->setSingleShot(true);auto data=std::make_shared<QByteArray>();auto failed=std::make_shared<bool>(false);auto settled=std::make_shared<bool>(false);
     auto finish=[process,done,data,failed,settled](bool okay){if(*settled)return;*settled=true;done(okay&&!*failed,QString::fromUtf8(*data).trimmed());process->deleteLater();};
@@ -191,7 +226,7 @@ void UpdateController::startCheck(bool automatic){
     if(automatic&&!automaticChecks())return;
     if(m_busy)return;m_busy=true;m_freshForNotification=false;m_automaticInFlight=automatic;m_message="Checking the published release catalog…";m_error.clear();emit changed();emit requestStarted();
     QString selected=channel();auto generation=++m_checkGeneration;QSettings().setValue("updates/lastAttempt/"+selected,QDateTime::currentSecsSinceEpoch());
-    auto *manager=m_fetch?nullptr:new QNetworkAccessManager(this);QNetworkRequest request(QUrl("https://zerus.dev/updates/v1/desktop/"+selected+".json"));request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);request.setTransferTimeout(10000);
+    auto *manager=m_fetch?nullptr:new QNetworkAccessManager(this);QNetworkRequest request(QUrl("https://zerus.dev/updates/"+QString(selected=="dev"?"v2":"v1")+"/desktop/"+selected+".json"));request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);request.setTransferTimeout(10000);
     auto *reply=m_fetch?m_fetch(request):manager->get(request);m_activeReply=reply;auto data=std::make_shared<QByteArray>();auto oversized=std::make_shared<bool>(false);auto *timer=new QTimer(reply);timer->setSingleShot(true);connect(timer,&QTimer::timeout,reply,&QNetworkReply::abort);timer->start(10000);
     connect(reply,&QNetworkReply::readyRead,this,[reply,data,oversized]{auto bytes=reply->readAll();if(data->size()+bytes.size()>256*1024){*oversized=true;reply->abort();}else *data+=bytes;});
     connect(reply,&QNetworkReply::finished,this,[this,reply,manager,timer,data,oversized,generation,selected]{timer->stop();if(generation==m_checkGeneration){
@@ -207,6 +242,13 @@ void UpdateController::completeComparison(bool newer,const QString &message){
 }
 void UpdateController::compare(){
     if(!m_feed.valid||m_installation.kind=="checking")return;
+    if(channel()=="dev"){
+        QString installedCommit;
+#ifdef ZERUS_SOURCE_COMMIT
+        installedCommit=QStringLiteral(ZERUS_SOURCE_COMMIT);
+#endif
+        completeComparison(m_installation.kind!="portable"&&devBuildIsNewer(m_feed,0,installedCommit),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
+    }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();
         const bool newer=m_installation.kind=="portable"?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);

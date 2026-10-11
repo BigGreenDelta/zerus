@@ -30,6 +30,10 @@ class AndroidUpdateViewModel(application: Application): AndroidViewModel(applica
     fun recover() = viewModelScope.launch { try { updates.recover() } catch(_:Exception) { error="Could not read the saved installer state. No installation was repeated." } }
     fun check() = viewModelScope.launch { if(busy) return@launch;busy=true;error=""
         try { updates.check(manual=true) } catch(_:Exception) { error="Could not check for updates." } finally { busy=false } }
+    fun setChannel(channel: String) = viewModelScope.launch {
+        if(busy) return@launch;busy=true;error=""
+        try { updates.setChannel(channel) } catch(_:Exception) { error="Could not change the update channel." } finally { busy=false }
+    }
     fun download(update:AndroidUpdate) {
         if(busy) return
         busy=true;error=""
@@ -65,22 +69,33 @@ class AndroidUpdateViewModel(application: Application): AndroidViewModel(applica
     val pending = state.sessionId >= 0
     val busy = interactionBlocked() || updater.busy || state.status in setOf("loading", "checking", "downloading")
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Release channel",style=MaterialTheme.typography.labelLarge)
+        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            for(channel in listOf("stable", "dev")) FilterChip(
+                selected=state.channel == channel,
+                onClick={ if(!interactionBlocked()) updater.setChannel(channel) },
+                enabled=!busy && !pending,
+                label={ Text(if(channel == "dev") "Dev" else "Stable") })
+        }
+        Text(if(state.channel == "dev") "Latest verified main builds." else "Published stable releases.",style=MaterialTheme.typography.bodySmall)
         Text(when(state.status) {
             "loading" -> "Reading saved update status…"
-            "checking" -> "Checking the development channel…"
+            "checking" -> "Checking the ${state.channel} channel…"
             "available" -> "Update ${state.available?.versionName.orEmpty()} is available."
             "downloading" -> "Downloading update…"
             "downloaded" -> "Update ${state.downloaded?.versionName.orEmpty()} is downloaded and verified."
             "installing" -> "Installation submitted to Android. Waiting for its result."
             "confirmation" -> "Android is waiting for your installation confirmation."
             "installed" -> "The updated app version is installed."
-            "current" -> "This app is up to date on the development channel."
-            else -> "Check for a newer development build."
+            "current" -> "This app is up to date on the ${state.channel} channel."
+            "ahead" -> "The installed version is newer than this channel. Android cannot downgrade; wait for a newer compatible build."
+            else -> "Check for a newer ${state.channel} build."
         })
         if(state.status=="downloading") LinearProgressIndicator(progress={ state.available?.size?.let { state.bytes.toFloat()/it } ?: 0f },modifier=Modifier.fillMaxWidth())
         if(state.error.isNotBlank()) Text(state.error,color=MaterialTheme.colorScheme.error)
         if(updater.error.isNotBlank()) Text(updater.error,color=MaterialTheme.colorScheme.error)
         Text("Checks are anonymous and independent of paired workspaces. Downloads and installation require your choice. Android will ask you to confirm installation.",style=MaterialTheme.typography.bodySmall)
+        Text("Both channels update the same app and preserve its data. Switching channels never installs an older Android version.",style=MaterialTheme.typography.bodySmall)
         TextButton(onClick={ if (!interactionBlocked()) updater.check() },enabled=!busy && !pending) { Text("Check for updates") }
         state.available?.takeIf { it != state.downloaded }?.let { update ->
             Button(onClick={ if (!interactionBlocked()) updater.download(update) },enabled=!busy && !pending) { Text("Download ${update.versionName}") }

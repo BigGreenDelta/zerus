@@ -15,6 +15,10 @@
         android:supportsRtl="true" android:theme="@style/Theme.Zerus">
         <receiver android:name=".UpdateInstallReceiver" android:exported="false" />
         <service android:name=".LiveConnectionService" android:exported="false" android:foregroundServiceType="remoteMessaging" />
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.attachments"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/attachment_paths" />
+        </provider>
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

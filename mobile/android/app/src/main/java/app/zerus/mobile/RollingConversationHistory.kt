@@ -78,7 +78,9 @@ object EventHistoryCodec {
         .put("history_epoch", event.historyEpoch).put("incoming_seq", event.incomingSeq ?: JSONObject.NULL)
         .put("original_ids", JSONArray(event.originalIds)).put("detail_truncated",event.detailTruncated)
         .put("outgoing_id", event.outgoingId).put("attachments", JSONArray(event.attachments.map { file ->
-            JSONObject().put("name", file.name).put("mime", file.mime).put("bytes", file.bytes).put("reference", file.reference)
+            JSONObject().put("name", file.name).put("mime", file.mime).put("bytes", file.bytes).put("reference", file.reference).also {
+                if (file.messageId.isNotBlank() && file.index >= 0) it.put("message_id", file.messageId).put("index", file.index)
+            }
         }))
     fun encode(events: List<Event>): JSONArray = JSONArray(events.map(::row))
     fun decode(raw: JSONArray): List<Event> {
@@ -91,7 +93,8 @@ object EventHistoryCodec {
             Event(value.getString("id"), value.getString("role"), value.getString("text"), value.getString("time"), at,
                 value.getString("request_id"), (0 until files.length()).map { position ->
                     val file = files.getJSONObject(position)
-                    DisplayedAttachment(file.getString("name"), file.getString("mime"), file.getLong("bytes"), file.getString("reference"))
+                    DisplayedAttachment(file.getString("name"), file.getString("mime"), file.getLong("bytes"), file.getString("reference"),
+                        file.optString("message_id"), file.optInt("index", -1))
                 }, value.getString("source"), value.getString("delivery"), value.getString("outgoing_id"), value.optString("native_type"), value.optString("submitted_text"), value.optString("original_id"),
                 value.optString("history_id"), value.optString("history_cursor"), value.optString("history_epoch"),
                 (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },

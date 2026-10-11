@@ -14,7 +14,7 @@ import functools
 import uuid
 
 from .attachments import MAX_QUEUE_BYTES
-from .context import CAPABILITY_OPERATIONS, READ_OPERATIONS, READ_SQL, inspect_features, supports
+from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
 from .routes import Registry, RouteError, drive_sync, SCHEMA as ROUTE_SCHEMA, MAX_PEER_SNAPSHOT_BYTES
 
@@ -111,6 +111,7 @@ class Store:
         """)
         self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at) WHERE state='queued' AND expires_at IS NOT NULL")
         self.db.execute("CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,operation,state)")
         self.db.execute("CREATE INDEX IF NOT EXISTS event_expiry ON events(created)")
@@ -128,17 +129,17 @@ class Store:
             self.db.executescript(f"""
             CREATE TABLE IF NOT EXISTS workspace_usage(workspace_id TEXT PRIMARY KEY,payload_bytes INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 0,reads INTEGER NOT NULL DEFAULT 0,mutations INTEGER NOT NULL DEFAULT 0,budget_bytes INTEGER NOT NULL DEFAULT {MAX_QUEUE_BYTES});
             INSERT OR IGNORE INTO workspace_usage(workspace_id) SELECT id FROM workspaces;
-            UPDATE workspace_usage SET payload_bytes=(SELECT COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) FROM requests WHERE workspace_id=workspace_usage.workspace_id),active=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND state IN ('queued','claimed')),reads=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND operation IN {READ_SQL}),mutations=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND operation NOT IN {READ_SQL});
+            UPDATE workspace_usage SET payload_bytes=(SELECT COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) FROM requests WHERE workspace_id=workspace_usage.workspace_id),active=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND state IN ('queued','claimed')),reads=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND operation IN {READ_CLASS_SQL}),mutations=(SELECT count(*) FROM requests WHERE workspace_id=workspace_usage.workspace_id AND operation NOT IN {READ_CLASS_SQL});
             CREATE TRIGGER IF NOT EXISTS workspace_usage_create AFTER INSERT ON workspaces BEGIN INSERT INTO workspace_usage(workspace_id) VALUES(NEW.id); END;
             DROP TRIGGER IF EXISTS request_usage_insert;
             DROP TRIGGER IF EXISTS request_usage_delete;
             DROP TRIGGER IF EXISTS request_usage_update;
             DROP TRIGGER IF EXISTS request_result_accounting;
             CREATE TRIGGER request_usage_insert AFTER INSERT ON requests BEGIN
-                UPDATE workspace_usage SET payload_bytes=payload_bytes+NEW.body_bytes+NEW.result_bytes+NEW.reserved_bytes,active=active+(NEW.state IN ('queued','claimed')),reads=reads+(NEW.operation IN {READ_SQL}),mutations=mutations+(NEW.operation NOT IN {READ_SQL}) WHERE workspace_id=NEW.workspace_id;
+                UPDATE workspace_usage SET payload_bytes=payload_bytes+NEW.body_bytes+NEW.result_bytes+NEW.reserved_bytes,active=active+(NEW.state IN ('queued','claimed')),reads=reads+(NEW.operation IN {READ_CLASS_SQL}),mutations=mutations+(NEW.operation NOT IN {READ_CLASS_SQL}) WHERE workspace_id=NEW.workspace_id;
             END;
             CREATE TRIGGER request_usage_delete AFTER DELETE ON requests BEGIN
-                UPDATE workspace_usage SET payload_bytes=payload_bytes-OLD.body_bytes-OLD.result_bytes-OLD.reserved_bytes,active=active-(OLD.state IN ('queued','claimed')),reads=reads-(OLD.operation IN {READ_SQL}),mutations=mutations-(OLD.operation NOT IN {READ_SQL}) WHERE workspace_id=OLD.workspace_id;
+                UPDATE workspace_usage SET payload_bytes=payload_bytes-OLD.body_bytes-OLD.result_bytes-OLD.reserved_bytes,active=active-(OLD.state IN ('queued','claimed')),reads=reads-(OLD.operation IN {READ_CLASS_SQL}),mutations=mutations-(OLD.operation NOT IN {READ_CLASS_SQL}) WHERE workspace_id=OLD.workspace_id;
             END;
             CREATE TRIGGER request_usage_update AFTER UPDATE OF body_bytes,result_bytes,reserved_bytes,state ON requests BEGIN
                 UPDATE workspace_usage SET payload_bytes=payload_bytes+NEW.body_bytes+NEW.result_bytes+NEW.reserved_bytes-OLD.body_bytes-OLD.result_bytes-OLD.reserved_bytes,active=active+(NEW.state IN ('queued','claimed'))-(OLD.state IN ('queued','claimed')) WHERE workspace_id=NEW.workspace_id;
@@ -225,6 +226,8 @@ class Store:
         with self.db:
             self.db.execute(f"UPDATE requests SET state='failed',error='terminal input expired before delivery',result_bytes=length('terminal input expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND expires_at<=? ORDER BY expires_at LIMIT {batch_size})", (now,now))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
+            # Attachment bytes are carried, never kept beyond a short read window.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"UPDATE requests SET state='failed',error='request expired before delivery',result_bytes=length('request expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND created<=? ORDER BY created LIMIT {batch_size})", (now, now - queue_ttl))
             if restart:
                 self.db.execute(f"UPDATE requests SET state='uncertain',error='relay restarted after claim',result_bytes=length('relay restarted after claim'),reserved_bytes=0,updated=? WHERE state='claimed'", (now,))
@@ -516,7 +519,7 @@ class Store:
             elif row["state"] == "claimed" and row["claimed"] <= now-claim_ttl:
                 self.db.execute("UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id=?", (now,value))
             row = self.db.execute("SELECT id,operation,state,result,error FROM requests WHERE id=?", (value,)).fetchone()
-            if row["operation"] == "terminal_snapshot" and row["state"] not in ("queued","claimed"):
+            if row["operation"] in ("terminal_snapshot", "attachment_read") and row["state"] not in ("queued","claimed"):
                 self.db.execute("UPDATE requests SET result_read=? WHERE id=?", (now,value))
             return self.envelope(row)
 

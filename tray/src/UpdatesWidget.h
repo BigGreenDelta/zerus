@@ -74,6 +74,10 @@ public:
         release->setObjectName("updatesRelease");
         compact(release);
         statusLayout->addWidget(release, 0, Qt::AlignLeft);
+        auto *download = new QPushButton;
+        download->setObjectName("updatesDownload");
+        compact(download);
+        statusLayout->addWidget(download, 0, Qt::AlignLeft);
         layout->addWidget(status);
 
         auto *preferences = new QWidget;
@@ -96,6 +100,7 @@ public:
         channel->setAccessibleName(tr("Release channel"));
         channel->addItem(tr("Stable"), "stable");
         channel->addItem(tr("Nightly"), "nightly");
+        channel->addItem(tr("Dev"), "dev");
         compact(channel);
         auto *check = new QPushButton(tr("Check now"));
         check->setObjectName("updatesCheck");
@@ -166,6 +171,11 @@ public:
         connect(release, &QPushButton::clicked, this, [controller] {
             if (controller->feed().valid) QDesktopServices::openUrl(QUrl(controller->feed().releaseUrl));
         });
+        connect(download, &QPushButton::clicked, this, [controller] {
+            const auto feed=controller->feed();
+            if(feed.valid && controller->channel()=="dev")
+                QDesktopServices::openUrl(QUrl(controller->installation().arch ? feed.packageUrl : feed.sourceUrl));
+        });
         connect(copy, &QPushButton::clicked, this, [controller] {
             const auto value = UpdateController::updateCommand(controller->installation(), controller->channel());
             if (!value.isEmpty()) QApplication::clipboard()->setText(value);
@@ -188,6 +198,9 @@ public:
             ownership->setText(ownershipText);
 
             const auto feed = controller->feed();
+            release->setText(controller->channel()=="dev" ? tr("View build") : tr("View release"));
+            download->setText(install.arch ? tr("Download dev package") : tr("Download dev source"));
+            download->setVisible(feed.valid && controller->channel()=="dev" && install.kind != "portable");
             title->setText(controller->busy() ? tr("Checking for updates…") : controller->updateAvailable() ? tr("Update available") : feed.valid ? tr("Release status") : tr("Updates have not been checked"));
             released->setText(feed.valid ? feed.version : tr("Not checked"));
             comparison->setText(controller->comparison());

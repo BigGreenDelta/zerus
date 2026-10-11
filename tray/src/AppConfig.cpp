@@ -25,6 +25,21 @@ QString AppConfig::configPath()
            + QStringLiteral("/.config/hgs/tray.conf");
 }
 
+QStringList AppConfig::hgsInstallDirs(const QString &home)
+{
+    // Same order in which hgs extends PATH for its children (src/platform/unix.rs).
+    return {home + QStringLiteral("/.local/bin"), QStringLiteral("/opt/homebrew/bin"),
+            QStringLiteral("/usr/local/bin")};
+}
+
+QString AppConfig::fallbackHgsPath(const QString &pathEnv, const QStringList &installDirs)
+{
+    const QStringList path = pathEnv.split(QLatin1Char(':'), Qt::SkipEmptyParts);
+    if (!path.isEmpty() && !QStandardPaths::findExecutable(QStringLiteral("hgs"), path).isEmpty())
+        return {};
+    return QStandardPaths::findExecutable(QStringLiteral("hgs"), installDirs);
+}
+
 void AppConfig::setConfigPathOverrideForTests(const QString &path)
 {
     g_configPathOverride = path;
@@ -94,6 +109,18 @@ bool AppConfig::isValidOpenMode(const QString &v, Platform p)
 
 namespace {
 
+// Windows looks next to hgs-tray.exe first (resolveHgsPath); the Unix fallback
+// directories do not exist there.
+QString hgsHelp(AppConfig::Platform p)
+{
+    return p == AppConfig::Platform::Windows
+        ? QStringLiteral("  --hgs <path>          path to hgs.exe; found next to hgs-tray.exe by\n"
+                         "                        default, then in PATH\n")
+        : QStringLiteral("  --hgs <path>          path to the hgs binary; found in PATH by default,\n"
+                         "                        then in ~/.local/bin, /opt/homebrew/bin and\n"
+                         "                        /usr/local/bin\n");
+}
+
 // Описание --open-mode для usage(): режимы у платформ разные, и печатать пользователю
 // про Konsole на маке (или про Terminal.app на Linux) значит объяснять ему то, чего у
 // него нет. Общий у обоих текстов только хвост -- clipboard и правила "флаг против меню".
@@ -159,7 +186,7 @@ QString AppConfig::usage()
                "\n"
                "Usage: hgs-tray [options]\n"
                "\n"
-               "  --hgs <path>          path to the hgs binary; found in PATH by default\n"
+               "%4"
                "  --local-poll <ms>     how often this box is polled  [default %1]\n"
                "  --peer-poll <ms>      how often peers are polled    [default %2]\n"
                "  --terminal <tmpl>     terminal launch template, {cmd} becomes the command\n"
@@ -186,7 +213,8 @@ QString AppConfig::usage()
                "beats the file.\n")
         .arg(d.localPollMs)
         .arg(d.peerPollMs)
-        .arg(openModeHelp(currentPlatform()));
+        .arg(openModeHelp(currentPlatform()))
+        .arg(hgsHelp(currentPlatform()));
 }
 
 namespace {

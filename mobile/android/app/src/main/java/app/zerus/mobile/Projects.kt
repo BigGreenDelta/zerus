@@ -22,6 +22,8 @@ object ProjectParser {
             val computerId = computer.getString("id")
             val computerName = computer.string("name", "id")
             val catalog = catalogs[computerId]
+            // An offline peer has no snapshot; Machines already reports it as offline.
+            if (computer.optJSONObject("snapshot") == null && !computer.optBoolean("online")) return@forEach
             if (catalog == null || catalog.optInt("schema") != 1 || !catalog.optBoolean("available")) {
                 unavailable += computerName
                 return@forEach

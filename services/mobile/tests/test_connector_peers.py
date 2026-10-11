@@ -126,6 +126,58 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ConnectorError, 'conflicts'):
             await self.connector.execute(changed)
 
+    def go_offline(self, machine=PEER):
+        self.inventory['peers'][0].update(machine_id=machine, online=False, error='unavailable',
+                                          identity='last_verified')
+        self.write_inventory()
+
+    async def test_last_verified_offline_peer_is_advertised_but_never_dispatched(self):
+        context = self.peer
+        self.go_offline()
+        await self.connector.fleet.discover()
+        # The same alias/UUID keeps its route and context; only availability changes.
+        self.assertIs(self.connector.fleet.contexts[self.identity], context)
+        body = self.connector.fleet.heartbeat(await self.connector.snapshot())
+        self.assertEqual(body['peers'], [{'route_id': self.identity, 'machine_id': PEER, 'name': 'Mac', 'online': False}])
+        self.assertNotIn('configured-mac', json.dumps(body))
+        self.connector.fleet.confirm_manifest(body)
+        self.assertEqual(self.connector.fleet.published, set())
+        before = len(self.calls())
+        with patch.object(self.connector, 'http', AsyncMock(return_value={})) as http:
+            await self.connector.fleet.publish(None)
+            http.assert_not_awaited()
+        for operation in ('inspect', 'send', 'history', 'catalog', 'launch'):
+            self.assertEqual((await self.connector.execute(self.request(operation)))['state'], 'failed', operation)
+        with self.assertRaisesRegex(ConnectorError, 'unavailable or changed'):
+            await context.native(['ls', '--json', '--local'])
+        self.assertEqual(len(self.calls()), before)
+        self.assertFalse((self.root / 'native_effects.jsonl').exists())
+        # Reconnection under the same verified identity restores the same route.
+        self.inventory['peers'][0].update(online=True, error=None, identity='verified')
+        self.write_inventory()
+        await self.connector.fleet.discover()
+        self.assertIs(self.connector.fleet.contexts[self.identity], context)
+        self.assertEqual((await self.connector.execute(self.request()))['state'], 'completed')
+
+    async def test_changed_verified_identity_replaces_the_offline_route(self):
+        self.go_offline()
+        await self.connector.fleet.discover()
+        self.inventory['peers'][0].update(machine_id=OTHER, online=True, error=None, identity='verified')
+        self.write_inventory()
+        await self.connector.fleet.discover()
+        replacement = route_id('configured-mac', OTHER)
+        self.assertEqual(set(self.connector.fleet.routes), {replacement})
+        self.assertEqual(set(self.connector.fleet.contexts), {replacement})
+        body = self.connector.fleet.heartbeat(await self.connector.snapshot())
+        self.assertEqual([row['route_id'] for row in body['peers']], [replacement])
+        self.assertEqual((await self.connector.execute(self.request()))['state'], 'failed')
+        # An identity-less unreachable alias is still never advertised.
+        self.inventory['peers'][0].update(machine_id=None, online=False, error='unavailable', identity=None)
+        self.write_inventory()
+        await self.connector.fleet.discover()
+        self.assertEqual(self.connector.fleet.routes, {})
+        self.assertEqual(self.connector.fleet.heartbeat({})['peers'], [])
+
     async def test_peer_presence_travels_beside_its_snapshot(self):
         presence = {'idle_seconds': 7.0, 'locked': True, 'locked_seconds': 3.0}
         self.inventory['presence'] = {PEER: presence}

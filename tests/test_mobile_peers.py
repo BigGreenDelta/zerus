@@ -149,7 +149,7 @@ class MobilePeers(unittest.TestCase):
     def test_discovery_is_direct_enabled_and_does_not_export_connection_settings(self):
         result = self.call('a', 'mobile-peers', '--json').json()
         self.assertEqual(result['local'], dict(machine_id=self.ids['a'], name='a'))
-        self.assertEqual(result['peers'], [dict(via='b', machine_id=self.ids['b'], name='b', online=True, error=None)])
+        self.assertEqual(result['peers'], [dict(via='b', machine_id=self.ids['b'], name='b', online=True, error=None, identity='verified')])
         self.assertEqual({alias for alias, _ in self.calls()}, {'b'})
         self.assertNotIn('c', [row['via'] for row in result['peers']])
         for private in ['private-fixture', 'private-key', 'hostname', 'identity_file']:
@@ -161,10 +161,85 @@ class MobilePeers(unittest.TestCase):
             path = self.root / marker
             path.touch()
             result = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
-            self.assertEqual(result, dict(via='b', machine_id=None, name='b', online=False, error='unavailable'))
+            self.assertEqual(result, dict(via='b', machine_id=None, name='b', online=False, error='unavailable', identity=None))
             self.call('a', 'mobile-peer', '--json', data=self.request(), ok=False)
             self.assertFalse((self.root / 'old-launch').exists())
             path.unlink()
+        self.assertFalse((self.root / 'native-called').exists())
+
+    def remembered(self):
+        path = self.root / 'a/swarm/mobile-peers.json'
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_unreachable_peer_keeps_last_verified_identity_without_becoming_usable(self):
+        self.call('a', 'mobile-peers', '--json')
+        path = self.root / 'a/swarm/mobile-peers.json'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.remembered(), dict(schema=1, local=self.ids['a'],
+                                                 peers=dict(b=dict(machine_id=self.ids['b'], name='b'))))
+        for private in ['private-fixture', 'private-key', 'hostname', 'identity_file']:
+            self.assertNotIn(private, path.read_text())
+        for marker in ['offline-b', 'old-b']:
+            (self.root / marker).touch()
+            row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+            self.assertEqual(row, dict(via='b', machine_id=self.ids['b'], name='b', online=False,
+                                       error='unavailable', identity='last_verified'))
+            # The remembered identity is presentation only: dispatch still probes
+            # and fails closed without reaching the native launcher.
+            self.call('a', 'mobile-peer', '--json', data=self.request(), ok=False)
+            self.call('a', 'mobile-peer', '--json', data=self.request(['ls', '--json', '--local']), ok=False)
+            self.assertFalse((self.root / 'old-launch').exists())
+            (self.root / marker).unlink()
+        self.assertFalse((self.root / 'native-called').exists())
+
+    def test_changed_identity_replaces_remembered_identity_and_removed_edges_forget_it(self):
+        self.call('a', 'mobile-peers', '--json')
+        catalog = self.root / 'b/swarm/catalog.json'
+        data = json.loads(catalog.read_text())
+        data['node_id'] = replaced = str(uuid.uuid4())
+        catalog.write_text(json.dumps(data))
+        self.assertEqual(self.call('a', 'mobile-peers', '--json').json()['peers'][0]['machine_id'], replaced)
+        (self.root / 'offline-b').touch()
+        row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+        self.assertEqual((row['machine_id'], row['identity']), (replaced, 'last_verified'))
+        # Disabling the edge forgets it; enabling it again does not revive it.
+        machines = self.root / 'a/machines.local.json'
+        settings = json.loads(machines.read_text())
+        settings['machines']['b']['enabled'] = False
+        machines.write_text(json.dumps(settings))
+        self.assertEqual(self.call('a', 'mobile-peers', '--json').json()['peers'], [])
+        self.assertEqual(self.remembered()['peers'], {})
+        settings['machines']['b']['enabled'] = True
+        machines.write_text(json.dumps(settings))
+        row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+        self.assertEqual((row['machine_id'], row['identity']), (None, None))
+
+    def test_copied_or_reset_gateway_identity_does_not_inherit_remembered_peers(self):
+        self.call('a', 'mobile-peers', '--json')
+        (self.root / 'offline-b').touch()
+        catalog = self.root / 'a/swarm/catalog.json'
+        data = json.loads(catalog.read_text())
+        data['node_id'] = str(uuid.uuid4())
+        catalog.write_text(json.dumps(data))
+        row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+        self.assertEqual((row['machine_id'], row['identity']), (None, None))
+
+    def test_only_a_locally_verified_swarm_binding_can_seed_an_offline_identity(self):
+        (self.root / 'offline-b').touch()
+        catalog = self.root / 'a/swarm/catalog.json'
+        data = json.loads(catalog.read_text())
+        # Shared catalog machine names are replicated data, never identity evidence.
+        data['bindings']['b'] = dict(id=self.ids['c'], verified=False)
+        catalog.write_text(json.dumps(data))
+        row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+        self.assertEqual((row['machine_id'], row['identity']), (None, None))
+        data['bindings']['b'] = dict(id=self.ids['b'], verified=True)
+        catalog.write_text(json.dumps(data))
+        row = self.call('a', 'mobile-peers', '--json').json()['peers'][0]
+        self.assertEqual(row, dict(via='b', machine_id=self.ids['b'], name='b', online=False,
+                                   error='unavailable', identity='last_verified'))
+        self.assertIsNone(self.remembered())
+        self.call('a', 'mobile-peer', '--json', data=self.request(), ok=False)
         self.assertFalse((self.root / 'native-called').exists())
 
     def test_native_downgrade_after_probe_uses_fail_closed_swarm_namespace(self):

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "HgsClient.h"
+#include <functional>
+
+class QObject;
 
 struct ComposerDraft {
     QString text, notice, storageError, label;
@@ -20,8 +23,17 @@ public:
     static QString directory();
     ComposerDraft load(const QString &key) const;
     bool save(const QString &key, ComposerDraft &draft) const;
+    // Ordinary edits enqueue/coalesce snapshots. Explicit send/discard/rename
+    // uses save(), which orders a durable barrier after earlier writes.
+    void saveAsync(const QString &key, const ComposerDraft &draft, QObject *owner,
+                   std::function<void(bool, const ComposerDraft &)> done) const;
+    static void flushWrites();
+    static void setWriteObserver(std::function<void()> observer); // isolated tests
     QStringList keys() const;
     QString label(const QString &key) const;
 private:
+    bool saveDirect(const QString &key, ComposerDraft &draft) const;
+    QString root() const;
     QString folder(const QString &key) const;
+    QString m_root;
 };

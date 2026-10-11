@@ -455,7 +455,10 @@ refine or change the plan:
   sealed in `SHA256SUMS` and checked again before upload. It is GitHub-only: the
   zerus.dev mirror neither stores it nor lists it in the v1 feed. A portable
   installation defaults Settings → Updates to the nightly channel and has no
-  self-update. A stable Windows asset remains a separate decision.
+  self-update. A stable Windows asset remains a separate decision. The Dev channel
+  that arrived meanwhile has no Windows build either: desktop Dev candidates carry
+  only the Arch package and source, and a portable installation on Dev never
+  reports a dev build as an update.
 - **Packaging.** `windeployqt` runs with `--no-opengl-sw`,
   `--no-system-d3d-compiler` and `--no-system-dxc-compiler`, and the ICU DLLs it
   copies from System32 are removed: Windows 10 1903 and later ship
@@ -474,7 +477,8 @@ refine or change the plan:
   unchanged) and refuses a checkout whose `install.sh` or `hgs_state.py` has CRLF
   line endings. `.gitattributes` keeps `*.sh` and `*.py` in LF.
 - **CI gate.** The `windows-desktop` job joined the CI gate and the nightly at
-  once, not after a stability period as planned. Clippy runs as
+  once, not after a stability period as planned. Dev candidates of main pushes
+  follow that gate too, so a Windows failure also holds back Dev. Clippy runs as
   `cargo +1.85.0 clippy -D warnings` over the Windows target. On the development
   PC, the parallel Qt suites showed load-sensitive timing failures that pass
   serially. Watch the first hosted runs.

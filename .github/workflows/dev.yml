@@ -1,0 +1,199 @@
+name: Dev candidates
+
+on:
+  workflow_call:
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_STORE_PASSWORD:
+        required: true
+      ANDROID_KEY_ALIAS:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+      ANDROID_GOOGLE_SERVICES_JSON:
+        required: true
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  desktop:
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: arch-x86_64-${{ github.sha }}
+          path: artifacts/dev-package
+      - name: Seal the exact verified package and source
+        env:
+          DEV_RUN_ID: ${{ github.run_id }}
+          DEV_RUN_NUMBER: ${{ github.run_number }}
+          DEV_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import datetime, os, pathlib, shutil, subprocess
+          root = pathlib.Path('artifacts/dev-input')
+          root.mkdir()
+          packages = list(pathlib.Path('artifacts/dev-package').glob('*.pkg.tar.zst'))
+          if len(packages) != 1:
+              raise SystemExit('Expected one checked Arch package.')
+          shutil.copyfile(packages[0], root / packages[0].name)
+          shutil.copyfile('VERSION', root / 'VERSION')
+          subprocess.run(['git', 'archive', '--format=tar.gz', '--prefix=zerus/',
+                          '--output=' + str(root / 'zerus-source.tar.gz'), os.environ['DEV_COMMIT']], check=True)
+          subprocess.run(['python3', 'scripts/prepare-dev-update.py', '--input', str(root),
+                          '--output', 'artifacts/dev-desktop', '--platform', 'desktop',
+                          '--run-id', os.environ['DEV_RUN_ID'], '--run-number', os.environ['DEV_RUN_NUMBER'],
+                          '--source-commit', os.environ['DEV_COMMIT'],
+                          '--published-at', datetime.datetime.now(datetime.timezone.utc).isoformat()], check=True)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zerus-dev-desktop-a${{ github.run_attempt }}
+          path: artifacts/dev-desktop
+          retention-days: 3
+          if-no-files-found: error
+
+  android:
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare existing Android identity and private Firebase configuration
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib
+          names = ('ANDROID_KEYSTORE_BASE64', 'ANDROID_STORE_PASSWORD', 'ANDROID_KEY_ALIAS',
+                   'ANDROID_KEY_PASSWORD', 'ANDROID_GOOGLE_SERVICES_JSON')
+          if any(not os.environ.get(name) for name in names):
+              raise SystemExit('Provision the existing Android signer and Firebase configuration in release.')
+          private = pathlib.Path(os.environ['RUNNER_TEMP']) / 'zerus-dev-signing'
+          private.mkdir(mode=0o700)
+          def write(path, data):
+              with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
+                  stream.write(data)
+          write(private / 'signer.jks', base64.b64decode(os.environ['ANDROID_KEYSTORE_BASE64'], validate=True))
+          def escape(value):
+              encoded = value.encode('utf-16-be')
+              return ''.join('\\u%04x' % int.from_bytes(encoded[i:i+2], 'big') for i in range(0, len(encoded), 2))
+          values = {'storeFile': str(private / 'signer.jks'), 'storePassword': os.environ['ANDROID_STORE_PASSWORD'],
+                    'keyAlias': os.environ['ANDROID_KEY_ALIAS'], 'keyPassword': os.environ['ANDROID_KEY_PASSWORD']}
+          write(private / 'signing.properties', ''.join(k+'='+escape(v)+'\n' for k,v in values.items()).encode())
+          config = json.loads(os.environ['ANDROID_GOOGLE_SERVICES_JSON'])
+          write(pathlib.Path('mobile/android/app/google-services.json'), json.dumps(config).encode())
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('ZERUS_ANDROID_SIGNING_PROPERTIES=' + str(private / 'signing.properties') + '\n')
+              output.write('JAVA_HOME=' + os.environ['JAVA_HOME_17_X64'] + '\n')
+          PY
+      - name: Android platform and build tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Test and build the dev APK with the shared signer
+        working-directory: mobile/android
+        env:
+          DEV_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease \
+            -PzerusFirebase=true -PzerusVersionCode="$((10000 + DEV_RUN_NUMBER))" \
+            -PzerusDevBuildNumber="$DEV_RUN_NUMBER"
+      - name: Seal the signed APK and exact source
+        env:
+          DEV_RUN_ID: ${{ github.run_id }}
+          DEV_RUN_NUMBER: ${{ github.run_number }}
+          DEV_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import datetime, os, pathlib, shutil, subprocess
+          root = pathlib.Path('artifacts/dev-android-input')
+          root.mkdir(parents=True)
+          shutil.copyfile('mobile/android/app/build/outputs/apk/release/app-release.apk', root / 'zerus.apk')
+          subprocess.run(['git', 'archive', '--format=tar.gz', '--prefix=zerus/',
+                          '--output=' + str(root / 'zerus-source.tar.gz'), os.environ['DEV_COMMIT']], check=True)
+          tools = pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0'
+          subprocess.run(['python3', 'scripts/prepare-dev-update.py', '--input', str(root),
+                          '--output', 'artifacts/dev-android', '--platform', 'android',
+                          '--run-id', os.environ['DEV_RUN_ID'], '--run-number', os.environ['DEV_RUN_NUMBER'],
+                          '--source-commit', os.environ['DEV_COMMIT'], '--aapt2', str(tools / 'aapt2'),
+                          '--apksigner', str(tools / 'apksigner'),
+                          '--published-at', datetime.datetime.now(datetime.timezone.utc).isoformat()], check=True)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zerus-dev-android-a${{ github.run_attempt }}
+          path: artifacts/dev-android
+          retention-days: 3
+          if-no-files-found: error
+      - name: Remove private signing inputs
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/zerus-dev-signing"
+          rm -f mobile/android/app/google-services.json
+
+  channel:
+    needs: [desktop, android]
+    if: >-
+      !cancelled() && needs.desktop.result == 'success' && needs.android.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      contents: write
+    concurrency:
+      group: dev-channel-tag
+      cancel-in-progress: false
+    steps:
+      - name: Advance only the dev channel tag, preserving newer completed builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEV_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          prefix = 'repos/ufna/zerus/'
+          def api(path, *args):
+              result = subprocess.run(['gh', 'api', prefix+path, *args], capture_output=True, text=True)
+              if result.returncode:
+                  raise SystemExit('Dev tag API request failed; no retry or forced move attempted.')
+              return json.loads(result.stdout)
+          # A successful complete list distinguishes absence from denied/failed lookup.
+          refs = api('git/matching-refs/tags/dev')
+          current = [r for r in refs if r['ref'] == 'refs/tags/dev']
+          if len(current) > 1:
+              raise SystemExit('Ambiguous dev tag.')
+          commit = os.environ['DEV_COMMIT']
+          if not current:
+              api('git/refs', '--method', 'POST', '-f', 'ref=refs/tags/dev', '-f', 'sha='+commit)
+          else:
+              obj = current[0]['object']
+              if obj['type'] != 'commit':
+                  raise SystemExit('The dev channel must use a lightweight commit tag.')
+              if obj['sha'] != commit:
+                  comparison = api('compare/'+obj['sha']+'...'+commit)['status']
+                  if comparison == 'ahead':
+                      api('git/refs/tags/dev', '--method', 'PATCH', '-f', 'sha='+commit, '-F', 'force=false')
+                  elif comparison != 'behind':
+                      raise SystemExit('Diverged dev source history; channel unchanged.')
+          PY

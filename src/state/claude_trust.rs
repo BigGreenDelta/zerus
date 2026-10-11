@@ -1,12 +1,12 @@
 //! Claude's workspace trust prompt is shown before SessionStart. Preserve the
 //! native disclosure and require a fresh, explicit choice for the pinned run.
+//! The frame (rule, title, folder, guide, exact choices and hint) must match;
+//! the disclosure is verbatim identity, so new native wording stays visible.
 use super::*;
 use sha2::{Digest, Sha256};
 
 const TITLE: &str = "Accessing workspace:";
 const HINT: &str = "Enter to confirm · Esc to cancel";
-const INTRO: &str = "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.";
-const ACCESS: &str = "Claude Code'll be able to read, edit, and execute files here.";
 const LABELS: [&str; 2] = ["No, exit", "Yes, I trust this folder"];
 
 struct Panel {
@@ -21,10 +21,8 @@ fn parse(screen: &str) -> Option<Panel> {
     if divider > 0 {
         // Already-running launchers can leave these exact notices above the
         // native panel. Never skip arbitrary output to find a quoted dialog.
-        let prelude = all[..divider].join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
-        let bitwarden = prelude == "Bitwarden master password: unlock: SOPS_AGE_KEY loaded for this session. run_claude: secrets unlocked → launching claude"
-            || prelude == "run_claude: SOPS_AGE_KEY already set — reusing it. run_claude: secrets unlocked → launching claude";
-        if !bitwarden {
+        if !kimi_tui_choice::launcher_notices(&all[..divider], "claude") {
+            let prelude = all[..divider].join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
             let prompt = prelude.strip_prefix("hgs: Claude token is in the locked login keychain (ssh context); unlocking it password to unlock ")?;
             if !prompt.starts_with('/') || !prompt.ends_with("/Library/Keychains/login.keychain-db:") { return None; }
         }
@@ -59,15 +57,10 @@ fn parse(screen: &str) -> Option<Panel> {
         } else { row };
         if label != *expected { return None; }
     }
-    let disclosure = rows[5..footer].join("\n").trim().to_owned();
-    let normalized = disclosure.split_whitespace().collect::<Vec<_>>().join(" ");
-    let expected = format!("{INTRO} {ACCESS}");
-    if !normalized.starts_with(&expected) { return None; }
     // Claude itself abbreviates long permission lists. Keep its complete visible
     // warning, including the count and "and N more", without implying expansion.
-    if normalized != expected && !normalized.ends_with("These will apply without asking. Only proceed if you trust this configuration.") {
-        return None;
-    }
+    let disclosure = rows[5..footer].join("\n").trim().to_owned();
+    if disclosure.is_empty() { return None; }
     Some(Panel { folder: rows[3].into(), disclosure, selected: selected? })
 }
 
@@ -149,8 +142,21 @@ mod tests {
         assert!(parse(&simple).is_some());
         for invalid in [SCREEN.replace(HINT,"Enter to confirm"), SCREEN.replace("Yes, I trust", "❯ Yes, I trust"),
             SCREEN.replace("Security guide", ""), SCREEN.replace("No, exit","No, continue without these permissions"),
-            format!("Previous agent said:\n{SCREEN}"), format!("{SCREEN}\n> "), SCREEN.replace("Only proceed if you trust this configuration.", "Only proceed…")] {
+            format!("Previous agent said:\n{SCREEN}"), format!("{SCREEN}\n> "),
+            SCREEN.split(" Quick safety").next().unwrap().to_owned()+"\n\n\n\n\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n"] {
             assert!(parse(&invalid).is_none());
+        }
+    }
+    #[test]
+    fn unfamiliar_disclosure_is_shown_verbatim() {
+        let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
+        for screen in [SCREEN.replace("Only proceed if you trust this configuration.", "Only proceed…"),
+            SCREEN.replace("Claude Code'll be able to read, edit, and execute files here.", "Claude Code can also run project hooks here.")] {
+            let panel = parse(&screen).unwrap();
+            let question = card(&record(), &panel).unwrap();
+            assert_eq!(question["questions"][0]["body"], format!("/work/example\n\n{}", panel.disclosure));
+            assert!(question["can_answer"].as_bool().unwrap());
+            assert_ne!(question["question_hash"], original["question_hash"]);
         }
     }
     #[test]
@@ -167,6 +173,7 @@ mod tests {
         let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
         for prefix in [
             "Bitwarden master password:\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_claude: secrets unlocked → launching claude\n\n",
+            "? Master password: [hidden]\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_claude: secrets unlocked → launching claude\n\n",
             "run_claude: SOPS_AGE_KEY already set — reusing it.\nrun_claude: secrets unlocked → launching claude\n\n",
         ] {
             let screen = format!("{prefix}{SCREEN}");

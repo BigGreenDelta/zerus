@@ -18,7 +18,11 @@ pub const READS: &[&str] = &[
     "dirs",
     "worktrees",
     "mark_read",
+    "attachment_read",
 ];
+/// Predicate of the persisted `read_history_v3` index and the one-hour read
+/// retention class. `attachment_read` is a read with its own shorter class
+/// (`attachment_history`), so this text and that index stay unchanged.
 pub const READ_SQL: &str =
     "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
@@ -35,6 +39,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
 pub const OPERATIONS: &[&str] = &[
     "answer",
     "archive",
+    "attachment_read",
     "catalog",
     "clear_context",
     "compact_context",
@@ -69,6 +74,15 @@ pub const FEATURES: &[&str] = &[
     "presence_alerts",
     "send_agent",
 ];
+/// Largest decoded chunk one `attachment_read` result may carry. Its base64
+/// form and metadata stay below the ordinary 1 MiB result limit.
+pub const ATTACHMENT_CHUNK_MAX: u64 = 512 * 1024;
+/// The per-file bound shared with phone uploads and the native attachment store.
+pub const ATTACHMENT_FILE_MAX: u64 = 10 * MIB as u64;
+/// Completed `attachment_read` rows are deleted this long after completion,
+/// or this long after the phone has read their terminal receipt.
+pub const ATTACHMENT_RESULT_TTL: f64 = 60.0;
+pub const ATTACHMENT_READ_GRACE: f64 = 5.0;
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
@@ -258,6 +272,14 @@ pub fn request(v: &Value) -> Result<()> {
             "fork" => &["tag", "archive_id"],
             "restore" | "forget" => &["archive_id"],
             "terminal_input" => &["terminal_binding_id", "text", "enter", "key"],
+            "attachment_read" => &[
+                "message_id",
+                "index",
+                "offset",
+                "length",
+                "archive_id",
+                "agent_id",
+            ],
             _ => &[],
         };
         fields(p, ID, extras)?;
@@ -270,6 +292,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "history",
                 "recovery_action",
                 "send_now",
+                "attachment_read",
             ]
             .contains(&op),
         )?;
@@ -338,6 +361,7 @@ pub fn request(v: &Value) -> Result<()> {
                 uuid(&p["archive_id"], true)?;
             }
             "terminal_input" => terminal(p)?,
+            "attachment_read" => attachment_read(p)?,
             _ => {}
         }
         if p.get("archive_id").is_some() {
@@ -516,6 +540,26 @@ fn bounded_id(v: &Value) -> Result<()> {
     let s = text(v, 128, false)?;
     if s.len() > 128 || s.trim() != s {
         return Err(Error::BAD);
+    }
+    Ok(())
+}
+/// One bounded byte range of a file from the exact conversation's own delivery
+/// receipt. The phone names the receipt and position; the connector and the
+/// native CLI resolve the file. A phone never supplies a path.
+fn attachment_read(p: &Value) -> Result<()> {
+    uuid(&p["message_id"], false)?;
+    let index = p["index"].as_u64().ok_or(Error::BAD)?;
+    let offset = p["offset"].as_u64().ok_or(Error::BAD)?;
+    let length = p["length"].as_u64().ok_or(Error::BAD)?;
+    if index >= 8
+        || offset >= ATTACHMENT_FILE_MAX
+        || !(1..=ATTACHMENT_CHUNK_MAX).contains(&length)
+        || offset + length > ATTACHMENT_FILE_MAX
+    {
+        return Err(Error::BAD);
+    }
+    if let Some(a) = p.get("agent_id") {
+        agent(a)?;
     }
     Ok(())
 }

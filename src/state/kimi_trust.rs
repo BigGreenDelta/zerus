@@ -1,12 +1,12 @@
 //! Kimi's startup trust panel precedes SessionStart and has no conversation ID.
 //! Only a complete panel in a supervised startup run can be answered. Its path
 //! and full MCP disclosure are part of the identity, never an implicit approval.
+//! The frame must match; the disclosure is shown verbatim, so new wording stays visible.
 use super::*;
 use sha2::{Digest, Sha256};
 
 const TITLE: &str = "Trust this folder?";
 const HINT: &str = "↑↓ navigate · Enter select · Esc exit";
-const EXPLANATION: &str = "Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the listed project MCP targets and remembers this folder.";
 const LABELS: [&str; 2] = ["Trust this folder", "Don't trust"];
 const DESCRIPTIONS: [&str; 2] = [
     "Enable project MCP servers. Remembered for this folder.",
@@ -24,9 +24,13 @@ fn border(row: &str) -> bool {
 }
 
 fn parse(screen: &str) -> Option<Panel> {
-    let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
+    let all: Vec<_> = screen.trim().lines().map(str::trim).collect();
+    let divider = all.iter().position(|row| border(row))?;
+    if divider > 0 && !kimi_tui_choice::launcher_notices(&all[..divider], "kimi") {
+        return None;
+    }
+    let rows = &all[divider..];
     if rows.len() < 15
-        || !border(rows[0])
         || !border(*rows.last()?)
         || rows[1] != TITLE
         || rows[2] != HINT
@@ -57,12 +61,10 @@ fn parse(screen: &str) -> Option<Panel> {
             return None;
         }
     }
+    // Kimi asks for every untrusted folder and lists targets only when the
+    // project's MCP configuration gates some. A clipped list is incomplete.
     let disclosure = rows[6..options].join("\n").trim().to_owned();
-    let normalized = disclosure.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !normalized.starts_with(EXPLANATION)
-        || !normalized.contains("Project MCP targets:")
-        || disclosure.contains('…')
-    {
+    if disclosure.is_empty() || disclosure.contains('…') {
         return None;
     }
     Some(Panel {
@@ -182,6 +184,45 @@ mod tests {
         ] {
             assert!(parse(&invalid).is_none());
         }
+    }
+    #[test]
+    fn launcher_notices_and_panel_without_targets() {
+        const LAUNCHED: &str = include_str!("../../tests/fixtures/kimi-folder-trust-launcher.txt");
+        let record = json!({"agent":"kimi","run_id":"run","run_identity_version":1,
+            "supervisor":{},"launch_dir":"/work/example"});
+        let prelude = "? Master password: [hidden]\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_kimi: secrets unlocked → launching kimi\n";
+        let native = LAUNCHED.strip_prefix(prelude).unwrap();
+        let panel = parse(LAUNCHED).unwrap();
+        assert_eq!((panel.selected, panel.folder.as_str()), (0, "/work/example"));
+        assert!(!panel.disclosure.contains("Project MCP targets"));
+        let question = card(&record, &panel).unwrap();
+        assert_eq!(question, card(&record, &parse(native).unwrap()).unwrap());
+        assert!(!string(&question["questions"][0], "body").contains("launching kimi"));
+        let reused = "run_kimi: SOPS_AGE_KEY already set — reusing it.\nrun_kimi: secrets unlocked → launching kimi\n";
+        assert_eq!(question, card(&record, &parse(&format!("{reused}{native}")).unwrap()).unwrap());
+        for invalid in [
+            format!("agent said:\n{LAUNCHED}"),
+            format!("{prelude}unrelated output\n{native}"),
+            LAUNCHED.replace("launching kimi", "launching claude"),
+            LAUNCHED.replace("secrets unlocked", "secrets unavailable"),
+            format!("{LAUNCHED} > composer"),
+        ] {
+            assert!(parse(&invalid).is_none(), "{invalid}");
+        }
+    }
+    #[test]
+    fn unfamiliar_disclosure_is_shown_verbatim() {
+        let record = json!({"agent":"kimi","run_id":"run","run_identity_version":1,
+            "supervisor":{},"launch_dir":"/work/example"});
+        let original = card(&record, &parse(SCREEN).unwrap()).unwrap();
+        for screen in [SCREEN.replace("remembers this folder.", "remembers this folder.\n   Project hooks also run after trust."),
+            SCREEN.replace("    tracker (stdio): command=uvx\n", "")] {
+            let panel = parse(&screen).unwrap();
+            let question = card(&record, &panel).unwrap();
+            assert_eq!(question["questions"][0]["body"], format!("/work/example\n\n{}", panel.disclosure));
+            assert_ne!(question["question_hash"], original["question_hash"]);
+        }
+        assert!(parse(&SCREEN.replace("command=uvx", "command=uv…")).is_none());
     }
     #[test]
     fn trust_identity_includes_folder_and_disclosure_but_not_selection() {

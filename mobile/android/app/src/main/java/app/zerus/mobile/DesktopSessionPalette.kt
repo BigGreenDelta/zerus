@@ -1,6 +1,6 @@
 package app.zerus.mobile
 
-enum class DesktopBadgeKind { Neutral, Working, Attention, Error, Paused, Unread }
+enum class DesktopBadgeKind { Neutral, Working, Attention, Error, Paused, Unread, Scheduled }
 data class DesktopBadgeColors(val background: Long, val foreground: Long)
 data class DesktopSessionBadge(val caption: String, val kind: DesktopBadgeKind, val additionalUnread: Boolean)
 
@@ -17,6 +17,7 @@ object DesktopSessionPalette {
             attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention
             working -> DesktopBadgeKind.Working
             unread -> DesktopBadgeKind.Unread
+            SessionFilters.scheduled(session, online) -> DesktopBadgeKind.Scheduled
             online && SessionFilters.state(session) == "paused" && !SessionFilters.archived(session) -> DesktopBadgeKind.Paused
             else -> DesktopBadgeKind.Neutral
         }
@@ -43,6 +44,7 @@ object DesktopSessionPalette {
         DesktopBadgeKind.Attention, DesktopBadgeKind.Unread -> DesktopBadgeColors(if (dark) 0xFFFFDA76 else 0xFFF4CE65, 0xFF392900)
         DesktopBadgeKind.Error -> if (dark) DesktopBadgeColors(0xFFFFABB6, 0xFF46202A) else DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF)
         DesktopBadgeKind.Paused -> if (dark) DesktopBadgeColors(0xFF443654, 0xFFDEC3FF) else DesktopBadgeColors(0xFFE8DDF5, 0xFF634187)
+        DesktopBadgeKind.Scheduled -> if (dark) DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0) else DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B)
         DesktopBadgeKind.Neutral -> if (dark) DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0) else DesktopBadgeColors(0xFFE7EDF2, 0xFF566575)
     }
 

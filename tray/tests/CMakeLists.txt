@@ -50,8 +50,9 @@ endfunction()
 
 add_executable(test_attention test_attention.cpp ../src/AttentionTracker.cpp ../src/FleetState.cpp)
 target_include_directories(test_attention PRIVATE ../src)
-target_link_libraries(test_attention PRIVATE Qt6::Test Qt6::Core)
+target_link_libraries(test_attention PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME attention COMMAND test_attention)
+set_tests_properties(attention PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(LINUX)
     find_program(DBUS_RUN_SESSION dbus-run-session REQUIRED)
     add_executable(test_linuxattention test_linuxattention.cpp ../src/LinuxAttentionNotifier.cpp ../src/AttentionNotifier.h)
@@ -286,7 +287,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_questioncard test_questioncard.cpp ../src/QuestionCard.cpp ../src/ComposerDraftStore.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
-target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown)
 add_test(NAME questioncard COMMAND test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

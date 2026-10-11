@@ -43,7 +43,8 @@ jobs:
           PY
   verify:
     needs: version
-    uses: ./.github/workflows/ci.yml
+    cache-mode: read
+    uses: ./.github/workflows/checks.yml
     with:
       ref: ${{ github.sha }}
       run_linux: true

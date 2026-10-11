@@ -131,6 +131,29 @@ class MachineCatalogTest {
         assertTrue(rows.filterIndexed { index, _ -> index != 1 }.all { it.parent == null })
     }
 
+    @Test fun unreachablePeerStaysUnderItsGatewayAsOfflineWithOptionalLastSeen() {
+        val gateway = direct()
+        val offline = parse(raw().put("online", false).put("via", via()).put("last_seen_at", JSONObject.NULL).put("snapshot", JSONObject.NULL))
+        val group = MachineCatalog.groups("workspace", listOf(gateway, offline)).single()
+        assertEquals(gateway, group.root.machine)
+        assertEquals(listOf(offline), group.children.map { it.machine })
+        assertEquals("Gateway", group.children.single().gatewayName)
+        assertFalse(offline.online)
+        assertNull(offline.lastSeenAt)
+        assertEquals("Offline", MachineCatalog.status(offline))
+        val seen = parse(raw().put("online", false).put("via", via()).put("last_seen_at", 1_700_000_000.5))
+        assertEquals(1_700_000_000.5, seen.lastSeenAt!!, 0.0)
+        assertTrue(MachineCatalog.status(seen).startsWith("Offline · last seen "))
+        assertEquals("Online", MachineCatalog.status(seen.copy(online = true)))
+        assertEquals("Last known", MachineCatalog.status(seen.copy(lastKnown = true)))
+        assertEquals(seen.lastSeenAt, MachineNames.apply(seen, listOf(MachineAlias(MachineKey("workspace", peerId), "Mac"))).lastSeenAt)
+        listOf("1700000000", -1, true, JSONObject()).forEach {
+            val invalid = parse(raw().put("online", false).put("last_seen_at", it))
+            assertNull(invalid.lastSeenAt)
+            assertEquals("Offline", MachineCatalog.status(invalid))
+        }
+    }
+
     @Test fun cyclesOrAmbiguousParentsStayVisibleWithoutInventedGateways() {
         val first = parse(raw(gatewayId).put("via", via(peerId)))
         val second = peer()

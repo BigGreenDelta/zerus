@@ -3,7 +3,7 @@
 #include <QPainter>
 
 namespace SessionStatusBadge {
-enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft };
+enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled };
 inline QFont font(QFont base) { base.setPixelSize(11); base.setWeight(QFont::Medium); return base; }
 // The state's color for a frame around the session; invalid for Neutral.
 inline QColor edge(Kind kind, bool dark) {
@@ -13,6 +13,7 @@ inline QColor edge(Kind kind, bool dark) {
     case Error: return QColor(dark ? "#ff8fa0" : "#c7405a");
     case Paused: return QColor(dark ? "#a988d6" : "#9474c0");
     case Draft: return QColor(dark ? "#6b9bd8" : "#5b8cc9");
+    case Scheduled: return QColor(dark ? "#5ab8cf" : "#2b8aa1");
     case Neutral: break;
     }
     return {};
@@ -28,12 +29,14 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         : (kind == Attention || kind == Unread) ? QColor(dark ? "#ffda76" : "#f4ce65")
         : kind == Error ? QColor(dark ? "#ffabb6" : "#b73750")
         : kind == Paused ? QColor(dark ? "#443654" : "#e8ddf5")
-        : kind == Draft ? QColor(dark ? "#263446" : "#e3edf9") : QColor(dark ? "#2b343e" : "#e7edf2");
+        : kind == Draft ? QColor(dark ? "#263446" : "#e3edf9")
+        : kind == Scheduled ? QColor(dark ? "#173e48" : "#d3edf4") : QColor(dark ? "#2b343e" : "#e7edf2");
     const QColor foreground = kind == Working ? QColor(dark ? "#97f0ba" : "#145b37")
         : (kind == Attention || kind == Unread) ? QColor("#392900")
         : kind == Error ? QColor(dark ? "#46202a" : "#ffffff")
         : kind == Paused ? QColor(dark ? "#dec3ff" : "#634187")
-        : kind == Draft ? QColor(dark ? "#9cc0ec" : "#2f5f93") : QColor(dark ? "#b6c2d0" : "#566575");
+        : kind == Draft ? QColor(dark ? "#9cc0ec" : "#2f5f93")
+        : kind == Scheduled ? QColor(dark ? "#9fe0f0" : "#165a6b") : QColor(dark ? "#b6c2d0" : "#566575");
     p->setPen(Qt::NoPen); p->setBrush(background); p->drawRoundedRect(rect, 5, 5);
     const QPointF center(rect.x() + 11, rect.center().y() + .5);
     p->setFont(font(p->font())); p->setPen(foreground);
@@ -54,6 +57,12 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         p->drawLine(center + QPointF(-3, 3), center + QPointF(2.5, -2.5));
         p->drawLine(center + QPointF(1.5, -3.5), center + QPointF(3.5, -1.5));
         p->drawLine(center + QPointF(-3, 3), center + QPointF(-3.5, 3.5));
+    } else if (kind == Scheduled) {
+        // A clock: the agent's own schedule starts its next turn.
+        p->setPen(QPen(foreground, 1.3, Qt::SolidLine, Qt::RoundCap)); p->setBrush(Qt::NoBrush);
+        p->drawEllipse(center, 4.5, 4.5);
+        p->drawLine(center, center + QPointF(0, -2.8));
+        p->drawLine(center, center + QPointF(2.2, 0));
     } else if (kind == Unread) {
         p->setPen(QPen(foreground, 1)); p->setBrush(Qt::NoBrush);
         p->drawRoundedRect(QRectF(center.x() - 4, center.y() - 3, 8, 6), 1, 1);

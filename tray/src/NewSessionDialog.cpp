@@ -123,10 +123,13 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(m_startWithWorktree&&!automaticWorktreeAvailable()){
             m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
         }
+        // Listed folders and worktrees of them already belong to the project.
+        // Decide before creation: the selection then moves to the new worktree.
+        const auto addFolder=m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
         if(m_startWithWorktree){
-            m_creationCatalog=m_worktreeCatalog;m_error->setText(tr("Creating worktree…"));
+            m_creationCatalog=m_worktreeCatalog;m_creationFolder=addFolder;m_error->setText(tr("Creating worktree…"));
             m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();
-        }else launch(path);
+        }else launch(path,addFolder);
     });
     connect(&m_client,&HgsClient::directoriesFailed,this,[this](quint64 request,const QString &machine,const QString &error){
         if(!m_validation||request!=m_validation||machine!=host())return;
@@ -158,7 +161,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         const auto path=result["path"].toString();
         auto entries=m_creationCatalog["worktrees"].toArray();entries.append(QJsonObject{{"path",path},{"kind","linked"},{"available",true}});
         m_creationCatalog["worktrees"]=entries;m_verifiedWorktrees[host()+'\n'+path]=m_creationCatalog;
-        m_autoPreferred=false;selectPath(path);launch(path);
+        m_autoPreferred=false;selectPath(path);launch(path,m_creationFolder);
     });
     setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
 }
@@ -339,7 +342,7 @@ QString NewSessionDialog::automaticWorktreePath() const
     const QFileInfo root(m_worktreeCatalog["selected_root"].toString());
     return QDir(root.path()).filePath(root.fileName()+'-'+m_generatedBranch);
 }
-void NewSessionDialog::launch(const QString &target)
+void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
     QSettings settings;settings.setValue("workspace/launchOpenTerminal",m_openTerminal->isChecked());
     // The next dialog starts with this agent and, per machine and agent, this account.
@@ -349,9 +352,7 @@ void NewSessionDialog::launch(const QString &target)
         auto machine=accounts.value(host()).toObject();machine[m_agent->currentText()]=account;accounts[host()]=machine;
         settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
     }
-    // Listed folders and worktrees of them already belong to the project.
-    const bool outside=m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString());
-    emit launchRequested(host(),m_agent->currentText(),target,m_name->text(),m_account->currentData().toString(),m_project->currentData().toString(),m_openTerminal->isChecked()&&m_agent->currentText()!="dsh",outside);accept();
+    emit launchRequested(host(),m_agent->currentText(),target,m_name->text(),m_account->currentData().toString(),m_project->currentData().toString(),m_openTerminal->isChecked()&&m_agent->currentText()!="dsh",addFolder);accept();
 }
 void NewSessionDialog::loadAccounts()
 {

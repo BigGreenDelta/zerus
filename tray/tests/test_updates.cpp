@@ -41,8 +41,40 @@ class TestUpdates : public QObject {
         value["artifacts"]=QJsonArray{QJsonObject{{"kind","arch-package"},{"name",name},{"url","https://zerus.dev/downloads/"+tag+"/"+name},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}}};
         return value;
     }
+    QJsonObject devRaw() const {
+        auto value=raw();value["schemaVersion"]=2;value["channel"]="dev";value["channelTag"]="dev";value["buildId"]=12345;value["buildNumber"]=50;value.remove("releaseId");value.remove("releaseUrl");value["buildUrl"]="https://github.com/ufna/zerus/actions/runs/12345";value.remove("packages");
+        value["artifacts"]=QJsonArray{
+            QJsonObject{{"kind","arch-package"},{"name","zerus.pkg.tar.zst"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}},
+            QJsonObject{{"kind","source"},{"name","zerus-source.tar.gz"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus-source.tar.gz"},{"sha256",QString(64,'c')},{"size",100},{"os","any"},{"arch","source"}}};
+        return value;
+    }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
+    void devCatalogAndNotificationsUseBuildIdentity(){
+        auto value=raw();value["schemaVersion"]=2;value["channel"]="dev";value["channelTag"]="dev";value["buildId"]=12345;value["buildNumber"]=50;value.remove("releaseId");value.remove("releaseUrl");value["buildUrl"]="https://github.com/ufna/zerus/actions/runs/12345";value.remove("packages");
+        value["artifacts"]=QJsonArray{
+            QJsonObject{{"kind","arch-package"},{"name","zerus.pkg.tar.zst"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}},
+            QJsonObject{{"kind","source"},{"name","zerus-source.tar.gz"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus-source.tar.gz"},{"sha256",QString(64,'c')},{"size",100},{"os","any"},{"arch","source"}}};
+        auto feed=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");QVERIFY(feed.valid);QCOMPARE(feed.buildNumber,50);QCOMPARE(feed.releaseId,12345);
+        QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);
+        QVERIFY(UpdateController::devBuildIsNewer(feed,49,QString(40,'d')));
+        QVERIFY(!UpdateController::devBuildIsNewer(feed,51,QString(40,'d')));
+        QVERIFY(!UpdateController::devBuildIsNewer(feed,0,QString(40,'a')));
+        QVERIFY(UpdateController::devBuildIsNewer(feed,0,{}));
+        QVERIFY(UpdateController::isUpdateToken("zerus-update:v2:dev:12345"));
+        QVERIFY(!UpdateController::isUpdateToken("zerus-update:v1:dev:12345"));
+        QVERIFY(!UpdateController::isUpdateToken("zerus-update:v2:stable:12345"));
+        QCOMPARE(UpdateController::automaticInterval("dev"),15*60);QCOMPARE(UpdateController::automaticInterval("stable"),24*60*60);
+        DesktopInstallation installation{"package","zerus-ade-bin","0.39.0-1",true,"yay"};QVERIFY(UpdateController::updateCommand(installation,"dev").isEmpty());
+        for(QString key:{"buildId","buildNumber","channelTag","buildUrl","sourceCommit"}){auto bad=value;bad[key]="bad";QVERIFY(!UpdateController::parseFeed(QJsonDocument(bad).toJson(),"dev").valid);}
+        value["sourceDirty"]=false;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev").valid);
+    }
+    void devChannelPersistsAndChecksItsIndependentFeed(){
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QString requested;
+        UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &request){requested=request.url().toString();auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply]{reply->finish("{}");});return reply;});
+        controller.setChannel("dev");QCOMPARE(controller.channel(),QString("dev"));controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QString("https://zerus.dev/updates/v2/desktop/dev.json"));
+        UpdateController restored(nullptr,dir.path()+"/missing");QCOMPARE(restored.channel(),QString("dev"));
+    }
     void initTestCase(){QCoreApplication::setOrganizationName("zerus-update-test");QCoreApplication::setApplicationName("isolated");QSettings::setDefaultFormat(QSettings::IniFormat);cleanup();}
     // Tests point the settings at temporary folders of their own. Later writes
     // (the next test, deferred work) go to empty settings that outlive the test
@@ -106,13 +138,17 @@ private slots:
         const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.37.0");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
         QFile executable(dir.path()+"/hgs-tray.exe");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
         QFile info(dir.path()+"/build-info.json");QVERIFY(info.open(QIODevice::WriteOnly));info.close();
-        const QByteArray stableFeed=QJsonDocument(raw()).toJson(),nightlyFeed=QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson();QStringList requested;
-        const auto fetch=[&](const QNetworkRequest &request){requested<<request.url().fileName();auto *reply=new FixtureReply;const auto bytes=request.url().fileName()=="nightly.json"?nightlyFeed:stableFeed;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
+        const QByteArray stableFeed=QJsonDocument(raw()).toJson(),nightlyFeed=QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),devFeed=QJsonDocument(devRaw()).toJson();QStringList requested;
+        const auto fetch=[&](const QNetworkRequest &request){requested<<request.url().fileName();auto *reply=new FixtureReply;const auto name=request.url().fileName();const auto bytes=name=="nightly.json"?nightlyFeed:name=="dev.json"?devFeed:stableFeed;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
         {
             UpdateController controller(nullptr,executable.fileName(),fetch);QSignalSpy notified(&controller,&UpdateController::newerReleaseVerified);
             QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("nightly"));
             controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"nightly.json"});
             QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/nightly-123"));
+            // Dev builds carry no Windows zip: never an update, never polled every 15 minutes.
+            controller.setChannel("dev");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("dev.json"));
+            QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),1);QVERIFY(controller.comparison().contains("Dev builds do not include"));
+            QVERIFY(controller.updateToken().isEmpty());
             // A deliberate stable choice is kept, and a newer stable release is not announced.
             controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
             QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),1);QVERIFY(controller.comparison().contains("nightly channel"));
@@ -121,6 +157,13 @@ private slots:
 #else
         QSKIP("Only Windows builds are portable");
 #endif
+    }
+    void portableBuildsNeverTakeDevBuilds(){
+        // Dev builds carry a source and an Arch package, never a Windows zip.
+        DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.42.0 (dev 50)";
+        DesktopInstallation portable;portable.kind="portable";DesktopInstallation source;source.kind="source";
+        QVERIFY(UpdateController::comparisonMessage(portable,dev,"0.39.0",0,false).contains("nightly channel"));
+        QVERIFY(UpdateController::comparisonMessage(source,dev,"0.39.0",0,false).contains("main build 50"));
     }
     void installationKindFollowsTheFolderLayout(){
         QTemporaryDir dir;QVERIFY(dir.isValid());

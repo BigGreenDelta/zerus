@@ -7,7 +7,7 @@ import unittest
 import uuid
 
 import test_input as fixtures
-from test_questions import Questions
+from test_questions import Questions, terminal_only
 
 FAKE = r'''
 import os,pathlib,signal,sys,termios,tty
@@ -19,10 +19,12 @@ def render(*args):
  if (root/'selection').exists(): selected=int((root/'selection').read_text());(root/'selection').unlink()
  target=(root/'target').read_text() if (root/'target').exists() else 'uvx'
  folder=(root/'folder').read_text() if (root/'folder').exists() else '/work/example'
- lines=['─'*96,' Trust this folder?',' ↑↓ navigate · Enter select · Esc exit','',folder,'',
+ prelude=(root/'prelude').read_text().split('\n') if (root/'prelude').exists() else []
+ targets=[] if (root/'no-targets').exists() else [' Project MCP targets:',
+  '   tracker (stdio): command='+target,'   args=["example-mcp"] cwd=/work/example']
+ lines=prelude+['─'*96,' Trust this folder?',' ↑↓ navigate · Enter select · Esc exit','',folder,'',
   ' Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the',
-  ' listed project MCP targets and remembers this folder.',' Project MCP targets:',
-  '   tracker (stdio): command='+target,'   args=["example-mcp"] cwd=/work/example','']
+  ' listed project MCP targets and remembers this folder.']+targets+['']
  for i,label in enumerate(labels):
   lines+=['  '+('❯' if selected==i else ' ')+' '+label,
    '    '+['Enable project MCP servers. Remembered for this folder.','Exit Kimi Code. Asked again next launch.'][i],'']
@@ -120,9 +122,28 @@ class FolderTrust(unittest.TestCase):
     def test_changed_folder_and_run_reject_without_input(self):
         self.answer(self.payload(expected_run_id='other'),success=False)
         self.redraw('folder','/other/folder','/other/folder')
-        self.assertEqual(self.inspect()['pending_questions'],[])
+        terminal_only(self,'Trust this folder?')
         self.answer(self.payload(),success=False)
         self.assertEqual(self.received(),b'')
+
+    def test_launcher_notices_and_panel_without_targets(self):
+        (self.root/'no-targets').touch()
+        notices = ('? Master password: [hidden]\nunlock: SOPS_AGE_KEY loaded for this session.\n'
+                   'run_kimi: secrets unlocked → launching kimi')
+        self.redraw('prelude', notices, 'launching kimi')
+        self.card = self.inspect()['pending_questions'][0]
+        body = self.card['questions'][0]['body']
+        self.assertNotIn('Project MCP targets', body)
+        self.assertNotIn('launching kimi', body)
+        receipt = self.answer(self.payload())
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertEqual((self.root/'submitted').read_text(), 'Trust this folder')
+
+    def test_unrelated_output_above_panel_is_not_answerable(self):
+        self.redraw('prelude', 'agent said:', 'agent said:')
+        self.assertNotIn('agent said', terminal_only(self, 'Trust this folder?')['questions'][0]['body'])
+        self.answer(self.payload(), success=False)
+        self.assertEqual(self.received(), b'')
 
     def test_missing_acknowledgement_is_not_retried(self):
         (self.root/'hold-dialog').touch();p=self.payload()

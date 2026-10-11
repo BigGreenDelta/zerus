@@ -99,6 +99,16 @@ protected:
 private:
     std::function<void()> m_sample;
 };
+// Question prompts as shown: the agent's Markdown, or plain text for terminal panels.
+QStringList questionPrompts(const QuestionCard *card)
+{
+    QStringList prompts;
+    for (const auto *prompt : card->findChildren<QWidget *>("questionPrompt")) {
+        if (const auto *markdown = qobject_cast<const QTextBrowser *>(prompt)) prompts << markdown->toPlainText();
+        else if (const auto *label = qobject_cast<const QLabel *>(prompt)) prompts << label->text();
+    }
+    return prompts;
+}
 
 class TestSessionsWindow : public QObject {
     Q_OBJECT
@@ -148,6 +158,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
+    void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
     void processPollingFollowsVisibilityAndSettings();
@@ -1635,7 +1646,27 @@ else: print('{}')
     QCOMPARE(menuPayload["expected_run_id"].toString(),QString("new-run"));
     QCOMPARE(menuPayload["expected_conversation_id"].toString(),QString("conversation-one"));
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));QCOMPARE(tabs->currentIndex(),1);
-    QTRY_COMPARE(finished.size(),4);tabs->setCurrentIndex(0);
+    QTRY_COMPARE(finished.size(),4);QVERIFY(!menuPayload.contains("dismiss_prompt"));QVERIFY(QFile::remove(capture));
+    // While Claude shows a chooser, an explicit reset first dismisses it with Esc.
+    details["phase"]="input";details["activity"]="busy";details["clear_context_supported"]=false;
+    details["clear_context_dismiss"]=true;applyDetails();QTRY_VERIFY(menuClear->isEnabled());settle();
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));
+        QVERIFY(dialog->text().contains("Esc"));QVERIFY(dialog->text().contains("denied"));QVERIFY(dialog->text().contains("draft"));
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){
+            QCOMPARE(button->text(),QString("Dismiss and clear"));button->click();return;}
+        QFAIL("Missing dismissal confirmation");});
+    menuClear->trigger();QTRY_VERIFY(QFileInfo::exists(capture));QVERIFY(sent.open(QIODevice::ReadOnly));
+    const auto dismissPayload=QJsonDocument::fromJson(sent.readAll()).object();sent.close();
+    QCOMPARE(dismissPayload["dismiss_prompt"].toBool(),true);QCOMPARE(dismissPayload["expected_run_id"].toString(),QString("new-run"));
+    QTRY_COMPARE(finished.size(),5);QVERIFY(QFile::remove(capture));
+    // A chooser that closed before confirmation is not dismissed.
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);
+        details["clear_context_dismiss"]=false;details["clear_context_supported"]=true;details["phase"]="idle";details["activity"]="idle";
+        applyDetails();settle();
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}});
+    menuClear->trigger();QTest::qWait(100);QVERIFY(!QFileInfo::exists(capture));
+    details["clear_context_supported"]=false;applyDetails();QVERIFY(!menuClear->isEnabled());tabs->setCurrentIndex(0);
     QTest::qWait(350);details["phase"]="compacting";details["activity"]="busy";details["clear_context_supported"]=false;details.remove("cache_hint");details["session_usage"]=QJsonObject{{"status","ok"},{"context",QJsonObject{{"used",215900},{"limit",258400}}}};
     applyDetails();settle();QTest::qWait(50);QVERIFY(!menuClear->isEnabled());
     auto *progress=window.findChild<ActivityView *>("mainActivity")->compactionIndicator();auto *context=window.findChild<QWidget *>("activityContext");
@@ -2096,12 +2127,14 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     overlap.conversationId = "overlap-conversation"; overlap.replyId = "overlap-reply";
     auto child = idle; child.name = "codex/hgs/child-request"; child.replyId.clear();
     child.subagentSource = "hooks"; child.subagents = {{"child", QJsonObject{{"display_state", "input"}}}};
+    auto preview = idle; preview.name = "codex/hgs/preview-request"; preview.replyId.clear();
+    preview.subagentSource = "hooks"; preview.subagentPreviews = {QJsonObject{{"state", "input"}}};
     auto reminder = box.sessions[2]; reminder.name = "codex/hgs/reminder"; reminder.reviewLater = true;
     auto exited = working; exited.name = "codex/hgs/exited"; exited.processState = "exited";
     auto ended = working; ended.name = "codex/hgs/ended"; ended.conversationState = "ended";
     auto unknown = working; unknown.name = "codex/hgs/unknown"; unknown.activity = "unknown";
     auto archived = overlap; archived.name = "codex/hgs/archive"; archived.state = "archived"; archived.archiveId = "archive-one";
-    box.sessions.append({overlap, child, reminder, exited, ended, unknown, archived});
+    box.sessions.append({overlap, child, preview, reminder, exited, ended, unknown, archived});
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     QVERIFY(state.setReviewLater({}, reminder, true));
     const auto previousMarks = QSettings().value("attention/sessionMarks");
@@ -2115,17 +2148,68 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
         QVERIFY(button->property("filter") != "working");
     }
     QVERIFY(active); QVERIFY(attention); QCOMPARE(active->accessibleName(), QString("Active"));
-    QCOMPARE(active->property("count").toInt(), 6); QCOMPARE(attention->property("count").toInt(), 5);
-    auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 6);
+    QCOMPARE(active->property("count").toInt(), 7); QCOMPARE(attention->property("count").toInt(), 6);
+    auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 7);
     QSet<QString> keys;
     for (int i = 0; i < list->count(); ++i) keys.insert(list->item(i)->data(Qt::UserRole).toString());
-    QCOMPARE(keys.size(), 6); QVERIFY(keys.contains("\ncodex/hgs/dashboard"));
+    QCOMPARE(keys.size(), 7); QVERIFY(keys.contains("\ncodex/hgs/dashboard"));
     QVERIFY(keys.contains("\nkimi/docs/research")); QVERIFY(keys.contains("mac\nclaude/infra/review"));
     QVERIFY(keys.contains("\ncodex/hgs/child-request")); QVERIFY(keys.contains("\ncodex/hgs/reminder"));
+    QVERIFY(keys.contains("\ncodex/hgs/preview-request"));
     box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     auto peer = *state.peer("mac"); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state); QCOMPARE(active->property("count").toInt(), 1); QCOMPARE(list->count(), 1);
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
+}
+
+void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery()
+{
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) { session.phase = "idle"; session.activity = "idle"; }
+    auto parent = box.sessions[0]; parent.name = "codex/hgs/child-parent"; parent.conversationId = "conversation-one";
+    parent.subagentSource = "hooks"; parent.subagents = {{"child", QJsonObject{{"state", "idle"}}}};
+    auto staleParent = parent; staleParent.name = "codex/hgs/stale-parent"; staleParent.conversationId = "new-conversation";
+    auto archived = box.sessions[0]; archived.name = "codex/hgs/archived-draft"; archived.state = "archived"; archived.archiveId = "archive-one";
+    box.sessions.append({parent, staleParent, archived}); state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto peer = *state.peer("mac"); peer.sessions[0].phase = "idle"; peer.sessions[0].activity = "idle";
+    state.setPeer(peer, QDateTime::currentMSecsSinceEpoch()); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
+    ComposerDraftStore store; ComposerDraft text; text.text = "Restored draft";
+    QVERIFY(store.save("\n" + box.sessions[2].name, text));
+    QVERIFY(store.save("arch\n" + parent.name + "\nconversation-one\nchild", text));
+    QVERIFY(store.save("arch\n" + staleParent.name + "\nconversation-one\nchild", text));
+    QVERIFY(store.save("\n" + archived.name + "\narchive-one", text));
+    ComposerDraft attachment; attachment.attachments = {{"notes.txt", "text/plain", "snapshot", {}}};
+    QVERIFY(store.save("mac\n" + peer.sessions[0].name, attachment));
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    QPushButton *active = nullptr; QSet<QString> filterIds;
+    for (auto *button : window.findChildren<QPushButton *>()) {
+        const auto id = button->property("filter").toString();
+        if (!id.isEmpty()) filterIds.insert(id);
+        if (id == "active") active = button;
+    }
+    QCOMPARE(filterIds, QSet<QString>({"all", "attention", "active", "paused", "archived"}));
+    QVERIFY(active); QCOMPARE(active->property("count").toInt(), 3);
+    auto *list = window.findChild<SessionList *>("sessionList"); active->click();
+    QSet<QString> keys;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) keys.insert(list->item(i)->data(SessionRoles::Key).toString());
+    QCOMPARE(keys, QSet<QString>({"\n" + box.sessions[2].name, "\n" + parent.name, "mac\n" + peer.sessions[0].name}));
+    window.findChild<MachineFilter *>()->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
+    window.findChild<MachineFilter *>()->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
+    window.showSession({}, staleParent.name); QTest::qWait(50);
+    QCOMPARE(active->property("count").toInt(), 3); // An older inspection cannot bind a child draft to a new parent conversation.
+    window.showSession({}, box.sessions[1].name);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    composer->editor()->setFocus(); composer->editor()->setPlainText("New draft");
+    QTRY_COMPARE(active->property("count").toInt(), 4);
+    const auto key = composer->sessionKey(); QCOMPARE(key, "\n" + box.sessions[1].name);
+    QVERIFY(composer->editor()->hasFocus());
+    composer->editor()->clear(); QTRY_COMPARE(active->property("count").toInt(), 3);
+    composer->editor()->setPlainText("Send this draft"); QTRY_COMPARE(active->property("count").toInt(), 4);
+    QVERIFY(composer->setSending(key)); QTRY_COMPARE(active->property("count").toInt(), 3);
+    composer->deliveryFinished(key, false, "Synthetic delivery failure"); QTRY_COMPARE(active->property("count").toInt(), 4);
+    QVERIFY(composer->setSending(key)); composer->deliveryFinished(key, true);
+    QTRY_COMPARE(active->property("count").toInt(), 3);
 }
 
 void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts_data()
@@ -2826,7 +2910,7 @@ elif sys.argv[1]=='answer':
     details["pending_questions"]=QJsonArray{submittedQuestion,nextQuestion};QVERIFY(save());
     client->inspectionReady({},"codex/hgs/dashboard",details);
     QVERIFY(card->isVisible());QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("1 pending"));
-    QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(),QString("Another unanswered question?"));
+    QCOMPARE(questionPrompts(card),QStringList{"Another unanswered question?"});
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question"));
     QVERIFY(card->findChild<QToolButton *>("questionQueuePrevious")->isHidden());
     QVERIFY(card->findChild<QToolButton *>("questionQueueNext")->isHidden());
@@ -2904,7 +2988,7 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
     auto olderItems=question["questions"].toArray();auto secondItem=olderItems.first().toObject();secondItem["id"]="q_1";secondItem["question"]="Another older question?";olderItems.append(secondItem);question["questions"]=olderItems;
     details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};client->inspectionReady({},"codex/hgs/dashboard",details);
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("3 pending"));
-    QStringList labels;for(auto *label:card->findChildren<QLabel *>())labels<<label->text();
+    QStringList labels=questionPrompts(card);
     QVERIFY(labels.contains("Most recent question?"));QVERIFY(!labels.contains("Which option?"));
     auto *previous=card->findChild<QToolButton *>("questionQueuePrevious"),*next=card->findChild<QToolButton *>("questionQueueNext");
     QVERIFY(previous->isVisible());QVERIFY(!previous->isEnabled());QVERIFY(next->isEnabled());
@@ -2917,7 +3001,7 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
     };
     firstAnswer()->setText("Latest draft");
     next->click();
-    labels.clear();for(auto *label:card->findChildren<QLabel *>("questionPrompt"))labels<<label->text();
+    labels=questionPrompts(card);
     QVERIFY(labels.contains("Which option?"));QVERIFY(!labels.contains("Most recent question?"));
     QVERIFY(previous->isEnabled());QVERIFY(!next->isEnabled());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #2/2"));
@@ -3814,6 +3898,14 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     });
     activity->fileReferenceActivated("docs/README.md:12");
     QCOMPARE(copied.takeFirst().at(0).toString(), QString("/local/project/docs/README.md"));
+    // A file link in a question's Markdown opens the same dialog.
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+        QCOMPARE(dialog->findChild<QLineEdit *>("sessionFilePath")->text(), QString("/local/project/docs/README.md"));
+        dialog->reject();
+    });
+    window.findChild<QuestionCard *>()->fileReferenceActivated("docs/README.md:12");
+    QVERIFY(!window.findChild<QDialog *>("sessionFileDialog"));
     window.showSession("mac", "claude/infra/review"); QTest::qWait(50);
     client->inspectionReady("mac", "claude/infra/review", {{"cwd", "/Users/remote/project"}, {"conversation_id", "conversation-one"}});
     QTimer::singleShot(0, &window, [&] {
@@ -5600,6 +5692,7 @@ void TestSessionsWindow::automaticLaunchWorktree_data()
     QTest::addColumn<QString>("mode");QTest::addColumn<QString>("host");
     QTest::newRow("local-auto")<<QString("created")<<QString();
     QTest::newRow("remote-auto")<<QString("created")<<QString("mac");
+    QTest::newRow("outside-auto")<<QString("outside")<<QString("mac");
     QTest::newRow("no-worktree")<<QString("none")<<QString();
     QTest::newRow("ordinary-folder")<<QString("not_repo")<<QString();
     QTest::newRow("creation-failed")<<QString("failed")<<QString("mac");
@@ -5653,8 +5746,10 @@ elif args[0] == 'worktrees':
         return result;
     };
     SessionOrganization projects;const auto project=projects.createGroup("Launch");
-    projects.addFolder(project,host.isEmpty()?"arch":host,"/repo");
+    // An outside repository joins the project, never the worktree generated from it.
+    projects.addFolder(project,host.isEmpty()?"arch":host,mode=="outside"?"/unrelated":"/repo");
     NewSessionDialog dialog(FakeCli::program(program.fileName()),fleet(),host,"codex",project);dialog.setGroups(projects,project);dialog.show();
+    if(mode=="outside")dialog.selectPath("/repo");
     auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");
     auto *none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *start=dialog.findChild<QPushButton *>("primary");
@@ -5662,7 +5757,7 @@ elif args[0] == 'worktrees':
     auto *target=dialog.findChild<QLabel *>("launchWorktreeTarget");
     QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
     QTRY_VERIFY(start->isEnabled());
-    QCOMPARE(creations().size(),0);QVERIFY(dialog.findChild<QLabel *>("muted")->text().isEmpty());
+    QCOMPARE(creations().size(),0);QTRY_COMPARE(dialog.findChild<QLabel *>("muted")->property("outsideProject").toBool(),mode=="outside");
     auto *manage=dialog.findChild<QToolButton *>("manageLaunchProject");QVERIFY(manage->text().isEmpty());QVERIFY(!manage->icon().isNull());
     auto *agents=dialog.findChild<QComboBox *>("launchAgent");for(int i=0;i<agents->count();++i)QVERIFY(!agents->itemIcon(i).isNull());
     const auto generated=name->text();const auto destination="/repo-"+generated;
@@ -5676,7 +5771,7 @@ elif args[0] == 'worktrees':
     if(mode=="none")none->click();
     start->click();
     if(mode=="none"||mode=="not_repo"){
-        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QCOMPARE(creations().size(),0);return;
+        QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][2].toString(),QString("/repo"));QVERIFY(launched[0][7].toString().isEmpty());QCOMPARE(creations().size(),0);return;
     }
     QTRY_COMPARE(creations().size(),1);QVERIFY(!start->isEnabled());QVERIFY(!name->isEnabled());
     QVERIFY(!dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->isEnabled());
@@ -5691,10 +5786,10 @@ elif args[0] == 'worktrees':
     QCOMPARE(option("--branch"),generated);QCOMPARE(option("--base"),QString("HEAD"));QCOMPARE(option("--destination"),destination);
     QVERIFY(!QUuid(option("--request-id")).isNull());if(!host.isEmpty())QCOMPARE(args.first().toString(),"@"+host);
     releaseRequest();
-    if(mode=="created"){
+    if(mode=="created"||mode=="outside"){
         QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][2].toString(),destination);
         QCOMPARE(launched[0][3].toString(),QString("review-session"));QCOMPARE(launched[0][4].toString(),QString("native-codex"));
-        QCOMPARE(launched[0][5].toString(),project);QVERIFY(!launched[0][7].toBool());
+        QCOMPARE(launched[0][5].toString(),project);QCOMPARE(launched[0][7].toString(),mode=="outside"?QString("/repo"):QString());
     }else{
         QTRY_VERIFY(name->isEnabled());QVERIFY(!start->isEnabled());QCOMPARE(launched.size(),0);QVERIFY(dialog.isVisible());
         QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().isEmpty());QCOMPARE(name->text(),QString("review-session"));
@@ -5746,13 +5841,13 @@ void TestSessionsWindow::arbitraryFolderAndTerminalPreference()
     const auto preview=qEnvironmentVariable("HGS_NAVIGATION_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(40);QVERIFY(dialog.grab().save(preview+"/new-session-folder-"+theme+".png"));}
     QSignalSpy launches(&dialog,&NewSessionDialog::launchRequested);terminal->setChecked(true);QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launches.size(),1);
-    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(launches[0][7].toBool());
+    QCOMPARE(launches[0][0].toString(),QString("mac"));QVERIFY(launches[0][6].toBool());QVERIFY(!launches[0][7].toString().isEmpty());QCOMPARE(launches[0][7].toString(),launches[0][2].toString());
     NewSessionDialog second(program(),fleet(),"mac");QVERIFY(second.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     second.setGroups(projects,id);QCOMPARE(second.findChild<QComboBox *>("launchProjectFolder")->count(),0);
     projects.addFolder(id,"mac","/remote/work tree");second.setGroups(projects,id);
     second.findChild<QCheckBox *>("launchOpenTerminal")->setChecked(false);
     QSignalSpy secondLaunch(&second,&NewSessionDialog::launchRequested);QTRY_VERIFY(second.findChild<QPushButton *>("primary")->isEnabled());second.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(secondLaunch.size(),1);
-    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(!secondLaunch[0][7].toBool());
+    QVERIFY(!secondLaunch[0][6].toBool());QVERIFY(secondLaunch[0][7].toString().isEmpty());
     NewSessionDialog third(program(),fleet());QVERIFY(!third.findChild<QCheckBox *>("launchOpenTerminal")->isChecked());
     // Selecting a project folder explicitly replaces the earlier Browse choice.
     project->setCurrentIndex(project->findData(other));
@@ -6288,6 +6383,10 @@ void TestSessionsWindow::worktreeFilterKeepsConversationDraftAndSearchScope()
     auto *composer=window.findChild<MessageComposer *>("messageComposer");composer->editor()->setPlainText("Keep my draft");window.activateWindow();QTest::qWait(30);composer->editor()->setFocus();QTRY_COMPARE(QApplication::focusWidget(),composer->editor());
     auto *title=window.findChild<QLabel *>("detailTitle");const auto selected=title->text();
     auto *page=window.findChild<ProjectsDialog *>("projectsPage");page->folderSessionsRequested({},"/linked",true);
+    for (auto *button : window.findChildren<QPushButton *>()) {
+        if (button->property("filter") == "all") QCOMPARE(button->property("count").toInt(), 1);
+        if (button->property("filter") == "active") QCOMPARE(button->property("count").toInt(), 0);
+    }
     auto *list=window.findChild<SessionList *>("sessionList");QStringList keys;
     for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Key).toString().isEmpty())keys<<list->item(i)->data(SessionRoles::Key).toString();
     QCOMPARE(keys,QStringList{"\nkimi/docs/research"});QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));QCOMPARE(QApplication::focusWidget(),composer->editor());
@@ -6296,6 +6395,8 @@ void TestSessionsWindow::worktreeFilterKeepsConversationDraftAndSearchScope()
     auto *hits=window.findChild<QListWidget *>("searchResults");QVERIFY(hits->count()>0);for(int i=0;i<hits->count();++i)QVERIFY(hits->item(i)->data(Qt::AccessibleTextRole).toString().contains("research"));
     window.findChild<QLineEdit *>("search")->clear();window.findChild<QPushButton *>("clearFolderFilter")->click();QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
     page->folderSessionsRequested({},"/empty",true);QCOMPARE(title->text(),selected);QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
+    for (auto *button : window.findChildren<QPushButton *>())
+        if (button->property("filter").isValid()) QCOMPARE(button->property("count").toInt(), 0);
     page->relatedSessionRequested({},"kimi/docs/research",{});QVERIFY(title->text()!=selected);QVERIFY(!window.findChild<QPushButton *>("clearFolderFilter")->isVisible());
     window.showSession({},"codex/hgs/dashboard");QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft"));
     page->folderSessionsRequested({},"/empty",true);window.findChild<DashboardPage *>()->filterRequested("@all","all");QVERIFY(!window.findChild<QPushButton *>("clearFolderFilter")->isVisible());

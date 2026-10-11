@@ -18,6 +18,7 @@ private slots:
     void init();
     void resultsKeepArchivesRunsAndRemoteIdentities();
     void activeScopeIncludesChildRequestsAndOfflineReminders();
+    void activeScopeIncludesDraftsAndRefreshesMembership();
     void staleQueriesCannotReplaceCurrentResults();
     void multipleMachinesScopeSearch();
     void selectionSurvivesFleetPollsAndExplicitRefresh();
@@ -143,6 +144,19 @@ void TestSessionSearch::activeScopeIncludesChildRequestsAndOfflineReminders()
     box.ok = true; box.sessions[0].subagentSource = "hook_profiles";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); search.setScope(state, "active", "@local");
     QCOMPARE(list(search)->count(), 0);
+}
+
+void TestSessionSearch::activeScopeIncludesDraftsAndRefreshesMembership()
+{
+    auto state = fleet(); const QSet<QString> drafts{"\ncodex/docs/saved", "\ncodex/docs/live", "mac\nkimi/remote"};
+    SessionSearch search(FakeCli::program(script())); search.setScope(state, "active", {}, drafts); search.setQuery("needle");
+    QTRY_COMPARE(list(search)->count(), 3); // Busy + draft is still one hit; archive stays excluded.
+    search.setScope(state, "active", "@local", drafts); QCOMPARE(list(search)->count(), 2);
+    search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 1);
+    auto box = state.local(); box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    search.setScope(state, "active", "@local", drafts);
+    search.setQuery("saved-run"); QCOMPARE(list(search)->count(), 1);
+    search.setScope(state, "active", "@local"); QCOMPARE(list(search)->count(), 0);
 }
 
 void TestSessionSearch::multipleMachinesScopeSearch()

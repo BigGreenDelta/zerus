@@ -163,7 +163,7 @@ impl LockedStore {
     }
 }
 
-pub(super) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap();
     let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
     platform::make_private(temporary.as_file())?;

@@ -1,11 +1,14 @@
 //! Codex's separate startup consent for new/changed hooks precedes SessionStart.
 //! Keep native trust ownership: the TUI submits its captured hook keys/hashes to
 //! Codex, which verifies them. HGS never edits trust files or bypasses the prompt.
+//! The title, exact choices and hint frame the panel; its disclosure, including
+//! the hook count and native errors, is shown verbatim as part of the identity.
 use super::*;
 use sha2::{Digest, Sha256};
 
 const TITLE: &str = "Hooks need review";
 const HINT: &str = "enter confirm · esc skip";
+#[cfg(test)]
 const DISCLOSURE: &str = "Hooks can run outside the sandbox after you trust them.";
 const LABELS: [&str; 3] = [
     "Review hooks",
@@ -30,14 +33,9 @@ fn parse(screen: &str) -> Option<Panel> {
         return None;
     }
     let first = rows.iter().position(|r| r.starts_with("1. ") || r.starts_with("› 1. "))?;
-    let disclosure = rows[1..first].join(" ");
-    let count = disclosure.split_whitespace().next()?.parse::<usize>().ok()?;
-    if count == 0 { return None; }
-    let count_line = if count == 1 { "1 hook is new or changed.".into() }
-        else { format!("{count} hooks are new or changed.") };
-    let remainder = disclosure.strip_prefix(&format!("{count_line} {DISCLOSURE}"))?;
     // Native errors are part of the visible decision and therefore its identity.
-    if !remainder.is_empty() && !remainder.starts_with(" Failed to trust hooks: ") { return None; }
+    let disclosure = rows[1..first].join(" ");
+    if disclosure.is_empty() || disclosure.contains('…') { return None; }
     let mut position = first;
     let mut selected = None;
     for (i, label) in LABELS.iter().enumerate() {
@@ -137,10 +135,20 @@ mod tests {
         assert_eq!(card(&record(), &parse(SCREEN).unwrap()), card(&record(), &parse(&narrow).unwrap()));
         assert!(parse(&SCREEN.replace("4 hooks are", "1 hook is")).is_some());
         for invalid in [SCREEN.replace(HINT, "enter confirm"), SCREEN.replace("  2.", "› 2."),
-            SCREEN.replace("4 hooks are", "0 hooks are"), SCREEN.replace(DISCLOSURE, "..."),
             SCREEN.replace("won't run)", "..."), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"),
-            SCREEN.replace(DISCLOSURE, &format!("{DISCLOSURE}\nTrusting hooks..."))] {
+            SCREEN.replace("Hooks can run", "Hooks…"), SCREEN.replace("  4 hooks are new or changed.\n  Hooks can run outside the sandbox after you trust them.\n", "")] {
             assert!(parse(&invalid).is_none(), "{invalid}");
+        }
+    }
+    #[test]
+    fn unfamiliar_disclosure_is_shown_verbatim() {
+        let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
+        for screen in [SCREEN.replace(DISCLOSURE, "Hooks can now also run during review."),
+            SCREEN.replace(DISCLOSURE, &format!("{DISCLOSURE}\nTrusting hooks..."))] {
+            let panel = parse(&screen).unwrap();
+            let question = card(&record(), &panel).unwrap();
+            assert_eq!(question["questions"][0]["body"], json!(panel.disclosure));
+            assert_ne!(question["question_hash"], original["question_hash"]);
         }
     }
     #[test]

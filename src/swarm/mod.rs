@@ -16,6 +16,42 @@ use store::LockedStore;
 
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
+#[cfg(unix)]
+pub(crate) use store::replace;
+
+/// Machine UUIDs this computer itself obtained through each configured SSH
+/// alias (`swarm hello`/`export`, then pinned by `bind`). Bindings stay local
+/// and are never exchanged. Shared catalog data, including machine names,
+/// redirects and the `machines` listing, comes from other members and is not
+/// identity evidence. Lock-free like `preferences`; a damaged or foreign store
+/// reports none.
+#[cfg(unix)]
+pub(crate) fn verified_bindings(
+    config: &Config,
+    local: &str,
+) -> std::collections::BTreeMap<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Local {
+        node_id: String,
+        #[serde(default)]
+        bindings: std::collections::BTreeMap<String, store::Binding>,
+    }
+    std::fs::read(config.dir.join("swarm/catalog.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Local>(&bytes).ok())
+        .filter(|store| store.node_id == local)
+        .map(|store| {
+            store
+                .bindings
+                .into_iter()
+                .filter(|(alias, binding)| {
+                    binding.verified && !config.is_self(alias) && binding.id != local
+                })
+                .map(|(alias, binding)| (alias, binding.id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or

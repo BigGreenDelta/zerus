@@ -68,11 +68,11 @@ Choose one package; all include the CLI and desktop and conflict with one anothe
 | [zerus-ade-bin](https://aur.archlinux.org/packages/zerus-ade-bin) | `yay -S zerus-ade-bin` | Stable prebuilt Arch x86_64 bundle |
 | [zerus](https://aur.archlinux.org/packages/zerus) | `yay -S zerus` | Stable release compiled locally |
 | [zerus-git](https://aur.archlinux.org/packages/zerus-git) | `yay -S zerus-git` | Current upstream main compiled locally |
-| [zerus-ade-nightly-bin](https://aur.archlinux.org/packages/zerus-ade-nightly-bin) | `yay -S zerus-ade-nightly-bin` | Prebuilt nightly after full Linux/Arch/macOS checks |
+| [zerus-ade-nightly-bin](https://aur.archlinux.org/packages/zerus-ade-nightly-bin) | `yay -S zerus-ade-nightly-bin` | Prebuilt nightly after full Linux/Arch/macOS/Windows checks |
 
 Keep Arch fully updated before installing. Binary library version requirements
 come from the verified release builder; source packages compile against your
-installed libraries. The [0.39.0 release](https://github.com/ufna/zerus/releases/tag/v0.39.0)
+installed libraries. The [0.42.0 release](https://github.com/ufna/zerus/releases/tag/v0.42.0)
 includes immutable source/binary archives, checked pacman packages, AUR recipes
 and SHA-256 checksums. Native agents are installed separately.
 
@@ -171,10 +171,11 @@ Limitations of the control console:
 - Other machines cannot connect to the Windows computer as a peer.
 - No installer, code signing, autostart or self-update, and only nightly
   releases carry the zip. **Settings → Updates** reports nightlies with a newer
-  product version. To update, quit Zerus from the tray menu and replace the
-  folder with the new one; configuration and state stay in your profile. To start
-  Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the Startup folder
-  (`shell:startup`).
+  product version; Stable and Dev have no Windows build, so on those channels it
+  says so and reports no update. To update, quit Zerus from the tray menu and
+  replace the folder with the new one; configuration and state stay in your
+  profile. To start Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the
+  Startup folder (`shell:startup`).
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds.

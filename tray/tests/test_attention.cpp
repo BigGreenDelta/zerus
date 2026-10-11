@@ -1,5 +1,7 @@
 #include <QtTest>
+#include <QGuiApplication>
 #include <QJsonDocument>
+#include <QWindow>
 #include "AttentionTracker.h"
 #include "FleetState.h"
 
@@ -17,6 +19,12 @@ private slots:
     void failedDeliveryRetriesAfterBackoff();
     void acknowledgedAttentionWithdrawsItsNotification();
     void lapsedAcknowledgementDoesNotAnnounceTheSameRequestAgain();
+    void intermediateRepliesWaitForIdleAndKeepExplicitQuestions();
+    void deliveredRepliesDoNotRepeatAfterWorking();
+    void foregroundRequestsStayActionableWithoutReplay();
+    void foregroundRepliesStayUnreadWithoutReplay();
+    void actualApplicationFocusSuppressesBanners();
+    void scheduledTicksStayUnreadUntilTheScheduleEnds();
 };
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
@@ -265,6 +273,176 @@ void TestAttention::lapsedAcknowledgementDoesNotAnnounceTheSameRequestAgain()
     box.sessions[0].attentionId="call-2";
     auto child=box.sessions[0].subagents["worker"].toObject(); child["attention_id"]="child-2"; box.sessions[0].subagents["worker"]=child;
     QCOMPARE(restarted.observe("mac",box).raised.size(),2);
+}
+
+void TestAttention::intermediateRepliesWaitForIdleAndKeepExplicitQuestions()
+{
+    SessionInfo s; s.name="claude/project/review"; s.cmd="claude"; s.runId="run";
+    s.conversationId="conversation"; s.replyId="progress-1";
+    s.activity="busy"; s.phase="working"; s.subagentActiveCount=1; s.subagentSource="native";
+    BoxState box; box.ok=true; box.host="arch"; box.sessions={s};
+    FleetState fleet; fleet.setLocal(box,0); AttentionTracker tracker;
+    QVERIFY(fleet.local().sessions[0].unreadReply);
+    QVERIFY(tracker.observe({},fleet.local()).raised.isEmpty());
+    AttentionTracker restarted(tracker.state());
+    box.sessions[0].replyId="progress-2"; fleet.setLocal(box,1);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+
+    // Unknown state and inconsistent idle/child snapshots cannot establish
+    // that the workflow has finished.
+    box.sessions[0].subagentActiveCount=0; box.sessions[0].activity="unknown";
+    box.sessions[0].phase="unknown"; fleet.setLocal(box,2);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    box.sessions[0].activity="idle"; box.sessions[0].phase="working"; fleet.setLocal(box,3);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    box.sessions[0].phase="idle"; box.sessions[0].subagentActiveCount=1; fleet.setLocal(box,4);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+
+    box.sessions[0].activity="busy"; box.sessions[0].phase="working";
+    box.sessions[0].subagents={{"reviewer",QJsonObject{{"label","Reviewer"},{"display_state","input"},{"question_id","q1"}}}};
+    fleet.setLocal(box,5);
+    auto changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised[0].title.contains("Needs attention"));
+    QVERIFY(changes.raised[0].body.contains("Reviewer"));
+    QVERIFY(AttentionTracker::target(changes.raised[0].token).value("reply").toString().isEmpty());
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+
+    // Main-agent approvals also stay actionable while replies wait.
+    box.sessions[0].subagents={}; box.sessions[0].phase="approval"; box.sessions[0].attentionId="approval-1";
+    fleet.setLocal(box,6);
+    changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised[0].body.contains("Approval needed"));
+    QCOMPARE(changes.cleared.size(),1);
+
+    box.sessions[0].activity="idle"; box.sessions[0].phase="idle";
+    box.sessions[0].subagentActiveCount=0; box.sessions[0].replyId="final"; fleet.setLocal(box,7);
+    changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    QCOMPARE(AttentionTracker::target(changes.raised[0].token).value("reply").toString(),QString("final"));
+    QCOMPARE(changes.cleared.size(),1);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    QVERIFY(fleet.markReplyRead({},s.name,s.conversationId,"final"));
+    QCOMPARE(restarted.observe({},fleet.local()).cleared.size(),1);
+}
+
+void TestAttention::deliveredRepliesDoNotRepeatAfterWorking()
+{
+    SessionInfo s; s.name="claude/project/review"; s.cmd="claude"; s.runId="run";
+    s.conversationId="conversation"; s.replyId="reply-1"; s.activity="idle"; s.phase="idle";
+    BoxState box; box.ok=true; box.sessions={s}; FleetState fleet; fleet.setLocal(box,0);
+    AttentionTracker tracker; QCOMPARE(tracker.observe({},fleet.local()).raised.size(),1);
+    box.sessions[0].activity="busy"; box.sessions[0].phase="working"; fleet.setLocal(box,1);
+    auto changes=tracker.observe({},fleet.local()); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    AttentionTracker restarted(tracker.state());
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    box.sessions[0].activity="idle"; box.sessions[0].phase="idle"; fleet.setLocal(box,2);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+
+    // A newer reply received while working stays pending and clears the old
+    // card. Finishing the children alone may establish idle without a new Stop.
+    box.sessions[0].activity="busy"; box.sessions[0].phase="working";
+    box.sessions[0].replyId="reply-2"; fleet.setLocal(box,3);
+    changes=restarted.observe({},fleet.local()); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    AttentionTracker pending(restarted.state());
+    box.sessions[0].activity="idle"; box.sessions[0].phase="idle"; fleet.setLocal(box,4);
+    changes=pending.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    QCOMPARE(AttentionTracker::target(changes.raised[0].token).value("reply").toString(),QString("reply-2"));
+    QVERIFY(pending.observe({},fleet.local()).raised.isEmpty());
+}
+
+void TestAttention::foregroundRequestsStayActionableWithoutReplay()
+{
+    SessionInfo s; s.name="claude/project/review"; s.cmd="claude"; s.runId="run";
+    s.conversationId="conversation"; s.activity="busy"; s.phase="input"; s.attentionId="q1";
+    s.subagentSource="native";
+    BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
+    QVERIFY(tracker.observe({},box,0,true).raised.isEmpty());
+    QVERIFY(box.sessions[0].needsAction()); QVERIFY(box.sessions[0].needsAttention());
+    AttentionTracker restarted(tracker.state());
+    QVERIFY(restarted.observe({},box,1,false).raised.isEmpty());
+
+    box.sessions[0].attentionId="q2";
+    auto changes=restarted.observe({},box,2,false); QCOMPARE(changes.raised.size(),1);
+    const auto delivered=changes.raised[0].token;
+    box.sessions[0].phase="approval"; box.sessions[0].attentionId="approval";
+    changes=restarted.observe({},box,3,true); QVERIFY(changes.raised.isEmpty());
+    QCOMPARE(changes.cleared,QStringList{delivered});
+    QVERIFY(restarted.observe({},box,4,false).raised.isEmpty());
+    box.sessions[0].phase="error"; box.sessions[0].attentionId="error";
+    QVERIFY(restarted.observe({},box,5,true).raised.isEmpty());
+    QVERIFY(box.sessions[0].needsAction());
+    QVERIFY(restarted.observe({},box,6,false).raised.isEmpty());
+
+    box.sessions[0].phase="working";
+    box.sessions[0].subagents={{"reviewer",QJsonObject{{"label","Reviewer"},{"display_state","input"},{"question_id","child-q1"}}}};
+    QVERIFY(restarted.observe("mac",box,7,true).raised.isEmpty());
+    AttentionTracker childRestart(restarted.state());
+    QVERIFY(childRestart.observe("mac",box,8,false).raised.isEmpty());
+    auto child=box.sessions[0].subagents["reviewer"].toObject(); child["question_id"]="child-q2";
+    box.sessions[0].subagents["reviewer"]=child;
+    changes=childRestart.observe("mac",box,9,false); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised[0].body.contains("Reviewer"));
+}
+
+void TestAttention::foregroundRepliesStayUnreadWithoutReplay()
+{
+    SessionInfo s; s.name="claude/project/review"; s.cmd="claude"; s.runId="run";
+    s.conversationId="conversation"; s.replyId="reply-1"; s.activity="idle"; s.phase="idle";
+    BoxState box; box.ok=true; box.sessions={s}; FleetState fleet; fleet.setLocal(box,0);
+    AttentionTracker tracker;
+    QVERIFY(tracker.observe({},fleet.local(),0,true).raised.isEmpty());
+    QVERIFY(fleet.local().sessions[0].unreadReply); QVERIFY(fleet.local().sessions[0].needsAttention());
+    AttentionTracker restarted(tracker.state());
+    QVERIFY(restarted.observe({},fleet.local(),1,false).raised.isEmpty());
+    QVERIFY(restarted.observe({},fleet.local(),2,true).raised.isEmpty());
+    box.sessions[0].replyId="reply-2"; fleet.setLocal(box,3);
+    auto changes=restarted.observe({},fleet.local(),3,false); QCOMPARE(changes.raised.size(),1);
+    const auto delivered=changes.raised[0].token;
+    restarted.deliveryFailed(delivered,4);
+    QVERIFY(restarted.observe({},fleet.local(),64,true).raised.isEmpty());
+    QVERIFY(restarted.observe({},fleet.local(),65,false).raised.isEmpty());
+}
+
+void TestAttention::actualApplicationFocusSuppressesBanners()
+{
+    int argc=1; char executable[]="test_attention"; char *argv[]={executable,nullptr};
+    QGuiApplication application(argc,argv);
+    QWindow window; window.resize(100,100); window.show(); window.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    QCOMPARE(QGuiApplication::applicationState(),Qt::ApplicationActive);
+    SessionInfo s; s.name="session"; s.runId="run"; s.phase="input"; s.attentionId="q1";
+    BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
+    QVERIFY(tracker.observe({},box,0).raised.isEmpty());
+    QVERIFY(s.needsAction());
+    QVERIFY(!tracker.state().isEmpty());
+}
+
+void TestAttention::scheduledTicksStayUnreadUntilTheScheduleEnds()
+{
+    SessionInfo s; s.name="kimi/project/watch"; s.cmd="kimi"; s.runId="run"; s.conversationId="conversation";
+    s.activity="idle"; s.phase="idle"; s.replyId="prompted"; s.recurringSchedules=1;
+    BoxState box; box.ok=true; box.sessions={s}; FleetState fleet; fleet.setLocal(box,0); AttentionTracker tracker;
+    // The person's own reply notifies even while a schedule is pending.
+    auto changes=tracker.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    box.sessions[0].replyId="tick-1"; box.sessions[0].replyScheduled=true; fleet.setLocal(box,1);
+    changes=tracker.observe({},fleet.local()); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    QVERIFY(fleet.local().sessions[0].unreadReply); QVERIFY(fleet.local().sessions[0].needsAttention());
+    // Ending the schedule later does not announce the routine tick.
+    AttentionTracker restarted(tracker.state());
+    box.sessions[0].recurringSchedules=0; fleet.setLocal(box,2);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    // Unknown schedules hold a scheduled reply until they are known; the reply
+    // after the schedule ends is the job's result and notifies.
+    box.sessions[0].replyId="tick-2"; box.sessions[0].recurringSchedules=-1; fleet.setLocal(box,3);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    box.sessions[0].recurringSchedules=0; fleet.setLocal(box,4);
+    changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
+    QCOMPARE(AttentionTracker::target(changes.raised[0].token).value("reply").toString(),QString("tick-2"));
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    // Scheduled replies still wait for idleness.
+    box.sessions[0].replyId="final"; box.sessions[0].activity="busy"; box.sessions[0].phase="working"; fleet.setLocal(box,5);
+    QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    box.sessions[0].activity="idle"; box.sessions[0].phase="idle"; fleet.setLocal(box,6);
+    QCOMPARE(restarted.observe({},fleet.local()).raised.size(),1);
 }
 
 QTEST_APPLESS_MAIN(TestAttention)

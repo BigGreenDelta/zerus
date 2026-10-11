@@ -29,6 +29,11 @@ struct SessionInfo {
     QString accountId, accountHome;
     double replyAt = 0;
     bool unreadReply = false;
+    // The reply came from a provider-scheduled turn. Jobs the agent scheduled
+    // for itself, -1 when unknown or unsupported; their earliest next run.
+    bool replyScheduled = false;
+    int scheduledJobs = -1, recurringSchedules = -1;
+    double nextScheduledAt = 0;
     bool reviewLater = false, attentionAcknowledged = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
@@ -163,7 +168,7 @@ public:
     quint64 requestStageFiles(const QString &host, const QString &name, const QStringList &paths,
                              const QString &run, const QString &conversation);
     quint64 requestCompactContext(const QString &host, const QString &name, const QString &run, const QString &conversation);
-    quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation);
+    quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt = false);
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,

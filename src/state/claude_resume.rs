@@ -1,17 +1,21 @@
 //! Claude's cold-conversation quota chooser has no question hook. It can appear
 //! on resume or between turns; mirror only the complete bottommost native panel.
+//! The title, exact choices and footer frame it; the cost warning and the new
+//! conversation description are shown verbatim as part of the identity.
 use super::*;
-use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 
 const TITLE: &str = "Resume this conversation?";
+const NEW_CONVERSATION: &str = "Start a new conversation";
+// The panel is gone once neither its title nor this native description shows.
 const DESCRIPTION: &str = "Claude can look this one up if you refer to it later";
+#[cfg(test)]
 const DRAFT_NOTICE: &str = "Your unsent message will still be there after you answer.";
 const FOOTER: &str = "Enter to confirm · Esc to resume";
 
 struct Panel {
     body: String,
+    description: String,
     selected: Option<usize>,
 }
 
@@ -20,11 +24,6 @@ fn normalized(text: &str) -> String {
 }
 
 fn parse(screen: &str) -> Option<Panel> {
-    static BODY: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-        r"^This conversation has been inactive for [0-9]+[smhd](?: [0-9]+[smhd])* and is [0-9]+(?:\.[0-9]+)?[kKmM]? tokens long\. Resuming it will use (?:about [0-9]+%|all) of your 5-hour usage limit\.$"
-    ).unwrap()
-    });
     let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
     let top = rows
         .iter()
@@ -44,10 +43,7 @@ fn parse(screen: &str) -> Option<Panel> {
         return None;
     }
     let body = normalized(&panel[2..first - 1].join(" "));
-    let warning = body
-        .strip_suffix(&format!(" {DRAFT_NOTICE}"))
-        .unwrap_or(&body);
-    if !BODY.is_match(warning) {
+    if body.is_empty() {
         return None;
     }
     let indexed = panel[first].contains("1. ");
@@ -73,10 +69,11 @@ fn parse(screen: &str) -> Option<Panel> {
             .collect::<Vec<_>>()
             .join(" "),
     );
-    if detail != format!("Start a new conversation {DESCRIPTION}") {
+    let description = detail.strip_prefix(NEW_CONVERSATION)?;
+    if !description.is_empty() && !description.starts_with(' ') {
         return None;
     }
-    Some(Panel { body, selected })
+    Some(Panel { body, description: description.trim().into(), selected })
 }
 
 fn eligible(record: &Value) -> bool {
@@ -99,6 +96,10 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
     if !eligible(record) {
         return None;
     }
+    let mut new_conversation = json!({"id":"new_conversation","label":NEW_CONVERSATION});
+    if !panel.description.is_empty() {
+        new_conversation["description"] = json!(panel.description);
+    }
     let hash = format!(
         "{:x}",
         Sha256::digest(
@@ -111,7 +112,8 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
                 record["expected_id"],
                 record["launch_dir"],
                 TITLE,
-                panel.body
+                panel.body,
+                panel.description
             ])
             .to_string()
         )
@@ -124,8 +126,7 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
         "answer_unavailable_reason":if panel.selected.is_some() { "" } else { "Pick a row in Terminal before answering; Claude's native draft still has focus." },
         "questions":[{"id":"resume","header":"Resume conversation","question":TITLE,
             "body":panel.body,"multi_select":false,"allow_other":false,
-            "options":[{"id":"resume","label":"Resume"},
-                {"id":"new_conversation","label":"Start a new conversation","description":DESCRIPTION}]}]}),
+            "options":[{"id":"resume","label":"Resume"},new_conversation]}]}),
     )
 }
 
@@ -206,18 +207,31 @@ mod tests {
         let all = SCREEN.replace("about 5%", "all");
         assert!(parse(&all).is_some());
         for invalid in [
-            SCREEN.replace("5-hour", "7-hour"),
-            SCREEN.replace(DESCRIPTION, ""),
             SCREEN.replace("❯ 1. Resume", "❯ 1. Continue"),
+            SCREEN.replace("Start a new conversation", "Start a new chat"),
             SCREEN.replace("2. Start", "❯ 2. Start"),
             SCREEN.replace(FOOTER, "Enter to confirm"),
-            SCREEN.replace("293.6k tokens long.", ""),
+            SCREEN.replace(" This conversation has been inactive for 1h 25m and is 293.6k tokens long. Resuming it will\n use about 5% of your 5-hour usage limit.\n", "\n"),
             SCREEN.replace("────────────────────────────────────────", ""),
             format!("{SCREEN}\n❯ another native prompt"),
             SCREEN.replace("2. Start", "3. Start"),
         ] {
             assert!(parse(&invalid).is_none(), "{invalid}");
         }
+    }
+    #[test]
+    fn unfamiliar_warning_and_description_are_shown_verbatim() {
+        let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
+        for screen in [SCREEN.replace("5-hour", "7-hour"), SCREEN.replace("293.6k tokens long.", ""),
+            SCREEN.replace(DESCRIPTION, "Claude keeps a summary of this one"), SCREEN.replace(DESCRIPTION, "")] {
+            let panel = parse(&screen).unwrap();
+            let question = card(&record(), &panel).unwrap();
+            assert_eq!(question["questions"][0]["body"], json!(panel.body));
+            assert_eq!(question["questions"][0]["options"][1]["description"].as_str().unwrap_or(""), panel.description);
+            assert_ne!(question["question_hash"], original["question_hash"]);
+        }
+        let question = card(&record(), &parse(&SCREEN.replace(DESCRIPTION, "")).unwrap()).unwrap();
+        assert!(question["questions"][0]["options"][1].get("description").is_none());
     }
     #[test]
     fn idle_unindexed_panel_and_wrapping_keep_identity_and_draft_focus() {

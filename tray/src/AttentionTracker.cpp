@@ -1,5 +1,6 @@
 #include "AttentionTracker.h"
 
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QUuid>
 
@@ -19,17 +20,23 @@ QString concise(QString value, int limit)
 
 AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now)
 {
+    const auto *application = qobject_cast<QGuiApplication *>(QCoreApplication::instance());
+    return observe(host, box, now, application && application->applicationState() == Qt::ApplicationActive);
+}
+
+AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now, bool applicationFocused)
+{
     AttentionChanges changes;
     if (!box.ok) return changes;
     const auto previous = m_hosts.value(host).toObject();
     QJsonObject current;
     const auto notice = [&](const SessionInfo &s, const QString &key, const QString &phase,
-                            const QString &request, const QString &reason, bool reply = false, bool acknowledged = false) {
+                            const QString &request, const QString &reason, bool reply = false, bool silent = false) {
         const auto old = previous.value(key).toObject();
-        if (acknowledged) {
-            // Withdraw the banner but remember the request without a token: if the
-            // acknowledgement lapses (an older host, a recovery-only identity), the
-            // same request must not be announced again.
+        if (silent) {
+            // Withdraw the banner but remember the request without a token: if an
+            // acknowledgement lapses (an older host, a recovery-only identity) or a
+            // schedule ends, the same request must not be announced again.
             current[key] = QJsonObject{{"phase", phase}, {"request", request}};
             return;
         }
@@ -47,7 +54,10 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         current[key] = QJsonObject{{"phase", phase}, {"request", request}, {"token", token}};
         const QString body = concise(s.name, 120) + " / " + concise(host.isEmpty() ? box.host : host, 40)
             + '\n' + reason;
-        changes.raised.append({token, reply ? QObject::tr("Zerus — New reply") : QObject::tr("Zerus — Needs attention"), body});
+        // Consume foreground edges without changing unread/action state. They
+        // must not become delayed banners after focus leaves or the GUI restarts.
+        if (!applicationFocused)
+            changes.raised.append({token, reply ? QObject::tr("Zerus — New reply") : QObject::tr("Zerus — Needs attention"), body});
     };
     for (const auto &s : box.sessions) {
         // Acknowledged here or on another device: the existing clear path withdraws it.
@@ -62,7 +72,18 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         // belong to conversations so a rename/resume does not repeat a banner.
         if (s.state != "archived" && s.unreadReply && !s.replyId.isEmpty() && !s.conversationId.isEmpty()) {
             const auto key = "reply:" + s.cmd + ':' + s.conversationId;
-            if (!s.needsAction()) notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
+            // A main Stop can be a progress reply while background work is
+            // still running. Keep it unread, but wait for confirmed idleness
+            // before posting a banner. Retain delivered identities below so
+            // a working/idle cycle cannot notify again for the same reply.
+            const bool idle = s.activity == "idle" && s.phase == "idle" && s.subagentActiveCount == 0 && !s.needsAction();
+            // Hosts do not report routine ticks of a recurring scheduled job as
+            // replies; consume any that arrive. The reply after the schedule
+            // ends, or once its count is known, notifies as usual.
+            if (idle && s.replyScheduled && s.recurringSchedules > 0)
+                notice(s, key, "reply", s.replyId, {}, true, true);
+            else if (idle && (!s.replyScheduled || s.recurringSchedules == 0))
+                notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
             else if (previous.value(key).toObject().value("request") == s.replyId) current[key] = previous.value(key);
         }
         if (s.state != "running" || s.processState == "exited" || s.activity == "unknown"

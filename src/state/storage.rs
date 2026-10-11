@@ -160,6 +160,15 @@ pub(super) fn read_run(name: &str, run_id: &str) -> Result<Option<Value>> {
     Ok(record)
 }
 
+/// Bindings are named by `legacy_record_path`; other JSON files in the state
+/// root, such as desktop presence and read marks, are not session records.
+fn is_record_path(path: &Path) -> bool {
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        && stem.len() == 64
+        && stem.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub(super) fn records() -> Result<Vec<Value>> {
     if !root().exists() {
         return Ok(Vec::new());
@@ -167,7 +176,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
     let mut paths: Vec<PathBuf> = fs::read_dir(root())
         .map_err(|e| e.to_string())?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .filter(|path| is_record_path(path))
         .collect();
     let bindings = root().join("bindings");
     if bindings.exists() {
@@ -175,7 +184,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
             fs::read_dir(bindings)
                 .map_err(|e| e.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json")),
+                .filter(|path| is_record_path(path)),
         );
     }
     paths.sort();

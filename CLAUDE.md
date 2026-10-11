@@ -100,7 +100,7 @@ code. Nightly tags/assets are immutable and never become the latest stable relea
 Retry publishers with the same verified candidate; never rebuild or overwrite its
 assets. Pure VCS version bumps do not create AUR commits. Nightly prereleases also
 carry the tested Windows x86_64 portable zip unchanged; it stays GitHub-only (not
-mirrored or in the v1 feed), and stable releases have no Windows asset.
+mirrored or in the v1 feed). Stable releases and Dev builds have no Windows asset.
 
 Run checks appropriate to the change; see `CONTRIBUTING.md`. Update Beads status
 and export with `bd export -o .beads/issues.jsonl` before staging tracker changes.

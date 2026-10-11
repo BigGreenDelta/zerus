@@ -5,6 +5,7 @@ import base64
 import binascii
 import re
 import unicodedata
+import uuid
 from .context import validate_compaction_id, bounded
 
 MAX_COUNT = 8
@@ -19,8 +20,48 @@ LIMITS = {"max_count": MAX_COUNT, "max_file_bytes": MAX_FILE_BYTES,
 REFERENCE = re.compile(r"\[(?:Image|File) #[1-9][0-9]{0,8}\]")
 
 
+MAX_READ_BYTES = 512 * 1024  # One attachment_read chunk; base64 stays below the 1 MiB result limit.
+READ_FIELDS = frozenset({"request_id", "expected_run_id", "expected_conversation_id", "message_id", "index", "offset", "length"})
+
+
 def control(value: str) -> bool:
     return any(unicodedata.category(char) == "Cc" for char in value)
+
+
+def validate_read(payload: dict, request_id: str) -> None:
+    """One bounded byte range of a file named by its own receipt and position.
+
+    The phone never supplies a path; native hgs resolves the receipt for the
+    exact conversation and reads only its private attachment store.
+    """
+    if (not isinstance(payload, dict) or not READ_FIELDS <= set(payload)
+            or set(payload) - READ_FIELDS - {"archive_id", "agent_id"} or payload.get("request_id") != request_id):
+        raise ValueError("invalid attachment read fields")
+    bounded(payload["expected_run_id"], 128)
+    bounded(payload["expected_conversation_id"], 256)
+    message = bounded(payload["message_id"], 36)
+    try:
+        canonical = str(uuid.UUID(message))
+    except ValueError:
+        canonical = ""
+    if canonical != message:
+        raise ValueError("invalid attachment message identity")
+    index, offset, length = payload["index"], payload["offset"], payload["length"]
+    if (type(index) is not int or not 0 <= index < MAX_COUNT or type(offset) is not int or not 0 <= offset < MAX_FILE_BYTES
+            or type(length) is not int or not 1 <= length <= MAX_READ_BYTES or offset + length > MAX_FILE_BYTES):
+        raise ValueError("invalid attachment position or range")
+    if "agent_id" in payload:
+        agent = bounded(payload["agent_id"], 160)
+        if any(c in agent for c in "/\\"):
+            raise ValueError("invalid child identity")
+    if "archive_id" in payload:
+        archive = bounded(payload["archive_id"], 36)
+        try:
+            parsed = uuid.UUID(archive)
+        except ValueError:
+            parsed = None
+        if parsed is None or str(parsed) != archive or parsed.int == 0:
+            raise ValueError("invalid archive identity")
 
 
 def validate_send(payload: dict) -> None:

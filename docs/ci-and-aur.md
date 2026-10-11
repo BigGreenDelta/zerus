@@ -206,9 +206,9 @@ the Qt archives against the checksums of the Qt repository. The header of the lo
 records how to regenerate it; review a new lock like the other pins. The Qt
 directory is cached with `actions/cache` under a key that covers the Qt release,
 its modules and the lock. That cache follows the same token rules as every other
-cache: upstream `main` pushes and schedules save it, while PR and manual runs
-restore it and only log a warning when saving is refused. Such a run downloads
-about 1.5 GB of Qt when no cache entry exists yet.
+cache: upstream `main` pushes save it, while PR, manual and nightly runs restore
+it and only log a warning when saving is refused. Such a run downloads about
+1.5 GB of Qt when no cache entry exists yet.
 
 `scripts/ci/gui.sh` re-enters itself through `scripts/ci/msvc-env.py`, which
 locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake
@@ -252,7 +252,10 @@ executables with a minimal environment, without Qt or the bundle on `PATH`:
 local computer, and `hgs-tray.exe --selftest` must find the `hgs.exe` next to
 it. The job uploads the zip and logs as `windows-x86_64-<commit>` without
 recompressing them and keeps them for seven days (three for schedules). With Qt
-WebEngine the zip is about 140 MB, about 345 MB unpacked.
+WebEngine the zip is about 140 MB, about 345 MB unpacked. Only nightly assembly
+uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
+waits for this job like every other suite, so a Windows failure also holds back
+Dev, but Dev candidates carry no Windows build.
 
 On a Windows development PC the same steps run from Git Bash;
 [CONTRIBUTING.md](../CONTRIBUTING.md#windows) lists the requirements and commands.
@@ -553,8 +556,8 @@ accounts, credentials or configuration. Package installation does not start or
 stop services, edit user homes or replace the user's tmux configuration.
 
 The product package version currently follows the desktop version: `VERSION`
-and `tray/CMakeLists.txt` are **0.39.0**. The independently versioned compatible
-CLI is **1.48.0**. CI rejects a product/desktop version mismatch; packaging
+and `tray/CMakeLists.txt` are **0.42.0**. The independently versioned compatible
+CLI is **1.51.0**. CI rejects a product/desktop version mismatch; packaging
 records both versions in `build-info.json`, with the source commit when built
 from Git. For source-archive builds, the release manifest and archive SHA-256
 provide the commit provenance.
@@ -625,12 +628,15 @@ one exact commit. macOS can be explicitly disabled. Windows is not selected:
 stable candidates carry no Windows asset. It consumes that run's
 Arch package, verifies its embedded version/source commit, assembles source and
 binary archives, rebuilds both stable recipes, runs namcap and seals the result.
+Stable and nightly candidates call the common `checks.yml` workflow directly
+with read-only cache access. Their verification never includes the main-push dev
+publisher or requests its tag-writing permissions.
 
 ```sh
 # Only when the owner requests a hosted build:
-gh workflow run release.yml --ref main -f version=0.39.0
+gh workflow run release.yml --ref main -f version=0.42.0
 # After this manual run succeeds:
-gh run download RUN_ID --name zerus-0.39.0-candidate --dir /tmp/zerus-candidate
+gh run download RUN_ID --name zerus-0.42.0-candidate --dir /tmp/zerus-candidate
 cd /tmp/zerus-candidate
 sha256sum -c SHA256SUMS
 ```
@@ -667,7 +673,7 @@ one Ubuntu runner, does no compilation and allocates no Arch/macOS runners:
 ```sh
 # Only after review and an explicit owner publication request:
 gh workflow run publish.yml --ref main \
-  -f version=0.39.0 -f candidate_run=RUN_ID
+  -f version=0.42.0 -f candidate_run=RUN_ID
 ```
 
 The publisher verifies the same-repository manual run came from `main`, succeeded,
@@ -882,3 +888,98 @@ version. The upgrade retained an existing isolated tmux server, terminal process
 session identity and user links. Installed-package checks passed again; all files
 expected under the container's pacman extraction policy were present, and the
 downloaded archive's build manifest matched the exact verified source commit.
+
+### Stable release 0.41.0 and Android 0.1.29
+
+On **2026-10-11**, the owner requested a new release from main and updates to the
+installed clients, including macOS. The [release candidate](https://github.com/ufna/zerus/actions/runs/38160427346)
+pins `39018336bfed70d57af148ecb0310c08384ed385` and passed the complete
+Linux/Arch/macOS matrix, including the pinned keyless native Codex contracts,
+relay PostgreSQL/memory qualification and both stable package rebuilds. Review
+verified the Actions artifact digest, source contents against `git archive`,
+embedded binary provenance, library floors, dependency notices and sealed assets.
+The [protected publisher](https://github.com/ufna/zerus/actions/runs/38162077178)
+published [v0.41.0](https://github.com/ufna/zerus/releases/tag/v0.41.0) as the latest
+stable release. All seven immutable asset digests and the three anonymous AUR Git
+recipes match the candidate; the VCS recipe retains its seed for version-only changes.
+
+Existing Linux and macOS source installations now run **Zerus 0.41.0 / hgs
+1.50.0** from that exact revision. On both machines, focused composer,
+question-form and update tests passed, installed/running artifact hashes match
+the qualified builds, and the managed GUI claimed its socket before activation.
+Updates preserved native process identities, existing settings and drafts, with
+private rollback backups. The Mac bundle uses the existing ad-hoc source-install
+signature; this release does not provide a notarized public macOS installer.
+Background draft persistence is installed, but full input responsiveness under
+general macOS computer load still requires workload verification.
+
+[Android 0.1.29](https://github.com/ufna/zerus/releases/tag/android-dev-0.1.29)
+(version code **30**) uses the same source, package and published signing
+certificate. Firebase-enabled Debug and Release each passed 597 unit tests;
+release lint passed. Its exact minified APK, source archive, metadata and checksums
+were verified anonymously after publication, while APK-bound R8 diagnostics remain
+private. Scheduled synchronization published the new desktop and Android catalogs;
+their anonymous downloads match the sealed candidates. No physical Android device
+was connected for installation. The existing Android signer and Firebase inputs
+are now provisioned in the protected release environment. Continuous main-build
+Dev activation still requires the Actions-aware mirror and its read credential;
+the same-app channel selector alone does not activate that pipeline.
+
+### Stable release 0.42.0 and Android 0.1.30
+
+On **2026-10-11**, the owner requested releases for all platforms and updates to the
+installed clients. The [release candidate](https://github.com/ufna/zerus/actions/runs/38166908970)
+pins `dfc63abd15ae71d90378ec1d962ebd8dbd8dc2a9` and passed the complete
+Linux/Arch/macOS matrix and both stable package rebuilds. Review verified the
+artifact checksums, the manifest source commit and the source archive file by
+file against `git archive` of that commit.
+
+The first two [publisher](https://github.com/ufna/zerus/actions/runs/38168633520)
+runs failed before any public write: GitHub answered `403 Resource not accessible
+by integration` when the job token created the draft, although it had
+`contents: write` (zerus-ktg3). Their AUR step was only the `--dry-run` preflight.
+The owner token then created the `v0.42.0` tag at the candidate commit and a draft
+holding exactly the candidate assets, with every size and digest verified. The
+[third publisher run](https://github.com/ufna/zerus/actions/runs/38168967736)
+verified that draft, published [v0.42.0](https://github.com/ufna/zerus/releases/tag/v0.42.0)
+as the latest stable release, checked every asset anonymously and synchronized
+`zerus` and `zerus-ade-bin`; their AUR Git recipes name `0.42.0-1` and the v0.42.0
+assets.
+
+[Android 0.1.30](https://github.com/ufna/zerus/releases/tag/android-dev-0.1.30)
+(version code **31**) was built locally from the exact archived source with the
+existing signer and Firebase inputs. Debug and Release unit suites each passed 598
+tests and release lint passed. The signing certificate matches 0.1.29, the source
+archive passed Gitleaks 8.30.1, and the published assets match the sealed candidate
+anonymously; the R8 mapping stays private. The public v1 Android dev feed serves
+the same APK digest, and the v1 desktop stable feed serves the v0.42.0 package and
+archive digests. No Android device was connected.
+
+Existing Linux and macOS source installations run **Zerus 0.42.0 / hgs 1.51.0**
+from that commit. Native agent and tmux processes were unchanged; only the GUI and
+hgs helper services restarted.
+
+### Shared Dev channel activation
+
+On **2026-10-11**, [main CI 38170405374](https://github.com/ufna/zerus/actions/runs/38170405374)
+passed the full Linux/Arch/macOS matrix and sealed desktop and Android Dev builds
+from `196d2817ebb9efbe4521d55d9a2e91702dbffa48`. The lightweight `dev` tag advanced
+to that source. [Protected publisher 38172339849](https://github.com/ufna/zerus/actions/runs/38172339849)
+published this same candidate through the existing mirror after the Actions archive
+media-type fix in `d45e8d2`; no candidate was rebuilt or GitHub Release created.
+Both anonymous [desktop Dev](https://zerus.dev/updates/v2/desktop/dev.json) and
+[Android Dev](https://zerus.dev/updates/v2/android/dev.json) catalogs, every payload
+size/digest and exact Git source archive were verified. Android **0.1.30-dev.201 /
+code 10201** preserves `app.zerus.mobile` and the original signing certificate.
+
+`DEV_UPDATES_ENABLED=true` now enables successful-main publication. The existing
+protected Android inputs and restricted SSH transport are provisioned; each
+publisher lends only its repository-scoped Actions/Contents-read job token to the
+existing unprivileged mirror. There is no stored personal token or second public
+host. The original three mirror timers and legacy v1 catalogs remain in use;
+GitHub latest remains `v0.42.0`. A fresh isolated desktop controller discovered the
+real public Dev feed, emitted one verified notice, persisted its channel choice
+and suppressed a duplicate check. Retention keeps three Dev builds per platform,
+a 72-hour retirement grace and the shared 20 GiB limit. Desktop installation stays
+explicit; macOS Dev currently offers source and notices while its signed binary
+distribution remains tracked in `zerus-osef.2`.

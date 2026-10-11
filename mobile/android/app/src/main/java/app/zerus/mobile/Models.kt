@@ -14,7 +14,7 @@ data class Connection(val id: String, val label: String, val url: String, val to
 data class Machine(val connectionId: String, val id: String, val name: String, val online: Boolean,
     val nativeName: String = name, val serverAliases: Set<String> = emptySet(),
     val route: MachineRoute = MachineRoute.Unknown, val lastKnown: Boolean = false,
-    val hgsVersion: String = "", val mobileDelivery: String = "")
+    val hgsVersion: String = "", val mobileDelivery: String = "", val lastSeenAt: Double? = null)
 data class Target(val computerId: String, val session: String, val run: String, val conversation: String, val connectionId: String = "demo", val archiveId: String = "", val agentId: String = "", val parentConversation: String = "") {
     val key: String get() = JSONArray(listOf(connectionId, computerId, session, run, conversation) + (if (archiveId.isBlank()) emptyList() else listOf(archiveId)) + (if(agentId.isBlank()) emptyList() else listOf("agent",agentId,parentConversation))).toString()
     fun json(): JSONObject {
@@ -37,7 +37,10 @@ data class Event(val id: String, val role: String, val text: String, val time: S
     val delivery: String = "", val outgoingId: String = "", val nativeType: String = "", val submittedText: String = "",
     val originalId: String = "", val historyId: String = "", val historyCursor: String = "",
     val historyEpoch: String = "", val incomingSeq: Long? = null, val originalIds: List<String> = emptyList(), val detailTruncated: Boolean = false)
-data class DisplayedAttachment(val name: String, val mime: String, val bytes: Long, val reference: String = "")
+/** Display metadata plus the identities that can open the exact bytes: a native
+ * receipt position (`messageId`, `index`) and/or this phone's private copy. */
+data class DisplayedAttachment(val name: String, val mime: String, val bytes: Long, val reference: String = "",
+    val messageId: String = "", val index: Int = -1, val localId: String = "", val sha256: String = "")
 data class Choice(val id: String, val label: String, val description: String)
 data class Prompt(val id: String, val text: String, val choices: List<Choice>, val multi: Boolean,
     val required: Boolean, val other: Boolean, val header: String = "", val body: String = "",
@@ -76,7 +79,12 @@ object Demo {
     ).mapIndexed { index, (title, status, preview) -> Session(Target("demo", "example-$index", "demo-run", "demo-conversation"),
         title, listOf("Codex", "Claude Code", "Kimi Code")[index], status, "Zerus", preview,
         if (index == 0) 1 else 0, JSONObject().put("state", "running").put("process_state", "running").put("tracked", true)
-            .put("tag", title).put("activity", if (index < 2) "busy" else "idle").put("phase", if (index == 0) "input" else if (index == 1) "working" else "idle")) }
+            .put("tag", title).put("activity", if (index < 2) "busy" else "idle").put("phase", if (index == 0) "input" else if (index == 1) "working" else "idle")
+            .put("git_metadata_state", "ok").put("git_branch", listOf("api-migration", "ui-polish", "main")[index])
+            .also { raw -> if (index == 1) raw.put("git_worktree", true).put("git_worktree_name", "zerus-ui-polish")
+                .put("subagent_source", "hooks").put("subagent_count", 1).put("subagent_total_count", 1).put("subagent_counts_complete", true)
+                .put("subagents", JSONObject().put("reviewer", JSONObject().put("label", "Accessibility review").put("state", "working")
+                    .put("task", "Checking focus order and contrast in the session list."))) }) }
     val events = listOf(Event("1", "You", "Review the API migration and call out any compatibility risks.", "10:42"),
         Event("2", "Codex", "I found two clients using the previous endpoint. I can keep a compatibility route while the new API rolls out.", "10:43"),
         Event("3", "Codex", "Should I keep the previous endpoint available during migration?", "10:44"))

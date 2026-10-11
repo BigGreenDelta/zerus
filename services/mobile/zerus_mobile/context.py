@@ -8,10 +8,19 @@ TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
 LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktree_create"})
 COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
-OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
+OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read"})
+READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read"})
+# Predicate of the persisted read_history_v3 index and the one-hour read class.
+# attachment_read is a read with its own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"
+# Every read operation, for counters and tombstone exclusion (never an index predicate).
+READ_CLASS_SQL = "(" + ",".join(f"'{operation}'" for operation in sorted(READ_OPERATIONS)) + ")"
+# Attachment bytes are carried, never kept: removed this long after completion,
+# or this long after the phone has read the terminal receipt.
+ATTACHMENT_RESULT_TTL = 60
+ATTACHMENT_READ_GRACE = 5
 CAPABILITY_OPERATIONS = OPERATIONS - {"inspect", "send", "answer", "interrupt"}
 IDENTITY_FIELDS = frozenset({"request_id", "expected_run_id", "expected_conversation_id"})
 

@@ -242,8 +242,17 @@ Linux application badges and the macOS Dock show the attention count, hiding zer
 
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
-request; resolved notifications are removed. Main-agent replies and explicit child
-questions can notify; ordinary child results and errors stay with the parent.
+request; resolved notifications are removed. Main-agent reply banners wait until
+the session is idle and has no reported active children; intermediate replies
+remain unread in Activity while work continues. Routine replies from a turn the
+agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
+job remains: they appear in Activity without an unread mark, badge or banner. The
+reply after the last job ends, a one-shot reminder and any reply to the person's
+prompt notify as usual. Explicit input and approval
+requests still notify immediately. Ordinary child results and errors stay with
+the parent. While Zerus has application focus, session banners are suppressed and
+are not replayed when focus leaves. Unread replies and attention requests remain
+visible in the interface, including requests from other sessions and machines.
 Delivery failures show a reason and retry after a minute while still relevant.
 macOS uses Notification Center and needs its system permission; Focus and OS
 notification settings still apply. Notification Center looks up the icon by bundle
@@ -288,7 +297,10 @@ cannot show a green check.
 
 **Ready** means a reply ended, not that a long-running task is complete. Working
 and compacting timers use native start evidence and update locally without extra
-host requests. Theme, density, animation and machine/project label appearance are
+host requests. An idle agent with pending jobs it scheduled for itself (Kimi
+`CronCreate`) is **Scheduled**: its badge and detail show the next run time
+instead of a timer, or "due" once that time has passed. A question, approval or
+error still takes precedence, and work shows as Working. Theme, density, animation and machine/project label appearance are
 local preferences. **Settings → Appearance → Content scale** adjusts Activity,
 questions, the message field and Terminal from 75% to 200% in 5% steps, with 100%
 as the default; the session list, the side panel, the session header and its tabs
@@ -320,11 +332,14 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
-The **Active** filter combines sessions currently working with those in
-**Needs attention**, counting each session once. It replaces the Working filter
-and also applies to content search. Explicit review-later reminders remain
-active offline; stale work alone does not. Archives stay in Archive. The
-Dashboard's Active counter opens this same filter.
+The **Active** filter combines sessions currently working or Scheduled, those in
+**Needs attention**, and sessions with unsent text or attachment drafts, counting
+each session once. Desktop and Android use the same filter IDs and membership
+rules; drafts remain local to each device. Drafts for visible subagents also keep
+their parent session active. Drafts and explicit review-later reminders remain
+active offline; stale work alone does not. Archives stay in Archive. Active also
+applies to desktop content search, and the Dashboard's Active counter opens this
+same filter. Creating, clearing or sending a draft updates the filter and count.
 
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project
@@ -430,6 +445,16 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Ordinary text, cursor and question-form edits save through one ordered background
+writer. Waiting edits coalesce to the latest snapshot per draft, so typing does
+not wait for disk commits. The editor shows **Saving draft** until its latest
+checkpoint completes; a crash before that checkpoint can lose pending edits.
+Graceful close drains outstanding writes. Sending, renaming and delivery-state
+changes use durable barriers, and an older queued save cannot replace a later
+checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
+immutable. Save failures remain visible and block sending until persistence
+succeeds.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
 from ended or missing sessions into the current session. Copying keeps the dialog
 open; restoring never sends anything and replacing an existing draft requires
@@ -489,6 +514,13 @@ locally. They restore only for the same machine/session, run, conversation and
 question hash. Interrupted submissions remain locked until reviewed; confirmed
 queued answers keep their submitted state after a GUI restart.
 
+Questions the agent wrote render its Markdown like replies in Activity: the
+prompt, details and option descriptions, at the card's text sizes. A link opens
+only when clicked: web links in the default browser and file references in the
+file dialog. Other link targets, raw HTML and images remain text. Approval and
+trust disclosures and panels read from Terminal, such as folder trust and resume
+prompts, are shown exactly as reported.
+
 Question cards fit the current question's content, up to 600 px or 60% of the
 Activity area's height, whichever is smaller. Longer prompts and options scroll
 inside the card; freeform answer fields and actions stay visible. Short questions
@@ -518,16 +550,34 @@ option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
 plan approval stay visible with **Open Terminal**.
 
+Claude Code can also ask its own questions without an agent tool call, such as
+whether to switch models after a safeguard stop. Activity shows the question and
+its options verbatim with **Open Terminal** while Terminal still shows them: no
+tool result can acknowledge an answer, so Zerus never chooses one of these
+options. When Claude waits for input and no request explains it, Activity shows
+the chooser visible at the bottom of Terminal, such as **Session paused**, in
+the same read-only way. A new prompt ends any earlier request.
+
 Supported startup prompts include Claude workspace trust and auto-mode consent,
 Codex folder access, **Hooks need review** and **Update available**, and Kimi
 folder/MCP trust. These can appear before a conversation exists, but only with
 verified startup identity.
-Claude workspace trust preserves its full permissions warning; Kimi includes the
-visible MCP commands. Trust persistence belongs to the native agent.
-Already-running Claude sessions can retain the exact Keychain or Bitwarden
-launcher notices above the complete workspace-trust panel. These notices do not
-change the request identity or appear in its disclosure; unrelated terminal
-output remains unsupported.
+A recognized panel must show its native title, folder, exact choices and key
+hint. Its explanation is shown verbatim and pinned to the answer, so changed
+native wording stays answerable: Claude workspace trust preserves its full
+permissions warning, Kimi includes the visible MCP commands, and Claude's
+auto-mode and resume panels keep their explanation and cost warning. Zerus adds
+descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
+folder access names the repository root that Codex will trust.
+Trust persistence belongs to the native agent.
+Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
+notices above the complete workspace-trust panel; Claude also accepts its
+Keychain notice. These notices do not change the request identity or appear in
+its disclosure.
+Any other chooser before a conversation exists, such as a renamed option, an
+unreviewed update command, a panel for another folder or unrelated output above
+it, appears read-only with its visible text and **Open Terminal**. Zerus never
+answers it, and messages wait until it is answered in Terminal.
 
 Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
 abbreviations that match the verified launch directory. It remains answerable
@@ -584,7 +634,13 @@ the current settings without retrying the stale request or showing a failure.
 
 Native clear/compact operations are capability-gated and require exact identity.
 **Clear session** requires confirmation naming the session and host, preserves
-unsent drafts and rechecks identity. DeepSeek context reset is unavailable until
+unsent drafts and rechecks identity. While Claude shows an approval, question or
+another chooser, **Clear session** asks for a separate **Dismiss and clear**
+confirmation: Zerus presses Esc once, as in Terminal, so an approval is denied and
+a question stays unanswered. It runs `/clear` only after the chooser closed and the
+empty native prompt is verified, and never repeats an uncertain attempt. Startup
+choices such as resume, permission mode and folder trust are answered in Activity
+instead. DeepSeek context reset is unavailable until
 its native Session Controller provides the supported operation. A confirmed clear
 adds an amber **Session cleared** boundary to Activity and keeps the earlier local
 timeline above it: the agent no longer sees that history, but you can still read
@@ -691,7 +747,9 @@ closing it clears this temporary choice. Selecting a listed folder unpins it.
 A folder outside the project shows a warning and is added only after a successful
 launch with the matching launch ID. Cancellation and launch failure add nothing.
 A worktree of a project folder on that computer is not outside the project, so
-starting there adds no folder; **Choose existing…** offers it again.
+starting there adds no folder; **Choose existing…** offers it again. When an
+automatic worktree is generated from an outside folder, the session starts in
+the worktree and the outside folder, not the worktree, joins the project.
 
 New launches immediately show **Starting…** until the matching session appears.
 Controls stay disabled before confirmation. Errors remove the placeholder and
@@ -840,7 +898,12 @@ CLI is `hgs [@host] worktrees create --path /repo --branch feature/task
 --destination /repo-task --base HEAD --json`. Zerus also verifies `--common-dir`
 and a request ID. Creation uses normal `git worktree add -b`, including configured
 checkout hooks, with no force, fetch or deletion. The ref is resolved before
-creation. The five-minute operation can leave partial results after failure;
+creation. When the base is a local branch with a remote upstream, such as `HEAD`
+on `main` tracking `origin/main`, the new branch inherits that upstream so its
+session card can verify publication; Git's default `simple` push mode still
+refuses a bare `git push` to the differently named branch. Commits, tags,
+detached `HEAD`, local upstreams and `push.default=upstream` or `tracking` leave
+the new branch without an upstream. The five-minute operation can leave partial results after failure;
 inspect the destination before retrying. Cancelling the session form preserves
 the created folder and branch. Closing or archiving a session never removes them.
 Automatic creation requires a fresh verified repository on the selected computer.
@@ -1272,6 +1335,9 @@ and installs it under `~/Applications/hgs-tray.app` with
 for the tray. Signing precedes bundle replacement; matching code hashes avoid
 unnecessary replacement. Ad-hoc signing is not a Developer ID distribution
 signature. LaunchAgent crash recovery is independent of native agent engines.
+Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
+and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
+the standard install directories listed under **Desktop option** below.
 
 ```sh
 launchctl list | grep com.hgdev.hgs-tray
@@ -1287,7 +1353,7 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable, normally discovered through PATH; on Windows `hgs.exe` next to `hgs-tray.exe` first |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
@@ -1376,8 +1442,10 @@ desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when neede
 `hgs swarm get` reports `worker: {running, current}` as elsewhere.
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
-`PATH`; `--hgs` overrides both. Settings are in `%APPDATA%\hgdev\hgs-tray.ini`, with
-drafts beside it, and one instance runs per user. When the local box reports
+`PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS
+fallback to `~/.local/bin` and Homebrew does not apply. Settings are in
+`%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
+user. When the local box reports
 `local_sessions: false`, the app offers remote machines only: in New session,
 Overview, the tray menu, Accounts, Projects and search. The Machines page lists
 this computer as a control console without SSH settings. Settings → Mobile
@@ -1391,8 +1459,11 @@ restarts the app with the same options.
 releases carry it. Settings → Updates therefore uses the nightly channel by
 default on a portable installation. It reports a nightly with a newer product
 version than the running app and links to its release page; nightlies of the same
-product version cannot be told apart. The zip is published on GitHub only: the
-zerus.dev mirror neither stores it nor lists it in the v1 desktop feed.
+product version cannot be told apart. Stable releases and Dev builds have no
+Windows build: on those channels Updates says so, never reports an update and
+offers no dev download. The zip is published on GitHub only: the zerus.dev mirror
+neither stores it nor lists it in the v1 desktop feed, and the v2 Dev catalogs
+have no Windows artifact.
 
 ## JSON and external clients
 
@@ -1465,6 +1536,19 @@ host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
+
+Kimi sessions report `schedules: {count, recurring, next_at}` folded from the
+native cron journal: pending jobs the agent scheduled for itself, how many of them
+recur, and the earliest next run in seconds since the epoch (`null` when no
+expression can be evaluated). The next run is the first local-time minute matching
+a job's five-field expression after its last fire or creation; Kimi's small jitter
+is not modeled, and the value never depends on the time of the listing. The object
+is `null` while the journal cannot be read. While `schedules.recurring` is
+positive, turns opened by those jobs without a prompt from the person do not
+advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
+`reply_scheduled` is true when the reported reply ended a scheduled turn, which
+happens once no recurring job remains or while the count is unknown. Other
+providers report false and omit `schedules`.
 
 ```sh
 printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5","attention_signature":null}' |

@@ -33,6 +33,114 @@ class WorkflowSecurityTests(unittest.TestCase):
     def setUp(self):
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
 
+    def dev_selected(self, workflow, name, results, cancelled=False, event='push',
+                     ref='refs/heads/main', repository='ufna/zerus', enabled='true', private=False):
+        expression = field(job(workflow, name), 'if')
+        # Without a status function GitHub adds success() over the dependency
+        # chain, including the deliberately skipped PR/manual branch on main.
+        self.assertIn('!cancelled()', expression)
+        expression = expression.replace('&&', ' and ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        return bool(eval(expression, {'__builtins__': {}}, {
+            'cancelled': lambda: cancelled,
+            'github': SimpleNamespace(repository=repository, ref=ref, event_name=event,
+                                      event=SimpleNamespace(repository=SimpleNamespace(private=private))),
+            'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled),
+            'needs': SimpleNamespace(**{key: SimpleNamespace(result=value) for key,value in results.items()}),
+        }))
+
+    def test_dev_requires_exact_main_gate_without_inheriting_skipped_review(self):
+        passed = {'gate':'success', 'automatic':'success', 'review':'skipped'}
+        self.assertTrue(self.dev_selected(self.ci, 'dev', passed))
+        for key in ['gate','automatic']:
+            for result in ['failure','cancelled','skipped']:
+                with self.subTest(key=key, result=result):
+                    self.assertFalse(self.dev_selected(self.ci, 'dev', {**passed,key:result}))
+        for overrides in [dict(cancelled=True), dict(event='pull_request'), dict(event='workflow_dispatch'),
+                          dict(ref='refs/heads/feature'), dict(repository='example/zerus'),
+                          dict(enabled=''), dict(private=True)]:
+            with self.subTest(overrides=overrides):
+                self.assertFalse(self.dev_selected(self.ci, 'dev', passed, **overrides))
+
+    def test_dev_reusable_jobs_preserve_status_and_candidate_success_checks(self):
+        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
+        passed = {'desktop':'success', 'android':'success', 'review':'skipped'}
+        for name in ['desktop','android','channel']:
+            self.assertTrue(self.dev_selected(workflow,name,passed))
+            for overrides in [dict(cancelled=True),dict(event='pull_request'),
+                              dict(ref='refs/heads/feature'),dict(repository='example/zerus')]:
+                with self.subTest(name=name,overrides=overrides):
+                    self.assertFalse(self.dev_selected(workflow,name,passed,**overrides))
+        for key in ['desktop','android']:
+            for result in ['failure','cancelled','skipped']:
+                with self.subTest(key=key,result=result):
+                    self.assertFalse(self.dev_selected(workflow,'channel',{**passed,key:result}))
+
+    def test_dev_passes_only_required_android_secrets_to_protected_build(self):
+        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
+        names = {'ANDROID_KEYSTORE_BASE64','ANDROID_STORE_PASSWORD','ANDROID_KEY_ALIAS',
+                 'ANDROID_KEY_PASSWORD','ANDROID_GOOGLE_SERVICES_JSON'}
+        caller = job(self.ci,'dev')
+        passed = dict(re.findall(r'(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$',caller))
+        self.assertEqual(passed,{name:name for name in names})
+        self.assertNotIn('secrets: inherit',caller)
+        header = workflow.split('\npermissions:',1)[0]
+        declared = set(re.findall(r'(?m)^      (\w+):\n        required: true$',header))
+        self.assertEqual(declared,names)
+        self.assertEqual(field(job(workflow,'android'),'environment'),'release')
+
+    def test_dev_main_build_finishes_while_newer_main_waits(self):
+        expression = re.search(r'(?m)^  cancel-in-progress: \$\{\{ (.*) \}\}$', self.ci)[1]
+        expression = expression.replace('&&', ' and ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        for event, ref, repository, enabled, private, cancels in [
+            ('push', 'refs/heads/main', 'ufna/zerus', 'true', False, False),
+            ('push', 'refs/heads/main', 'ufna/zerus', '', False, True),
+            ('push', 'refs/heads/main', 'ufna/zerus', 'true', True, True),
+            ('push', 'refs/heads/main', 'example/zerus', 'true', False, True),
+            ('push', 'refs/heads/feature', 'ufna/zerus', 'true', False, True),
+            ('pull_request', 'refs/pull/123/merge', 'ufna/zerus', 'true', False, True),
+            ('workflow_dispatch', 'refs/heads/main', 'ufna/zerus', 'true', False, True),
+        ]:
+            github = SimpleNamespace(repository=repository, ref=ref, event_name=event,
+                                     event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+            with self.subTest(event=event, repository=repository, enabled=enabled, private=private):
+                self.assertEqual(bool(eval(expression, {'__builtins__': {}}, {
+                    'github': github, 'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled)})), cancels)
+
+    def test_dev_publisher_accepts_only_successful_main_events_or_main_retry(self):
+        workflow = (ROOT / '.github/workflows/publish-dev.yml').read_text()
+        expression = field(job(workflow, 'publish'), 'if').replace('&&', ' and ').replace('||', ' or ')
+        expression = re.sub(r'\bfalse\b', 'False', expression)
+        fixtures = [
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, True),
+            ('workflow_run', 'push', 'failure', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'cancelled', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'pull_request', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'feature', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'example/zerus', 'refs/heads/main', 'true', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', '', False, False),
+            ('workflow_run', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', True, False),
+            ('workflow_dispatch', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, True),
+            ('workflow_dispatch', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/feature', 'true', False, False),
+            ('pull_request', 'push', 'success', 'main', 'ufna/zerus', 'refs/heads/main', 'true', False, False),
+        ]
+        for event, source_event, conclusion, branch, repository, ref, enabled, private, allowed in fixtures:
+            source = SimpleNamespace(event=source_event, conclusion=conclusion, head_branch=branch,
+                                     head_repository=SimpleNamespace(full_name=repository))
+            github = SimpleNamespace(repository='ufna/zerus', ref=ref, event_name=event,
+                                     event=SimpleNamespace(repository=SimpleNamespace(private=private), workflow_run=source))
+            with self.subTest(event=event, source=source, ref=ref, enabled=enabled, private=private):
+                self.assertEqual(bool(eval(expression, {'__builtins__': {}}, {
+                    'github': github, 'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled)})), allowed)
+        self.assertEqual(field(job(workflow, 'publish'), 'environment'), 'release')
+        self.assertIn('actions: read', workflow)
+        self.assertIn('contents: read', workflow)
+        self.assertNotRegex(workflow, r'(?m)^\s*(actions|contents): write')
+        self.assertEqual(re.search(r'(?m)^cache-mode: (.*)$', workflow)[1], 'none')
+
     def selected(self, name, event, ref="refs/heads/main", test_ref="", repository="ufna/zerus"):
         # These are the actual committed conditions, evaluated over synthetic
         # event fixtures. No user strings become executable test expressions.
@@ -195,13 +303,47 @@ class WorkflowSecurityTests(unittest.TestCase):
                 for runner in re.findall(r'"((?:ubuntu|macos|windows)-[^"]+)"', text):
                     self.assertIn(runner, labels)
 
+    def test_dev_candidates_follow_the_whole_main_matrix_but_take_only_the_arch_package(self):
+        # Dev starts after the main gate, which selects every suite on a push,
+        # Windows included: a Windows failure also holds back Dev.
+        selected = dict(re.findall(r"(?m)^      (run_\w+): \$\{\{ (.*) \}\}$", job(self.ci, "automatic")))
+        self.assertEqual(set(selected), {"run_linux", "run_arch", "run_macos", "run_windows"})
+        for name, expression in selected.items():
+            with self.subTest(suite=name):
+                self.assertTrue(eval(expression.replace("||", " or "), {"__builtins__": {}}, {
+                    "github": SimpleNamespace(event_name="push"), "inputs": SimpleNamespace(**{name: False})}))
+        self.assertIn("    needs: [gate, automatic]\n", job(self.ci, "dev"))
+        # The v2 Dev catalogs have no Windows artifact kind; the portable zip
+        # stays a nightly-only GitHub asset.
+        dev = (ROOT / ".github/workflows/dev.yml").read_text()
+        downloads = re.findall(r"uses: actions/download-artifact@\S+ # v[\d.]+\n        with:\n          name: (.+)", dev)
+        self.assertEqual(downloads, ["arch-x86_64-${{ github.sha }}"])
+        self.assertEqual(dev.count("actions/download-artifact@"), len(downloads))
+        self.assertNotIn("windows-x86_64", dev)
+
     def test_privileged_publishers_have_no_cache_access(self):
-        for name in ("publish.yml", "publish-nightly.yml"):
+        for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "publish-dev.yml"):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
                 self.assertRegex(text, r"(?m)^cache-mode: none$")
                 self.assertNotIn("actions/cache@", text)
                 self.assertNotRegex(text, r"(?m)^    cache-mode:")
+
+    def test_candidate_verification_has_a_read_only_reusable_chain(self):
+        for name in ("release.yml", "nightly.yml"):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                verify = job(text, "verify")
+                self.assertEqual(field(verify, "cache-mode"), "read")
+                self.assertEqual(field(verify, "uses"), "./.github/workflows/checks.yml")
+                checks = (ROOT / ".github/workflows/checks.yml").read_text()
+                # GitHub validates nested permissions even for skipped jobs.
+                # A candidate must never request publication write permissions.
+                self.assertNotRegex(checks, r"(?m)^\s*contents:\s*write\s*$")
+                self.assertNotIn("./.github/workflows/dev.yml", checks)
+                self.assertIn("run_linux: true", verify)
+                self.assertIn("run_arch: true", verify)
+                self.assertIn("run_macos:", verify)
 
 
 if __name__ == "__main__":

@@ -69,8 +69,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
     suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
     suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
-        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send")) { "This control belongs to the parent session." }
-        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
+        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send", "attachment_read")) { "This control belongs to the parent session." }
+        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
         return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
             .put("computer_id", target.computerId).put("session", target.session).put("operation", operation).put("payload", payload)).also {
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
@@ -162,7 +162,8 @@ object NativeParser {
             }
             val source = value.string("source").ifBlank { stream }
             val files = value.optJSONArray("attachments")?.objects().orEmpty().map {
-                DisplayedAttachment(it.string("name"), it.string("mime"), it.optLong("bytes"), it.string("reference"))
+                DisplayedAttachment(it.string("name"), it.string("mime"), it.optLong("bytes"), it.string("reference"),
+                    it.string("request_id"), (it.opt("index") as? Int) ?: -1)
             }
             val text = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
                 else value.string("detail", "text", "message", "prompt", "submitted_text")

@@ -21,6 +21,7 @@
 #include "SingleInstance.h"
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
+#include "MessageBoxIcons.h"
 #endif
 
 #include <cstdio>
@@ -144,6 +145,12 @@ int main(int argc, char *argv[])
         errOut << QStringLiteral("hgs-tray: %1\n\n").arg(parseError) << AppConfig::usage();
         return 2;
     }
+#ifndef Q_OS_WIN
+    // Windows resolves hgs.exe next to hgs-tray.exe first (resolveHgsPath below).
+    if (cfg.hgsPath.isEmpty())
+        cfg.hgsPath = AppConfig::fallbackHgsPath(qEnvironmentVariable("PATH"),
+                                                 AppConfig::hgsInstallDirs(QDir::homePath()));
+#endif
 
     if (cfg.selfTest) {
         QCoreApplication app(argc, argv);
@@ -177,6 +184,9 @@ int main(int argc, char *argv[])
 #endif
     ScrollbarTheme scrollbarTheme(app);
     WorkspaceFocus::install();
+#ifdef Q_OS_MACOS
+    MessageBoxIcons::install();
+#endif
     QCoreApplication::setOrganizationName(QStringLiteral("hgdev"));
     QCoreApplication::setApplicationName(QStringLiteral("hgs-tray"));
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));

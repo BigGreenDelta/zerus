@@ -136,6 +136,11 @@ class AttachmentStore(context: Context) {
         }
     }
 
+    /** Authenticated plaintext of a saved draft/outbox file, for local viewing only. */
+    suspend fun decrypt(attachment: Attachment, sink: (ByteArray) -> Unit) = withContext(Dispatchers.IO) {
+        FILE_LOCK.withLock { files.decrypt(attachment, { ensureActive() }, sink) }
+    }
+
     suspend fun remove(id: String, protectedIds: Set<String>): Boolean = withContext(Dispatchers.IO) {
         FILE_LOCK.withLock { files.remove(id, protectedIds) }
     }
@@ -225,6 +230,15 @@ internal class EncryptedAttachmentFiles(
     }
 
     fun wire(attachment: Attachment, checkCancellation: () -> Unit = {}): JSONObject {
+        val result = ByteArrayOutputStream()
+        decrypt(attachment, checkCancellation, result::write)
+        return JSONObject().put("name", attachment.name).put("mime", attachment.mime)
+            .put("data_base64", Base64.getEncoder().encodeToString(result.toByteArray()))
+    }
+
+    /** Streams plaintext to [sink]. It is authenticated only when this returns,
+     * so a caller must discard everything it received if this throws. */
+    fun decrypt(attachment: Attachment, checkCancellation: () -> Unit = {}, sink: (ByteArray) -> Unit) {
         AttachmentPolicy.validate(attachment)
         directory()
         val source = file(attachment.id)
@@ -232,7 +246,6 @@ internal class EncryptedAttachmentFiles(
             || source.length() !in 33..(AttachmentPolicy.MAX_FILE_BYTES + 32))
             throw AttachmentException("Saved attachment is missing or changed. Select the file again.")
         try {
-            val result = ByteArrayOutputStream()
             val digest = MessageDigest.getInstance("SHA-256")
             var count = 0L
             fun plaintext(value: ByteArray?) {
@@ -241,7 +254,7 @@ internal class EncryptedAttachmentFiles(
                 if (count > attachment.bytes || count > AttachmentPolicy.MAX_FILE_BYTES)
                     throw AttachmentException("Saved attachment size changed. Select the file again.")
                 digest.update(value)
-                result.write(value)
+                sink(value)
             }
             DataInputStream(source.inputStream().buffered()).use { input ->
                 if (input.readInt() != MAGIC) throw AttachmentException("Saved attachment is invalid.")
@@ -266,8 +279,6 @@ internal class EncryptedAttachmentFiles(
             checkCancellation()
             if (count != attachment.bytes || digest.digest().hex() != attachment.sha256)
                 throw AttachmentException("Saved attachment content changed. Select the file again.")
-            return JSONObject().put("name", attachment.name).put("mime", attachment.mime)
-                .put("data_base64", Base64.getEncoder().encodeToString(result.toByteArray()))
         } catch (error: AttachmentException) { throw error
         } catch (_: IOException) {
             throw AttachmentException("Saved attachment could not be read. Select the file again.")

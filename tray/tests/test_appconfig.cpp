@@ -51,7 +51,13 @@ private slots:
     void writeAppendsNewlineToFileThatLackedOne();
     void writeRejectsBadKeyAndLeavesFileAlone();
 
+    void hgsInstallDirsPreferUserInstallThenHomebrew();
+    void fallbackHgsKeepsPathLookupWhenPathProvidesHgs();
+    void fallbackHgsFindsFirstExecutableInstall();
+    void fallbackHgsIsEmptyWithoutAnyInstall();
+
 private:
+    static QString writeHgs(const QString &dir, bool executable);
     // Два РАЗНЫХ валидных режима текущей платформы. Тестам про "файл против командной
     // строки" и про запись не важно, какие именно, важно лишь, что значения различаются
     // и оба здесь допустимы -- а литералами этого на двух платформах не написать.
@@ -550,6 +556,73 @@ void TestAppConfig::restartKeepsSettingsButNotOneShotOptions()
                           "--local-poll", "5000", "--icon-color", "#fff", "--peer-poll", "60000"}));
     QVERIFY(AppConfig::restartArguments({"hgs-tray"}).isEmpty());
     QVERIFY(AppConfig::restartArguments({"hgs-tray", "--sessions"}).isEmpty());
+}
+
+QString TestAppConfig::writeHgs(const QString &dir, bool executable)
+{
+    QDir().mkpath(dir);
+    const QString path = dir + QStringLiteral("/hgs");
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return {};
+    f.write("#!/bin/sh\n");
+    f.close();
+    f.setPermissions(executable ? QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
+                                : QFile::ReadOwner | QFile::WriteOwner);
+    return path;
+}
+
+void TestAppConfig::hgsInstallDirsPreferUserInstallThenHomebrew()
+{
+    // Same order in which hgs extends PATH for its own children (src/platform/unix.rs).
+    QCOMPARE(AppConfig::hgsInstallDirs(QStringLiteral("/home/example")),
+             (QStringList{QStringLiteral("/home/example/.local/bin"), QStringLiteral("/opt/homebrew/bin"),
+                          QStringLiteral("/usr/local/bin")}));
+}
+
+void TestAppConfig::fallbackHgsKeepsPathLookupWhenPathProvidesHgs()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows finds hgs.exe next to hgs-tray.exe, then in PATH");
+#endif
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QVERIFY(!writeHgs(dir.filePath(QStringLiteral("path")), true).isEmpty());
+    QVERIFY(!writeHgs(dir.filePath(QStringLiteral("local")), true).isEmpty());
+    // A terminal launch keeps resolving bare "hgs" through the user's PATH.
+    QCOMPARE(AppConfig::fallbackHgsPath(dir.filePath(QStringLiteral("path")),
+                                        {dir.filePath(QStringLiteral("local"))}),
+             QString());
+}
+
+void TestAppConfig::fallbackHgsFindsFirstExecutableInstall()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows finds hgs.exe next to hgs-tray.exe, then in PATH");
+#endif
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QDir().mkpath(dir.filePath(QStringLiteral("empty")));
+    QVERIFY(!writeHgs(dir.filePath(QStringLiteral("plain")), false).isEmpty());
+    const QString first = writeHgs(dir.filePath(QStringLiteral("first")), true);
+    QVERIFY(!writeHgs(dir.filePath(QStringLiteral("second")), true).isEmpty());
+    // Finder, Dock and Spotlight start the app with PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+    QCOMPARE(AppConfig::fallbackHgsPath(dir.filePath(QStringLiteral("empty")),
+                                        {dir.filePath(QStringLiteral("missing")),
+                                         dir.filePath(QStringLiteral("plain")),
+                                         dir.filePath(QStringLiteral("first")),
+                                         dir.filePath(QStringLiteral("second"))}),
+             first);
+}
+
+void TestAppConfig::fallbackHgsIsEmptyWithoutAnyInstall()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows finds hgs.exe next to hgs-tray.exe, then in PATH");
+#endif
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QCOMPARE(AppConfig::fallbackHgsPath(dir.path(), {dir.filePath(QStringLiteral("missing"))}),
+             QString());
 }
 
 QTEST_APPLESS_MAIN(TestAppConfig)

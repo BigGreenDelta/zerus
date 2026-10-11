@@ -71,6 +71,65 @@ class ReadAllTest {
         val newHead=restored.head(target,"epoch",11,11,true).record(target)!!
         assertEquals(10L,newHead.readThrough);assertFalse(newHead.reviewLater);assertEquals("anchor",newHead.viewport!!.eventId)
     }
+    private fun reply(id:String,seq:Long?=null,epoch:String="epoch")=Event(id,"AgentMessage","reply","",nativeType="AgentMessage",historyEpoch=if(seq==null) "" else epoch,incomingSeq=seq)
+    /** What the phone shows for one conversation: its reminder and the unread lower bound. */
+    private fun shown(state:ConversationReadState,rows:List<Event>)=state.record(target).let { (it?.reviewLater==true) to ConversationReadPolicies.lowerBound(it,rows) }
+    /** The predicate must agree with what apply() would actually change. */
+    private fun assertAgrees(state:ConversationReadState,evidence:ReadAttentionEvidence?,rows:List<Event>,expected:Boolean) {
+        val record=state.record(target)
+        assertEquals(expected,ReadAllPolicies.changes(record,evidence,rows))
+        if(expected) assertTrue(ReadAllPolicies.pending(record,rows))
+        val captured=listOf(ReadAllCapture(target,evidence))
+        val applied=ReadAllPolicies.apply(state,captured,captured).state
+        assertEquals(expected,shown(applied,rows)!=shown(state,rows))
+    }
+    @Test fun readAllIsActionableOnlyWhenItWouldClearSomethingShown() {
+        val head=ConversationReadState().head(target,"epoch",10,10,true)
+        val read=ReadAllPolicies.apply(head,listOf(capture(evidence())),listOf(capture(evidence()))).state
+        assertAgrees(head,evidence(),emptyList(),true)
+        assertAgrees(read,evidence(),emptyList(),false)
+        assertFalse(ReadAllPolicies.pending(read.record(target),emptyList()))
+        // A reminder alone is something Read all clears when it has evidence.
+        assertAgrees(read.review(target,true),evidence(),emptyList(),true)
+        // Evidence-less reminders remain: pending, but Read all cannot clear them.
+        val reminder=ConversationReadState().review(target,true)
+        assertTrue(ReadAllPolicies.pending(reminder.record(target),emptyList()))
+        assertAgrees(reminder,null,emptyList(),false)
+        assertAgrees(reminder,ReadAttentionEvidence(target,"","",null,false,emptySet()),emptyList(),false)
+    }
+    @Test fun partialEvidenceIsActionableOnlyForLoadedUnreadReplies() {
+        val rows=listOf(reply("a"),reply("b"))
+        val loaded=ReadAttentionEvidence(target,"","",null,false,setOf("a","b"))
+        assertAgrees(ConversationReadState(),loaded,rows,true)
+        val seen=ConversationReadState().viewed(target,setOf("a","b"))
+        assertAgrees(seen,loaded,rows,false)
+        assertFalse(ReadAllPolicies.pending(seen.record(target),rows))
+        assertAgrees(ConversationReadState().viewed(target,setOf("a")),loaded,rows,true)
+        // Canonical partial pages use the captured loaded watermark.
+        val canonical=listOf(reply("c7",7),reply("c8",8))
+        val partial=evidence().copy(authoritative=false,loadedIds=setOf("c7","c8"),loadedThrough=8,head=12)
+        val window=ConversationReadState().head(target,"epoch",12,12,false)
+        assertAgrees(window,partial,canonical,true)
+        val through=ReadAllPolicies.apply(window,listOf(capture(partial)),listOf(capture(partial))).state
+        assertEquals(8L,through.record(target)!!.readThrough)
+        // Newer replies outside the loaded window stay pending, but these rows add nothing.
+        assertTrue(ReadAllPolicies.pending(through.record(target),canonical))
+        assertAgrees(through,partial,canonical,false)
+    }
+    @Test fun readAllPredicateFollowsApplySkipRules() {
+        val state=ConversationReadState().head(target,"epoch",10,10,true)
+        // Changed head, epoch or incomplete head: apply() skips, so nothing is actionable.
+        assertFalse(ReadAllPolicies.changes(state.record(target),evidence(head=11),emptyList()))
+        assertFalse(ReadAllPolicies.changes(state.record(target),evidence().copy(epoch="other"),emptyList()))
+        val incomplete=ConversationReadState().head(target,"epoch",10,10,false)
+        assertAgrees(incomplete,evidence(),emptyList(),false)
+        assertTrue(ReadAllPolicies.pending(incomplete.record(target),emptyList()))
+        // A new conversation the 500-record cap refuses is skipped as well.
+        val rows=listOf(reply("a"));val loaded=ReadAttentionEvidence(target,"","",null,false,setOf("a"))
+        assertTrue(ReadAllPolicies.changes(null,loaded,rows))
+        assertFalse(ReadAllPolicies.changes(null,loaded,rows,full=true))
+        assertFalse(ReadAllPolicies.unreadReplies(ConversationReadState().review(target,true).record(target),emptyList()))
+    }
     @Test fun headCandidatesIncludeUnvisitedReplyEvidenceAndRecordedChatsButExcludeArchivesAndUnknown() {
         val recorded=target.copy(conversation="recorded")
         val state=ConversationReadState().review(recorded,true)

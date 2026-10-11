@@ -1,6 +1,7 @@
 """Real HTTP relay + outbound connector + native-shaped subprocess integration."""
 import asyncio
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -92,6 +93,28 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
                         attachments = inspected["result"]["attachment_messages"][-1]
                         self.assertEqual(attachments["message_id"], attachment_body["request_id"])
                         self.assertEqual(attachments["attachments"][0]["bytes"], len(file_bytes))
+                        self.assertEqual(len((root / "mutations.jsonl").read_text().splitlines()), 2)
+                        # The phone reads the exact receipt file back in bounded ranges.
+                        received = b""
+                        while len(received) < len(file_bytes):
+                            _, chunk = await request("attachment_read", {"message_id": attachment_body["request_id"], "index": 0,
+                                "offset": len(received), "length": min(512 * 1024, len(file_bytes) - len(received))})
+                            self.assertEqual((chunk["result"]["offset"], chunk["result"]["bytes"], chunk["result"]["file_name"]),
+                                             (len(received), len(file_bytes), "example.txt"))
+                            self.assertEqual(chunk["result"]["sha256"], hashlib.sha256(file_bytes).hexdigest())
+                            received += base64.b64decode(chunk["result"]["data_base64"])
+                        self.assertEqual(received, file_bytes)
+                        foreign = str(uuid.uuid4())
+                        missing = {"request_id": foreign, "computer_id": node["node_id"], "operation": "attachment_read", "session": session["name"],
+                                   "payload": {"request_id": foreign, "expected_run_id": session["run_id"], "expected_conversation_id": session["conversation_id"],
+                                               "message_id": str(uuid.uuid4()), "index": 0, "offset": 0, "length": 1}}
+                        result = await call("POST", "/v1/requests", missing)
+                        for _ in range(200):
+                            if result["state"] not in {"queued", "claimed"}:
+                                break
+                            await asyncio.sleep(0.03)
+                            result = await call("GET", "/v1/requests/" + foreign)
+                        self.assertEqual(result["state"], "failed")
                         self.assertEqual(len((root / "mutations.jsonl").read_text().splitlines()), 2)
 
                         record = inspected["result"]

@@ -137,7 +137,7 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
     if kind=="PermissionRequest" {
         record["pending_approval"]=event.clone();
         record["pending_approval_at"]=json!(now());
-    } else if ["SessionStart","SessionEnd","Interrupt","Stop","StopFailure","PostToolUse","PostToolUseFailure"].contains(&kind) {
+    } else if ["SessionStart","SessionEnd","Interrupt","Stop","StopFailure","PostToolUse","PostToolUseFailure","UserPromptSubmit"].contains(&kind) {
         record.as_object_mut().unwrap().remove("pending_approval");
         record.as_object_mut().unwrap().remove("pending_approval_at");
     }
@@ -340,6 +340,12 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
     }
     if let Some(hint) = kimi_cache_hint::current(record) {
         cards.push(hint);
+    }
+    if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
+        cards.push(terminal);
+    }
+    if cards.is_empty() {
+        cards.extend(startup_choice::current(record));
     }
     cards.sort_by(|a, b| {
         a["created_at"]
@@ -827,6 +833,16 @@ mod tests {
             &json!({"hook_event_name":"PostToolUse","tool_call_id":"tool_test"}),
         );
         assert_eq!(record["pending_questions"], json!({}));
+    }
+    #[test]
+    fn a_new_prompt_resolves_the_previous_permission_request() {
+        let mut record = record();
+        observe(&mut record, &json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion"}));
+        assert!(record["pending_approval"].is_object());
+        // Claude accepts a prompt only after its chooser closed, even when
+        // no other hook reported how it was answered.
+        observe(&mut record, &json!({"hook_event_name":"UserPromptSubmit","prompt":"next"}));
+        assert!(record.get("pending_approval").is_none() && record.get("pending_approval_at").is_none());
     }
     #[test]
     fn ignores_resolved_or_inactive_questions_and_rejects_bad_choices() {

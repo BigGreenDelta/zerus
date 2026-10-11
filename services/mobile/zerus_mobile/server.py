@@ -16,7 +16,7 @@ import uuid
 
 from aiohttp import web
 
-from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_send
+from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
@@ -306,6 +306,9 @@ def validate_request(value):
         return
     if op == "history":
         validate_history(payload,request_id)
+        return
+    if op == "attachment_read":
+        validate_read(payload,request_id)
         return
     if op in TERMINAL_OPERATIONS:
         validate_terminal(op,payload,request_id)

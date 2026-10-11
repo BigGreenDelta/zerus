@@ -78,6 +78,20 @@ inline QString providerFailure(const QJsonObject &error)
     if (kind == "model_unavailable") return QObject::tr("Model unavailable");
     return QObject::tr("Provider error");
 }
+// Jobs the agent scheduled for itself will start its next turns: the session
+// is neither waiting for the person nor working right now.
+inline bool scheduledIdle(const SessionInfo &s)
+{
+    return s.activity == "idle" && s.phase == "idle" && s.scheduledJobs > 0;
+}
+// The next run as a time of day, "due" once it has passed, or empty if unknown.
+inline QString nextScheduledRun(const SessionInfo &s, const QDateTime &now = QDateTime::currentDateTime())
+{
+    if (s.nextScheduledAt <= 0) return {};
+    const auto next = QDateTime::fromSecsSinceEpoch(qint64(s.nextScheduledAt)).toLocalTime();
+    if (next <= now) return QObject::tr("due");
+    return next.date() == now.date() ? next.toString("HH:mm") : next.toString("d MMM HH:mm");
+}
 inline QString status(const SessionInfo &s, bool reachable = true)
 {
     if (!reachable) return QObject::tr("Offline");
@@ -104,6 +118,10 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "starting") return QObject::tr("Starting");
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
+    if (scheduledIdle(s)) {
+        const auto next = nextScheduledRun(s);
+        return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
+    }
     if (s.activity == "idle") return QObject::tr("Ready");
     // A conversation can end while the CLI and its tmux terminal remain alive.
     if (s.activity == "ended" || s.activity == "unknown") return QObject::tr("Status unknown");
@@ -150,6 +168,11 @@ inline bool working(const SessionInfo &s, bool online = true)
     return currentActivity(s, online) && s.activity == "busy" && !s.needsAction();
 }
 
+inline bool scheduled(const SessionInfo &s, bool online = true)
+{
+    return currentActivity(s, online) && !s.needsAction() && scheduledIdle(s);
+}
+
 inline bool needsAttention(const SessionInfo &s, bool online = true)
 {
     if (s.state == "archived") return false;
@@ -159,7 +182,16 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
         const auto state = childState(value.toObject());
         if (state == "approval" || state == "input" || state == "attention") return true;
     }
+    for (const auto &value : s.subagentPreviews) {
+        const auto state = childState(value.toObject());
+        if (state == "approval" || state == "input" || state == "attention") return true;
+    }
     return false;
+}
+
+inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
+{
+    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online));
 }
 
 inline QString promptPreview(const QString &text)
@@ -193,6 +225,12 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
     }
     if (s.unreadReply && s.activity != "busy" && !s.needsAction()) return status(s, online);
     if (!currentActivity(s, online)) return status(s, online);
+    if (scheduled(s, online)) {
+        const auto now = QDateTime::currentDateTime();
+        if (s.nextScheduledAt <= 0) return QObject::tr("Waiting for its next scheduled run");
+        return s.nextScheduledAt <= now.toSecsSinceEpoch() ? QObject::tr("Next run due")
+            : QObject::tr("Next run at %1").arg(nextScheduledRun(s, now));
+    }
 
     if (!s.activitySummary.isEmpty()) return s.activitySummary + (s.activityDetail.isEmpty() ? QString() : QStringLiteral(": ") + activityDetailPreview(s));
     if (!s.currentTool.isEmpty()) return s.currentTool + (s.toolDetail.isEmpty() ? QString() : QStringLiteral(": ") + s.toolDetail);

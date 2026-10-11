@@ -65,7 +65,9 @@ class Fleet:
                             or via in aliases or type(row.get("online")) is not bool):
                         raise self.error("native direct peer inventory has invalid format")
                     aliases.add(via)
-                    # An unreachable peer without a verified identity cannot be advertised.
+                    # An unreachable peer is advertised offline only under the identity
+                    # this gateway last verified through the same alias; without one it
+                    # cannot be advertised. Offline routes never dispatch (see callback).
                     if machine is None and row["online"] is False:
                         continue
                     if not canonical_uuid(machine):

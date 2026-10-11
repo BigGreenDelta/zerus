@@ -53,6 +53,21 @@ bundle_cdhash() {
 echo "[1/4] Building..."
 CMAKE="$(find_tool cmake)" || { echo "hgs-tray: cmake not found (brew install cmake)" >&2; exit 1; }
 BREW="$(find_tool brew)"   || { echo "hgs-tray: brew not found -- Qt6 comes from it" >&2; exit 1; }
+# An Xcode or Command Line Tools update removes the SDK a cached configuration
+# names, and Qt's imported targets then fail to configure. Start from a clean
+# cache when any cached SDK is gone; sources and build outputs stay.
+stale_sdk() {
+    local sdk
+    [ -f "$1" ] || return 1
+    while IFS= read -r sdk; do
+        [ -d "${sdk}" ] || return 0
+    done < <(grep -o '/[^][;:"=]*\.sdk' "$1" | sort -u)
+    return 1
+}
+if stale_sdk "${SCRIPT_DIR}/build/CMakeCache.txt"; then
+    echo "      Cached macOS SDK is gone (Xcode or Command Line Tools updated); reconfiguring."
+    rm -rf "${SCRIPT_DIR}/build/CMakeCache.txt" "${SCRIPT_DIR}/build/CMakeFiles"
+fi
 "${CMAKE}" -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" \
     -DCMAKE_PREFIX_PATH="$("${BREW}" --prefix qt)" -DCMAKE_BUILD_TYPE=Release
 "${CMAKE}" --build "${SCRIPT_DIR}/build" -j"${JOBS}"

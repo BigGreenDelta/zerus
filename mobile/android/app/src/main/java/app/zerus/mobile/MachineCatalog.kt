@@ -23,7 +23,15 @@ object MachineCatalog {
         serverAliases = aliases(raw.opt("aliases")), route = route(raw),
         hgsVersion = (raw.optJSONObject("snapshot")?.opt("hgs_version") as? String)
             ?.takeIf { it.length <= 128 && versionFormat.matches(it) }.orEmpty(),
-        mobileDelivery = MobileDelivery.parse(raw.optJSONObject("snapshot")))
+        mobileDelivery = MobileDelivery.parse(raw.optJSONObject("snapshot")),
+        lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 })
+
+    /** Relay availability only; an offline row is never a usable target. */
+    fun status(machine: Machine): String = when {
+        machine.lastKnown -> "Last known"
+        machine.online -> "Online"
+        else -> AccountPresentation.date(machine.lastSeenAt)?.let { "Offline · last seen $it" } ?: "Offline"
+    }
 
     fun gateway(machine: Machine, catalog: List<Machine>): Machine? {
         return GatewayIndex(catalog.filter { it.connectionId == machine.connectionId }).resolve(machine)

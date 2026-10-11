@@ -45,7 +45,7 @@ import kotlinx.coroutines.delay
             machines.filter { !it.supported || !it.available || it.accounts.isEmpty() }.forEach { catalog ->
                 item(key="availability:"+catalog.key.toString()) { Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     AccountMachineLabel(model,catalog)
-                    Text(when { !catalog.supported -> "Update the machine connector to view accounts."; !catalog.available -> "Account catalog is not available yet."; else -> "No account profiles reported on this machine." },style=MaterialTheme.typography.bodySmall)
+                    Text(when { !catalog.supported && !catalog.online -> "Account profiles appear when this machine is online."; !catalog.supported -> "Update the machine connector to view accounts."; !catalog.available -> "Account catalog is not available yet."; else -> "No account profiles reported on this machine." },style=MaterialTheme.typography.bodySmall)
                     if(!catalog.online) Text("Offline",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 } }
             }

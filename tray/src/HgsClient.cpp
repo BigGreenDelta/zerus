@@ -94,6 +94,11 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.created = static_cast<qint64>(obj.value(QStringLiteral("created")).toDouble());
     s.conversationId = obj.value("conversation_id").toString();
     s.replyId = obj.value("reply_id").toString(); s.replyAt = obj.value("reply_at").toDouble();
+    s.replyScheduled = obj.value("reply_scheduled").toBool();
+    const auto schedules = obj.value("schedules").toObject();
+    s.scheduledJobs = schedules.value("count").toInt(-1);
+    s.recurringSchedules = schedules.value("recurring").toInt(-1);
+    s.nextScheduledAt = schedules.value("next_at").toDouble();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
@@ -1301,9 +1306,11 @@ quint64 HgsClient::requestCompactContext(const QString &host, const QString &nam
     return runSessionAction(host,name,"compact-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
 }
 
-quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation)
+quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt)
 {
-    return runSessionAction(host,name,"clear-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
+    QJsonObject data{{"expected_run_id",run},{"expected_conversation_id",conversation}};
+    if (dismissPrompt) data["dismiss_prompt"] = true; // Older hgs rejects the unknown field.
+    return runSessionAction(host,name,"clear-context",data);
 }
 
 quint64 HgsClient::requestInterrupt(const QString &host, const QString &name, const QString &run,

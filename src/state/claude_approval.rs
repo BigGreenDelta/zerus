@@ -11,7 +11,7 @@ use std::path::Path;
 struct Panel { title:String, body:Vec<String>, question:String, labels:Vec<String>, selected:usize }
 
 // Claude also reports AskUserQuestion as a PermissionRequest; claude_question
-// owns that card. Plan approval can turn an option into a text field, so its
+// owns that card, or native_question when no tool call exists. Plan approval can turn an option into a text field, so its
 // card only points to Terminal.
 const QUESTION_TOOLS:[&str;3]=["AskUserQuestion","request_user_input","AskUser"];
 const TERMINAL_ONLY_TOOLS:[&str;2]=["ExitPlanMode","EnterPlanMode"];
@@ -174,6 +174,116 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
 }
 
+/// The chooser Claude draws at the bottom of its screen: a title under the
+/// nearest full-width rule, optional body rows, then consecutive numbered
+/// options with exactly one highlighted. Deeper indented rows describe the
+/// option above them; blank rows may separate options.
+fn bottom_choice(screen:&str)->Option<(String,String,Vec<(String,String)>)> {
+    let rows:Vec<&str>=screen.lines().map(str::trim_end).collect();
+    let marked=rows.iter().rposition(|r|numbered(r.trim()).is_some_and(|(mark,_,_)|mark))?;
+    let top=rows[..marked].iter().rposition(|r|rule(r.trim(),'─'))?;
+    let first=(top+1..=marked).find(|&i|numbered(rows[i].trim()).is_some())?;
+    let text:Vec<&str>=rows[top+1..first].iter().map(|r|{let r=r.trim();r.strip_prefix('│').map_or(r,str::trim_start)}).collect();
+    let title=text.iter().position(|r|!r.is_empty())?;
+    let mut options:Vec<(String,String,usize)>=Vec::new();
+    let (mut highlighted,mut index)=(0,first);
+    while let Some(row)=rows.get(index) {
+        let trimmed=row.trim();
+        if trimmed.is_empty() {
+            let next=rows[index+1..].iter().find(|r|!r.trim().is_empty());
+            if next.and_then(|r|numbered(r.trim())).is_some_and(|(_,n,_)|n==options.len()+1) {index+=1;continue;}
+            break;
+        }
+        if rule(trimmed,'─') {break;}
+        match numbered(trimmed) {
+            Some((mark,n,text)) if n==options.len()+1 => {
+                highlighted+=usize::from(mark);
+                let column=row.chars().count()-text.chars().count();
+                options.push((text,String::new(),column));
+            }
+            Some(_) => return None,
+            None => {
+                let option=options.last_mut()?;
+                if row.chars().count()-trimmed.chars().count()<option.2 {break;}
+                if !option.1.is_empty() {option.1.push(' ');}
+                option.1.push_str(trimmed);
+            }
+        }
+        index+=1;
+    }
+    if highlighted!=1||options.len()<2||marked>=index {return None;}
+    Some((text[title].to_owned(),text[title+1..].join("\n").trim().to_owned(),
+        options.into_iter().map(|(label,description,_)|(label,description)).collect()))
+}
+
+/// Any chooser Claude draws for the user now: a tool approval or another
+/// numbered panel at the bottom of its screen.
+pub(super) fn chooser_visible(screen:&str)->bool {visible(screen)||bottom_choice(screen).is_some()}
+
+// Every option of one question is on screen as its numbered row; a long label
+// may wrap, so the row shows its beginning.
+fn shows(screen:&str,items:&Value)->bool {
+    let rows:Vec<_>=screen.lines().filter_map(|r|numbered(r.trim())).map(|(_,n,text)|(n,label(&text))).collect();
+    items.as_array().into_iter().flatten().any(|item|{
+        let options=item["options"].as_array().map_or(&[][..],Vec::as_slice);
+        !options.is_empty()&&options.iter().enumerate().all(|(i,option)|rows.iter()
+            .any(|(n,text)|*n==i+1&&!text.is_empty()&&label(string(option,"label")).starts_with(text.as_str())))
+    })
+}
+
+/// What Claude asks in Terminal without a request Zerus can answer: its own
+/// question, else any visible chooser while no other card explains the wait.
+pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
+    if record["agent"]!="claude"||!["input","approval"].contains(&string(record,"phase")) {return None;}
+    let screen=kimi_tui_choice::identity(record).and_then(|record|kimi_tui_choice::capture(&record)).ok();
+    native_question(record,screen.as_deref())
+        .or_else(||if cards.is_empty() {terminal_choice(record,screen.as_deref()?)} else {None})
+}
+
+/// Any other chooser while Claude waits for the user, such as a session paused
+/// after a safeguard stop. No hook describes it, so the card shows the visible
+/// panel verbatim and points to Terminal.
+fn terminal_choice(record:&Value,screen:&str)->Option<Value> {
+    if record["agent"]!="claude"||!["input","approval"].contains(&string(record,"phase"))
+        ||pause_active(record)||!string(record,"error").is_empty() {return None;}
+    let (title,body,options)=bottom_choice(screen)?;
+    let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
+        record["process_start"],title,body,options]).to_string()));
+    let created=record["attention_started"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    let options:Vec<_>=options.iter().enumerate()
+        .map(|(i,(label,description))|json!({"id":(i+1).to_string(),"label":label,"description":description})).collect();
+    Some(json!({"question_id":format!("claude-terminal-choice:{hash}"),"question_hash":hash,"tool_call_id":"",
+        "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_terminal_choice",
+        "can_answer":false,"answer_transport":"","answer_unavailable_reason":"Answer this in Terminal.","created_at":created,
+        "questions":[{"id":"terminal","question":title,"header":"Terminal","body":body,"multi_select":false,
+            "allow_other":false,"options":options}]}))
+}
+
+/// Claude Code asks some questions itself, such as a model switch after a
+/// safeguard stop. They arrive only as an AskUserQuestion PermissionRequest:
+/// without a tool call there is no tool result to acknowledge an answer, so
+/// the card mirrors the request and points to Terminal. A readable screen must
+/// still show its options. A model question has an active tool call and keeps
+/// claude_question's answerable card.
+fn native_question(record:&Value,screen:Option<&str>)->Option<Value> {
+    let request=&record["pending_approval"];
+    let tool=string(request,"tool_name");
+    if record["agent"]!="claude"||record["phase"]!="input"||pause_active(record)||!string(record,"error").is_empty()
+        ||!request.is_object()||!question_tool(tool)
+        ||record["active_tools"].as_object().into_iter().flatten().any(|(_,active)|active["name"]==tool) {return None;}
+    let mut items=questions::normalize(&request["tool_input"]["questions"]).unwrap_or_else(|_|json!([{"id":"q_0",
+        "question":"Claude asks a question in Terminal","header":tool,"body":summary(request),"options":[]}]));
+    if screen.is_some_and(|screen|!shows(screen,&items)) {return None;}
+    for item in items.as_array_mut().into_iter().flatten() {item["allow_other"]=json!(false);}
+    let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
+        record["process_start"],tool,request["tool_input"]]).to_string()));
+    let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    Some(json!({"question_id":format!("claude-native-question:{hash}"),"question_hash":hash,"tool_call_id":"",
+        "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_native_question",
+        "can_answer":false,"answer_transport":"","answer_unavailable_reason":"Claude Code asks this itself. Answer it in Terminal.",
+        "created_at":created,"questions":items}))
+}
+
 fn snapshot(record:&Value,screen:&str)->Option<(Value,usize)> {
     let (card,panel)=build(record,Some(screen))?;
     if card["can_answer"]!=true {return None;}
@@ -281,6 +391,84 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
         assert!(parse(&OUTSIDE.replace("   4. Yes, but ask again next time","   5. Yes, but ask again next time")).is_none());
         assert!(parse(&OUTSIDE.replace("   3. No, and","❯  3. No, and")).is_none());
         assert!(parse(&OUTSIDE.replace("\n\n Esc to cancel","\n Esc to cancel")).is_none());
+    }
+
+    #[test] fn claude_code_questions_without_a_tool_call_point_to_terminal() {
+        // Claude Code asks this itself after a safeguard stop: no PreToolUse,
+        // no active tool, only the permission prompt of AskUserQuestion.
+        let input=json!({"metadata":{"source":"refusal_fallback_preference"},"questions":[{"header":"Model switch",
+            "multiSelect":false,"question":"Switch models and keep going whenever this happens?","options":[
+            {"label":"Switch automatically","description":"Continue on the other model now"},
+            {"label":"Stay","description":"Stop here without switching"}]}]});
+        let mut asked=record("AskUserQuestion",input);asked["phase"]=json!("input");asked["active_tools"]=json!({});
+        let card=native_question(&asked,None).unwrap();
+        assert_eq!((card["source"].clone(),card["can_answer"].clone(),card["created_at"].clone()),
+            (json!("claude_native_question"),json!(false),json!(10.0)));
+        assert_eq!(card["answer_unavailable_reason"],"Claude Code asks this itself. Answer it in Terminal.");
+        let item=&card["questions"][0];
+        assert_eq!((item["header"].clone(),item["allow_other"].clone()),(json!("Model switch"),json!(false)));
+        assert_eq!(item["question"],"Switch models and keep going whenever this happens?");
+        assert_eq!(item["options"][0]["label"],"Switch automatically");
+        assert_eq!(item["options"][1]["description"],"Stop here without switching");
+        // A request Zerus cannot normalize still shows that Claude waits.
+        let mut odd=asked.clone();odd["pending_approval"]["tool_input"]=json!({"questions":"?"});
+        let odd=native_question(&odd,None).unwrap();
+        assert_eq!(odd["questions"][0]["question"],"Claude asks a question in Terminal");
+        assert!(odd["questions"][0]["options"].as_array().unwrap().is_empty());
+        assert_ne!(odd["question_hash"],card["question_hash"]);
+        // The model's own question keeps claude_question's answerable card.
+        let mut model=asked.clone();model["active_tools"]=json!({"toolu_ask":{"name":"AskUserQuestion"}});
+        assert!(native_question(&model,None).is_none());
+        let mut resolved=asked.clone();resolved["phase"]=json!("working");assert!(native_question(&resolved,None).is_none());
+        let mut tool=asked.clone();tool["pending_approval"]["tool_name"]=json!("Read");assert!(native_question(&tool,None).is_none());
+        assert!(build(&asked,None).is_none());
+    }
+
+    // Claude Code 2.1.296 at 92 columns, below assistant output.
+    const MODEL_SWITCH:&str="⏺ Checking the panel:\n\n────────────────────────────────────────────────────────────\n ☐ Model switch\n\n│ Switch models and keep going whenever this happens?\n\n❯ 1. Switch automatically\n     Continue on the other model now\n  2. Stay\n     Stop here without switching\n  3. Type something.\n────────────────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n\n✻ Waiting for API response · will retry in 0s · check your network\n";
+    const PAUSED:&str="⏺ Opus 5.5's safeguards stopped the response above · continuing once with that noted\n\n────────────────────────────────────────────────────────────\n Session paused\n\n  Opus 5.5's safeguards flagged this session. Edit and retry, or\n  continue with Opus 4.8.\n\n  Details: `[cyber]`\n\n  ❯ 1. Switch to Opus 4.8\n    2. Edit prompt and retry with Opus 5.5\n\n✻ Waiting for API response · will retry in 2m 40s · check your network\n";
+    const IDLE:&str="⏺ Done.\n\n────────────────────────────────────────────────────────────\n❯ 1. first draft item\n  2. second draft item\n────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on\n";
+
+    #[test] fn claude_code_questions_follow_the_terminal() {
+        let input=json!({"questions":[{"header":"Model switch","question":"Switch models and keep going whenever this happens?",
+            "options":[{"label":"Switch automatically","description":"Continue on the other model now"},
+            {"label":"Stay","description":"Stop here without switching"}]}]});
+        let mut asked=record("AskUserQuestion",input);asked["phase"]=json!("input");asked["active_tools"]=json!({});
+        assert!(native_question(&asked,Some(MODEL_SWITCH)).is_some());
+        // Answered in Terminal, then another chooser or the composer.
+        assert!(native_question(&asked,Some(PAUSED)).is_none());
+        assert!(native_question(&asked,Some(IDLE)).is_none());
+        assert!(native_question(&asked,Some(&MODEL_SWITCH.replace("  2. Stay\n","\n  2. Stay\n"))).is_some());
+    }
+
+    #[test] fn other_claude_terminal_choosers_point_to_terminal() {
+        let mut waiting=json!({"agent":"claude","phase":"input","run_id":"run","conversation_id":"conversation",
+            "attention_started":20.0,"active_tools":{}});
+        let card=terminal_choice(&waiting,PAUSED).unwrap();
+        assert_eq!((card["source"].clone(),card["can_answer"].clone(),card["created_at"].clone()),
+            (json!("claude_terminal_choice"),json!(false),json!(20.0)));
+        let item=&card["questions"][0];
+        assert_eq!(item["question"],"Session paused");
+        assert_eq!(item["body"],"Opus 5.5's safeguards flagged this session. Edit and retry, or\ncontinue with Opus 4.8.\n\nDetails: `[cyber]`");
+        assert_eq!(item["options"].as_array().unwrap().iter().map(|o|string(o,"label")).collect::<Vec<_>>(),
+            ["Switch to Opus 4.8","Edit prompt and retry with Opus 5.5"]);
+        // Moving the highlight keeps the same card.
+        let moved=PAUSED.replace("  ❯ 1. Switch","    1. Switch").replace("    2. Edit","  ❯ 2. Edit");
+        assert_eq!(terminal_choice(&waiting,&moved).unwrap()["question_hash"],card["question_hash"]);
+        let question=terminal_choice(&waiting,MODEL_SWITCH).unwrap();
+        assert_eq!(question["questions"][0]["question"],"☐ Model switch");
+        assert_eq!(question["questions"][0]["body"],"Switch models and keep going whenever this happens?");
+        assert_eq!(question["questions"][0]["options"][1]["description"],"Stop here without switching");
+        assert_eq!(question["questions"][0]["options"].as_array().unwrap().len(),3);
+        // A composer draft is not a chooser, and only waiting sessions are read.
+        assert!(terminal_choice(&waiting,IDLE).is_none());
+        assert!(terminal_choice(&waiting,&PAUSED.replace("  ❯ 1.","    1.")).is_none());
+        waiting["phase"]=json!("working");assert!(terminal_choice(&waiting,PAUSED).is_none());
+    }
+
+    #[test] fn any_bottom_chooser_counts_as_visible_for_dismissal() {
+        for screen in [MODEL_SWITCH,PAUSED,BASH,OUTSIDE] {assert!(chooser_visible(screen),"{screen}");}
+        for screen in [IDLE,DENIED,""] {assert!(!chooser_visible(screen),"{screen}");}
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {

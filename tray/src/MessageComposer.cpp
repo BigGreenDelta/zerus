@@ -251,7 +251,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         auto &draft = m_drafts[m_key]; draft.text = m_editor->toPlainText();
         draft.position = m_editor->textCursor().position(); draft.anchor = m_editor->textCursor().anchor();
         if (!draft.error && !draft.uncertain) draft.notice.clear();
-        saveDraft(m_key);
+        saveDraft(m_key, true);
         updateControls();
     });
     auto rememberCursor = [this] {
@@ -259,7 +259,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         auto &draft = m_drafts[m_key];
         if (draft.position == m_editor->textCursor().position() && draft.anchor == m_editor->textCursor().anchor()) return;
         draft.position = m_editor->textCursor().position(); draft.anchor = m_editor->textCursor().anchor();
-        saveDraft(m_key); updateControls();
+        saveDraft(m_key, true); updateControls();
     };
     connect(edit, &QPlainTextEdit::cursorPositionChanged, this, rememberCursor);
     connect(edit, &QPlainTextEdit::selectionChanged, this, rememberCursor);
@@ -284,11 +284,13 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     auto *retrySave = new QTimer(this); retrySave->setInterval(2000);
     connect(retrySave, &QTimer::timeout, this, [this] {
         const auto pending = m_failedSaves;
-        for (const auto &key : pending) saveDraft(key);
+        for (const auto &key : pending) saveDraft(key, true);
         if (!pending.isEmpty()) updateControls();
     }); retrySave->start();
     setTheme(true); updateControls();
 }
+
+MessageComposer::~MessageComposer() { ComposerDraftStore::flushWrites(); }
 
 void MessageComposer::resizeEvent(QResizeEvent *event)
 {
@@ -380,6 +382,16 @@ bool MessageComposer::isSending(const QString &key) const { return m_drafts.valu
 
 bool MessageComposer::hasDraft(const QString &key) const
 {
+    if (!m_drafts.contains(key)) {
+        // Read manifest metadata once. Filtering must find restored drafts without
+        // opening their conversations or reading attachment payloads.
+        if (!m_draftsIndexed) {
+            const auto keys = m_draftStore.keys();
+            m_storedDrafts = QSet<QString>(keys.cbegin(), keys.cend());
+            m_draftsIndexed = true;
+        }
+        return m_storedDrafts.contains(key);
+    }
     const auto draft = m_drafts.value(key);
     return !draft.sending && (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty());
 }
@@ -401,10 +413,25 @@ bool MessageComposer::draftMatches(const QString &key, const QString &text, cons
     return true;
 }
 
-bool MessageComposer::saveDraft(const QString &key)
+bool MessageComposer::saveDraft(const QString &key, bool asynchronous)
 {
     // Retrying an older Activity message must never replace the current draft.
     auto &draft = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
+    const auto revision = ++m_saveRevision[key];
+    if (asynchronous) {
+        m_savingKeys.insert(key);
+        m_draftStore.saveAsync(key, draft, this, [this, key, revision](bool saved, const ComposerDraft &written) {
+            if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) return;
+            auto &current = m_preservedDrafts.contains(key) ? m_preservedDrafts[key] : m_drafts[key];
+            current.storageError = written.storageError; current.attachmentHashes = written.attachmentHashes;
+            if (m_preservedDrafts.contains(key)) m_drafts[key].storageError = written.storageError;
+            m_savingKeys.remove(key);
+            if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
+            if (key == m_key) updateControls();
+        });
+        return true;
+    }
+    m_savingKeys.remove(key);
     const bool saved = m_draftStore.save(key, draft);
     if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
     if (m_preservedDrafts.contains(key)) m_drafts[key].storageError = draft.storageError;
@@ -478,6 +505,7 @@ void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
     }
     if (!m_draftStore.save(newKey, moved)) { m_drafts[oldKey].storageError = moved.storageError; updateControls(); return; }
     Draft empty; m_draftStore.save(oldKey, empty);
+    m_storedDrafts.remove(oldKey);
     m_drafts.insert(newKey, m_drafts.take(oldKey));
     if(m_preservedDrafts.contains(oldKey))m_preservedDrafts.insert(newKey,m_preservedDrafts.take(oldKey));
     notifyDraft(oldKey); notifyDraft(newKey);
@@ -494,6 +522,7 @@ void MessageComposer::send()
         return;
     }
     QToolTip::hideText();
+    if (!saveDraft(m_key)) { updateControls(); return; }
     const auto draft = m_drafts.value(m_key);
     // Sending answers the suggestion; the same one never returns.
     if (m_suggestions.contains(m_key)) {
@@ -701,7 +730,8 @@ void MessageComposer::updateControls()
     QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
     // An available composer may still explain what Send will do first.
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_available || !m_unavailableReason.isEmpty() ? m_unavailableReason
-        : hasContent ? tr("Draft saved locally. Enter to send; Shift+Enter for a new line") : tr("Enter to send; Shift+Enter for a new line");
+        : hasContent ? (m_savingKeys.contains(m_key) ? tr("Saving draft… Enter to send; Shift+Enter for a new line")
+                       : tr("Draft saved locally. Enter to send; Shift+Enter for a new line")) : tr("Enter to send; Shift+Enter for a new line");
     m_status->setText(status); m_status->setToolTip(status);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
 }

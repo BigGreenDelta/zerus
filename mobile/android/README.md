@@ -2,7 +2,8 @@
 
 Settings → About shows the Android app version and each connected computer's
 reported `hgs` CLI version. Offline reports are marked `last known`; older CLIs
-without version metadata show `version unavailable`. The optional `hgs_version`
+without version metadata show `version unavailable`, and an unreachable peer
+without a report shows `version unavailable while offline`. The optional `hgs_version`
 field travels with the existing computer snapshot and keeps API v1 compatible.
 
 Native Kotlin and Jetpack Compose companion for the Zerus gateway protocol in
@@ -35,8 +36,12 @@ label when available. These computers belong to the same workspace connection;
 each keeps its own name, color, status and controls, and session and project
 filters still select individual computers. Each machine's action menu opens
 Rename machine and Label color. Cached routes show “Last known” until
-the catalog refreshes. The tree describes the selected one-hop route, not a
-permanent master computer.
+the catalog refreshes. A configured peer that its gateway cannot reach stays
+beneath it as “Offline”, with “last seen” when the relay reports a time, under
+the identity that gateway last verified. It keeps its label, color and filter;
+New session lists it disabled, and Sessions shows no project-catalog warning for
+it. A peer the gateway never verified is not shown. The tree describes the
+selected one-hop route, not a permanent master computer.
 
 The retired official relay origin is a narrow transport alias for
 `https://relay.zerus.dev`. Existing encrypted connection URLs remain stored as
@@ -109,6 +114,19 @@ transport or file cleanup, even if the screen is disposed; failed outgoing persi
 nothing. Successful outgoing records remain durable but are omitted from Saved
 drafts.
 
+Tap an attachment in a conversation, draft or outgoing message to open it.
+Files still held in this phone's encrypted store open without network access;
+others are read from the owning computer with `attachment_read` in 512 KiB
+ranges, with progress on the row, and must match the computer's SHA-256. Images
+open in a full-screen preview (pinch or double-tap to zoom, Open with, Share);
+other types open in another app through a FileProvider URI with a temporary
+read grant, or the row explains that no app can open the type. Opened files stay
+in the private `cacheDir/attachment-view/` cache for at most 24 hours and
+100 MiB, least recently opened first, and are cleared on disconnect. A failed
+read is never retried automatically; tap the row to try again. A relay or
+computer without the operation shows "Update Zerus on this computer to open
+attachments."
+
 Gateway tokens, drafts, outgoing messages, attachments, and push endpoints are encrypted with an Android Keystore
 AES-GCM key. Android backup is disabled. Drafts remain available after disconnect
 or session disappearance. Disconnect revokes this phone's gateway credential
@@ -119,8 +137,12 @@ An unavailable gateway leaves the connection intact.
 
 Sessions is the initial view. Its compact filters use the desktop glyphs and
 native semantics: All sessions, Needs attention, Active, Saved sessions, and
-Archive. Active combines working sessions and sessions needing attention,
-counting each session once. Work requires a reachable computer and a current running agent;
+Archive. Active combines working sessions, sessions needing attention, and sessions
+with local unsent text or attachment drafts, counting each session once. Drafts
+(including visible subagent drafts) stay active offline and update the count as
+they are edited, cleared or sent; archived sessions remain exclusive to Archive.
+Drafts stay on their device; desktop and Android share the filter rules and IDs.
+Work requires a reachable computer and a current running agent;
 input, approval, non-recovering errors, and blocked recovery require attention.
 Optional native questions and explicit child requests also count as attention.
 Routine child failures and legacy hook-profile observations do not. Saved
@@ -131,6 +153,28 @@ cards use the same computer, project, and search scope. Results form collapsible
 project groups; empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
+
+Session cards follow the desktop cards. A checkout line shows a small Git branch
+mark and the branch, or detached HEAD; ordinary folders have none. As on the
+desktop, the worktree name is not repeated on the card. A subagent counter uses
+the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
+the children that are working, waiting for input, paused, failed or unknown,
+in stable ID order. Finished turns stay hidden, as with the desktop default,
+unless the child has an unsent draft on this phone. Profile groups are counted
+but not listed. Tapping a child opens its session and then the child's activity
+once that conversation is verified; Back returns to the session. Open subagent
+lists persist with the other Sessions state.
+
+Long-pressing a session card, or using its accessibility long-press action,
+opens its actions in the desktop context menu order: Open terminal, Mark as read
+or Review later, Pause, Resume or Restore, Rename, Fork, Move to archive for
+saved sessions, copying its name, reference or folder, and Terminate or Forget.
+Unavailable items stay listed with their reason. Mark as read applies the Read
+all evidence rules to that session and may start its bounded metadata probe; a
+reminder without reply evidence can be cleared alone. Native items are gated
+only by the catalog row: choosing one opens the session, where the existing
+confirmation stays disabled until a fresh inspection verifies its exact
+identity and eligibility.
 
 Projects shows the canonical logical catalog, including empty projects, and its
 saved folders grouped by machine. Overview cards show each folder's name and
@@ -168,7 +212,9 @@ and search. It captures each conversation before changing local markers:
 fresh complete heads mark the captured replies,
 partial evidence marks only loaded replies, and unknown, unavailable or offline
 rows without loaded evidence are skipped. Its result reports marked conversations, partial marks and skipped
-rows. Reminders without usable reply evidence remain. New replies arriving
+rows. Reminders without usable reply evidence remain. Read all is disabled when
+its scope has nothing it would clear: no reminder and no reply counted unread
+that its current evidence covers. New replies arriving
 after the captured evidence remain unread; reading anchors and drafts stay put.
 When the computer advertises `mark_read`, reaching the newest reply (a fresh
 complete head read through on this phone), Mark read and Read all also send the
@@ -201,8 +247,9 @@ Snapshots poll adaptively while visible; input sends literal text or fixed keys,
 with confirmation for Ctrl+C and Ctrl+D. Submitted means native input handoff,
 not command completion. New session uses the selected computer's native provider,
 account catalog and an explicitly chosen folder. Ordinary folders remain usable
-without creating a Git repository. Worktree creation is a separate explicit
-action on a verified repository. A launch is confirmed only by its own native
+without creating a Git repository. A verified repository defaults to a generated
+worktree, created only after Create session; None and existing or manually
+created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
 ## Build and install
@@ -386,7 +433,8 @@ archive filtering, and verified composer readiness. Additional tests cover stabl
 project scoping and empty groups, delayed progress and stale operation ownership,
 atomic composer/outgoing transitions, legacy draft migration, first-conversation
 creation, ambiguous event reconciliation, immutable encrypted file copies,
-tamper/cancellation handling, attachment presentation, and large bounded streamed
+tamper/cancellation handling, attachment presentation, attachment read identities,
+range verification and the bounded view cache, and large bounded streamed
 JSON envelopes. Android lint checks the app.
 Device/emulator checks are still needed for push delivery,
 Keystore persistence, notification permissions, and native conversation controls.
@@ -399,24 +447,40 @@ Accounts is a read-only viewer grouped by workspace and provider-reported accoun
 
 ## Project and account selection
 
-New session presents Project, Folder, Agent and Account as compact selectors.
-An editable session name is generated when the form opens and is kept while
-changing the other selections.
+New session is a full-screen form with Project, Folder, Worktree, Agent and
+account, and Session name sections. Tapping outside never closes it; Close or
+Back asks before discarding edits and is unavailable while a worktree or session
+is being created. A disabled **Create session** button shows one reason.
+A `work-` name with eight hexadecimal digits is generated once per form; it is
+the editable session name and Auto's branch.
 Projects use the selected computer's fresh canonical swarm/project IDs, and
-only its local folders are offered. The native browser verifies a chosen folder
-again before creation. A folder explicitly chosen through Browse remains selected
-when changing projects in the same dialog; a listed project folder follows its
-project. Choosing an outside folder explicitly adds it to the selected project,
-as the dialog states.
+only its local folders are offered. The project picker searches names, folder
+names and paths in catalog order and opens at the current project. A project
+without a folder on that computer says so and offers Browse. The native browser
+verifies a chosen folder again before creation. A folder explicitly chosen
+through Browse remains selected when changing projects in the same form; a
+listed project folder, chosen worktree or created worktree gives way to the next
+project's folder. Choosing an outside folder explicitly adds it to the selected
+project, as the form states.
 
-When the selected computer supports worktrees, a fresh catalog offers existing
-checkouts. Create worktree separately asks for a new branch, destination and
-starting revision. It never starts a session automatically or removes partial
-work after an unknown result. Check delivery reads the original creation receipt
-without repeating the operation. A related worktree is recognized only when a
-current native catalog contains both the selected checkout and a saved folder
-of the chosen project; it is not added as another project folder. Unavailable
-worktree support leaves ordinary folder launches usable.
+Worktree mirrors desktop. **Auto** is the default when a fresh, complete catalog
+shows the selected folder inside an available checkout with a named root. The
+form shows the sibling `<root>-<branch>` path and new branch before launch.
+Create session then locks the form, creates that worktree from `HEAD` with a
+durable receipt, checks its folder and catalog, and launches there. A worktree
+of a project folder is placed as a related worktree; otherwise the form states
+that the new folder will be added. Opening the form and checking folders never
+create anything. **None** starts in the selected folder; ordinary non-Git folders, catalog errors
+and older computers use it, and never initialize Git. The options menu offers
+**Choose existing…** and **Create manually…** (branch, base and destination);
+both select that checkout for a direct launch. Auto runs at most once per form.
+A failed or unknown creation is never repeated and leaves its destination
+available for inspection or an explicit direct-folder launch; Check delivery
+reads the original receipt. Closing the form keeps a created folder and branch.
+A related worktree is recognized only when a current native catalog, or the
+form's confirmed creation, contains both the selected checkout and a saved
+folder of the chosen project; it is not added as another project folder. The
+connector checks this again with a fresh native catalog before launching.
 
 Mobile worktree creation has a 25-second native deadline and a 15-second checkout
 budget. A lost SSH connection or cancelled connector attempt drains its own
