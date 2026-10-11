@@ -195,24 +195,48 @@ void SessionSearch::rebuild()
             const bool reachable = box.ok && (host.isEmpty() || QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
             if (!accepts(host, s, reachable) || !active()) continue;
             const QString machine = host.isEmpty() ? box.host : host;
+            QString matchedIdentity;
+            const auto identity = [&](const QString &id, const QString &label) {
+                if (!id.isEmpty() && id.contains(m_query, Qt::CaseInsensitive) && matchedIdentity.isEmpty())
+                    matchedIdentity = label + ": " + id;
+            };
+            identity(s.conversationId, tr("Session ID")); identity(s.runId, tr("Run ID")); identity(s.archiveId, tr("Archive ID"));
+            const auto childIdentity = [&](const QString &id, const QJsonObject &child) {
+                identity(id, tr("Agent ID")); identity(child.value("conversation_id").toString(), tr("Child session ID"));
+            };
+            if (s.subagentSource != "hook_profiles") {
+                for (auto it = s.subagents.begin(); it != s.subagents.end(); ++it) childIdentity(it.key(), it.value().toObject());
+                for (const auto &value : s.subagentPreviews) {
+                    const auto child = value.toObject(); childIdentity(child.value("id").toString(child.value("agent_id").toString()), child);
+                }
+            }
             const auto add = [&](const QJsonObject &hit) {
                 const bool content = !hit.isEmpty(); auto *item = new QListWidgetItem(m_list);
                 const QString key = host + '\n' + s.name + '\n' + s.archiveId + '\n' + hit.value("message_id").toString(); item->setData(Qt::UserRole, key);
                 const QString title = s.tag.isEmpty() ? s.project.isEmpty() ? s.name : s.project : s.project + " / " + s.tag;
                 QString meta = s.state == "archived" ? tr("Archive") : QString();
                 if (content) meta += (meta.isEmpty() ? QString() : QStringLiteral(" / ")) + (hit.value("role") == "user" ? tr("You") : hit.value("role") == "assistant" ? tr("Agent") : tr("Tool")) + " / " + QDateTime::fromSecsSinceEpoch(qint64(hit.value("at").toDouble())).toLocalTime().toString("d MMM HH:mm");
-                else if (!s.model.isEmpty()) meta += (meta.isEmpty() ? QString() : QStringLiteral(" / ")) + s.model;
+                else {
+                    const auto description = matchedIdentity.isEmpty() ? s.model : matchedIdentity;
+                    if (!description.isEmpty()) meta += (meta.isEmpty() ? QString() : QStringLiteral(" / ")) + description;
+                }
                 item->setData(Provider, s.cmd); item->setData(Machine, machine);
                 item->setData(Title, title); item->setData(Meta, meta); item->setData(Query, m_query); item->setData(Snippet, hit.value("snippet").toString());
                 item->setData(Host, host); item->setData(Name, s.name); item->setData(Archive, s.archiveId); item->setData(Run, s.runId);
                 auto event = hit.value("event").toObject();
                 if (hit.value("content_truncated").toBool()) event["content_truncated"] = true;
                 item->setData(Hit, event); item->setData(Qt::AccessibleTextRole, title + '\n' + IdentityBadges::providerName(s.cmd) + " / " + machine + '\n' + meta + '\n' + hit.value("snippet").toString());
+                QStringList tooltip{title, machine};
+                if (!s.conversationId.isEmpty()) tooltip << tr("Session ID: %1").arg(s.conversationId);
+                if (!s.runId.isEmpty()) tooltip << tr("Run ID: %1").arg(s.runId);
+                if (!s.archiveId.isEmpty()) tooltip << tr("Archive ID: %1").arg(s.archiveId);
+                if (!matchedIdentity.isEmpty() && !tooltip.contains(matchedIdentity)) tooltip << matchedIdentity;
+                item->setToolTip("<qt>" + tooltip.join('\n').toHtmlEscaped().replace('\n', "<br>") + "</qt>");
                 if (key == m_selectedHit) m_list->setCurrentItem(item);
             };
             const QString metadata = s.name + ' ' + machine + ' ' + s.model + ' ' + s.effort + ' ' + s.cwd + ' ' + s.gitBranch + ' ' + s.gitWorktreeName;
             bool shown = false;
-            if (metadata.contains(m_query, Qt::CaseInsensitive)) { add({}); shown = true; }
+            if (metadata.contains(m_query, Qt::CaseInsensitive) || !matchedIdentity.isEmpty()) { add({}); shown = true; }
             for (const auto &value : reply.value("results").toArray()) {
                 const auto hit = value.toObject();
                 if (hit.value("name").toString() != s.name || hit.value("archive_id").toString() != s.archiveId) continue;

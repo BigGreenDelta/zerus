@@ -9,6 +9,19 @@ class SessionFiltersTest {
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
     private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =
         Session(Target("same", name, "run", "conversation", connection, archive), "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, JSONObject(raw))
+    @Test fun identitySearchFindsSavedArchiveAndChildIdsWithinTheMachineScope() {
+        val item = session("""{"state":"paused","subagents":{"agent-one":{"conversation_id":"child-conversation"}}}""", archive="archive-one")
+        listOf("CONVERSATION", "versat", "run", "archive-one", "agent-one", "child-conversation").forEach { query ->
+            assertEquals(listOf(item), SessionFilters.scoped(listOf(item), machines, emptySet(), query))
+            assertTrue(SessionFilters.scoped(listOf(item), machines, setOf(MachineKey("b", "same")), query).isEmpty())
+        }
+        val profiles = item.copy(raw=JSONObject("""{"subagent_source":"hook_profiles","subagents":{"profile-only":{"conversation_id":"profile-conversation"}}}"""))
+        assertTrue(SessionFilters.scoped(listOf(profiles), machines, emptySet(), "profile-only").isEmpty())
+        val preview = item.copy(raw=JSONObject("""{"subagent_previews":[{"agent_id":"preview-child","conversation_id":"preview-conversation"}]}"""))
+        assertEquals(listOf(preview), SessionFilters.scoped(listOf(preview), machines, emptySet(), "preview-child"))
+        val mention = item.copy(preview="Working on task zerus-ab12")
+        assertEquals(listOf(mention), SessionFilters.scoped(listOf(mention), machines, emptySet(), "zerus-ab12"))
+    }
     @Test fun omittedLifecycleDefaultsRunningAsDesktopDoes() {
         val item = session("""{"activity":"busy","phase":"tool","process_state":"running"}""")
         assertEquals("running", SessionFilters.state(item))

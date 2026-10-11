@@ -39,6 +39,10 @@ object SessionDetailsPresentation {
         val recorded = !verified || target.archiveId.isNotBlank()
         val fields = buildList {
             add(ContextDetail("Session", target.session))
+            SessionReference.identifiers(target).forEach { identifier ->
+                add(ContextDetail(identifier.substringBefore(": "), identifier.substringAfter(": ")))
+            }
+            if (target.archiveId.isNotBlank()) add(ContextDetail("Archive ID", target.archiveId))
             listOf("agent" to "Provider", "model" to "Model", "effort" to "Effort", "cwd" to "Directory", "project" to "Project").forEach { (key, label) ->
                 record.string(key).takeIf { it.isNotBlank() }?.let { add(ContextDetail(label, it)) }
             }

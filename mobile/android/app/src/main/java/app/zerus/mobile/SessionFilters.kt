@@ -94,9 +94,17 @@ object SessionFilters {
     fun scoped(sessions: List<Session>, machines: List<Machine>, selectedMachines: Set<MachineKey>, query: String,
         project: ProjectKey? = null): List<Session> = sessions.filter { session ->
         (project == null || session.projectKey == project) && (selectedMachines.isEmpty() || machineKey(session.target) in selectedMachines) &&
-            (query.isBlank() || (listOf(session.target.session, label(session), session.title, session.preview, session.agent, session.project) +
+            (query.isBlank() || (listOf(session.target.session, session.target.conversation, session.target.run, session.target.archiveId,
+                session.target.agentId, label(session), session.title, session.preview, session.agent, session.project) + childIdentifiers(session) +
                 listOf("prompt", "current_tool", "git_branch", "git_worktree_name", "activity_summary", "activity_detail", "cwd").map { SessionPreview.render(session.raw.string(it)) } +
                 machines.filter { machineKey(session.target) == MachineKey(it.connectionId, it.id) }.map { it.name }).joinToString(" ").contains(query.trim(), true))
+    }
+    private fun childIdentifiers(session: Session): List<String> {
+        if (session.raw.string("subagent_source") == "hook_profiles") return emptyList()
+        val roster = session.raw.optJSONObject("subagents")
+        val previews = session.raw.optJSONArray("subagent_previews")?.objects().orEmpty()
+        return roster?.keys()?.asSequence()?.flatMap { id -> sequenceOf(id, roster.optJSONObject(id)?.string("conversation_id").orEmpty()) }?.toList().orEmpty() +
+            previews.flatMap { listOf(it.string("id", "agent_id"), it.string("conversation_id")) }
     }
     fun counts(sessions: List<Session>, machines: List<Machine>): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
         sessions.count { matches(it, filter, online(it, machines)) }

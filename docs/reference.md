@@ -51,6 +51,19 @@ alone never launches a session or sends input.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
+The session header on desktop and Android shows its native **Session ID** in
+small, muted, selectable text. Before that ID is reported, **Run ID** identifies
+the current process run; it can change on resume. Child views also show their
+**Agent ID**. Search accepts complete IDs or parts of conversation, run, archive
+and reported child IDs; a child match identifies its parent conversation.
+Machine, project and state filters still apply. Desktop ID results show the
+matched identifier and expose its complete value in the tooltip.
+
+Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
+message search finds their public mentions; Android session search finds mentions
+in the available session metadata and previews. A task mention alone does not
+establish a unique session identity.
+
 <a id="recovery"></a>
 
 ## Pause, resume and reboot
@@ -324,7 +337,7 @@ strip, the full list opens over the conversation; turn this off with **Settings 
 Sessions → Expand the collapsed session list on hover**. The collapsed state and
 the docked width are local preferences.
 
-Search names, folders, branches and models immediately. From two characters,
+Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
 events on each host. Machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest

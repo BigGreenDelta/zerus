@@ -23,6 +23,8 @@ private slots:
     void errorsFollowHostScopeAndRecoverWhenPeerConnects();
     void newlyAddedPeerIsSearchedForTheCurrentQuery();
     void selectedResultCanBeReopenedWithoutDuplicateActivation();
+    void identifiersMatchWithoutHistoryAndKeepScope();
+    void taskNumbersRemainPublicMessageMatches();
     void preview();
 private:
     FleetState fleet(bool remoteOnline = true) const;
@@ -229,6 +231,41 @@ void TestSessionSearch::selectedResultCanBeReopenedWithoutDuplicateActivation()
     QTest::mouseClick(results->viewport(), Qt::LeftButton, {}, results->visualItemRect(results->item(1)).center());
     QCOMPARE(activated.size(), 4);
     QTest::keyClick(results, Qt::Key_Down); QCOMPARE(activated.size(), 5);
+}
+void TestSessionSearch::identifiersMatchWithoutHistoryAndKeepScope()
+{
+    auto state = fleet(false); auto box = state.local();
+    const QString conversation = "11111111-1111-4111-8111-111111111111";
+    box.sessions[0].conversationId = conversation;
+    box.sessions[0].subagents = {{"child-reference", QJsonObject{{"conversation_id", "child-conversation"}}}};
+    box.sessions[1].conversationId = "saved-conversation";
+    box.sessions[2].conversationId = "archived-conversation";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionSearch search(script()); search.setScope(state, "all", {});
+    for (const auto &query : QStringList{conversation, "4111-8111", "LIVE-RUN", "child-reference", "child-conversation"}) {
+        search.setQuery(query); QCOMPARE(list(search)->count(), 1);
+        QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("ID:"));
+        QVERIFY(list(search)->item(0)->toolTip().contains(conversation));
+        QVERIFY(status(search)->text().contains("0 messages"));
+    }
+    search.setQuery("archive-one"); QCOMPARE(list(search)->count(), 1);
+    QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Archive ID: archive-one"));
+    search.setQuery("saved-conversation"); QCOMPARE(list(search)->count(), 1);
+    search.setScope(state, "active", {}); QCOMPARE(list(search)->count(), 0);
+    search.setScope(state, "all", {"mac"}); QCOMPARE(list(search)->count(), 0);
+    box.ok = false; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    search.setScope(state, "all", {}); search.setQuery(conversation); QCOMPARE(list(search)->count(), 1);
+    box.sessions[0].subagentSource = "hook_profiles"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    search.setScope(state, "all", {}); search.setQuery("child-reference"); QCOMPARE(list(search)->count(), 0);
+}
+void TestSessionSearch::taskNumbersRemainPublicMessageMatches()
+{
+    configure({}, "zerus-ab12", {hit("codex/docs/saved", "saved-run", "task-message", "Release task zerus-ab12 is in progress.")});
+    SessionSearch search(script()); search.setScope(fleet(), "all", {"@local"}); search.setQuery("zerus-ab12");
+    QTRY_COMPARE(list(search)->count(), 1);
+    QVERIFY(status(search)->text().contains("1 messages"));
+    QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Release task zerus-ab12"));
+    QVERIFY(!list(search)->item(0)->toolTip().contains("Session ID: zerus-ab12"));
 }
 void TestSessionSearch::preview()
 {

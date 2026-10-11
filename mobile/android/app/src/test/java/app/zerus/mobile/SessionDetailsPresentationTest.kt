@@ -7,6 +7,12 @@ import org.junit.Test
 
 class SessionDetailsPresentationTest {
     private val target = Target("computer","provider/project/tag","run","conversation","workspace")
+    @Test fun detailsExposeExactIdentityIncludingArchives() {
+        val view = SessionDetailsPresentation.parse(null, target.copy(archiveId="archive-one"), false)
+        assertEquals("conversation", view.fields.single { it.label == "Session ID" }.value)
+        assertEquals("archive-one", view.fields.single { it.label == "Archive ID" }.value)
+        assertFalse(view.fields.any { it.label == "Run ID" })
+    }
     private fun task(run: String) = JSONObject().put("run_id",run).put("source","plan").put("items",JSONArray().put(JSONObject()
         .put("id","task").put("title","Native task").put("status","in_progress")))
     private fun model() = JSONObject().put("model","native-model").put("effort","high").put("settings_change_supported",true)

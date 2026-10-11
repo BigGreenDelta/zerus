@@ -40,6 +40,10 @@ The CLI verifies computer and conversation identities and follows session rename
 Use the resolved name and IDs for any separately authorized operation. See the
 session references section in `docs/reference.md`.
 
+When referring to another conversation, include its Zerus session name or copied
+reference. Beads IDs such as `zerus-ab12` identify tasks, not conversations; never
+present a task number as a session ID.
+
 Keep the `hgs` CLI, `HGS_*` variables, state/config paths and existing application
 and service identifiers compatible. A repository rename must not reset accounts,
 project catalogs, native agent processes or saved conversations.

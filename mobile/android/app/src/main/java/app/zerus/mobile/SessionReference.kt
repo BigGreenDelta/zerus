@@ -4,6 +4,12 @@ import java.net.URLEncoder
 import java.util.UUID
 
 object SessionReference {
+    fun identifiers(target: Target): List<String> = buildList {
+        if (target.conversation.isNotBlank()) add("Session ID: ${target.conversation}")
+        else if (target.agentId.isBlank() && target.run.isNotBlank()) add("Run ID: ${target.run}")
+        if (target.agentId.isNotBlank()) add("Agent ID: ${target.agentId}")
+    }
+
     fun create(target: Target, nativeMachineName: String): String? {
         val id = runCatching { UUID.fromString(target.computerId) }.getOrNull() ?: return null
         if (id.toString() != target.computerId || id == UUID(0,0) ||

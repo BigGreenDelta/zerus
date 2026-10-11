@@ -86,6 +86,7 @@ class TestSessionsWindow : public QObject {
 private slots:
     void initTestCase();
     void copySessionReferencePreservesSelectionAndDraft();
+    void sessionIdentifiersRemainSelectableAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void init() { QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -3169,6 +3170,33 @@ void TestSessionsWindow::copySessionReferencePreservesSelectionAndDraft()
     QFile args(program+".args");QVERIFY(args.open(QIODevice::ReadOnly));QCOMPARE(args.readAll(),QByteArray("reference\ncodex/hgs/dashboard\n--json\n--run\nrun\n--conversation\nconversation-one\n"));
     box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(!button->isEnabled());
 }
+void TestSessionsWindow::sessionIdentifiersRemainSelectableAcrossNavigation()
+{
+    auto state = fleet(); auto box = state.local();
+    box.ok = false; box.sessions[0].conversationId = "11111111-1111-4111-8111-111111111111";
+    box.sessions[1].conversationId.clear(); box.sessions[1].runId = "unconfirmed-run";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); window.resize(820, 700); window.setFleet(state); window.show();
+    window.showSession({}, box.sessions[0].name);
+    auto *id = window.findChild<QLabel *>("sessionId"); QVERIFY(id); QVERIFY(id->isVisible());
+    QCOMPARE(id->text(), QString("Session ID: 11111111-1111-4111-8111-111111111111"));
+    QVERIFY(id->textInteractionFlags().testFlag(Qt::TextSelectableByMouse));
+    QVERIFY(id->wordWrap()); QVERIFY(id->font().pixelSize() < window.findChild<QLabel *>("detailTitle")->font().pixelSize());
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); composer->editor()->setPlainText("Keep this draft");
+    const auto text = id->text(); id->setSelection(text.indexOf(": ") + 2, box.sessions[0].conversationId.size());
+    QCOMPARE(id->selectedText(), box.sessions[0].conversationId); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    window.setFleet(state); QCOMPARE(id->selectedText(), box.sessions[0].conversationId);
+    const auto preview = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window.grab().save(preview + "/session-id.png")); }
+    window.showSession({}, box.sessions[1].name); QCOMPARE(id->text(), QString("Run ID: unconfirmed-run"));
+    QVERIFY(id->toolTip().contains("not been reported"));
+    window.showSession({}, box.sessions[0].name); QCOMPARE(id->text(), text);
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    // A confirmed inspected conversation replaces the run fallback, including after clear.
+    window.findChild<HgsClient *>()->inspectionReady({}, box.sessions[0].name,
+        {{"tracked", true}, {"conversation_id", "new-conversation"}, {"run_id", "new-run"}});
+    QCOMPARE(id->text(), QString("Session ID: new-conversation"));
+}
 
 void TestSessionsWindow::activityMarkReadKeepsReadingPosition_data()
 {
@@ -3809,6 +3837,7 @@ void TestSessionsWindow::subagentActivityKeepsMainDraftAndRejectsStaleHistory()
     auto *stack = window.findChild<QStackedWidget *>("activityStack");
     roster->anchorClicked(QUrl("hgs-agent:unknown")); QCOMPARE(stack->currentIndex(),0);
     roster->anchorClicked(QUrl("hgs-agent:child-1")); QCOMPARE(stack->currentIndex(),1); QVERIFY(!composer->isVisible());
+    QCOMPARE(window.findChild<QLabel *>("subagentId")->text(), QString("Agent ID: child-1"));
     auto *view = window.findChild<ActivityView *>("subagentActivity");
     QJsonObject child{{"parent_conversation_id","conversation-one"},{"conversation_id","conversation-one/child-1"},{"run_id","run-one"},
         {"history_scope","Native subagent history"},{"events",QJsonArray{QJsonObject{{"type","AgentMessage"},{"detail","Review finished"},{"at",1700000000}}}}};

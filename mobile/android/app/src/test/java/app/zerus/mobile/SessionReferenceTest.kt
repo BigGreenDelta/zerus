@@ -5,6 +5,13 @@ import org.junit.Test
 
 class SessionReferenceTest {
     private val target=Target("11111111-1111-4111-8111-111111111111","claude/project/a & б","run","parent")
+    @Test fun displayIdentitiesDistinguishConversationRunAndChild() {
+        assertEquals(listOf("Session ID: parent"), SessionReference.identifiers(target))
+        assertEquals(listOf("Run ID: run"), SessionReference.identifiers(target.copy(conversation="")))
+        assertEquals(listOf("Session ID: native-child", "Agent ID: child"), SessionReference.identifiers(target.copy(conversation="native-child", agentId="child", parentConversation="parent")))
+        assertEquals(listOf("Agent ID: child"), SessionReference.identifiers(target.copy(conversation="",agentId="child",parentConversation="parent")))
+        assertTrue(SessionReference.identifiers(target.copy(conversation="",run="")).isEmpty())
+    }
     @Test fun referencePreservesMachineConversationAndEscapedName() {
         val uri=SessionReference.create(target,"fixture")!!
         assertTrue(uri.startsWith("zerus://session?machine=${target.computerId}&host=fixture&"))
