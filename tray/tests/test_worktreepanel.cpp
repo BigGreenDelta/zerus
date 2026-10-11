@@ -82,10 +82,10 @@ private slots:
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(script(),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
         auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
-        auto *choose=dialog.findChild<QPushButton *>("chooseLaunchWorktree");QTRY_VERIFY(choose->isVisible());
-        QTimer::singleShot(0,&dialog,[&]{auto *picker=dialog.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTimer::singleShot(3000,picker,&QDialog::reject);auto *tree=picker->findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);tree->setCurrentItem(tree->topLevelItem(1));auto *use=picker->findChild<QPushButton *>("useWorktreeFolder");QTRY_VERIFY(use->isEnabled());use->click();});choose->click();
+        auto *choose=dialog.findChild<QAction *>("chooseLaunchWorktree");QVERIFY(choose);QTRY_VERIFY(choose->isVisible());
+        QTimer::singleShot(0,&dialog,[&]{auto *picker=dialog.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTimer::singleShot(3000,picker,&QDialog::reject);auto *tree=picker->findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);tree->setCurrentItem(tree->topLevelItem(1));auto *use=picker->findChild<QPushButton *>("useWorktreeFolder");QTRY_VERIFY(use->isEnabled());use->click();});choose->trigger();
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/linked"));dialog.setFleet(state);
-        auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QCOMPARE(hint->text(),QString("Worktree in Work"));QVERIFY(hint->styleSheet().isEmpty());
+        auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());QVERIFY(hint->styleSheet().isEmpty());
         QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(account->currentData().toString(),QString("work"));QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/linked"));
         QCOMPARE(org.group(project)->folders.size(),1);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);dialog.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched.first()[2].toString(),QString("/linked"));QCOMPARE(launched.first()[4].toString(),QString("work"));QCOMPARE(org.group(project)->folders.size(),1);
     }
@@ -107,8 +107,8 @@ private slots:
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(script(),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
         auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
-        auto *create=dialog.findChild<QPushButton *>("newLaunchWorktree");QTRY_VERIFY(create->isVisible()&&create->isEnabled());
-        QTimer::singleShot(0,&dialog,[&]{auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);form->reject();});create->click();
+        auto *create=dialog.findChild<QAction *>("newLaunchWorktree");QVERIFY(create);QTRY_VERIFY(create->isVisible()&&create->isEnabled());
+        QTimer::singleShot(0,&dialog,[&]{auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);form->reject();});create->trigger();
         QFile calls(dir.filePath("calls"));QVERIFY(calls.open(QIODevice::ReadOnly));QVERIFY(!calls.readAll().contains("worktrees create"));calls.close();
         QTimer::singleShot(0,&dialog,[&]{
             auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);QTimer::singleShot(3000,form,&QDialog::reject);
@@ -116,9 +116,9 @@ private slots:
             form->findChild<QComboBox *>("newWorktreeBase")->setCurrentText("origin/main");
             form->findChild<QLineEdit *>("newWorktreePath")->setText("/new folder");
             auto *submit=form->findChild<QPushButton *>("createWorktree");submit->click();QVERIFY(!submit->isEnabled());form->reject();QVERIFY(form->isVisible());
-        });create->click();
+        });create->trigger();
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/new folder"));dialog.setFleet(state);
-        auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QCOMPARE(hint->text(),QString("Worktree in Work"));QVERIFY(hint->styleSheet().isEmpty());
+        auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());QVERIFY(hint->styleSheet().isEmpty());
         QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(account->currentData().toString(),QString("work"));
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/new folder"));QCOMPARE(org.group(project)->folders.size(),1);
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);dialog.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched.first()[2].toString(),QString("/new folder"));
@@ -128,22 +128,22 @@ private slots:
         QFile fail(dir.filePath("fail-create"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.close();
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");org.addFolder(project,"arch","/repo");
         NewSessionDialog dialog(script(),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
-        auto *create=dialog.findChild<QPushButton *>("newLaunchWorktree");QTRY_VERIFY(create->isVisible()&&create->isEnabled());
+        auto *create=dialog.findChild<QAction *>("newLaunchWorktree");QVERIFY(create);QTRY_VERIFY(create->isVisible()&&create->isEnabled());
         QTimer::singleShot(0,&dialog,[&]{
             auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);QTimer::singleShot(3000,form,&QDialog::reject);
             form->findChild<QLineEdit *>("newWorktreeBranch")->setText("taken");form->findChild<QPushButton *>("createWorktree")->click();
             auto *error=form->findChild<QLabel *>("newWorktreeError");QTRY_VERIFY(error->text().contains("already exists"));
             QCOMPARE(form->findChild<QLineEdit *>("newWorktreeBranch")->text(),QString("taken"));QVERIFY(form->findChild<QPushButton *>("createWorktree")->isEnabled());form->reject();
-        });create->click();
+        });create->trigger();
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/repo"));QCOMPARE(org.group(project)->folders.size(),1);
     }
     void worktreeMembershipRequiresTheSelectedProjectAndMachine(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work"),other=org.createGroup("Other");
         org.addFolder(project,"arch","/repo/subfolder");org.addFolder(other,"arch","/unrelated");org.addFolder(project,"mac","/unrelated");
         NewSessionDialog dialog(script(),state,{},"codex",project);dialog.setGroups(org,project);dialog.show();
-        QTRY_VERIFY(dialog.findChild<QPushButton *>("chooseLaunchWorktree")->isVisible());
+        QTRY_VERIFY(dialog.findChild<QAction *>("chooseLaunchWorktree")->isVisible());
         dialog.selectPath("/linked/subfolder");auto *hint=dialog.findChild<QLabel *>("muted");
-        QTRY_VERIFY(!hint->property("outsideProject").toBool());QCOMPARE(hint->text(),QString("Worktree in Work"));
+        QTRY_VERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());
         dialog.setFleet(state);QVERIFY(!hint->property("outsideProject").toBool());
         dialog.selectPath("/linked-unrelated");QTRY_VERIFY(hint->property("outsideProject").toBool());
         dialog.selectPath("/bare");QTRY_VERIFY(hint->property("outsideProject").toBool());
