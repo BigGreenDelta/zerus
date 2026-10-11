@@ -12,6 +12,7 @@
 #include "GitStatusBadge.h"
 #include "SessionPresentation.h"
 #include "WorkspaceIcons.h"
+#include "MessageBoxIcons.h"
 #include <QDir>
 
 class ListProbe : public SessionList { public: using SessionList::mimeData; using SessionList::initViewItemOption; };
@@ -35,6 +36,7 @@ private slots:
     void elapsedWorkTimeKeepsUpdatingWithoutAnimation();
     void shortIdentityLabelsFitWithoutElision();
     void workspaceIconsAreReused();
+    void darkQuestionBoxesShowLightGlyph();
     void draftStatusSitsBetweenWorkAndReplies();
     void gitStatusSeparatesEvidenceAndExpires();
     void gitStatusCardsKeepMetadataAndMachineReadable();
@@ -144,6 +146,34 @@ void TestWorkspace::workspaceIconsAreReused()
     QVERIFY(workspaceIcon("refresh", QColor("#8ce3c9")).cacheKey() != first.cacheKey());
     QVERIFY(workspaceIcon("add", QColor("#506278")).cacheKey() != first.cacheKey());
     QVERIFY(!first.pixmap(24, 24).isNull());
+}
+
+void TestWorkspace::darkQuestionBoxesShowLightGlyph()
+{
+    // macOS's question glyph is translucent and dark; a dark palette inverts it
+    // and makes the body opaque enough to read.
+    QImage translucent(1, 1, QImage::Format_ARGB32); translucent.setPixel(0, 0, qRgba(40, 40, 40, 100));
+    const QRgb face = darkPaletteQuestionGlyph(QPixmap::fromImage(translucent)).toImage().pixel(0, 0);
+    QVERIFY(qAlpha(face) >= 245); QVERIFY(qGray(face) >= 205);
+
+    MessageBoxIcons::install();
+    const auto image = [](const QMessageBox &box) { return box.iconPixmap().toImage().convertToFormat(QImage::Format_ARGB32); };
+    QMessageBox question(QMessageBox::Question, "Question", "Continue?"), warning(QMessageBox::Warning, "Warning", "Continue?");
+    const QImage nativeQuestion = image(question), nativeWarning = image(warning);
+    QVERIFY(!nativeQuestion.isNull());
+    const QImage lightGlyph = darkPaletteQuestionGlyph(QPixmap::fromImage(nativeQuestion)).toImage().convertToFormat(QImage::Format_ARGB32);
+    QPalette dark = question.palette(), light = dark;
+    dark.setColor(QPalette::Window, QColor(30, 30, 30)); light.setColor(QPalette::Window, QColor(236, 236, 236));
+    question.setPalette(dark); warning.setPalette(dark);
+    question.show(); warning.show();
+    QCOMPARE(image(question), lightGlyph);
+    QCOMPARE(image(warning), nativeWarning);
+    // Appearance can change while the box is open.
+    question.setPalette(light);
+    QTRY_COMPARE(image(question), nativeQuestion);
+    QCOMPARE(question.icon(), QMessageBox::Question);
+    question.setPalette(dark);
+    QTRY_COMPARE(image(question), lightGlyph);
 }
 
 void TestWorkspace::shortIdentityLabelsFitWithoutElision()
