@@ -916,6 +916,96 @@ async fn alert_candidates_are_bounded_and_expire() {
     f.close().await;
 }
 #[tokio::test]
+async fn maintenance_rechecks_most_overdue_workspaces_first() {
+    let f = Fixture::new().await;
+    // More waiting workspaces than one pass takes (32): owners at their desks
+    // keep 33 of them waiting, so every pass is full.
+    let mut spaces = vec![];
+    for _ in 0..35 {
+        let c = f
+            .store
+            .provision("Example workspace", "Example computer")
+            .await
+            .unwrap();
+        spaces.push((
+            s(&c, "workspace_id").to_owned(),
+            s(&c, "node_id").to_owned(),
+        ));
+    }
+    spaces.sort();
+    let (expired, asleep) = (&spaces[33], &spaces[34]);
+    let at = now();
+    let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)";
+    for (w, node) in &spaces[..33] {
+        f.store
+            .db
+            .exec(
+                "UPDATE nodes SET presence_at=?,presence_until=? WHERE id=?",
+                args![at, at + 600.0, node],
+            )
+            .await
+            .unwrap();
+        f.store
+            .db
+            .exec(insert, args![w, node, at, at - 15.0])
+            .await
+            .unwrap();
+    }
+    // The highest workspace id is the most overdue and its machine sleeps; the
+    // next one holds only an expired candidate that is not due.
+    f.store
+        .db
+        .exec(insert, args![&asleep.0, &asleep.1, at, at - 30.0])
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec(
+            insert,
+            args![&expired.0, &expired.1, at - 86401.0, at + 600.0],
+        )
+        .await
+        .unwrap();
+    let mut rechecked = std::collections::BTreeSet::new();
+    for pass in 0..2 {
+        let before = now();
+        f.store.maintain(false).await.unwrap();
+        if pass == 0 {
+            let alert = format!("events WHERE kind='alert' AND workspace_id='{}'", asleep.0);
+            assert_eq!((f.count(&alert).await, f.alert_count().await), (1, 1));
+            assert_eq!(
+                f.count(&format!(
+                    "alert_candidates WHERE workspace_id='{}'",
+                    expired.0
+                ))
+                .await,
+                0
+            );
+        }
+        let mut t = f.store.db.begin().await.unwrap();
+        for r in t
+            .all(
+                "SELECT workspace_id FROM alert_candidates WHERE next_at>?",
+                args![before],
+            )
+            .await
+            .unwrap()
+        {
+            rechecked.insert(s(&r, "workspace_id").to_owned());
+        }
+        t.commit().await.unwrap();
+        // Fifteen seconds pass for every waiting candidate.
+        f.store
+            .db
+            .exec("UPDATE alert_candidates SET next_at=next_at-15", &[])
+            .await
+            .unwrap();
+    }
+    // Every waiting workspace was rechecked within two full passes.
+    assert_eq!(rechecked.len(), 33);
+    f.close().await;
+}
+#[tokio::test]
 async fn snapshot_events_and_push_claims() {
     let f = Fixture::new().await;
     f.store

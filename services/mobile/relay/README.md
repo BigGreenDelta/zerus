@@ -91,14 +91,18 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
   state only. Changed snapshots and new presence evaluate candidates on the
-  worker that received the heartbeat; an elected maintenance pass (at most 32
-  workspaces, rechecking waiting candidates within 15 seconds) evaluates due
-  candidates and expires old ones. Plans come from unlocked reads, so several
-  workers may evaluate the same candidate. Deleting the candidate row in the
-  transaction that appends the `alert` event and coalesces device wakes is the
-  cross-worker single-delivery claim. Candidate rows are locked after any event
-  locks, in ascending id within a workspace; maintenance folds expired rows
-  into that order.
+  worker that received the heartbeat. An elected maintenance pass evaluates the
+  due candidates of at most 32 workspaces, most overdue first, and drops the
+  oldest expired candidates of any workspace. Waiting candidates are rechecked
+  within 15 seconds while at most 32 × 15 / `maintenance_interval` workspaces
+  wait (480 at the 1-second default); beyond that, rechecks slow down
+  proportionally, still most overdue first. Plans come from unlocked reads, so
+  several workers may evaluate the same candidate. Deleting the candidate row
+  in the transaction that appends the `alert` event and coalesces device wakes
+  is the cross-worker single-delivery claim. Candidate rows are locked last,
+  after any event, credential and route/node locks, in ascending id;
+  maintenance visits workspaces in sorted order and folds expired rows into
+  that order.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
   PostgreSQL startup never retires another worker's claims.

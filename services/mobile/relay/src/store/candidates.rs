@@ -248,7 +248,10 @@ impl Store {
         if !Self::elected(&mut t, 735628114).await? {
             return Ok(());
         }
-        let due = t.all("SELECT DISTINCT workspace_id FROM (SELECT workspace_id FROM alert_candidates WHERE next_at<=? ORDER BY next_at,id LIMIT ?) due ORDER BY workspace_id LIMIT 32",args![at,batch]).await?;
+        // The most overdue workspaces first, so none starves under load; the
+        // sorted map still applies them in workspace order. Expiry takes the
+        // oldest rows of any workspace, outside this cap.
+        let due = t.all("SELECT workspace_id FROM (SELECT workspace_id,next_at FROM alert_candidates WHERE next_at<=? ORDER BY next_at,id LIMIT ?) due GROUP BY workspace_id ORDER BY MIN(next_at),workspace_id LIMIT 32",args![at,batch]).await?;
         let mut plans = BTreeMap::new();
         for r in due {
             let w = s(&r, "workspace_id").to_owned();
