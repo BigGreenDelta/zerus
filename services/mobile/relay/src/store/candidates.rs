@@ -39,15 +39,15 @@ impl Store {
         computer: &str,
         candidates: &[Candidate],
     ) -> Result<()> {
-        let mut count = i(
-            &t.one(
-                "SELECT count(*) AS n FROM alert_candidates WHERE workspace_id=?",
+        // Lock order: event locks, then every candidate row of this workspace in
+        // ascending id, as evaluators do, before replacing any of them.
+        let mut count = t
+            .all(
+                "SELECT id FROM alert_candidates WHERE workspace_id=? ORDER BY id FOR UPDATE",
                 args![w],
             )
             .await?
-            .ok_or(Error::BAD)?,
-            "n",
-        );
+            .len() as i64;
         for c in candidates {
             // A newer event for the same session and kind replaces the held one.
             count -= t.exec("DELETE FROM alert_candidates WHERE workspace_id=? AND computer_id=? AND session=? AND kind=?",args![w,computer,&c.session,&c.kind]).await? as i64;
@@ -166,6 +166,8 @@ impl Store {
         Ok(plan)
     }
     /// Applies a plan. The caller holds event locks when it contains deliveries.
+    /// Plan rows are in ascending id, so candidate rows are locked after any
+    /// event locks in the same order as `record_candidates`.
     /// Returns true when an alert was appended.
     async fn apply_alerts(&self, t: &mut Tx, w: &str, plan: AlertPlan) -> Result<bool> {
         let mut latest = None;

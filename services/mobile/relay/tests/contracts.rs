@@ -1101,6 +1101,35 @@ async fn postgres_cross_worker_contract() {
     );
     let (a, b) = tokio::join!(f.store.claim_push_jobs(), second.claim_push_jobs());
     assert_eq!(a.unwrap().len() + b.unwrap().len(), 1);
+    // An active desktop reschedules the held candidate; the lock alone then
+    // delivers on the other worker from the stored snapshot.
+    let held = json!({"sessions":[session_row("input","busy","q2",Some(&signature('2')),Value::Null)],"mobile_capabilities":next["mobile_capabilities"]});
+    let beat = |p: Value| json!({"snapshot":held,"machine_id":heartbeat["machine_id"],"peers":[],"presence":p});
+    second
+        .heartbeat(
+            &f.node,
+            &beat(presence(1.0, None)),
+            &canonical(&held).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (1, 1)
+    );
+    assert_eq!(f.count("alert_candidates WHERE next_at>created").await, 1);
+    f.store
+        .heartbeat(
+            &f.node,
+            &beat(presence(1.0, Some(0.0))),
+            &canonical(&held).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 2)
+    );
     // Simulate losing only this fixture database's LISTEN sockets. Durable
     // commands must remain visible while listeners reconnect and wake waiters.
     let mut wake = second.db.wake.subscribe();
