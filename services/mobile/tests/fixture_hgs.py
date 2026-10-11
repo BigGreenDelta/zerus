@@ -257,6 +257,9 @@ def main():
                       if key not in ("events", "provider_messages", "pending_questions", "attachment_messages")} for row in [record, *states] if not row.get("fixture_forgotten")]
         result = {"host": "Integration fixture", "ok": True, "projects": {}, "sessions": summaries,
                   "preferences": json.loads((root / "preferences.json").read_text()) if (root / "preferences.json").exists() else {"mobile_delivery": "away"}}
+        for key in ("desktop_presence", "preferences"):  # Phase 2 listing fields, synthetic here.
+            if isinstance(fixture_config.get(key), dict):
+                result[key] = fixture_config[key]
     elif args == ["swarm", "get"]:
         node_id = "11111111-1111-4111-8111-111111111111"
         result = {"schema": 1, "initialized": True, "node_id": node_id,

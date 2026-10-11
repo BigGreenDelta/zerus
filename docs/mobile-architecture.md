@@ -639,7 +639,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | --- | --- | --- |
 | `GET /healthz` | Public | Health and protocol version |
 | `POST /v1/pair` | Invitation | `{code, device_name}` → `{device_id, device_token, workspace_id, workspace_name}` |
-| `GET /v1/capabilities` | Device | Protocol version, operations, inspect extensions, push providers and attachment limits |
+| `GET /v1/capabilities` | Device | Protocol version, operations, features (inspect extensions, `presence_alerts`), push providers and attachment limits |
 | `GET /v1/computers` | Device | `{computers: [{id, name, online, last_seen_at, snapshot}]}` |
 | `POST /v1/requests` | Device | `{request_id, computer_id, operation, session, payload}` → request envelope |
 | `GET /v1/requests/{id}` | Owning device | Request envelope |
@@ -647,7 +647,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/push` | Device | `{provider: "fcm", token}`; other providers return 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
-| `POST /v1/node/heartbeat` | Computer | `{snapshot}` using local `hgs ls --json --local` output |
+| `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |
 | `GET /v1/node/requests?wait=25` | Computer | `{requests: [{request_id, operation, session, payload}]}` |
 | `POST /v1/node/requests/{id}/result` | Computer | `{state, result, error}` |
 
@@ -699,9 +699,64 @@ reported as partial rather than a completed conversation.
 ## Notifications
 
 The relay detects attention, failure and completion transitions from computer
-snapshots. An initial baseline is silent. Push payloads contain only generic
-wake information, never conversation text, project names or credentials. Opening
-a notification refreshes the authenticated session state.
+snapshots, including failed recovery and counted native questions, so every
+condition a phone notifies on has an event. An initial baseline is silent. Each
+transition is stored as an ordinary event, which refreshes phone state, and as
+an alert candidate. Push payloads contain only generic wake information, never
+conversation text, project names or credentials. Opening a notification
+refreshes the authenticated session state.
+
+### Presence-aware delivery
+
+Relays advertising the `presence_alerts` feature hold candidates while the
+owner works at a Zerus desktop. The connector sends each machine's
+`desktop_presence` (`idle_seconds`, `locked`, `locked_seconds`) as `presence`
+beside the snapshot, so changing idle time never rewrites snapshots; the relay
+remembers the latest presence per machine with its own receipt time. When a
+heartbeat carries no valid `presence`, the relay falls back to
+`snapshot.desktop_presence`, which older connectors still forward inside the
+snapshot. Idle time is aged by the time since the relay received it, which is
+stricter than reading idle at receipt and errs toward extra alerts.
+
+The delivery choice is `preferences.mobile_delivery` of the most recently seen
+gateway snapshot that carries a valid value: `immediate`, `away` (the default),
+or `away_5`, `away_10`, `away_15` and `away_30`. With no such snapshot the
+choice is `away`. The owner is active while a machine whose presence is at most
+120 seconds old is unlocked with less than 120 seconds of input idle time. Away
+time counts from the end of the latest activity over every remembered machine,
+or the earlier lock time; a machine that stopped reporting (lid closed, asleep)
+cannot keep the owner active but still marks when activity ended. With no
+presence ever received the owner is away, so connectors without these fields
+behave as before.
+
+A candidate is dropped when its session disappears, is archived, or changes run
+or conversation; when its attention signature changes or is marked read; for a
+candidate without a signature, only when the native need is resolved; or, for a
+completed turn, when that reply is read, a newer reply exists or the session is
+busy again. Otherwise it is delivered immediately, as soon as the owner is away,
+or after the chosen number of away minutes. Candidates expire after 24 hours
+and are capped at 1,000 per workspace.
+
+Evaluation runs inline on whichever relay worker accepted a changed snapshot or
+new presence. An advisory-elected maintenance pass rechecks the most overdue
+workspaces first, 32 per pass, so waiting candidates are re-evaluated within
+about 15 seconds; at the default 1 second interval that holds up to about 480
+waiting workspaces. Several workers may evaluate the same candidate, but a
+candidate row is deleted in the same transaction that appends its `alert`
+event, so an alert is delivered once.
+
+A delivered candidate appends `{id, computer_id, session, kind: "alert",
+alert_kind, created_at}` to `GET /v1/events`, with `alert_kind` `attention`,
+`error` or `completed`, and coalesces one generic wake per registered phone.
+Ordinary events no longer wake phones themselves. Phones that know the feature
+create cards only from alert events.
+
+Roll out `hgs`, the desktop and the connector first, then Android, then the
+relay. The connector retries without `presence` when an older relay rejects it,
+and Android alert-only mode starts only when the relay advertises the feature.
+Android builds released before this change keep only the newest event per
+session in a batch, so an alert following a completion can hide their opt-in
+completion card.
 
 Android notification preferences distinguish input and approvals, errors, and
 turn completion. Input and errors are enabled by default; completion is opt-in.
