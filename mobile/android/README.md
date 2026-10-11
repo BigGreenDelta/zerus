@@ -298,6 +298,15 @@ individual cards retain their exact workspace, computer and session destination.
 Cards refresh with events, settings changes and app startup. A resolved input
 request can remain until the next refresh when the relay emits no new event.
 
+When the relay advertises `presence_alerts`, a new card needs a relay `alert`
+event for the same workspace, computer and session whose kind matches the
+session's current need: attention for input and approvals, error, or completed
+for an opted-in finished turn. The relay sends it only while the item is unread
+and unresolved, and only when the owner is away from every Zerus desktop or
+chose immediate delivery. Ordinary events still refresh and withdraw cards; a
+card already shown for the same need stays without a new alert. Relays without
+the feature keep the behavior above, so this build ships before the relay.
+
 “Keep a live connection” starts an explicit foreground remote messaging service
 with a visible Stop action. It listens to the gateway event stream and follows
 additional paired gateways. It is the fallback for builds without Firebase and

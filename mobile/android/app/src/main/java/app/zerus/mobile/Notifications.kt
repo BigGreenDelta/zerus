@@ -99,6 +99,13 @@ object SessionNotifications {
         it.id == connection.id && it.url == connection.url && it.token == connection.token
     }
 
+    /** null keeps the last known mode when optional capability discovery fails. */
+    private suspend fun presenceAlerts(connection: Connection): Boolean? = try {
+        NotificationCatalogParser.presenceAlerts(api.capabilities(connection))
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+    catch (e: RelayException) { if (e.status in listOf(401, 403)) throw e else null }
+    catch (_: Exception) { null }
+
     /** true means durable work remains; the worker retries instead of replacing itself. */
     suspend fun sync(context: Context, connection: Connection, wait: Int = 0, forceCatalog: Boolean = false): Boolean =
         locks.getOrPut(connection.id) { Mutex() }.withLock {
@@ -107,6 +114,7 @@ object SessionNotifications {
             var state = store.notificationState(connection.id)
             var force = forceCatalog
             var operations = 0
+            var capabilitiesChecked = false
             while (operations < 10) {
                 currentCoroutineContext().ensureActive()
                 if (!connected(store, connection)) return@withLock false
@@ -122,6 +130,11 @@ object SessionNotifications {
                 val needsCatalog = page.full || page.empty || operations >= 9
                 if (needsCatalog && (state.bootstrap || state.pending.isNotEmpty() || force ||
                     state.settingsGeneration != preferences.generation || state.pendingPosts.isNotEmpty() || state.deliveryNeeded)) {
+                    if (!capabilitiesChecked) {
+                        capabilitiesChecked = true
+                        operations++
+                        presenceAlerts(connection)?.let { state = state.copy(presenceAlerts = it) }
+                    }
                     val raw = api.computers(connection).getJSONArray("computers").objects()
                     operations++
                     currentCoroutineContext().ensureActive()
@@ -132,7 +145,7 @@ object SessionNotifications {
                     }
                     val plan = NotificationPolicy.plan(NotificationPolicy.clockGuard(state, android.os.SystemClock.elapsedRealtime()),
                         catalog.sessions, state.pending.mapNotNull { catalog.resolve(connection.id, it) },
-                        store.notificationPreferences(), System.currentTimeMillis() / 1000.0, active)
+                        store.notificationPreferences(), System.currentTimeMillis() / 1000.0, active, alertsOnly = state.presenceAlerts)
                     state = plan.state
                     store.saveNotificationState(connection.id, state)
                     state = deliver(context, connection, store, state, plan)

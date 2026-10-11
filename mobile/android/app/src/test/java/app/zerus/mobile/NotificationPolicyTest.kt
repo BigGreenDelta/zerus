@@ -19,6 +19,11 @@ class NotificationPolicyTest {
         prefs: NotificationPreferences = preferences, at: Double = now) =
         NotificationPolicy.plan(state, listOf(value), valueEvent?.let { listOf(value.slot to it) }.orEmpty(), prefs, at)
     private fun roundtrip(state: NotificationState) = NotificationStateCodec.decode(JSONObject(NotificationStateCodec.encode(state).toString()))
+    private fun alert(id: Long = 2, name: String = "review", kind: String = "attention", at: Double = now) =
+        NotificationEvent(id, "computer", name, "alert", at, kind)
+    private fun alertPlan(state: NotificationState, value: NotificationCurrent, valueEvent: NotificationEvent?,
+        prefs: NotificationPreferences = preferences, at: Double = now) =
+        NotificationPolicy.plan(state, listOf(value), valueEvent?.let { listOf(value.slot to it) }.orEmpty(), prefs, at, alertsOnly = true)
 
     @Test fun defaultsAndIndependentTypesDoNotEnableFinished() {
         assertTrue(preferences.allows(SessionAlertKind.Input))
@@ -264,4 +269,53 @@ class NotificationPolicyTest {
         assertEquals(SessionAlertKind.Error, error.desired.single().kind)
     }
 
+    @Test fun presenceAlertsPostOnlyForMatchingAlertRows() {
+        val changed = current(identity = "question-2")
+        val waiting = alertPlan(ready(), changed, event())
+        assertTrue(waiting.desired.isEmpty())
+        assertTrue(waiting.retained.isEmpty())
+        assertTrue(alertPlan(waiting.state, changed, alert(kind = "error")).desired.isEmpty())
+        val alerted = alertPlan(waiting.state, changed, alert(3))
+        assertEquals(SessionAlertKind.Input, alerted.desired.single().kind)
+        assertTrue(alerted.desired.single().fresh)
+    }
+
+    @Test fun presenceAlertsKeepPostedCardAndCancelReplacedNeedWithoutAlert() {
+        val changed = current(identity = "question-2")
+        val alerted = alertPlan(ready(), changed, alert())
+        val posted = roundtrip(NotificationPolicy.reserve(alerted.state, alerted.desired.single(), true, 10_000))
+        val refresh = alertPlan(posted, changed, event(3), at = now + 1)
+        assertEquals(setOf(changed.slot.key), refresh.retained)
+        assertFalse(refresh.desired.single().fresh)
+        val replaced = alertPlan(refresh.state, changed.copy(identity = "question-3"), event(4), at = now + 2)
+        assertTrue(replaced.desired.isEmpty())
+        assertTrue(replaced.retained.isEmpty())
+    }
+
+    @Test fun presenceAlertsAnnounceCompletionOnlyFromCompletedAlert() {
+        val idle = current(kind = null, idle = true)
+        val enabled = preferences.copy(finished = true)
+        assertTrue(alertPlan(ready(), idle, event(kind = "completed"), enabled).desired.isEmpty())
+        assertEquals(SessionAlertKind.Finished, alertPlan(ready(), idle, alert(kind = "completed"), enabled).desired.single().kind)
+    }
+
+    @Test fun withoutPresenceAlertsAlertRowsNeitherAnnounceNorHideCompletion() {
+        val idle = current(kind = null, idle = true)
+        val enabled = preferences.copy(finished = true)
+        val both = listOf(idle.slot to event(1, kind = "completed"), idle.slot to alert(2, kind = "completed"))
+        assertEquals(SessionAlertKind.Finished, NotificationPolicy.plan(ready(), listOf(idle), both, enabled, now).desired.single().kind)
+        val onlyAlert = listOf(idle.slot to alert(kind = "completed"))
+        assertTrue(NotificationPolicy.plan(ready(), listOf(idle), onlyAlert, enabled, now).desired.isEmpty())
+        val input = current(identity = "question-2")
+        assertEquals(SessionAlertKind.Input, plan(ready(), input, alert()).desired.single().kind)
+    }
+
+    @Test fun alertRowsSurviveLaterRefreshRowsAndCodecRoundtrip() {
+        val page = NotificationPolicy.ingest(NotificationState(bootstrap = false), listOf(event(1), alert(2), event(3, kind = "completed")))
+        val state = roundtrip(page.state.copy(presenceAlerts = true))
+        assertEquals(listOf(2L, 3L), state.pending.map { it.id }.sorted())
+        assertEquals("attention", state.pending.single { it.kind == "alert" }.alertKind)
+        assertNull(state.pending.single { it.kind == "completed" }.alertKind)
+        assertTrue(state.presenceAlerts)
+    }
 }

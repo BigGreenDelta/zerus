@@ -96,4 +96,15 @@ class NotificationCatalogTest {
         invalid.getJSONArray("events").getJSONObject(0).put("session", "review\nspoof")
         assertThrows(IllegalArgumentException::class.java) { NotificationCatalogParser.events(invalid) }
     }
+
+    @Test fun alertRowsCarryOnlyKnownKindsAndCapabilitiesEnableAlertMode() {
+        fun row(id: Int, kind: String, alertKind: String? = null) = JSONObject().put("id", id).put("computer_id", computer)
+            .put("session", "review").put("kind", kind).put("created_at", 1_000.0).apply { alertKind?.let { put("alert_kind", it) } }
+        val events = NotificationCatalogParser.events(JSONObject().put("events", JSONArray(listOf(
+            row(1, "attention"), row(2, "alert", "completed"), row(3, "alert", "future"), row(4, "attention", "error")))))
+        assertEquals(listOf(null, "completed", null, null), events.map { it.alertKind })
+        assertTrue(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after", "presence_alerts")))))
+        assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after")))))
+        assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject()))
+    }
 }

@@ -67,6 +67,7 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         return Connection(UUID.randomUUID().toString(), result.string("workspace_name").ifBlank { URI(normalized).host ?: "Workspace" }, normalized, result.getString("device_token"))
     }
     suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
+    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
         require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send")) { "This control belongs to the parent session." }
         require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
