@@ -71,7 +71,7 @@ Choose one package; all include the CLI and desktop and conflict with one anothe
 
 Keep Arch fully updated before installing. Binary library version requirements
 come from the verified release builder; source packages compile against your
-installed libraries. The [0.39.0 release](https://github.com/ufna/zerus/releases/tag/v0.39.0)
+installed libraries. The [0.40.0 release](https://github.com/ufna/zerus/releases/tag/v0.40.0)
 includes immutable source/binary archives, checked pacman packages, AUR recipes
 and SHA-256 checksums. Native agents are installed separately.
 
