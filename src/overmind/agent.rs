@@ -151,7 +151,14 @@ pub fn advance(ctx: &mut Ctx, request: Value) -> Result<Value> {
     // Refusals of the other checks come from the write itself, in their order.
     if let (Some(cwd), Some(evidence)) = (ctx.cwd.clone(), req.evidence.clone()) {
         let actor = ctx.actor.clone();
-        let git_evidence = ctx.store.read(|tx| Ok(check_advance(tx, &actor, &req).is_ok_and(|a| a.git_evidence)))?;
+        let git_evidence = ctx.store.read(|tx| {
+            // The write itself refuses a malformed request_id or replays a receipt.
+            let id = req.request_id.as_str();
+            if !id.is_empty() && (uuid::Uuid::parse_str(id).is_err() || tx.receipt(id)?.is_some()) {
+                return Ok(false);
+            }
+            Ok(check_advance(tx, &actor, &req).is_ok_and(|a| a.git_evidence))
+        })?;
         if git_evidence {
             verify_evidence(&cwd, &evidence)?;
         }
@@ -527,7 +534,20 @@ mod tests {
         assert_eq!((refusal(text).field.as_str()), "evidence");
         let missing = advance(&mut agent(&mut store, "w1", cwd.clone()), json!({"task": task, "to": "Review", "worklog": "did", "evidence": "deadbeefdeadbeef"})).unwrap_err();
         assert_eq!(refusal(missing).state, "invalid");
-        advance(&mut agent(&mut store, "w1", cwd), json!({"task": task, "to": "Review", "worklog": "did", "evidence": head})).unwrap();
+        let request = json!({"request_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "task": task, "to": "Review", "worklog": "did", "evidence": head});
+        let first = advance(&mut agent(&mut store, "w1", cwd), request.clone()).unwrap();
+        // Sent back to Build, a replay still returns its receipt, even from a
+        // repository that lacks the commit.
+        store.write(|tx| {
+            let current = commands::load(tx, &task)?;
+            let report = BTreeMap::from([("report".to_string(), "again".to_string())]);
+            commands::transition(tx, &Actor::human(MACHINE), &current, Action::NeedsWork, "Build", report, None, vec![], "")?;
+            Ok(())
+        }).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("-C").arg(other.path()).args(["init", "-q"]).output().unwrap().status.success());
+        let replay = advance(&mut agent(&mut store, "w1", Some(other.path().to_path_buf())), request).unwrap();
+        assert_eq!(replay, first);
     }
 
     #[test]
