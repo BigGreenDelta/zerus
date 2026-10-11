@@ -390,8 +390,8 @@ accounts, credentials or configuration. Package installation does not start or
 stop services, edit user homes or replace the user's tmux configuration.
 
 The product package version currently follows the desktop version: `VERSION`
-and `tray/CMakeLists.txt` are **0.40.0**. The independently versioned compatible
-CLI is **1.49.0**. CI rejects a product/desktop version mismatch; packaging
+and `tray/CMakeLists.txt` are **0.41.0**. The independently versioned compatible
+CLI is **1.50.0**. CI rejects a product/desktop version mismatch; packaging
 records both versions in `build-info.json`, with the source commit when built
 from Git. For source-archive builds, the release manifest and archive SHA-256
 provide the commit provenance.
@@ -464,9 +464,9 @@ binary archives, rebuilds both stable recipes, runs namcap and seals the result.
 
 ```sh
 # Only when the owner requests a hosted build:
-gh workflow run release.yml --ref main -f version=0.40.0
+gh workflow run release.yml --ref main -f version=0.41.0
 # After this manual run succeeds:
-gh run download RUN_ID --name zerus-0.40.0-candidate --dir /tmp/zerus-candidate
+gh run download RUN_ID --name zerus-0.41.0-candidate --dir /tmp/zerus-candidate
 cd /tmp/zerus-candidate
 sha256sum -c SHA256SUMS
 ```
@@ -503,7 +503,7 @@ one Ubuntu runner, does no compilation and allocates no Arch/macOS runners:
 ```sh
 # Only after review and an explicit owner publication request:
 gh workflow run publish.yml --ref main \
-  -f version=0.40.0 -f candidate_run=RUN_ID
+  -f version=0.41.0 -f candidate_run=RUN_ID
 ```
 
 The publisher verifies the same-repository manual run came from `main`, succeeded,
