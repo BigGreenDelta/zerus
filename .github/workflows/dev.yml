@@ -49,6 +49,8 @@ jobs:
               raise SystemExit('Expected one checked Arch package.')
           shutil.copyfile(packages[0], root / packages[0].name)
           shutil.copyfile('VERSION', root / 'VERSION')
+          shutil.copyfile('DEV_VERSION', root / 'DEV_VERSION')
+          shutil.copyfile('artifacts/dev-package/desktop-build-info.json', root / 'desktop-build-info.json')
           subprocess.run(['git', 'archive', '--format=tar.gz', '--prefix=zerus/',
                           '--output=' + str(root / 'zerus-source.tar.gz'), os.environ['DEV_COMMIT']], check=True)
           subprocess.run(['python3', 'scripts/prepare-dev-update.py', '--input', str(root),

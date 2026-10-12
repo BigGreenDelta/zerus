@@ -54,6 +54,24 @@ class TestUpdates : public QObject {
     }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
+    void devVersionSequenceIsVisibleAndMatchesTheFeed(){
+        auto value=devRaw();
+        auto legacy=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");
+        QVERIFY(legacy.valid);QCOMPARE(legacy.version,value["versionName"].toString()+"-dev.50");
+        value["versionName"]="0.42.1-dev.50";
+        auto numbered=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");
+        QVERIFY(numbered.valid);QCOMPARE(numbered.version,QString("0.42.1-dev.50"));
+        for(const auto &bad:{"0.42.1-dev.49","0.42.1-dev.050","0.42.1-dev.51"}){
+            value["versionName"]=bad;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev").valid);
+        }
+        const auto identity=UpdateController::buildInfo();const auto version=UpdateController::installedVersion();
+        QSettings settings;const auto previous=settings.value("updates/channel");
+        for(const auto &channel:{"stable","dev","nightly"}){
+            settings.setValue("updates/channel",channel);
+            QCOMPARE(UpdateController::buildInfo(),identity);QCOMPARE(UpdateController::installedVersion(),version);
+        }
+        if(previous.isValid())settings.setValue("updates/channel",previous);else settings.remove("updates/channel");
+    }
     void devCatalogAndNotificationsUseBuildIdentity(){
         auto value=raw();value["schemaVersion"]=2;value["channel"]="dev";value["channelTag"]="dev";value["buildId"]=12345;value["buildNumber"]=50;value.remove("releaseId");value.remove("releaseUrl");value["buildUrl"]="https://github.com/ufna/zerus/actions/runs/12345";value.remove("packages");
         value["artifacts"]=QJsonArray{

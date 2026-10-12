@@ -63,11 +63,18 @@ execute_process(COMMAND git status --porcelain --untracked-files=normal
                 OUTPUT_VARIABLE ZERUS_SOURCE_CHANGES RESULT_VARIABLE ZERUS_GIT_STATUS ERROR_QUIET)
 get_filename_component(ZERUS_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
 string(LENGTH "${ZERUS_SOURCE_COMMIT}" ZERUS_SOURCE_COMMIT_LENGTH)
+set(ZERUS_CLEAN_SOURCE FALSE)
 if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUAL 40
-   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0
-   AND ZERUS_SOURCE_CHANGES STREQUAL "")
-    target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0)
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_BUILD_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+    if(ZERUS_SOURCE_CHANGES STREQUAL "")
+        set(ZERUS_CLEAN_SOURCE TRUE)
+        target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}" ZERUS_BUILD_SOURCE_DIRTY=0)
+    else()
+        target_compile_definitions(hgs-updates PRIVATE ZERUS_BUILD_SOURCE_DIRTY=1)
+    endif()
 endif()
+include(cmake/BuildVersion.cmake)
 
 add_executable(hgs-tray
     resources.qrc

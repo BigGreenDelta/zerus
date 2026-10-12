@@ -93,7 +93,12 @@ review manifest migrations explicitly and retain Rust 1.85 compatibility.
 Keep security alerts and security updates enabled separately. Never auto-merge.
 AUR packages are `zerus` (stable source), `zerus-git` (upstream main),
 `zerus-ade-bin` (stable binary) and `zerus-ade-nightly-bin` (verified nightly binary),
-with x86_64 support. Stable publication remains owner-triggered. Daily nightlies
+with x86_64 support. Stable fixes increment patch; Dev builds use the next planned
+stable base from `DEV_VERSION` (Android: `mobile/android/DEV_VERSION`) plus the
+growing verified CI sequence, `next-version-dev.N`. Keep installed build identity
+independent of selected channels and retain all published asset versions. See the
+version rule in `docs/public-distribution.md`.
+Stable publication remains owner-triggered. Daily nightlies
 publish automatically only after full CI and package checks succeed. Publication
 credentials remain confined to trusted main in the release environment, never PR
 code. Nightly tags/assets are immutable and never become the latest stable release.

@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QLocalServer>
+#include <QJsonDocument>
 #include <QLocalSocket>
 #include <QSettings>
 #include <QStringList>
@@ -140,7 +141,15 @@ int main(int argc, char *argv[])
     if (!parsed) {
         if (parseError == QLatin1String("__help__")) { out << AppConfig::usage(); return 0; }
         if (parseError == QLatin1String("__version__")) {
-            out << QStringLiteral("Zerus %1\n").arg(QLatin1String(HGS_TRAY_VERSION));
+            QCoreApplication app(argc, argv);
+            QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
+            out << QStringLiteral("Zerus %1\n").arg(UpdateController::buildInfo()["versionName"].toString());
+            return 0;
+        }
+        if (parseError == QLatin1String("__build_info__")) {
+            QCoreApplication app(argc, argv);
+            QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
+            out << QJsonDocument(UpdateController::buildInfo()).toJson(QJsonDocument::Compact) << '\n';
             return 0;
         }
         errOut << QStringLiteral("hgs-tray: %1\n\n").arg(parseError) << AppConfig::usage();

@@ -37,3 +37,4 @@ PY
     cp ./*.pkg.tar.zst "$repo_root/artifacts/"
 )
 python3 scripts/check-package.py --root "$package_build/pkg/zerus-git"
+cp "$package_build/pkg/zerus-git/usr/share/doc/zerus/build-info.json" artifacts/desktop-build-info.json
