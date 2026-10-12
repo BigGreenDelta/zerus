@@ -32,30 +32,48 @@ object SessionCardPresentation {
         }
     }
 
-    /** The card's checkout line: the branch, or detached HEAD. Ordinary folders have none. */
+    /** The branch, or detached HEAD. Ordinary folders have none. */
     fun branch(raw: JSONObject): String {
         if (text(raw, "git_metadata_state") == "not_repo") return ""
         return text(raw, "git_branch").ifEmpty { if (flag(raw, "git_detached")) "detached HEAD" else "" }
     }
 
-    private fun worktree(raw: JSONObject): String =
-        if (!flag(raw, "git_worktree") || text(raw, "git_metadata_state") == "not_repo") ""
-        else text(raw, "git_worktree_name").let { if (it.isEmpty()) "worktree" else "worktree: $it" }
+    private fun linked(raw: JSONObject): Boolean = flag(raw, "git_worktree") && text(raw, "git_metadata_state") != "not_repo"
 
-    /** projectContext without the project name, as the header and Details show it. */
-    fun checkout(raw: JSONObject): String = listOf(branch(raw), worktree(raw)).filter { it.isNotEmpty() }.joinToString(" / ")
+    // Path components of a local or remote path, whichever separator its machine uses.
+    private fun parts(path: String): List<String> = path.split('/', '\\').filter { it.isNotEmpty() }
 
-    /** Cards show only the branch; the spoken description keeps the linked worktree. */
+    /** checkoutFolder: a linked worktree names its main checkout (`zerus`, not `zerus-work-1a2b`). */
+    fun folder(raw: JSONObject): String {
+        val common = if (linked(raw)) parts(text(raw, "git_common_dir")) else emptyList()
+        val repository = (if (common.size > 1 && common.last().startsWith('.')) common.dropLast(1) else common).lastOrNull().orEmpty()
+            .let { if (it.length > 4 && it.endsWith(".git")) it.dropLast(4) else it }
+        if (repository.isNotEmpty()) return repository
+        val root = if (text(raw, "git_metadata_state") == "not_repo") "" else text(raw, "git_root")
+        return parts(root.ifEmpty { text(raw, "cwd").ifEmpty { text(raw, "cwd_canonical") } }).lastOrNull().orEmpty()
+    }
+
+    /** The card's checkout line: folder / branch (or detached HEAD); an ordinary folder shows its name. */
+    fun line(raw: JSONObject): String = listOf(folder(raw), branch(raw)).filter { it.isNotEmpty() }.joinToString(" / ")
+
+    /** projectContext: the card line plus a linked-worktree mark, as the desktop header and Details show it. */
+    fun checkout(raw: JSONObject): String = line(raw).let { if (linked(raw) && it.isNotEmpty()) "$it · worktree" else it }
+
+    /** The spoken checkout line keeps the linked worktree's own folder. */
     fun checkoutDescription(raw: JSONObject): String {
+        val folder = folder(raw)
         val branch = branch(raw)
-        if (branch.isEmpty()) return ""
         val name = text(raw, "git_worktree_name")
         val worktree = when {
-            worktree(raw).isEmpty() -> ""
+            branch.isEmpty() || !linked(raw) -> ""
             name.isEmpty() -> ", linked worktree"
             else -> ", linked worktree $name"
         }
-        return (if (branch == "detached HEAD") "Detached HEAD" else "Git branch $branch") + worktree
+        return listOf(if (folder.isEmpty()) "" else "Folder $folder", when (branch) {
+            "" -> ""
+            "detached HEAD" -> "Detached HEAD"
+            else -> "Git branch $branch"
+        }).filter { it.isNotEmpty() }.joinToString(", ") + worktree
     }
 
     fun childState(child: JSONObject): String = text(child, "display_state").ifEmpty { text(child, "state") }

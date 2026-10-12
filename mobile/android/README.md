@@ -155,8 +155,8 @@ groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
 Session cards follow the desktop cards. A checkout line shows a small Git branch
-mark and the branch, or detached HEAD; ordinary folders have none. As on the
-desktop, the worktree name is not repeated on the card. A subagent counter uses
+mark and `folder / branch` (or detached HEAD); a linked worktree names its main
+checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
 the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
 the children that are working, waiting for input, paused, failed or unknown,
 in stable ID order. Finished turns stay hidden, as with the desktop default,

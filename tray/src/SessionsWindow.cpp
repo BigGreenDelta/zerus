@@ -2326,7 +2326,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
-        item->setData(SessionRoles::BranchIcon, false);
+        item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
@@ -2397,8 +2397,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
         item->setData(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
         item->setData(TitleRole, sessionLabel(s)); item->setData(AgentRole, s.cmd);
-        QString meta = SessionPresentation::branchContext(s);
-        item->setData(SessionRoles::BranchIcon, !meta.isEmpty());
+        QString meta = SessionPresentation::checkoutLine(s);
+        item->setData(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
         if (s.state == "archived" && s.archivedAt > 0) {
             if (!meta.isEmpty()) meta += QStringLiteral(" / ");
             meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
@@ -2763,6 +2763,7 @@ void SessionsWindow::renderDetails()
     s.gitBranch = m_details.value("git_branch").toString(s.gitBranch);
     s.gitWorktree = m_details.value("git_worktree").toBool(s.gitWorktree);
     s.gitWorktreeName = m_details.value("git_worktree_name").toString(s.gitWorktreeName);
+    s.gitCommonDir = m_details.value("git_common_dir").toString(s.gitCommonDir);
     s.gitDetached = m_details.value("git_detached").toBool(s.gitDetached);
     const bool terminating=isTerminating(*entry);
     const QString state = terminating?tr("Terminating…"):status(s, entry->online);

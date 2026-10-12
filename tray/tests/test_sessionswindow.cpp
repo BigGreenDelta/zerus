@@ -574,6 +574,7 @@ void TestSessionsWindow::dashboardActivityRowsStayReadable()
             if (index.data(SessionRoles::Working).toBool()) {
                 QCOMPARE(index.data(SessionRoles::Title).toString(), QString("dashboard"));
                 QCOMPARE(index.data(SessionRoles::Meta).toString(), QString("main"));
+                QCOMPARE(index.data(SessionRoles::MetaIcon).toString(), QString("git-branch"));
                 QCOMPARE(index.data(SessionRoles::WorkingSince).toDouble(), session.turnStarted);
                 QCOMPARE(index.data(SessionRoles::Children).toString(), QString("2"));
                 if (poll == 0) { workingRow = row; row->setFocus(); }
@@ -4165,7 +4166,7 @@ void TestSessionsWindow::compactMetadataAndSubagentRoster()
 {
     QSettings().setValue("workspace/showCompletedSubagents", true);
     auto state = fleet(); auto box = state.local(); auto &session = box.sessions[0];
-    session.gitBranch = "feat/compact"; session.gitWorktree = true; session.gitWorktreeName = "ui-tree";
+    session.gitBranch = "feat/compact"; session.gitWorktree = true; session.gitWorktreeName = "ui-tree"; session.gitCommonDir = "/work/ui/.git";
     session.cwd = "/work/ui-tree"; session.gitRoot = session.cwd; session.activitySummary = "Read"; session.activityDetail = "view.cpp";
     session.subagentSource = "hooks"; session.subagentCountsComplete = true; session.subagentActiveCount = 2; session.subagentTotalCount = 14;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
@@ -4173,13 +4174,17 @@ void TestSessionsWindow::compactMetadataAndSubagentRoster()
     auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list->sizeHintForRow(0) <= 96);
     QCOMPARE(list->item(0)->data(Qt::UserRole + 1).toString(), QString("dashboard"));
     QCOMPARE(list->item(0)->data(Qt::UserRole + 7).toString(), QString("2/14"));
-    QCOMPARE(list->item(0)->data(SessionRoles::Meta).toString(), QString("feat/compact"));
+    // A linked worktree names its main checkout folder, not its own generated folder.
+    QCOMPARE(list->item(0)->data(SessionRoles::Meta).toString(), QString("ui / feat/compact"));
+    QCOMPARE(list->item(0)->data(SessionRoles::MetaIcon).toString(), QString("git-branch"));
     const auto accessible = list->item(0)->data(Qt::AccessibleTextRole).toString();
-    QVERIFY(accessible.contains("feat/compact")); QVERIFY(!accessible.contains("worktree: ui-tree")); QVERIFY(accessible.contains("/work/ui-tree"));
+    QVERIFY(accessible.contains("ui / feat/compact")); QVERIFY(!accessible.contains("worktree: ui-tree")); QVERIFY(accessible.contains("/work/ui-tree"));
     QVERIFY(accessible.contains("Read: view.cpp")); QVERIFY(accessible.contains("2 active / 14 total"));
-    QVERIFY(window.findChild<QLabel *>("sessionMeta")->toolTip().contains("worktree: ui-tree"));
+    auto *header = window.findChild<QLabel *>("sessionMeta");
+    QCOMPARE(header->accessibleName(), QString("ui / feat/compact · worktree"));
+    QVERIFY(header->toolTip().contains("/work/ui-tree")); QVERIFY(!header->toolTip().contains("ui-tree / "));
     const auto info = window.findChild<QTextBrowser *>("sessionInfo")->toPlainText();
-    QVERIFY(info.contains("worktree: ui-tree")); QVERIFY(info.contains("/work/ui-tree"));
+    QVERIFY(info.contains("ui / feat/compact · worktree")); QVERIFY(info.contains("/work/ui-tree")); QVERIFY(!info.contains("worktree: ui-tree"));
     auto *search = window.findChild<QLineEdit *>("search"); search->setText("feat/compact"); QCOMPARE(window.findChild<QListWidget *>("searchResults")->count(), 1); search->clear();
     QJsonObject children;
     for (int i = 0; i < 14; ++i) children[QString("agent-%1").arg(i)] = QJsonObject{{"label", QString("Child %1").arg(i)}, {"state", i < 2 ? "working" : "finished"}, {"detail", "Review code"}};
@@ -4605,7 +4610,9 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     auto old = local.sessions[0]; old.state = "archived"; old.archiveId = "older"; old.archivedAt = 1790928000;
     auto recent = old; recent.archiveId = "recent"; recent.archivedAt += 10;
     local.sessions.append(old); local.sessions.append(recent); state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
-    SessionsWindow window(program()); window.setFleet(state); window.show();
+    SessionsWindow window(program());
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
+    window.setFleet(state); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     auto filter = [&](const QString &id) -> QPushButton * {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == id) return button;
@@ -4622,11 +4629,16 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QVERIFY(window.findChild<QLabel *>("hint")->text().contains("uses this name"));
     QVERIFY(!window.findChild<QAction *>("archiveSessionAction")->isVisible());
     QSignalSpy terminal(&window, &SessionsWindow::sessionActivated);
-    auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+    QSignalSpy writes(client, &HgsClient::writeDone);
     QTest::keyClick(list, Qt::Key_Return); QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 0);
     QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(0)).center());
     QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 0);
-    QTest::qWait(50); // Let the automatic fixture inspection settle before injecting late replies.
+    // Wait for this archive's fixture reply before injecting late replies. A
+    // fixed delay can let a slow subprocess replace the injected details.
+    QTRY_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [&](const QList<QVariant> &reply) {
+        return reply[0].toString().isEmpty() && reply[1].toString() == recent.name
+            && reply[3].toString() == recent.archiveId;
+    }));
     auto *activity = window.findChild<QTextBrowser *>("activity");
     QJsonObject details{{"tracked", true}, {"conversation_id", "conversation-one"}, {"prompt", "wrong live request"}, {"events", QJsonArray{}}, {"cursor", 0}};
     client->inspectionReady({}, recent.name, details); QVERIFY(!activity->toPlainText().contains("wrong live request"));

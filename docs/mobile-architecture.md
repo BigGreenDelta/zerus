@@ -320,9 +320,11 @@ glyphs reuse the desktop drawing geometry.
 
 `SessionCardPresentation` ports the desktop card rules from
 `SessionPresentation.h` and the session tree in `SessionsWindow.cpp`. The
-checkout line is `branchContext` (branch or detached HEAD, none for `not_repo`),
-with the desktop Git branch glyph. `checkout` keeps the `projectContext`
-worktree suffix for headers, Details and spoken descriptions. The counter is
+checkout line is `checkoutLine`: `checkoutFolder` (a linked worktree's main
+checkout from `git_common_dir`) and `branchContext` (branch or detached HEAD,
+none for `not_repo`), with the desktop Git branch glyph, or the folder glyph for
+an ordinary folder. `checkout` adds the `projectContext` worktree mark for
+headers and Details; the spoken description keeps the worktree's own folder. The counter is
 `childCount` without completed children. Rows come only from the snapshot
 `subagents` roster, never previews, and never for `hook_profiles`. They use
 `childStatus`, `Recorded` without current activity, and the `showChild`
