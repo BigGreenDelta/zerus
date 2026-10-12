@@ -409,6 +409,48 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+quint64 HgsClient::requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input)
+{
+    const quint64 request = ++m_overmindRequest;
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("overmind") << arguments << QStringLiteral("--json");
+    auto process = processRequest(m_hgs, args);
+    process.timeoutMs = host.isEmpty() ? 10000 : 30000;
+    // Always written and closed: with --json every command, rev included, reads
+    // its request to the end of stdin.
+    process.input = QJsonDocument(input).toJson(QJsonDocument::Compact);
+    // runHgs hands stdout only to a success; a refusal comes on stdout with exit 1.
+    ProcessRunner::run(std::move(process), this, [this, request, host](const ProcessRunner::Result &result) {
+        if (result.outcome == ProcessRunner::Result::TimedOut) {
+            emit overmindFailed(request, host, {}, tr("The task board did not answer in time."));
+            return;
+        }
+        if (result.outcome == ProcessRunner::Result::FailedToStart) {
+            emit overmindFailed(request, host, {}, tr("Cannot start %1: %2").arg(m_hgs, result.errorString));
+            return;
+        }
+        QJsonParseError error;
+        const auto document = QJsonDocument::fromJson(result.standardOutput, &error);
+        const auto reply = error.error == QJsonParseError::NoError && document.isObject() ? document.object() : QJsonObject();
+        const bool exited = result.exitStatus == QProcess::NormalExit;
+        const bool refused = reply.value(QStringLiteral("ok")) == QJsonValue(false);
+        if (exited && result.exitCode == 0 && !reply.isEmpty() && !refused) {
+            emit overmindReady(request, host, reply);
+            return;
+        }
+        const auto refusal = refused ? reply.value(QStringLiteral("error")).toObject() : QJsonObject();
+        const auto message = refusal.value(QStringLiteral("message")).toString();
+        const auto stderrText = QString::fromUtf8(result.standardError).trimmed().left(4000);
+        QString detail = !message.isEmpty() ? message : stderrText;
+        if (detail.isEmpty())
+            detail = exited && result.exitCode == 0 ? tr("The task board sent an invalid response.")
+                                                    : tr("hgs overmind exited with code %1.").arg(result.exitCode);
+        emit overmindFailed(request, host, refusal, detail);
+    });
+    return request;
+}
+
 void HgsClient::setPresence(double idleSeconds, bool locked)
 {
     if (m_presenceInFlight) { m_pendingPresence = qMakePair(idleSeconds, locked); m_presencePending = true; return; }

@@ -129,6 +129,11 @@ public:
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
+    // `hgs [@host] overmind <arguments> --json` with the request as compact JSON on
+    // stdin ({} when empty). A refusal is JSON on stdout with exit 1; it reaches
+    // overmindFailed as the parsed `error` object ({code, message, field?, state?}),
+    // other failures with an empty object and the CLI's own text.
+    quint64 requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input = {});
     // `hgs presence set --json`. At most one write runs; while it does, only the
     // newest sample waits, so a slow CLI never builds a queue of stale samples.
     void setPresence(double idleSeconds, bool locked);
@@ -223,6 +228,8 @@ signals:
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
     void swarmFailed(quint64 request, const QString &error);
+    void overmindReady(quint64 request, const QString &host, const QJsonObject &reply);
+    void overmindFailed(quint64 request, const QString &host, const QJsonObject &refusal, const QString &detail);
     void presenceFinished(const QString &error); // Empty on success.
     void machineSetupOutput(const QString &text);
     void machineSetupFinished(bool ok, const QString &error);
@@ -300,6 +307,7 @@ private:
     quint64 m_recoveryRequest = 0;
     quint64 m_machineRequest = 0;
     quint64 m_swarmRequest = 0;
+    quint64 m_overmindRequest = 0;
     quint64 m_accountRequest = 0;
     bool m_machineSetupInFlight = false;
     quint64 m_messageRequest = 0;

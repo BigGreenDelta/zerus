@@ -74,6 +74,7 @@ add_executable(hgs-tray
     src/main.cpp
     src/AppConfig.cpp
     src/HgsClient.cpp
+    src/OvermindModel.cpp
     src/ProcessRunner.cpp
     src/FleetState.cpp
     src/ReadMarkSync.cpp

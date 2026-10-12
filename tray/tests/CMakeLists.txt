@@ -84,6 +84,12 @@ target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME hgsclient COMMAND test_hgsclient)
 
+add_executable(test_overmindmodel test_overmindmodel.cpp ../src/OvermindModel.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
+target_include_directories(test_overmindmodel PRIVATE ../src)
+target_link_libraries(test_overmindmodel PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME overmindmodel COMMAND test_overmindmodel)
+set_tests_properties(overmindmodel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_readmarksync test_readmarksync.cpp ../src/ReadMarkSync.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
 target_include_directories(test_readmarksync PRIVATE ../src)
 target_link_libraries(test_readmarksync PRIVATE Qt6::Test Qt6::Core)
