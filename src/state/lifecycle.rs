@@ -591,6 +591,11 @@ fn session_arguments(
         home_var(string(record, "agent"))?,
         string(record, "agent_home").to_owned(),
     );
+    // A setting of the launching shell must reach the run although the tmux
+    // server, which started earlier, has never seen it.
+    if let Some(setting) = nonempty_env("HGS_OVERMIND_MCP") {
+        environment.insert("HGS_OVERMIND_MCP", setting);
+    }
     let mut arguments = vec![
         "new-session".into(),
         "-d".into(),

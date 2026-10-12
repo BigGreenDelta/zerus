@@ -117,6 +117,28 @@ class Overmind(unittest.TestCase):
         body = json.loads(replies[2]['result']['content'][0]['text'])
         self.assertEqual(body['error']['code'], 'agent_only')
 
+    def test_mcp_with_session_flag_refuses_every_call_without_a_verified_session(self):
+        call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'my_tasks', 'arguments': {}}}
+        result = subprocess.run([str(HGS), 'overmind', 'mcp', '--session'], input=json.dumps(call) + '\n',
+                                env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reply = json.loads(result.stdout)
+        self.assertTrue(reply['result']['isError'])
+        self.assertEqual(json.loads(reply['result']['content'][0]['text'])['error']['code'], 'session_mismatch')
+
+    def test_decisions_projects_and_the_extended_board(self):
+        self.assertEqual(self.ok('decisions', '--json', data={})['decisions'], [])
+        self.assertEqual(self.ok('projects', '--json', data={})['projects'], [])
+        created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'Fix drafts', 'stage': 'Queue'})
+        ref = created['task']['ref']
+        self.ok('pin', '--json', data={'task': ref, 'session': {'name': 'w1'}})
+        board = self.ok('board', '--json', data={'project': 'demo'})
+        self.assertEqual([s['role'] for s in board['workflow']['stages']][:2], ['backlog', 'ready'])
+        self.assertEqual(board['tasks'][0]['queue_of']['name'], 'w1')
+        self.assertEqual(board['tasks'][0]['markers'], [])
+        projects = self.ok('projects', '--json', data={})['projects']
+        self.assertEqual([(p['project'], p['total'], p['roles']['ready']) for p in projects], [('demo', 1, 1)])
+
     def test_store_is_private(self):
         self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})
         directory = self.state / 'overmind'

@@ -527,10 +527,109 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
         .map(|t| {
             let mut view = view(t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false);
             with_current_pin(&mut view, t, &renames, machine);
+            view["queue_of"] = json!(t.pinned);
+            view["markers"] = json!(markers(t, &wf));
             view
         })
         .collect();
     Ok(json!({"ok": true, "project": req.project, "cursor": cursor, "workflow": wf, "tasks": views}))
+}
+
+/// What a card shows besides its stage: `working` while a session holds the
+/// task in an active stage, the review verdict, and the flags a person acts on.
+fn markers(task: &Task, wf: &Workflow) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if task.assignee.is_some() && wf.role(&task.stage) == Some(Role::Active) {
+        out.push("working");
+    }
+    for (name, marker) in [("reviewed", "reviewed"), ("review-failed", "needs_work")] {
+        if task.labels.contains(name) {
+            out.push(marker);
+        }
+    }
+    for (name, marker) in [("conflict", "conflict"), ("delivery_uncertain", "uncertain"), ("orphaned", "orphaned")] {
+        if task.flags.contains(name) {
+            out.push(marker);
+        }
+    }
+    out
+}
+
+fn clip(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+const MAX_DECISIONS: usize = 50;
+
+fn last_question(task: &Task) -> Option<&super::fold::JournalEntry> {
+    task.journal.iter().rev().find(|j| j.marker == "[needs-human]")
+}
+
+/// Tasks waiting for a person in every project, oldest question first. The log
+/// is folded once. `signature` changes whenever the task does, so a watcher
+/// notifies once per change.
+pub fn decisions(ctx: &mut Ctx) -> Result<Value> {
+    let cursor = ctx.store.cursor()?;
+    let events = ctx.store.load(&Filter::All)?;
+    let names = refs::refs(&ctx.store.task_ids()?);
+    let all: Vec<&Event> = events.iter().collect();
+    let mut workflows: BTreeMap<String, Workflow> = BTreeMap::new();
+    let mut waiting: Vec<(u64, Task)> = Vec::new();
+    for task in fold_many(&events).into_values() {
+        if task.deleted {
+            continue;
+        }
+        let wf = workflows.entry(task.project.clone()).or_insert_with(|| project_workflow(&all, &task.project));
+        if wf.role(&task.stage) != Some(Role::NeedsHuman) {
+            continue;
+        }
+        let asked = last_question(&task).map_or(task.updated_at, |j| j.at);
+        waiting.push((asked, task));
+    }
+    waiting.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.uuid.cmp(&b.1.uuid)));
+    let decisions: Vec<Value> = waiting
+        .into_iter()
+        .take(MAX_DECISIONS)
+        .map(|(_, task)| {
+            let question = last_question(&task).map(|j| clip(&j.text, 500)).unwrap_or_default();
+            json!({
+                "task": task.uuid, "ref": names.get(&task.uuid).map(String::as_str).unwrap_or_default(),
+                "project": task.project, "title": clip(&task.title, 120), "stage": task.stage,
+                "question": question, "assignee": task.assignee,
+                "signature": format!("{:x}", Sha256::digest(format!("{}{}", task.uuid, task.head).as_bytes())),
+            })
+        })
+        .collect();
+    Ok(json!({"ok": true, "cursor": cursor, "decisions": decisions}))
+}
+
+/// Projects that hold tasks, with a count per stage role (every role is
+/// present, zero when empty). Deleted tasks do not count.
+pub fn projects(ctx: &mut Ctx) -> Result<Value> {
+    let cursor = ctx.store.cursor()?;
+    let events = ctx.store.load(&Filter::All)?;
+    let all: Vec<&Event> = events.iter().collect();
+    let mut workflows: BTreeMap<String, Workflow> = BTreeMap::new();
+    let mut counts: BTreeMap<String, (u64, BTreeMap<Role, u64>)> = BTreeMap::new();
+    for task in fold_many(&events).into_values().filter(|t| !t.deleted) {
+        let wf = workflows.entry(task.project.clone()).or_insert_with(|| project_workflow(&all, &task.project));
+        let entry = counts.entry(task.project.clone()).or_default();
+        entry.0 += 1;
+        if let Some(role) = wf.role(&task.stage) {
+            *entry.1.entry(role).or_default() += 1;
+        }
+    }
+    let list: Vec<Value> = counts
+        .into_iter()
+        .map(|(project, (total, by_role))| {
+            let roles: BTreeMap<String, u64> = [Role::Backlog, Role::Ready, Role::Active, Role::Review, Role::NeedsHuman, Role::Done, Role::Parked]
+                .into_iter()
+                .map(|role| (json!(role).as_str().unwrap_or_default().to_owned(), by_role.get(&role).copied().unwrap_or(0)))
+                .collect();
+            json!({"project": project, "total": total, "roles": roles})
+        })
+        .collect();
+    Ok(json!({"ok": true, "cursor": cursor, "projects": list}))
 }
 
 /// Adds `pinned_current` to a task's view when the task is pinned to a session
@@ -1191,6 +1290,130 @@ mod tests {
         let delta = board(&mut human(&mut store), json!({"project": "p", "since": cursor})).unwrap();
         assert_eq!(delta["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(delta["tasks"][0]["labels"], json!(["ui"]));
+    }
+
+    fn claim(store: &mut Store, task: &str, name: &str) {
+        store
+            .write(|tx| {
+                let current = load(tx, task)?;
+                transition(tx, &Actor::human(MACHINE), &current, Action::Claim, "Design", BTreeMap::new(), Some(SessionRef { machine: MACHINE.into(), name: name.into() }), vec![], "")?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    fn ask(store: &mut Store, task: &str, name: &str, question: &str) {
+        let ctx = &mut Ctx { store, actor: Actor::agent(MACHINE, name), cwd: None };
+        super::super::agent::call_human(ctx, json!({"task": task, "question": question})).unwrap();
+    }
+
+    #[test]
+    fn decisions_list_your_call_tasks_oldest_first_with_signatures() {
+        let (_dir, mut store) = store();
+        let a = new_task(&mut store, "Queue");
+        let b = new_task(&mut store, "Queue");
+        let quiet = new_task(&mut store, "Queue");
+        let gone = new_task(&mut store, "Queue");
+        for (task, name) in [(&b, "w2"), (&a, "w1"), (&gone, "w3")] {
+            claim(&mut store, task, name);
+        }
+        ask(&mut store, &b, "w2", "Which API?");
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // event times have a resolution of one second
+        ask(&mut store, &a, "w1", &"q".repeat(900));
+        ask(&mut store, &gone, "w3", "Dropped?");
+        delete(&mut human(&mut store), json!({"task": gone})).unwrap();
+        let result = decisions(&mut human(&mut store)).unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["cursor"], store.cursor().unwrap());
+        let list = result["decisions"].as_array().unwrap();
+        let order: Vec<&str> = list.iter().map(|d| d["task"].as_str().unwrap()).collect();
+        assert_eq!(order, vec![b.as_str(), a.as_str()]);
+        assert!(!order.contains(&quiet.as_str()));
+        let first = &list[0];
+        assert_eq!(first["project"], "p");
+        assert_eq!(first["stage"], "Your Call");
+        assert_eq!(first["question"], "Which API?");
+        assert_eq!(first["assignee"], json!({"machine": MACHINE, "name": "w2"}));
+        assert_eq!(first["title"], "Fix the drafts");
+        assert!(first["ref"].as_str().unwrap().len() >= 4);
+        assert_eq!(list[1]["question"].as_str().unwrap().chars().count(), 500);
+        let signature = first["signature"].as_str().unwrap();
+        assert_eq!(signature.len(), 64);
+        // The signature names the task's last transition: stable across polls
+        // and comments, different per task.
+        let again = decisions(&mut human(&mut store)).unwrap();
+        assert_eq!(again["decisions"][0]["signature"], signature);
+        comment(&mut human(&mut store), json!({"task": b, "text": "More context"})).unwrap();
+        let changed = decisions(&mut human(&mut store)).unwrap();
+        assert_eq!(changed["decisions"][0]["signature"], signature);
+        assert_ne!(list[1]["signature"], signature);
+    }
+
+    #[test]
+    fn decisions_stop_at_fifty() {
+        let (_dir, mut store) = store();
+        for i in 0..52 {
+            let task = new_task(&mut store, "Queue");
+            claim(&mut store, &task, &format!("w{i}"));
+            ask(&mut store, &task, &format!("w{i}"), "Which?");
+        }
+        let result = decisions(&mut human(&mut store)).unwrap();
+        assert_eq!(result["decisions"].as_array().unwrap().len(), 50);
+    }
+
+    #[test]
+    fn board_carries_the_workflow_queue_and_markers() {
+        let (_dir, mut store) = store();
+        let queued = new_task(&mut store, "Queue");
+        pin(&mut human(&mut store), json!({"task": queued, "session": {"name": "w9"}})).unwrap();
+        let working = new_task(&mut store, "Queue");
+        claim(&mut store, &working, "w1");
+        let tagged = new_task(&mut store, "Queue");
+        label(&mut human(&mut store), json!({"task": tagged, "label": "ui", "present": true})).unwrap();
+        let result = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        assert_eq!(result["workflow"]["stages"][0]["role"], "backlog");
+        let find = |uuid: &str| result["tasks"].as_array().unwrap().iter().find(|t| t["uuid"] == uuid).unwrap().clone();
+        assert_eq!(find(&queued)["queue_of"], json!({"machine": MACHINE, "name": "w9"}));
+        assert_eq!(find(&queued)["markers"], json!([]));
+        assert_eq!(find(&working)["queue_of"], Value::Null);
+        assert_eq!(find(&working)["markers"], json!(["working"]));
+        assert_eq!(find(&tagged)["markers"], json!([]));
+    }
+
+    #[test]
+    fn markers_name_verdicts_and_flags() {
+        let (_dir, mut store) = store();
+        let id = new_task(&mut store, "Queue");
+        let mut task = store.read(|tx| load(tx, &id)).unwrap();
+        let wf = Workflow::default_v1();
+        assert!(markers(&task, &wf).is_empty());
+        task.labels.insert("reviewed".into());
+        task.labels.insert("review-failed".into());
+        for flag in ["conflict", "delivery_uncertain", "orphaned"] {
+            task.flags.insert(flag.into());
+        }
+        assert_eq!(markers(&task, &wf), vec!["reviewed", "needs_work", "conflict", "uncertain", "orphaned"]);
+    }
+
+    #[test]
+    fn projects_count_tasks_per_role_and_skip_empty_projects() {
+        let (_dir, mut store) = store();
+        let a = new_task(&mut store, "Queue");
+        new_task(&mut store, "Queue");
+        new_task(&mut store, "Backlog");
+        claim(&mut store, &a, "w1");
+        ask(&mut store, &a, "w1", "Which?");
+        let other = create(&mut human(&mut store), json!({"project": "q", "prompt": "Other"})).unwrap()["task"]["uuid"].as_str().unwrap().to_owned();
+        delete(&mut human(&mut store), json!({"task": other})).unwrap();
+        let result = projects(&mut human(&mut store)).unwrap();
+        assert_eq!(result["cursor"], store.cursor().unwrap());
+        let list = result["projects"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["project"], "p");
+        assert_eq!(list[0]["total"], 3);
+        assert_eq!(list[0]["roles"]["ready"], 1);
+        assert_eq!(list[0]["roles"]["backlog"], 1);
+        assert_eq!(list[0]["roles"]["needs_human"], 1);
+        assert_eq!(list[0]["roles"]["done"], 0);
     }
 
     #[test]

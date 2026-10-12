@@ -12,7 +12,9 @@ use std::io::Read;
 pub const MAX_REQUEST: u64 = 29 * 1024 * 1024;
 
 const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSON request on stdin)
-  board --json {project, since?}           tasks of a project, optionally changed since a cursor
+  board --json {project, since?}           tasks of a project (with its workflow, queue_of and markers), optionally changed since a cursor
+  decisions --json {}                      tasks waiting in Your Call across projects, oldest first
+  projects --json {}                       projects that have tasks, with counts per stage role
   show <ref> | show --json {task}          one task with its prompt and journal
   create --json {project, prompt, title?, stage?, priority?, labels?, pinned?, attachments?, parent?, follows?}
   edit --json {task, title?, prompt?, priority?, attachments?}
@@ -28,7 +30,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
   rev                                      change cursor for watchers
   status                                   replication state with every peer
-  mcp                                      serve the agent commands as an MCP server on stdio
+  mcp [--session]                          serve the agent commands as an MCP server on stdio (--session: only for a verified agent session)
 Write requests may carry a request_id (UUID); repeating it replays the result.
 ";
 
@@ -98,8 +100,8 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     }
     // The MCP server reads protocol messages, not one request, and checks the
     // caller on every tool call instead of once.
-    if command == "mcp" && words.len() == 1 {
-        super::mcp::serve(config, std::io::stdin().lock(), std::io::stdout().lock())?;
+    if command == "mcp" && (words.len() == 1 || words[1..] == ["--session"]) {
+        super::mcp::serve(config, words.len() == 2, std::io::stdin().lock(), std::io::stdout().lock())?;
         return Ok(None);
     }
     let machine = super::machine(config)?;
@@ -113,6 +115,8 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     let value = match (command, positional.as_slice()) {
         ("rev", []) => commands::rev(&mut ctx)?,
         ("status", []) => commands::status(&mut ctx)?,
+        ("decisions", []) => commands::decisions(&mut ctx)?,
+        ("projects", []) => commands::projects(&mut ctx)?,
         ("board", []) => commands::board(&mut ctx, request)?,
         ("show", [reference]) => commands::show(&mut ctx, json!({"task": reference}))?,
         ("show", []) => commands::show(&mut ctx, request)?,

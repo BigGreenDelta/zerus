@@ -375,8 +375,8 @@ pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
 /// session with and the peers it may fetch images from. Codex starts MCP servers
 /// with a cleared environment and passes on only the variables it is told to.
 #[cfg(unix)]
-const OVERMIND_MCP_ENV: [&str; 11] = [
-    "HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "XDG_STATE_HOME", "HGS_SELF", "HGS_PEERS",
+const OVERMIND_MCP_ENV: [&str; 13] = [
+    "HOME", "PATH", "HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "XDG_STATE_HOME", "HGS_SELF", "HGS_PEERS",
     "HGS_SSH", "SSH_AUTH_SOCK", "TMUX", "TMUX_TMPDIR",
 ];
 
@@ -396,7 +396,7 @@ pub fn apply_overmind_mcp(provider: &str, enabled: bool, executable: &str, argv:
     if !enabled || argv.is_empty() || !overmind_mcp_agent(provider) { return; }
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
     let values = if provider == "claude" {
-        let server = json!({"type": "stdio", "command": executable, "args": ["overmind", "mcp"]});
+        let server = json!({"type": "stdio", "command": executable, "args": ["overmind", "mcp", "--session"]});
         vec!["--mcp-config".to_owned(), json!({"mcpServers": {"overmind": server}}).to_string()]
     } else {
         // Codex reads each override value as TOML.
@@ -404,7 +404,7 @@ pub fn apply_overmind_mcp(provider: &str, enabled: bool, executable: &str, argv:
         let mut values = Vec::new();
         for (key, value) in [
             ("command", toml_edit::Value::from(executable).to_string()),
-            ("args", list(&["overmind", "mcp"])),
+            ("args", list(&["overmind", "mcp", "--session"])),
             ("env_vars", list(&OVERMIND_MCP_ENV)),
         ] {
             values.push("-c".to_owned());
@@ -1042,7 +1042,7 @@ mod overmind_mcp_tests {
         apply_overmind_mcp("claude", true, executable, &mut argv);
         assert_eq!(argv[..4], strings(&["claude", "--resume", "id", "--mcp-config"]));
         let config: Value = serde_json::from_str(&argv[4]).unwrap();
-        assert_eq!(config, json!({"mcpServers": {"overmind": {"type": "stdio", "command": executable, "args": ["overmind", "mcp"]}}}));
+        assert_eq!(config, json!({"mcpServers": {"overmind": {"type": "stdio", "command": executable, "args": ["overmind", "mcp", "--session"]}}}));
         assert_eq!(argv[5..], strings(&["--", "--mcp-config"]), "prompt text stays after the delimiter");
         let mut prompt = strings(&["claude", "initial prompt"]);
         apply_overmind_mcp("claude", true, "/usr/bin/hgs", &mut prompt);
@@ -1060,9 +1060,9 @@ mod overmind_mcp_tests {
         assert_eq!(argv[argv.len() - 2..], strings(&["--", "-c"]), "prompt text stays after the delimiter");
         let overrides = codex_overrides(&argv);
         assert_eq!(overrides["mcp_servers.overmind.command"], json!(executable));
-        assert_eq!(overrides["mcp_servers.overmind.args"], json!(["overmind", "mcp"]));
+        assert_eq!(overrides["mcp_servers.overmind.args"], json!(["overmind", "mcp", "--session"]));
         let names = overrides["mcp_servers.overmind.env_vars"].as_array().unwrap();
-        for name in ["HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "TMUX"] {
+        for name in ["HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "TMUX", "HOME", "PATH"] {
             assert!(names.contains(&json!(name)), "{name} reaches the server: {names:?}");
         }
         assert_eq!(overrides.len(), 3, "{overrides:?}");

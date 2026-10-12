@@ -1,6 +1,6 @@
 //! `hgs overmind mcp`: the agent commands as a stdio MCP server (JSON-RPC 2.0,
 //! one message per line). Stdout carries protocol messages only.
-use super::model::{Actor, Refusal};
+use super::model::{Actor, ActorKind, Refusal};
 use super::store::Store;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -14,14 +14,16 @@ struct Session {
     cwd: Option<PathBuf>,
 }
 
-pub fn serve(config: &crate::config::Config, input: impl BufRead, output: impl Write) -> Result<()> {
+/// `require_session` is the launch flag `--session`: every tool call then needs a
+/// verified agent session, so a server that lost its identity fails closed.
+pub fn serve(config: &crate::config::Config, require_session: bool, input: impl BufRead, output: impl Write) -> Result<()> {
     let open = || -> Result<Session> {
         let machine = super::machine(config)?;
         let (actor, cwd) = super::identity::caller(&machine)?;
         let store = Store::open(&config.state.join("overmind"), &machine)?;
         Ok(Session { store, actor, cwd })
     };
-    serve_with(&open, input, output)
+    serve_with(&open, require_session, input, output)
 }
 
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -92,6 +94,11 @@ fn tools() -> Value {
 }
 
 /// Reads an image the agent names and turns it into an `attach` request.
+fn open_nonblocking(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)
+}
+
 fn attach_request(arguments: &Value) -> Result<Value> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -114,11 +121,12 @@ fn attach_request(arguments: &Value) -> Result<Value> {
     let limit = super::commands::MAX_ATTACHMENT as u64;
     let unreadable = |e: std::io::Error| Refusal::field("invalid_field", "path", "invalid", format!("cannot read {}: {e}", args.path));
     let not_a_file = || Refusal::field("invalid_field", "path", "invalid", "the path is not a file");
-    // Checked before opening: opening a FIFO would wait for a writer.
+    // Checked before opening, and opened without waiting: a path swapped for a
+    // FIFO in between must not wait for a writer either.
     if !std::fs::metadata(path).map_err(unreadable)?.is_file() {
         return Err(not_a_file().into());
     }
-    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let file = open_nonblocking(path).map_err(unreadable)?;
     if !file.metadata().map_err(unreadable)?.is_file() {
         return Err(not_a_file().into());
     }
@@ -155,9 +163,14 @@ fn tool_result(text: String, is_error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": is_error})
 }
 
-fn call_tool(open: &dyn Fn() -> Result<Session>, name: &str, arguments: Value) -> Value {
+fn call_tool(open: &dyn Fn() -> Result<Session>, require_session: bool, name: &str, arguments: Value) -> Value {
     // The caller is checked on every call: a session may be renamed meanwhile.
-    let outcome = open().and_then(|mut session| run_tool(&mut session, name, arguments));
+    let outcome = open().and_then(|mut session| {
+        if require_session && session.actor.kind != ActorKind::Agent {
+            return Err(Refusal::new("session_mismatch", "this MCP server was started for an agent session, but no verified session identity is present").into());
+        }
+        run_tool(&mut session, name, arguments)
+    });
     match outcome {
         Ok(value) => tool_result(value.to_string(), false),
         Err(failure) => match failure.downcast_ref::<Refusal>() {
@@ -168,7 +181,7 @@ fn call_tool(open: &dyn Fn() -> Result<Session>, name: &str, arguments: Value) -
 }
 
 /// The answer to one parsed message, or `None` for a notification.
-fn handle(open: &dyn Fn() -> Result<Session>, message: &Value) -> Option<Value> {
+fn handle(open: &dyn Fn() -> Result<Session>, require_session: bool, message: &Value) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(error(&Value::Null, -32600, "a message must be a JSON object"));
     };
@@ -219,13 +232,13 @@ fn handle(open: &dyn Fn() -> Result<Session>, message: &Value) -> Option<Value> 
                 Some(v) if v.is_object() => v.clone(),
                 Some(_) => return Some(error(id, -32602, "arguments must be an object")),
             };
-            reply(call_tool(open, name, arguments))
+            reply(call_tool(open, require_session, name, arguments))
         }
         _ => error(id, -32601, &format!("method not found: {method}")),
     })
 }
 
-fn serve_with(open: &dyn Fn() -> Result<Session>, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+fn serve_with(open: &dyn Fn() -> Result<Session>, require_session: bool, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -252,7 +265,7 @@ fn serve_with(open: &dyn Fn() -> Result<Session>, mut input: impl BufRead, mut o
             answer = Some(error(&Value::Null, -32600, "the message exceeds 29 MiB"));
         } else if !line.iter().all(u8::is_ascii_whitespace) {
             answer = match serde_json::from_slice::<Value>(&line) {
-                Ok(message) => handle(open, &message),
+                Ok(message) => handle(open, require_session, &message),
                 Err(e) => {
                     eprintln!("hgs overmind mcp: unparsable message: {e}");
                     Some(error(&Value::Null, -32700, "parse error"))
@@ -311,7 +324,7 @@ mod tests {
             Ok(Session { store, actor, cwd: None })
         };
         let mut out = Vec::new();
-        serve_with(&open, input.as_bytes(), &mut out).unwrap();
+        serve_with(&open, false, input.as_bytes(), &mut out).unwrap();
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
@@ -385,6 +398,37 @@ mod tests {
         assert_eq!(payload(&replies[0])["error"]["code"], "session_mismatch");
         let unknown = talk(&fx, &[call(1, "advance", json!({"task": "nope", "to": "Build", "spec": "x"}))]);
         assert_eq!(unknown[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn a_server_started_with_session_refuses_calls_without_a_verified_agent() {
+        let fx = fixture();
+        // Nobody calls as a person: the launch flag makes a missing identity an error.
+        let human = || -> Result<Session> {
+            Ok(Session { store: Store::open(fx.dir.path(), MACHINE)?, actor: Actor::human(MACHINE), cwd: None })
+        };
+        let agent = || -> Result<Session> {
+            Ok(Session { store: Store::open(fx.dir.path(), MACHINE)?, actor: Actor::agent(MACHINE, "w1"), cwd: None })
+        };
+        let input = [call(1, "my_tasks", json!({})), json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})]
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let run = |open: &dyn Fn() -> Result<Session>, require: bool| -> Vec<Value> {
+            let mut out = Vec::new();
+            serve_with(open, require, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+        };
+        let refused = run(&human, true);
+        assert_eq!(refused[0]["result"]["isError"], true);
+        assert_eq!(payload(&refused[0])["error"]["code"], "session_mismatch");
+        assert!(refused[1]["result"]["tools"].is_array(), "the protocol itself still works");
+        let by_hand = run(&human, false);
+        // Without the flag a person keeps today's behaviour: the command itself answers.
+        assert_ne!(payload(&by_hand[0])["error"]["code"], "session_mismatch");
+        let verified = run(&agent, true);
+        assert_eq!(verified[0]["result"]["isError"], false);
     }
 
     #[test]
@@ -463,6 +507,16 @@ mod tests {
         let replies = talk_raw(&fx, &input, Some("w1"));
         assert_eq!(replies.len(), 1, "{replies:?}");
         assert_eq!(replies[0]["id"], 1);
+    }
+
+    #[test]
+    fn a_fifo_opens_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        let file = open_nonblocking(&fifo).unwrap();
+        assert!(!file.metadata().unwrap().is_file());
     }
 
     #[test]

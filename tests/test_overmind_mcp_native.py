@@ -34,7 +34,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 '''
 
-SESSION_VARIABLES = {'HGS_SESSION', 'HGS_RUN_ID', 'HGS_STATE_DIR', 'TMUX'}
+SESSION_VARIABLES = {'HGS_SESSION', 'HGS_RUN_ID', 'HGS_STATE_DIR', 'TMUX', 'HOME', 'PATH'}
 
 
 @unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex MCP test')
@@ -68,7 +68,7 @@ class NativeCodexMcp(test_pause.Harness):
         self.assertTrue(server['enabled'], server)
         transport = server['transport']
         self.assertEqual((transport['type'], transport['command'], transport['args']),
-                         ('stdio', str(test_pause.HGS), ['overmind', 'mcp']))
+                         ('stdio', str(test_pause.HGS), ['overmind', 'mcp', '--session']))
         self.assertLessEqual(SESSION_VARIABLES, set(transport['env_vars']))
         listed = self.native(*overrides, 'mcp', 'list')
         self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
@@ -107,7 +107,7 @@ stream_max_retries=0
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertTrue(started.exists(), 'Codex never started the MCP server\n' + run.stdout + run.stderr)
         seen = json.loads(started.read_text())
-        self.assertEqual(seen['argv'], ['overmind', 'mcp'])
+        self.assertEqual(seen['argv'], ['overmind', 'mcp', '--session'])
         self.assertEqual({key: seen['env'].get(key) for key in session}, session)
 
 

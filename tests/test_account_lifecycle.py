@@ -117,11 +117,11 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         def assert_attached(provider, argv):
             server = mcp(argv)
             self.assertIsNotNone(server, argv)
-            self.assertEqual((server['command'], server['args']), (hgs, ['overmind', 'mcp']))
+            self.assertEqual((server['command'], server['args']), (hgs, ['overmind', 'mcp', '--session']))
             if provider == 'claude':
                 self.assertEqual(server['type'], 'stdio')
             else:
-                self.assertLessEqual({'HGS_SESSION', 'HGS_RUN_ID', 'HGS_STATE_DIR', 'TMUX'}, set(server['env_vars']))
+                self.assertLessEqual({'HGS_SESSION', 'HGS_RUN_ID', 'HGS_STATE_DIR', 'TMUX', 'HOME', 'PATH'}, set(server['env_vars']))
         def assert_recipe_clean(name):
             record = self.binding(name)
             self.assertIsNone(mcp(record['base']), record['base'])
@@ -163,6 +163,28 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         self.hgs('pause', sources['claude']); self.resume(sources['claude'])
         assert_attached('claude', launches('claude')[-1])
         self.assertIs(self.binding(sources['claude'])['overmind_mcp'], True)
+        # A setting in the launching shell reaches the session although the tmux
+        # server already runs (and has no global setting of its own).
+        self.t('set-environment', '-gu', 'HGS_OVERMIND_MCP')
+        (self.root/'cfg/config').write_text('HGS_OVERMIND_MCP=1\n')
+        claude = sources['claude']
+        for value, attached in (('0', False), ('1', True)):
+            self.env['HGS_OVERMIND_MCP'] = value
+            try:
+                self.hgs('pause', claude); self.resume(claude)
+            finally:
+                del self.env['HGS_OVERMIND_MCP']
+            argv = launches('claude')[-1]
+            self.assertEqual(mcp(argv) is not None, attached, argv)
+            self.assertIs(self.binding(claude)['overmind_mcp'], attached)
+        (self.root/'cfg/config').write_text('HGS_OVERMIND_MCP=0\n')
+        self.env['HGS_OVERMIND_MCP'] = '1'
+        try:
+            started = self.start('claude', 'envwins')
+        finally:
+            del self.env['HGS_OVERMIND_MCP']
+        assert_attached('claude', launches('claude')[-1])
+        self.assertIs(self.binding(started)['overmind_mcp'], True)
 
     def test_managed_claude_inherits_user_settings_on_start_and_resume(self):
         native=self.root/'.claude/settings.json';native.parent.mkdir(exist_ok=True)

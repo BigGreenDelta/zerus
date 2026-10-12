@@ -1785,6 +1785,11 @@ fn launch(
     }
     environment.extend(account_environment);
     environment.extend(platform::gui_env());
+    // A setting of the launching shell reaches the run although the tmux server,
+    // which started earlier, has never seen it.
+    if let Some(setting) = env::var("HGS_OVERMIND_MCP").ok().filter(|v| !v.is_empty()) {
+        environment.push(format!("HGS_OVERMIND_MCP={setting}"));
+    }
     if !options.fresh
         && (requested_saved || (options.resume_id.is_none() && binding_exists(config, &session)?))
     {
