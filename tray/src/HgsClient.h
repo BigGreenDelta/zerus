@@ -134,7 +134,8 @@ public:
     // overmindFailed as the parsed `error` object ({code, message, field?, state?}).
     // A deadline (timeoutMs, 0: 10 s local, 30 s remote) gives {code: "timed_out",
     // message, uncertain: true}: the command may have taken effect. Other failures
-    // give an empty object and the CLI's own text.
+    // give an empty object and the CLI's own text. The CLI runs without
+    // HGS_SESSION and HGS_RUN_ID: the board acts for the person.
     quint64 requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input = {}, int timeoutMs = 0);
     // `hgs presence set --json`. At most one write runs; while it does, only the
     // newest sample waits, so a slow CLI never builds a queue of stale samples.

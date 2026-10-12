@@ -417,6 +417,12 @@ quint64 HgsClient::requestOvermind(const QString &host, const QStringList &argum
     args << QStringLiteral("overmind") << arguments << QStringLiteral("--json");
     auto process = processRequest(m_hgs, args);
     process.timeoutMs = timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 10000 : 30000;
+    // The board acts for the person. A tray started from a Zerus terminal
+    // inherits that agent's session, which `hgs overmind` would act as.
+    auto environment = process.environment.value_or(QProcessEnvironment::systemEnvironment());
+    environment.remove(QStringLiteral("HGS_SESSION"));
+    environment.remove(QStringLiteral("HGS_RUN_ID"));
+    process.environment = environment;
     // Always written and closed: with --json every command, rev included, reads
     // its request to the end of stdin.
     process.input = QJsonDocument(input).toJson(QJsonDocument::Compact);

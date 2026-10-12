@@ -17,7 +17,8 @@
 namespace {
 
 // A fake `hgs overmind` that serves rev, status, board, decisions and show from
-// files next to it. Every call is recorded when it starts (argv and stdin) and,
+// files next to it. Every call is recorded when it starts (argv, stdin and the
+// session variables it got) and,
 // with "done", when it ends. sleep.json delays calls ({"<host>:<command>": s},
 // host empty for local). A write moves the cursor, unless refuse.json holds a
 // refusal to print. `broken` makes the commands it lists (comma-separated; all
@@ -29,8 +30,9 @@ root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 data = sys.stdin.read()
 def record(**extra):
+    env = {name: os.environ[name] for name in ('HGS_SESSION', 'HGS_RUN_ID', 'HGS_OVERMIND_PROBE') if name in os.environ}
     with (root / 'calls').open('a') as calls:
-        calls.write(json.dumps(dict({'argv': sys.argv[1:], 'input': data}, **extra)) + '\n')
+        calls.write(json.dumps(dict({'argv': sys.argv[1:], 'input': data, 'env': env}, **extra)) + '\n')
 def read(name, default=None):
     try:
         return (root / name).read_text()
@@ -215,6 +217,7 @@ class TestOvermindModel : public QObject {
     Q_OBJECT
 private slots:
     void requestOvermindParsesRepliesAndRefusals();
+    void requestsNeverActAsTheTraysSession();
     void reloadsOnlyWhenRevChanges();
     void activeSwitchesThePollInterval();
     void refusalsReachWriteFailed();
@@ -281,6 +284,25 @@ void TestOvermindModel::requestOvermindParsesRepliesAndRefusals()
     QTRY_COMPARE(failed.size(), 3);
     QVERIFY(failed[2][2].toJsonObject().isEmpty());
     QVERIFY(failed[2][3].toString().contains("cannot open the Overmind store"));
+}
+
+// A tray started from a Zerus terminal inherits that agent's session: its
+// board calls act for the person, so the session variables never reach them.
+void TestOvermindModel::requestsNeverActAsTheTraysSession()
+{
+    Fixture f; QVERIFY(f.setUp());
+    struct Environment {
+        Environment() { qputenv("HGS_SESSION", "codex/demo"); qputenv("HGS_RUN_ID", "run-1"); qputenv("HGS_OVERMIND_PROBE", "kept"); }
+        ~Environment() { qunsetenv("HGS_SESSION"); qunsetenv("HGS_RUN_ID"); qunsetenv("HGS_OVERMIND_PROBE"); }
+    } inherited;
+    HgsClient client(FakeCli::program(f.script));
+    QSignalSpy ready(&client, &HgsClient::overmindReady);
+    client.requestOvermind({}, {"rev"});
+    client.requestOvermind("mac", {"show"}, {{"task", "t1"}});
+    QTRY_COMPARE(ready.size(), 2);
+    const auto calls = f.starts();
+    QCOMPARE(calls.size(), 2);
+    for (const auto &call : calls) QCOMPARE(call["env"].toObject(), (QJsonObject{{"HGS_OVERMIND_PROBE", "kept"}}));
 }
 
 void TestOvermindModel::reloadsOnlyWhenRevChanges()
