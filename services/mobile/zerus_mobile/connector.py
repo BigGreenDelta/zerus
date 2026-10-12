@@ -52,6 +52,10 @@ CONTEXT_KEYS = frozenset({
 MAX_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD = MAX_REQUEST_BYTES
 MAX_RESULT = 1024 * 1024
+# One Overmind page leaves room for the receipt envelope below the result bound.
+PAGE_BUDGET = MAX_RESULT - 4096
+# The relay's heartbeat body limit; the Overmind digest is left out rather than exceed it.
+MAX_HEARTBEAT = 1024 * 1024
 ARCHIVE_SNAPSHOT_TTL = 45
 LOCAL_MACHINE_GUARD = contextvars.ContextVar("mobile_local_machine_guard", default=None)
 
@@ -486,6 +490,7 @@ class Connector:
         if time.monotonic() < self.capabilities_next_poll:
             return
         self.capabilities_next_poll = time.monotonic() + 300
+        overmind_supported = self.overmind_supported
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
@@ -517,7 +522,9 @@ class Connector:
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
         except (ConnectorError, UnicodeError):
-            pass
+            # A failed probe says nothing about Overmind: withdrawing its operations would
+            # drop the decision alerts the relay holds. Only a probe without the marker does.
+            self.overmind_supported = overmind_supported
         finally:
             if getattr(self, "fleet", None):
                 self.fleet.probe_complete = True
@@ -791,7 +798,9 @@ class Connector:
 
         A refusal (`ok: false`, exit 1) is the answer the phone shows, so it is a
         completed result. A write carries the envelope identity as its Overmind
-        `request_id`, which also names a created task, so hgs replays a retry too.
+        `request_id`, which also names a created task, so hgs replays a retry too;
+        its task comes back as a compact card. `task` and `board` reads are pages:
+        their window halves until the answer fits one relay result.
         """
         action, request = payload["action"], payload["request"]
         argv = ["overmind", overmind.COMMANDS[action], "--json"]
@@ -803,9 +812,20 @@ class Connector:
         elif action == "attachment":
             # hgs names the local file; the connector serves one bounded range of it.
             request = {key: request[key] for key in ("task", "sha256") if key in request}
-        result = await self.native(argv, request, failure_json=True)
-        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
-            raise ConnectorError("native Overmind answer is invalid")
+        field, window = overmind.PAGES.get(action, (None, None))
+        if field is not None:
+            window = request.get(field, window)  # The phone's own window is where shrinking starts.
+        while True:
+            result = await self.native(argv, request if field is None else {**request, field: window}, failure_json=True)
+            if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                raise ConnectorError("native Overmind answer is invalid")
+            if field is None or not result["ok"] or len(json.dumps(result).encode()) <= PAGE_BUDGET:
+                break
+            if type(window) is not int or window <= 1:
+                return overmind.too_large(field)
+            window //= 2
+        if operation == "overmind_write":
+            return overmind.card(result)
         if action == "attachment" and result["ok"]:
             try:
                 result = await asyncio.to_thread(overmind.read_range, result, payload["request"])
@@ -1233,6 +1253,10 @@ class Connector:
             try:
                 snapshot = await self.snapshot()
                 body = self.fleet.heartbeat(snapshot)
+                if "mobile_overmind" in snapshot and len(json.dumps({**body, "presence": self.presence}).encode()) > MAX_HEARTBEAT:
+                    # A missing digest keeps the decision alerts the relay holds; a refused heartbeat delivers nothing.
+                    del snapshot["mobile_overmind"]
+                    LOG.warning("Overmind digest omitted: the heartbeat would exceed the relay limit")
                 try:
                     await self.post_with_presence(client, "/v1/node/heartbeat", body, self.presence)
                 except RelayError as error:

@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 import uuid
 
 from zerus_mobile import overmind, postgres_schema
@@ -41,9 +42,22 @@ with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps({"argv": args, "payload": payload, "local": local}) + "\n")
 config = json.loads((root / "config.json").read_text())
 if args == ["--help"]:
+    if config["help"] is None:
+        sys.exit(3)
     print(config["help"])
 elif args == ["ls", "--json", "--local"]:
     print(json.dumps({"host": "Synthetic gateway", "sessions": []}))
+elif args[:2] == ["overmind", "show"] and "journal" in config:
+    journal, limit = config["journal"], payload.get("journal_limit", 0)
+    before = min(payload.get("journal_before", len(journal)), len(journal))
+    start = max(0, before - limit)
+    print(json.dumps({"ok": True, "task": {"uuid": "task", "prompt": "Synthetic", "journal": journal[start:before],
+                                           "journal_total": len(journal), "journal_from": start}}))
+elif args[:2] == ["overmind", "board"] and "tasks" in config:
+    tasks, start = config["tasks"], int(payload.get("after", "0"))
+    end = start + payload.get("limit", len(tasks))
+    print(json.dumps({"ok": True, "project": "example", "cursor": 7, "workflow": {"stages": []}, "tasks": tasks[start:end],
+                      "next": str(end) if end < len(tasks) else None}))
 elif args[:1] == ["overmind"] and len(args) > 1 and args[1] in config["answers"]:
     answer = config["answers"][args[1]]
     print(json.dumps(answer["output"]))
@@ -123,6 +137,22 @@ class OvermindDigestTests(unittest.TestCase):
         self.assertGreater(len(result["projects"]), 10)
         self.assertEqual(list(result["projects"]), [row["project"] for row in projects["projects"][:len(result["projects"])]])
 
+    def test_all_fifty_decisions_fit_with_astral_titles_and_projects_are_trimmed(self):
+        astral = "\U0001F600"  # Twelve escaped bytes each.
+        decisions = {**DECISIONS, "decisions": [{**DECISION, "task": str(uuid.UUID(int=index)), "project": astral * 32,
+                                                 "title": astral * 120, "signature": "f" * 128} for index in range(60)]}
+        projects = {**PROJECTS, "projects": [{"project": "project-%05d" % index, "total": 1, "roles": ROLES} for index in range(2000)]}
+        result = overmind.digest(projects, decisions)
+        self.assertEqual(len(result["decisions"]), 50)
+        for entry in result["decisions"]:
+            self.assertLessEqual(len(json.dumps(entry["title"])) - 2, 600)
+            self.assertEqual(entry["title"], astral * 50)
+        self.assertLessEqual(len(json.dumps(result, separators=(",", ":"))), 64 * 1024)
+        self.assertEqual(list(result["projects"]), [row["project"] for row in projects["projects"][:len(result["projects"])]])
+        # A project id longer than hgs allows (128 UTF-8 bytes) cannot be a decision's project.
+        self.assertEqual(overmind.digest(PROJECTS, {**DECISIONS, "decisions": [{**DECISION, "project": astral * 33}, DECISION]})["decisions"],
+                         DIGEST["decisions"])
+
     def test_decision_changes_need_a_digest_on_both_sides(self):
         snapshot = lambda *entries: {"sessions": [], "mobile_overmind": {"decisions": [{"task": task, "signature": signature} for task, signature in entries]}}
         other = "00000000-0000-4000-8000-0000000000a2"
@@ -169,9 +199,9 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.connector.journal.close()
         self.temp.cleanup()
 
-    def configure(self, help=HELP, **answers):
+    def configure(self, help=HELP, pages=None, **answers):
         answers = {"projects": {"output": PROJECTS}, "decisions": {"output": DECISIONS}, **answers}
-        (self.root / "config.json").write_text(json.dumps({"help": help, "answers": answers}))
+        (self.root / "config.json").write_text(json.dumps({"help": help, "answers": answers, **(pages or {})}))
 
     def calls(self, command=None):
         path = self.root / "calls.jsonl"
@@ -276,8 +306,8 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.configure(board=answer, show=answer, decisions=answer, done=answer, **{"review-send": answer})
         review = request("overmind_write", "review-send", {"task": "om-abcde", "session": {"name": "codex/review"}})
         cases = [(request("overmind_read", "board", {"project": "example", "since": 2}, device=" Pixel 9 "),
-                  ["overmind", "board", "--json", "--device", "Pixel 9"], {"project": "example", "since": 2}),
-                 (request("overmind_read", "task", {"task": "om-abcde"}), ["overmind", "show", "--json"], {"task": "om-abcde"}),
+                  ["overmind", "board", "--json", "--device", "Pixel 9"], {"project": "example", "since": 2, "limit": 200}),
+                 (request("overmind_read", "task", {"task": "om-abcde"}), ["overmind", "show", "--json"], {"task": "om-abcde", "journal_limit": 100}),
                  (request("overmind_read", "decisions", {}, device="Pixel\u0085"), ["overmind", "decisions", "--json", "--device", "Pixel"], {}),
                  (review, ["overmind", "review-send", "--json"], {**review["payload"]["request"], "request_id": review["request_id"]}),
                  # The informational label never blocks an action: a label hgs would refuse is normalized or omitted.
@@ -329,7 +359,8 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         await self.connector.snapshot()
         data = bytes(range(256)) * 4097  # Three ranges, the last one partial.
         sha = hashlib.sha256(data).hexdigest()
-        blob = self.root / "blob.png"
+        blob = self.root / "blobs" / sha[:2] / sha  # Blobs are content-addressed, as hgs stores them.
+        blob.parent.mkdir(parents=True)
         blob.write_bytes(data)
         answer = {"ok": True, "path": str(blob), "name": "screen.png", "mime": "image/png", "bytes": len(data)}
         self.configure(attachment={"output": answer})
@@ -349,11 +380,16 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, data)
         self.assertEqual([call["payload"] for call in self.calls("attachment")], [{"task": "om-abcde", "sha256": sha}] * 3)
         self.assertEqual((await self.connector.execute(read(len(data) - 10, 64)))["result"]["length"], 10)
-        # Ranges past the end, a changed size, links and relative paths fail; they never read other bytes.
-        link = self.root / "link.png"
+        # Ranges past the end, a changed size, links, relative paths, directories and a path that does not
+        # name the requested image fail; they never read other bytes.
+        link, directory, other = self.root / "links" / sha, self.root / "directories" / sha, self.root / "screen.png"
+        link.parent.mkdir()
         link.symlink_to(blob)
-        for change, offset in (({}, len(data)), ({"bytes": len(data) + 1}, 0), ({"path": str(link)}, 0), ({"path": "blob.png"}, 0),
-                               ({"path": str(self.root)}, 0), ({"bytes": "1"}, 0)):
+        directory.mkdir(parents=True)
+        other.write_bytes(data)
+        for change, offset in (({}, len(data)), ({"bytes": len(data) + 1}, 0), ({"path": str(link)}, 0), ({"path": sha}, 0),
+                               ({"path": str(directory)}, 0), ({"bytes": "1"}, 0), ({"path": str(other)}, 0),
+                               ({"path": str(blob.parent / ("0" * 64))}, 0)):
             self.configure(attachment={"output": {**answer, **change}})
             with self.subTest(change=change, offset=offset):
                 response = await self.connector.execute(read(offset))
@@ -364,6 +400,105 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         before = len(self.calls())
         self.assertEqual((await self.connector.execute(read(0, 524289)))["state"], "failed")
         self.assertEqual(len(self.calls()), before)
+
+    async def test_an_applied_write_answers_with_a_compact_card(self):
+        await self.connector.snapshot()
+        card = {"uuid": TASK, "ref": "om-abcde", "project": "example", "title": "Synthetic", "stage": "Build", "priority": 2, "rank": "U",
+                "labels": [], "pinned": None, "assignee": None, "reviewer": None, "flags": [], "parent": None, "follows": [],
+                "created_at": 1, "updated_at": 2, "read_only": False, "deleted": False, "journal_count": 2, "head": "event-2",
+                "pinned_current": "codex/renamed"}
+        # The full view escapes past the 1 MiB result bound (Cyrillic costs six bytes a character).
+        full = {**card, "prompt": "ж" * 1000, "attachments": [], "journal": [{"marker": "[comment]", "text": "ж" * 180000}],
+                "related": [], "resume_stage": "", "created_by": {"kind": "human"}}
+        self.configure(comment={"output": {"ok": True, "delivery": "sent", "reason": "", "task": full}},
+                       delete={"output": {"ok": True, "deleted": TASK}}, done={"exit": 1, "output": REFUSAL})
+        write = request("overmind_write", "comment", {"task": "om-abcde", "text": "ж" * 10})
+        first = await self.connector.execute(write)
+        self.assertEqual(first, {"state": "completed", "result": {"ok": True, "delivery": "sent", "reason": "", "task": card}, "error": None})
+        self.assertEqual(await self.connector.execute(write), first)
+        self.assertEqual(len(self.calls("comment")), 1)
+        self.assertEqual((await self.connector.execute(request("overmind_write", "delete", {"task": "om-abcde"})))["result"], {"ok": True, "deleted": TASK})
+        self.assertEqual((await self.connector.execute(request("overmind_write", "done", {"task": "om-abcde"})))["result"], REFUSAL)
+
+    async def test_task_journal_reads_are_bounded_pages(self):
+        await self.connector.snapshot()
+        journal = [{"marker": "[comment]", "text": "ж" * 2000 + str(index)} for index in range(300)]  # About 12 KB escaped each.
+        self.configure(pages={"journal": journal})
+        received, before = [], None
+        for _ in range(20):
+            if before == 0:
+                break
+            body = {"task": "om-abcde"} if before is None else {"task": "om-abcde", "journal_before": before}
+            response = await self.connector.execute(request("overmind_read", "task", body))
+            self.assertEqual(response["state"], "completed")
+            self.assertLessEqual(len(json.dumps(response).encode()), 1024 * 1024 - 1024)
+            task = response["result"]["task"]
+            self.assertEqual(task["journal_total"], 300)
+            received, before = task["journal"] + received, task["journal_from"]
+        self.assertEqual(received, journal)
+        self.assertEqual([call["payload"]["journal_limit"] for call in self.calls("show")][:2], [100, 50])  # Halved until it fits.
+        await self.connector.execute(request("overmind_read", "task", {"task": "om-abcde", "journal_limit": 20}))
+        self.assertEqual(self.calls("show")[-1]["payload"], {"task": "om-abcde", "journal_limit": 20})
+        # One entry that cannot fit is a refusal-like answer, never an uncertain or failed receipt.
+        self.configure(pages={"journal": [{"marker": "[comment]", "text": "ж" * 200000}]})
+        response = await self.connector.execute(request("overmind_read", "task", {"task": "om-abcde"}))
+        self.assertEqual((response["state"], response["result"]["ok"], response["result"]["error"]["code"], response["result"]["error"]["field"]),
+                         ("completed", False, "too_large", "journal_limit"))
+        self.assertEqual(self.calls("show")[-1]["payload"]["journal_limit"], 1)
+
+    async def test_board_reads_are_bounded_pages(self):
+        await self.connector.snapshot()
+        tasks = [{"uuid": str(uuid.UUID(int=index)), "title": "ж" * 1000} for index in range(450)]  # About 6 KB escaped each.
+        self.configure(pages={"tasks": tasks})
+        received, after = [], None
+        for _ in range(20):
+            body = {"project": "example"} if after is None else {"project": "example", "after": after}
+            response = await self.connector.execute(request("overmind_read", "board", body))
+            self.assertEqual(response["state"], "completed")
+            self.assertLessEqual(len(json.dumps(response).encode()), 1024 * 1024 - 1024)
+            received, after = received + response["result"]["tasks"], response["result"]["next"]
+            if after is None:
+                break
+        self.assertEqual(received, tasks)
+        self.assertEqual([call["payload"]["limit"] for call in self.calls("board")][:2], [200, 100])
+        self.configure(pages={"tasks": [{"uuid": TASK, "title": "ж" * 200000}]})
+        result = (await self.connector.execute(request("overmind_read", "board", {"project": "example", "stage": "Queue"})))["result"]
+        self.assertEqual((result["ok"], result["error"]["code"], result["error"]["field"]), (False, "too_large", "limit"))
+        self.assertEqual(self.calls("board")[-1]["payload"], {"project": "example", "stage": "Queue", "limit": 1})
+
+    async def test_a_failed_help_probe_keeps_overmind_until_a_probe_succeeds(self):
+        await self.connector.snapshot()
+        self.configure(help=None)  # The probe itself fails, for example by a timeout.
+        self.connector.capabilities_next_poll = self.connector.overmind_next_poll = 0
+        snapshot = await self.connector.snapshot()
+        self.assertTrue(GATEWAY_OPERATIONS <= set(snapshot["mobile_capabilities"]["operations"]))
+        self.assertEqual(snapshot["mobile_overmind"], DIGEST)
+        self.assertEqual((await self.connector.execute(request()))["state"], "completed")
+        self.configure(help="hgs ls")
+        self.connector.capabilities_next_poll = 0
+        snapshot = await self.connector.snapshot()
+        self.assertFalse(GATEWAY_OPERATIONS & set(snapshot["mobile_capabilities"]["operations"]))
+        self.assertNotIn("mobile_overmind", snapshot)
+
+    async def test_digest_is_omitted_when_the_heartbeat_would_exceed_the_relay_limit(self):
+        class Stop(Exception):
+            pass
+        sent = []
+
+        async def post(client, path, body, presence):
+            sent.append(json.loads(json.dumps(body)))
+            raise Stop
+
+        def gateway_snapshot(total):
+            # A snapshot carrying the digest whose heartbeat body encodes to exactly `total` bytes.
+            value = {"sessions": [{"name": "codex/example", "padding": ""}], "mobile_overmind": DIGEST}
+            value["sessions"][0]["padding"] = "x" * (total - len(json.dumps({"snapshot": value, "presence": None}).encode()))
+            return value
+        for total, kept in ((1024 * 1024, True), (1024 * 1024 + 1, False)):
+            with self.subTest(total=total), patch.object(self.connector, "snapshot", AsyncMock(return_value=gateway_snapshot(total))), \
+                    patch.object(self.connector, "post_with_presence", post), self.assertRaises(Stop):
+                await self.connector.heartbeats(None)
+            self.assertEqual("mobile_overmind" in sent[-1]["snapshot"], kept)
 
 
 if __name__ == "__main__":

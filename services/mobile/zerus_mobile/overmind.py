@@ -28,6 +28,17 @@ DIGEST_MAX = 64 * 1024
 DIGEST_SECONDS = 15
 DECISIONS_MAX = 50
 DECISION_SLOT = "overmind:"
+# Escaped (canonical ASCII JSON) bytes a digest decision may spend per field, so all 50
+# always fit in 64 KiB; hgs project ids have at most 128 UTF-8 bytes, 384 escaped.
+ENTRY_BOUNDS = {"task": 64, "project": 384, "signature": 128}
+TITLE_CHARS, TITLE_BYTES = 120, 600
+# Reads the connector pages into one relay result: the window field and its first size.
+PAGES = {"task": ("journal_limit", 100), "board": ("limit", 200)}
+# An applied write's task as a compact card: the board fields of hgs `view(full=false)`
+# plus the transition head and a renamed pin, so its answer always fits one result.
+CARD_KEYS = frozenset({"uuid", "ref", "project", "title", "stage", "priority", "rank", "labels", "pinned", "assignee",
+                       "reviewer", "flags", "parent", "follows", "created_at", "updated_at", "read_only", "deleted",
+                       "journal_count", "head", "pinned_current"})
 
 
 def valid_device(value) -> bool:
@@ -69,23 +80,41 @@ def device_label(value) -> str | None:
     return re.sub(r"^[\s@-]+", "", label)[:DEVICE_MAX].rstrip() or None
 
 
+def escaped(text: str) -> int:
+    return len(json.dumps(text)) - 2
+
+
+def card(result: dict) -> dict:
+    """An applied write's answer: every top-level field, and its task as a compact card."""
+    if result.get("ok") is True and isinstance(result.get("task"), dict):
+        return {**result, "task": {key: value for key, value in result["task"].items() if key in CARD_KEYS}}
+    return result
+
+
+def too_large(field: str) -> dict:
+    """The answer for one journal entry or task that cannot fit one relay result."""
+    return {"ok": False, "error": {"code": "too_large", "field": field, "state": "invalid",
+                                   "message": "too large to show on the phone; open it on the computer"}}
+
+
 def digest(projects, decisions) -> dict:
     """`mobile_overmind` from native `projects` and `decisions` answers, at most 64 KiB:
     `{schema, rev, projects: {id: {role: count}}, decisions: [{task, project, title, signature}]}`.
-    Your Call entries come first; project counts fill the remaining room."""
+    Every Your Call entry fits (bounded fields, titles clipped to 120 characters and 600
+    escaped bytes); project counts fill the remaining room in hgs order."""
     if not (isinstance(projects, dict) and projects.get("ok") is True and isinstance(projects.get("projects"), list)
             and isinstance(decisions, dict) and decisions.get("ok") is True and isinstance(decisions.get("decisions"), list)):
         raise ValueError("native Overmind digest is invalid")
     rev = decisions.get("cursor")
     value = {"schema": 1, "rev": rev if type(rev) is int else None, "projects": {}, "decisions": []}
-    room = DIGEST_MAX - len(json.dumps(value))
     for row in decisions["decisions"][:DECISIONS_MAX]:
-        if isinstance(row, dict) and all(isinstance(row.get(key), str) for key in ("task", "project", "title", "signature")):
-            entry = {"task": row["task"], "project": row["project"], "title": row["title"][:120], "signature": row["signature"]}
-            room -= len(json.dumps(entry)) + 2
-            if room < 0:
-                break
-            value["decisions"].append(entry)
+        if (isinstance(row, dict) and all(isinstance(row.get(key), str) for key in ("task", "project", "title", "signature"))
+                and all(escaped(row[key]) <= bound for key, bound in ENTRY_BOUNDS.items())):
+            title = row["title"][:TITLE_CHARS]
+            while escaped(title) > TITLE_BYTES:
+                title = title[:-1]
+            value["decisions"].append({"task": row["task"], "project": row["project"], "title": title, "signature": row["signature"]})
+    room = DIGEST_MAX - len(json.dumps(value))
     for row in projects["projects"]:
         if room >= 0 and isinstance(row, dict) and isinstance(row.get("project"), str) and isinstance(row.get("roles"), dict):
             roles = {role: count for role, count in row["roles"].items() if type(count) is int}
@@ -129,6 +158,8 @@ def read_range(answer: dict, request: dict) -> dict:
     path, size, offset, length = answer.get("path"), answer.get("bytes"), request["offset"], request["length"]
     if not isinstance(path, str) or not os.path.isabs(path) or type(size) is not int or not 0 < size <= MAX_FILE_BYTES:
         raise ValueError("native attachment answer is invalid")
+    if os.path.basename(path) != request.get("sha256"):  # hgs blobs are content-addressed.
+        raise ValueError("native attachment path does not name the requested image")
     if offset >= size:
         raise ValueError("attachment range is outside the file")
     try:
