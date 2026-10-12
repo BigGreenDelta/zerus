@@ -1489,13 +1489,17 @@ A store restored from an old copy writes under its old origin, so its new
 events can collide with events its peers already hold at the same positions.
 Each exchange therefore also carries tips: for every origin, the id of the
 sender's last event of it. A side that holds that position with another event
-has found a collision of that origin, and it tells the other side. The shorter
-log's tip always lies inside the longer one, so one of the two always finds it.
-A store whose own origin collides, or whose peer holds more events of its
-origin than it does, writes later events under a fresh origin. Events of a
-colliding origin are no longer exchanged between the two stores, so neither
-mixes the two logs; tasks changed before the exchange may differ between them.
-Copying a store directory to a second machine is unsupported.
+has found a collision of that origin, and it tells the other side. Every push
+of an origin also starts with the event at the receiver's last known position
+of it, so the receiver compares that event before it extends its log, and a
+different one is a collision too. Detection works per pair of stores, at their
+next exchange. A store whose own origin collides, or whose peer holds more
+events of its origin than it does, writes later events under a fresh origin.
+Two stores do not exchange events of an origin while their logs of it differ;
+each exchange checks this again, so a store that was created again on a
+machine gets the origin once more. Tasks changed before the exchange may differ
+between the stores. Copying a store directory to a second machine is
+unsupported.
 
 `hgs overmind status` shows this store's origin id and each peer's last
 exchange and last error, including events the peer did not accept and events

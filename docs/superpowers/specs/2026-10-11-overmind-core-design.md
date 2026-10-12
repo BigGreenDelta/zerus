@@ -159,15 +159,15 @@ its own origin id, created with the store, and numbers its events from `seq` 1.
 therefore never collides with events written earlier, even when it writes
 before its peers refill it. A store restored from an old copy writes under the
 same origin as the original, so its new events could collide with events written
-since. Exchanges carry tips (Replication below), so the collision is found at
-the next exchange with a peer that holds those positions, however many events
-the copy wrote; a copy that only lost events finds it when a peer holds more
-events of its origin than it does. The store then switches to a fresh origin
-for later events and records the fact in its origin history, which `status`
-shows. Events written before that exchange keep the old origin, are no longer
-exchanged with the peers that hold other events there, and tasks changed then
-may differ from the other machines. Copying a whole store directory to a
-second machine is unsupported.
+since. Exchanges carry tips and pushes start at an anchor (Replication below),
+so the collision is found at the next exchange with a peer store that holds
+those positions, however many events the copy wrote; a copy that only lost
+events finds it when a peer holds more events of its origin than it does. The
+store then switches to a fresh origin for later events and records the fact in
+its origin history, which `status` shows. Events written before that exchange
+keep the old origin and are not exchanged with peer stores that hold other
+events there, and tasks changed then may differ from the other machines.
+Copying a whole store directory to a second machine is unsupported.
 
 `lamport` is the maximum seen plus one, so a causally later event always sorts
 later. Kinds: `task_created`, `field_set`, `transition`, `journal`, `rank_set`,
@@ -208,16 +208,24 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
 - Collisions. The request and the answer of an exchange carry `tips`: for
   every origin of the sender's version vector, the id of the sender's event at
   that position. A side that holds the position with another event has found
-  a collision of that origin: the two logs differ there or earlier. The
-  shorter log's tip always lies inside the longer one, so one side always finds
-  it, and it tells the other in `collisions`, which both messages carry. A
-  store whose own current origin collides replaces it before anything is
-  written there again, as a store does when a peer holds more events of its
-  origin than it does. Both sides record each collision once, with the peer,
-  the origin and the time, and from then on neither sends events of that
-  origin to the other nor stores the other's, so no log mixes the two
-  histories. Both fields are optional, so a machine without them still
-  exchanges.
+  a collision of that origin: the two logs differ there or earlier. It tells
+  the other side in `collisions`, which both messages carry and which name the
+  collisions found in the current exchange. Every push of an origin, in the
+  request and in the answer, starts with the event at the receiver's last known
+  position of that origin (the anchor) when that position is past zero, so
+  `insert_raw` compares it before extending the log: an identical anchor is
+  skipped, and a different one is refused, stops the origin and is a collision
+  as well. Detection works per pair of stores, at their next exchange. A store
+  whose own current origin collides replaces it before anything is written
+  there again, as a store does when a peer holds more events of its origin
+  than it does. Both sides record each collision once in the origin history,
+  with the peer, the origin and the time. The history is a record, not a
+  block: two stores do not exchange events of an origin while an exchange finds
+  their logs of it different, and each exchange decides this again from what
+  the peer carries then. A caller holds back an origin that collided with the
+  peer before until the peer's first answer, and a peer that holds nothing of
+  the origin, such as a store created again on its machine, gets it again.
+  Both fields are optional, so a machine without them still exchanges.
 - `status` shows `origin_history`, newest first and at most 20: each change of
   this store's origin (`restored`) and each collision (`collision`), with `at`,
   `origin`, `peer` and, when the store replaced the origin, `replaced_by`. A
@@ -622,7 +630,7 @@ payloads never contain task content.
 | Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. The flag names the session and applies only while that session holds the task, so a session that lost a concurrent claim, or a task taken back meanwhile, is not flagged. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag, as does an accepted action of the assignee session itself (`advance`, `call_human`), which proves that it is alive, for example after its archive was restored. A task in Your Call keeps the flag through Icebox and back to Queue until it is sent again. |
 | Session renamed | `session_renamed` event inside the rename; pins, assignees and reviewers follow. The host writes assignees and reviewers with the current name, so only a pin written on another machine can miss a concurrent rename: the rename sorts before the pin, and the fold keeps the name as written. The host resolves such a pin through its own renames, oldest first, past every name that no session there uses: `send` compares the resolved name for `pinned_elsewhere`, and `show` and `board` add it as `pinned_current`. Other machines show the pin as written until the host resolves it. A name reused by a session that has since ended can resolve a pin to the session that first held the name, so `pinned_current` is a hint; `board --since` does not resend a task whose `pinned_current` changed only because a session's binding appeared or disappeared. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |
-| Store restored from an old copy, or two logs of one origin | Found at the next exchange with a peer that holds more events of the store's origin, or another event at a position (tips). A store whose own origin it is writes later events under a fresh origin (`restored` or `collision` in `origin_history`); on a collision both stores note it and stop exchanging that origin with each other. |
+| Store restored from an old copy, or two logs of one origin | Found at the next exchange with a peer that holds more events of the store's origin, or another event at a position (tips). A store whose own origin it is writes later events under a fresh origin (`restored` or `collision` in `origin_history`); on a collision both stores note it and do not exchange that origin with each other while their logs of it differ. Detection works per pair of stores. |
 | Cache corrupted or schema changed | Rebuilt from `events`. |
 | Unknown event kind or version | Task read-only on that machine. |
 | Concurrent conflicting transitions | `[rejected]` for the loser; `conflict` if an external effect is overturned. |
