@@ -1,7 +1,7 @@
 //! Presence-aware phone alert rule. Pure functions take the caller's clock.
 //! Missing, stale or malformed information means "away": an extra phone
 //! alert is preferred over a missed one.
-use crate::registry::archived;
+use crate::{protocol, registry::archived};
 use serde_json::Value;
 
 /// Seconds a machine's latest presence keeps it present.
@@ -14,6 +14,12 @@ pub const CANDIDATE_TTL: f64 = 86400.0;
 pub const RECHECK: f64 = 15.0;
 /// One candidate per computer, session and kind; this bounds a workspace.
 pub const WORKSPACE_CANDIDATES: i64 = 1000;
+/// Your Call alerts from the gateway's Overmind digest use this kind and a
+/// `overmind:<task uuid>` slot in place of a session name.
+pub const DECISION: &str = "decision";
+pub const DECISION_SLOT: &str = "overmind:";
+/// Digest entries read per snapshot; later entries are ignored.
+pub const DECISIONS_MAX: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -147,6 +153,36 @@ fn text(v: &Value, key: &str) -> Option<String> {
     v[key].as_str().map(str::to_owned)
 }
 
+/// The Your Call entries of a snapshot's `mobile_overmind` digest as
+/// (`overmind:<task>` slot, entry), in digest order. Only the first 50 entries
+/// are read. An entry counts when its `task` is a canonical UUID and its
+/// `signature` 1–128 characters without control characters; a repeated task
+/// counts once, by its first entry. Project and title are for the phone.
+/// `None`: no `mobile_overmind.decisions` array, which is missing data, not an
+/// empty list.
+pub fn decisions(snapshot: &Value) -> Option<Vec<(String, &Value)>> {
+    let items = snapshot["mobile_overmind"]["decisions"].as_array()?;
+    let mut found: Vec<(String, &Value)> = vec![];
+    for v in items.iter().take(DECISIONS_MAX) {
+        let (Ok(task), Ok(_)) = (
+            protocol::uuid(&v["task"], false),
+            protocol::text(&v["signature"], 128, false),
+        ) else {
+            continue;
+        };
+        let slot = format!("{DECISION_SLOT}{task}");
+        if !found.iter().any(|(s, _)| *s == slot) {
+            found.push((slot, v));
+        }
+    }
+    Some(found)
+}
+/// A decision slot's digest entry. `None`: the snapshot carries no digest;
+/// `Some(None)`: the digest does not list the slot.
+fn entry<'a>(snapshot: &'a Value, slot: &str) -> Option<Option<&'a Value>> {
+    decisions(snapshot).map(|d| d.into_iter().find(|(s, _)| s == slot).map(|(_, v)| v))
+}
+
 /// The identity a derived event had when it became a candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -159,6 +195,19 @@ pub struct Candidate {
 }
 impl Candidate {
     pub fn capture(snapshot: &Value, session: &str, kind: &str) -> Self {
+        if kind == DECISION {
+            // The digest signature names the task's last transition.
+            return Self {
+                session: session.into(),
+                kind: kind.into(),
+                run_id: None,
+                conversation_id: None,
+                attention_signature: entry(snapshot, session)
+                    .flatten()
+                    .and_then(|d| text(d, "signature")),
+                reply_id: None,
+            };
+        }
         let row = live(snapshot, session).unwrap_or(&Value::Null);
         let completed = kind == "completed";
         Self {
@@ -189,12 +238,26 @@ impl Candidate {
             reply_id: text(r, "reply_id"),
         }
     }
+    /// Resolution against a computer's current snapshot: the live session row,
+    /// or for a decision its slot in the `mobile_overmind` digest. A snapshot
+    /// without a digest is missing data and keeps a decision.
+    pub fn resolved_in(&self, snapshot: &Value) -> bool {
+        if self.kind == DECISION {
+            return entry(snapshot, &self.session).is_some_and(|e| self.resolved(e));
+        }
+        self.resolved(live(snapshot, &self.session))
+    }
     /// True when the current live row proves the item was handled or read.
-    /// `None` means the snapshot no longer has the live session.
+    /// `None` means the snapshot no longer has the live session. For a
+    /// decision the item is its digest entry: it resolves once the task leaves
+    /// Your Call or its signature changes (a new candidate replaces it then).
     pub fn resolved(&self, session: Option<&Value>) -> bool {
         let Some(v) = session else {
             return true;
         };
+        if self.kind == DECISION {
+            return v["signature"].as_str() != self.attention_signature.as_deref();
+        }
         let current = |key: &str| v[key].as_str();
         if current("run_id") != self.run_id.as_deref()
             || current("conversation_id") != self.conversation_id.as_deref()

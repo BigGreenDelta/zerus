@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     db::{f, Tx},
-    protocol::{ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READS, READ_SQL},
+    protocol::{ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READS, READ_SQL, SHORT_READS},
 };
 use std::collections::BTreeSet;
 impl Store {
@@ -279,10 +279,14 @@ impl Store {
             ] {
                 rows.extend(t.all(&format!("SELECT id,workspace_id FROM requests WHERE {predicate} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![threshold,batch]).await?);
             }
-            // Attachment bytes are carried, never kept: a result leaves shortly
-            // after the phone read it, or after a short TTL if it never does.
-            // The partial `attachment_history` index holds only these rows.
-            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?",args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
+            // Attachment bytes and Overmind reads are carried, never kept: a
+            // result leaves shortly after the phone read it, or after a short TTL
+            // if it never does. The partial `attachment_history` and
+            // `overmind_history` indexes hold only these rows; the operation is
+            // literal so each query can use its index.
+            for op in SHORT_READS {
+                rows.extend(t.all(&format!("SELECT id,workspace_id FROM requests WHERE operation='{op}' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?"),args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
+            }
             rows.sort_by(|a, b| s(a, "id").cmp(s(b, "id")));
             rows.dedup_by(|a, b| a["id"] == b["id"]);
             rows.truncate(batch as usize);
@@ -292,16 +296,19 @@ impl Store {
                 if !["completed", "failed", "uncertain"].contains(&s(&r, "state")) {
                     continue;
                 }
-                let read = READS.contains(&s(&r, "operation"));
-                let attachment = r["operation"] == "attachment_read";
+                let op = s(&r, "operation");
+                let read = READS.contains(&op);
+                let short = SHORT_READS.contains(&op);
                 let remove = read
                     && (f(&r, "updated")
-                        < at - match s(&r, "operation") {
-                            "terminal_snapshot" => 120.0,
-                            "attachment_read" => ATTACHMENT_RESULT_TTL,
-                            _ => self.db.cfg.retention.min(3600) as f64,
+                        < at - if op == "terminal_snapshot" {
+                            120.0
+                        } else if short {
+                            ATTACHMENT_RESULT_TTL
+                        } else {
+                            self.db.cfg.retention.min(3600) as f64
                         }
-                        || (attachment
+                        || (short
                             && !r["result_read"].is_null()
                             && f(&r, "result_read") < at - ATTACHMENT_READ_GRACE));
                 let size = i(&r, "body_bytes") + i(&r, "result_bytes") + i(&r, "reserved_bytes");

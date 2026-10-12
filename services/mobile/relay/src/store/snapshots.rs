@@ -104,7 +104,8 @@ impl Store {
             let previous=if let Some((route,_))=peer {
                 self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0",args![&c.id,route]).await?
             }else{self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM nodes WHERE id=? AND workspace_id=? AND revoked=0",args![&c.id,&c.workspace]).await?}.ok_or(Error::NOT_FOUND)?;
-            let changes = registry::event_changes(previous["snapshot"].as_str(), snapshot)?;
+            let changes =
+                registry::event_changes(previous["snapshot"].as_str(), snapshot, peer.is_none())?;
             let mut t = self.db.begin().await?;
             if !changes.is_empty() {
                 self.event_locks(&mut t, &[c.workspace.as_str()], changes.len())

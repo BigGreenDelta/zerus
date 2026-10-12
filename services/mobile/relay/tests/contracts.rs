@@ -1564,6 +1564,70 @@ async fn postgres_cross_worker_contract() {
         (f.count("alert_candidates").await, f.alert_count().await),
         (0, 2)
     );
+    // Gateway Overmind reads have their own short class on every worker.
+    assert_eq!(
+        f.count("pg_indexes WHERE indexname='overmind_history'")
+            .await,
+        1
+    );
+    let read = gateway_op(&f.node.id, "overmind_read", "projects", json!({}));
+    f.submit(&read).await.unwrap();
+    let claimed = second
+        .claim(&f.node, true)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(claimed["requests"][0]["operation"], "overmind_read");
+    assert!(claimed["requests"][0]["gateway_route"]["route_id"].is_null());
+    let projects = json!({"state":"completed","result":{"ok":true,"projects":[]},"error":null});
+    let encoded = canonical(&projects["result"]).unwrap();
+    second
+        .result(&f.node, s(&read, "request_id"), &projects, Some(&encoded))
+        .await
+        .unwrap();
+    f.store
+        .receipt(&f.phone, s(&read, "request_id"))
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET result_read=? WHERE id=?",
+            args![now() - 6.0, &read["request_id"]],
+        )
+        .await
+        .unwrap();
+    second.maintain(false).await.unwrap();
+    assert_eq!(f.count("requests WHERE operation='overmind_read'").await, 0);
+    f.check_accounting().await;
+    // A decision raised on one worker is delivered from the gateway digest.
+    let task = Uuid::new_v4().to_string();
+    let mut overmind = held.clone();
+    overmind["mobile_overmind"] = json!({"schema":1,"rev":"1","projects":{},"decisions":[]});
+    let away = presence(1.0, Some(0.0));
+    let beat = |snapshot: &Value| json!({"snapshot":snapshot,"machine_id":heartbeat["machine_id"],"peers":[],"presence":away});
+    second
+        .heartbeat(&f.node, &beat(&overmind), &canonical(&overmind).unwrap())
+        .await
+        .unwrap();
+    overmind["mobile_overmind"]["decisions"] =
+        json!([{"task":task,"project":"example","title":"t","signature":signature('3')}]);
+    f.store
+        .heartbeat(&f.node, &beat(&overmind), &canonical(&overmind).unwrap())
+        .await
+        .unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(
+        (
+            alerts.len(),
+            &alerts[2]["alert_kind"],
+            &alerts[2]["session"]
+        ),
+        (3, &json!("decision"), &json!(format!("overmind:{task}")))
+    );
+    assert_eq!(f.count("alert_candidates").await, 0);
     // Simulate losing only this fixture database's LISTEN sockets. Durable
     // commands must remain visible while listeners reconnect and wake waiters.
     let mut wake = second.db.wake.subscribe();
@@ -2089,5 +2153,490 @@ async fn mobile_delivery_is_computer_scoped_and_capability_gated() {
             Err(e) if e.0.as_u16() == 400
         ));
     }
+    f.close().await;
+}
+
+/// A gateway-scoped Overmind envelope; writes repeat the request identity.
+fn gateway_op(computer: &str, op: &str, action: &str, request: Value) -> Value {
+    let id = Uuid::new_v4().to_string();
+    let mut payload = json!({"action":action,"request":request});
+    if op == "overmind_write" {
+        payload["request_id"] = json!(id);
+    }
+    json!({"request_id":id,"computer_id":computer,"operation":op,"session":"","payload":payload})
+}
+/// 0 when the envelope is accepted, otherwise the refusal status.
+fn refusal(body: Value) -> u16 {
+    zerus_relay::store::Submission::new(body).map_or_else(|e| e.0.as_u16(), |_| 0)
+}
+fn advertising(operations: &[&str]) -> Value {
+    json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":operations,"features":[]}})
+}
+
+#[test]
+fn overmind_envelopes_are_exact() {
+    for op in ["overmind_read", "overmind_write"] {
+        assert!(protocol::OPERATIONS.contains(&op) && protocol::GATEWAY.contains(&op));
+        assert!(protocol::capabilities(vec![])["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == op));
+    }
+    assert!(protocol::READS.contains(&"overmind_read"));
+    assert!(!protocol::READS.contains(&"overmind_write"));
+    assert!(!protocol::READ_SQL.contains("overmind"));
+    let c = Uuid::new_v4().to_string();
+    let read = |action: &str, request: Value| gateway_op(&c, "overmind_read", action, request);
+    let write = |action: &str, request: Value| gateway_op(&c, "overmind_write", action, request);
+    let range = json!({"task":"OM-1","sha256":"a".repeat(64),"offset":0,"length":524288});
+    // Every allowed action with any object request; hgs validates the fields.
+    for action in ["projects", "board", "task", "decisions", "attachment"] {
+        let request = if action == "attachment" {
+            range.clone()
+        } else {
+            json!({"project":"example","since":"12"})
+        };
+        assert_eq!(refusal(read(action, request)), 0, "{action}");
+    }
+    for action in [
+        "create",
+        "edit",
+        "move",
+        "reorder",
+        "pin",
+        "unpin",
+        "label",
+        "link",
+        "comment",
+        "send",
+        "review-send",
+        "rework-send",
+        "answer",
+        "resolve-delivery",
+        "done",
+        "reopen",
+        "delete",
+    ] {
+        assert_eq!(refusal(write(action, json!({}))), 0, "{action}");
+    }
+    // The informational device label: at most 64 characters, any script.
+    let mut labelled = write(
+        "create",
+        json!({"project":"example","title":"Pick a database"}),
+    );
+    labelled["payload"]["device"] = json!("Ü".repeat(64));
+    assert_eq!(refusal(labelled), 0);
+    // Writes carry inline images up to the request maximum, beyond the 1 MiB bound of other operations.
+    let image = json!({"images":[{"data_base64":"A".repeat(2 * protocol::MIB)}]});
+    assert_eq!(refusal(write("create", image)), 0);
+    let huge = json!({"text":"A".repeat(protocol::REQUEST_MAX)});
+    assert_eq!(refusal(write("create", huge)), 413);
+    // Reads stay small.
+    assert_eq!(
+        refusal(read("board", json!({"since":"1".repeat(65000)}))),
+        0
+    );
+    assert_eq!(
+        refusal(read("board", json!({"since":"1".repeat(65536)}))),
+        413
+    );
+    // `None` removes the field at the path.
+    let changed = |mut body: Value, path: &str, value: Option<Value>| {
+        let keys: Vec<&str> = path.split('/').collect();
+        let (last, parents) = keys.split_last().unwrap();
+        let mut target = &mut body;
+        for key in parents {
+            target = &mut target[*key];
+        }
+        match value {
+            Some(v) => target[*last] = v,
+            None => {
+                target.as_object_mut().unwrap().remove(*last);
+            }
+        }
+        body
+    };
+    let mut denied = vec![];
+    for (base, other) in [
+        (read("board", json!({})), "create"),
+        (write("create", json!({})), "board"),
+    ] {
+        for (path, value) in [
+            ("session", Some(json!("codex/example/tag"))),
+            ("payload/action", Some(json!(other))),
+            ("payload/action", Some(json!("sessions"))),
+            ("payload/action", Some(json!("show"))),
+            ("payload/action", Some(json!("advance"))),
+            ("payload/action", Some(json!("call-human"))),
+            ("payload/action", Some(json!("rev"))),
+            ("payload/action", Some(json!(""))),
+            ("payload/action", Some(json!(7))),
+            ("payload/action", None),
+            ("payload/request", Some(json!([]))),
+            ("payload/request", Some(json!("{}"))),
+            ("payload/request", Some(Value::Null)),
+            ("payload/request", None),
+            ("payload/expected_run_id", Some(json!("run"))),
+            ("payload/device", Some(json!(""))),
+            ("payload/device", Some(json!("d".repeat(65)))),
+            ("payload/device", Some(json!("phone\nlabel"))),
+            ("payload/device", Some(json!("phone\u{7f}"))),
+            ("payload/device", Some(json!(7))),
+        ] {
+            denied.push((path, value, base.clone()));
+        }
+    }
+    // Only a write repeats the envelope identity, exactly.
+    let stray = read("board", json!({}));
+    let id = stray["request_id"].clone();
+    denied.push(("payload/request_id", Some(id), stray));
+    let other = json!(Uuid::new_v4().to_string());
+    denied.push((
+        "payload/request_id",
+        Some(other),
+        write("create", json!({})),
+    ));
+    denied.push(("payload/request_id", None, write("create", json!({}))));
+    // Attachment ranges follow `attachment_read`.
+    for (path, value) in [
+        ("payload/request/offset", None),
+        ("payload/request/length", None),
+        ("payload/request/length", Some(json!(0))),
+        ("payload/request/length", Some(json!(524289))),
+        ("payload/request/length", Some(json!(1.5))),
+        ("payload/request/length", Some(json!("1"))),
+        ("payload/request/offset", Some(json!(-1))),
+        ("payload/request/offset", Some(json!(10 * 1024 * 1024))),
+        ("payload/request/offset", Some(json!(10 * 1024 * 1024 - 10))),
+    ] {
+        denied.push((path, value, read("attachment", range.clone())));
+    }
+    for (path, value, base) in denied {
+        let name = format!("{} {path} {value:?}", base["operation"]);
+        assert_eq!(refusal(changed(base, path, value)), 400, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn overmind_ops_run_only_on_the_advertising_gateway() {
+    let f = Fixture::new().await;
+    let read = gateway_op(&f.node.id, "overmind_read", "projects", json!({}));
+    let write = gateway_op(
+        &f.node.id,
+        "overmind_write",
+        "create",
+        json!({"project":"example","title":"Pick a database"}),
+    );
+    // A gateway that does not advertise an operation keeps rejecting it.
+    assert_eq!(f.submit(&read).await.unwrap_err().0.as_u16(), 409);
+    assert_eq!(f.submit(&write).await.unwrap_err().0.as_u16(), 409);
+    f.beat(&advertising(&["overmind_read"])).await;
+    assert_eq!(f.submit(&read).await.unwrap()["state"], "queued");
+    assert_eq!(f.submit(&write).await.unwrap_err().0.as_u16(), 409);
+    f.beat(&advertising(&["overmind_read", "overmind_write"]))
+        .await;
+    assert_eq!(f.submit(&write).await.unwrap()["state"], "queued");
+    // The gateway's own connector receives them, with no session and no route.
+    for expected in [&read, &write] {
+        let claim = f
+            .store
+            .claim(&f.node, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode()
+            .unwrap();
+        let r = &claim["requests"][0];
+        assert_eq!(
+            (
+                &r["request_id"],
+                &r["operation"],
+                &r["session"],
+                &r["payload"]
+            ),
+            (
+                &expected["request_id"],
+                &expected["operation"],
+                &json!(""),
+                &expected["payload"]
+            )
+        );
+        assert!(r.get("gateway_route").is_none());
+    }
+    // Behind a one-hop gateway a peer is never a target, even when it advertises them.
+    let (root, machine, route) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut caps = advertising(protocol::OPERATIONS);
+    caps["mobile_capabilities"]["features"] = json!(["gateway_one_hop"]);
+    let peers = json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":true}]);
+    gateway_beat(&f, &root, &peers, &caps).await;
+    peer_beat(&f, &route, &machine, &caps, &Value::Null).await;
+    let catalog = f.store.computers(&f.phone).await.unwrap();
+    let peer = catalog["computers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["machine_id"] == machine)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for op in ["overmind_read", "overmind_write"] {
+        let action = if op == "overmind_read" {
+            "projects"
+        } else {
+            "create"
+        };
+        let b = gateway_op(&peer, op, action, json!({}));
+        assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409, "{op}");
+        // The ordinary session operations still reach the peer.
+        let mut send = f.command("send");
+        send["computer_id"] = json!(peer);
+        assert_eq!(f.submit(&send).await.unwrap()["state"], "queued");
+        assert!(f.store.claim(&f.node, true).await.unwrap().is_some());
+    }
+    // The gateway computer's local route serves them; its claim names no peer route.
+    let local = gateway_op(&f.node.id, "overmind_read", "decisions", json!({}));
+    assert_eq!(f.submit(&local).await.unwrap()["state"], "queued");
+    let claim = f
+        .store
+        .claim(&f.node, true)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    let r = &claim["requests"][0];
+    assert_eq!(r["request_id"], local["request_id"]);
+    assert!(r["gateway_route"]["route_id"].is_null());
+    assert_eq!(r["gateway_route"]["machine_id"], root);
+    // Peer snapshots never raise decisions; only the gateway publishes the digest.
+    let digest = |items: Value| {
+        let mut s = caps.clone();
+        s["mobile_overmind"] = json!({"schema":1,"rev":"1","projects":{},"decisions":items});
+        s
+    };
+    let item = json!([{"task":Uuid::new_v4().to_string(),"project":"example","title":"t","signature":signature('1')}]);
+    peer_beat(&f, &route, &machine, &digest(json!([])), &Value::Null).await;
+    peer_beat(&f, &route, &machine, &digest(item), &Value::Null).await;
+    assert!(f.events_of("decision").await.is_empty());
+    f.check_accounting().await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn overmind_reads_are_short_lived_and_writes_keep_their_identity() {
+    let f = Fixture::new().await;
+    assert_eq!(
+        f.count("sqlite_master WHERE type='index' AND name='overmind_history'")
+            .await,
+        1
+    );
+    f.beat(&advertising(&["overmind_read", "overmind_write"]))
+        .await;
+    let usage = |f: &Fixture| {
+        let w = f.phone.workspace.clone();
+        let db = f.store.db.clone();
+        async move {
+            let r = db
+                .one(
+                    "SELECT reads,mutations FROM workspace_usage WHERE workspace_id=?",
+                    args![&w],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            (i(&r, "reads"), i(&r, "mutations"))
+        }
+    };
+    let complete = |b: &Value, result: Value| {
+        let id = s(b, "request_id").to_owned();
+        let store = f.store.clone();
+        let node = f.node.clone();
+        async move {
+            assert!(store.claim(&node, false).await.unwrap().is_some());
+            let body = json!({"state":"completed","result":result,"error":null});
+            let e = canonical(&body["result"]).unwrap();
+            store.result(&node, &id, &body, Some(&e)).await.unwrap();
+        }
+    };
+    let rows = "requests WHERE operation='overmind_read'";
+    // A read result near the 1 MiB bound leaves soon after the phone read it.
+    let read = gateway_op(
+        &f.node.id,
+        "overmind_read",
+        "board",
+        json!({"project":"example"}),
+    );
+    assert_eq!(f.submit(&read).await.unwrap()["state"], "queued");
+    assert_eq!(usage(&f).await, (1, 0));
+    complete(
+        &read,
+        json!({"ok":true,"tasks":[],"page":"A".repeat(1_000_000)}),
+    )
+    .await;
+    f.check_accounting().await;
+    let receipt = f
+        .store
+        .receipt(&f.phone, s(&read, "request_id"))
+        .await
+        .unwrap();
+    assert_eq!(receipt["result"]["page"].as_str().unwrap().len(), 1_000_000);
+    assert_eq!(
+        f.count(&format!("{rows} AND result_read IS NOT NULL"))
+            .await,
+        1
+    );
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(f.count(rows).await, 1);
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET result_read=? WHERE id=?",
+            args![now() - 6.0, &read["request_id"]],
+        )
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(f.count(rows).await, 0);
+    assert_eq!(usage(&f).await, (0, 0));
+    f.check_accounting().await;
+    // An unread result leaves after its TTL; a pruned read identity is new again.
+    let unread = gateway_op(&f.node.id, "overmind_read", "projects", json!({}));
+    f.submit(&unread).await.unwrap();
+    complete(&unread, json!({"ok":true,"projects":[]})).await;
+    for (age, left) in [(59.0, 1), (61.0, 0)] {
+        f.store
+            .db
+            .exec(
+                "UPDATE requests SET updated=? WHERE id=?",
+                args![now() - age, &unread["request_id"]],
+            )
+            .await
+            .unwrap();
+        f.store.maintain(false).await.unwrap();
+        assert_eq!(f.count(rows).await, left, "{age}");
+    }
+    assert_eq!(f.submit(&unread).await.unwrap()["state"], "queued");
+    f.check_accounting().await;
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    // A write is a mutation: it outlives the read classes, and a retry after its
+    // history expired still returns the completed receipt instead of running again.
+    let write = gateway_op(
+        &f.node.id,
+        "overmind_write",
+        "create",
+        json!({"project":"example","title":"Pick a database"}),
+    );
+    assert_eq!(f.submit(&write).await.unwrap()["state"], "queued");
+    assert_eq!(usage(&f).await.1, 1);
+    complete(
+        &write,
+        json!({"ok":true,"task":{"uuid":write["request_id"]}}),
+    )
+    .await;
+    f.store
+        .receipt(&f.phone, s(&write, "request_id"))
+        .await
+        .unwrap();
+    for age in [3601.0, 8.0 * 86400.0] {
+        f.store
+            .db
+            .exec(
+                "UPDATE requests SET updated=? WHERE id=?",
+                args![now() - age, &write["request_id"]],
+            )
+            .await
+            .unwrap();
+        f.store.maintain(false).await.unwrap();
+        assert_eq!(
+            f.submit(&write).await.unwrap()["state"],
+            "completed",
+            "{age}"
+        );
+    }
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn decision_alerts_are_held_and_delivered_from_the_gateway_digest() {
+    let f = Fixture::new().await;
+    f.store
+        .register_push(&f.phone, "fcm", "synthetic-token")
+        .await
+        .unwrap();
+    let active = presence(1.0, None);
+    let task = Uuid::new_v4().to_string();
+    let slot = format!("overmind:{task}");
+    let digest = |items: Value| json!({"sessions":[],"mobile_overmind":{"schema":1,"rev":"1","projects":{},"decisions":items}});
+    let waiting = |sig: char| {
+        digest(
+            json!([{"task":task,"project":"example","title":"Pick a database","signature":signature(sig)}]),
+        )
+    };
+    let held = || f.count("alert_candidates WHERE kind='decision'");
+    f.beat_with(&digest(json!([])), &active).await;
+    // Entering Your Call refreshes phones and holds the alert while the owner is active.
+    f.beat_with(&waiting('1'), &active).await;
+    let raised = f.events_of("decision").await;
+    assert_eq!(raised.len(), 1);
+    assert_eq!(
+        (
+            raised[0]["session"].as_str(),
+            raised[0]["computer_id"].as_str()
+        ),
+        (Some(slot.as_str()), Some(f.node.id.as_str()))
+    );
+    assert!(raised[0].get("alert_kind").is_none());
+    assert_eq!((held().await, f.alert_count().await), (1, 0));
+    // The task leaves Your Call: the held alert resolves.
+    f.beat_with(&digest(json!([])), &active).await;
+    assert_eq!(held().await, 0);
+    // It returns, then changes while waiting: each raises it again, one slot.
+    f.beat_with(&waiting('1'), &active).await;
+    f.beat_with(&waiting('2'), &active).await;
+    assert_eq!(f.events_of("decision").await.len(), 3);
+    assert_eq!(
+        f.count(&format!(
+            "alert_candidates WHERE session='{slot}' AND attention_signature='{}'",
+            signature('2')
+        ))
+        .await,
+        1
+    );
+    // A snapshot without the digest is missing data: nothing resolves or repeats.
+    f.beat_with(&json!({"sessions":[]}), &active).await;
+    f.beat_with(&waiting('2'), &active).await;
+    assert_eq!(f.events_of("decision").await.len(), 3);
+    assert_eq!((held().await, f.alert_count().await), (1, 0));
+    // The lock alone delivers it under the ordinary presence rule.
+    f.beat_with(&waiting('2'), &presence(2.0, Some(1.0))).await;
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        (
+            alerts[0]["alert_kind"].as_str(),
+            alerts[0]["session"].as_str(),
+            alerts[0]["computer_id"].as_str()
+        ),
+        (
+            Some("decision"),
+            Some(slot.as_str()),
+            Some(f.node.id.as_str())
+        )
+    );
+    assert_eq!((held().await, f.count("push_jobs").await), (0, 1));
+    // Wakes stay generic: push payloads never carry task content.
+    let jobs = f.store.claim_push_jobs().await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(s(&jobs[0], "payload")).unwrap(),
+        json!({"event_id":alerts[0]["id"],"kind":"wake"})
+    );
     f.close().await;
 }

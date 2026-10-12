@@ -110,6 +110,11 @@ impl Store {
             None => Value::Null,
         };
         let op = b.operation.as_str();
+        // Gateway operations run on the gateway's own connector, never one hop away.
+        // An available local route always sorts first, so a peer here means none.
+        if protocol::GATEWAY.contains(&op) && i(&node, "local") == 0 {
+            return Err(Error::CONFLICT);
+        }
         if !["inspect", "send", "answer", "interrupt"].contains(&op)
             && !protocol::supports(&snapshot, op, "operations")
         {
@@ -240,7 +245,8 @@ impl Store {
         } else {
             r
         };
-        if ["terminal_snapshot", "attachment_read"].contains(&s(&row, "operation"))
+        let op = s(&row, "operation");
+        if (op == "terminal_snapshot" || protocol::SHORT_READS.contains(&op))
             && ["completed", "failed", "uncertain"].contains(&s(&row, "state"))
         {
             t.exec(

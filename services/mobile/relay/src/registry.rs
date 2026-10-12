@@ -1,6 +1,6 @@
 //! Workspace-scoped physical computers and explicitly advertised one-hop routes.
 use crate::{
-    alerts::recovery_failed,
+    alerts::{decisions, recovery_failed, DECISION},
     args,
     db::{f, i, now, s, Db, Tx},
     error::{Error, Result},
@@ -432,7 +432,13 @@ pub async fn revoke_computer(db: &Db, t: &mut Tx, c: &Value) -> Result<()> {
 pub fn archived(v: &Value) -> bool {
     v["archived"] == true || v["kind"] == "archive" || v["state"] == "archived"
 }
-pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(String, String)>> {
+/// Session transitions a phone notifies on and, from a gateway's own snapshot
+/// (`gateway`), new or changed Your Call entries of its Overmind digest.
+pub fn event_changes(
+    previous: Option<&str>,
+    snapshot: &Value,
+    gateway: bool,
+) -> Result<Vec<(String, String)>> {
     let Some(previous) = previous else {
         return Ok(vec![]);
     };
@@ -497,6 +503,22 @@ pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(St
             continue;
         };
         events.push((s(v, "name").into(), kind.into()));
+    }
+    // Only the gateway publishes the digest. One missing on either side is
+    // missing data, never a change, so a connector upgrade or restart raises
+    // nothing; a task leaving the list resolves its candidate instead.
+    if gateway {
+        if let (Some(before), Some(current)) = (decisions(&previous), decisions(snapshot)) {
+            for (slot, entry) in current {
+                if before
+                    .iter()
+                    .find(|(s, _)| *s == slot)
+                    .is_none_or(|(_, b)| b["signature"] != entry["signature"])
+                {
+                    events.push((slot, DECISION.into()));
+                }
+            }
+        }
     }
     Ok(events)
 }

@@ -19,15 +19,47 @@ pub const READS: &[&str] = &[
     "worktrees",
     "mark_read",
     "attachment_read",
+    "overmind_read",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
-/// retention class. `attachment_read` is a read with its own shorter class
-/// (`attachment_history`), so this text and that index stay unchanged.
+/// retention class. `attachment_read` and `overmind_read` are reads with their
+/// own shorter class (`attachment_history`, `overmind_history`), so this text
+/// and that index stay unchanged.
 pub const READ_SQL: &str =
     "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
 /// Computer-scoped: no session, delivered to the gateway computer itself.
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
+/// Gateway-scoped: no session, served only by the gateway computer's own
+/// connector (its local route), never through a peer route.
+pub const GATEWAY: &[&str] = &["overmind_read", "overmind_write"];
+/// `overmind_read` actions. `hgs overmind` on the gateway validates the fields
+/// of every request; the relay checks only the envelope.
+pub const OVERMIND_READ: &[&str] = &["projects", "board", "task", "decisions", "attachment"];
+/// `overmind_write` actions: the human desktop commands.
+pub const OVERMIND_WRITE: &[&str] = &[
+    "create",
+    "edit",
+    "move",
+    "reorder",
+    "pin",
+    "unpin",
+    "label",
+    "link",
+    "comment",
+    "send",
+    "review-send",
+    "rework-send",
+    "answer",
+    "resolve-delivery",
+    "done",
+    "reopen",
+    "delete",
+];
+/// Largest canonical `overmind_read` payload; writes are bounded by `REQUEST_MAX`.
+pub const OVERMIND_READ_MAX: usize = 64 * 1024;
+/// Longest informational device label a phone may attach to Overmind requests.
+pub const DEVICE_MAX: usize = 64;
 pub const MOBILE_DELIVERY: &[&str] = &[
     "immediate",
     "away",
@@ -51,6 +83,8 @@ pub const OPERATIONS: &[&str] = &[
     "interrupt",
     "launch",
     "mark_read",
+    "overmind_read",
+    "overmind_write",
     "pause",
     "process_output",
     "process_stop",
@@ -79,10 +113,12 @@ pub const FEATURES: &[&str] = &[
 pub const ATTACHMENT_CHUNK_MAX: u64 = 512 * 1024;
 /// The per-file bound shared with phone uploads and the native attachment store.
 pub const ATTACHMENT_FILE_MAX: u64 = 10 * MIB as u64;
-/// Completed `attachment_read` rows are deleted this long after completion,
-/// or this long after the phone has read their terminal receipt.
+/// Completed `attachment_read` and `overmind_read` rows are deleted this long
+/// after completion, or this long after the phone has read their terminal receipt.
 pub const ATTACHMENT_RESULT_TTL: f64 = 60.0;
 pub const ATTACHMENT_READ_GRACE: f64 = 5.0;
+/// Reads whose results are carried, not kept: each has its own partial index.
+pub const SHORT_READS: &[&str] = &["attachment_read", "overmind_read"];
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
@@ -178,9 +214,14 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        LAUNCH.contains(&op) || COMPUTER.contains(&op),
+        LAUNCH.contains(&op) || COMPUTER.contains(&op) || GATEWAY.contains(&op),
     )?;
-    if LAUNCH.contains(&op) {
+    if GATEWAY.contains(&op) {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        gateway(op, p, id)?;
+    } else if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
@@ -368,9 +409,36 @@ pub fn request(v: &Value) -> Result<()> {
             uuid(&p["archive_id"], op != "process_output")?;
         }
     }
-    if op != "send" {
+    // Sends and Overmind writes carry inline images up to the request maximum.
+    if op != "send" && op != "overmind_write" {
         json::size(v, MIB)?;
     }
+    Ok(())
+}
+/// The envelope of a gateway-scoped Overmind request. Field rules and gates
+/// belong to `hgs overmind`; the relay checks shape, actions, identity and size.
+fn gateway(op: &str, p: &Value, id: &str) -> Result<()> {
+    let read = op == "overmind_read";
+    if read {
+        fields(p, &["action", "request"], &["device"])?;
+    } else {
+        // The envelope identity is the Overmind request (and created task) identity.
+        fields(p, &["request_id", "action", "request"], &["device"])?;
+        if p["request_id"] != id {
+            return Err(Error::BAD);
+        }
+    }
+    let actions = if read { OVERMIND_READ } else { OVERMIND_WRITE };
+    if !actions.iter().any(|a| p["action"] == *a) || !p["request"].is_object() {
+        return Err(Error::BAD);
+    }
+    if let Some(d) = p.get("device") {
+        text(d, DEVICE_MAX, false)?;
+    }
+    if read && p["action"] == "attachment" {
+        range(&p["request"]["offset"], &p["request"]["length"])?;
+    }
+    json::size(p, if read { OVERMIND_READ_MAX } else { REQUEST_MAX })?;
     Ok(())
 }
 fn agent(v: &Value) -> Result<()> {
@@ -548,18 +616,24 @@ fn bounded_id(v: &Value) -> Result<()> {
 /// native CLI resolve the file. A phone never supplies a path.
 fn attachment_read(p: &Value) -> Result<()> {
     uuid(&p["message_id"], false)?;
-    let index = p["index"].as_u64().ok_or(Error::BAD)?;
-    let offset = p["offset"].as_u64().ok_or(Error::BAD)?;
-    let length = p["length"].as_u64().ok_or(Error::BAD)?;
-    if index >= 8
-        || offset >= ATTACHMENT_FILE_MAX
+    if p["index"].as_u64().is_none_or(|index| index >= 8) {
+        return Err(Error::BAD);
+    }
+    range(&p["offset"], &p["length"])?;
+    if let Some(a) = p.get("agent_id") {
+        agent(a)?;
+    }
+    Ok(())
+}
+/// One file range: `offset` below 10 MiB, `length` 1 to 512 KiB, within the file bound.
+fn range(offset: &Value, length: &Value) -> Result<()> {
+    let offset = offset.as_u64().ok_or(Error::BAD)?;
+    let length = length.as_u64().ok_or(Error::BAD)?;
+    if offset >= ATTACHMENT_FILE_MAX
         || !(1..=ATTACHMENT_CHUNK_MAX).contains(&length)
         || offset + length > ATTACHMENT_FILE_MAX
     {
         return Err(Error::BAD);
-    }
-    if let Some(a) = p.get("agent_id") {
-        agent(a)?;
     }
     Ok(())
 }

@@ -390,7 +390,8 @@ fn unannounced_signature_changes_keep_the_candidate_until_away() {
         assert!(
             event_changes(
                 Some(previous.as_str()),
-                &json!({ "sessions": [after.clone()] })
+                &json!({ "sessions": [after.clone()] }),
+                true
             )
             .unwrap()
             .is_empty(),
@@ -589,11 +590,171 @@ fn every_phone_alert_condition_produces_a_relay_event() {
     ];
     for (name, before, after, expected) in cases {
         let previous = canonical(&listing(before)).unwrap();
-        let kinds: Vec<String> = event_changes(Some(previous.as_str()), &listing(after))
+        let kinds: Vec<String> = event_changes(Some(previous.as_str()), &listing(after), true)
             .unwrap()
             .into_iter()
             .map(|(_, kind)| kind)
             .collect();
         assert_eq!(kinds, expected, "{name}");
     }
+}
+
+const TASK: &str = "00000000-0000-4000-8000-000000000001";
+const OTHER: &str = "00000000-0000-4000-8000-000000000002";
+/// A gateway snapshot carrying the `mobile_overmind` digest.
+fn digest(decisions: Value) -> Value {
+    json!({"sessions":[],"mobile_overmind":{"schema":1,"rev":"7","projects":{"example":{"needs_human":1}},"decisions":decisions}})
+}
+fn decision(task: &str, signature: &str) -> Value {
+    json!({"task":task,"project":"example","title":"Pick a database","signature":signature})
+}
+fn changes(before: &Value, after: &Value, gateway: bool) -> Vec<(String, String)> {
+    let previous = canonical(before).unwrap();
+    event_changes(Some(previous.as_str()), after, gateway).unwrap()
+}
+
+#[test]
+fn decision_alerts_follow_the_digest() {
+    let slot = format!("overmind:{TASK}");
+    let raised = vec![(slot.clone(), "decision".to_owned())];
+    let empty = digest(json!([]));
+    let waiting = digest(json!([decision(TASK, "s1")]));
+    let changed = digest(json!([decision(TASK, "s2")]));
+    let none = json!({"sessions":[]});
+    // Entering Your Call raises the task's slot; unchanged polls raise nothing.
+    assert_eq!(changes(&empty, &waiting, true), raised);
+    assert!(changes(&waiting, &waiting, true).is_empty());
+    // A changed signature raises again; leaving the list raises nothing.
+    assert_eq!(changes(&waiting, &changed, true), raised);
+    assert!(changes(&waiting, &empty, true).is_empty());
+    // A task that returns raises again.
+    assert_eq!(changes(&empty, &waiting, true), raised);
+    // Only the gateway's own snapshot carries Overmind; peers raise nothing.
+    assert!(changes(&empty, &waiting, false).is_empty());
+    // A digest that appears or disappears is missing data, not a change.
+    assert!(changes(&none, &waiting, true).is_empty());
+    assert!(changes(&waiting, &none, true).is_empty());
+    // Session events still flow beside decisions, from gateways and peers.
+    let asking = json!({"sessions":[{"name":"s","run_id":"r","conversation_id":"c","phase":"input","activity":"busy"}],"mobile_overmind":{"decisions":[decision(TASK,"s1")]}});
+    let working = json!({"sessions":[{"name":"s","run_id":"r","conversation_id":"c","phase":"working","activity":"busy"}],"mobile_overmind":{"decisions":[]}});
+    assert_eq!(
+        changes(&working, &asking, true),
+        vec![
+            ("s".to_owned(), "attention".to_owned()),
+            (slot.clone(), "decision".to_owned())
+        ]
+    );
+    assert_eq!(
+        changes(&working, &asking, false),
+        vec![("s".to_owned(), "attention".to_owned())]
+    );
+
+    let held = Candidate::capture(&waiting, &slot, "decision");
+    assert_eq!(
+        (
+            held.session.as_str(),
+            held.kind.as_str(),
+            held.attention_signature.as_deref(),
+            held.run_id.as_deref(),
+            held.conversation_id.as_deref(),
+            held.reply_id.as_deref()
+        ),
+        (slot.as_str(), "decision", Some("s1"), None, None, None)
+    );
+    let cases = [
+        ("still waiting", waiting.clone(), false),
+        ("the task left Your Call", empty.clone(), true),
+        ("the signature changed", changed.clone(), true),
+        (
+            "only another task waits",
+            digest(json!([decision(OTHER, "s1")])),
+            true,
+        ),
+        ("no digest is missing data", none.clone(), false),
+        (
+            "a malformed digest is missing data",
+            json!({"sessions":[],"mobile_overmind":{"decisions":{}}}),
+            false,
+        ),
+        (
+            "a session with the slot's name is not the decision",
+            json!({"sessions":[{"name":slot,"run_id":"r","conversation_id":"c","phase":"input","attention_signature":"s1"}],"mobile_overmind":{"decisions":[]}}),
+            true,
+        ),
+    ];
+    for (name, snapshot, dropped) in cases {
+        assert_eq!(held.resolved_in(&snapshot), dropped, "{name}");
+    }
+    // A stored row reads back the captured identity and the same rule.
+    let stored = Candidate::from_row(
+        &json!({"session":slot,"kind":"decision","run_id":null,"conversation_id":null,"attention_signature":"s1","reply_id":null}),
+    );
+    assert_eq!(stored, held);
+    assert!(!stored.resolved_in(&waiting) && stored.resolved_in(&changed));
+}
+
+#[test]
+fn decision_digests_are_bounded_and_skip_malformed_items() {
+    let empty = digest(json!([]));
+    let slots = |after: &Value| -> Vec<String> {
+        changes(&empty, after, true)
+            .into_iter()
+            .map(|(slot, kind)| {
+                assert_eq!(kind, "decision");
+                slot
+            })
+            .collect()
+    };
+    let malformed = [
+        json!("decision"),
+        json!(null),
+        json!({"project":"example","title":"t","signature":"s1"}),
+        json!({"task":"00000000-0000-4000-8000-00000000000A","project":"example","title":"t","signature":"s1"}),
+        json!({"task":"task-1","project":"example","title":"t","signature":"s1"}),
+        json!({"task":7,"project":"example","title":"t","signature":"s1"}),
+        json!({"task":TASK,"project":"example","title":"t"}),
+        json!({"task":TASK,"project":"example","title":"t","signature":""}),
+        json!({"task":TASK,"project":"example","title":"t","signature":"s\n1"}),
+        json!({"task":TASK,"project":"example","title":"t","signature":"s".repeat(129)}),
+        json!({"task":TASK,"project":"example","title":"t","signature":1}),
+    ];
+    for item in &malformed {
+        assert!(slots(&digest(json!([item]))).is_empty(), "{item}");
+        // A malformed item never hides a valid one beside it.
+        assert_eq!(
+            slots(&digest(json!([item, decision(OTHER, "s1")]))),
+            [format!("overmind:{OTHER}")],
+            "{item}"
+        );
+    }
+    // Project and title are the phone's; the relay reads only task and signature.
+    assert_eq!(
+        slots(&digest(json!([{"task":TASK,"signature":"s".repeat(128)}]))),
+        [format!("overmind:{TASK}")]
+    );
+    // A repeated task counts once, by its first entry.
+    let repeated = digest(json!([decision(TASK, "s1"), decision(TASK, "s2")]));
+    assert_eq!(slots(&repeated), [format!("overmind:{TASK}")]);
+    assert!(changes(&digest(json!([decision(TASK, "s1")])), &repeated, true).is_empty());
+    let held = Candidate::capture(&repeated, &format!("overmind:{TASK}"), "decision");
+    assert_eq!(held.attention_signature.as_deref(), Some("s1"));
+    // Only the first 50 entries are read, in digest order.
+    let task = |n: usize| format!("00000000-0000-4000-8000-{n:012}");
+    let many: Vec<Value> = (0..60).map(|n| decision(&task(n), "s1")).collect();
+    let expected: Vec<String> = (0..50).map(|n| format!("overmind:{}", task(n))).collect();
+    assert_eq!(slots(&digest(json!(many))), expected);
+    let late = Candidate::capture(
+        &digest(json!([decision(&task(50), "s1")])),
+        &format!("overmind:{}", task(50)),
+        "decision",
+    );
+    assert!(late.resolved_in(&digest(json!(many))));
+    let mut padded: Vec<Value> = (0..49).map(|_| json!("padding")).collect();
+    padded.push(decision(TASK, "s1"));
+    assert_eq!(
+        slots(&digest(json!(padded.clone()))),
+        [format!("overmind:{TASK}")]
+    );
+    padded.insert(0, json!("padding"));
+    assert!(slots(&digest(json!(padded))).is_empty());
 }

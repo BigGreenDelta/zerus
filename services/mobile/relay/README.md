@@ -63,6 +63,28 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   a completed row 5 seconds after the phone has read its terminal receipt
   (`result_read`) or 60 seconds after completion, so file bytes are carried,
   not kept. Submission requires the computer to advertise the operation.
+  `overmind_read` and `overmind_write` are gateway-scoped (`GATEWAY`): the
+  session is empty and the payload is exactly `{action, request, device?}`
+  for a read or `{request_id, action, request, device?}` for a write, whose
+  `request_id` repeats the envelope's (it is the Overmind request identity and
+  the created task's UUID). Read actions are `projects`, `board`, `task`,
+  `decisions` and `attachment`; write actions are `create`, `edit`, `move`,
+  `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`,
+  `review-send`, `rework-send`, `answer`, `resolve-delivery`, `done`, `reopen`
+  and `delete`. `request` is an object whose fields and gates `hgs overmind`
+  on the gateway validates, so new request fields need no relay deployment;
+  an `attachment` read's `offset` and `length` follow the `attachment_read`
+  bounds. `device`, an informational label, has 1–64 characters without
+  control characters. A canonical read payload is at most 64 KiB and a write
+  payload at most the 29 MiB request maximum (inline images); other envelope
+  violations are 400. Submission requires the gateway snapshot to advertise
+  the operation and an available local route of the named computer: a
+  computer reachable only through a peer route is refused with 409, so a
+  gateway operation never runs on another machine's connector, and its claim
+  carries no peer route. `overmind_read` is a read with the attachment
+  retention class and its own partial `overmind_history` index;
+  `overmind_write` is a mutation with a permanent identity tombstone, so a
+  retry returns the first receipt instead of applying twice.
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000
@@ -102,7 +124,14 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   `attention_signature`, `reply_id`, shared read marks and native need. A
   changed signature drops an attention or error candidate only once the native
   need is gone; a read mark of the captured or current signature drops it.
-  Missing or malformed information means away.
+  Missing or malformed information means away. `decision` candidates come from
+  the gateway's own snapshot only, from `mobile_overmind.decisions` (Your
+  Call): of its first 50 entries, those with a canonical UUID `task` and a
+  1–128 character `signature`, first entry per task. A new or re-signed entry
+  is an ordinary `decision` event and a candidate in the slot
+  `overmind:<task>`, which captures the signature; leaving the list or a
+  changed signature resolves it. A snapshot without the digest is missing
+  data: it raises nothing against a digest, and keeps held decisions.
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
   state only. Changed snapshots and new presence evaluate candidates on the
@@ -204,6 +233,18 @@ requests table once, briefly blocking writes on PostgreSQL. Phones use the
 operation only when both relay capabilities and the computer snapshot list it,
 so the relay, connector and app can be deployed in any order; replace all
 PostgreSQL workers together so every worker accepts and expires the operation.
+
+Overmind operations add only the `overmind_history` partial index (schema
+version 1; the Python reference creates it too), with the same one-time scan
+as `attachment_history`. Deploy `hgs`, the desktop and the connector first,
+then Android, then the relay, replacing all PostgreSQL workers together: an
+older worker refuses the operations as invalid and derives no `decision`
+alerts. Phones use the operations only when both relay capabilities and the
+gateway snapshot list them. Android builds that predate the `decision` kind
+treat its alert rows and ordinary events as plain refreshes. Snapshots are
+stored verbatim, so an upgraded relay compares against the digest stored before
+it; tasks already waiting in Your Call before either upgrade raise nothing, only
+later entries and signature changes do.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite

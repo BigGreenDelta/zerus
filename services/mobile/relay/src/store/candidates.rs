@@ -113,8 +113,7 @@ impl Store {
             for (k, r) in rows.iter().enumerate() {
                 if s(r, "computer_id") == id {
                     checked[k] = true;
-                    resolved[k] =
-                        Candidate::from_row(r).resolved(alerts::live(snapshot, s(r, "session")));
+                    resolved[k] = Candidate::from_row(r).resolved_in(snapshot);
                 }
             }
         }
@@ -137,10 +136,7 @@ impl Store {
                         None => resolved[k] = true,
                         // No stored snapshot is missing data: keep the candidate.
                         Some(Value::Null) => {}
-                        Some(current) => {
-                            resolved[k] = Candidate::from_row(r)
-                                .resolved(alerts::live(current, s(r, "session")))
-                        }
+                        Some(current) => resolved[k] = Candidate::from_row(r).resolved_in(current),
                     }
                 }
             }
