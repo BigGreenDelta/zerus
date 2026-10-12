@@ -33,6 +33,7 @@ object OvermindWrites {
     private const val MAX_CARD = 64 * 1024
     private const val KEEP = 20
     private val rejected = setOf(400, 401, 403, 404, 409, 413, 429)
+    private val unrecorded = setOf(404, 409)
 
     fun create(requestId: String, gateway: MachineKey, action: String, request: JSONObject, attachments: List<Attachment>, device: String, createdAt: Long): OvermindWrite {
         require(OvermindDigests.canonical(requestId)) { "Invalid request identity." }
@@ -81,13 +82,16 @@ object OvermindWrites {
     private fun unknown(write: OvermindWrite) = write.copy(status = "uncertain", code = CHECK, field = "", delivery = "", error = CHECK_TASK)
 
     /** A failure after the request may have left the phone stays unconfirmed. Only a first submission becomes `failed` without
-     * a receipt: before the network, or refused by the relay. A retry's original may already be recorded, so a retry that did not
-     * reach the relay, or met a refused credential (401/403), stays unconfirmed. Any other refusal of a retry means the relay never
-     * recorded this request_id: it looks a known request_id up first and answers with its first receipt (or 409 for other content). */
+     * a receipt: before the network, or refused by the relay with 400/401/403/404/409/413/429, none of which records it.
+     * A retry's original may already be recorded. `Store::submit` (services/mobile/relay/src/store/requests.rs) looks a known
+     * request_id up first and answers with its first receipt, or 409 for other content; only 404 (unknown computer) and 409
+     * (identity or route conflict) come solely after that lookup, so only they prove a retry was never recorded. Everything else
+     * on a retry stays unconfirmed: no attempt, 400/408/413 while the relay reads the body, 401/403 from authentication, 429 from
+     * per-client rate limiting or capacity (both before the lookup), and any 5xx. */
     fun failure(write: OvermindWrite, error: Exception, attempted: Boolean, retry: Boolean = false): OvermindWrite = when {
         !attempted && !retry -> write.copy(status = "failed", error = error.message.orEmpty().ifBlank { "The change was not sent." })
         !attempted -> write.copy(status = "uncertain", error = listOf(error.message.orEmpty(), UNCONFIRMED).filter(String::isNotBlank).joinToString(" "))
-        error is RelayException && error.status in rejected && !(retry && error.status in setOf(401, 403)) -> write.copy(status = "failed", error = error.message.orEmpty())
+        error is RelayException && error.status in (if (retry) unrecorded else rejected) -> write.copy(status = "failed", error = error.message.orEmpty())
         else -> write.copy(status = "uncertain", error = UNCONFIRMED)
     }
 

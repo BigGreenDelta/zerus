@@ -205,14 +205,23 @@ class OvermindOutboxTest {
             assertEquals("uncertain" to true, noAttempt.status to noAttempt.retryable)
             assertEquals(0, server.requestCount)
             missingFiles = false
-            for (code in listOf(401, 403)) {
+            // Rate limiting, capacity, authentication and body reading run before the relay's identity lookup.
+            for (code in listOf(400, 401, 403, 408, 413, 429, 500, 503)) {
                 status = code
-                assertEquals("uncertain", outbox(holding()).retry(gateway, lost()).status)
+                val retried = outbox(holding()).retry(gateway, lost())
+                assertEquals("$code", "uncertain" to true, retried.status to retried.retryable)
             }
-            // The relay looks a known request_id up first, so any other refusal means it never recorded this one.
-            status = 409
-            assertEquals("failed", outbox(holding()).retry(gateway, lost()).status)
-            assertEquals(3, server.requestCount)
+            // 404 and 409 come only after the lookup, so the relay never recorded this request_id.
+            for (code in listOf(404, 409)) {
+                status = code
+                assertEquals("$code", "failed", outbox(holding()).retry(gateway, lost()).status)
+            }
+            // A first submission refused by the relay was not recorded either.
+            status = 429
+            assertEquals("failed", outbox(Store()).submit(gateway, write(id = other)).status)
+            status = 503
+            assertEquals("uncertain", outbox(Store()).submit(gateway, write(id = other)).status)
+            assertEquals(12, server.requestCount)
         } }
     }
 
