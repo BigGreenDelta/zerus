@@ -43,6 +43,24 @@ pub struct Store {
     machine: String,
 }
 
+/// What `insert_raw` did with a batch from another machine.
+#[allow(dead_code)] // Used by replication (plan 1b).
+#[derive(Debug, Default, PartialEq)]
+pub struct Received {
+    pub inserted: usize,
+    /// Damaged events, out-of-range positions and ids stored at another position.
+    pub refused: usize,
+}
+
+/// Identities are UUIDs, and positions stay below `i64::MAX` so that the next
+/// `seq` and `lamport` still fit in SQLite.
+fn storable(event: &Event) -> bool {
+    uuid::Uuid::parse_str(&event.id).is_ok()
+        && uuid::Uuid::parse_str(&event.origin).is_ok()
+        && (1..i64::MAX as u64).contains(&event.seq)
+        && event.lamport < i64::MAX as u64
+}
+
 pub struct Tx<'a> {
     tx: rusqlite::Transaction<'a>,
     machine: String,
@@ -170,45 +188,46 @@ impl Store {
     /// `max_bytes`. The flag says whether more remain.
     #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn missing(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
-        let mut statement = self.conn.prepare("SELECT origin, seq, raw FROM events ORDER BY origin, seq")?;
-        let rows = statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64, row.get::<_, String>(2)?)))?
+        let origins = self
+            .conn
+            .prepare("SELECT DISTINCT origin FROM events ORDER BY origin")?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut statement = self.conn.prepare("SELECT raw FROM events WHERE origin = ?1 AND seq > ?2 ORDER BY seq")?;
         let mut out = Vec::new();
         let mut bytes = 0;
-        for (origin, seq, raw) in rows {
-            if seq <= peer.get(&origin).copied().unwrap_or(0) {
-                continue;
+        for origin in origins {
+            let known = peer.get(&origin).map_or(0, |seq| i64::try_from(*seq).unwrap_or(i64::MAX));
+            let mut rows = statement.query(params![origin, known])?;
+            while let Some(row) = rows.next()? {
+                let raw: String = row.get(0)?;
+                if !out.is_empty() && bytes + raw.len() > max_bytes {
+                    return Ok((out, true));
+                }
+                bytes += raw.len();
+                out.push(serde_json::from_str(&raw)?);
             }
-            if !out.is_empty() && bytes + raw.len() > max_bytes {
-                return Ok((out, true));
-            }
-            bytes += raw.len();
-            out.push(serde_json::from_str(&raw)?);
         }
         Ok((out, false))
     }
 
     #[allow(dead_code)] // Used by replication (plan 1b).
     /// Inserts events from another machine. Known events are skipped, and an
-    /// origin's events after a gap are left for a later exchange.
-    pub fn insert_raw(&mut self, raws: &[Value]) -> Result<usize> {
-        let mut events = raws
-            .iter()
-            .map(|raw| Ok((serde_json::from_value::<Event>(raw.clone())?, raw.to_string())))
-            .collect::<Result<Vec<_>>>()?;
+    /// origin's events after a gap are left for a later exchange. A refused
+    /// event is never stored, so its origin stops there; the rest of the batch
+    /// is still inserted.
+    pub fn insert_raw(&mut self, raws: &[Value]) -> Result<Received> {
+        let mut received = Received::default();
+        let mut events = Vec::new();
+        for raw in raws {
+            match serde_json::from_value::<Event>(raw.clone()) {
+                Ok(event) if storable(&event) => events.push((event, raw.to_string())),
+                _ => received.refused += 1,
+            }
+        }
         events.sort_by(|a, b| (a.0.origin.as_str(), a.0.seq).cmp(&(b.0.origin.as_str(), b.0.seq)));
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut inserted = 0;
         for (event, raw) in &events {
-            ensure!(
-                uuid::Uuid::parse_str(&event.id).is_ok()
-                    && uuid::Uuid::parse_str(&event.origin).is_ok()
-                    && event.seq > 0
-                    && event.seq <= i64::MAX as u64
-                    && event.lamport < i64::MAX as u64,
-                "received an invalid Overmind event"
-            );
             let max: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), 0) FROM events WHERE origin = ?1",
                 params![event.origin],
@@ -217,14 +236,21 @@ impl Store {
             if event.seq != max as u64 + 1 {
                 continue;
             }
+            // The same id at another position is a damaged or forged copy.
+            let reused: bool =
+                tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)", params![event.id], |row| row.get(0))?;
+            if reused {
+                received.refused += 1;
+                continue;
+            }
             insert(&tx, event, raw)?;
-            inserted += 1;
+            received.inserted += 1;
         }
         tx.commit()?;
-        if inserted > 0 {
+        if received.inserted > 0 {
             self.bump_quietly();
         }
-        Ok(inserted)
+        Ok(received)
     }
 
     /// Runs `f` against a consistent snapshot; nothing is written.
@@ -413,13 +439,78 @@ mod tests {
         assert!(!more);
         let mut store = Store::open(dir.path(), MACHINE).unwrap();
         // A gap (seq 1 missing) inserts nothing for that origin.
-        assert_eq!(store.insert_raw(&all[1..]).unwrap(), 0);
-        assert_eq!(store.insert_raw(&all).unwrap(), 3);
-        assert_eq!(store.insert_raw(&all).unwrap(), 0);
+        assert_eq!(store.insert_raw(&all[1..]).unwrap(), received(0, 0));
+        assert_eq!(store.insert_raw(&all).unwrap(), received(3, 0));
+        assert_eq!(store.insert_raw(&all).unwrap(), received(0, 0));
         let local = store.write(|tx| tx.append(&draft("t"))).unwrap();
         assert!(local.lamport > 3);
         let (rest, _) = store.missing(&source.version_vector().unwrap(), usize::MAX).unwrap();
         assert_eq!(rest.len(), 1);
+    }
+
+    fn received(inserted: usize, refused: usize) -> Received {
+        Received { inserted, refused }
+    }
+
+    /// Events of OTHER, as a peer would send them.
+    fn remote(count: usize) -> Vec<Value> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Store::open(dir.path(), OTHER).unwrap();
+        for _ in 0..count {
+            source.write(|tx| tx.append(&draft("t"))).unwrap();
+        }
+        source.missing(&BTreeMap::new(), usize::MAX).unwrap().0
+    }
+
+    #[test]
+    fn missing_skips_what_the_peer_has_per_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        for _ in 0..3 {
+            store.write(|tx| tx.append(&draft("t"))).unwrap();
+        }
+        store.insert_raw(&remote(2)).unwrap();
+        let positions = |peer: BTreeMap<String, u64>| -> Vec<(String, u64)> {
+            let (events, more) = store.missing(&peer, usize::MAX).unwrap();
+            assert!(!more);
+            events.iter().map(|e| (e["origin"].as_str().unwrap().to_owned(), e["seq"].as_u64().unwrap())).collect()
+        };
+        let peer = BTreeMap::from([(MACHINE.to_owned(), 2), (OTHER.to_owned(), 2)]);
+        assert_eq!(positions(peer), vec![(MACHINE.to_owned(), 3)]);
+        let beyond = BTreeMap::from([(MACHINE.to_owned(), u64::MAX)]);
+        assert_eq!(positions(beyond), vec![(OTHER.to_owned(), 1), (OTHER.to_owned(), 2)]);
+    }
+
+    #[test]
+    fn refused_events_never_stop_the_rest_of_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let local = store.write(|tx| tx.append(&draft("t"))).unwrap();
+        let theirs = remote(2);
+        let copy = |origin: &str, seq: u64, lamport: u64, id: &str| {
+            let mut event = theirs[0].clone();
+            event["origin"] = json!(origin);
+            event["seq"] = json!(seq);
+            event["lamport"] = json!(lamport);
+            event["id"] = json!(id);
+            event
+        };
+        let fresh = || uuid::Uuid::new_v4().to_string();
+        let origins: Vec<String> = (0..3).map(|_| fresh()).collect();
+        let mut batch = vec![
+            copy(&origins[0], 1, 1, &local.id),
+            copy(&origins[1], i64::MAX as u64, 1, &fresh()),
+            copy(&origins[2], 1, i64::MAX as u64, &fresh()),
+            json!({"id": "damaged"}),
+        ];
+        batch.extend(theirs.iter().cloned());
+        assert_eq!(store.insert_raw(&batch).unwrap(), received(2, 4));
+        let vector = store.version_vector().unwrap();
+        assert_eq!(vector, BTreeMap::from([(MACHINE.to_owned(), 1), (OTHER.to_owned(), 2)]));
+        // The largest storable positions are stored and can still be extended once.
+        let edge = copy(&origins[0], 1, i64::MAX as u64 - 1, &fresh());
+        assert_eq!(store.insert_raw(&[edge]).unwrap(), received(1, 0));
+        assert_eq!(store.write(|tx| tx.append(&draft("t"))).unwrap().lamport, i64::MAX as u64);
     }
 
     #[test]
