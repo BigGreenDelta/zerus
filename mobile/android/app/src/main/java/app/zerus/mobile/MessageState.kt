@@ -19,6 +19,9 @@ fun Target.resolvesTo(current: Target): Boolean = agentId.isBlank() && current.a
 
 /** The entire draft -> immutable outbox -> empty composer transition is one encrypted commit. */
 data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: List<OutgoingMessage> = emptyList(), val pickerDraft: Draft? = null, val pickerId: String = "", val contextOperations: List<ContextOperation> = emptyList(), val sessionActions: List<SessionAction> = emptyList(), val conversationIndex: List<IndexedConversation> = emptyList(), val terminalBuffers:List<TerminalBuffer> = emptyList(), val machineAliases:List<MachineAlias> = emptyList(), val machineColors:List<MachineColorOverride> = emptyList(), val overmindWrites: List<OvermindWrite> = emptyList()) {
+    /** Saved files that something here still names; they must not be deleted. */
+    fun attachmentIds(): Set<String> = (drafts.flatMap { it.attachments } + outgoing.flatMap { it.attachments } + pickerDraft?.attachments.orEmpty() +
+        overmindWrites.flatMap { it.attachments }).map { it.id }.toSet()
     fun overmind(write: OvermindWrite): MessageState = copy(overmindWrites = OvermindWrites.retain(overmindWrites.filterNot { it.requestId == write.requestId } + write))
     fun action(action: SessionAction): MessageState {
         val next = sessionActions.filterNot { it.requestId == action.requestId } + action

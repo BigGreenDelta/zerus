@@ -3,7 +3,15 @@ package app.zerus.mobile
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class NotificationCatalog(val sessions: List<NotificationCurrent>, val identities: Map<String, String?>) {
+/** [decisionGaps]: gateways that serve Tasks but sent no readable digest; their decisions are unknown, not gone. */
+data class NotificationCatalog(val sessions: List<NotificationCurrent>, val identities: Map<String, String?>, val decisionGaps: Set<String> = emptySet()) {
+    /** Keeps the decision records of a gateway without a digest as they are, like an offline session's, until the digest returns. */
+    fun withHeld(records: List<NotificationRecord>): List<NotificationCurrent> {
+        val shown = sessions.mapNotNull { OvermindDigests.task(it.slot.session) }.toSet()
+        return sessions + records.filter { it.slot.computer in decisionGaps && OvermindDigests.task(it.slot.session)?.let { task -> task !in shown } == true }
+            .distinctBy { OvermindDigests.task(it.slot.session) }
+            .map { NotificationCurrent(it.slot, it.target, "Task", "Computer", SessionAlertKind.Decision, "", false, online = false) }
+    }
     fun resolve(connection: String, event: NotificationEvent): Pair<NotificationSlot, NotificationEvent>? =
         identities[event.computer]?.let { NotificationSlot(connection, it, event.session) to event }
 }
@@ -13,6 +21,7 @@ object NotificationCatalogParser {
     fun parse(connection: Connection, records: List<JSONObject>, aliases: List<MachineAlias>, overmind: Boolean = false): NotificationCatalog {
         val identities = mutableMapOf<String, String?>()
         val current = mutableListOf<NotificationCurrent>()
+        val servers = mutableListOf<Pair<Machine, OvermindDigest?>>()
         val unique = records.groupBy { it.getString("id") }.filterValues { it.size == 1 }.values.map { it.single() }
         for (raw in unique) {
             val machine = MachineNames.apply(MachineCatalog.parse(connection.id, raw), aliases)
@@ -45,14 +54,17 @@ object NotificationCatalogParser {
                     identity, value.string("activity") == "idle", machine.online,
                     SessionFilters.state(session) == "running" && value.string("process_state") != "exited")
             }
-            // A missing digest says nothing, and a gateway without both operations serves no Tasks: no decision cards.
-            if (overmind && OvermindAccess.supports(OvermindAccess.snapshotOperations(raw))) OvermindDigests.parse(raw)?.decisions?.forEach { decision ->
-                current += NotificationCurrent(NotificationSlot(connection.id, machine.id, OvermindDigests.slot(decision.task)),
-                    JSONArray(listOf("overmind", decision.task)).toString(), clean(decision.title, "Task"), clean(machine.name, "Computer"),
-                    SessionAlertKind.Decision, NotificationPolicy.fingerprint(JSONArray(listOf("decision", decision.signature)).toString()), false, machine.online)
-            }
+            // A gateway without both operations serves no Tasks: no decision cards.
+            if (overmind && OvermindAccess.supports(OvermindAccess.snapshotOperations(raw))) servers += machine to OvermindDigests.parse(raw)
         }
-        return NotificationCatalog(current, identities)
+        // A task waiting on several gateways gets one card, from the gateway the Tasks screen would use.
+        val seen = mutableSetOf<String>()
+        for ((machine, digest) in servers.sortedWith(compareBy(OvermindAccess.preference) { it.first })) digest?.decisions?.forEach { decision ->
+            if (seen.add(decision.task)) current += NotificationCurrent(NotificationSlot(connection.id, machine.id, OvermindDigests.slot(decision.task)),
+                JSONArray(listOf("overmind", decision.task)).toString(), clean(decision.title, "Task"), clean(machine.name, "Computer"),
+                SessionAlertKind.Decision, NotificationPolicy.fingerprint(JSONArray(listOf("decision", decision.signature)).toString()), false, machine.online)
+        }
+        return NotificationCatalog(current, identities, servers.filter { it.second == null }.map { it.first.id }.toSet())
     }
 
     private fun clean(value: String, fallback: String) = value.filterNot {

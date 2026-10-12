@@ -84,8 +84,50 @@ class OvermindNotificationTest {
         val state = NotificationState(records = listOf(record), overmind = true, overflowKinds = setOf(SessionAlertKind.Decision))
         val restored = NotificationStateCodec.decode(JSONObject(NotificationStateCodec.encode(state).toString()))
         assertEquals(state, restored)
-        val future = NotificationStateCodec.encode(state).also { it.getJSONArray("records").getJSONObject(0).put("kind", "FutureKind") }
+        val future = NotificationStateCodec.encode(state).also { it.getJSONArray("records").getJSONObject(0).put("posted_kind", "FutureKind") }
         assertNull(NotificationStateCodec.decode(future).records.single().postedKind)
         assertFalse(NotificationStateCodec.decode(NotificationStateCodec.encode(NotificationState()).apply { remove("overmind") }).overmind)
+    }
+
+    @Test fun decisionRecordsStayReadableByOlderBuilds() {
+        val decision = NotificationRecord(NotificationSlot(connection.id, GATEWAY, slot), "target", now, postedFingerprint = "f", postedKind = SessionAlertKind.Decision)
+        val input = decision.copy(slot = NotificationSlot(connection.id, GATEWAY, "session"), postedKind = SessionAlertKind.Input)
+        val encoded = JSONObject(NotificationStateCodec.encode(NotificationState(records = listOf(decision, input))).toString())
+        // Builds before Decision decode `kind` with an unguarded valueOf over the three names they know.
+        val legacy = encoded.getJSONArray("records").objects().map { row -> row.string("kind").takeIf { it.isNotEmpty() }?.let { name ->
+            require(name in setOf("Input", "Error", "Finished")) { "an older build would fail on $name" }; SessionAlertKind.valueOf(name) } }
+        assertEquals(listOf(null, SessionAlertKind.Input), legacy)
+        assertEquals(listOf(SessionAlertKind.Decision, SessionAlertKind.Input), NotificationStateCodec.decode(encoded).records.map { it.postedKind })
+        // A state written by an older build still decodes.
+        encoded.getJSONArray("records").objects().forEach { it.remove("posted_kind") }
+        assertEquals(listOf(null, SessionAlertKind.Input), NotificationStateCodec.decode(encoded).records.map { it.postedKind })
+    }
+
+    @Test fun aMissingDigestKeepsPostedDecisionCards() {
+        val withDigest = catalog()
+        val key = withDigest.sessions.single().slot.key
+        val announced = plan(ready, withDigest.sessions, listOf(alert()))
+        val posted = NotificationPolicy.reserve(announced.state, announced.desired.single(), true, 10_000).copy(pendingPosts = emptySet())
+        val gap = catalog(gateway(digest = false))
+        assertTrue(gap.sessions.isEmpty())
+        val held = plan(posted, gap.withHeld(posted.records), emptyList(), at = now + 30)
+        assertEquals(setOf(key), held.retained)
+        assertTrue(held.desired.isEmpty())
+        val back = plan(held.state, catalog().withHeld(held.state.records), emptyList(), at = now + 60)
+        assertEquals(setOf(key), back.retained)
+        assertFalse(back.desired.single().fresh)
+        // A gateway that stops serving Tasks, or a relay without the operations, holds nothing.
+        assertTrue(catalog(gateway(ops = listOf("send"), digest = false)).withHeld(posted.records).isEmpty())
+        assertTrue(catalog(gateway(digest = false), overmind = false).withHeld(posted.records).isEmpty())
+        assertTrue(plan(posted, catalog(gateway(ops = listOf("send"))).withHeld(posted.records), emptyList(), at = now + 30).retained.isEmpty())
+    }
+
+    @Test fun aDecisionWaitingOnTwoGatewaysShowsOneCard() {
+        val second = "22222222-2222-4222-8222-222222222222"
+        val laptop = gateway().put("id", second).put("name", "Laptop")
+        fun computers(rows: List<JSONObject>) = NotificationCatalogParser.parse(connection, rows, emptyList(), true).sessions.map { it.slot.computer }
+        assertEquals(listOf(GATEWAY), computers(listOf(laptop, gateway())))
+        assertEquals(listOf(second), computers(listOf(gateway(online = false), laptop)))
+        assertEquals(listOf(second), computers(listOf(gateway().put("via", JSONObject().put("gateway_id", second)), laptop)))
     }
 }

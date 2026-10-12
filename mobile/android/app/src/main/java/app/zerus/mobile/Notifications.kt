@@ -145,7 +145,7 @@ object SessionNotifications {
                         cards(context).mapNotNull { it.notification.extras.getString("zerus_slot") }.toSet()
                     }
                     val plan = NotificationPolicy.plan(NotificationPolicy.clockGuard(state, android.os.SystemClock.elapsedRealtime()),
-                        catalog.sessions, state.pending.mapNotNull { catalog.resolve(connection.id, it) },
+                        catalog.withHeld(state.records), state.pending.mapNotNull { catalog.resolve(connection.id, it) },
                         store.notificationPreferences(), System.currentTimeMillis() / 1000.0, active, alertsOnly = state.presenceAlerts)
                     state = plan.state
                     store.saveNotificationState(connection.id, state)

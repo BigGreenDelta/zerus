@@ -23,10 +23,13 @@ class OvermindOutboxTest {
     private fun receipt(state: String, result: JSONObject? = null, error: String = "") = JSONObject().put("request_id", request).put("state", state)
         .put("result", result ?: JSONObject.NULL).put("error", error.ifEmpty { JSONObject.NULL })
     /** The private state and every reduction the outbox committed, in order. */
-    private class Store { var state = MessageState(); val commits = mutableListOf<MessageState>()
-        val durable: suspend ((MessageState) -> MessageState) -> MessageState = { reduce -> reduce(state).also { state = it; commits += it } } }
+    private class Store { var state = MessageState(); val commits = mutableListOf<MessageState>(); var connected = true; var saves = Int.MAX_VALUE
+        val durable: suspend ((MessageState) -> MessageState) -> MessageState = { reduce ->
+            check(saves-- > 0) { "synthetic storage failure" }; reduce(state).also { state = it; commits += it } } }
+    private var missingFiles = false
     private fun outbox(store: Store) = OvermindOutbox(OvermindRepository(RelayApi(OkHttpClient.Builder().retryOnConnectionFailure(false)
-        .readTimeout(2, TimeUnit.SECONDS).build())), { files -> JSONArray(files.map { JSONObject().put("name", it.name).put("mime", it.mime).put("data_base64", "AAAA") }) }, store.durable)
+        .readTimeout(2, TimeUnit.SECONDS).build())), { files -> if (missingFiles) throw AttachmentException("Saved attachment is missing or changed. Select the file again.")
+            JSONArray(files.map { JSONObject().put("name", it.name).put("mime", it.mime).put("data_base64", "AAAA") }) }, { store.connected }, store.durable)
 
     @Test fun createUsesTheRequestUuidAsTheTaskAndKeepsOnlyItsRequest() {
         val created = write(body = JSONObject().put("project", "example").put("prompt", "Write it").put("request_id", other))
@@ -141,12 +144,25 @@ class OvermindOutboxTest {
         val comment = write("comment", JSONObject().put("task", other).put("text", "Looks good"))
         assertEquals("refused", OvermindWrites.settle(comment, receipt("completed", JSONObject().put("ok", false).put("error", JSONObject().put("code", "delivery_unknown")))).status)
         assertEquals("failed", OvermindWrites.settle(send, receipt("failed", error = "validation failed")).status)
-        listOf(receipt("uncertain"), receipt("claimed"), receipt("queued"), receipt("completed", JSONObject().put("ok", "yes")), receipt("completed"),
-            receipt("completed", ok()).put("request_id", other)).forEach {
+        // Still queued or claimed, or another identity: the same request can be sent again safely.
+        listOf(receipt("claimed"), receipt("queued"), receipt("completed", ok()).put("request_id", other)).forEach {
             val settled = OvermindWrites.settle(send, it)
             assertEquals(it.toString(), "uncertain", settled.status)
             assertTrue(settled.retryable)
+            assertFalse(settled.needsCheck)
         }
+        // A terminal receipt without a result: the relay will not run it again, so the person checks the task.
+        listOf(receipt("uncertain"), receipt("completed", JSONObject().put("ok", "yes")), receipt("completed"),
+            receipt("completed", error = "request history expired; delivery must not be retried")).forEach {
+            val settled = OvermindWrites.settle(send, it)
+            assertEquals(it.toString(), "uncertain", settled.status)
+            assertTrue(settled.needsCheck)
+            assertFalse(settled.retryable)
+            assertFalse(settled.needsResolution)
+            assertEquals(other, settled.task)
+            assertEquals(OvermindWrites.CHECK_TASK, settled.error)
+        }
+        assertEquals(request, OvermindWrites.settle(write(), receipt("uncertain")).task)
         val deleted = OvermindWrites.settle(write("delete", JSONObject().put("task", "#12")), receipt("completed", ok().put("deleted", other)))
         assertEquals("completed" to other, deleted.status to deleted.task)
     }
@@ -168,5 +184,71 @@ class OvermindOutboxTest {
         assertEquals("Wait for the current message or session command to finish before installing.",
             UpdateInstallGuard.reason(MessageState(overmindWrites = listOf(write())), true, false, false, false, false))
         assertEquals("", UpdateInstallGuard.reason(MessageState(overmindWrites = listOf(write().copy(status = "uncertain"))), true, false, false, false, false))
+        // A saved image stays protected while any Overmind write still names it.
+        assertTrue(image.id in MessageState(overmindWrites = listOf(write(files = listOf(image)))).attachmentIds())
+        assertTrue(image.id in MessageState(drafts = listOf(Draft(Target("c", "s", "r", "v"), "", attachments = listOf(image)))).attachmentIds())
+    }
+
+    @Test fun aRetryThatMayNotHaveReachedTheRelayStaysUnconfirmed() = runBlocking<Unit> {
+        var status = 401
+        val relay = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setResponseCode(status).setBody("{\"error\":\"synthetic\"}")
+        }
+        overmindServer(relay) { server, gateway -> runBlocking {
+            fun lost() = write(files = listOf(image)).copy(status = "uncertain")
+            fun holding() = Store().apply { state = state.overmind(lost()) }
+            // A first submission that never left the phone did not happen.
+            missingFiles = true
+            assertEquals("failed", outbox(Store()).submit(gateway, write(files = listOf(image))).status)
+            // A retry's original may already be recorded: no attempt, or a refused credential, proves nothing.
+            val noAttempt = outbox(holding()).retry(gateway, lost())
+            assertEquals("uncertain" to true, noAttempt.status to noAttempt.retryable)
+            assertEquals(0, server.requestCount)
+            missingFiles = false
+            for (code in listOf(401, 403)) {
+                status = code
+                assertEquals("uncertain", outbox(holding()).retry(gateway, lost()).status)
+            }
+            // The relay looks a known request_id up first, so any other refusal means it never recorded this one.
+            status = 409
+            assertEquals("failed", outbox(holding()).retry(gateway, lost()).status)
+            assertEquals(3, server.requestCount)
+        } }
+    }
+
+    @Test fun aDisconnectedWorkspaceNeverGetsItsWritesBack() = runBlocking<Unit> {
+        val store = Store()
+        val relay = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                // The workspace is disconnected while the write is in flight.
+                store.connected = false
+                store.state = store.state.copy(overmindWrites = emptyList())
+                return MockResponse().setBody(receipt("completed", ok().put("task", card(requestUuid, "Todo", "a"))).toString())
+            }
+        }
+        overmindServer(relay) { server, gateway -> runBlocking {
+            outbox(store).submit(gateway, write())
+            assertTrue(store.state.overmindWrites.isEmpty())
+            assertThrows(IllegalArgumentException::class.java) { runBlocking { outbox(store).submit(gateway, write(id = other)) } }
+            assertTrue(store.state.overmindWrites.isEmpty())
+            assertEquals(1, server.requestCount)
+        } }
+    }
+
+    @Test fun aResultThatCouldNotBeSavedIsReportedAsPossiblyApplied() = runBlocking<Unit> {
+        val relay = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setBody(receipt("completed", ok()).toString())
+        }
+        overmindServer(relay) { server, gateway -> runBlocking {
+            val store = Store().apply { saves = 1 }
+            val error = runCatching { outbox(store).submit(gateway, write()) }.exceptionOrNull()
+            assertTrue(error is OvermindUnsavedResult)
+            assertTrue(error!!.message!!.contains("may have been applied"))
+            assertEquals(1, server.requestCount)
+            assertEquals("sending", store.state.overmindWrites.single().status)
+            val unsaved = runCatching { outbox(Store().apply { saves = 0 }).submit(gateway, write(id = other)) }.exceptionOrNull()
+            assertTrue(unsaved != null && unsaved !is OvermindUnsavedResult)
+            assertEquals(1, server.requestCount)
+        } }
     }
 }

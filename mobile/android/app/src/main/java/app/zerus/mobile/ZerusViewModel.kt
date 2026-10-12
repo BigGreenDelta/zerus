@@ -466,7 +466,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val historyCache = ConversationCache(application)
     /** Overmind reads and their encrypted presentation cache; Tasks screens read through it with [overmindTarget]. */
     val overmind = OvermindRepository(api, OvermindCache.create(application))
-    private val overmindOutbox = OvermindOutbox(overmind, { attachmentStore.payload(it) }) { reduce ->
+    private val overmindOutbox = OvermindOutbox(overmind, { attachmentStore.payload(it) }, { id -> connections.any { it.id == id } }) { reduce ->
         durable(reduce) { current, _ -> runCatching { reduce(current) }.getOrDefault(current) } }
     private val overmindDevice = OvermindDevice.label(android.os.Build.MODEL).ifEmpty { "Android" }
     private var overmindFlights by mutableStateOf<Set<String>>(emptySet())
@@ -493,6 +493,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try { onSettled(overmindOutbox.submit(gateway, write)) }
             catch (e: CancellationException) { throw e }
+            catch (e: OvermindUnsavedResult) { error = e.message.orEmpty() }
             catch (e: Exception) { error = "Could not save the task change. It was not sent. ${e.message.orEmpty()}" }
             finally { overmindFlights -= write.requestId }
         }
@@ -506,6 +507,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try { onSettled(overmindOutbox.retry(OvermindGateway(connection, write.computerId), write)) }
             catch (e: CancellationException) { throw e }
+            catch (e: OvermindUnsavedResult) { error = e.message.orEmpty() }
             catch (e: Exception) { error = "The task change could not be retried. ${e.message.orEmpty()}" }
             finally { overmindFlights -= write.requestId }
         }
@@ -2176,10 +2178,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         importJob?.cancel()
         try { editState { it.copy(pickerDraft = null, pickerId = "") }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
-    private fun protectedAttachmentIds(): Set<String> {
-        fun refs(state: MessageState) = state.drafts.flatMap { it.attachments } + state.outgoing.flatMap { it.attachments } + state.pickerDraft?.attachments.orEmpty()
-        return (refs(messageState) + persistence?.durableState?.let(::refs).orEmpty()).map { it.id }.toSet()
-    }
+    private fun protectedAttachmentIds(): Set<String> = messageState.attachmentIds() + persistence?.durableState?.attachmentIds().orEmpty()
     fun removeAttachment(target: Target, id: String) = viewModelScope.launch {
         if (target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch
         if (continuation?.draft?.target == target) cancelCompactContinuation()

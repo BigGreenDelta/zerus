@@ -15,14 +15,20 @@ data class OvermindWrite(val requestId: String, val connectionId: String, val co
     val pending get() = status in listOf("sending", "uncertain")
     /** The session may have received it: the person checks and resolves the delivery on the task, as on the desktop. */
     val needsResolution get() = status == "uncertain" && (delivery == "uncertain" || code == "delivery_unknown")
+    /** The relay finished without a result and will not run it again: the person checks the task (for `create`, [task] is its UUID). */
+    val needsCheck get() = status == "uncertain" && code == OvermindWrites.CHECK
     /** Only an unconfirmed transport is retried, by hand, with the same request_id and payload. */
-    val retryable get() = status == "uncertain" && !needsResolution
+    val retryable get() = status == "uncertain" && !needsResolution && !needsCheck
     fun recover() = if (status == "sending") copy(status = "uncertain", error = OvermindWrites.UNCONFIRMED) else this
 }
 
 object OvermindWrites {
     const val UNCONFIRMED = "The change was not confirmed. Retry sends the same request, which is never applied twice."
     const val RESOLVE = "The session may have received this. Check it, then resolve the delivery on the task."
+    /** A phone-side code, never an hgs refusal: the outcome is unknown and final. */
+    const val CHECK = "check_task"
+    const val CHECK_TASK = "The change may have been applied, and it will not be sent again. Check the task before changing it again."
+    const val UNSAVED = "The change may have been applied, but its result could not be saved on this phone. Check the task before changing it again."
     private const val MAX_REQUEST = 192 * 1024
     private const val MAX_CARD = 64 * 1024
     private const val KEEP = 20
@@ -62,17 +68,26 @@ object OvermindWrites {
                     write.copy(status = if (delivering && code == "delivery_unknown") "uncertain" else "refused", code = code, field = refusal.string("field"),
                         error = refusal.string("message").ifBlank { "The task board refused this change. Nothing was changed." })
                 }
-                else -> write.copy(status = "uncertain", error = UNCONFIRMED)
+                // No boolean `ok`, or a result the relay no longer keeps ("request history expired"): terminal and unknown.
+                else -> unknown(write)
             }
             "failed" -> write.copy(status = "failed", error = receipt.string("error").ifBlank { "The gateway could not run this change. Nothing was changed." })
+            // The connector may have run it; the relay answers the same request_id with this receipt forever.
+            "uncertain" -> unknown(write)
+            // Still queued or claimed: sending the same request again only returns its receipt.
             else -> write.copy(status = "uncertain", error = UNCONFIRMED)
         }
     }
+    private fun unknown(write: OvermindWrite) = write.copy(status = "uncertain", code = CHECK, field = "", delivery = "", error = CHECK_TASK)
 
-    /** A transport failure after the request may have left the phone stays unconfirmed; a refusal at submission is final. */
-    fun failure(write: OvermindWrite, error: Exception, attempted: Boolean): OvermindWrite = when {
-        !attempted -> write.copy(status = "failed", error = error.message.orEmpty().ifBlank { "The change was not sent." })
-        error is RelayException && error.status in rejected -> write.copy(status = "failed", error = error.message.orEmpty())
+    /** A failure after the request may have left the phone stays unconfirmed. Only a first submission becomes `failed` without
+     * a receipt: before the network, or refused by the relay. A retry's original may already be recorded, so a retry that did not
+     * reach the relay, or met a refused credential (401/403), stays unconfirmed. Any other refusal of a retry means the relay never
+     * recorded this request_id: it looks a known request_id up first and answers with its first receipt (or 409 for other content). */
+    fun failure(write: OvermindWrite, error: Exception, attempted: Boolean, retry: Boolean = false): OvermindWrite = when {
+        !attempted && !retry -> write.copy(status = "failed", error = error.message.orEmpty().ifBlank { "The change was not sent." })
+        !attempted -> write.copy(status = "uncertain", error = listOf(error.message.orEmpty(), UNCONFIRMED).filter(String::isNotBlank).joinToString(" "))
+        error is RelayException && error.status in rejected && !(retry && error.status in setOf(401, 403)) -> write.copy(status = "failed", error = error.message.orEmpty())
         else -> write.copy(status = "uncertain", error = UNCONFIRMED)
     }
 
@@ -94,21 +109,29 @@ object OvermindWrites {
         raw.optString("task"), raw.optString("result"), raw.optLong("created")).recover()
 }
 
-/** Persists a write before the network and settles it from its receipt. It never retries on its own. */
+/** The request may have reached the gateway, but its settled result could not be saved; the write stays unconfirmed. */
+class OvermindUnsavedResult(cause: Throwable) : Exception(OvermindWrites.UNSAVED, cause)
+
+/** Persists a write before the network and settles it from its receipt. It never retries on its own.
+ * [connected] guards every reduction, so a write of a workspace disconnected meanwhile is dropped, never saved again. */
 class OvermindOutbox(private val repository: OvermindRepository, private val wire: suspend (List<Attachment>) -> JSONArray,
-    private val durable: suspend ((MessageState) -> MessageState) -> MessageState) {
+    private val connected: (String) -> Boolean, private val durable: suspend ((MessageState) -> MessageState) -> MessageState) {
+    private fun connectedOnly(state: MessageState, write: OvermindWrite) =
+        if (connected(write.connectionId)) state else state.copy(overmindWrites = state.overmindWrites.filterNot { it.connectionId == write.connectionId })
+    private fun requireConnected(write: OvermindWrite) = require(connected(write.connectionId)) { "This workspace was disconnected. The change was not sent." }
     suspend fun submit(gateway: OvermindGateway, write: OvermindWrite): OvermindWrite {
         require(write.status == "sending" && write.gateway == gateway.key) { "Review this change before sending it." }
-        durable { state -> require(state.overmindWrites.none { it.requestId == write.requestId }) { "This request already exists." }; state.overmind(write) }
-        return send(gateway, write)
+        durable { state -> requireConnected(write); require(state.overmindWrites.none { it.requestId == write.requestId }) { "This request already exists." }
+            state.overmind(write) }
+        return send(gateway, write, retry = false)
     }
     /** Explicit only: the same request_id and payload, so the relay answers with the first receipt when it has one. */
     suspend fun retry(gateway: OvermindGateway, write: OvermindWrite): OvermindWrite {
         require(write.retryable && write.gateway == gateway.key) { "Only an unconfirmed change can be retried." }
         val sending = write.copy(status = "sending", error = "")
-        durable { state -> require(state.overmindWrites.any { it.requestId == write.requestId && it.recover().retryable }) { "This change was already settled." }
+        durable { state -> requireConnected(write); require(state.overmindWrites.any { it.requestId == write.requestId && it.recover().retryable }) { "This change was already settled." }
             state.overmind(sending) }
-        return send(gateway, sending)
+        return send(gateway, sending, retry = true)
     }
     private suspend fun payload(write: OvermindWrite): JSONObject {
         val request = JSONObject(write.request)
@@ -120,14 +143,16 @@ class OvermindOutbox(private val repository: OvermindRepository, private val wir
         return JSONObject().put("request_id", write.requestId).put("action", write.action).put("request", request)
             .also { if (write.device.isNotEmpty()) it.put("device", write.device) }
     }
-    private suspend fun send(gateway: OvermindGateway, write: OvermindWrite): OvermindWrite {
+    private suspend fun send(gateway: OvermindGateway, write: OvermindWrite, retry: Boolean): OvermindWrite {
         var attempted = false; var failure: Exception? = null
         val settled = try {
             val payload = payload(write)
             attempted = true
             OvermindWrites.settle(write, repository.await(gateway, repository.submitWrite(gateway, write.requestId, payload)))
-        } catch (e: Exception) { failure = e; OvermindWrites.failure(write, e, attempted) }
-        val saved = withContext(NonCancellable) { durable { state -> OvermindWrites.result(state, write.requestId) { settled } } }
+        } catch (e: Exception) { failure = e; OvermindWrites.failure(write, e, attempted, retry) }
+        val saved = try {
+            withContext(NonCancellable) { durable { state -> connectedOnly(OvermindWrites.result(state, write.requestId) { settled }, write) } }
+        } catch (e: Exception) { if (attempted || retry) throw OvermindUnsavedResult(e) else throw e }
         if (failure is CancellationException) throw failure
         return saved.overmindWrites.find { it.requestId == write.requestId } ?: settled
     }

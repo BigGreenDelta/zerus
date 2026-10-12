@@ -214,6 +214,8 @@ object NotificationPolicy {
 }
 
 object NotificationStateCodec {
+    /** Builds before Decision read `kind` with an unguarded valueOf, so it only ever names these; `posted_kind` carries every kind. */
+    private val legacyKinds = setOf(SessionAlertKind.Input, SessionAlertKind.Error, SessionAlertKind.Finished)
     fun encode(state: NotificationState): JSONObject = JSONObject().put("schema", 1).put("cursor", state.cursor)
         .put("bootstrap", state.bootstrap).put("draining", state.draining).put("batch", state.batchActive)
         .put("batch_sound", state.batchSoundUsed).put("sound_elapsed", state.lastSoundElapsed).put("settings", state.settingsGeneration)
@@ -221,7 +223,8 @@ object NotificationStateCodec {
             .put("session", it.session).put("kind", it.kind).put("at", it.at).put("alert_kind", it.alertKind) }))
         .put("records", JSONArray(state.records.map { JSONObject().put("slot", JSONArray(listOf(it.slot.connection, it.slot.computer, it.slot.session)))
             .put("target", it.target).put("observed", it.observedAt).put("fingerprint", it.observedFingerprint)
-            .put("posted", it.postedFingerprint).put("kind", it.postedKind?.name).put("posted_target", it.postedTarget)
+            .put("posted", it.postedFingerprint).put("kind", it.postedKind?.takeIf { kind -> kind in legacyKinds }?.name)
+            .put("posted_kind", it.postedKind?.name).put("posted_target", it.postedTarget)
             .put("event", it.eventId).put("at", it.eventAt).put("summary_only", it.summaryOnly).put("candidate", it.candidateFingerprint)
             .put("candidate_target", it.candidateTarget).put("candidate_event", it.candidateEventId).put("candidate_at", it.candidateEventAt).put("restored", it.restoredAt) }))
         .put("posting", JSONArray(state.pendingPosts.toList())).put("truncated", state.truncated).put("delivery_needed", state.deliveryNeeded).put("overflow_kinds", JSONArray(state.overflowKinds.map { it.name })).put("restore_kinds", JSONArray(state.pendingRestoreKinds.map { it.name })).put("presence_alerts", state.presenceAlerts).put("overmind", state.overmind)
@@ -238,7 +241,7 @@ object NotificationStateCodec {
             records.map { row -> val slot = row.getJSONArray("slot")
                 NotificationRecord(NotificationSlot(slot.getString(0), slot.getString(1), slot.getString(2)), row.getString("target"),
                     row.getDouble("observed"), row.string("fingerprint"), row.string("posted"),
-                    row.string("kind").takeIf { it.isNotEmpty() }?.let { runCatching { SessionAlertKind.valueOf(it) }.getOrNull() }, row.string("posted_target"), row.optLong("event"), row.optDouble("at"), row.optBoolean("summary_only"),
+                    row.string(if (row.has("posted_kind")) "posted_kind" else "kind").takeIf { it.isNotEmpty() }?.let { runCatching { SessionAlertKind.valueOf(it) }.getOrNull() }, row.string("posted_target"), row.optLong("event"), row.optDouble("at"), row.optBoolean("summary_only"),
                     row.string("candidate"), row.string("candidate_target"), row.optLong("candidate_event"), row.optDouble("candidate_at"), row.optLong("restored", -1)) },
             (0 until posting.length()).map { posting.getString(it) }.toSet(), raw.optBoolean("truncated"), raw.optBoolean("delivery_needed"), raw.optJSONArray("overflow_kinds")?.let { kinds ->
                 (0 until kinds.length()).mapNotNull { runCatching { SessionAlertKind.valueOf(kinds.getString(it)) }.getOrNull() }.toSet() }.orEmpty(),

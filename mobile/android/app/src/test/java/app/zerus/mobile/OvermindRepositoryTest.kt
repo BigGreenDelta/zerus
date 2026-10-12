@@ -257,6 +257,24 @@ class OvermindRepositoryTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun anInFlightReadCannotRefillAPurgedWorkspace() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("zerus-overmind-purge-race").toFile()
+        try {
+            val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+            val cache = OvermindCache(EncryptedConversationFiles(root, { key }, maxEntries = 128, maxBytes = 64L * 1024 * 1024))
+            // The workspace is disconnected while its board read is on the wire.
+            val relay = FakeOvermindRelay { runBlocking { cache.purgeWorkspace("workspace") }; page(5, listOf(card(a, "Todo", "a")), null) }
+            overmindServer(relay) { _, gateway -> runBlocking {
+                val repository = OvermindRepository(RelayApi(), cache)
+                assertEquals(listOf(a), repository.board(gateway, "example").cards.map { it.uuid })
+                assertNull(repository.cachedBoard(gateway, "example"))
+                cache.put(gateway.key, "board", "example", ok())
+                assertNull(cache.get(gateway.key, "board", "example"))
+            } }
+            assertTrue(root.listFiles().orEmpty().none { it.name.endsWith(".bin") })
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun readsFillTheCacheForTheNextOpen() = runBlocking<Unit> {
         val root = Files.createTempDirectory("zerus-overmind-read-cache").toFile()
         try {

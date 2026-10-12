@@ -24,8 +24,10 @@ object OvermindAccess {
     fun gateway(connectionId: String, machines: List<Machine>, relay: Set<String>?, machine: (MachineKey) -> Set<String>?): Machine? {
         if (!supports(relay)) return null
         return machines.filter { it.connectionId == connectionId && !it.lastKnown && supports(machine(MachineKey(connectionId, it.id))) }
-            .sortedWith(compareBy<Machine>({ !it.online }, { it.route != MachineRoute.Direct }, { it.id })).firstOrNull()
+            .sortedWith(preference).firstOrNull()
     }
+    /** Online first, then a direct route, then the machine id; decision cards use the same choice. */
+    val preference: Comparator<Machine> = compareBy({ !it.online }, { it.route != MachineRoute.Direct }, { it.id })
 }
 
 /** hgs and the relay refuse controls and a leading '-' or '@'. The label only says which client acted, so it is cleaned, never refused. */
