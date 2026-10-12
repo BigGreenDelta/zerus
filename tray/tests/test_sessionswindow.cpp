@@ -4547,8 +4547,12 @@ void TestSessionsWindow::childTreeKeepsRoutineResultsQuiet()
     box.sessions[0].subagents["agent-b"] = QJsonObject{{"name","Tests"},{"state","finished"}};
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
-    // Parent replies still need to be read and participate in Mark all as read.
+    // An intermediate parent reply waits for the turn to finish without being marked read.
     box.sessions[0].replyId = "12:120";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(list->count(), 0); QVERIFY(state.local().sessions[0].unreadReply);
+    // Finished parent replies still need to be read and participate in Mark all as read.
+    box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
     QVERIFY(readAll->isEnabled()); QSignalSpy read(&window, &SessionsWindow::repliesMarkedRead);
