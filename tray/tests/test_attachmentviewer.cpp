@@ -8,11 +8,24 @@
 class TestAttachmentViewer : public QObject {
     Q_OBJECT
     QList<QUrl> m_opened;
+    QStringList m_revealed;
 private slots:
     void capture(const QUrl &url){m_opened.append(url);}
     void initTestCase(){QStandardPaths::setTestModeEnabled(true);}
-    void init(){m_opened.clear();QDesktopServices::setUrlHandler("file",this,"capture");}
-    void cleanup(){AttachmentFiles::setIoObserver({}); QVERIFY(AttachmentFiles::pool().waitForDone(5000)); QDesktopServices::unsetUrlHandler("file");}
+    void init(){m_opened.clear();m_revealed.clear();QDesktopServices::setUrlHandler("file",this,"capture");
+        ExternalFile::setRevealHandler([this](const QString &path){m_revealed<<path;return true;});}
+    void cleanup(){AttachmentFiles::setIoObserver({}); QVERIFY(AttachmentFiles::pool().waitForDone(5000)); QDesktopServices::unsetUrlHandler("file");
+        ExternalFile::setRevealHandler({});}
+    void programAttachmentIsShownInItsFolder() {
+        // A conversation attachment that runs programs is revealed, never started.
+        HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);
+        const auto path=AttachmentFiles::store("setup.exe","MZ program fixture");QVERIFY(!path.isEmpty());
+        auto cleanup=qScopeGuard([&]{QFile::remove(path);});
+        QString notice;bool done=false;
+        loader.open("mac","session","conversation",{}, {},{{"name","setup.exe"},{"local_path",path}},
+            [&](const QString &opened,const QString &error,const QString &message){QCOMPARE(opened,path);QVERIFY(error.isEmpty());notice=message;done=true;});
+        QTRY_VERIFY(done);QVERIFY(m_opened.isEmpty());QCOMPARE(m_revealed,QStringList{path});QVERIFY(notice.contains("setup.exe"));
+    }
     void cachedImageHasThumbnailAndOpensInDefaultAppWithoutDialog() {
         HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);
         QImage image(320,200,QImage::Format_RGB32);image.fill(Qt::blue);
@@ -22,7 +35,7 @@ private slots:
         const auto thumbnail=AttachmentLoader::thumbnail(path);QVERIFY(!thumbnail.isNull());QVERIFY(thumbnail.width()<=192);QVERIFY(thumbnail.height()<=128);
         bool done=false;
         loader.open("mac","session","conversation",{}, {},{{"name","screen.png"},{"mime","image/png"},{"local_path",path}},
-            [&](const QString &opened,const QString &error){QCOMPARE(opened,path);QVERIFY(error.isEmpty());done=true;});
+            [&](const QString &opened,const QString &error,const QString &notice){QCOMPARE(opened,path);QVERIFY(error.isEmpty());QVERIFY(notice.isEmpty());done=true;});
         QTRY_VERIFY(done);QCOMPARE(m_opened,QList<QUrl>{QUrl::fromLocalFile(path)});QCOMPARE(errors.size(),0);
         for(auto *widget:QApplication::topLevelWidgets())QVERIFY(widget->objectName()!="attachmentPreviewDialog");
         const auto html=AttachmentFiles::store("notes.html","<script>never execute</script>");
@@ -31,7 +44,7 @@ private slots:
     void missingFileAndUnrelatedResponseDoNotOpenAnotherAttachment() {
         HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);bool done=false;
         loader.open("mac","session","conversation",{}, {},{{"name","missing.png"},{"request_id","request-one"},{"index",0}},
-            [&](const QString &path,const QString &error){QVERIFY(path.isEmpty());QVERIFY(!error.isEmpty());done=true;});
+            [&](const QString &path,const QString &error,const QString &){QVERIFY(path.isEmpty());QVERIFY(!error.isEmpty());done=true;});
         client.attachmentReady(77,{{"name","other.txt"}},"unrelated");QVERIFY(m_opened.isEmpty());
         QTRY_VERIFY(done);QVERIFY(m_opened.isEmpty());
         QTemporaryFile file;QVERIFY(file.open());QVERIFY(AttachmentFiles::cached({{"local_path",file.fileName()}}).isEmpty());
@@ -41,7 +54,7 @@ private slots:
         const QJsonObject file{{"name","image.png"},{"mime","image/png"},{"request_id","request-one"},{"index",0}};
         QString path;
         loader.fetch("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QVERIFY(error.isEmpty());path=p;++firstConversation;++done;});
-        loader.open("mac","session","one",{}, {},file,[&](const QString &p,const QString &error){QCOMPARE(p,path);QVERIFY(error.isEmpty());++firstConversation;++done;});
+        loader.open("mac","session","one",{}, {},file,[&](const QString &p,const QString &error,const QString &){QCOMPARE(p,path);QVERIFY(error.isEmpty());++firstConversation;++done;});
         loader.fetch("mac","session","two",{}, {},file,[&](const QString &p,const QString &error){QVERIFY(p.isEmpty());QVERIFY(!error.isEmpty());++done;});
         client.attachmentReady(1,{{"name","image.png"}},"fixture bytes");
         QTRY_COMPARE(firstConversation,2);QCOMPARE(m_opened.size(),1);

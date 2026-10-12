@@ -51,7 +51,7 @@ endfunction()
 add_executable(test_speech test_speech.cpp ../src/ProcessRunner.cpp ../src/MessageComposer.cpp
     ../src/ComposerDraftStore.cpp ../src/ComposerToolbar.cpp)
 target_include_directories(test_speech PRIVATE ../src)
-target_link_libraries(test_speech PRIVATE Qt6::Test hgs-speech)
+target_link_libraries(test_speech PRIVATE Qt6::Test hgs-speech hgs-external-file)
 add_test(NAME speech COMMAND test_speech)
 set_tests_properties(speech PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -280,7 +280,7 @@ add_executable(test_sessionswindow test_sessionswindow.cpp ../src/SessionsWindow
                ../src/NewSessionDialog.cpp ../src/ProjectsDialog.cpp ../resources.qrc)
 target_include_directories(test_sessionswindow PRIVATE ../src)
 target_compile_definitions(test_sessionswindow PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
-target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech)
+target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file)
 # The longest suite runs as parallel shards of its test functions.
 foreach(shard RANGE 9)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
@@ -306,7 +306,7 @@ set_tests_properties(activityview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 
 add_executable(test_messagecomposer test_messagecomposer.cpp ../src/MessageComposer.cpp ../src/ComposerToolbar.cpp ../src/ComposerDraftStore.cpp)
 target_include_directories(test_messagecomposer PRIVATE ../src)
-target_link_libraries(test_messagecomposer PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_messagecomposer PRIVATE Qt6::Test Qt6::Widgets hgs-external-file)
 add_test(NAME messagecomposer COMMAND test_messagecomposer)
 set_tests_properties(messagecomposer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -378,9 +378,14 @@ set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 
 add_executable(test_attachmentviewer test_attachmentviewer.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
 target_include_directories(test_attachmentviewer PRIVATE ../src)
-target_link_libraries(test_attachmentviewer PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_attachmentviewer PRIVATE Qt6::Test Qt6::Widgets hgs-external-file)
 add_test(NAME attachmentviewer COMMAND test_attachmentviewer)
 set_tests_properties(attachmentviewer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_externalfile test_externalfile.cpp)
+target_link_libraries(test_externalfile PRIVATE Qt6::Test Qt6::Gui hgs-external-file)
+add_test(NAME externalfile COMMAND test_externalfile)
+set_tests_properties(externalfile PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_worktreepanel test_worktreepanel.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp ../src/FleetState.cpp
                ../src/NewSessionDialog.cpp ../src/SessionOrganization.cpp ../src/DirectoryDialog.cpp)

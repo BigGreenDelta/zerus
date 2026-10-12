@@ -35,7 +35,7 @@ inline QString resolve(const Target &target, const QString &cwd, const QString &
 {
     if (!target.valid()) return {};
     if (QDir::isAbsolutePath(target.path)) return QDir::cleanPath(target.path);
-    if (target.path.startsWith("~/")) return localHome.isEmpty() ? QString() : QDir(localHome).filePath(target.path.mid(2));
+    if (target.path.startsWith("~/")) return localHome.isEmpty() ? QString() : QDir::cleanPath(QDir(localHome).filePath(target.path.mid(2)));
     if (!QDir::isAbsolutePath(cwd)) return {};
     return QDir::cleanPath(QDir(cwd).filePath(target.path));
 }

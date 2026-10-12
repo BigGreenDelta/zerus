@@ -51,6 +51,18 @@ if(LINUX)
     target_link_libraries(hgs-window-layer PRIVATE Qt6::DBus)
 endif()
 
+# Opening session files like browser downloads (see ExternalFile.h).
+add_library(hgs-external-file STATIC src/ExternalFile.cpp)
+target_include_directories(hgs-external-file PUBLIC src)
+target_link_libraries(hgs-external-file PUBLIC Qt6::Gui)
+if(LINUX)
+    target_link_libraries(hgs-external-file PRIVATE Qt6::DBus)
+elseif(WIN32)
+    target_link_libraries(hgs-external-file PRIVATE shlwapi)
+elseif(APPLE)
+    target_link_libraries(hgs-external-file PRIVATE "-framework CoreFoundation" "-framework CoreServices")
+endif()
+
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
@@ -197,7 +209,7 @@ if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
-target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech)
+target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech hgs-external-file)
 qt_finalize_executable(hgs-tray)
 
 include(CTest)

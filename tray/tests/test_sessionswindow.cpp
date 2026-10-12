@@ -55,6 +55,7 @@
 #include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
+#include "ExternalFile.h"
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
 #include "SettingsPage.h"
@@ -84,9 +85,14 @@
 class FolderUrlRecorder : public QObject {
     Q_OBJECT
 public:
-    FolderUrlRecorder() { QDesktopServices::setUrlHandler("file",this,"record"); }
-    ~FolderUrlRecorder() override { QDesktopServices::unsetUrlHandler("file"); }
+    // Files that run programs are revealed instead; no test starts a file manager.
+    FolderUrlRecorder() {
+        QDesktopServices::setUrlHandler("file",this,"record");
+        ExternalFile::setRevealHandler([this](const QString &path) { revealed<<path; return true; });
+    }
+    ~FolderUrlRecorder() override { QDesktopServices::unsetUrlHandler("file"); ExternalFile::setRevealHandler({}); }
     QList<QUrl> urls;
+    QStringList revealed;
 public slots:
     void record(const QUrl &url) { urls<<url; }
 };
@@ -218,6 +224,7 @@ private slots:
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
+    void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
     void remoteFileDownloads_data();
@@ -4247,6 +4254,8 @@ void TestSessionsWindow::remoteFileDownloads_data()
     QTest::newRow("failure-keeps-dialog-and-existing-copy") << 2;
     QTest::newRow("cancel-save-does-not-download") << 3;
     QTest::newRow("closing-dialog-keeps-requested-download-and-open") << 4;
+    // A downloaded program is shown in its folder rather than run.
+    QTest::newRow("download-and-open-program") << 5;
 }
 
 void TestSessionsWindow::remoteFileDownloads()
@@ -4256,7 +4265,7 @@ void TestSessionsWindow::remoteFileDownloads()
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    const auto destination = directory.filePath("local résumé's copy.png");
+    const auto destination = directory.filePath(mode == 5 ? "local deploy.sh" : "local résumé's copy.png");
     if (mode == 2) { QFile file(destination); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("previous copy"); }
     const auto fixture = m_dir->filePath("file-download-hgs");
     QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
@@ -4286,7 +4295,7 @@ void TestSessionsWindow::remoteFileDownloads()
         QVERIFY(opened.urls.isEmpty()); QVERIFY(!QFile::exists(fixture + ".calls"));
         if (mode == 0 && qEnvironmentVariableIsSet("HGS_TEST_FILE_DIALOG_PREVIEW"))
             QVERIFY(dialog->grab().save(qEnvironmentVariable("HGS_TEST_FILE_DIALOG_PREVIEW")));
-        auto *download = dialog->findChild<QPushButton *>(mode == 1 || mode == 4 ? "downloadOpenSessionFile" : "downloadSessionFile");
+        auto *download = dialog->findChild<QPushButton *>(mode == 1 || mode == 4 || mode == 5 ? "downloadOpenSessionFile" : "downloadSessionFile");
         QVERIFY(download); QVERIFY(download->isEnabled());
         QTimer::singleShot(0, &window, [&] {
             auto *save = window.findChild<QFileDialog *>("sessionFileSaveDialog"); QVERIFY(save);
@@ -4321,20 +4330,49 @@ void TestSessionsWindow::remoteFileDownloads()
     });
     window.findChild<ActivityView *>("mainActivity")->fileReferenceActivated(QString::fromUtf8(QUrl::toPercentEncoding(path, "/")));
     QVERIFY(dialog.isNull());
-    if (mode == 0 || mode == 1 || mode == 4) {
+    if (mode == 0 || mode == 1 || mode == 4 || mode == 5) {
         QTRY_COMPARE(downloaded.size(), 1);
-        QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(destination));
+        if (mode == 5) { QTRY_COMPARE(opened.revealed, QStringList{destination}); QVERIFY(opened.urls.isEmpty()); }
+        else { QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(destination)); }
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+        // Every completed download carries the system's downloaded-file marker.
+        QVERIFY(!ExternalFile::downloadMarker(destination).isEmpty());
+#endif
         QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
         const auto args = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
         QCOMPARE(args, (QJsonArray{"@mac", "download", "--path", path, "--output", destination}));
     } else { QVERIFY(opened.urls.isEmpty()); }
 }
 
+void TestSessionsWindow::activityAttachmentsOpenLikeDownloads()
+{
+    // A conversation attachment opens quietly; a program is shown in its folder.
+    QStandardPaths::setTestModeEnabled(true); const auto realPaths = qScopeGuard([] { QStandardPaths::setTestModeEnabled(false); });
+    FolderUrlRecorder opened;
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *activity = window.findChild<ActivityView *>("mainActivity"); auto *notice = window.findChild<QLabel *>("notice");
+    const auto document = AttachmentFiles::store("notes.txt", "attachment notes"), program = AttachmentFiles::store("setup.exe", "MZ fixture");
+    const auto cleanup = qScopeGuard([&] { QFile::remove(document); QFile::remove(program); });
+    QVERIFY(!document.isEmpty()); QVERIFY(!program.isEmpty());
+    activity->attachmentActivated({{"name", "notes.txt"}, {"local_path", document}});
+    QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first().toLocalFile(), QFileInfo(document).canonicalFilePath());
+    QTest::qWait(20); QVERIFY(!notice->text().contains("Operation failed")); QVERIFY(opened.revealed.isEmpty());
+    activity->attachmentActivated({{"name", "setup.exe"}, {"local_path", program}});
+    QTRY_COMPARE(opened.revealed.size(), 1); QCOMPARE(opened.urls.size(), 1);
+    QTRY_VERIFY(notice->text().contains("setup.exe")); QVERIFY(!notice->property("error").toBool());
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    QVERIFY(!ExternalFile::downloadMarker(program).isEmpty());
+#endif
+}
+
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()
 {
     QTest::addColumn<bool>("folder");
-    QTest::newRow("file") << false;
-    QTest::newRow("folder") << true;
+    QTest::addColumn<QString>("name");
+    QTest::newRow("file") << false << "sample image.png";
+    QTest::newRow("folder") << true << "sample image.png";
+    // An agent's script is shown in its folder rather than run.
+    QTest::newRow("program") << false << "deploy.sh";
 }
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
@@ -4342,10 +4380,10 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 #ifdef Q_OS_WIN
     QSKIP("Local session folders and files exist only on computers that run agents; a Windows control console has none.");
 #endif
-    QFETCH(bool, folder);
+    QFETCH(bool, folder); QFETCH(QString, name);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
-    const auto path = directory.filePath("sample image.png");
+    const auto path = directory.filePath(name);
     QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("synthetic file"); file.close();
     FolderUrlRecorder opened;
     SessionsWindow window(program()); window.setFleet(fleet()); window.show(); QTest::qWait(80);
@@ -4366,7 +4404,11 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
     });
     activity->fileReferenceActivated(path);
     QVERIFY(dialog.isNull());
-    QVERIFY(opened.urls.isEmpty());
+    QVERIFY(opened.urls.isEmpty()); QVERIFY(opened.revealed.isEmpty());
+    if (name.endsWith(".sh")) {
+        QTRY_COMPARE(opened.revealed, QStringList{path}); QVERIFY(opened.urls.isEmpty());
+        QTRY_VERIFY(window.findChild<QLabel *>("notice")->text().contains("deploy.sh")); return;
+    }
     QTRY_COMPARE(opened.urls.size(), 1);
     QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(folder ? directory.path() : path));
 }

@@ -2,6 +2,7 @@
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "ContentScale.h"
+#include "ExternalFile.h"
 #include "LocalFile.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
@@ -728,7 +729,13 @@ void MessageComposer::openAttachment(int index)
         if (m_key != key) return;
         if (!error.isEmpty() || files.isEmpty()) { showError(error.isEmpty() ? tr("Could not open the attachment.") : error); return; }
         const auto path = files.first().toObject().value("local_path").toString();
-        if (!openUrl(QUrl::fromLocalFile(path))) showError(tr("Could not open the attachment with its default application."));
+        switch (ExternalFile::open(path, ExternalFile::Origin::ThisComputer, openUrl)) {
+        case ExternalFile::Outcome::Opened: return;
+        // The status line carries cautions, including an open that was not run.
+        case ExternalFile::Outcome::Revealed: showError(ExternalFile::revealedNotice(path)); return;
+        case ExternalFile::Outcome::RevealFailed: showError(ExternalFile::revealFailedNotice(path)); return;
+        case ExternalFile::Outcome::OpenFailed: showError(tr("Could not open the attachment with its default application.")); return;
+        }
     });
 }
 

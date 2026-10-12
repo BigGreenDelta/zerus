@@ -1,4 +1,5 @@
 #pragma once
+#include "ExternalFile.h"
 #include "HgsClient.h"
 #include <QBuffer>
 #include <QCryptographicHash>
@@ -183,12 +184,19 @@ public:
         m_jobs.insert(key,{host,session,conversation,archive,agent,file,{std::move(done)}});
         if(priority)m_queue.prepend(key);else m_queue.append(key);pump();
     }
+    // Conversation attachments come from another machine, like browser downloads:
+    // `done` receives the path and either an error or an informational notice.
+    using OpenCallback = std::function<void(const QString &path, const QString &error, const QString &notice)>;
     void open(const QString &host,const QString &session,const QString &conversation,const QString &archive,
-              const QString &agent,const QJsonObject &file,Callback done) {
+              const QString &agent,const QJsonObject &file,OpenCallback done) {
         fetch(host,session,conversation,archive,agent,file,[done](const QString &path,const QString &error) {
-            if(!error.isEmpty()){done({},error);return;}
-            if(!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {done({},tr("No application could open this file."));return;}
-            done(path,{});
+            if(!error.isEmpty()){done({},error,{});return;}
+            switch(ExternalFile::open(path,ExternalFile::Origin::OtherMachine)) {
+            case ExternalFile::Outcome::Opened: done(path,{},{});return;
+            case ExternalFile::Outcome::Revealed: done(path,{},ExternalFile::revealedNotice(path));return;
+            case ExternalFile::Outcome::RevealFailed: done({},ExternalFile::revealFailedNotice(path),{});return;
+            case ExternalFile::Outcome::OpenFailed: done({},tr("No application could open this file."),{});return;
+            }
         },true);
     }
     static QImage thumbnail(const QString &path) {

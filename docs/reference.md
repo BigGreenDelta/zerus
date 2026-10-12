@@ -599,6 +599,29 @@ nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is
 destroyed so Wayland activation does not depend on a disappearing window.
 
+Zerus opens files the way a browser treats downloads. Conversation attachments,
+draft attachments, downloaded copies, local file references and their folders
+open in their default application. Anything that would run a program is selected
+in the file manager instead, with a notice that says why. That includes:
+- file types that run programs, scripts or installers, such as `.exe`, `.bat`,
+  `.ps1`, `.url`, `.app`, `.command`, `.pkg`, `.dmg`, `.desktop`, `.sh`, `.jar`
+  and `.py`, plus types Windows itself rates as dangerous;
+- macOS bundles;
+- on Windows, names without an extension;
+- on Linux and macOS, executable files without one, and programs or `#!/…`
+  scripts recognized by their content.
+
+A link is judged by its target. On Linux, when no file manager answers, Zerus
+opens the folder instead of selecting the file.
+
+Files from other machines carry the system's downloaded-file marker. These are
+attachment copies opened from Activity, and every completed download as soon as
+it is saved. The marker is Mark of the Web for the Internet zone on Windows and
+quarantine on macOS, which keeps an earlier approval. SmartScreen, Office
+Protected View and Gatekeeper therefore still apply when such a file is opened
+later. Windows skips the marker when policy disables zone information. Linux has
+no such marker, and cached attachment copies there are never executable.
+
 ### Questions and approvals
 
 Activity exposes supported native questions with their full visible disclosure,

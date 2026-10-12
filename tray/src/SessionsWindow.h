@@ -144,6 +144,8 @@ private:
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
     void showNotice(const QString &message, bool error = false);
+    // Opens a session file like a browser download; see ExternalFile.h.
+    void openExternalFile(const QString &path, bool otherMachine);
     void jumpToLatestActivity(QListWidgetItem *item);
     void openSession();
     void changeSession();

@@ -166,6 +166,7 @@ private slots:
     void contentScaleEnlargesOnlyTheMessageField();
     void draftStateFollowsUnsentContent();
     void attachmentsChipSummarizesAndRemoves();
+    void programAttachmentRowIsShownInItsFolder();
     void droppedShortcutIsCheckedAsTheFileItReads();
     void attachmentsPopoverFollowsSessionAndSending();
     void attachmentRowOpensStoredCopyAndPreviews();
@@ -1222,6 +1223,23 @@ void TestMessageComposer::attachmentsPopoverFollowsSessionAndSending()
     QVERIFY(!chip->popover()->isVisible()); QVERIFY(chip->isHidden());
     window.composer->deliveryFinished("local/a", false, "Network down");
     QVERIFY(chip->isVisible()); QCOMPARE(chip->fullLabel(), QString("1 attached"));
+}
+
+void TestMessageComposer::programAttachmentRowIsShownInItsFolder()
+{
+    // Opening a draft attachment never runs a program; its copy is revealed.
+    Window window("local/program"); QVERIFY(QTest::qWaitForWindowExposed(&window.widget));
+    QList<QUrl> opened; window.composer->openUrl = [&opened](const QUrl &url) { opened << url; return true; };
+    QStringList revealed; ExternalFile::setRevealHandler([&revealed](const QString &path) { revealed << path; return true; });
+    const auto restore = qScopeGuard([] { ExternalFile::setRevealHandler({}); });
+    QVERIFY(window.composer->addAttachment("setup.exe", "application/octet-stream", "MZ program fixture"));
+    auto *chip = window.chip(); QTest::mouseClick(chip, Qt::LeftButton); QTRY_VERIFY(chip->popover()->isVisible());
+    auto *row = chip->popover()->findChild<QWidget *>("attachmentRow"); QVERIFY(row);
+    QTest::mouseClick(row, Qt::LeftButton, Qt::NoModifier, QPoint(row->width() / 2, row->height() / 2));
+    QTRY_COMPARE(revealed.size(), 1); QVERIFY(revealed.first().endsWith("/setup.exe")); QVERIFY(opened.isEmpty());
+    auto *status = window.composer->findChild<QLabel *>("messageStatus");
+    QVERIFY(status); QTRY_VERIFY(status->text().contains("setup.exe"));
+    QFile::remove(revealed.first());
 }
 
 void TestMessageComposer::attachmentRowOpensStoredCopyAndPreviews()

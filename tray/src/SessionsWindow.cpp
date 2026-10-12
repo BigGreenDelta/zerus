@@ -2,6 +2,7 @@
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
+#include "ExternalFile.h"
 #include "LocalFile.h"
 #include "SessionPresentation.h"
 #include "AccountUsage.h"
@@ -594,7 +595,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const QString host = entry->host, machine = entry->machine;
         const bool local = host.isEmpty(), online = entry->online;
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
-        QUrl desktopTarget;
+        // Files open after the dialog closes; folders open as they are.
+        QUrl desktopTarget; bool desktopFile = false;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
         dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(local ? 560 : 650, 230);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
@@ -622,9 +624,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         quint64 pending = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
-            connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget] {
+            connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget, &desktopFile] {
                 if (!QFileInfo::exists(path)) { hint->setText(tr("This file is no longer available at this path.")); return; }
-                desktopTarget = QUrl::fromLocalFile(path);
+                desktopTarget = QUrl::fromLocalFile(path); desktopFile = true;
                 dialog.accept();
             });
             auto *folder = buttons->addButton(tr("Open folder"), QDialogButtonBox::ActionRole); folder->setObjectName("openSessionFileFolder");
@@ -662,11 +664,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 const auto request = pending;
                 connect(&m_client, &HgsClient::fileDownloaded, completion, [this, completion, shownDialog, request, opening](quint64 id, const QString &localPath) {
                     if (id != request) return;
+                    // Like a browser download, the copy is marked as coming from another machine.
+                    ExternalFile::markDownloaded(localPath);
                     if (!shownDialog) {
-                        if (opening) QTimer::singleShot(0, this, [this, localPath] {
-                            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)))
-                                showNotice(tr("Saved to %1, but no application could open the file.").arg(localPath), true);
-                        });
+                        if (opening) QTimer::singleShot(0, this, [this, localPath] { openExternalFile(localPath, true); });
                         else showNotice(tr("Downloaded to %1").arg(localPath));
                     }
                     completion->deleteLater();
@@ -689,11 +690,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 pending = 0; progress->hide(); savedPath = destination;
                 download->setEnabled(downloadable); open->setEnabled(downloadable);
                 hint->setText(tr("Saved on this computer: %1").arg(destination)); open->hide(); savedOpen->show();
-                if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); dialog.accept(); }
+                if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); desktopFile = true; dialog.accept(); }
             });
             connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
                 if (!LocalFile::readable(QFileInfo(savedPath))) { hint->setText(tr("The local copy is no longer available.")); return; }
-                desktopTarget = QUrl::fromLocalFile(savedPath); dialog.accept();
+                desktopTarget = QUrl::fromLocalFile(savedPath); desktopFile = true; dialog.accept();
             });
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");
             connect(ssh, &QPushButton::clicked, &dialog, [this, host, &dialog] { emit machineSshRequested(host); dialog.accept(); });
@@ -706,9 +707,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             // Wayland defers launch until the focused window receives an
             // activation token. Destroying that window cancels the callback.
             // Dispatch after the modal has gone, using the persistent workspace.
-            QTimer::singleShot(0, this, [this, desktopTarget] {
-                if (!QDesktopServices::openUrl(desktopTarget))
-                    showNotice(tr("Could not open %1 with its default application. You can copy the path.").arg(desktopTarget.toLocalFile()), true);
+            // Folders take the same path: a macOS bundle folder would launch.
+            QTimer::singleShot(0, this, [this, desktopTarget, desktopFile, local] {
+                openExternalFile(desktopTarget.toLocalFile(), desktopFile && !local);
             });
         }
     };
@@ -888,7 +889,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             showNotice(tr("Opening attachment…"));
             attachments->open(entry->host,entry->session.name,m_details.value("conversation_id").toString(),
                 entry->session.archiveId,view==m_subagentView?m_subagentId:QString(),file,
-                [this](const QString &,const QString &error){showNotice(error,!error.isEmpty());});
+                [this](const QString &,const QString &error,const QString &notice){
+                    // A plain success leaves "Opening attachment…" to expire on its own.
+                    if(!error.isEmpty())showNotice(error,true);else if(!notice.isEmpty())showNotice(notice);
+                });
         });
         connect(view,&ActivityView::voicePlaybackRequested,this,[this,view,attachments](const QString &key,const QJsonObject &file){
             const auto *entry=selected();if(!entry)return;
@@ -3969,6 +3973,17 @@ void SessionsWindow::finishQuestion(quint64 request, bool ok, const QString &err
     else m_question->setError(pending.key, pending.questionId, error, uncertain);
     if (m_selectedKey == pending.key) { renderDetails(); inspect(); }
     emit refreshRequested();
+}
+
+void SessionsWindow::openExternalFile(const QString &path, bool otherMachine)
+{
+    switch (ExternalFile::open(path, otherMachine ? ExternalFile::Origin::OtherMachine : ExternalFile::Origin::ThisComputer)) {
+    case ExternalFile::Outcome::Opened: return;
+    case ExternalFile::Outcome::Revealed: showNotice(ExternalFile::revealedNotice(path)); return;
+    case ExternalFile::Outcome::RevealFailed: showNotice(ExternalFile::revealFailedNotice(path), true); return;
+    case ExternalFile::Outcome::OpenFailed:
+        showNotice(tr("Could not open %1 with its default application. You can copy the path.").arg(path), true); return;
+    }
 }
 
 void SessionsWindow::showNotice(const QString &message, bool error)
