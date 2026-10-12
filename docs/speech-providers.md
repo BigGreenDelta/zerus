@@ -6,6 +6,12 @@ separate client preference. Creating, editing or deleting a profile never change
 an already recorded preview, sends audio, installs packages or downloads weights.
 Local GigaAM and an OpenAI-compatible transcription server are separate adapters.
 
+For installation and configuration, follow the provider-specific user guide:
+[Local GigaAM](speech-setup.md#local-gigaam) or
+[OpenAI-compatible server](speech-setup.md#openai-compatible-server). Both use the
+selected computer's private speech service; only local GigaAM needs model packages
+and weights. The sections below specify the host and transport contracts.
+
 The HTTP adapter uses a base URL including the API prefix (for example
 `https://speech.example.net/v1`) and appends `/audio/transcriptions`. It posts a
 mono 16 kHz PCM WAV as multipart `file`, with `model`, optional `language`, and

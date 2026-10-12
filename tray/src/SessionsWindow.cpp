@@ -1462,7 +1462,7 @@ void SessionsWindow::applyTheme()
     const QString hover = m_dark ? "#2b3540" : "#edf2f5";
     const QString selected = m_dark ? "#233d35" : "#e0f0e9";
     setStyleSheet(QString(R"(
-        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor, QDialog#speechSetupGuide { background:%1; color:%2; }
+        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QWidget { font-size:13px; }
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
@@ -1502,13 +1502,13 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QDialog#speechSetupGuide QScrollArea, QWidget#speechEditorContent, QWidget#speechSetupContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
-        QDialog#speechSetupGuide QScrollBar:vertical, QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
-        QDialog#speechSetupGuide QScrollBar:horizontal, QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
-        QDialog#speechSetupGuide QScrollBar::handle:vertical, QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
-        QDialog#speechSetupGuide QScrollBar::handle:horizontal, QDialog#speechProfileEditor QScrollBar::handle:horizontal { background:%4; border-radius:4px; min-width:24px; }
-        QDialog#speechSetupGuide QScrollBar::add-line, QDialog#speechSetupGuide QScrollBar::sub-line, QDialog#speechProfileEditor QScrollBar::add-line, QDialog#speechProfileEditor QScrollBar::sub-line { width:0; height:0; }
-        QDialog#speechSetupGuide QScrollBar::add-page, QDialog#speechSetupGuide QScrollBar::sub-page, QDialog#speechProfileEditor QScrollBar::add-page, QDialog#speechProfileEditor QScrollBar::sub-page { background:transparent; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
+        QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
+        QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
+        QDialog#speechProfileEditor QScrollBar::handle:horizontal { background:%4; border-radius:4px; min-width:24px; }
+        QDialog#speechProfileEditor QScrollBar::add-line, QDialog#speechProfileEditor QScrollBar::sub-line { width:0; height:0; }
+        QDialog#speechProfileEditor QScrollBar::add-page, QDialog#speechProfileEditor QScrollBar::sub-page { background:transparent; }
         QPushButton#railButton:checked { background:%10; border-color:%4; }
         QPushButton#sessionFilter { padding:4px 2px; min-height:22px; font-size:11px; background:transparent; border-color:transparent; }
         QPushButton#sessionFilter:checked { background:%10; border-color:%4; color:%5; }
@@ -1555,7 +1555,7 @@ void SessionsWindow::applyTheme()
         QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
         QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected { background:%10; color:%2; }
-        QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput, QPlainTextEdit#speechSetupCommand { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
+        QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
         QPushButton#machineFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }
         QSlider#workspaceContentScale, QSlider#workspaceActivityWidth { min-height:22px; }

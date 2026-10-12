@@ -24,7 +24,6 @@ import java.util.UUID
     var editor by remember { mutableStateOf<Pair<SpeechConfiguration, SpeechConfigProfile>?>(null) }
     var removal by remember { mutableStateOf<Pair<SpeechConfiguration, SpeechConfigProfile>?>(null) }
     var actionError by remember { mutableStateOf("") }
-    var guideHost by remember { mutableStateOf<String?>(null) }
     val hosts = model.machines.filter { machine -> model.connections.any { it.id == machine.connectionId } }
         .map { SpeechConfigHost(MachineKey(it.connectionId, it.id), it.machineId, it.name) }
     val selected = manager.host
@@ -56,7 +55,7 @@ import java.util.UUID
                             } }, onClick = { hostMenu = false; editor = null; removal = null; actionError = ""; manager.select(host) }) }
                         }
                     }
-                    TextButton(onClick = { guideHost = selected?.name.orEmpty() }) { Text("Local setup guide") }
+                    SpeechDocumentationButton()
                     if (hosts.isEmpty()) Text("Connect a computer to manage its speech providers.")
                     if (selected != null) {
                         manager.reason(selected).takeIf { it.isNotBlank() }?.let { Text(it) }
@@ -105,7 +104,6 @@ import java.util.UUID
             }
         }
     }
-    guideHost?.let { SpeechLocalSetupDialog(it) { guideHost = null } }
     if (selected != null) editor?.let { (baseline, profile) ->
         SpeechConfigurationEditor(manager, selected, baseline, profile) { editor = null }
     }
@@ -140,7 +138,6 @@ import java.util.UUID
     var secret by remember(host, original.id) { mutableStateOf("") } // Never saved into instance state or private preferences.
     var error by remember(host, original.id) { mutableStateOf("") }
     var operationId by remember(host, original.id) { mutableStateOf<String?>(null) }
-    var guideOpen by remember(host, original.id) { mutableStateOf(false) }
     val pending = manager.pending.find { it.id == operationId }
     val editable = pending == null && manager.canMutate(host)
     val latest = manager.configuration
@@ -155,7 +152,6 @@ import java.util.UUID
         text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Processing computer: ${host.name}", style = MaterialTheme.typography.labelMedium)
             Text(speechServiceReadiness(host, latest, manager.loading), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = { guideOpen = true }) { Text("Local setup guide") }
             Text("Provider ID: ${profile.id}", style = MaterialTheme.typography.labelSmall)
             OutlinedTextField(profile.name, { profile = profile.copy(name = it) }, label = { Text("Name") }, singleLine = true, enabled = editable)
             ProviderMenu("Type", profile.adapter, baseline.adapters.filter { it.id in setOf("gigaam", "openai_http") }.map {
@@ -165,6 +161,7 @@ import java.util.UUID
                 profile = profile.copy(adapter = id, model = adapter.models.firstOrNull().orEmpty(), device = adapter.devices.firstOrNull().orEmpty(), baseUrl = "", allowInsecureHttp = false)
                 secret = ""; credentialMode = if (id == "gigaam") "remove" else "keep"
             }
+            SpeechDocumentationButton(profile.adapter)
             if (profile.adapter == "gigaam") {
                 val adapter = baseline.adapters.find { it.id == "gigaam" }
                 Text("Local inference runs on ${host.name}. Prepare its Python/PyTorch speech service before testing this profile.", style = MaterialTheme.typography.bodySmall)
@@ -181,7 +178,7 @@ import java.util.UUID
             } else if (profile.adapter == "openai_http") {
                 OutlinedTextField(profile.baseUrl, { profile = profile.copy(baseUrl = it) }, label = { Text("Server base URL") },
                     placeholder = { Text("https://speech.example.test/v1") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), singleLine = true, enabled = editable)
-                Text("The processing computer sends WAV audio to /audio/transcriptions under this URL.", style = MaterialTheme.typography.bodySmall)
+                Text("${host.name} sends WAV audio to this server’s /audio/transcriptions endpoint. Local GigaAM and GPU setup are not required for this provider.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(profile.model, { profile = profile.copy(model = it) }, label = { Text("Model") }, singleLine = true, enabled = editable)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(profile.allowInsecureHttp, { profile = profile.copy(allowInsecureHttp = it) }, enabled = editable)
@@ -216,5 +213,4 @@ import java.util.UUID
             } catch (failure: Exception) { error = failure.message ?: "Check the provider fields." }
         }, enabled = editable) { Text("Save provider") } },
         dismissButton = { TextButton(onClick = ::dismiss) { Text("Close") } })
-    if (guideOpen) SpeechLocalSetupDialog(host.name) { guideOpen = false }
 }

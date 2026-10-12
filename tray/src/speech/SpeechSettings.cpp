@@ -1,11 +1,7 @@
 #include "SpeechSettings.h"
 #include "SpeechClient.h"
 #include <QAudioDevice>
-#include <QApplication>
-#include <QClipboard>
-#include <QFile>
-#include <QFontDatabase>
-#include <QPlainTextEdit>
+#include <QDesktopServices>
 #include <QScreen>
 #include <QScrollArea>
 #include <QCheckBox>
@@ -49,47 +45,30 @@ QString localComputerName() {
     return QObject::tr("This computer (Linux)");
 #endif
 }
-void showLocalSetupGuide(const QString &computer, QWidget *parent) {
-    QFile file(":/hgs/speech-local-setup.json");
-    const auto guide = file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject{};
-    QDialog dialog(parent); dialog.setObjectName("speechSetupGuide"); dialog.setWindowTitle(guide.value("title").toString(QObject::tr("Local speech setup")));
-    auto *layout = new QVBoxLayout(&dialog); layout->setSpacing(12);
-    auto *host = label(QObject::tr("Processing computer: %1").arg(computer)); host->setObjectName("speechSetupComputer"); layout->addWidget(host);
-    auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); layout->addWidget(scroll, 1);
-    auto *content = new QWidget; content->setObjectName("speechSetupContent"); auto *body = new QVBoxLayout(content); body->setSpacing(14); body->setContentsMargins(0,0,12,0); scroll->setWidget(content);
-    if (guide.value("schema").toInt() != 1) body->addWidget(label(QObject::tr("The setup guide is missing from this installation. Update or reinstall Zerus.")));
-    else {
-        body->addWidget(label(guide.value("intro").toString()));
-        for (const auto &value : guide.value("steps").toArray()) {
-            const auto step = value.toObject(); auto *title = label(step.value("title").toString()); title->setObjectName("heading"); body->addWidget(title);
-            body->addWidget(label(step.value("body").toString()));
-            for (const auto &entry : step.value("commands").toArray()) {
-                const auto command = entry.toString();
-                auto *code = new QPlainTextEdit(command); code->setObjectName("speechSetupCommand"); code->setReadOnly(true); code->setLineWrapMode(QPlainTextEdit::NoWrap); code->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-                code->setFixedHeight(qBound(72, (command.count('\n') + 1) * code->fontMetrics().lineSpacing() + 48, 210)); body->addWidget(code);
-                auto *copy = new QPushButton(QObject::tr("Copy command")); copy->setObjectName("speechSetupCopyCommand"); copy->setAutoDefault(false); body->addWidget(copy, 0, Qt::AlignLeft);
-                QObject::connect(copy, &QPushButton::clicked, &dialog, [command, copy] { QApplication::clipboard()->setText(command); copy->setText(QObject::tr("Copied")); });
-            }
-        }
-        for (const auto &note : guide.value("notes").toArray()) body->addWidget(label(note.toString()));
-    }
-    body->addStretch();
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close); layout->addWidget(buttons); QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    dialog.resize(680, qMin(680, dialog.screen()->availableGeometry().height()-80)); dialog.exec();
+QUrl documentationUrl(const QString &adapter = {}) {
+    QUrl url(QStringLiteral("https://github.com/ufna/zerus/blob/main/docs/speech-setup.md"));
+    if (adapter == "gigaam") url.setFragment("local-gigaam");
+    else if (adapter == "openai_http") url.setFragment("openai-compatible-server");
+    return url;
+}
+void openDocumentationLink(const QUrl &url, QLabel *failure, const std::function<bool(const QUrl &)> &open) {
+    const bool opened = open(url);
+    failure->setText(opened ? QString() : QObject::tr("Could not open the browser. Open this link manually:\n%1").arg(url.toString()));
+    failure->setVisible(!opened);
 }
 
 // All editor values are transient. A stored key is represented only by its
 // presence; replacement text is cleared as soon as its request is dispatched.
 class ProfileEditor : public QDialog {
 public:
-    ProfileEditor(const QString &computer, const QJsonObject &service, const QJsonArray &adapters, const QJsonObject &saved, QWidget *parent)
+    ProfileEditor(const QString &computer, const QJsonObject &service, const QJsonArray &adapters, const QJsonObject &saved, QWidget *parent, std::function<bool(const QUrl &)> openDocumentation)
         : QDialog(parent), original(saved) {
         setObjectName("speechProfileEditor"); setWindowTitle(saved.isEmpty() ? tr("Add speech provider") : tr("Edit speech provider"));
         auto *layout = new QVBoxLayout(this); layout->setSpacing(12);
         auto *host = label(tr("Processing computer: %1").arg(computer)); host->setObjectName("speechEditComputer"); layout->addWidget(host);
         auto *readiness = label(service.value("available").toBool()
-            ? tr("Recognition service is available on %1. The selected model and device still need a successful Test after saving.").arg(computer)
-            : tr("Recognition service is not ready on %1. %2").arg(computer, service.value("reason").toString(tr("Prepare the local service before testing this provider."))));
+            ? tr("Recognition service is available on %1. Test the saved profile to verify the selected provider.").arg(computer)
+            : tr("Recognition service is not ready on %1. %2").arg(computer, service.value("reason").toString(tr("Prepare the speech service on this processing computer before testing."))));
         readiness->setObjectName("speechEditReadiness"); layout->addWidget(readiness);
         auto *formScroll = new QScrollArea; formScroll->setWidgetResizable(true); formScroll->setFrameShape(QFrame::NoFrame); layout->addWidget(formScroll, 1);
         auto *content = new QWidget; content->setObjectName("speechEditorContent"); auto *fields = new QVBoxLayout(content); fields->setContentsMargins(0,0,12,0); fields->setSpacing(12); formScroll->setWidget(content);
@@ -110,8 +89,11 @@ public:
         credential->addItem(tr("Replace API key"), "replace"); credential->addItem(tr("Remove API key"), "remove"); form->addRow(tr("API key"), credential);
         key = new QLineEdit; key->setObjectName("speechEditKey"); key->setEchoMode(QLineEdit::Password); key->setMaxLength(8192); form->addRow(tr("New API key"), key);
         help = label({}); help->setObjectName("speechEditHelp"); fields->addWidget(help);
-        auto *guide = new QPushButton(tr("Local setup guide")); guide->setObjectName("speechEditSetupGuide"); guide->setAutoDefault(false); fields->addWidget(guide, 0, Qt::AlignLeft);
-        connect(guide, &QPushButton::clicked, this, [this, computer] { showLocalSetupGuide(computer, this); });
+        documentation = new QPushButton; documentation->setObjectName("speechEditDocumentation"); documentation->setAutoDefault(false); layout->addWidget(documentation, 0, Qt::AlignLeft);
+        documentationFailure = label({}); documentationFailure->setObjectName("speechEditDocumentationError"); documentationFailure->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard); documentationFailure->hide(); layout->addWidget(documentationFailure);
+        connect(documentation, &QPushButton::clicked, this, [this, openDocumentation = std::move(openDocumentation)] {
+            openDocumentationLink(documentationUrl(type->currentData().toString()), documentationFailure, openDocumentation);
+        });
         status = label({}); status->setObjectName("speechEditStatus"); layout->addWidget(status);
         check = new QPushButton(tr("Check operation status")); check->setObjectName("speechEditCheckOperation"); check->setAutoDefault(false); check->hide(); layout->addWidget(check, 0, Qt::AlignLeft);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout->addWidget(buttons);
@@ -181,18 +163,26 @@ private:
         if (remote() && original.value("adapter").toString() == selected) model->setEditText(original.value("model").toString());
         for (QWidget *field : QList<QWidget *>{url, insecure, credential, key}) { field->setVisible(remote()); if (auto *caption = form->labelForField(field)) caption->setVisible(remote()); }
         device->setVisible(!remote()); form->labelForField(device)->setVisible(!remote());
-        help->setText(remote() ? tr("The processing computer sends audio to the server's /audio/transcriptions endpoint. The API key stays on the processing computer after saving. Saving does not send audio. HTTP exposes audio and the key in transit; only enable it for a trusted private connection.")
-            : tr("Local inference runs on the processing computer named above. Saving creates a profile; it does not install the service or download model weights.\n\nv3_e2e_rnnt is the default for Russian with punctuation; use ru for Russian.\n\nCPU uses the processor. CUDA requires a supported NVIDIA GPU and CUDA-enabled PyTorch. MPS requires a supported Apple GPU/runtime. Use Test to verify the chosen model and device."));
+        documentation->setText(remote() ? tr("HTTP transcription documentation") : selected == "gigaam" ? tr("Local GigaAM documentation") : tr("Speech provider documentation"));
+        documentation->setToolTip(documentationUrl(selected).toString()); documentationFailure->clear(); documentationFailure->hide();
+        name->setPlaceholderText(remote() ? tr("e.g. Team transcription server") : tr("e.g. Russian speech"));
+        help->setText(remote() ? tr("The processing computer sends audio to the server's /audio/transcriptions endpoint. Use the server's model ID and a two-letter language code, or leave language empty.\n\nThe optional API key is saved on the processing computer. Prefer HTTPS; private HTTP requires explicit consent. Saving sends no audio.")
+            : selected == "gigaam" ? tr("Local inference runs on the processing computer named above. Saving creates a profile; it does not install the service or download model weights.\n\nv3_e2e_rnnt is the default for Russian with punctuation; use ru for Russian.\n\nCPU uses the processor. CUDA requires a supported NVIDIA GPU and CUDA-enabled PyTorch. MPS requires a supported Apple GPU/runtime. Use Test to verify the chosen model and device.")
+            : tr("This provider type cannot be edited by this version of Zerus. See the provider documentation before changing it."));
         validate();
     }
     QFormLayout *form;
+    QPushButton *documentation;
+    QLabel *documentationFailure;
     QJsonArray capabilities;
     QSet<QString> allowedModels, allowedDevices;
     bool locked = false;
 };
 }
 
-SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent) : QWidget(parent), m_client(new SpeechClient(executable, this))
+SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::function<bool(const QUrl &)> openDocumentation)
+    : QWidget(parent), m_client(new SpeechClient(executable, this)),
+      m_openDocumentation(openDocumentation ? std::move(openDocumentation) : QDesktopServices::openUrl)
 {
     setObjectName("speechSettings");
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0,0,12,0); layout->setSpacing(14);
@@ -210,8 +200,9 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent) : QWi
     m_default = label({}); m_default->setObjectName("speechDefault"); layout->addWidget(m_default);
     m_status = label({}); m_status->setObjectName("speechSettingsStatus"); layout->addWidget(m_status);
     m_result = label({}); m_result->setObjectName("speechOperationResult"); m_result->hide(); layout->addWidget(m_result);
-    auto *setup = new QPushButton(tr("Local setup guide")); setup->setObjectName("speechSetupGuideButton"); layout->addWidget(setup,0,Qt::AlignLeft);
-    connect(setup, &QPushButton::clicked, this, [this] { showLocalSetupGuide(m_host->currentText(), this); });
+    auto *documentation = new QPushButton(tr("Speech provider documentation")); documentation->setObjectName("speechDocumentation"); documentation->setToolTip(documentationUrl().toString()); layout->addWidget(documentation,0,Qt::AlignLeft);
+    auto *documentationFailure = label({}); documentationFailure->setObjectName("speechDocumentationError"); documentationFailure->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard); documentationFailure->hide(); layout->addWidget(documentationFailure);
+    connect(documentation, &QPushButton::clicked, this, [this, documentationFailure] { openDocumentationLink(documentationUrl(), documentationFailure, m_openDocumentation); });
     m_refresh = new QPushButton(tr("Refresh providers and microphones")); m_refresh->setObjectName("speechRefresh"); layout->addWidget(m_refresh,0,Qt::AlignLeft);
     m_pendingStatus = label({}); m_pendingStatus->setObjectName("speechPendingOperation"); layout->addWidget(m_pendingStatus);
     m_check = new QPushButton(tr("Check operation status")); m_check->setObjectName("speechCheckOperation"); layout->addWidget(m_check,0,Qt::AlignLeft);
@@ -324,7 +315,7 @@ void SpeechSettings::editProfile(bool create)
     const auto original = create ? QJsonObject{} : selectedProfile(); if (!create && original.isEmpty()) return;
     const auto host = m_host->currentData().toString(); const auto machine = m_machine; const auto revision = m_revision;
     QStringList ids; for (int row = 0; row < m_profiles->count(); ++row) ids.append(m_profiles->item(row)->data(Qt::UserRole).toJsonObject().value("id").toString());
-    ProfileEditor dialog(m_host->currentText(), m_service, m_adapters, original, this);
+    ProfileEditor dialog(m_host->currentText(), m_service, m_adapters, original, this, m_openDocumentation);
     connect(dialog.check, &QPushButton::clicked, this, &SpeechSettings::checkOperation);
     connect(m_client, &SpeechClient::requestFinished, &dialog, [this, &dialog] { dialog.check->setVisible(!m_pending.isEmpty()); dialog.check->setEnabled(!m_busy); if (!m_pending.isEmpty() && !m_busy && !m_waiting) dialog.status->setText(tr("The operation is not confirmed. Check its status before making another change.")); });
     connect(dialog.save, &QPushButton::clicked, &dialog, [this, &dialog, host, machine, revision, ids, create] {

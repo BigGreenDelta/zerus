@@ -10,11 +10,13 @@ class QComboBox;
 class QLabel;
 class QListWidget;
 class QPushButton;
+class QUrl;
 
 class SpeechSettings : public QWidget {
     Q_OBJECT
 public:
-    explicit SpeechSettings(const QString &executable, QWidget *parent = nullptr);
+    explicit SpeechSettings(const QString &executable, QWidget *parent = nullptr,
+                            std::function<bool(const QUrl &)> openDocumentation = {});
     void setPeers(const QStringList &peers);
     void refresh();
 private:
@@ -30,6 +32,7 @@ private:
     void operationResult(const QJsonObject &reply, const QString &error, bool initial = false);
     void checkOperation();
     SpeechClient *m_client;
+    std::function<bool(const QUrl &)> m_openDocumentation;
     QComboBox *m_host, *m_microphone;
     QListWidget *m_profiles;
     QLabel *m_status, *m_statistics, *m_default, *m_pendingStatus, *m_result, *m_profileDetails;

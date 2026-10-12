@@ -83,57 +83,23 @@ is edited or removed. Legacy unversioned requests retain their previous behavior
 
 ## Host installation
 
-The offline guide shown by both clients comes from
-[`docs/speech-local-setup.json`](../../docs/speech-local-setup.json). Run its
-commands on the selected processing computer, as the same operating-system user
-that runs Zerus or its connector, from a matching Zerus checkout. Opening the
-guide or saving a profile never runs installation commands. Local GigaAM uses
-Python/PyTorch; it is neither an Ollama model nor an HTTP transcription endpoint.
+Use the repository setup guide for your selected provider:
 
-Use an existing reviewed checkout, or obtain the public source in a fresh
-directory without overwriting or resetting an existing checkout:
+- [Local GigaAM](../../docs/speech-setup.md#local-gigaam): FFmpeg, the reviewed
+  PyTorch/torchaudio pair, pinned GigaAM dependencies and explicit model/device
+  preparation on the processing computer.
+- [OpenAI-compatible server](../../docs/speech-setup.md#openai-compatible-server):
+  an existing transcription API and only the lightweight base `services/speech`
+  package on the processing computer; no GigaAM, PyTorch, FFmpeg or weights.
 
-```sh
-mkdir -p "$HOME/.local/share/zerus-speech"
-git clone --depth 1 https://github.com/ufna/zerus.git "$HOME/.local/share/zerus-speech/source" && cd "$HOME/.local/share/zerus-speech/source"
-```
+The [shared host setup](../../docs/speech-setup.md#prepare-the-processing-computer)
+requires Python 3.11+ on a supported Unix host, including Linux and macOS. Both
+adapters use the private service under the same user/configuration as the Zerus
+CLI or connector. The guide includes source checkout, foreground startup and the
+optional Linux user-service installer. Opening help or saving a profile performs
+none of these actions.
 
-Keep the optional environment and weights outside the checkout. Python 3.11+,
-Git, FFmpeg and a matching PyTorch/torchaudio installation are required. The
-reviewed upstream `preprocess.load_audio` invokes `ffmpeg` even for our PCM WAV
-files, so it must be on the service's `PATH`. On a CUDA host,
-install the appropriate reviewed CUDA PyTorch wheels first. The initial GPU
-qualification uses PyTorch and torchaudio 2.10.0. The service itself has no
-third-party dependencies.
-
-```sh
-python3 -m venv "$HOME/.local/share/zerus-speech/venv"
-"$HOME/.local/share/zerus-speech/venv/bin/pip" install torch==2.10.0 torchaudio==2.10.0
-"$HOME/.local/share/zerus-speech/venv/bin/pip" install './services/speech[gigaam]'
-```
-
-Explicitly download and verify the selected model using that environment. Start
-with CPU as a baseline; this prepares the same cache for a later explicit GPU
-selection:
-
-```sh
-"$HOME/.local/share/zerus-speech/venv/bin/python" -c \
-  'import gigaam; gigaam.load_model("v3_e2e_rnnt", device="cpu", use_flash=False)'
-```
-
-For NVIDIA inference, verify `torch.cuda.is_available()` in this environment,
-choose the intended `cuda` device in the profile, then explicitly Test that saved
-profile. A compatible driver and PyTorch CUDA build are required; use the
-[official PyTorch installation selector](https://pytorch.org/get-started/locally/)
-if the reviewed environment is not available on the host. Zerus does not select
-CUDA or Apple MPS automatically. A running service or discovered profile does
-not prove an unsaved model/device choice can perform inference.
-
-Upstream verifies the checkpoint checksum on load. The service requires both the
-checkpoint and the E2E tokenizer to exist before accepting a recording. Model
-files are trusted code/data installed by the computer's owner; clients cannot
-upload or select arbitrary checkpoint paths. The normal inference path uses the
-prepared cache and does not install packages.
+## Advanced host configuration
 
 Profiles saved through Zerus need no `speech.json` file. The service uses its
 defaults and reads the managed profile store. As an optional bootstrap or for
@@ -165,30 +131,11 @@ Custom state and socket paths must be absolute; their directories must belong
 to this user with mode 0700. The socket is mode 0600. Configuration remains on
 the processing computer and is not part of Swarm configuration synchronization.
 
-Run the service directly, or explicitly install the Linux user service:
-
-```sh
-"$HOME/.local/share/zerus-speech/venv/bin/python" -m zerus_speech
-python3 services/speech/install-user-service.py \
-  --python "$HOME/.local/share/zerus-speech/venv/bin/python" --start
-```
-
-The first command runs in the foreground on supported Unix hosts, including
-Linux and macOS; keep that terminal open. Use one launch method at a time: stop
-the foreground process with Ctrl+C before enabling the Linux user service. The
-installer accepts an absent default `speech.json`, but an explicitly supplied
-`--config` must exist. It only enables `zerus-speech.service` when `--start` is
-supplied. Managed
-profile edits take effect without restarting the service. Changes to socket,
-state, limits or analytics settings still require a service restart. Package
-installation itself never starts or restarts a service. Native agents, tmux and
-DeepSeek processes are independent of this service. Other Unix hosts may run it
-with their existing supervisor or use a configured remote GPU computer.
-
-Return to Voice settings on that processing computer, save model `v3_e2e_rnnt`,
-language `ru` and the prepared device, then run Test on the saved profile. After
-success, explicitly choose it as the default for new recordings. Existing voice
-previews retain their original provider revision until explicitly reselected.
+For startup and persistent-service commands, see
+[Start the speech service](../../docs/speech-setup.md#start-the-speech-service).
+Managed profile edits take effect without restarting the service. Changes to
+socket/state paths, limits or analytics settings require a service restart.
+Native agents, tmux and DeepSeek processes are independent of this service.
 
 ## JSON interface
 

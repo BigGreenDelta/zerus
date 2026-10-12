@@ -3,6 +3,7 @@ package app.zerus.mobile
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
@@ -23,6 +24,7 @@ import java.security.MessageDigest
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -40,7 +42,7 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
         val result = Bundle()
         try {
             check(BuildConfig.DEBUG); smoke()
-            result.putString("stream", "Speech configuration smoke passed: capability gate, no active conversation, native encrypted-key form, bundled offline guide and explicit command copy without changing unsaved fields/key, conflict edit retention, lost-response status-only recovery including missing receipts, saved-profile test, explicit default without preview retargeting, confirmed removal, unchanged pinned voice/typed drafts and Android P256 interoperability.\n")
+            result.putString("stream", "Speech configuration smoke passed: capability gate, no active conversation, native encrypted-key form, provider-specific explicit browser links and visible opening failures without changing unsaved fields/key, conflict edit retention, lost-response status-only recovery including missing receipts, saved-profile test, explicit default without preview retargeting, confirmed removal, unchanged pinned voice/typed drafts and Android P256 interoperability.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             uiAutomation.takeScreenshot()?.let { bitmap ->
@@ -214,33 +216,57 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
         }
         await("configuration without active conversation") { manager.configuration != null }
         check(main { model.selected == null })
-        val bundled = targetContext.assets.open("speech-local-setup.json").bufferedReader().use { SpeechSetupGuide.parse(it.readText()) }
         fun screenshot(name: String) {
             waitForIdleSync(); SystemClock.sleep(500) // Capture after the native dialog enter animation.
             val bitmap = checkNotNull(uiAutomation.takeScreenshot())
             File(targetContext.getExternalFilesDir(null), name).outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
         }
-        val readsBeforeGuide = configReads.get()
-        tap("Local setup guide"); node("Run these steps on ${host.name}."); node(bundled.title)
-        screenshot("speech-local-setup-guide.png")
-        tap("Close setup guide")
-        check(configReads.get() == readsBeforeGuide && writes.get() == 0 && tests.get() == 0 && deletes.get() == 0)
+        val openedDocuments = CopyOnWriteArrayList<String>()
+        val failOpening = AtomicBoolean(false)
+        val browserMonitor = object : ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): ActivityResult? {
+                if (intent.action != Intent.ACTION_VIEW) return null
+                openedDocuments.add(intent.dataString.orEmpty())
+                if (failOpening.getAndSet(false)) throw ActivityNotFoundException("Synthetic missing browser")
+                return ActivityResult(Activity.RESULT_CANCELED, null) // Never launch a browser from the fixture.
+            }
+        }
+        addMonitor(browserMonitor)
+        val document = "https://github.com/ufna/zerus/blob/main/docs/speech-setup.md"
+        val readsBeforeHelp = configReads.get()
+        check(openedDocuments.isEmpty())
+        tap("Speech provider documentation")
+        check(openedDocuments.toList() == listOf(document))
+        check(configReads.get() == readsBeforeHelp && writes.get() == 0 && tests.get() == 0 && deletes.get() == 0)
         tap("Add provider"); node("Processing computer: ${host.name}")
         node(speechServiceReadiness(host, main { manager.configuration }, false))
-        screenshot("speech-local-setup-editor.png")
+        check(openedDocuments.size == 1) { "Opening the editor launched documentation" }
+        tap("Local GigaAM setup")
+        check(openedDocuments.last() == "$document#local-gigaam")
+        screenshot("speech-provider-help-local.png")
         text("Name", "Remote fixture")
         tap("Type: Local GigaAM"); tap("OpenAI-compatible server")
+        node("OpenAI-compatible server setup")
+        check(openedDocuments.size == 2) { "Changing type launched documentation" }
+        check(nodes().none { it.text?.toString() == "Local GigaAM setup" })
         text("Server base URL", "https://remote.example.test/v1"); text("Model", "gigaam")
         tap("API key: No key"); tap("Enter new key"); text("New API key", "synthetic-private-key")
-        tap("Local setup guide"); node("Run these steps on ${host.name}.")
-        val firstCommands = bundled.steps.first { it.commands.isNotEmpty() }
-        val copyLabel = if (firstCommands.commands.size == 1) "Copy commands: ${firstCommands.title}" else "Copy commands 1: ${firstCommands.title}"
-        tap(copyLabel)
-        val copied = main { targetContext.getSystemService(android.content.ClipboardManager::class.java).primaryClip?.getItemAt(0)?.text?.toString() }
-        check(copied == firstCommands.commands.first()) { "Setup command changed during explicit copy" }
-        tap("Close setup guide"); node("Remote fixture")
+        tap("OpenAI-compatible server setup")
+        check(openedDocuments.last() == "$document#openai-compatible-server")
+        node("Remote fixture"); node("https://remote.example.test/v1")
+        failOpening.set(true)
+        tap("OpenAI-compatible server setup")
+        node("Could not open the documentation. Check that a browser is available and try again.")
+        node("Remote fixture"); node("https://remote.example.test/v1")
+        screenshot("speech-provider-help-http-failure.png")
+        tap("OpenAI-compatible server setup")
+        check(openedDocuments.toList() == listOf(document, "$document#local-gigaam",
+            "$document#openai-compatible-server", "$document#openai-compatible-server", "$document#openai-compatible-server"))
+        check(nodes().none { it.text?.toString()?.startsWith("Could not open the documentation.") == true })
+        screenshot("speech-provider-help-http.png")
         check(writes.get() == 0 && tests.get() == 0 && deletes.get() == 0)
-        // The same unsaved key must still decrypt after opening and closing help.
+        removeMonitor(browserMonitor)
+        // The same unsaved key must decrypt after both successful and failed browser dispatch.
         tap("Save provider")
         await("conflict retained editor") { manager.result?.errorCode == "revision_conflict" && manager.pending.isEmpty() }
         node("Remote fixture")

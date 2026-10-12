@@ -272,12 +272,12 @@ relay and never returned to the phone. Saving does not install packages or downl
 weights. **Test** sends synthetic audio to the saved profile, without using the
 microphone or retained recordings. Removal requires confirmation.
 
-**Local setup guide** opens bundled, scrollable instructions from the manager or
-profile editor without a network request. The editor names the processing computer
-and reports its last service check separately from model/device readiness. Local
-model, language and CPU/GPU fields include guidance. Copying a command is explicit;
-opening help preserves unsaved fields and an entered key and never executes commands.
-Both clients package the canonical [local setup guide](../../docs/speech-local-setup.json).
+The editor names the processing computer and reports its last service check separately
+from provider readiness. Brief help and an explicit browser link follow the selected
+type: **Local GigaAM setup** or **OpenAI-compatible server setup**. The manager offers
+**Speech provider documentation** for the general [setup document](../../docs/speech-setup.md).
+Opening a link preserves unsaved fields and the entered key. Links never include profile settings,
+server addresses or credentials. Browser failures are shown beside the link.
 
 Configuration edits use the computer's revision and a durable operation UUID.
 Conflicts retain the form for explicit review; uncertain saves recover through
