@@ -60,7 +60,9 @@ pub fn after(a: &str) -> String {
         return "V".into();
     }
     if head > LAST_HEAD {
-        return format!("z{}", after(&a[1..]));
+        // Below a long run of `z`, a whole key may not fit; `between` adds one character.
+        let next = format!("z{}", after(&a[1..]));
+        return if next.len() <= 64 { next } else { between(a, None) };
     }
     let top = DIGITS.len() - 1;
     let width = head - FIRST_HEAD + 1;
@@ -151,6 +153,10 @@ mod tests {
         assert_eq!(after("zA3"), "zV");
         assert_eq!(after("z"), "zV");
         assert_eq!(after(&format!("y{}", "z".repeat(30))), "z");
+        for a in [format!("{}W", "z".repeat(62)), format!("{}y", "z".repeat(34)), "z".repeat(63)] {
+            let next = after(&a);
+            assert!(valid(&next) && a < next, "{a} -> {next}");
+        }
     }
 
     #[test]
@@ -172,9 +178,11 @@ mod tests {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
-            let len = 1 + (seed % 32) as usize;
+            // Up to 63 characters, often below a run of `z` such as old ranks left.
+            let len = 1 + (seed % 63) as usize;
+            let run = if seed % 3 == 0 { (seed >> 8) as usize % len } else { 0 };
             let a: String = (0..len)
-                .map(|i| DIGITS[((seed >> (i % 8 * 8)) as usize + i * 7) % DIGITS.len()] as char)
+                .map(|i| if i < run { 'z' } else { DIGITS[((seed >> (i % 8 * 8)) as usize + i * 7) % DIGITS.len()] as char })
                 .collect();
             let next = after(&a);
             assert!(valid(&next) && !next.ends_with('0'), "{a} -> {next}");
