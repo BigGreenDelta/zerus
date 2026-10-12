@@ -301,7 +301,7 @@ private:
     QString program() const { return FakeCli::program(script()); }
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
-    QString programInspecting(const QString &name, const QJsonObject &details) const;
+    QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}) const;
     // Created by initTestCase(): listing the functions (-functions, as
     // RunQtShard.cmake does) exits without destroying the test object.
     std::unique_ptr<QTemporaryDir> m_dir;
@@ -334,10 +334,12 @@ elif c=='ls':print('{"host":"mac","ok":true,"sessions":[]}')
     auto catalog=QJsonDocument::fromJson(R"({"state":"ok","path":"/repo","selected_root":"/repo","common_dir":"/repo/.git","worktrees":[{"path":"/repo","kind":"main","branch":"main","available":true},{"path":"/linked","kind":"linked","branch":"feat/worktree-catalog","available":true},{"path":"/empty","kind":"linked","branch":"fix/empty-copy","available":true}]})").object();catalog["sampled_at"]=QDateTime::currentSecsSinceEpoch();catalogFile.write(QJsonDocument(catalog).toJson());
 }
 
-QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details) const
+QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
-    const QByteArray answer = "elif c=='inspect':print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact))) + ")\n";
+    QByteArray answer;
+    if (!child.isEmpty()) answer = "elif c=='inspect' and '--agent' in a:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(child).toJson(QJsonDocument::Compact))) + ")\n";
+    answer += "elif c=='inspect':print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact))) + ")\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? FakeCli::program(fixture) : QString();
 }
@@ -2475,12 +2477,17 @@ void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts()
     QFETCH(bool, busy);
     QFETCH(bool, providerFailure);
     const QString capture = m_dir->filePath("message-capture.json");
+    const QString snapshot = m_dir->filePath(QString("message-inspect-%1.json").arg(QTest::currentDataTag()));
+    QFile::remove(snapshot);
     const QString program = m_dir->filePath("message-hgs");
     QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
     const QByteArray captureLiteral = QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact);
-    QByteArray body = "#!/usr/bin/env python3\nimport sys,json,time\nargs=sys.argv[1:]\nif args[0].startswith('@'): args=args[1:]\n";
+    QByteArray body = "#!/usr/bin/env python3\nimport sys,json,time\nfrom pathlib import Path\nargs=sys.argv[1:]\nif args[0].startswith('@'): args=args[1:]\n";
     body += "capture=" + captureLiteral + "[0]\n";
-    body += R"PY(if args[0]=='inspect':
+    body += "snapshot=Path(" + FakeCli::pythonString(snapshot) + ")\n";
+    body += R"PY(if args[0]=='inspect' and snapshot.exists():
+ print(snapshot.read_text())
+elif args[0]=='inspect':
  print(json.dumps({'tracked':True,'run_id':'run-ready','conversation_id':'conversation-ready','runtime_state':'live','process_state':'running','activity':'idle','phase':'idle','last_event_at':2000000000,'events':[],'cursor':0}))
 elif args[0]=='send':
  payload=json.load(sys.stdin)
@@ -2530,6 +2537,7 @@ elif args[0]=='send':
         {"runtime_state", "live"}, {"process_state", "running"}, {"activity", "idle"}, {"phase", "idle"}, {"last_event_at", 2000000000},
         {"cursor", 1}, {"events", QJsonArray{QJsonObject{{"seq", 1}, {"at", QDateTime::currentMSecsSinceEpoch() / 1000.0},
         {"type", promptEvent}, {"detail", payload.value("text")}}}}};
+    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
     client->inspectionReady({}, "codex/hgs/dashboard", details);
     auto *activity = window.findChild<QTextBrowser *>("activity"); QVERIFY(activity);
     QTRY_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
@@ -2539,10 +2547,11 @@ elif args[0]=='send':
     // not be replaced at all, and must never transiently appear twice.
     auto attachment = QJsonObject{{"name","notes.txt"},{"mime","text/plain"},{"bytes",12},
         {"reference","[File #1]"},{"request_id",payload["request_id"]},{"index",0}};
-    details["attachment_messages"] = QJsonArray{QJsonObject{{"type","UserPromptSubmit"},{"source","hgs_delivery"},
-        {"message_id",payload["request_id"]},{"at",QDateTime::currentMSecsSinceEpoch()/1000.0},
+    details["attachment_messages"] = QJsonArray{QJsonObject{{"type",promptEvent},{"source","hgs_delivery"},
+        {"message_id",payload["request_id"]},{"at",details["events"].toArray().first().toObject()["at"]},
         {"detail",payload["text"]},{"submitted_text",payload["text"]},{"attachments",QJsonArray{attachment}}}};
     details["events"] = QJsonArray{};
+    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
     QSignalSpy documentChanges(activity, &QTextBrowser::textChanged);
     client->inspectionReady({}, "codex/hgs/dashboard", details);
     QTRY_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
@@ -3398,13 +3407,13 @@ elif sys.argv[1]=='answer':
 
 void TestSessionsWindow::activityEscapingAndActions()
 {
-    SessionsWindow window(program()); window.setFleet(fleet()); window.setClipboardMode(true); window.show(); QTest::qWait(50);
-    auto *list = window.findChild<QListWidget *>("sessionList"); list->setCurrentRow(0);
-    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     QJsonObject data{{"tracked", true}, {"conversation_id", "conversation-one"}, {"phase", "idle"}, {"activity", "idle"},
         {"cwd", "/workspace/zerus"}, {"prompt", "<b>literal request</b>"}, {"cursor", 5},
         {"events", QJsonArray{QJsonObject{{"seq", 4}, {"at", 1790928000}, {"type", "PostToolUse"}, {"tool", "Bash"}, {"detail", "<img src='file:///not-loaded'>"}},
             QJsonObject{{"seq", 5}, {"at", 1790928001}, {"type", "Stop"}, {"detail", QString("A response paragraph.\n\n").repeated(60)}}}}};
+    SessionsWindow window(programInspecting("activity-escaping-hgs", data)); window.setFleet(fleet()); window.setClipboardMode(true); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList"); list->setCurrentRow(0);
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     client->inspectionReady({}, "codex/hgs/dashboard", data);
     auto *activity = window.findChild<QTextBrowser *>("activity");
     QTRY_VERIFY(activity->toPlainText().contains("<b>literal request</b>"));
@@ -3617,7 +3626,11 @@ void TestSessionsWindow::fileDropsAcrossSessionPanelKeepDraftAndTarget()
     QTemporaryDir temporary;QVERIFY(temporary.isValid());QFile file(temporary.filePath("report #1.pdf"));
     QVERIFY(file.open(QIODevice::WriteOnly));file.write("%PDF-1.4\nA test report");file.close();
     QMimeData mime;mime.setUrls({QUrl::fromLocalFile(file.fileName())});
-    SessionsWindow window(program());window.resize(1100,760);window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
+    const QJsonObject parent{{"tracked",true},{"conversation_id","conversation-one"},{"run_id","run-one"},
+        {"subagents",QJsonObject{{"child-1",QJsonObject{{"name","Review"},{"state","working"}}}}}};
+    const QJsonObject childDetails{{"parent_conversation_id","conversation-one"},{"conversation_id","child-one"},
+        {"run_id","run-one"},{"send_supported",true}};
+    SessionsWindow window(programInspecting("file-drop-hgs",parent,childDetails));window.resize(1100,760);window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep every word of this draft");
     auto cursor=composer->editor()->textCursor();cursor.select(QTextCursor::Document);composer->editor()->setTextCursor(cursor);
     auto *panel=window.findChild<QWidget *>("sessionDetailPanel");auto *overlay=window.findChild<QWidget *>("sessionFileDropOverlay");QVERIFY(panel);QVERIFY(overlay);
@@ -3649,14 +3662,13 @@ void TestSessionsWindow::fileDropsAcrossSessionPanelKeepDraftAndTarget()
     QDragEnterEvent remote(QPoint(10,10),Qt::CopyAction,&web,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&remote);QVERIFY(!remote.isAccepted());
     // A visible subagent composer owns the panel's drop; the parent draft stays intact.
     auto *client=window.findChild<HgsClient *>();QTest::qWait(60);
-    client->inspectionReady({},"codex/hgs/dashboard",{{"tracked",true},{"conversation_id","conversation-one"},{"run_id","run-one"},
-        {"subagents",QJsonObject{{"child-1",QJsonObject{{"name","Review"},{"state","working"}}}}}});
+    client->inspectionReady({},"codex/hgs/dashboard",parent);
     window.findChild<QTextBrowser *>("subagents")->anchorClicked(QUrl("hgs-agent:child-1"));
-    client->subagentInspectionReady({},"codex/hgs/dashboard","child-1",{},{{"parent_conversation_id","conversation-one"},{"conversation_id","child-one"},{"run_id","run-one"},{"send_supported",true}});
+    client->subagentInspectionReady({},"codex/hgs/dashboard","child-1",{},childDetails);
     auto *child=window.findChild<MessageComposer *>("subagentComposer");QVERIFY(child->isInputVisible());setComposerText(child, "Child draft");
     QDragEnterEvent childEnter(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&childEnter);QVERIFY(childEnter.isAccepted());
     QDropEvent childDrop(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&childDrop);QVERIFY(childDrop.isAccepted());
-    QCOMPARE(child->findChildren<QWidget *>("attachmentRow").size(),1);QVERIFY(child->editor()->toPlainText().contains("Child draft"));
+    QTRY_COMPARE(child->findChildren<QWidget *>("attachmentRow").size(),1);QVERIFY(child->editor()->toPlainText().contains("Child draft"));
     QCOMPARE(composer->findChildren<QWidget *>("attachmentRow").size(),count);QCOMPARE(sent.size(),0);
 }
 

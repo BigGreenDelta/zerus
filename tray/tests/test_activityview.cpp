@@ -44,14 +44,27 @@
 #include <ctime>
 #include <limits>
 #include <QKeySequence>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace {
 // Existing presentation contracts assert the committed document. Keep their
 // setup explicit while the responsiveness tests below use the asynchronous API.
 qint64 threadCpuMs()
 {
+#ifdef Q_OS_WIN
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+        qFatal("Cannot read this test thread's CPU time");
+    const auto ticks = [](FILETIME value) {
+        return (quint64(value.dwHighDateTime) << 32) | value.dwLowDateTime;
+    };
+    return qint64((ticks(kernel) + ticks(user)) / 10000);
+#else
     timespec now{}; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+#endif
 }
 void standardKey(QWidget *widget, QKeySequence::StandardKey key)
 {
