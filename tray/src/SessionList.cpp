@@ -32,25 +32,28 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
         if (!m_activityTimer.isActive()) return;
         const qreal pulse = (1.0 - std::cos((m_activityClock.elapsed() % 1600) * 6.28318530718 / 1600.0)) / 2.0;
         setProperty("workingPulse", pulse);
-        for (int i = 0; i < count(); ++i) {
-            const auto *row = item(i);
-            if (!row->isHidden() && row->data(SessionRoles::Working).toInt() > 0) {
-                const auto rect = visualItemRect(row);
-                if (rect.intersects(viewport()->rect())) viewport()->update(rect);
-            }
+        QHash<QPersistentModelIndex, QRegion> nextRegions;
+        for (const auto &index : m_visibleWorkingRows) {
+            const auto option = animationOption(index);
+            const auto region = SessionDelegate::animationRegion(option, index);
+            const auto previous = m_animationRegions.constFind(index);
+            // Elapsed caption widths can move the badge at a second boundary.
+            // Restore the entire title band before using the new indicator clip.
+            if (previous != m_animationRegions.cend() && *previous != region)
+                viewport()->update(SessionDelegate::elapsedRegion(option, index));
+            else viewport()->update(region);
+            nextRegions.insert(index, region);
         }
+        m_animationRegions = std::move(nextRegions);
     });
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &SessionList::syncActivityAnimation);
     m_elapsedTimer.setInterval(1000);
     connect(&m_elapsedTimer, &QTimer::timeout, this, [this] {
         syncActivityAnimation();
         if (!m_elapsedTimer.isActive()) return;
-        for (int i = 0; i < count(); ++i) {
-            const auto *row = item(i);
-            if (!row->isHidden() && row->data(SessionRoles::Working).toBool() && row->data(SessionRoles::WorkingSince).toDouble() > 0) {
-                const auto rect = visualItemRect(row);
-                if (rect.intersects(viewport()->rect())) viewport()->update(rect);
-            }
+        for (const auto &index : m_visibleWorkingRows) {
+            if (index.data(SessionRoles::WorkingSince).toDouble() > 0)
+                viewport()->update(SessionDelegate::elapsedRegion(animationOption(index), index));
         }
     });
 }
@@ -62,20 +65,33 @@ void SessionList::setActivityAnimationEnabled(bool enabled)
 void SessionList::syncActivityAnimation()
 {
     bool active = false, elapsed = false;
-    if (isVisible() && !window()->isMinimized()) {
-        for (int i = 0; i < count(); ++i) {
-            const auto *row = item(i);
-            if (!row->isHidden() && row->data(SessionRoles::Working).toInt() > 0
-                && visualItemRect(row).intersects(viewport()->rect())) {
+    m_visibleWorkingRows.clear();
+    if (count() && isVisible() && !window()->isMinimized()) {
+        // Walk viewport geometry instead of scanning every hidden/offscreen row.
+        const QRect viewportRect = viewport()->rect();
+        for (int y = viewportRect.top(); y <= viewportRect.bottom();) {
+            const auto index = indexAt(QPoint(viewportRect.center().x(), y));
+            if (!index.isValid()) { ++y; continue; }
+            const QRect row = visualRect(index);
+            if (index.data(SessionRoles::Working).toInt() > 0) {
+                m_visibleWorkingRows.append(index);
                 active = m_animateActivity;
-                elapsed |= row->data(SessionRoles::WorkingSince).toDouble() > 0;
+                elapsed |= !index.data(SessionRoles::Header).toBool() && index.data(SessionRoles::WorkingSince).toDouble() > 0;
             }
+            y = qMax(y + 1, row.bottom() + 1);
         }
     }
     if (active && !m_activityTimer.isActive()) { m_activityClock.start(); m_activityTimer.start(); }
-    else if (!active && m_activityTimer.isActive()) { m_activityTimer.stop(); setProperty("workingPulse", 0.0); viewport()->update(); }
+    else if (!active && m_activityTimer.isActive()) { m_activityTimer.stop(); setProperty("workingPulse", 0.0); viewport()->update(); m_animationRegions.clear(); }
     if (elapsed && !m_elapsedTimer.isActive()) m_elapsedTimer.start();
     else if (!elapsed) m_elapsedTimer.stop();
+}
+QStyleOptionViewItem SessionList::animationOption(const QModelIndex &index) const
+{
+    QStyleOptionViewItem option; initViewItemOption(&option);
+    option.rect = visualRect(index);
+    option.state.setFlag(QStyle::State_Selected, selectionModel()->isSelected(index));
+    return option;
 }
 void SessionList::showEvent(QShowEvent *event) { WorkspaceList::showEvent(event); syncActivityAnimation(); }
 void SessionList::hideEvent(QHideEvent *event) { m_activityTimer.stop(); m_elapsedTimer.stop(); setProperty("workingPulse", 0.0); WorkspaceList::hideEvent(event); }
@@ -372,7 +388,9 @@ void SessionList::keyPressEvent(QKeyEvent *e)
 }
 void SessionList::paintEvent(QPaintEvent *e)
 {
+    m_paintRegion = e->region();
     QListWidget::paintEvent(e);
+    m_paintRegion = {};
     if (m_indicator.isEmpty()) return;
     QPainter p(viewport()); p.setRenderHint(QPainter::Antialiasing);
     const QColor accent(property("hgsDark").toBool() ? "#8bdfc0" : "#167357");

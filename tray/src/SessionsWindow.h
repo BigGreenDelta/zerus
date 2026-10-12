@@ -237,7 +237,7 @@ private:
     void applyQueuedModelSettings();
     void sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {}, const QString &compactionId = {}, bool contextChosen = false);
     void deliverMessage(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
-                        const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId);
+                        const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId, bool fullContextConsent = false, const QJsonObject &evidence = {});
     void messageAction(const QString &id, const QString &action);
     void finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error = {}, bool uncertain = false);
     void reconcileMessages();
@@ -281,6 +281,9 @@ private:
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
+    QSet<QString> m_retryReads;
+    QHash<QString, quint64> m_waitingPreparations;
+    quint64 m_waitingPreparationSerial = 0;
     bool m_draftRefreshPending = false;
     int m_tick = 0;
     QTimer m_timer;
@@ -367,6 +370,10 @@ private:
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;
     QHash<QString, QJsonArray> m_localMessages;
+    QHash<QString, QJsonObject> m_pendingSendEvidence;
+    QHash<QString, int> m_pendingEvidenceUsers;
+    void beginSendEvidence(const QString &key, const QJsonObject &data);
+    void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
     bool m_confirmingQuestionCache = false;

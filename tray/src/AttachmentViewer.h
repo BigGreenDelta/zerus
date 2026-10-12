@@ -14,14 +14,26 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <functional>
+#include <memory>
+#include <QFutureWatcher>
+#include <QPromise>
+#include <QRunnable>
+#include <QThreadPool>
+#include <QMutex>
+#include <QMutexLocker>
 
 namespace AttachmentFiles {
 inline QString root() {return QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/attachments";}
-inline QString store(const QString &name,const QByteArray &bytes) {
+// Capture the settings-derived root on the caller's thread. Workers receive
+// only immutable values and never query application settings or UI objects.
+inline QString storeAt(const QString &cacheRoot, const QString &name, const QByteArray &bytes) {
     if(bytes.isEmpty() || bytes.size()>HgsClient::MaximumAttachmentBytes)return {};
-    const auto folder=root()+"/"+QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());
-    if(!QDir().mkpath(folder))return {};
-    QFile::setPermissions(root(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+    const auto digest=QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());
+    if(!QDir().mkpath(cacheRoot))return {};
+    const auto canonicalRoot=QFileInfo(cacheRoot).canonicalFilePath();
+    const auto folder=cacheRoot+"/"+digest;
+    if(!QDir().mkpath(folder) || QFileInfo(folder).canonicalFilePath()!=canonicalRoot+'/'+digest)return {};
+    QFile::setPermissions(cacheRoot,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     QFile::setPermissions(folder,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     auto base=QFileInfo(name).fileName();base.replace(QRegularExpression("[^\\p{L}\\p{N}._ -]"),"_");
     if(base.isEmpty() || base=="." || base=="..")base="attachment";
@@ -29,10 +41,84 @@ inline QString store(const QString &name,const QByteArray &bytes) {
     file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
     if(file.write(bytes)!=bytes.size() || !file.commit())return {};return path;
 }
-inline QString cached(const QJsonObject &file) {
+inline QString store(const QString &name,const QByteArray &bytes) { return storeAt(root(),name,bytes); }
+inline QString cachedAt(const QString &cacheRoot, const QJsonObject &file) {
     const QFileInfo info(file.value("local_path").toString());const auto path=info.canonicalFilePath();
-    const auto allowed=QFileInfo(root()).canonicalFilePath();
-    return !allowed.isEmpty() && path.startsWith(allowed+'/') && info.isFile() && info.size()<=HgsClient::MaximumAttachmentBytes?path:QString();
+    const auto allowed=QFileInfo(cacheRoot).canonicalFilePath();
+    return !allowed.isEmpty() && path.startsWith(allowed+'/') && info.isFile() && info.size()>0
+        && info.size()<=HgsClient::MaximumAttachmentBytes?path:QString();
+}
+inline QString cached(const QJsonObject &file) { return cachedAt(root(),file); }
+inline QThreadPool &pool() {
+    static QThreadPool value;
+    static const bool configured=[] { value.setMaxThreadCount(2); return true; }();
+    Q_UNUSED(configured); return value;
+}
+inline QMutex &observerMutex() { static QMutex value; return value; }
+inline std::function<void()> &ioObserver() { static std::function<void()> value; return value; }
+// Deterministic tests can hold disk work without blocking the GUI thread.
+inline void setIoObserver(std::function<void()> observer) { QMutexLocker lock(&observerMutex()); ioObserver()=std::move(observer); }
+inline std::function<void()> capturedObserver() { QMutexLocker lock(&observerMutex()); return ioObserver(); }
+template<class Result, class Work, class Done>
+inline void runAsync(QObject *owner, Work work, Done done) {
+    if(!owner)return;
+    auto promise=std::make_shared<QPromise<Result>>();promise->start();
+    auto *watcher=new QFutureWatcher<Result>(owner);
+    QObject::connect(watcher,&QFutureWatcher<Result>::finished,owner,[watcher,done=std::move(done)]() mutable {
+        const auto result=watcher->result();watcher->deleteLater();done(result);
+    });
+    watcher->setFuture(promise->future());
+    pool().start(QRunnable::create([promise,work=std::move(work)]() mutable {
+        promise->addResult(work());promise->finish();
+    }));
+}
+struct Prepared { QJsonArray files; QString error; };
+inline void prepareAsync(const QList<MessageAttachment> &attachments, QObject *owner, std::function<void(QJsonArray,QString)> done) {
+    if(attachments.isEmpty()) { if(owner)QTimer::singleShot(0,owner,[done=std::move(done)]{done({},{});}); return; }
+    const auto cacheRoot=root();const auto observer=capturedObserver();
+    runAsync<Prepared>(owner,[attachments,cacheRoot,observer] {
+        if(observer)observer();
+        const auto failure=[] { return Prepared{{},QObject::tr("Could not save the attachments. Your draft was kept without sending.")}; };
+        if(attachments.size()>HgsClient::MaximumAttachments)return failure();
+        qsizetype total=0;
+        for(const auto &attachment:attachments) {
+            if(attachment.data.isEmpty() || attachment.data.size()>HgsClient::MaximumAttachmentBytes)return failure();
+            total+=attachment.data.size();if(total>HgsClient::MaximumAttachmentsBytes)return failure();
+        }
+        Prepared result;
+        for(const auto &attachment:attachments) {
+            const auto path=storeAt(cacheRoot,attachment.name,attachment.data);if(path.isEmpty())return failure();
+            result.files.append(QJsonObject{{"name",attachment.name},{"mime",attachment.mime},{"bytes",qint64(attachment.data.size())},
+                {"reference",attachment.reference},{"local_path",path}});
+        }
+        return result;
+    },[done=std::move(done)](const Prepared &result) {done(result.files,result.error);});
+}
+struct Read { QList<MessageAttachment> attachments; QString error; };
+inline void readAsync(const QJsonArray &files, QObject *owner, std::function<void(QList<MessageAttachment>,QString)> done) {
+    if(files.isEmpty()) { if(owner)QTimer::singleShot(0,owner,[done=std::move(done)]{done({},{});}); return; }
+    const auto cacheRoot=root();const auto observer=capturedObserver();
+    runAsync<Read>(owner,[files,cacheRoot,observer] {
+        if(observer)observer();
+        const auto failure=[] { return Read{{},QObject::tr("The saved attachment is unavailable or changed. Attach it again before sending.")}; };
+        if(files.size()>HgsClient::MaximumAttachments)return failure();
+        Read result;qsizetype total=0;
+        for(const auto &value:files) {
+            if(!value.isObject())return failure();
+            const auto metadata=value.toObject();const auto path=cachedAt(cacheRoot,metadata);
+            QFile file(path);if(path.isEmpty() || !file.open(QIODevice::ReadOnly))return failure();
+            // Bound the allocation even if the file grows after its initial stat.
+            const auto limit=qMin(HgsClient::MaximumAttachmentBytes,HgsClient::MaximumAttachmentsBytes-total);
+            const auto bytes=file.read(limit+1);
+            if(file.error()!=QFileDevice::NoError || bytes.isEmpty() || bytes.size()>limit)return failure();
+            total+=bytes.size();if(total>HgsClient::MaximumAttachmentsBytes)return failure();
+            if(!metadata.value("bytes").isDouble() || metadata.value("bytes").toDouble(-1)!=bytes.size())return failure();
+            const auto digest=QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());
+            if(QFileInfo(path).dir().dirName()!=digest)return failure();
+            result.attachments.append({metadata.value("name").toString(),metadata.value("mime").toString(),bytes,metadata.value("reference").toString()});
+        }
+        return result;
+    },[done=std::move(done)](const Read &result) {done(result.attachments,result.error);});
 }
 }
 
@@ -44,10 +130,16 @@ public:
     explicit AttachmentLoader(HgsClient *client, QObject *parent=nullptr) : QObject(parent), m_client(client) {
         connect(client,&HgsClient::attachmentReady,this,[this](quint64 id,const QJsonObject &metadata,const QByteArray &bytes) {
             if(!m_pending.contains(id))return;
-            const auto path=AttachmentFiles::store(metadata.value("name").toString(),bytes);
-            finish(id,path,path.isEmpty()?tr("Could not save the attachment."):QString());
+            if(m_saving.contains(id))return;
+            m_saving.insert(id);
+            AttachmentFiles::prepareAsync({MessageAttachment{metadata.value("name").toString(),metadata.value("mime").toString(),bytes,{}}},this,
+                [this,id](const QJsonArray &files,const QString &error) {
+                    m_saving.remove(id);
+                    const auto path=files.isEmpty()?QString():files.first().toObject().value("local_path").toString();
+                    finish(id,path,error.isEmpty()?QString():tr("Could not save the attachment."));
+                });
         });
-        connect(client,&HgsClient::attachmentFailed,this,[this](quint64 id,const QString &error) { finish(id,{},error); });
+        connect(client,&HgsClient::attachmentFailed,this,[this](quint64 id,const QString &error) { if(!m_saving.contains(id))finish(id,{},error); });
     }
     void fetch(const QString &host,const QString &session,const QString &conversation,const QString &archive,
                const QString &agent,const QJsonObject &file,Callback done,bool priority=false) {
@@ -92,6 +184,7 @@ private:
     }
     void finish(quint64 id,const QString &path,const QString &error) {
         if(!m_pending.contains(id))return;
+        m_saving.remove(id);
         const auto key=m_pending.take(id);const auto job=m_jobs.take(key);
         if(!path.isEmpty()) {if(m_paths.size()>=256)m_paths.erase(m_paths.begin());m_paths.insert(key,path);}
         for(const auto &done:job.callbacks)done(path,error);
@@ -102,4 +195,5 @@ private:
     QStringList m_queue;
     QHash<QString,Job> m_jobs;
     QHash<quint64,QString> m_pending;
+    QSet<quint64> m_saving;
 };

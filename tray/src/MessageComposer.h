@@ -44,9 +44,15 @@ public:
                           bool enabled, const QString &reason, const QString &pendingModel = {},
                           const QString &pendingEffort = {}, const QString &applyWhen = {});
     void setSettingsTerminalAvailable(bool available);
+    // Only a successful callback permits transport; pending work locks this exact draft.
+    void prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done);
+    bool isPreparingSending(const QString &key) const { return m_preparingKeys.contains(key); }
+    bool isDraftLoading(const QString &key) const { return m_loadingKeys.contains(key); }
+    // UI convenience: acceptance is asynchronous. Transport owners use prepareSendingAsync.
     bool setSending(const QString &key, bool preserveDraft = false);
     // A later send awaits startup/compaction. Keep its payload visible and
     // selectable, while locking edits. A restart restores an ordinary draft.
+    void prepareWaitingToSendAsync(const QString &key, const QString &reason, std::function<void(bool)> done);
     bool setWaitingToSend(const QString &key, const QString &reason);
     bool isWaitingToSend(const QString &key) const { return m_waitingSends.contains(key); }
     bool draftMatches(const QString &key, const QString &text, const QList<MessageAttachment> &attachments) const;
@@ -57,7 +63,7 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canAttachFiles() const { return !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -83,7 +89,7 @@ protected:
 
 private:
     using Draft = ComposerDraft;
-    bool saveDraft(const QString &key, bool asynchronous = false);
+    bool saveDraft(const QString &key);
     void send();
     void restoreDraft();
     void notifyDraft(const QString &key);
@@ -108,8 +114,11 @@ private:
     QHash<QString, Draft> m_preservedDrafts;
     QHash<QString, QString> m_waitingSends;
     QSet<QString> m_unsent;   // keys whose last reported hasDraft() was true
-    mutable QSet<QString> m_storedDrafts;
-    mutable bool m_draftsIndexed = false;
+    QSet<QString> m_loadingKeys;
+    QSet<QString> m_preparingKeys;
+    QSet<QString> m_preparingWaiting;
+    QSet<QString> m_renamingKeys;
+    QSet<QString> m_storedDrafts;
     ComposerDraftStore m_draftStore;
     QHash<QString, quint64> m_saveRevision;
     QSet<QString> m_savingKeys;
