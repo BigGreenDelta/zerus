@@ -21,5 +21,6 @@ private:
     void dispatch(const QString &host, const QJsonObject &payload, Reply done, const QString &session = {});
     QString m_executable;
     QSet<QString> m_supported;
+    QSet<QString> m_managementSupported;
     QSet<QString> m_voiceSupported;
 };

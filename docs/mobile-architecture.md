@@ -705,6 +705,15 @@ row says "Update Zerus on this computer to open attachments."
 
 ### Voice input
 
+The provider manager targets an explicitly selected authorized processing
+computer, independently of the open conversation. It creates, edits, tests and
+removes Local GigaAM or OpenAI-compatible HTTP profiles through the
+[speech management API](speech-providers.md). Profile credentials stay on the
+processing host; Android seals replacement keys before the durable relay queue.
+Forms pin host and configuration revision, keep key entry only in memory, and
+retain ambiguous operation identities for status checks without resubmission.
+Provider management does not alter a captured voice preview or select a default.
+
 Voice creates a persistent audio message. Record, stop, and review the separate
 voice draft with Play, Discard or **Send voice**. The typed draft is preserved.
 The phone encrypts the retained WAV and request UUID before sending. Closing or

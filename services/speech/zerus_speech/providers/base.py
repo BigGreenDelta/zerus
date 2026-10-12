@@ -8,3 +8,10 @@ class Provider(Protocol):
 
 class Cancelled(Exception):
     pass
+
+
+class ProviderError(Exception):
+    """Only a reviewed error code crosses the service boundary."""
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)

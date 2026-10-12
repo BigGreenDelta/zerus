@@ -133,6 +133,8 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_peer_migration.py -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
           env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
+          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech_config.py -v
+          env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech_config.py -v
       - name: Build the deployment image
         run: docker build --tag zerus-relay-contract services/mobile
       - name: Enforce the 256 MiB runtime envelope

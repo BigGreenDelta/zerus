@@ -272,6 +272,32 @@ planned fleet analytics architecture are described in
 [analytics](../../../docs/analytics.md). API v1 remains trusted TLS transport;
 the relay can see audio and status responses in transit.
 
+## Speech provider management
+
+The additive computer-scoped operations `speech_config`, `speech_profile_upsert`,
+`speech_profile_remove`, `speech_profile_test` and `speech_config_status` manage
+profiles independently of conversation selection. They require both relay and
+target capabilities; the connector probes the distinct native help marker
+`Speech profile management v1`. Exact machine identity and configuration revision
+are checked by the host. Status is additionally bound to the original device,
+workspace and physical computer route.
+
+Mobile replacement credentials must use the host's sealed P256/HKDF/AES-GCM
+envelope; plaintext replacement keys are rejected before persistence. The
+connector validates redacted responses and removes CLI/SSH stderr from management
+errors. Completed mutation bodies are erased while their hashes and receipts
+prevent replay; management reads expire after 120 seconds. Two additive indexes
+cover management reads and body cleanup on both storage backends. Update all
+PostgreSQL workers together through the existing backup/drain procedure.
+
+The complete [profile and credential contract](../../../docs/speech-providers.md)
+also defines explicit synthetic tests and optional voice/ASR `profile_revision`
+pinning. Qualification runs `test_mobile_speech_config.py` against both released
+HTTP implementations, plus local Rust and isolated PostgreSQL cross-worker
+contracts. It covers real connector/CLI configuration without an inference
+runtime, malformed and plaintext keys, identity conflicts, response redaction,
+status ownership, short retention and exact payload accounting.
+
 ## Capacity evidence
 
 Run `tests/load.py` through the repository's Python test environment after building

@@ -26,11 +26,12 @@ def validate(operation, payload, request_id):
             raise ValueError("invalid voice conversation identity")
     if operation == "voice_submit":
         route = payload["speech"]
-        if not isinstance(route, dict) or set(route) != {"machine_id", "profile_id"}:
+        if not isinstance(route, dict) or not {"machine_id", "profile_id"} <= set(route) or set(route) - {"machine_id", "profile_id", "profile_revision"}:
             raise ValueError("invalid voice speech route")
         speech.identity(route["machine_id"])
         speech.validate("speech_submit", {"request_id": request_id,
-                        "profile_id": route["profile_id"], "audio": payload["audio"]}, request_id)
+                        "profile_id": route["profile_id"], "audio": payload["audio"],
+                        **({"profile_revision": route["profile_revision"]} if "profile_revision" in route else {})}, request_id)
     elif "message_id" in extra:
         speech.identity(payload["message_id"])
 

@@ -126,6 +126,122 @@ async fn voice_acceptance_erases_relay_audio_and_preserves_shared_conversation_a
     f.close().await;
 }
 
+#[test]
+fn voice_profile_revision_is_optional_bounded_and_exact() {
+    let mut request = voice_command(&Uuid::new_v4().to_string(), "voice_submit", None);
+    protocol::request(&request).unwrap();
+    request["payload"]["speech"]["profile_revision"] = json!(7);
+    protocol::request(&request).unwrap();
+    for revision in [
+        json!(-1),
+        json!(true),
+        json!("7"),
+        json!(9_007_199_254_740_992u64),
+    ] {
+        request["payload"]["speech"]["profile_revision"] = revision;
+        assert!(protocol::request(&request).is_err());
+    }
+}
+
+fn speech_config_command(computer: &str, op: &str, previous: Option<&str>) -> Value {
+    let id = Uuid::new_v4().to_string();
+    let owner = "00000000-0000-4000-8000-000000000001";
+    let payload = match op {
+        "speech_profile_upsert" => {
+            json!({"request_id":id,"expected_machine_id":owner,"expected_revision":0,
+            "profile":{"id":"fixture","name":"Fixture provider","adapter":"openai_http","model":"fixture",
+                "language":"ru","base_url":"https://speech.example.invalid/v1","allow_insecure_http":false},
+            "credential":{"mode":"keep"}})
+        }
+        "speech_config_status" => {
+            json!({"operation_id":previous.unwrap(),"expected_machine_id":owner})
+        }
+        _ => json!({}),
+    };
+    json!({"request_id":id,"computer_id":computer,"operation":op,"session":"","payload":payload})
+}
+
+async fn speech_config_storage_contract(f: &Fixture, writer: &Store) {
+    f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":protocol::SPEECH}})).await;
+    let change = speech_config_command(&f.node.id, "speech_profile_upsert", None);
+    f.submit(&change).await.unwrap();
+    assert!(writer.claim(&f.node, false).await.unwrap().is_some());
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
+    let result = json!({"schema":1,"machine_id":change["payload"]["expected_machine_id"],
+        "request_id":change["request_id"],"state":"completed","revision":1});
+    let reply = json!({"state":"completed","result":result,"error":null});
+    writer
+        .result(
+            &f.node,
+            s(&change, "request_id"),
+            &reply,
+            Some(&canonical(&result).unwrap()),
+        )
+        .await
+        .unwrap();
+    let row = f
+        .store
+        .db
+        .one(
+            "SELECT body,body_bytes FROM requests WHERE id=?",
+            args![&change["request_id"]],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["body"], "");
+    assert_eq!(row["body_bytes"], 0);
+    assert_eq!(f.submit(&change).await.unwrap()["result"], result);
+    assert!(writer.claim(&f.node, false).await.unwrap().is_none());
+    let mut conflict = change.clone();
+    conflict["payload"]["profile"]["name"] = json!("Changed");
+    assert!(f.submit(&conflict).await.is_err());
+    let status = speech_config_command(
+        &f.node.id,
+        "speech_config_status",
+        Some(s(&change, "request_id")),
+    );
+    f.submit(&status).await.unwrap();
+    assert!(writer.claim(&f.node, false).await.unwrap().is_some());
+    writer
+        .result(
+            &f.node,
+            s(&status, "request_id"),
+            &reply,
+            Some(&canonical(&result).unwrap()),
+        )
+        .await
+        .unwrap();
+    writer
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 121.0, &status["request_id"]],
+        )
+        .await
+        .unwrap();
+    writer.maintain(false).await.unwrap();
+    assert!(f
+        .store
+        .db
+        .one(
+            "SELECT id FROM requests WHERE id=?",
+            args![&status["request_id"]]
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(f.submit(&change).await.unwrap()["result"], result);
+    f.check_accounting().await;
+}
+
+#[tokio::test]
+async fn speech_config_receipts_erase_bodies_and_expire_reads() {
+    let f = Fixture::new().await;
+    speech_config_storage_contract(&f, &f.store).await;
+    f.close().await;
+}
+
 fn speech_command(computer: &str, op: &str, job: Option<&str>) -> Value {
     let id = Uuid::new_v4().to_string();
     let payload = match op {
@@ -1830,6 +1946,7 @@ async fn postgres_cross_worker_speech() {
         f.submit(&voice).await.unwrap()["result"],
         accepted["result"]
     );
+    speech_config_storage_contract(&f, &second).await;
     f.check_accounting().await;
     second.db.close().await;
     f.close().await;

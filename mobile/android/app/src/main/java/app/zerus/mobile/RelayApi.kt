@@ -98,6 +98,18 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         }
         return receipt.getJSONObject("result")
     }
+    internal suspend fun speechConfiguration(connection: Connection, host: SpeechConfigHost, operation: String,
+        payload: JSONObject, id: String = UUID.randomUUID().toString()): JSONObject {
+        require(host.key.connectionId == connection.id && operation in SpeechConfigProtocol.operations)
+        if (operation in SpeechConfigProtocol.mutations) require(payload.string("request_id") == id)
+        if (operation != "speech_config") require(payload.string("expected_machine_id") == host.machineId)
+        val initial = call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
+            .put("computer_id", host.key.computerId).put("session", "").put("operation", operation).put("payload", payload))
+        check(initial.string("request_id") == id) { "The gateway returned a different configuration receipt." }
+        val receipt = await(connection, initial)
+        check(receipt.string("state") == "completed") { "The computer has not confirmed this configuration operation. Check its status." }
+        return receipt.getJSONObject("result")
+    }
     suspend fun receipt(connection: Connection, id: String) = call(connection.url, connection.token, "/v1/requests/$id").also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }

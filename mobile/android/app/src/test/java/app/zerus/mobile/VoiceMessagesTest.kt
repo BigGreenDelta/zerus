@@ -89,6 +89,25 @@ class VoiceMessagesTest {
         assertTrue(reason(profiles = listOf(computers.single().copy(profiles = listOf(chosen.copy(maxDurationMs = 1_000))))).isNotBlank())
         assertEquals(SpeechSelection(MachineKey(target.connectionId, machine), "chosen"), draft.selection)
     }
+    @Test fun providerRevisionPinsPreviewOutgoingAndSubmitWithoutAdoptingEdits() {
+        val machine = "b4075bf0-9c22-4a67-b768-55af2d2936a4"
+        val preview = VoiceDraft(target, machine, "chosen", audio, 200, 50.0, profileRevision = 7)
+        val saved = VoiceState(preview.selection, preview, listOf(entry().copy(profileRevision = 7, uploadState = "uncertain")))
+        assertEquals(saved, VoiceCodec.decode(VoiceCodec.encode(saved)))
+        assertEquals(7L, VoiceProtocol.provider(preview).getLong("profile_revision"))
+        val profile = SpeechProfile("chosen", "Chosen", "synthetic", true, profileRevision = 7)
+        fun reason(p: SpeechProfile) = VoiceRoutes.providerReason(preview, target, false, listOf(VoiceComputer(machine, "GPU", listOf(p))))
+        assertEquals("", reason(profile))
+        assertTrue(reason(profile.copy(profileRevision = 8)).contains("changed"))
+        assertTrue(reason(profile.copy(profileRevision = null)).contains("changed"))
+        val legacy = preview.copy(profileRevision = null)
+        assertFalse(VoiceProtocol.provider(legacy).has("profile_revision"))
+        assertTrue(VoiceRoutes.providerReason(legacy, target, false, listOf(VoiceComputer(machine, "GPU", listOf(profile)))).isNotBlank())
+        val raw = JSONObject().put("schema", 1).put("profiles", JSONArray().put(JSONObject().put("id", "chosen").put("available", true).put("profile_revision", 7)))
+        assertEquals(7L, SpeechProtocol.profiles(raw).single().profileRevision)
+        raw.getJSONArray("profiles").getJSONObject(0).put("profile_revision", 7.5)
+        assertThrows(IllegalArgumentException::class.java) { SpeechProtocol.profiles(raw) }
+    }
     @Test fun rejectsForeignIdentityAndUnboundedAudio() {
         val raw = JSONObject().put("schema", 1).put("message", VoiceProtocol.json(message()))
         assertEquals(message(), VoiceProtocol.response(raw, target, id))

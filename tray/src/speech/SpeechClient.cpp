@@ -13,12 +13,18 @@ ProcessRunner::Request command(const QString &executable, const QString &host, Q
     request.arguments = args; request.timeoutMs = 30000; request.input = QByteArray();
     return request;
 }
-QString failure(const ProcessRunner::Result &result)
+bool management(const QJsonObject &payload)
+{
+    const auto action = payload.value("action").toString();
+    return action.startsWith("config_") || action.startsWith("profile_");
+}
+QString failure(const ProcessRunner::Result &result, bool redact = false)
 {
     if (result.outcome == ProcessRunner::Result::TimedOut) return QObject::tr("Speech computer did not respond in time.");
     if (result.outcome == ProcessRunner::Result::FailedToStart) return QObject::tr("Could not start hgs: %1").arg(result.errorString);
     if (result.exitStatus != QProcess::NormalExit || result.exitCode != 0)
-        return QObject::tr("Speech request failed: %1").arg(QString::fromUtf8(result.standardError).trimmed().left(1000));
+        return redact ? QObject::tr("The provider request could not be completed. Check its status before trying again.")
+                      : QObject::tr("Speech request failed: %1").arg(QString::fromUtf8(result.standardError).trimmed().left(1000));
     return {};
 }
 }
@@ -36,14 +42,19 @@ SpeechClient::Reply SpeechClient::reportCompletion(Reply done)
 void SpeechClient::request(const QString &host, const QJsonObject &payload, Reply done)
 {
     done = reportCompletion(std::move(done));
-    if (m_supported.contains(host)) { dispatch(host, payload, std::move(done)); return; }
+    const bool manage = management(payload);
+    if (manage ? m_managementSupported.contains(host) : m_supported.contains(host)) { dispatch(host, payload, std::move(done)); return; }
     ProcessRunner::run(command(m_executable, host, {"--help"}), this,
-        [this, host, payload, done](const ProcessRunner::Result &result) {
-            const auto error = failure(result);
-            if (!error.isEmpty()) { done({}, error); return; }
+        [this, host, payload, done, manage](const ProcessRunner::Result &result) {
+            const auto error = failure(result, manage);
+            if (!error.isEmpty()) { done(manage ? QJsonObject{{"client_dispatch_started", false}} : QJsonObject{}, error); return; }
             if (!QRegularExpression(QStringLiteral("\\bspeech\\s+--json\\b")).match(QString::fromUtf8(result.standardOutput)).hasMatch()) {
-                done({}, tr("Voice input needs an updated hgs CLI on the selected speech computer.")); return;
+                done(manage ? QJsonObject{{"client_dispatch_started", false}} : QJsonObject{}, tr("Voice input needs an updated hgs CLI on the selected speech computer.")); return;
             }
+            if (manage && !result.standardOutput.contains("Speech profile management v1")) {
+                done({{"client_dispatch_started", false}}, tr("Update hgs on this computer to manage speech providers.")); return;
+            }
+            if (manage) m_managementSupported.insert(host);
             m_supported.insert(host); dispatch(host, payload, done);
         });
 }
@@ -68,13 +79,14 @@ void SpeechClient::dispatch(const QString &host, const QJsonObject &payload, Rep
 {
     auto request = command(m_executable, host, session.isEmpty() ? QStringList{"speech", "--json"} : QStringList{"voice", session, "--json"});
     request.input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-    ProcessRunner::run(std::move(request), this, [done](const ProcessRunner::Result &result) {
-        const auto error = failure(result);
+    ProcessRunner::run(std::move(request), this, [done, redact = management(payload)](const ProcessRunner::Result &result) {
+        const auto error = failure(result, redact);
         if (!error.isEmpty()) { done({}, error); return; }
         QJsonParseError parse;
         const auto json = QJsonDocument::fromJson(result.standardOutput, &parse);
         if (result.standardOutput.size() > 1024 * 1024 || parse.error != QJsonParseError::NoError || !json.isObject()
             || json.object().value("schema").toInt() != 1) { done({}, tr("The speech computer returned an invalid response.")); return; }
-        done(json.object(), {});
+        auto reply = json.object(); reply.remove("client_dispatch_started");
+        done(reply, {});
     });
 }

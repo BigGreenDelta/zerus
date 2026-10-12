@@ -10,6 +10,8 @@
 #include <QDialog>
 #include <QComboBox>
 #include <QClipboard>
+#include <QCheckBox>
+#include <QLineEdit>
 #include <QFile>
 #include <QJsonDocument>
 #include <QLabel>
@@ -66,11 +68,50 @@ with (root / 'calls').open('a') as log:
     log.write(json.dumps(sys.argv[1:]) + '\n')
 if '--help' in sys.argv:
     while (root / 'help-gate').exists(): time.sleep(.01)
-    print('hgs ls --json' if '@legacy' in sys.argv or (root / 'legacy').exists() else 'hgs speech --json\nhgs voice <session> --json')
+    print('hgs ls --json' if '@legacy' in sys.argv or (root / 'legacy').exists() else 'hgs speech --json\nhgs voice <session> --json' + ('' if (root/'management-legacy').exists() else '\nSpeech profile management v1'))
 else:
     payload = json.load(sys.stdin)
     (root / 'payload').write_text(json.dumps(payload))
-    if 'voice' in sys.argv:
+    if payload['action'].startswith(('config_','profile_')):
+        action=payload['action'];machine='cccccccc-cccc-4ccc-cccc-cccccccccccc' if '@other-host' in sys.argv else 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
+        configured=json.loads((root/'profiles').read_text()) if (root/'profiles').exists() else [{'id':'russian','name':'Russian','available':True}]
+        profiles=[dict({'revision':1,'adapter':'gigaam','model':'v3_e2e_rnnt','language':'ru','device':'cpu','credential':{'configured':False}},**p) for p in configured]
+        state_path=root/('config-'+machine); state=json.loads(state_path.read_text()) if state_path.exists() else {'revision':1,'profiles':profiles}
+        if action=='config_list':
+            (root/'config-started').write_text('started')
+            while (root/'config-gate').exists():time.sleep(.01)
+            print(json.dumps(dict(schema=1,machine_id=machine,service={'available':True},adapters=[{'id':'gigaam','models':['v3_e2e_rnnt','v3_e2e_ctc'],'devices':['cpu','cuda','mps']},{'id':'openai_http'}],**state)))
+            sys.exit(0)
+        ops_path=root/'operations';ops=json.loads(ops_path.read_text()) if ops_path.exists() else {}
+        if action=='config_status':
+            if payload['operation_id'] in ops and ops[payload['operation_id']]['state']=='running':
+                ops[payload['operation_id']]['state']='completed';ops_path.write_text(json.dumps(ops))
+            print(json.dumps(ops.get(payload['operation_id'],dict(schema=1,machine_id=machine,request_id=payload['operation_id'],state='failed',error_code='operation_not_found',error='Operation not found'))));sys.exit(0)
+        with (root/'management-actions').open('a') as log:log.write(json.dumps(payload)+'\n')
+        request_id=payload['request_id'];uuid.UUID(request_id)
+        result=dict(schema=1,machine_id=machine,request_id=request_id,state='completed')
+        if request_id in ops: print(json.dumps(ops[request_id]));sys.exit(0)
+        if payload['expected_machine_id']!=machine:result.update(state='failed',error_code='wrong_machine',error='Computer changed')
+        elif action!='profile_test' and (payload['expected_revision']!=state['revision'] or (root/'revision-conflict').exists()):result.update(state='failed',error_code='revision_conflict',error='Configuration changed')
+        elif action=='profile_upsert':
+            profile=payload['profile'];old=next((p for p in state['profiles'] if p['id']==profile['id']),{})
+            credential=payload['credential'];configured=old.get('credential',{}).get('configured',False)
+            if credential['mode']=='replace':assert credential['value'];configured=True
+            elif credential['mode']=='remove':configured=False
+            state['revision']+=1;profile=dict(profile,revision=state['revision'],credential={'configured':configured},available=True)
+            state['profiles']=[p for p in state['profiles'] if p['id']!=profile['id']]+[profile]
+            result.update(profile_id=profile['id'],profile_revision=profile['revision'],revision=state['revision'])
+        elif action=='profile_remove':
+            state['revision']+=1;state['profiles']=[p for p in state['profiles'] if p['id']!=payload['profile_id']];result.update(revision=state['revision'],profile_id=payload['profile_id'])
+        elif action=='profile_test':result.update(profile_id=payload['profile_id'],profile_revision=payload['expected_profile_revision'])
+        if action=='profile_test' and (root/'running-test').exists():result['state']='running'
+        state_path.write_text(json.dumps(state));ops[request_id]=result;ops_path.write_text(json.dumps(ops))
+        (root/'management-started').write_text('started')
+        while (root/'management-gate').exists():time.sleep(.01)
+        if (root/'lost-management').exists():
+            print(payload.get('credential',{}).get('value','private fixture value'),file=sys.stderr);sys.exit(1)
+        print(json.dumps(result))
+    elif 'voice' in sys.argv:
         uuid.UUID(payload['request_id'])
         assert payload['expected_run_id']
         assert 'expected_conversation_id' in payload
@@ -184,55 +225,220 @@ private slots:
     }
     void settingsRestoreAndPersistTheSelectedRemoteProvider() {
         QTemporaryDir dir;
-        QFile profiles(dir.path()+"/profiles"); QVERIFY(profiles.open(QIODevice::WriteOnly));
-        profiles.write(R"JSON([{"id":"first","name":"First","available":true},{"id":"russian","name":"Russian","available":true},{"id":"offline","name":"Offline","available":false}])JSON"); profiles.close();
-        QSettings().setValue("speech/host","speech-host"); QSettings().setValue("speech/profile","russian");
-        SpeechSettings settings(fixture(dir.path())); settings.setPeers({"speech-host"}); settings.show(); settings.refresh();
-        auto *provider=settings.findChild<QComboBox *>("speechProfile"); QVERIFY(provider);
-        auto *refresh=settings.findChild<QPushButton *>("speechRefresh"); QVERIFY(refresh);
-        QTRY_VERIFY(refresh->isEnabled()); QVERIFY(provider->isEnabled()); QCOMPARE(provider->count(),3);
-        QCOMPARE(provider->currentData().toString(),"russian");
-        QCOMPARE(provider->currentData().metaType(),QMetaType::fromType<QString>());
-        QVERIFY(provider->model()->flags(provider->model()->index(1,0)).testFlag(Qt::ItemIsEnabled));
-        QVERIFY(!provider->model()->flags(provider->model()->index(2,0)).testFlag(Qt::ItemIsEnabled));
-        provider->setFocus(); QTest::keyClick(provider,Qt::Key_Home);
-        QCOMPARE(provider->currentData().toString(),"first"); QCOMPARE(QSettings().value("speech/profile").toString(),"first");
-        refresh->click(); QTRY_VERIFY(refresh->isEnabled()); QCOMPARE(provider->currentData().toString(),"first");
-        QFile calls(dir.path()+"/calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
-        for(const auto &line:calls.readAll().split('\n')) if(!line.isEmpty()) QCOMPARE(QJsonDocument::fromJson(line).array().at(0).toString(),"@speech-host");
+        QFile profiles(dir.path()+"/profiles");QVERIFY(profiles.open(QIODevice::WriteOnly));
+        profiles.write(R"JSON([{"id":"first","name":"First","available":true},{"id":"russian","name":"Russian","available":true},{"id":"offline","name":"Offline","available":false}])JSON");profiles.close();
+        QSettings().setValue("speech/host","speech-host");QSettings().setValue("speech/profile","russian");QSettings().setValue("speech/machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
+        SpeechSettings settings(fixture(dir.path()));settings.setPeers({"speech-host","other-host"});settings.show();settings.refresh();
+        auto *list=settings.findChild<QListWidget *>("speechProfiles");auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
+        QTRY_VERIFY(refresh->isEnabled());QCOMPARE(list->count(),3);QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject().value("id").toString(),"russian");
+        list->setCurrentRow(0);QCOMPARE(QSettings().value("speech/profile").toString(),"russian");
+        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(QSettings().value("speech/profile").toString(),"first");
+        list->setCurrentRow(2);QVERIFY(settings.findChild<QPushButton *>("speechEdit")->isEnabled());
+        const auto owner=QSettings().value("speech/machine_id").toString();auto *host=settings.findChild<QComboBox *>("speechComputer");host->setCurrentIndex(host->findData("other-host"));
+        QTRY_VERIFY(refresh->isEnabled());QCOMPARE(QSettings().value("speech/profile").toString(),"first");QCOMPARE(QSettings().value("speech/machine_id").toString(),owner);
     }
     void settingsCanRefreshAfterSpeechIsRestoredOnReceiver() {
-        QTemporaryDir dir; const auto executable=fixture(dir.path());
-        QFile legacy(dir.path()+"/legacy"); QVERIFY(legacy.open(QIODevice::WriteOnly)); legacy.close();
-        QSettings().setValue("speech/host","speech-host"); QSettings().setValue("speech/profile","russian");
-        SpeechSettings settings(executable); settings.show(); settings.refresh();
-        auto *provider=settings.findChild<QComboBox *>("speechProfile");
-        auto *status=settings.findChild<QLabel *>("speechSettingsStatus");
-        auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
-        QTRY_VERIFY(refresh->isEnabled()); QVERIFY(!provider->isEnabled()); QVERIFY(status->text().contains("updated hgs"));
-        QCOMPARE(QSettings().value("speech/profile").toString(),"russian"); QVERIFY(!QFile::exists(dir.path()+"/payload"));
-        QVERIFY(legacy.remove()); refresh->click(); QTRY_VERIFY(refresh->isEnabled());
-        QVERIFY(provider->isEnabled()); QCOMPARE(provider->count(),1); QCOMPARE(provider->currentData().toString(),"russian");
-        QVERIFY(status->text().startsWith("Ready."));
+        QTemporaryDir dir;const auto executable=fixture(dir.path());QFile legacy(dir.path()+"/management-legacy");QVERIFY(legacy.open(QIODevice::WriteOnly));legacy.close();
+        QSettings().setValue("speech/host","speech-host");QSettings().setValue("speech/profile","russian");
+        SpeechSettings settings(executable);settings.show();settings.refresh();
+        auto *status=settings.findChild<QLabel *>("speechSettingsStatus");auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
+        QTRY_VERIFY(refresh->isEnabled());QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(status->text().contains("Update hgs"));
+        QCOMPARE(QSettings().value("speech/profile").toString(),"russian");QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+        QVERIFY(legacy.remove());refresh->click();QTRY_VERIFY(refresh->isEnabled());QVERIFY(settings.findChild<QPushButton *>("speechAdd")->isEnabled());
+        QCOMPARE(settings.findChild<QListWidget *>("speechProfiles")->count(),1);
     }
     void nativeSettingsOnExplicitSpeechHost() {
-        const auto executable=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HGS");
-        const auto host=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HOST");
+        const auto executable=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HGS");const auto host=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HOST");
         const auto expected=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_PROFILE");
-        if(executable.isEmpty() || expected.isEmpty()) QSKIP("Requires an explicit installed hgs and profile; only reads providers/statistics.");
-        QSettings().setValue("speech/host",host); QSettings().setValue("speech/profile",expected);
-        SpeechSettings settings(executable); settings.setPeers({host}); settings.show(); settings.refresh();
-        auto *provider=settings.findChild<QComboBox *>("speechProfile");
-        auto *status=settings.findChild<QLabel *>("speechSettingsStatus");
-        auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
-        QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
-        QVERIFY2(provider->isEnabled(),qPrintable(status->text())); QCOMPARE(provider->currentData().toString(),expected);
-        const auto index=provider->model()->index(provider->currentIndex(),0);
-        QVERIFY(provider->model()->flags(index).testFlag(Qt::ItemIsEnabled));
-        QVERIFY(provider->model()->flags(index).testFlag(Qt::ItemIsSelectable));
-        provider->setFocus(); provider->showPopup(); QTest::keyClick(provider,Qt::Key_Return);
-        QCOMPARE(QSettings().value("speech/profile").toString(),expected);
-        QVERIFY(status->text().startsWith("Ready."));
+        if(executable.isEmpty() || expected.isEmpty())QSKIP("Requires an explicit installed hgs and profile; only reads configuration/statistics.");
+        QSettings().setValue("speech/host",host);QSettings().setValue("speech/profile",expected);
+        SpeechSettings settings(executable);settings.setPeers({host});settings.show();settings.refresh();
+        auto *refresh=settings.findChild<QPushButton *>("speechRefresh");QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
+        QVERIFY2(settings.findChild<QPushButton *>("speechAdd")->isEnabled(),qPrintable(settings.findChild<QLabel *>("speechSettingsStatus")->text()));
+        auto *list=settings.findChild<QListWidget *>("speechProfiles");bool found=false;
+        for(int row=0;row<list->count();++row){const auto profile=list->item(row)->data(Qt::UserRole).toJsonObject();if(profile.value("id").toString()==expected){QVERIFY(profile.value("available").toBool());found=true;}}
+        QVERIFY(found);
+    }
+    void managementRequiresItsOwnCapabilityBeforeSendingAKey() {
+        QTemporaryDir dir;const auto executable=fixture(dir.path());QFile legacy(dir.path()+"/management-legacy");QVERIFY(legacy.open(QIODevice::WriteOnly));legacy.close();
+        SpeechClient client(executable);bool complete=false;QJsonObject reply;QString error;
+        client.request("speech-host",{{"action","profile_upsert"},{"credential",QJsonObject{{"mode","replace"},{"value","synthetic-private-key"}}}},
+            [&](const QJsonObject &result,const QString &failure){reply=result;error=failure;complete=true;});
+        QTRY_VERIFY(complete);QVERIFY(error.contains("Update hgs"));QVERIFY(reply.contains("client_dispatch_started"));QVERIFY(!reply.value("client_dispatch_started").toBool());
+        QVERIFY(!QFile::exists(dir.path()+"/payload"));QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+    }
+    void settingsCreateRemoteProfileWithoutRememberingItsKey() {
+        QTemporaryDir dir;SpeechSettings settings(fixture(dir.path()));settings.refresh();
+        auto *add=settings.findChild<QPushButton *>("speechAdd");QTRY_VERIFY(add->isEnabled());bool exercised=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);
+            auto *type=dialog->findChild<QComboBox *>("speechEditType");type->setCurrentIndex(type->findData("openai_http"));
+            dialog->findChild<QLineEdit *>("speechEditName")->setText("Remote fixture");dialog->findChild<QLineEdit *>("speechEditId")->setText("remote-fixture");
+            dialog->findChild<QComboBox *>("speechEditModel")->setEditText("gigaam");dialog->findChild<QLineEdit *>("speechEditUrl")->setText("https://speech.example.net/v1");
+            auto *mode=dialog->findChild<QComboBox *>("speechEditCredential");mode->setCurrentIndex(mode->findData("replace"));
+            auto *key=dialog->findChild<QLineEdit *>("speechEditKey");key->setText("synthetic-private-key");
+            QCOMPARE(key->echoMode(),QLineEdit::Password);auto *save=dialog->findChild<QPushButton *>("speechSaveProfile");QVERIFY(save->isEnabled());save->click();QVERIFY(key->text().isEmpty());exercised=true;
+        });
+        add->click();QVERIFY(exercised);auto *list=settings.findChild<QListWidget *>("speechProfiles");QTRY_COMPARE(list->count(),2);
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject().value("id").toString(),"remote-fixture");
+        QVERIFY(QSettings().value("speech/profile").toString().isEmpty());QSettings saved;saved.sync();QFile ini(saved.fileName());QVERIFY(ini.open(QIODevice::ReadOnly));QVERIFY(!ini.readAll().contains("synthetic-private-key"));
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(log.readLine()).object();
+        QCOMPARE(request.value("expected_machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QCOMPARE(request.value("expected_revision").toInteger(),1);
+        QCOMPARE(request.value("profile").toObject().value("base_url").toString(),"https://speech.example.net/v1");QVERIFY(!request.value("profile").toObject().contains("device"));
+        QCOMPARE(request.value("credential").toObject().value("value").toString(),"synthetic-private-key");QVERIFY(log.readAll().isEmpty());
+        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(QSettings().value("speech/profile").toString(),"remote-fixture");QCOMPARE(QSettings().value("speech/profile_revision").toLongLong(),2);
+    }
+    void settingsRemoteCredentialModesAndHttpConsent_data() {
+        QTest::addColumn<QString>("mode");QTest::newRow("keep")<<QString("keep");QTest::newRow("remove")<<QString("remove");
+    }
+    void settingsRemoteCredentialModesAndHttpConsent() {
+        QFETCH(QString,mode);QTemporaryDir dir;QFile profiles(dir.path()+"/profiles");QVERIFY(profiles.open(QIODevice::WriteOnly));
+        profiles.write("[{\"id\":\"remote\",\"name\":\"Remote\",\"available\":true,\"adapter\":\"openai_http\",\"model\":\"gigaam\",\"base_url\":\"https://speech.example.net/v1\",\"credential\":{\"configured\":true}}]");profiles.close();
+        SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *edit=settings.findChild<QPushButton *>("speechEdit");QTRY_VERIFY(edit->isEnabled());bool exercised=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);auto *key=dialog->findChild<QLineEdit *>("speechEditKey");QVERIFY(key->text().isEmpty());QVERIFY(!key->isEnabled());
+            auto *credential=dialog->findChild<QComboBox *>("speechEditCredential");QVERIFY(credential->currentText().contains("stored"));credential->setCurrentIndex(credential->findData(mode));
+            auto *url=dialog->findChild<QLineEdit *>("speechEditUrl");auto *save=dialog->findChild<QPushButton *>("speechSaveProfile");
+            url->setText("http://127.0.0.1:9000/v1");QVERIFY(!save->isEnabled());dialog->findChild<QCheckBox *>("speechEditInsecureHttp")->setChecked(true);QVERIFY(save->isEnabled());
+            url->setText("https://user:secret@example.net/v1");QVERIFY(!save->isEnabled());url->setText("https://speech.example.net/v1?key=secret");QVERIFY(!save->isEnabled());
+            url->setText("https://speech.example.net/v1");save->click();exercised=true;
+        });edit->click();QVERIFY(exercised);
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(log.readLine()).object();
+        QCOMPARE(request.value("credential").toObject().value("mode").toString(),mode);QVERIFY(!request.value("credential").toObject().contains("value"));
+    }
+    void settingsPinnedSaveSurvivesBrowsingAnotherComputer() {
+        QTemporaryDir dir;QFile gate(dir.path()+"/management-gate");QVERIFY(gate.open(QIODevice::WriteOnly));gate.close();
+        SpeechSettings settings(fixture(dir.path()));settings.setPeers({"other-host"});settings.refresh();auto *edit=settings.findChild<QPushButton *>("speechEdit");QTRY_VERIFY(edit->isEnabled());bool checked=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);dialog->findChild<QLineEdit *>("speechEditName")->setText("Only original computer");dialog->findChild<QPushButton *>("speechSaveProfile")->click();
+            QTRY_VERIFY(QFile::exists(dir.path()+"/management-started"));auto *host=settings.findChild<QComboBox *>("speechComputer");host->setCurrentIndex(host->findData("other-host"));
+            QTRY_VERIFY(settings.findChild<QPushButton *>("speechRefresh")->isEnabled());QCOMPARE(settings.findChild<QListWidget *>("speechProfiles")->currentItem()->data(Qt::UserRole).toJsonObject().value("name").toString(),"Russian");
+            QVERIFY(gate.remove());checked=true;
+        });edit->click();QVERIFY(checked);
+        QCOMPARE(settings.findChild<QComboBox *>("speechComputer")->currentData().toString(),"other-host");
+        QCOMPARE(settings.findChild<QListWidget *>("speechProfiles")->currentItem()->data(Qt::UserRole).toJsonObject().value("name").toString(),"Russian");
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(log.readLine()).object();
+        QCOMPARE(request.value("expected_machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QVERIFY(log.readLine().isEmpty());
+    }
+    void settingsConflictKeepsTheFormAndNeverRetries() {
+        QTemporaryDir dir;QFile conflict(dir.path()+"/revision-conflict");QVERIFY(conflict.open(QIODevice::WriteOnly));conflict.close();
+        SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *edit=settings.findChild<QPushButton *>("speechEdit");QTRY_VERIFY(edit->isEnabled());bool retained=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);auto *name=dialog->findChild<QLineEdit *>("speechEditName");name->setText("My unsaved edit");
+            dialog->findChild<QPushButton *>("speechSaveProfile")->click();auto *status=dialog->findChild<QLabel *>("speechEditStatus");QTRY_VERIFY(status->text().contains("configuration changed"));
+            QCOMPARE(name->text(),"My unsaved edit");QVERIFY(!dialog->findChild<QPushButton *>("speechSaveProfile")->isEnabled());retained=true;dialog->reject();
+        });
+        edit->click();QVERIFY(retained);QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));QVERIFY(!log.readLine().isEmpty());QVERIFY(log.readLine().isEmpty());
+    }
+    void settingsLostSaveUsesTheSameReceiptAfterRestart() {
+        QTemporaryDir dir;const auto executable=fixture(dir.path());QFile lost(dir.path()+"/lost-management");QVERIFY(lost.open(QIODevice::WriteOnly));lost.close();QString requestId;
+        {
+            SpeechSettings settings(executable);settings.refresh();auto *edit=settings.findChild<QPushButton *>("speechEdit");QTRY_VERIFY(edit->isEnabled());
+            QTimer::singleShot(0,&settings,[&]{
+                auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);dialog->findChild<QLineEdit *>("speechEditName")->setText("Saved despite lost response");
+                dialog->findChild<QPushButton *>("speechSaveProfile")->click();auto *check=dialog->findChild<QPushButton *>("speechEditCheckOperation");QTRY_VERIFY(check->isEnabled());
+                QVERIFY(dialog->findChild<QLabel *>("speechEditStatus")->text().contains("not confirmed"));QVERIFY(!dialog->findChild<QPushButton *>("speechSaveProfile")->isEnabled());
+                requestId=QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object().value("request_id").toString();QVERIFY(!requestId.isEmpty());dialog->reject();
+            });edit->click();
+        }
+        SpeechSettings restored(executable);restored.refresh();auto *check=restored.findChild<QPushButton *>("speechCheckOperation");QVERIFY(!check->isHidden());check->click();
+        QTRY_VERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());QTRY_VERIFY(restored.findChild<QPushButton *>("speechEdit")->isEnabled());
+        QCOMPARE(restored.findChild<QListWidget *>("speechProfiles")->currentItem()->data(Qt::UserRole).toJsonObject().value("name").toString(),"Saved despite lost response");
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));QCOMPARE(QJsonDocument::fromJson(log.readLine()).object().value("request_id").toString(),requestId);QVERIFY(log.readLine().isEmpty());
+    }
+    void settingsUnknownReceiptRemainsPendingWithoutReplay() {
+        QTemporaryDir dir;const QJsonObject pending{{"host",""},{"computer","This computer"},{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"request_id","aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},{"action","profile_upsert"}};
+        QSettings().setValue("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+        SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *check=settings.findChild<QPushButton *>("speechCheckOperation");check->click();QTRY_VERIFY(check->isEnabled());
+        QCOMPARE(QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object(),pending);
+        QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+    }
+    void managementTransportNeverEchoesAReplacementKey() {
+        QTemporaryDir dir;QFile lost(dir.path()+"/lost-management");QVERIFY(lost.open(QIODevice::WriteOnly));lost.close();
+        SpeechClient client(fixture(dir.path()));bool finished=false;QString error;
+        client.request("",{{"action","profile_upsert"},{"request_id","aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},{"expected_machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"expected_revision",1},
+            {"profile",QJsonObject{{"id","remote"},{"name","Remote"},{"adapter","openai_http"},{"model","gigaam"},{"language","ru"},{"base_url","https://speech.example.net/v1"},{"allow_insecure_http",false}}},
+            {"credential",QJsonObject{{"mode","replace"},{"value","synthetic-private-key"}}}},[&](const QJsonObject &reply,const QString &failure){QVERIFY(!reply.contains("client_dispatch_started"));error=failure;finished=true;});
+        QTRY_VERIFY(finished);QVERIFY(!error.isEmpty());QVERIFY(!error.contains("synthetic-private-key"));
+        QFile calls(dir.path()+"/calls");QVERIFY(calls.open(QIODevice::ReadOnly));QVERIFY(!calls.readAll().contains("synthetic-private-key"));
+    }
+    void settingsRemoveConfirmsAndPreservesUnavailableDefault() {
+        QTemporaryDir dir;QSettings().setValue("speech/machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QSettings().setValue("speech/profile","russian");
+        SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *remove=settings.findChild<QPushButton *>("speechRemove");QTRY_VERIFY(remove->isEnabled());
+        QTimer::singleShot(0,&settings,[&]{auto *dialog=settings.findChild<QMessageBox *>("speechRemoveConfirm");QVERIFY(dialog);QVERIFY(dialog->text().contains("Russian"));dialog->reject();});remove->click();
+        QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+        QTimer::singleShot(0,&settings,[&]{settings.findChild<QPushButton *>("speechConfirmRemove")->click();});remove->click();
+        QTRY_COMPARE(settings.findChild<QListWidget *>("speechProfiles")->count(),0);QCOMPARE(QSettings().value("speech/profile").toString(),"russian");
+        QCOMPARE(QSettings().value("speech/machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QVERIFY(settings.findChild<QLabel *>("speechDefault")->text().contains("unavailable"));
+    }
+    void settingsTestPinsSavedProfileRevision() {
+        QTemporaryDir dir;SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *test=settings.findChild<QPushButton *>("speechTest");QTRY_VERIFY(test->isEnabled());test->click();
+        QTRY_VERIFY(settings.findChild<QLabel *>("speechOperationResult")->text().contains("test on"));
+        QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(log.readLine()).object();
+        QCOMPARE(request.value("action").toString(),"profile_test");QCOMPARE(request.value("profile_id").toString(),"russian");QCOMPARE(request.value("expected_profile_revision").toInteger(),1);
+        QVERIFY(!request.contains("credential"));QVERIFY(!request.contains("audio"));QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
+    void runningProviderTestPollsItsReceiptWithoutAnotherMutation() {
+        QTemporaryDir dir;QFile running(dir.path()+"/running-test");QVERIFY(running.open(QIODevice::WriteOnly));running.close();
+        SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *test=settings.findChild<QPushButton *>("speechTest");QTRY_VERIFY(test->isEnabled());test->click();
+        QTRY_VERIFY(!QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        QTRY_VERIFY(settings.findChild<QLabel *>("speechOperationResult")->text().contains("completed successfully"));
+        QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        QFile actions(dir.path()+"/management-actions");QVERIFY(actions.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(actions.readLine()).object();QVERIFY(actions.readLine().isEmpty());
+        QFile payload(dir.path()+"/payload");QVERIFY(payload.open(QIODevice::ReadOnly));
+        QFile calls(dir.path()+"/calls");QVERIFY(calls.open(QIODevice::ReadOnly));QVERIFY(calls.readAll().count("speech")>=2);
+        QFile operations(dir.path()+"/operations");QVERIFY(operations.open(QIODevice::ReadOnly));const auto receipts=QJsonDocument::fromJson(operations.readAll()).object();
+        QCOMPARE(receipts.size(),1);QCOMPARE(receipts.value(request.value("request_id").toString()).toObject().value("state").toString(),"completed");
+    }
+    void newRecordingUsesCurrentRevisionOfExplicitDefault() {
+        QTemporaryDir dir;QFile profiles(dir.path()+"/voice-profiles");QVERIFY(profiles.open(QIODevice::WriteOnly));
+        profiles.write(R"JSON([{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","name":"Fixture","profiles":[{"id":"russian","name":"Russian","available":true,"profile_revision":2}]}])JSON");profiles.close();
+        QSettings().setValue("speech/machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QSettings().setValue("speech/profile","russian");QSettings().setValue("speech/profile_revision",1);
+        MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();
+        auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());ComposerDraftStore::flushWrites();
+        QCOMPARE(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").formState.value("speech").toObject().value("profile_revision").toInteger(),2);
+    }
+    void refreshedProfileRevisionRequiresExplicitPreviewReselection_data() {
+        QTest::addColumn<int>("initialRevision");QTest::newRow("legacy-to-managed")<<0;QTest::newRow("changed-managed")<<1;
+    }
+    void refreshedProfileRevisionRequiresExplicitPreviewReselection() {
+        QFETCH(int,initialRevision);QTemporaryDir dir;QFile profiles(dir.path()+"/voice-profiles");QVERIFY(profiles.open(QIODevice::WriteOnly));
+        QJsonObject originalProfile{{"id","russian"},{"name","Russian"},{"available",true}};if(initialRevision)originalProfile["profile_revision"]=initialRevision;
+        profiles.write(QJsonDocument(QJsonArray{QJsonObject{{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"name","Fixture"},{"profiles",QJsonArray{originalProfile}}}}).toJson());profiles.close();
+        const auto executable=fixture(dir.path());QString id;QByteArray audio;
+        {
+            MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+            auto *recorder=new FixtureRecorder;SpeechComposer speech(executable,&composer,[&]{return target(composer);},recorder);
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());
+            ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");QCOMPARE(draft.formState.value("speech").toObject().value("profile_revision").toInteger(),initialRevision);
+            id=draft.formState.value("id").toString();audio=draft.attachments[0].data;
+        }
+        QVERIFY(profiles.open(QIODevice::WriteOnly|QIODevice::Truncate));profiles.write(R"JSON([{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","name":"Fixture","profiles":[{"id":"russian","name":"Russian","available":true,"profile_revision":2}]}])JSON");profiles.close();
+        MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        SpeechComposer speech(executable,&composer,[&]{return target(composer);});auto *provider=composer.findChild<QComboBox *>("voiceProvider");auto *send=composer.findChild<QPushButton *>("voiceSend");
+        QTRY_COMPARE(provider->currentText(),"Selected provider (unavailable)");QVERIFY(!send->isEnabled());ComposerDraftStore::flushWrites();
+        QCOMPARE(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").formState.value("speech").toObject().value("profile_revision").toInteger(),initialRevision);
+        provider->setCurrentIndex(0);QVERIFY(send->isEnabled());ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
+        QCOMPARE(draft.formState.value("id").toString(),id);QCOMPARE(draft.attachments[0].data,audio);QCOMPARE(draft.formState.value("speech").toObject().value("profile_revision").toInteger(),2);
+        send->click();QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile log(dir.path()+"/voice-actions");QVERIFY(log.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(log.readLine()).object().value("speech").toObject().value("profile_revision").toInteger(),2);
+    }
+    void malformedProviderRevisionCannotBeSent_data() {
+        QTest::addColumn<QJsonValue>("revision");QTest::newRow("zero")<<QJsonValue(0);QTest::newRow("negative")<<QJsonValue(-1);
+        QTest::newRow("fraction")<<QJsonValue(1.5);QTest::newRow("unsafe-integer")<<QJsonValue(9007199254740992.);QTest::newRow("string")<<QJsonValue("1");
+    }
+    void malformedProviderRevisionCannotBeSent() {
+        QFETCH(QJsonValue,revision);QTemporaryDir dir;QFile profiles(dir.path()+"/voice-profiles");QVERIFY(profiles.open(QIODevice::WriteOnly));
+        const QJsonObject profile{{"id","russian"},{"name","Russian"},{"available",true},{"profile_revision",revision}};
+        profiles.write(QJsonDocument(QJsonArray{QJsonObject{{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"name","Fixture"},{"profiles",QJsonArray{profile}}}}).toJson());profiles.close();
+        MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();
+        QTRY_VERIFY(composer.findChild<QPushButton *>("voiceRefreshProviders")->isEnabled());QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());
+        QCOMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
     }
     void recordingWaitsForExplicitSendAndPreservesText() {
         QTemporaryDir dir; MessageComposer composer;composer.setSessionKey("fixture\noriginal");

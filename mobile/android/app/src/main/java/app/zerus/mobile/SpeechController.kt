@@ -76,7 +76,7 @@ internal class SpeechController(private val context: Context, private val model:
         val captured = draft
         if (previewId != null && (captured?.audio?.id != previewId || captured.target != target)) return false
         value = value.copy(selection = selection, draft = captured?.let {
-            if (previewId != null) it.copy(machineId = selection.host?.computerId.orEmpty(), profileId = selection.profileId) else it
+            if (previewId != null) it.copy(machineId = selection.host?.computerId.orEmpty(), profileId = selection.profileId, profileRevision = selection.profileRevision) else it
         })
         return true
     }
@@ -85,7 +85,8 @@ internal class SpeechController(private val context: Context, private val model:
     fun chooseHost(host: MachineKey, target: Target? = model.selected?.target, previewId: String? = null) {
         if (target == null || host.connectionId != target.connectionId || computers.none { it.id == host.computerId }) return
         val current = choiceSelection(target, previewId) ?: return
-        val next = SpeechSelection(host, current.profileId.takeIf { current.host?.computerId == host.computerId }.orEmpty())
+        val sameHost = current.host?.computerId == host.computerId
+        val next = SpeechSelection(host, current.profileId.takeIf { sameHost }.orEmpty(), current.profileRevision.takeIf { sameHost })
         if (!choose(next, target, previewId)) return
         scope.launch { try { persist(); refreshStatistics() } catch (_: Exception) { notice = "Could not save the voice computer." } }
     }
@@ -93,9 +94,16 @@ internal class SpeechController(private val context: Context, private val model:
         if (target == null) return
         val current = choiceSelection(target, previewId) ?: return
         val computer = computers.find { it.id == current.host?.computerId } ?: return
-        if (computer.profiles.none { it.id == id } || !choose(current.copy(
-            host = current.host?.copy(connectionId = target.connectionId), profileId = id), target, previewId)) return
+        val selectedProfile = computer.profiles.find { it.id == id } ?: return
+        if (!choose(current.copy(host = current.host?.copy(connectionId = target.connectionId), profileId = id,
+            profileRevision = selectedProfile.profileRevision), target, previewId)) return
         scope.launch { try { persist() } catch (_: Exception) { notice = "Could not save the voice profile." } }
+    }
+    fun chooseDefault(selection: SpeechSelection): Boolean {
+        if (!ready || recording || savingRecording || model.updateInstallPreparing) return false
+        value = value.copy(selection = selection) // Retained recordings keep their independently pinned route.
+        scope.launch { try { persist(); refreshStatistics() } catch (_: Exception) { notice = "Could not save the default voice provider." } }
+        return true
     }
     fun refreshProfiles(target: Target? = model.selected?.target) {
         if (!ready || loading && requestedProfileTarget == target) return
@@ -167,6 +175,7 @@ internal class SpeechController(private val context: Context, private val model:
         if (reason.isNotBlank()) { notice = reason; return }
         val machine = selection.host?.computerId.orEmpty()
         val profileId = selection.profileId
+        val profileRevision = if (profileTarget == target && !loading && profile != null) profile?.profileRevision else selection.profileRevision
         model.attachments.stopAudio()
         discardWhenStopped = false; seconds = 0; notice = ""; recording = true
         val capture = SpeechRecorder(context); recorder = capture
@@ -179,7 +188,7 @@ internal class SpeechController(private val context: Context, private val model:
                 check(pcm.size >= 3_200) { "The recording was too short. Try again." }
                 savingRecording = true
                 imported = audioStore.importRecording(VoiceProtocol.wav(pcm))
-                value = value.copy(draft = VoiceDraft(target, machine, profileId, imported, pcm.size / 32, System.currentTimeMillis() / 1000.0))
+                value = value.copy(draft = VoiceDraft(target, machine, profileId, imported, pcm.size / 32, System.currentTimeMillis() / 1000.0, profileRevision))
                 persist()
                 imported = null
                 notice = "Recording saved. Send it when ready."
@@ -238,7 +247,7 @@ internal class SpeechController(private val context: Context, private val model:
         if (reason.isNotBlank()) { notice = reason; return }
         if (model.voiceColdCache() && !allowColdCache) { notice = "Confirm sending with full context first."; return }
         val id = UUID.randomUUID().toString()
-        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt)
+        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt, profileRevision = captured.profileRevision)
         savingRecording = true; activeRequests = activeRequests + id
         scope.launch {
             var attempted = false
@@ -253,7 +262,7 @@ internal class SpeechController(private val context: Context, private val model:
                 audioStore.decrypt(captured.audio) { bytes.write(it) }
                 val payload = withContext(Dispatchers.Default) {
                     VoiceProtocol.payload(captured.target, id)
-                        .put("speech", JSONObject().put("machine_id", captured.machineId).put("profile_id", captured.profileId))
+                        .put("speech", VoiceProtocol.provider(captured))
                         .put("audio", JSONObject().put("format", "pcm_s16le").put("sample_rate", 16_000).put("channels", 1)
                             .put("data_base64", Base64.getEncoder().encodeToString(VoiceProtocol.pcm(bytes.toByteArray()))))
                 }
@@ -348,7 +357,7 @@ internal class SpeechController(private val context: Context, private val model:
         val current = outgoing.find { it.id == entry.id } ?: return
         if (current != entry || !current.canRestoreUnsent || current.audio == null ||
             current.id in activeRequests || draft != null || recording || savingRecording) return
-        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt)
+        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt, current.profileRevision)
         savingRecording = true
         scope.launch {
             try {

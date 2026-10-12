@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -312,6 +313,30 @@ class VoiceWorker(unittest.TestCase):
         self.assertEqual(json.loads(body)["error_code"], "target_changed")
         self.assertGreater(len(audio), 44)
         self.assertEqual(self.received(), b"")
+
+    def test_changed_profile_revision_fails_before_asr_and_keeps_original(self):
+        # Keep this fixture's worker lock while delaying its next iteration;
+        # submit otherwise starts another worker automatically.
+        self.worker.send_signal(signal.SIGSTOP)
+        try:
+            managed = self.command(["speech", "--json"], {"action": "config_list"})
+            payload = self.payload()
+            payload["speech"]["profile_revision"] = managed["profiles"][0]["revision"]
+            accepted = self.voice(payload)
+            path = Path(self.env["HGS_CONFIG_DIR"]) / "speech-profiles/profiles.sqlite3"
+            with sqlite3.connect(path) as db:
+                db.execute("UPDATE profiles SET revision=revision+1 WHERE id='fixture'")
+                db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
+        finally:
+            self.worker.send_signal(signal.SIGCONT)
+        result = self.settle(accepted["id"], {"failed"})
+        self.assertNotIn("transcript", result)
+        self.assertEqual(self.server.jobs.stats()["totals"]["submitted"], 0)
+        self.assertEqual(self.received(), b"")
+        with sqlite3.connect(self.state / "voice/messages.sqlite3") as db:
+            body, audio = db.execute("SELECT body,audio FROM messages WHERE id=?", (accepted["id"],)).fetchone()
+        self.assertEqual(json.loads(body)["speech"]["profile_revision"], payload["speech"]["profile_revision"])
+        self.assertEqual(audio[44:], base64.b64decode(payload["audio"]["data_base64"]))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,18 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
     internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
+    internal val speechConfiguration by lazy { SpeechConfigurationController(application, this, viewModelScope, api) }
+    internal fun speechConfigurationReason(host: SpeechConfigHost): String = when {
+        demo || !storageReady -> "Connect a computer to manage its speech providers."
+        updateInstallPreparing -> "Finish the app update first."
+        connections.none { it.id == host.key.connectionId } -> "The workspace is disconnected."
+        machines.none { it.connectionId == host.key.connectionId && it.id == host.key.computerId &&
+            it.machineId == host.machineId && it.online && !it.lastKnown } -> "The selected computer is unavailable or its identity changed."
+        !AttachmentPolicy.validId(host.machineId) -> "Refresh to verify this computer's identity."
+        !relayOperations[host.key.connectionId].orEmpty().containsAll(SpeechConfigProtocol.operations) -> "Update this gateway to manage speech providers."
+        !machineOperations[host.key].orEmpty().containsAll(SpeechConfigProtocol.operations) -> "Update Zerus on this computer to manage speech providers."
+        else -> ""
+    }
     internal val speechNavigation get() = navigationId
     internal fun voiceHostReason(target: Target): String = when {
         demo -> "Connect a computer to send voice messages."
@@ -665,7 +677,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync() }
     var updateInstallPreparing by mutableStateOf(false); private set
-    fun updateInstallReason(): String = if (speech.busy) "Finish voice recording or recognition before installing." else UpdateInstallGuard.reason(messageState,storageReady,
+    fun updateInstallReason(): String = if (speech.busy || speechConfiguration.busy) "Finish the voice operation before installing." else UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),
         deliveryFlights.isNotEmpty() || contextFlights.isNotEmpty() || actionFlights.isNotEmpty(),compactContinuationActive)
     suspend fun prepareUpdateInstall() {

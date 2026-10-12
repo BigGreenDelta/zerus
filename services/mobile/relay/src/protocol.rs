@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "speech_config",
+    "speech_config_status",
     "inspect",
     "history",
     "process_output",
@@ -33,6 +35,11 @@ pub const READ_SQL: &str =
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
 /// Computer-scoped: no session, delivered to the gateway computer itself.
 pub const SPEECH: &[&str] = &[
+    "speech_config",
+    "speech_profile_upsert",
+    "speech_profile_remove",
+    "speech_profile_test",
+    "speech_config_status",
     "speech_profiles",
     "speech_stats",
     "speech_submit",
@@ -52,6 +59,11 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "speech_config",
+    "speech_profile_upsert",
+    "speech_profile_remove",
+    "speech_profile_test",
+    "speech_config_status",
     "voice_profiles",
     "voice_submit",
     "voice_status",
@@ -178,6 +190,9 @@ pub fn supports(s: &Value, op: &str, field: &str) -> bool {
             .is_some_and(|a| a.iter().any(|v| v == op))
 }
 fn speech(op: &str, p: &Value, id: &str) -> Result<()> {
+    if crate::speech_config::OPERATIONS.contains(&op) {
+        return crate::speech_config::validate(op, p, id);
+    }
     match op {
         "speech_profiles" | "speech_stats" => fields(p, &[], &[]),
         "speech_status" | "speech_cancel" => {
@@ -186,7 +201,18 @@ fn speech(op: &str, p: &Value, id: &str) -> Result<()> {
             Ok(())
         }
         "speech_submit" => {
-            fields(p, &["request_id", "profile_id", "audio"], &[])?;
+            fields(
+                p,
+                &["request_id", "profile_id", "audio"],
+                &["profile_revision"],
+            )?;
+            if p.get("profile_revision").is_some()
+                && p["profile_revision"]
+                    .as_u64()
+                    .is_none_or(|n| n > 9_007_199_254_740_991)
+            {
+                return Err(Error::BAD);
+            }
             if p["request_id"] != id {
                 return Err(Error::BAD);
             }
@@ -387,7 +413,18 @@ pub fn request(v: &Value) -> Result<()> {
         )?;
         match op {
             "voice_submit" => {
-                fields(&p["speech"], &["machine_id", "profile_id"], &[])?;
+                fields(
+                    &p["speech"],
+                    &["machine_id", "profile_id"],
+                    &["profile_revision"],
+                )?;
+                if p["speech"].get("profile_revision").is_some()
+                    && p["speech"]["profile_revision"]
+                        .as_u64()
+                        .is_none_or(|n| n > 9_007_199_254_740_991)
+                {
+                    return Err(Error::BAD);
+                }
                 uuid(&p["speech"]["machine_id"], true)?;
                 speech(
                     "speech_submit",

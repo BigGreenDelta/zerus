@@ -263,6 +263,23 @@ displays the selected processing computer's aggregate local counts. Audio and
 transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
 and [analytics](../../docs/analytics.md).
 
+**Manage speech providers** works without an open conversation. Choose the processing
+computer, then add or edit **Local GigaAM** or an **OpenAI-compatible server**. Local
+model/device choices come from that computer; remote profiles use a base URL, model,
+optional language and optional API key. HTTP requires an explicit local/private
+network opt-in. Keys are encrypted for the selected computer before crossing the
+relay and never returned to the phone. Saving does not install packages or download
+weights. **Test** sends synthetic audio to the saved profile, without using the
+microphone or retained recordings. Removal requires confirmation.
+
+Configuration edits use the computer's revision and a durable operation UUID.
+Conflicts retain the form for explicit review; uncertain saves recover through
+**Check operation status** and are never repeated. Editing a provider does not
+change the selected default or saved recording. **Use for new recordings** explicitly
+sets the default while preserving a recording that is already saved. A retained recording pins the
+provider revision: if it changes, explicitly select the provider again before
+sending. See [provider configuration](../../docs/speech-providers.md).
+
 Tap the composer microphone, speak, then **Stop recording**. Local capture starts
 without waiting for provider discovery; discovery refreshes in the background.
 Capture lasts at most two minutes. Stopping, leaving the foreground and returning from system settings

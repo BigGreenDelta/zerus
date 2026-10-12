@@ -76,3 +76,6 @@ CREATE INDEX IF NOT EXISTS alert_candidate_expiry ON alert_candidates(created,id
 
 CREATE INDEX IF NOT EXISTS speech_reads_history ON requests(updated,id) WHERE operation IN ('speech_profiles','speech_stats','speech_status') AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS speech_audio_cleanup ON requests(updated,id) WHERE operation='speech_submit' AND body!='' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS speech_config_reads_history ON requests(updated,id) WHERE operation IN ('speech_config','speech_config_status') AND state IN ('completed','failed','uncertain');
+CREATE INDEX IF NOT EXISTS speech_config_body_cleanup ON requests(updated,id) WHERE operation IN ('speech_profile_upsert','speech_profile_remove','speech_profile_test') AND body!='' AND state IN ('completed','failed','uncertain');

@@ -3,6 +3,7 @@ import base64
 import binascii
 import re
 import uuid
+from .speech_config import revision
 
 OPERATIONS = frozenset({"speech_profiles", "speech_stats", "speech_submit", "speech_status", "speech_cancel"})
 READS = frozenset({"speech_profiles", "speech_stats", "speech_status"})
@@ -32,9 +33,11 @@ def validate(operation, payload, request_id):
             raise ValueError("speech job requires only its identity")
         identity(payload["job_id"])
     elif operation == "speech_submit":
-        if set(payload) != {"request_id", "profile_id", "audio"} or payload["request_id"] != request_id:
+        if not {"request_id", "profile_id", "audio"} <= set(payload) or set(payload) - {"request_id", "profile_id", "profile_revision", "audio"} or payload["request_id"] != request_id:
             raise ValueError("speech request identity does not match")
         identity(request_id)
+        if "profile_revision" in payload:
+            revision(payload["profile_revision"])
         profile = payload["profile_id"]
         if not isinstance(profile, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
             raise ValueError("invalid speech profile")
