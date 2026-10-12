@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn agent_only(actor: &Actor) -> Result<SessionRef> {
     match (actor.kind, actor.session_ref()) {
@@ -65,9 +65,21 @@ pub fn mine(ctx: &mut Ctx) -> Result<Value> {
         "note": "Work on one task at a time. Read it with `show`, then advance it; use call-human (MCP: call_human) when a decision is not yours to make. You can never move a task to Done; a person signs it off."}))
 }
 
+/// Git in the session's directory. The agent's own Git variables (`GIT_DIR`
+/// and the like) would skip the check or point it at another repository.
+fn git(cwd: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(cwd).stdin(Stdio::null());
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
 fn verify_evidence(cwd: &Path, evidence: &str) -> Result<()> {
-    let inside = Command::new("git")
-        .arg("-C").arg(cwd)
+    let inside = git(cwd)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
@@ -80,8 +92,7 @@ fn verify_evidence(cwd: &Path, evidence: &str) -> Result<()> {
     if !hex {
         return Err(Refusal::field("invalid_field", "evidence", "invalid", "in a Git repository, evidence is the commit SHA of the finished work").into());
     }
-    let exists = Command::new("git")
-        .arg("-C").arg(cwd)
+    let exists = git(cwd)
         .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
         .status()
         .map(|s| s.success())

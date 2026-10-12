@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
 import uuid
+
+import test_input as fixtures
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
@@ -145,6 +148,78 @@ class Overmind(unittest.TestCase):
     def test_renames_create_no_store(self):
         self.rename('codex/demo/old', 'codex/demo/new')
         self.assertFalse((self.state / 'overmind').exists())
+
+
+class AgentSession(unittest.TestCase):
+    """`hgs overmind` inside a live session on an isolated tmux socket."""
+    setUp = fixtures.InputTransport.setUp
+    tearDown = fixtures.InputTransport.tearDown
+    script = fixtures.InputTransport.script
+    tmux = fixtures.InputTransport.tmux
+    wait_for = fixtures.InputTransport.wait_for
+    write_record = fixtures.InputTransport.write_record
+
+    def overmind(self, *args, data=None, agent=True, env=None):
+        env = dict(env or self.env)
+        if agent:
+            env.update(HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        result = subprocess.run([str(HGS), 'overmind', *args], input=None if data is None else json.dumps(data),
+                                env=env, text=True, capture_output=True, timeout=20)
+        return result.returncode, json.loads(result.stdout) if result.stdout.startswith('{') else result.stdout
+
+    def ok(self, *args, **kwargs):
+        code, body = self.overmind(*args, **kwargs)
+        self.assertEqual(code, 0, body)
+        return body
+
+    def claim(self):
+        """Claims the only task for this session; plan 1a has no command for it."""
+        db = sqlite3.connect(self.state / 'overmind/overmind.sqlite3')
+        with db:
+            created = json.loads(db.execute("SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])
+            seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+            event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind='transition',
+                         base=created['id'], request_id='',
+                         payload={'action': 'claim', 'to': 'Design', 'fields': {},
+                                  'session': {'machine': created['origin'], 'name': self.name}})
+            db.execute('INSERT INTO events(origin, seq, id, lamport, task, project, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                       (event['origin'], seq, event['id'], lamport, event['task'], event['project'], event['kind'],
+                        json.dumps(event)))
+        db.close()
+
+    def commit(self, repo):
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+                        'commit', '--allow-empty', '-qm', 'work'], check=True)
+        return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+
+    def test_a_live_session_acts_as_its_agent(self):
+        self.assertIn('You can never move a task to Done', self.ok('--help'))
+        self.assertEqual(self.ok('mine')['tasks'], [])
+        ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'}, agent=False)['task']['ref']
+        self.claim()
+        self.assertEqual([t['ref'] for t in self.ok('mine')['tasks']], [ref])
+        self.run_id = str(uuid.uuid4())
+        code, body = self.overmind('mine')
+        self.assertEqual((code, body['error']['code']), (1, 'session_mismatch'))
+
+    def test_evidence_is_checked_in_the_session_repository(self):
+        repo, other = self.root / 'repo', self.root / 'other'
+        sha = self.commit(repo)
+        self.commit(other)
+        self.record['cwd'] = str(repo)
+        self.write_record()
+        ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'}, agent=False)['task']['ref']
+        self.claim()
+        self.ok('advance', '--json', data={'task': ref, 'to': 'Build', 'spec': 'plan'})
+        review = {'task': ref, 'to': 'Review', 'worklog': 'done', 'evidence': '0' * 40}
+        # The agent's own Git variables neither skip the check nor move it to another repository.
+        for env in (self.env, dict(self.env, GIT_DIR=str(other / '.git'), GIT_WORK_TREE=str(other))):
+            code, body = self.overmind('advance', '--json', data=review, env=env)
+            self.assertEqual((code, body['error']['field']), (1, 'evidence'))
+        elsewhere = dict(self.env, GIT_DIR=str(other / '.git'))
+        task = self.ok('advance', '--json', data={**review, 'evidence': sha}, env=elsewhere)['task']
+        self.assertEqual(task['stage'], 'Review')
 
 
 if __name__ == '__main__':
