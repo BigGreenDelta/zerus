@@ -912,6 +912,7 @@ fn remember(
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    let _lock = crate::platform::FileLock::held(lock);
     let current = remembered(config, local);
     let next = merge(&current);
     if next == current {
