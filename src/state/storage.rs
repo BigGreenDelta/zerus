@@ -46,12 +46,7 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
         .map_err(|e| e.to_string())
 }
 
-pub(super) struct Guard(File);
-impl Drop for Guard {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
+pub(super) type Guard = crate::platform::FileLock;
 
 pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     let default = root().join(".lock");
@@ -63,8 +58,7 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
         .mode(0o600)
         .open(path)
         .map_err(|e| e.to_string())?;
-    file.lock_exclusive().map_err(|e| e.to_string())?;
-    let guard = Guard(file);
+    let guard = Guard::exclusive(file).map_err(|e| e.to_string())?;
     if path == default {
         rename::recover_locked()?;
         rename::sync_legacy_locked()?;
@@ -84,7 +78,7 @@ pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Op
         .map_err(|e| e.to_string())?;
     loop {
         match file.try_lock_exclusive() {
-            Ok(()) => return Ok(Some(Guard(file))),
+            Ok(()) => return Ok(Some(Guard::held(file))),
             Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error.to_string()),
             Err(_) if std::time::Instant::now() >= deadline => return Ok(None),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),

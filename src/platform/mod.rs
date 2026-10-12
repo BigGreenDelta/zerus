@@ -124,6 +124,31 @@ pub fn lock_contended(error: &io::Error) -> bool {
         || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
+/// An fs2 lock this process holds on a file, released explicitly when dropped.
+/// Windows frees a closed handle's lock only when system resources allow, and a
+/// forked child can keep a Unix descriptor open until exec, so closing the file
+/// alone can leave the next process waiting.
+pub struct FileLock(File);
+
+impl FileLock {
+    pub fn exclusive(file: File) -> io::Result<Self> {
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+
+    /// Takes ownership of a file whose lock this process has just acquired.
+    pub fn held(file: File) -> Self {
+        Self(file)
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Rust 1.89+ File::unlock would shadow the trait method; name fs2 explicitly.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
 pub fn quote(word: &str) -> String {
     if !word.is_empty()
         && word
@@ -355,5 +380,14 @@ mod tests {
         let error = contender.try_lock_exclusive().unwrap_err();
         assert!(lock_contended(&error), "{error:?}");
         assert!(!lock_contended(&io::Error::from(io::ErrorKind::NotFound)));
+        drop(holder);
+
+        // Dropping the guard releases the lock even while another handle to the
+        // same open file stays alive, as in a child between fork and exec.
+        let owner = File::create(&lock).unwrap();
+        let still_open = owner.try_clone().unwrap();
+        drop(FileLock::exclusive(owner).unwrap());
+        contender.try_lock_exclusive().unwrap();
+        drop(still_open);
     }
 }

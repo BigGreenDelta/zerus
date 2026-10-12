@@ -36,15 +36,29 @@ inline QString storeAt(const QString &cacheRoot, const QString &name, const QByt
     QFile::setPermissions(cacheRoot,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     QFile::setPermissions(folder,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     auto base=QFileInfo(name).fileName();base.replace(QRegularExpression("[^\\p{L}\\p{N}._ -]"),"_");
-    if(base.isEmpty() || base=="." || base=="..")base="attachment";
+    // Cached copies stay plain files everywhere. Linux and macOS limit names to 255
+    // bytes, and QSaveFile may add a 7-byte temporary suffix; Windows drops trailing
+    // dots and spaces and reserves device names; Qt and the Windows shell treat a
+    // .lnk name as a shortcut to another path. Shortening keeps the extension, which
+    // chooses the application that opens the copy, and never splits a surrogate pair.
+    const auto dot=base.lastIndexOf('.');const auto extension=dot>0 && base.size()-dot<=16?base.mid(dot):QString();
+    auto stem=base.left(base.size()-extension.size());
+    while(!stem.isEmpty() && (stem.size()+extension.size()>180 || QFile::encodeName(stem+extension).size()>240)) {
+        stem.chop(1);if(!stem.isEmpty() && stem.back().isHighSurrogate())stem.chop(1);
+    }
+    base=stem+extension;while(base.endsWith('.') || base.endsWith(' '))base.chop(1);
+    if(base.isEmpty())base="attachment";
+    static const QRegularExpression device("^(con|prn|aux|nul|com[0-9\\x{b9}\\x{b2}\\x{b3}]|lpt[0-9\\x{b9}\\x{b2}\\x{b3}]) *(\\..*)?$",
+        QRegularExpression::CaseInsensitiveOption);
+    if(device.match(base).hasMatch())base.prepend('_');
+    if(base.endsWith(".lnk",Qt::CaseInsensitive))base+='_';
     // Identical attachments share this content-addressed path. Writers take turns
     // and keep an intact copy: Windows cannot replace a file that another worker,
     // a thumbnail reader or an opened viewer has open.
     static QBasicMutex writers;const QMutexLocker lock(&writers);
-    const auto path=folder+"/"+base.left(180);const QFileInfo entry(path);
-    // QFile reads a Windows .lnk shortcut itself; only real links lead elsewhere.
-    const bool redirected=entry.isSymbolicLink() || entry.isJunction();
-    if(QFile existing(path);!redirected && (entry.isFile() || entry.isShortcut()) && existing.open(QIODevice::ReadOnly)
+    const auto path=folder+"/"+base;const QFileInfo entry(path);
+    // Only a plain file is reused; a link of any kind leads elsewhere.
+    if(QFile existing(path);!entry.isSymLink() && entry.isFile() && existing.open(QIODevice::ReadOnly)
         && existing.size()==bytes.size() && existing.read(bytes.size()+1)==bytes)return path;
     // QSaveFile writes through links, shortcuts and aliases, so remove the entry itself.
     if(entry.isSymLink() && !QFile::remove(path))return {};

@@ -1,5 +1,6 @@
 #include "HgsClient.h"
 #include "ProcessRunner.h"
+#include "LocalFile.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -585,7 +586,7 @@ quint64 HgsClient::downloadFile(const QString &host, const QString &path, const 
             const QFileInfo saved(destination);
             if (object.value("host").toString() != host || object.value("path").toString() != path
                 || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
-                || !saved.isFile() || object.value("bytes").toDouble() != saved.size()) {
+                || !LocalFile::readable(saved) || object.value("bytes").toDouble() != LocalFile::size(saved)) {
                 emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
             }
             emit fileDownloaded(id, destination);
@@ -1309,7 +1310,8 @@ quint64 HgsClient::requestStageFiles(const QString &host, const QString &name, c
     for (const auto &path : paths) {
         QFile file(path); const QFileInfo info(path);
         if (!error.isEmpty()) break;
-        if (!info.isFile() || info.size() <= 0 || info.size() > MaximumAttachmentBytes || !file.open(QIODevice::ReadOnly)) {
+        const auto size = LocalFile::size(info);
+        if (!LocalFile::readable(info) || size <= 0 || size > MaximumAttachmentBytes || !file.open(QIODevice::ReadOnly)) {
             error = tr("Each file must be readable, nonempty, and at most 10 MiB."); break;
         }
         const auto bytes = file.read(MaximumAttachmentBytes + 1); total += bytes.size();

@@ -115,15 +115,57 @@ private slots:
         QCOMPARE(AttachmentFiles::store("shared.txt","shared fixture"),path);
         QFile restored(path);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),QByteArray("shared fixture"));
     }
+    void cachedNamesStayPlainFiles() {
+        // Qt and the Windows shell treat a .lnk name as a shortcut to another path,
+        // and Windows drops trailing dots and spaces from names.
+        // Windows 10 also reserves device names, and Linux and macOS limit names
+        // to 255 bytes, from which QSaveFile may need 7 for a temporary suffix.
+        const QRegularExpression device("^(con|prn|aux|nul|com.|lpt.) *(\\..*)?$",QRegularExpression::CaseInsensitiveOption);
+        // U+20000 is a letter outside the BMP, so names keep it as a surrogate pair.
+        const auto wide=QString::fromUcs4(U"\U00020000");QString wides;for(int i=0;i<70;++i)wides+=wide;
+        const QStringList names{"folder.lnk","FOLDER.LNK","folder.lnk. ","..","notes.txt","CON.txt","nul","Com1 .log",
+            QString::fromUtf8("LPT\xc2\xb9.txt"),QString(125,QChar(0x0436))+"a.lnk",QString(100,QChar(0x4e2d))+".png",
+            wides+".txt",QString(190,'a')+".pdf",QString(179,'a')+wide+".txt",
+            // Both caps cut just after a high surrogate here.
+            QString(175,'a')+wide+"x.txt","a"+wides+".txt"};
+        for(const auto &name:names) {
+            const auto path=AttachmentFiles::store(name,"plain fixture "+name.toUtf8());QVERIFY2(!path.isEmpty(),qPrintable(name));
+            auto cleanup=qScopeGuard([&]{QFile::remove(path);});
+            const auto file=QFileInfo(path).fileName();
+            QVERIFY2(!file.endsWith(".lnk",Qt::CaseInsensitive) && !file.endsWith('.') && !file.endsWith(' '),qPrintable(file));
+            QVERIFY2(!device.match(file).hasMatch() && QFile::encodeName(file).size()<=248,qPrintable(file));
+            QCOMPARE(QFile::decodeName(QFile::encodeName(file)),file);QVERIFY2(file.size()<=182,qPrintable(file));
+            // Shortening keeps the extension that chooses the application.
+            if(name.endsWith(".txt") || name.endsWith(".pdf") || name.endsWith(".png"))QCOMPARE(file.right(4),name.right(4));
+            QCOMPARE(AttachmentFiles::cached({{"local_path",path}}),QFileInfo(path).canonicalFilePath());
+        }
+        QVERIFY(AttachmentFiles::store(QString(100,QChar(0x4e2d))+".png","long").endsWith(".png"));
+        QVERIFY(AttachmentFiles::store("notes.txt","notes").endsWith("/notes.txt"));
+        QFile::remove(AttachmentFiles::store("notes.txt","notes"));
+        QFile::remove(AttachmentFiles::store(QString(100,QChar(0x4e2d))+".png","long"));
+#ifdef Q_OS_WIN
+        // A real shortcut to a folder stays an available attachment once cached.
+        QTemporaryDir folder;QVERIFY(folder.isValid());const auto shortcut=folder.filePath("folder.lnk");
+        QVERIFY(QFile::link(folder.path(),shortcut));
+        QFile source(shortcut);QVERIFY(source.open(QIODevice::ReadOnly));const auto bytes=source.readAll();QVERIFY(!bytes.isEmpty());
+        const auto path=AttachmentFiles::store("folder.lnk",bytes);QVERIFY(!path.isEmpty());
+        auto cleanup=qScopeGuard([&]{QFile::remove(path);});
+        QVERIFY(!AttachmentFiles::cached({{"local_path",path}}).isEmpty());
+        QList<MessageAttachment> restored;QString error;bool done=false;
+        AttachmentFiles::readAsync({QJsonObject{{"name","folder.lnk"},{"mime","application/octet-stream"},{"bytes",qint64(bytes.size())},{"local_path",path}}},this,
+            [&](const QList<MessageAttachment> &result,const QString &failure){restored=result;error=failure;done=true;});
+        QTRY_VERIFY(done);QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(restored.size(),1);QCOMPARE(restored.first().data,bytes);
+#endif
+    }
     void cachedShortcutNeverWritesThroughToItsTarget() {
-        // QFile::link makes a .lnk shortcut on Windows; storing its bytes again must
-        // keep or replace the cached shortcut itself, never the user's target file.
+        // QFile::link makes a .lnk shortcut on Windows. Its cached copy is a plain
+        // .lnk_ file; storing the bytes again never writes to the user's target.
         QTemporaryDir folder;QVERIFY(folder.isValid());const auto target=folder.filePath("document.txt");
         {QFile file(target);QVERIFY(file.open(QIODevice::WriteOnly));QVERIFY(file.write("user document")>0);}
         const auto shortcut=folder.filePath("document.lnk");QVERIFY(QFile::link(target,shortcut));
         QFile source(shortcut);QVERIFY(source.open(QIODevice::ReadOnly));const auto bytes=source.readAll();QVERIFY(!bytes.isEmpty());
         const auto unchanged=[&]{QFile file(target);return file.open(QIODevice::ReadOnly) && file.readAll()=="user document";};
-        const auto path=AttachmentFiles::store("document.lnk",bytes);QVERIFY(!path.isEmpty());
+        const auto path=AttachmentFiles::store("document.lnk",bytes);QVERIFY(path.endsWith("/document.lnk_"));
         auto cleanup=qScopeGuard([&]{QFile::remove(path);});
         QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(unchanged());
         {QFile damaged(path);QVERIFY(damaged.open(QIODevice::WriteOnly|QIODevice::Truncate));QCOMPARE(damaged.write(QByteArray(bytes.size(),'x')),qint64(bytes.size()));}

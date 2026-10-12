@@ -1063,6 +1063,7 @@ fn worker() -> Result<i32> {
     if file.try_lock_exclusive().is_err() {
         return Ok(0);
     }
+    let _lock = crate::platform::FileLock::held(file);
     recover_interrupted_jobs()?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let started = fs::metadata(&executable).and_then(|m| m.modified()).ok();
