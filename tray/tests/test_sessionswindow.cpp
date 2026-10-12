@@ -50,6 +50,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
 #include "QuestionCard.h"
@@ -169,6 +170,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
+    void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
@@ -2296,6 +2298,45 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     auto peer = *state.peer("mac"); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state); QCOMPARE(active->property("count").toInt(), 1); QCOMPARE(list->count(), 1);
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
+}
+
+void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
+{
+    QSettings().setValue("processes/enabled", true);
+    auto state = fleet(); auto box = state.local(); auto &s = box.sessions[1];
+    s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1;
+    s.backgroundStarted = QDateTime::currentSecsSinceEpoch() - 90;
+    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList");
+    QListWidgetItem *row = nullptr;
+    for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) row=list->item(i);
+    QVERIFY(row);
+    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background work"));
+    QVERIFY(row->data(SessionRoles::Working).toBool());
+    QVERIFY(!row->data(SessionRoles::Scheduled).toBool());
+    QCOMPARE(row->data(SessionRoles::WorkingSince).toDouble(),s.backgroundStarted);
+    QVERIFY(row->data(SessionRoles::Detail).toString().contains("build --wait"));
+    list->setCurrentItem(row);
+    QSignalSpy terminated(&window,&SessionsWindow::sessionActivated);
+    QContextMenuEvent event(QContextMenuEvent::Mouse,list->visualItemRect(row).center(),list->viewport()->mapToGlobal(list->visualItemRect(row).center()));
+    QApplication::sendEvent(list->viewport(),&event);
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    auto *action=menu->findChild<QAction *>("contextOpenProcesses"); QVERIFY(action); QVERIFY(action->isEnabled());
+    action->trigger(); menu->hide();
+    QCOMPARE(window.findChild<QTabWidget *>("sessionDetailTabs")->currentWidget(),window.findChild<ProcessView *>());
+    QCOMPARE(terminated.size(),0);
+    auto *badge=window.findChild<QLabel *>("badge"); QVERIFY(badge);
+    QVERIFY(badge->width() >= badge->fontMetrics().horizontalAdvance(badge->text()) + 16);
+    const QString preview=qEnvironmentVariable("ZERUS_BACKGROUND_PREVIEW");
+    if(!preview.isEmpty())QVERIFY(window.grab().save(preview));
+    box.sessions[1].backgroundProcesses=0; box.sessions[1].scheduledJobs=0;
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) {
+        QCOMPARE(list->item(i)->data(SessionRoles::Status).toString(),QString("Ready"));
+        QVERIFY(!list->item(i)->data(SessionRoles::Working).toBool());
+    }
 }
 
 void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery()

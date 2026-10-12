@@ -8,6 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopSessionPaletteTest {
+    @Test fun backgroundWorkRetainsDistinctCaptionAndUnreadMarker() {
+        val row=session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"mobile_unread_reply":true}""")
+        val badge=DesktopSessionPalette.badge(row,true)
+        assertEquals("Background work",badge.caption)
+        assertEquals(DesktopBadgeKind.Working,badge.kind)
+        assertTrue(badge.additionalUnread)
+    }
     private fun session(raw: String = "{}", pending: Int = 0, archive: String = "") = Session(
         Target("computer", "codex/project/task", "run", "conversation", "workspace", archive),
         "Task", "codex", "Untrusted display string", "Project", "Preview", pending, JSONObject(raw))

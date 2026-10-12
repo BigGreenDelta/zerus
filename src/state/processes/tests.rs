@@ -3,6 +3,16 @@ use super::*;
 pub(super) fn record(agent: &str) -> Value {
     json!({"agent":agent,"conversation_id":"1a4f09e2-115c-4e49-9fa9-30d184d6ee18","run_id":"run-a","cwd":"/workspace"})
 }
+#[test]
+fn native_work_requires_current_registry_and_ignores_historical_calls() {
+    let r = record("dsh");
+    assert!(dsh_work(&r, &json!({}), true)["count"].is_null());
+    let native = json!({"jobs":[],"shellCalls":[{"callId":"a","owner":r["conversation_id"],"command":"build","status":"running","startedAt":1000},
+        {"callId":"b","owner":r["conversation_id"],"command":"finished","status":"completed","startedAt":1000}]});
+    assert_eq!(dsh_work(&r, &native, true)["count"], 1);
+    assert_eq!(dsh_work(&r, &native, true)["command"], "build");
+    assert!(dsh_work(&r, &native, false)["count"].is_null());
+}
 fn hook(kind: &str, call: &str, response: Value) -> Value {
     json!({"hook_event_name":kind,"tool_name":"Bash","tool_use_id":call,"tool_input":{"command":"echo same"},"tool_response":response})
 }

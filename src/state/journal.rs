@@ -644,6 +644,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["clear_context_request"] = record["clear_context_request"].clone();
     if include_processes {
         output["processes"] = processes::snapshot(&record, archive_id.is_none() && panes.is_some() && process_alive(&record));
+        output["process_work"] = processes::WorkSample::default().summary(&record,
+            archive_id.is_none() && panes.is_some() && output["activity"] == "idle" && output["phase"] == "idle");
     }
     output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
     output["compact_context_request"] = record["compact_context_request"].clone();

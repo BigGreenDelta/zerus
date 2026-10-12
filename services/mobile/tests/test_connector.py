@@ -66,6 +66,14 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.connector.journal.close()
         self.temp.cleanup()
 
+    async def test_process_observation_clock_does_not_change_snapshot_work(self):
+        expected = dict(count=1, started_at=100, command='build --wait')
+        for clock in [200, 201]:
+            row = dict(name='codex/example', process_work={**expected, 'sampled_at': clock})
+            self.hgs.write_text(FAKE_HGS.replace("{'name': 'codex/example'}", repr(row)))
+            snapshot = await self.connector.snapshot()
+            self.assertEqual(snapshot['sessions'][0]['process_work'], expected)
+
     async def test_desktop_presence_travels_beside_the_snapshot_with_old_relay_fallback(self):
         presence = {'idle_seconds': 4.0, 'locked': False, 'locked_seconds': None}
         self.hgs.write_text(FAKE_HGS.replace("'hgs_version': '9.8.7', ", "'hgs_version': '9.8.7', 'desktop_presence': %r, " % presence))

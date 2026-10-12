@@ -81,5 +81,26 @@ class ProcessControl(unittest.TestCase):
         new=self.jobs()[0]['id'];self.assertNotEqual(old,new)
         self.cli('processes',self.name,'--stop',old,'--run',self.run_id,'--conversation','replacement-conversation',ok=False)
         self.assertEqual(len(self.jobs()),2)
+    def test_idle_background_work_is_current_and_clears_after_os_exit(self):
+        self.record.update(phase='idle', active_tools={})
+        self.write_record()
+        def listed():
+            return next(s for s in self.cli('ls','--json','--local')['sessions'] if s['name']==self.name)
+        row=listed()
+        self.assertEqual(row['activity'],'idle')
+        self.assertEqual(row['process_work']['count'],2)
+        self.assertGreater(row['process_work']['started_at'],0)
+        self.assertIn('sh',row['process_work']['command'])
+        self.assertEqual(row['process_work']['started_at'],listed()['process_work']['started_at'])
+        self.assertEqual(self.cli('inspect',self.name)['process_work']['count'],2)
+        self.assertNotIn('process_work',self.cli('inspect',self.name,'--skip-processes'))
+        for pid in self.children:os.killpg(pid,signal.SIGKILL)
+        self.wait_for(lambda:listed()['process_work']['count']==0)
+        os.kill(self.record['pid'],0)
+        # Recorded running jobs are not live evidence after their processes end.
+        self.record['shell_jobs']={'old':dict(id='old',status='running',background=True,observed=True,
+            source='hooks',run_id=self.run_id,conversation_id=self.conversation_id,command='old command')}
+        self.write_record()
+        self.assertEqual(listed()['process_work']['count'],0)
 
 if __name__=='__main__':unittest.main()
