@@ -1,52 +1,74 @@
 #pragma once
 #include "MessageComposer.h"
-#include <QElapsedTimer>
 #include <QObject>
 #include <QUrl>
 
 class SpeechClient;
 class SpeechRecorder;
 class ToolbarChip;
-class QTimer;
+class QComboBox;
+class QLabel;
+class QMediaPlayer;
+class QAudioOutput;
 
 class SpeechComposer : public QObject {
     Q_OBJECT
 public:
+    struct Target {
+        QString key, host, session, run, conversation, warning;
+        bool available = false;
+        bool sameConversation(const Target &other) const {
+            return key == other.key && host == other.host && session == other.session
+                && run == other.run && conversation == other.conversation;
+        }
+    };
     explicit SpeechComposer(const QString &executable, MessageComposer *composer,
-                            std::function<QString()> conversationIdentity, SpeechRecorder *recorder = nullptr,
+                            std::function<Target()> target, SpeechRecorder *recorder = nullptr,
                             std::function<bool(const QUrl &)> openSettings = {});
     static QUrl microphoneSettingsUrl();
+signals:
+    void messageChanged(const QString &sessionKey, const QJsonObject &message);
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
-    enum class State { Idle, Checking, Starting, Recording, Submitting, Recognizing, Uncertain, Saving };
+    enum class State { Idle, Checking, Starting, Recording, Saving, Preview, Submitting, Uncertain };
     enum class Notice { General, MicrophonePermission };
     void start();
-    void submitRecording(const QByteArray &base64);
-    void cancel();
-    void poll();
+    void recorded(const QByteArray &base64);
+    void send();
+    void check();
     void result(const QJsonObject &reply, const QString &error);
-    void completed(const QString &text);
+    void discard();
+    void syncTarget();
+    void saveVoice(std::function<void(bool)> done, bool requireGeneration = true);
+    void loadProfiles(std::function<void(bool)> done);
     void update();
+    void play();
+    void stopPlayback();
     void showResult();
     void fail(const QString &error, Notice notice = Notice::General);
     void showPermissionRecovery();
-    void clearPending();
+    QJsonObject identityPayload(const QString &action) const;
+    QString storageKey() const;
     MessageComposer *m_composer;
     SpeechClient *m_client;
     SpeechRecorder *m_recorder;
     ToolbarChip *m_voice, *m_cancel, *m_result;
-    QTimer *m_poll;
-    std::function<QString()> m_identity;
+    QWidget *m_preview;
+    QLabel *m_previewLabel;
+    QPushButton *m_play, *m_send, *m_discard;
+    QComboBox *m_provider;
+    QMediaPlayer *m_player = nullptr;
+    QAudioOutput *m_output = nullptr;
+    std::function<Target()> m_currentTarget;
     std::function<bool(const QUrl &)> m_openSettings;
-    MessageComposer::VoiceTarget m_target;
-    QString m_originalIdentity, m_host, m_profile, m_job, m_recoveryKey, m_text, m_notice;
+    Target m_target;
     ComposerDraftStore m_store;
-    QString m_pendingKey;
-    bool m_loadingPending = true;
+    QByteArray m_pcm;
+    QString m_id, m_notice, m_loadedKey;
+    bool m_loading = false, m_syncing = false;
     State m_state = State::Idle;
     Notice m_noticeKind = Notice::General;
     quint64 m_generation = 0;
     int m_seconds = 0;
-    QElapsedTimer m_deadline;
 };

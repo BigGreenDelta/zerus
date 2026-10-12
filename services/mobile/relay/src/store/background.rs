@@ -287,7 +287,7 @@ impl Store {
             // after the phone read it, or after a short TTL if it never does.
             // The partial `attachment_history` index holds only these rows.
             rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?",args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
-            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='speech_submit' AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated,id LIMIT ?",args![batch]).await?);
+            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation IN ('speech_submit','voice_submit') AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated,id LIMIT ?",args![batch]).await?);
             rows.sort_by(|a, b| s(a, "id").cmp(s(b, "id")));
             rows.dedup_by(|a, b| a["id"] == b["id"]);
             rows.truncate(batch as usize);
@@ -303,7 +303,7 @@ impl Store {
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
                             "terminal_snapshot" | "speech_profiles" | "speech_stats"
-                            | "speech_status" => 120.0,
+                            | "speech_status" | "voice_profiles" | "voice_status" => 120.0,
                             "attachment_read" => ATTACHMENT_RESULT_TTL,
                             _ => self.db.cfg.retention.min(3600) as f64,
                         }
@@ -320,7 +320,9 @@ impl Store {
                     )
                     .await?;
                     self.db.bytes(&mut t, s(&r, "workspace_id"), -size).await?;
-                } else if r["operation"] == "speech_submit" && i(&r, "body_bytes") > 0 {
+                } else if ["speech_submit", "voice_submit"].contains(&s(&r, "operation"))
+                    && i(&r, "body_bytes") > 0
+                {
                     t.exec(
                         "UPDATE requests SET body='',body_bytes=0 WHERE id=?",
                         args![&r["id"]],

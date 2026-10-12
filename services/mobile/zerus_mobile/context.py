@@ -2,6 +2,7 @@
 import uuid
 import re
 from .speech import OPERATIONS as SPEECH_OPERATIONS, READS as SPEECH_READS
+from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
 
 CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clear-context"}
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
@@ -10,9 +11,9 @@ LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktr
 COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
-OPERATIONS = SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+OPERATIONS = VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = SPEECH_READS | frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read"})
+READ_OPERATIONS = VOICE_READS | SPEECH_READS | frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read"})
 # Predicate of the persisted read_history_v3 index and the one-hour read class.
 # attachment_read is a read with its own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"

@@ -119,7 +119,7 @@ class MainActivity : ComponentActivity() {
             model.finishAttachmentPick(uris, selectionId)
         }
     }
-    override fun onStop() { model.speech.background(); super.onStop() }
+    override fun onStop() { model.speech.background(); model.attachments.stopAudio(); super.onStop() }
     override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
@@ -654,7 +654,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val target = session.target
     val raw = model.activity
     val archived = target.archiveId.isNotBlank()
-    val events = if (model.demo) Demo.events else model.conversationEvents
+    val events = if (model.demo) Demo.events else VoiceHistory.merge(target, model.conversationEvents, model.speech.outgoing)
+    LaunchedEffect(target, model.speech.ready) { if (!model.demo && model.speech.ready) model.speech.refreshProfiles() }
+    LaunchedEffect(target, model.conversationEvents, model.speech.ready, model.activityVerified) {
+        if (!model.demo && model.activityVerified) model.speech.observe(target, model.conversationEvents)
+    }
     val questions = if (archived || model.demo) emptyList() else model.conversationQuestions
     var savedQuestionDisplay by rememberSaveable(stateSaver = Saver< QuestionDisplayState, String>(
         save = { it.encode() }, restore = { QuestionDisplayState.decode(it) })) { mutableStateOf(QuestionDisplayState(target.key)) }
@@ -972,7 +976,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
-                if (replies != null) {
+                if (event.voice != null) {
+                    VoiceMessageContent(model, model.selected?.target, event.voice)
+                } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         replies.orEmpty().forEach { reply ->
@@ -986,7 +992,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     if(own) SelectionContainer { Text(event.text, lineHeight = 23.sp, style = MaterialTheme.typography.bodyLarge) }
                     else ProvideTextStyle(MaterialTheme.typography.bodyLarge.copy(lineHeight=23.sp)) { MarkdownText(event.text) }
                 }
-                AttachmentRows(event.attachments, model.selected?.target, model)
+                if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
                 if (event.delivery.isNotBlank() || event.at > 0) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
@@ -1195,6 +1201,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Saved drafts", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold) }
         item { Text("Private to this phone. Kept for the exact machine, session, run, and conversation.", color = Muted) }
+        if (model.speech.draft != null || model.speech.outgoing.isNotEmpty()) item { VoiceSavedMessages(model) }
         if(model.actionResultNotice.isNotBlank()) item { Text(model.actionResultNotice,color = Amber,style = MaterialTheme.typography.bodySmall) }
         items(unsent.sortedByDescending { it.updatedAt }, key = { it.key }) { draft ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

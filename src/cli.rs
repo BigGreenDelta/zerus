@@ -41,6 +41,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
@@ -377,11 +378,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "recovery" => {
+        | "attachment" | "recovery" | "voice" => {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -614,7 +615,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),

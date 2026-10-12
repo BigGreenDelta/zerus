@@ -569,11 +569,23 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *activityPage = new QWidget; auto *activityLayout = new QVBoxLayout(activityPage);
     activityLayout->setContentsMargins(0, 0, 0, 0); activityLayout->setSpacing(0);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
-    new SpeechComposer(hgsPath, m_composer, [this] {
+    auto *voice = new SpeechComposer(hgsPath, m_composer, [this] {
+        SpeechComposer::Target target;
         const auto *entry = selected();
-        if (!entry || m_details.isEmpty()) return QString();
-        return QString::fromUtf8(QJsonDocument(QJsonArray{entry->key, entry->machine,
-            m_details.value("run_id"), m_details.value("conversation_id")}).toJson(QJsonDocument::Compact));
+        if (!entry || m_details.isEmpty()) return target;
+        target.key=entry->key;target.host=entry->host;target.session=entry->session.name;
+        target.run=m_details.value("run_id").toString();target.conversation=m_details.value("conversation_id").toString();
+        target.available=entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        if(CacheStatus::expired(m_details))target.warning=CacheStatus::warning(m_details)+tr("\n\nSend this voice message with the full conversation context?");
+        return target;
+    });
+    connect(voice,&SpeechComposer::messageChanged,this,[this](const QString &key,const QJsonObject &message){
+        auto &rows=m_localMessages[key];const auto id=message.value("id").toString();
+        for(qsizetype i=rows.size();i-->0;)if(rows[i].toObject().value("message_id")==id)rows.removeAt(i);
+        rows.append(QJsonObject{{"id","voice-"+id},{"message_id",id},{"request_id",id},{"source","hgs_voice"},{"type","UserMessage"},
+            {"voice",message},{"text",message.value("transcript")},{"status","sent"},{"run_id",message.value("run_id")},
+            {"conversation_id",message.value("conversation_id")},{"submitted_at",message.value("created_at")},{"attachments",QJsonArray{message.value("audio")}}});
+        if(key==m_selectedKey){reconcileMessages();renderDetails();m_activityView->jumpToLatest();inspect();}
     });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
@@ -834,12 +846,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     subagentTop->addWidget(m_subagentHint);
     m_subagentView = new ActivityView; m_subagentView->setObjectName("subagentActivity"); m_subagentView->browser()->setObjectName("subagentJournal"); subagentLayout->addWidget(m_subagentView, 1);
     m_subagentComposer = new MessageComposer; m_subagentComposer->setObjectName("subagentComposer"); m_subagentComposer->setInputVisible(false);
-    new SpeechComposer(hgsPath, m_subagentComposer, [this] {
-        const auto *entry = selected();
-        if (!entry || m_subagentId.isEmpty() || m_subagentDetails.isEmpty()) return QString();
-        return QString::fromUtf8(QJsonDocument(QJsonArray{entry->key, entry->machine, m_subagentId,
-            m_details.value("run_id"), m_details.value("conversation_id"), m_subagentDetails.value("conversation_id")}).toJson(QJsonDocument::Compact));
-    });
+    // Voice delivery is scoped to a main conversation until the durable voice
+    // protocol supports an exact child identity; never route a child to its parent.
     m_subagentContextUsage=new SessionUsage::ContextButton;m_subagentContextUsage->setObjectName("subagentContext");
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);
@@ -880,6 +888,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             attachments->open(entry->host,entry->session.name,m_details.value("conversation_id").toString(),
                 entry->session.archiveId,view==m_subagentView?m_subagentId:QString(),file,
                 [this](const QString &,const QString &error){showNotice(error,!error.isEmpty());});
+        });
+        connect(view,&ActivityView::voicePlaybackRequested,this,[this,view,attachments](const QString &key,const QJsonObject &file){
+            const auto *entry=selected();if(!entry)return;
+            attachments->fetch(entry->host,entry->session.name,m_details.value("conversation_id").toString(),entry->session.archiveId,
+                view==m_subagentView?m_subagentId:QString(),file,[view,key](const QString &path,const QString &error){view->playVoice(key,path,error);},true);
         });
         connect(view,&ActivityView::attachmentPreviewRequested,this,[this,view,attachments](const QString &key,const QJsonObject &file){
             const auto *entry=selected();if(!entry)return;
@@ -3741,6 +3754,11 @@ void SessionsWindow::reconcileMessages()
         if ((!runId.isEmpty() && message.value("run_id").toString() != runId)
             || (!conversationId.isEmpty() && message.value("conversation_id").toString() != conversationId)) {
             messages.removeAt(i); continue;
+        }
+        if(message.value("source")=="hgs_voice") {
+            for(const auto &value:m_details.value("voice_messages").toArray())
+                if(value.toObject().value("message_id")==message.value("message_id")){messages.removeAt(i);break;}
+            continue;
         }
         const bool failed=message.value("status")=="error";
         if (!failed && message.value("status") != "sent") continue;

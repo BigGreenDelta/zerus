@@ -30,6 +30,25 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val api = RelayApi()
     internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
     internal val speechNavigation get() = navigationId
+    internal fun voiceHostReason(target: Target): String = when {
+        demo -> "Connect a computer to send voice messages."
+        connections.none { it.id == target.connectionId } -> "The voice workspace is disconnected."
+        machines.none { it.connectionId == target.connectionId && it.id == target.computerId && it.online && !it.lastKnown } -> "The conversation computer is offline."
+        !relayOperations[target.connectionId].orEmpty().containsAll(VoiceProtocol.operations) -> "Update this gateway to send voice messages."
+        !machineOperations[MachineKey(target.connectionId, target.computerId)].orEmpty().containsAll(VoiceProtocol.operations) -> "Update Zerus on the conversation computer to send voice messages."
+        else -> ""
+    }
+    internal fun voiceSendReason(target: Target): String = when {
+        !storageReady || updateInstallPreparing -> "Private storage is not ready."
+        target.agentId.isNotBlank() || target.archiveId.isNotBlank() -> "Voice messages are available in live parent conversations."
+        voiceHostReason(target).isNotBlank() -> voiceHostReason(target)
+        !fresh(target) -> "Open and refresh the original conversation before sending."
+        NativeParser.messageBlockReason(activity).isNotBlank() -> NativeParser.messageBlockReason(activity)
+        sendingBlocked(target) -> "Resolve the pending delivery before sending this recording."
+        else -> ""
+    }
+    internal fun voiceColdCache() = ContextPresentation.isCold(activity)
+    internal fun voiceSent(target: Target, id: String) { lastOwnSend = target to id }
     internal fun speechHostReason(host: MachineKey): String = when {
         demo -> "Connect a computer to use voice input."
         connections.none { it.id == host.connectionId } -> "The voice workspace is disconnected."
@@ -721,7 +740,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val window=historyWindows[frame.target.key]
                 if(window?.atHead==true && !olderLoading && frame.observedAt>0 && frame.observedAt!=lastHistoryObservation) {
                     lastHistoryObservation=frame.observedAt
-                    window.events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor?.takeIf { it.isNotBlank() }?.let { loadHistory(frame.target,"after",it) }
+                    HistoryRequests.refreshAtHead(window)?.let { (direction,cursor) -> loadHistory(frame.target,direction,cursor) }
                 }
             }
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
@@ -2156,7 +2175,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun protectedAttachmentIds(): Set<String> {
         fun refs(state: MessageState) = state.drafts.flatMap { it.attachments } + state.outgoing.flatMap { it.attachments } + state.pickerDraft?.attachments.orEmpty()
-        return (refs(messageState) + persistence?.durableState?.let(::refs).orEmpty()).map { it.id }.toSet()
+        return (refs(messageState) + persistence?.durableState?.let(::refs).orEmpty()).map { it.id }.toSet() + speech.protectedAudioIds()
     }
     fun removeAttachment(target: Target, id: String) = viewModelScope.launch {
         if (target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch

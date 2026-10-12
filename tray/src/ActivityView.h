@@ -17,6 +17,9 @@ class QLabel;
 class QTextBrowser;
 class QUrl;
 class QShowEvent;
+class QHideEvent;
+class QMediaPlayer;
+class QAudioOutput;
 struct ActivityRenderResult;
 
 // Chronological, read-only journal presentation. Agent input lives in the
@@ -49,6 +52,7 @@ public:
     // The document as copied: chips and list markers spelled out.
     QString plainText() const;
     void setAttachmentPreview(const QString &key, const QImage &image);
+    void playVoice(const QString &key, const QString &path, const QString &error = {});
     // Journal HTML generations. Tests verify that unchanged polls skip them.
     int renderPasses() const { return m_renderPasses; }
     bool renderPending() const { return m_renderDirty || m_renderInFlight || m_renderScheduled; }
@@ -62,6 +66,7 @@ signals:
     void externalLinkActivated(const QUrl &url);
     void attachmentActivated(const QJsonObject &file);
     void attachmentPreviewRequested(const QString &key, const QJsonObject &file);
+    void voicePlaybackRequested(const QString &key, const QJsonObject &file);
     void queueSendNowRequested(const QString &queueId);
     void messageActionRequested(const QString &id, const QString &action);
     void processRequested(const QString &id);
@@ -73,6 +78,7 @@ signals:
 
 protected:
     void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -110,6 +116,10 @@ private:
     QHash<QString, QString> m_fileLinks;
     QHash<QString, QString> m_deliveryKeys;
     QHash<QString, QJsonObject> m_attachmentLinks;
+    QHash<QString, QJsonObject> m_voiceLinks;
+    QMediaPlayer *m_voicePlayer = nullptr;
+    QAudioOutput *m_voiceOutput = nullptr;
+    QString m_voiceKey, m_voicePlaying, m_voiceLoading, m_voiceError;
     QHash<QString, QJsonObject> m_previewFiles;
     QHash<QString, QImage> m_previews;
     QHash<QString, QPair<QString, QString>> m_messageActions;

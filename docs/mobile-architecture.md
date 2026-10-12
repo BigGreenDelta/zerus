@@ -705,49 +705,41 @@ row says "Update Zerus on this computer to open attachments."
 
 ### Voice input
 
-In Android Settings, choose a **Voice input** computer and one of its configured
-recognition profiles. The processing computer is independent of the computer
-running the current session. Choices use the existing authorized connected
-computers and direct peers; an unavailable selection never switches to another
-provider automatically. Both the relay and selected computer must advertise
-the speech operations before the phone sends them.
+Voice creates a persistent audio message. Record, stop, and review the separate
+voice draft with Play, Discard or **Send voice**. The typed draft is preserved.
+The phone encrypts the retained WAV and request UUID before sending. Closing or
+restarting the client preserves the stopped preview and any uncertain outbox
+entry; an interrupted upload is checked by its original identity, never blindly
+replayed. Capture remains bounded to two minutes of mono 16 kHz PCM.
 
-Tap the composer microphone, allow Android microphone access, then speak. Tap
-**Stop and transcribe** to submit the recording; **Cancel** discards a recording
-before upload. Capture lasts at most two minutes and produces at most 3,840,000
-bytes of mono 16 kHz signed little-endian PCM. Recording and the 48 kHz fallback
-conversion run off the main thread. Leaving the foreground stops capture and
-retains the audio in memory for explicit **Transcribe** or **Discard**. Audio is
-not persisted on the phone, so process death during capture loses that recording.
+The conversation computer stores the original audio and owns recognition and
+native text delivery. Its reachable speech computers and profiles are selected
+by stable machine UUID, so the phone can use a model on another configured
+computer without interpreting that computer's SSH aliases. Provider discovery is
+scoped to the selected live conversation. Child and archived conversations do not
+accept new voice recordings in the initial implementation.
 
-The phone stores the request UUID, processing host/profile and exact original
-draft identity in encrypted storage before its single upload attempt. An
-interrupted submission exposes **Check status** for the same job and never
-automatically uploads again. Submit and cancel acknowledgements contain no
-transcript; completed text is fetched through status and encrypted locally
-before insertion. An unchanged draft on the same navigation receives an append.
-If the draft or navigation changed, or the app restarted, the result stays
-available for explicit **Insert into draft** in the original conversation or
-**Copy**. Insertion checks the actual editor before its asynchronous draft mirror
-and advances the editor generation before waiting for storage, preserving IME
-edits arriving at either boundary. Attachments and existing edits are retained.
-A durable insertion ID prevents the same result from being appended again after interruption. Voice
-recognition never sends a message to the agent.
+After explicit Send voice, one synchronized history card shows processing,
+delivery or error state, the playable original and expandable transcript. The
+native agent receives recognized text. The original remains available even when
+recognition fails or delivery is cancelled. Unknown native delivery is shown as
+unconfirmed and is never automatically repeated. Archive playback uses the same
+exact conversation authorization as other attachments.
 
-Voice jobs use the ordinary authenticated request envelope with the processing
-`computer_id` and an empty `session`. Operations are `speech_profiles`,
-`speech_submit`, `speech_status` and `speech_cancel`. Audio travels through the
-trusted relay, which can read it; this is not end-to-end encrypted. Models,
-provider credentials and inference remain on the selected computer. See the
-[speech service](../services/speech/README.md) for host setup and limits.
+The additive relay operations are `voice_profiles`, `voice_submit`, `voice_status`
+and `voice_cancel`, targeting the conversation `computer_id` and exact `session`.
+Existing `attachment_read` serves bounded audio chunks. Read receipts and relay
+uploads remain short-lived; the conversation host retains the original audio.
+Audio travels through the trusted relay, which can read it; this is not end-to-end
+encrypted. Models, credentials and inference stay on the processing computer.
+See [voice messages](voice-messages.md) for the wire contract and
+[the speech service](../services/speech/README.md) for model setup.
 
-When `speech_stats` is advertised, Settings also shows that computer's retained
-aggregate counts for completed and failed recognition and accepted audio
-minutes. These counters belong to the processing host; the phone does not count
-the same recording again or send audio/text to Firebase analytics. Broader local
-and fleet measurements are described in [analytics](analytics.md). The
-[Android README](../mobile/android/README.md#voice-input) covers client behavior
-and the isolated microphone smoke test.
+Existing `speech_stats` reports processing-host aggregate counts and audio
+minutes without counting retries as new audio. Voice metadata is not sent to
+Firebase analytics. Broader local and fleet measurements are described in
+[analytics](analytics.md); the [Android README](../mobile/android/README.md#voice-input)
+covers client behavior and the isolated microphone smoke test.
 
 ## Protocol version 1
 

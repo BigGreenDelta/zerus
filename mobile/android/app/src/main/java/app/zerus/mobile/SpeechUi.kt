@@ -25,31 +25,27 @@ import androidx.compose.ui.unit.dp
     val speech = model.speech
     var hostsOpen by remember { mutableStateOf(false) }
     var profilesOpen by remember { mutableStateOf(false) }
-    val selected = model.machines.find { MachineKey(it.connectionId, it.id) == speech.selection.host }
-    LaunchedEffect(speech.ready, speech.selection.host) { if (speech.ready) speech.refreshProfiles() }
+    val selected = speech.computers.find { it.id == speech.selection.host?.computerId }
+    LaunchedEffect(speech.ready, model.selected?.target) { if (speech.ready) speech.refreshProfiles() }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Voice input", style = MaterialTheme.typography.titleLarge)
-        Text("Choose the computer and profile that process your recordings. This can be different from the computer running your conversation.", style = MaterialTheme.typography.bodySmall)
+        Text("Voice messages", style = MaterialTheme.typography.titleLarge)
+        Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
         Box {
-            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.busy && !model.updateInstallPreparing,
+            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
                 modifier = Modifier.fillMaxWidth()) {
                 Text(selected?.name ?: if (speech.selection.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
-                model.machines.forEach { machine ->
-                    val host = MachineKey(machine.connectionId, machine.id)
-                    val reason = model.speechHostReason(host)
-                    DropdownMenuItem(text = { Column {
-                        Text(machine.name)
-                        if (model.connections.size > 1) Text(model.connections.find { it.id == machine.connectionId }?.displayName.orEmpty(), style = MaterialTheme.typography.bodySmall)
-                        if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
-                    } }, onClick = { hostsOpen = false; speech.chooseHost(host) })
+                speech.computers.forEach { machine ->
+                    DropdownMenuItem(text = { Text(machine.name) }, onClick = {
+                        hostsOpen = false
+                        model.selected?.target?.let { speech.chooseHost(MachineKey(it.connectionId, machine.id)) }
+                    })
                 }
-                if (model.machines.isEmpty()) DropdownMenuItem(text = { Text("Connect a computer first") }, onClick = {}, enabled = false)
             }
         }
         Box {
-            OutlinedButton(onClick = { profilesOpen = true }, enabled = speech.profiles.isNotEmpty() && !speech.busy && !model.updateInstallPreparing,
+            OutlinedButton(onClick = { profilesOpen = true }, enabled = speech.profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
                 modifier = Modifier.fillMaxWidth()) {
                 Text(speech.profile?.name ?: speech.selection.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -61,12 +57,20 @@ import androidx.compose.ui.unit.dp
                 } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id) }) }
             }
         }
-        Text("Recordings are sent through your gateway to the selected computer after you stop. Your gateway can read the audio. The result is an editable draft; sending remains a separate action.", style = MaterialTheme.typography.bodySmall)
+        Text("Tap Send after recording. Zerus keeps the audio in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the audio.", style = MaterialTheme.typography.bodySmall)
         if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
         if (speech.statistics.isNotBlank()) Text(speech.statistics, style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { speech.refreshProfiles() }, enabled = speech.selection.host != null && !speech.loading && !speech.busy) { Text("Refresh voice profiles and statistics") }
-        if (speech.busy || speech.attempt != null) SpeechComposerStatus(model)
+        TextButton(onClick = { speech.refreshProfiles() }, enabled = !speech.loading && !speech.recording) { Text("Refresh voice profiles") }
+        SpeechComposerStatus(model)
+        speech.legacyResult?.let { legacy ->
+            Text("An earlier dictation result remains saved on this phone. It has not been sent.", style = MaterialTheme.typography.bodySmall)
+            if (legacy.text.isNotBlank()) {
+                val clipboard = LocalClipboardManager.current
+                SelectionContainer { Text(legacy.text) }
+                TextButton(onClick = { clipboard.setText(AnnotatedString(legacy.text)) }) { Text("Copy earlier transcription") }
+            }
+        }
     }
 }
 
@@ -87,11 +91,12 @@ import androidx.compose.ui.unit.dp
     fun start() {
         saveEditor()
         if (speech.startReason(target).isNotBlank()) { settings = true; return }
+        model.attachments.stopAudio()
         if (SpeechMicrophoneAccess.granted(context)) speech.start(target)
         else { permissionTarget = target to model.speechNavigation; permission.launch(Manifest.permission.RECORD_AUDIO) }
     }
-    IconButton(onClick = { if (speech.recording) speech.stop() else start() }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) {
-        Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, if (speech.recording) "Stop recording and transcribe" else "Voice input",
+    IconButton(onClick = { if (speech.recording) speech.stop() else start() }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing && target.agentId.isBlank() && target.archiveId.isBlank()) {
+        Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, if (speech.recording) "Stop recording" else "Voice input",
             tint = if (speech.recording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
     }
     if (microphoneDenied) {
@@ -119,47 +124,117 @@ import androidx.compose.ui.unit.dp
 
 @Composable internal fun SpeechComposerStatus(model: ZerusViewModel) {
     val speech = model.speech
-    val attempt = speech.attempt
-    val clipboard = LocalClipboardManager.current
-    var discard by remember { mutableStateOf(false) }
-    if (!speech.busy && attempt == null) return
+    val draft = speech.draft
+    var confirmCold by remember { mutableStateOf<VoiceDraft?>(null) }
+    var confirmDiscard by remember { mutableStateOf<VoiceDraft?>(null) }
+    if (!speech.recording && !speech.savingRecording && draft == null) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (speech.recording) {
-            Text("Recording ${speech.seconds / 60}:${(speech.seconds % 60).toString().padStart(2, '0')} (up to 2 minutes)", color = MaterialTheme.colorScheme.error)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { speech.stop() }) { Text("Stop and transcribe") }
-                TextButton(onClick = { speech.discardRecording() }) { Text("Cancel") }
-            }
-        } else if (speech.recorded) {
-            Text("Recording ready (${speech.seconds}s)", style = MaterialTheme.typography.bodySmall)
-            Row {
-                TextButton(onClick = { speech.submit() }, enabled = !speech.working) { Text("Transcribe") }
-                TextButton(onClick = { speech.discardRecording() }, enabled = !speech.working) { Text("Discard") }
-            }
-        } else if (attempt != null) {
-            Text("Voice for ${attempt.origin.target.session}", style = MaterialTheme.typography.labelSmall)
-            Text(speech.notice.ifBlank { "Voice recording for ${attempt.origin.target.session}" }, style = MaterialTheme.typography.bodySmall)
-            if (attempt.state == "completed" && attempt.text.isNotBlank()) {
-                SelectionContainer { Text(attempt.text, maxLines = 6, overflow = TextOverflow.Ellipsis) }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { speech.insertReviewed() }, enabled = !speech.working && model.selected?.target == attempt.origin.target) { Text("Insert into draft") }
-                    if (model.selected?.target != attempt.origin.target) model.sessions.find { it.target == attempt.origin.target }?.let { original ->
-                        TextButton(onClick = { model.open(original) }) { Text("Open conversation") }
-                    }
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(attempt.text)) }) { Text("Copy") }
-                    TextButton(onClick = { discard = true }, enabled = !speech.working) { Text("Discard") }
+        when {
+            speech.recording -> {
+                Text("Recording ${speech.seconds / 60}:${(speech.seconds % 60).toString().padStart(2, '0')} (up to 2 minutes)", color = MaterialTheme.colorScheme.error)
+                Row {
+                    TextButton(onClick = { speech.stop() }) { Text("Stop recording") }
+                    TextButton(onClick = { speech.discardRecording() }) { Text("Cancel") }
                 }
-            } else Row {
-                if (attempt.state !in setOf("completed", "cancelled", "failed")) {
-                    TextButton(onClick = { speech.checkStatus() }, enabled = !speech.working) { Text("Check status") }
-                    TextButton(onClick = { speech.cancel() }) { Text("Cancel") }
+            }
+            speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            draft != null -> {
+                Text("Voice message for ${draft.target.session}", style = MaterialTheme.typography.labelMedium)
+                val computer = speech.computers.find { it.id == draft.machineId }
+                Text("Transcription: ${computer?.name ?: draft.machineId} / ${computer?.profiles?.find { it.id == draft.profileId }?.name ?: draft.profileId}", style = MaterialTheme.typography.bodySmall)
+                VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs)
+                val reason = speech.sendReason()
+                Row {
+                    TextButton(onClick = {
+                        model.attachments.stopAudio()
+                        if (model.voiceColdCache()) confirmCold = draft else speech.submit()
+                    }, enabled = reason.isBlank()) { Text("Send voice message") }
+                    TextButton(onClick = { confirmDiscard = draft }) { Text("Discard") }
                 }
-                if (!speech.working && attempt.state in setOf("completed", "failed", "cancelled", "uncertain")) TextButton(onClick = { discard = true }) { Text("Dismiss") }
+                if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
+                if (model.selected?.target != draft.target) model.sessions.find { it.target == draft.target }?.let { session ->
+                    TextButton(onClick = { model.open(session) }) { Text("Open original conversation") }
+                }
             }
         }
+        if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
     }
-    if (discard) AlertDialog(onDismissRequest = { discard = false }, title = { Text("Discard voice result?") },
-        text = { Text("This removes the saved voice request and transcription from this phone. Your draft is preserved.") },
-        confirmButton = { TextButton(onClick = { speech.dismiss(); discard = false }) { Text("Discard") } },
-        dismissButton = { TextButton(onClick = { discard = false }) { Text("Keep") } })
+    confirmCold?.let { captured ->
+        AlertDialog(onDismissRequest = { confirmCold = null }, title = { Text("Send with full context?") },
+            text = { Text("The prompt cache for ${captured.target.session} has expired. Sending this voice message can process the full conversation again and use more tokens. Your typed draft will stay here.") },
+            confirmButton = { TextButton(onClick = {
+                confirmCold = null
+                if (speech.draft == captured && speech.sendReason().isBlank()) speech.submit(allowColdCache = true)
+            }) { Text("Send with full context") } },
+            dismissButton = { TextButton(onClick = { confirmCold = null }) { Text("Cancel") } })
+    }
+    confirmDiscard?.let { captured ->
+        AlertDialog(onDismissRequest = { confirmDiscard = null }, title = { Text("Discard recording?") },
+            text = { Text("Discard the saved voice recording for ${captured.target.session}? This removes only this unsent recording. Your typed draft and sent messages are kept.") },
+            confirmButton = { TextButton(onClick = {
+                confirmDiscard = null
+                if (speech.draft == captured && !speech.savingRecording) { model.attachments.stopAudio(); speech.discardRecording() }
+            }) { Text("Discard recording") } },
+            dismissButton = { TextButton(onClick = { confirmDiscard = null }) { Text("Keep recording") } })
+    }
+}
+
+@Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int) {
+    val viewer = model.attachments
+    val key = AttachmentIdentity.rowKey(target, audio)
+    val row = viewer.state(target, audio)
+    val active = viewer.playingKey == key
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = { viewer.toggleAudio(target, audio) }, enabled = row?.loading != true) {
+            Text(if (active && viewer.playing) "Pause" else "Play")
+        }
+        val position = if (active) viewer.audioPositionMs else 0
+        Text("${position / 60_000}:${(position / 1_000 % 60).toString().padStart(2, '0')} / ${durationMs / 60_000}:${(durationMs / 1_000 % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.bodySmall)
+        if (row?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+    }
+    row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+}
+
+@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage) {
+    var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
+    val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
+    Text("Voice message", style = MaterialTheme.typography.labelMedium)
+    VoiceAudio(model, target, voice.audio, voice.durationMs)
+    Text(VoiceProtocol.label(voice.state), style = MaterialTheme.typography.bodySmall)
+    val error = local?.error?.ifBlank { voice.error } ?: voice.error
+    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+    if (voice.transcript.isNotBlank()) {
+        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide recognized text" else "Show recognized text") }
+        if (expanded) SelectionContainer { Text(voice.transcript) }
+    }
+    if (local != null && voice.state !in setOf("submitted", "failed", "cancelled")) Row {
+        TextButton(onClick = { model.speech.checkStatus(local) }, enabled = local.id !in model.speech.activeRequests) { Text("Check status") }
+        TextButton(onClick = { model.speech.cancel(local) }, enabled = voice.state != "uploading") { Text("Cancel delivery") }
+    }
+    if (local?.canRestoreUnsent == true) TextButton(onClick = { model.speech.restoreUnsent(local) },
+        enabled = model.speech.draft == null && !model.speech.savingRecording) { Text("Return to recording") }
+}
+
+@Composable internal fun VoiceSavedMessages(model: ZerusViewModel) {
+    val speech = model.speech
+    var remove by remember { mutableStateOf<VoiceOutgoing?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SpeechComposerStatus(model)
+        speech.outgoing.sortedByDescending { it.createdAt }.forEach { entry ->
+            Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(entry.target.session, style = MaterialTheme.typography.titleSmall)
+                VoiceMessageContent(model, entry.effectiveTarget, entry.displayed())
+                Row {
+                    model.sessions.find { entry.belongsTo(it.target) }?.let { session ->
+                        TextButton(onClick = { model.open(session) }) { Text("Open conversation") }
+                    }
+                    if (entry.terminal) TextButton(onClick = { remove = entry }, enabled = entry.id !in speech.activeRequests) { Text("Remove local copy") }
+                }
+            } }
+        }
+    }
+    remove?.let { entry -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove local voice copy?") },
+        text = { Text("Remove this phone's saved audio and receipt for ${entry.target.session}? This does not cancel delivery or remove the message from the computer's conversation history.") },
+        confirmButton = { TextButton(onClick = { model.attachments.stopAudio(); speech.dismiss(entry); remove = null }) { Text("Remove local copy") } },
+        dismissButton = { TextButton(onClick = { remove = null }) { Text("Keep") } }) }
 }

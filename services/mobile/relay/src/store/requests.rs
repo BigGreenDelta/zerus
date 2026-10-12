@@ -366,7 +366,7 @@ impl Store {
             }
             return Err(Error::CONFLICT);
         }
-        let audio_bytes = if row["operation"] == "speech_submit" {
+        let audio_bytes = if ["speech_submit", "voice_submit"].contains(&s(&row, "operation")) {
             i(&row, "body_bytes")
         } else {
             0

@@ -7,6 +7,11 @@ JSON interface; remote desktop clients use the existing configured SSH route and
 Android uses the mobile connector/relay. Selecting a profile never downloads or
 loads a model. Nothing falls back to a cloud provider automatically.
 
+Client **Send voice** uses the conversation host's durable voice-message worker
+to orchestrate this service and native delivery. That worker retains original
+audio and transcript for synchronized playback; this ASR service keeps its
+existing short-lived jobs. See [persistent voice messages](../../docs/voice-messages.md).
+
 The first adapter is GigaAM, pinned to upstream commit
 `7447938d791c4f3e643386ee22c33777004293a5`. Its reviewed short-audio API supports
 `v3_e2e_rnnt`, `v3_e2e_ctc`, `v3_rnnt`, `v3_ctc`, `multilingual_ctc` and

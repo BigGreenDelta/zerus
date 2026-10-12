@@ -47,6 +47,14 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
 
 ## Boundaries
 
+The additive `voice_profiles`, `voice_submit`, `voice_status` and `voice_cancel`
+operations target an exact conversation computer and session. Its native worker
+owns retained audio, recognition and delivery; the relay acknowledges acceptance
+and immediately clears completed upload bodies, retaining only the request
+identity receipt. Voice history and playback are shared by authorized devices
+through existing conversation and `attachment_read` access, independent of which
+device submitted the voice message. See [the contract](../../../docs/voice-messages.md).
+
 - `http.rs` owns authentication before ingestion, separate anonymous,
   authenticated and long-poll admission, trusted proxy parsing, request/body
   deadlines, disconnect cleanup and bounded response spools.

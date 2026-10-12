@@ -67,6 +67,65 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
     var preview by mutableStateOf<OpenedAttachment?>(null); private set
     var external by mutableStateOf<OpenedAttachment?>(null); private set
     private val jobs = mutableMapOf<String, Job>()
+    private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    private var player: android.media.MediaPlayer? = null
+    private var audioJob: Job? = null
+    private var focus: android.media.AudioFocusRequest? = null
+    var playingKey by mutableStateOf(""); private set
+    var playing by mutableStateOf(false); private set
+    var audioPositionMs by mutableStateOf(0); private set
+
+    /** Playback only begins after a user's Play tap and authenticated byte verification. */
+    fun toggleAudio(target: Target?, file: DisplayedAttachment) {
+        if (file.mime != "audio/wav") return
+        val key = AttachmentIdentity.rowKey(target, file)
+        val current = player
+        if (playingKey == key && current != null) {
+            runCatching { if (playing) current.pause() else current.start(); playing = !playing }
+                .onFailure { stopAudio(); failed(key, "Could not play this recording. Try again.") }
+            return
+        }
+        if (audioJob?.isActive == true && playingKey == key) return
+        stopAudio(); playingKey = key
+        rows = rows + (key to AttachmentRowState(loading = true))
+        audioJob = scope.launch {
+            try {
+                val entry = load(key, target, file)
+                if (playingKey != key) return@launch
+                val next = android.media.MediaPlayer()
+                player = next
+                next.setAudioAttributes(android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                withContext(Dispatchers.IO) { next.setDataSource(entry.file.absolutePath) }
+                next.setOnPreparedListener {
+                    if (player !== next || playingKey != key) return@setOnPreparedListener
+                    val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                        .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                        .setOnAudioFocusChangeListener { change -> if (change < 0) stopAudio() }.build()
+                    focus = request
+                    if (audioManager.requestAudioFocus(request) != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                        stopAudio(); failed(key, "Audio is in use. Tap Play again when it is available.")
+                    } else { rows = rows - key; next.start(); playing = true }
+                }
+                next.setOnCompletionListener { stopAudio() }
+                next.setOnErrorListener { _, _, _ -> stopAudio(); failed(key, "Could not play this recording. Try again."); true }
+                next.prepareAsync()
+                while (playingKey == key) {
+                    kotlinx.coroutines.delay(200)
+                    if (playing) audioPositionMs = runCatching { next.currentPosition }.getOrDefault(0)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { stopAudio(); failed(key, "The recording could not be loaded. Reconnect and try again.") }
+        }
+    }
+    fun stopAudio() {
+        audioJob?.cancel(); audioJob = null
+        rows = rows - playingKey
+        playingKey = ""; playing = false; audioPositionMs = 0
+        player?.let { runCatching { it.release() } }; player = null
+        focus?.let { audioManager.abandonAudioFocusRequest(it) }; focus = null
+    }
 
     init { scope.launch(Dispatchers.IO) { runCatching { cache.trim() } } }
 
@@ -154,6 +213,7 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
 
     /** Removes every decrypted copy, for example when a gateway is disconnected. */
     fun clear() {
+        stopAudio()
         jobs.values.forEach { it.cancel() }
         preview = null; external = null; rows = emptyMap()
         scope.launch(Dispatchers.IO) { runCatching { cache.clear() } }

@@ -84,12 +84,14 @@ class Jobs:
             text TEXT, error TEXT, started REAL)""")
         if "started" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN started REAL")
+        if "error_code" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN error_code TEXT")
         self.db.execute("CREATE TABLE IF NOT EXISTS daily_stats (day TEXT,profile TEXT,counters TEXT NOT NULL,PRIMARY KEY(day,profile))")
         with self.db:
             now = time.time()
             for row in self.db.execute("SELECT * FROM jobs WHERE state IN ('queued','running')").fetchall():
                 self._count(row["profile"], row["created"], {"uncertain": 1}, "service_restarted")
-            self.db.execute("UPDATE jobs SET state='uncertain', error='Speech service restarted; record again', updated=? WHERE state IN ('queued','running')", (now,))
+            self.db.execute("UPDATE jobs SET state='uncertain', error='Speech service restarted; record again', error_code='service_restarted', updated=? WHERE state IN ('queued','running')", (now,))
         for pattern in ("*.pcm", "*.wav"):
             for path in self.state_dir.glob(pattern):
                 path.unlink(missing_ok=True)
@@ -109,7 +111,7 @@ class Jobs:
 
     def _expire(self):
         with self.db:
-            self.db.execute("UPDATE jobs SET state='uncertain',text=NULL,error='Speech result expired; record again' WHERE updated < ? AND state IN ('completed','failed')", (time.time() - self.config["result_ttl_seconds"],))
+            self.db.execute("UPDATE jobs SET state='uncertain',text=NULL,error='Speech result expired; record again',error_code='result_expired' WHERE updated < ? AND state IN ('completed','failed')", (time.time() - self.config["result_ttl_seconds"],))
             cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS - 1)).strftime("%Y-%m-%d")
             self.db.execute("DELETE FROM daily_stats WHERE day < ?", (cutoff,))
 
@@ -147,6 +149,8 @@ class Jobs:
             result["text"] = row["text"]
         if row["error"]:
             result["error"] = row["error"]
+        if row["error_code"]:
+            result["error_code"] = row["error_code"]
         return result
 
     def discovery(self):
@@ -182,7 +186,7 @@ class Jobs:
                 return self._submit(job_id, request)
             row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
-                return {"schema": 1, "job_id": job_id, "state": "failed", "error": "Speech job was not found"}
+                return {"schema": 1, "job_id": job_id, "state": "failed", "error_code": "not_found", "error": "Speech job was not found"}
             if action == "cancel" and row["state"] in {"queued", "running"}:
                 with self.db:
                     now = time.time()
@@ -207,7 +211,7 @@ class Jobs:
         previous = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if previous:
             if previous["fingerprint"] != fingerprint:
-                return {"schema": 1, "job_id": job_id, "state": "failed", "error": "Speech request ID was already used for different input"}
+                return {"schema": 1, "job_id": job_id, "state": "failed", "error_code": "request_conflict", "error": "Speech request ID was already used for different input"}
             result = self._result(previous)
             result.pop("text", None)
             return result
@@ -231,7 +235,7 @@ class Jobs:
                 os.fsync(output.fileno())
             now = time.time()
             with self.db:
-                self.db.execute("INSERT INTO jobs VALUES (?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL)", (job_id, fingerprint, profile_id, now, now))
+                self.db.execute("INSERT INTO jobs (id,fingerprint,profile,state,created,updated) VALUES (?, ?, ?, 'queued', ?, ?)", (job_id, fingerprint, profile_id, now, now))
                 self._count(profile_id, now, {"submitted": 1, "audio_ms": len(pcm) * 1000 // 32000})
         except BaseException:
             path.unlink(missing_ok=True)
@@ -282,6 +286,6 @@ class Jobs:
             with self.changed:
                 with self.db:
                     now = time.time()
-                    changed = self.db.execute("UPDATE jobs SET state=?,text=?,error=?,updated=? WHERE id=? AND state='running'", (state, text, error, now, job_id)).rowcount
+                    changed = self.db.execute("UPDATE jobs SET state=?,text=?,error=?,error_code=?,updated=? WHERE id=? AND state='running'", (state, text, error, "inference_failed" if state == "failed" else None, now, job_id)).rowcount
                     if changed:
                         self._count(row["profile"], row["created"], {state: 1, "processing_ms": (now - started) * 1000}, "inference_failed" if state == "failed" else None)

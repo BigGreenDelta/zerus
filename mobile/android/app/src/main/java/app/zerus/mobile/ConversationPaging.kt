@@ -94,7 +94,10 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
         val known=events.flatMap { HistoryInspection.identities(it) }.toSet()
         val updated=events.map { canonical ->
             val exact=incoming.filter { row -> row.id in HistoryInspection.identities(canonical) && row.source==canonical.source && row.nativeType==canonical.nativeType && row.role==canonical.role }.singleOrNull()
-            if(exact!=null && (!exact.detailTruncated || canonical.detailTruncated)) canonical.copy(text=exact.text,attachments=exact.attachments,detailTruncated=exact.detailTruncated) else canonical
+            if(exact!=null && (!exact.detailTruncated || canonical.detailTruncated)) {
+                val voice = exact.voice?.let { VoiceProtocol.newer(canonical.voice, it) } ?: canonical.voice
+                canonical.copy(text=voice?.transcript ?: exact.text,attachments=if (voice == null) exact.attachments else listOf(voice.audio),detailTruncated=exact.detailTruncated,voice=voice)
+            } else canonical
         }
         val watermark=HistoryInspection.journalWatermark(events+previousInspection)
         val newer=incoming.filter { row -> row.id !in known && watermark!=null && HistoryInspection.journalSequence(row)?.let { it>watermark }==true }
@@ -107,6 +110,12 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
 }
 
 object HistoryRequests {
+    /** An empty canonical head has no cursor, but can still gain its first voice message. */
+    fun refreshAtHead(window:HistoryWindow):Pair<String,String>? {
+        if(!window.atHead) return null
+        val cursor=window.events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor
+        return if(cursor==null) "" to "" else "after" to cursor
+    }
     fun payload(target:Target,id:String,direction:String="",cursor:String="",limit:Int=100):JSONObject {
         require(target.run.isNotBlank() && target.conversation.isNotBlank() && limit in 1..100)
         require(direction in setOf("","before","after","around","unread") && (direction.isEmpty()==cursor.isEmpty()) && cursor.length<=8192)

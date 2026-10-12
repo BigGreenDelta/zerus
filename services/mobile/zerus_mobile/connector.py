@@ -28,7 +28,7 @@ import aiohttp
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
-from . import speech
+from . import speech, voice
 from . import attachment_reads
 from .recovery import validate_recovery
 from .history import validate_history
@@ -189,6 +189,7 @@ class Journal:
         with self.db:
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            self.db.execute(f"DELETE FROM requests WHERE operation IN {voice.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             # Delivered attachment chunks are never kept beyond the same short window.
             self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
@@ -304,6 +305,7 @@ class Connector:
         self.preference_supported = False
         self.attachment_read_supported = False
         self.speech_supported = False
+        self.voice_supported = False
         self.attachment_reads = attachment_reads.AttachmentReads()
         self.capabilities_next_poll = 0.0
         self.presence = None  # Latest listing desktop_presence; sent beside, never inside, the snapshot.
@@ -474,7 +476,7 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -497,6 +499,7 @@ class Connector:
         self.preference_supported = False
         self.attachment_read_supported = False
         self.speech_supported = False
+        self.voice_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -513,6 +516,7 @@ class Connector:
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
             self.speech_supported = isinstance(help_text, str) and speech.HELP_MARKER in help_text
+            self.voice_supported = isinstance(help_text, str) and voice.HELP_MARKER in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -659,6 +663,9 @@ class Connector:
             raise ConnectorError("expected_run_id is required")
         if operation == "recovery_action":
             try: validate_recovery(payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation in voice.OPERATIONS:
+            try: voice.validate(operation, payload, request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
@@ -831,6 +838,8 @@ class Connector:
                         raise ConnectorError("native Terminal binding or input support changed")
                     if deadline <= time.time():
                         raise ConnectorError("terminal input expired before native delivery")
+            if operation in voice.OPERATIONS and not self.voice_supported:
+                raise ConnectorError("native voice message ABI is unavailable")
             if operation in speech.OPERATIONS and not self.speech_supported:
                 raise ConnectorError("native speech ABI is unavailable")
             if operation in LAUNCH_OPERATIONS and not self.launch_supported:
@@ -1068,6 +1077,10 @@ class Connector:
                     self.sessions.add(target["name"])
                     if operation == "rename" and target["name"] != session:
                         self.sessions.discard(session)
+            elif operation in voice.OPERATIONS:
+                result = await self.native(["voice", session, "--json"], {"action": voice.ACTIONS[operation], **payload}, timeout=30)
+                if not voice.result_valid(operation, result, payload):
+                    raise ConnectorError("native voice acknowledgement did not match")
             elif operation in speech.OPERATIONS:
                 result = await self.native(["speech", "--json"], {"action": speech.ACTIONS[operation], **payload}, timeout=10)
                 if not speech.result_valid(operation, result, payload):

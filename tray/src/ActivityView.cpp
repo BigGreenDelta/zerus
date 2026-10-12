@@ -8,6 +8,8 @@
 #include "SessionFileReference.h"
 
 #include <QDateTime>
+#include <QAudioOutput>
+#include <QMediaPlayer>
 #include <QAbstractTextDocumentLayout>
 #include <QAction>
 #include <QClipboard>
@@ -356,6 +358,7 @@ QString questionReplyBody(const QJsonArray &replies, const QString &muted, const
 
 QString eventKey(const QJsonObject &event)
 {
+    if(event.value("source")=="hgs_voice")return "voice-"+event.value("voice").toObject().value("id").toString(event.value("message_id").toString());
     if (!event.value("activity_key").toString().isEmpty()) return event.value("activity_key").toString();
     if(event.value("type")=="LocalMessage")return "local-"+event.value("id").toString();
     if(event.value("source")=="hgs_delivery")return "receipt-"+event.value("message_id").toString();
@@ -401,6 +404,7 @@ QString timeText(const QJsonObject &event)
 
 QString messageRole(const QJsonObject &event)
 {
+    if (event.value("source") == "hgs_voice" && event.value("voice").isObject()) return "user";
     if (!event.value("agent_id").toString().isEmpty() || (event.value("detail").toString().isEmpty() && event.value("attachments").toArray().isEmpty())) return {};
     // Claude starts a turn for finished background work; nobody wrote it.
     const auto origin = event.value("origin").toString();
@@ -478,7 +482,8 @@ struct ActivityRenderResult {
     QJsonArray m_events, m_localMessages;
     QHash<QString, bool> m_expanded;
     QHash<QString, QString> m_fileLinks, m_deliveryKeys, m_copyTexts;
-    QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles;
+    QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles, m_voiceLinks;
+    QString m_voicePlaying, m_voiceLoading, m_voiceError;
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QImage> m_previews;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
@@ -503,6 +508,12 @@ struct ActivityRenderResult {
     if (clear.value("type") == "SessionCleared" && !std::any_of(m_events.cbegin(), m_events.cend(), [&clear](const QJsonValue &value) {
             return sameSessionClear(value.toObject(), clear);
         })) m_events.append(clear);
+    for(const auto &value:details.value("voice_messages").toArray()) {
+        const auto voice=value.toObject();const auto id=voice.value("message_id").toString();
+        if(id.isEmpty())continue;
+        for(qsizetype i=m_events.size();i-->0;)if(m_events[i].toObject().value("source")=="hgs_voice" && m_events[i].toObject().value("message_id")==id)m_events.removeAt(i);
+        m_events.append(voice);
+    }
     for(const auto &value:details.value("attachment_messages").toArray()) {
         const auto receipt=value.toObject();if(receipt.value("source")!="hgs_delivery" || receipt.value("attachments").toArray().isEmpty())continue;
         const auto submitted=receipt.value("submitted_text").toString().trimmed();int match=-1;double nearest=10.;
@@ -510,7 +521,7 @@ struct ActivityRenderResult {
             const auto event=m_events[i].toObject();const auto body=event.value("detail").toString().trimmed();
             const double distance=qAbs(event.value("at").toDouble()-receipt.value("at").toDouble());
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
-            if(event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
+            if(event.value("source")!="hgs_voice" && event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
         }
         if(match<0){auto message=receipt;message["attachment_submitted_text"]=receipt.value("submitted_text");m_events.append(message);}
         else {auto event=m_events[match].toObject();event["detail"]=receipt.value("detail");event["attachments"]=receipt.value("attachments");event["attachment_request_id"]=receipt.value("message_id");event["attachment_submitted_text"]=receipt.value("submitted_text");m_events[match]=event;}
@@ -555,6 +566,11 @@ struct ActivityRenderResult {
     }
     for(const auto &value:localMessages) {
         auto message=value.toObject();message["type"]="LocalMessage";message["detail"]=message.value("text");message["at"]=message.value("submitted_at");
+        if(message.value("source")=="hgs_voice") {
+            bool saved=false;for(const auto &event:sourceEvents)if(event.toObject().value("source")=="hgs_voice" && event.toObject().value("message_id")==message.value("message_id")){saved=true;break;}
+            if(!saved)sourceEvents.append(message);
+            continue;
+        }
         // The native hook can arrive before the durable delivery metadata.
         // Keep the cached file attached to that event, not as a second message.
         int match=-1;double nearest=10.;
@@ -564,7 +580,7 @@ struct ActivityRenderResult {
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
             const auto body=event.value("detail").toString().trimmed();
             const double distance=qAbs(event.value("at").toDouble()-message.value("at").toDouble());
-            if(event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
+            if(event.value("source")!="hgs_voice" && event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
         }
         if(match>=0){auto event=sourceEvents[match].toObject();event["activity_key"]=eventKey(message);event["detail"]=message.value("detail");event["attachments"]=message.value("attachments");event["attachment_submitted_text"]=message.value("submitted_text");sourceEvents[match]=event;continue;}
         sourceEvents.append(message);
@@ -660,9 +676,31 @@ struct ActivityRenderResult {
 
     QList<QJsonObject> events;
     QSet<QString> seen;
+    bool voiceBoundPrompt = false;
+    QList<QJsonObject> voiceBindings;
+    for(const auto &value:sourceEvents) {
+        const auto event=value.toObject();
+        if(event.value("source")=="hgs_voice")voiceBindings.append(event.value("voice").toObject().value("native_binding").toObject());
+    }
     for (const auto &value : sourceEvents) {
         if (!value.isObject()) continue;
         const auto event = value.toObject(); const auto key = eventKey(event);
+        if(event.value("source")!="hgs_voice") {
+            bool bound=false;
+            for(const auto &binding:voiceBindings) {
+                const auto seq=binding.value("journal_seq").toInteger();
+                const auto id=binding.value("provider_message_id").toString();
+                const auto source=binding.value("provider_source").toString();
+                if((seq>0 && event.value("seq").toInteger()==seq)
+                    || (!id.isEmpty() && !source.isEmpty()
+                        && event.value("provider_message_id").toString(event.value("message_id").toString())==id
+                        && event.value("provider_source").toString(event.value("source").toString())==source)) {bound=true;break;}
+            }
+            if(bound) {
+                if(!event.value("detail").toString().isEmpty() && event.value("detail")==details.value("prompt"))voiceBoundPrompt=true;
+                continue;
+            }
+        }
         // Kimi emits this lifecycle hook without text before TurnStarted.
         // It still drives session state, but adds no content to the transcript.
         if (event.value("type") == "UserPromptSubmit" && event.value("agent_id").toString().isEmpty()
@@ -695,7 +733,8 @@ struct ActivityRenderResult {
         const auto previousType = previous.value("type").toString();
         const auto previousText=previous.value("attachment_submitted_text").toString(previous.value("detail").toString()).trimmed();
         const auto currentText=current.value("attachment_submitted_text").toString(current.value("detail").toString()).trimmed();
-        if ((previousType == "UserPromptSubmit" || previousType == "UserPromptQueued")
+        if (previous.value("source") != "hgs_voice" && current.value("source") != "hgs_voice"
+            && (previousType == "UserPromptSubmit" || previousType == "UserPromptQueued")
             && current.value("type") == "TurnStarted"
             && messageRole(previous) == "user" && messageRole(current) == "user"
             && (isExcerptOf(previousText, currentText)
@@ -710,10 +749,11 @@ struct ActivityRenderResult {
         } else ++i;
     }
     QString prompt = details.value("prompt").toString(fallbackPrompt);
+    if(voiceBoundPrompt)prompt.clear();
     QString answer = details.value("last_message").toString();
     for (int i = events.size() - 1; i >= 0; --i) {
         const auto role = messageRole(events[i]);
-        if (role == "user" && events[i].value("type") != "QuestionAnswered"
+        if (role == "user" && events[i].value("source") != "hgs_voice" && events[i].value("type") != "QuestionAnswered"
             && !prompt.isEmpty() && isExcerptOf(events[i].value("attachment_submitted_text").toString(events[i].value("detail").toString()).trimmed(), prompt.trimmed())) {
             if(events[i].value("attachments").toArray().isEmpty()) events[i]["detail"] = prompt;
             prompt.clear();
@@ -782,6 +822,30 @@ struct ActivityRenderResult {
         if (!role.isEmpty()) {
             const auto text = event.value("detail").toString();
             const auto replies = role == "user" ? QuestionReply::parse(text) : QJsonArray();
+            if(event.value("source")=="hgs_voice") {
+                const auto voice=event.value("voice").toObject();const auto audio=voice.value("audio").toObject();
+                const auto id=voice.value("id").toString(event.value("message_id").toString());
+                const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+"\n"+id).toUtf8(),QCryptographicHash::Sha256).toHex());
+                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,audio);
+                const auto state=voice.value("state").toString();
+                const QHash<QString,QString> labels{{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
+                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent")},{"failed",tr("Voice message failed")},
+                    {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
+                const auto seconds=audio.value("duration_ms").toInteger()/1000;
+                const auto time=QString("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QLatin1Char('0'));
+                const auto play=m_voiceLoading==key?tr("Loading…"):m_voicePlaying==key?tr("Pause"):tr("Play");
+                QString body=QString("<p><a href='hgs-voice:%1' style='color:%2;'>%3</a> &nbsp; %4</p>").arg(key,accent,escaped(play),time);
+                const auto transcript=voice.value("transcript").toString();
+                if(!transcript.isEmpty()) {
+                    const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
+                    body+=QString("<p><a href='hgs-activity:%1' style='color:%2;'>%3</a></p>").arg(toggle,accent,escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript")));
+                    if(m_expanded.value(toggle))body+=userMessage(transcript);
+                }
+                if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
+                if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
+                html+=card(eventKey(event),tr("You (voice)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
+                ++i;continue;
+            }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
@@ -1032,6 +1096,8 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 void ActivityView::setSessionKey(const QString &key)
 {
     if (key == m_sessionKey) return;
+    if(m_voicePlayer)m_voicePlayer->stop();
+    m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceError.clear();m_voiceLinks.clear();
     m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
     m_attachmentLinks.clear();m_fileLinks.clear();
     m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
@@ -1364,6 +1430,13 @@ void ActivityView::activateLink(const QUrl &url)
         emit fileReferenceActivated(m_fileLinks.value(url.path()));
     } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
         emit attachmentActivated(m_attachmentLinks.value(url.path()));
+    } else if(url.scheme()=="hgs-voice" && m_voiceLinks.contains(url.path())) {
+        const auto key=url.path();
+        if(m_voicePlayer && m_voiceKey==key && m_voicePlayer->playbackState()==QMediaPlayer::PlayingState){m_voicePlayer->pause();return;}
+        if(m_voicePlayer && m_voiceKey==key && !m_voicePlayer->source().isEmpty()){m_voicePlayer->play();return;}
+        if(m_voiceLoading==key)return;
+        if(m_voicePlayer)m_voicePlayer->stop();
+        m_voiceLoading=key;m_voiceError.clear();render(false);emit voicePlaybackRequested(key,m_voiceLinks.value(key));
     } else if(url.scheme()=="hgs-message" && m_messageActions.contains(url.path())) {
         const auto action=m_messageActions.value(url.path());emit messageActionRequested(action.first,action.second);
     } else if(url.scheme()=="hgs-process" && m_processLinks.contains(url.path())) emit processRequested(url.path());
@@ -1458,6 +1531,7 @@ void ActivityView::startRender()
     result->m_fallbackPrompt = m_fallbackPrompt;
     result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys;
     result->m_previews = m_previews;
+    result->m_voicePlaying=m_voicePlaying;result->m_voiceLoading=m_voiceLoading;result->m_voiceError=m_voiceError;
     result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale;
     result->processesEnabled = ProcessSettings::enabled();
     result->width = m_browser->viewport()->width();
@@ -1581,7 +1655,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
         && previous->metrics.dotsPerMeterY() == next->metrics.dotsPerMeterY()) {
         // Attachment location metadata can change without changing its identity
         // or markup. Keep the committed action maps current even in that case.
-        m_attachmentLinks = result->m_attachmentLinks;
+        m_attachmentLinks = result->m_attachmentLinks;m_voiceLinks=result->m_voiceLinks;
         m_messageActions = result->m_messageActions;
         m_pendingContentUpdate = result->contentRevision != m_contentRevision;
         return;
@@ -1594,7 +1668,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     }
     m_pendingContentUpdate = result->contentRevision != m_contentRevision;
     m_knownEvents = result->m_knownEvents; m_html = result->m_html;
-    m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;
+    m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;m_voiceLinks=result->m_voiceLinks;
     m_messageActions = result->m_messageActions; m_copyTexts = result->m_copyTexts;
     m_expanded = result->m_expanded; m_deliveryKeys = result->m_deliveryKeys;
     m_toggleKeys = result->m_toggleKeys; m_processLinks = result->m_processLinks;
@@ -1677,3 +1751,21 @@ void ActivityView::clearDocument()
 }
 
 #include "ActivityView.moc"
+
+void ActivityView::playVoice(const QString &key,const QString &path,const QString &error)
+{
+    if(m_voiceLoading!=key || !m_voiceLinks.contains(key) || !isVisible())return;
+    m_voiceLoading.clear();
+    if(!error.isEmpty() || path.isEmpty()){m_voiceError=key+"\n"+(error.isEmpty()?tr("Recording is unavailable."):error);render(false);return;}
+    if(!m_voicePlayer){
+        m_voicePlayer=new QMediaPlayer(this);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
+        connect(m_voicePlayer,&QMediaPlayer::playbackStateChanged,this,[this]{m_voicePlaying=m_voicePlayer->playbackState()==QMediaPlayer::PlayingState?m_voiceKey:QString();render(false);});
+        connect(m_voicePlayer,&QMediaPlayer::errorOccurred,this,[this](QMediaPlayer::Error,const QString &detail){m_voiceError=m_voiceKey+"\n"+tr("Could not play recording: %1").arg(detail);render(false);});
+    }
+    m_voiceKey=key;m_voicePlayer->setSource(QUrl::fromLocalFile(path));m_voicePlayer->play();render(false);
+}
+void ActivityView::hideEvent(QHideEvent *event)
+{
+    if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();
+    QWidget::hideEvent(event);
+}

@@ -17,7 +17,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import speech
+from . import speech, voice
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
@@ -292,6 +292,9 @@ def validate_request(value):
         if value["session"] != "": raise ValueError("speech uses no session target")
         speech.validate(op, payload, request_id)
         return
+    if op in voice.OPERATIONS:
+        voice.validate(op, payload, request_id)
+        return
     if op in COMPUTER_OPERATIONS:
         if value["session"] != "": raise ValueError("the delivery setting uses no session target")
         validate_mobile_delivery(payload)
@@ -347,7 +350,7 @@ async def submit(request):
     await blocking(validate_request, value)
     if value["operation"] == "send":
         await blocking(validate_send, value["payload"])
-    elif value["operation"] == "speech_submit":
+    elif value["operation"] in {"speech_submit", "voice_submit"}:
         if await blocking(encoded_size, value, 6 * 1024 * 1024) > 6 * 1024 * 1024:
             raise web.HTTPRequestEntityTooLarge(max_size=6 * 1024 * 1024, actual_size=6 * 1024 * 1024 + 1)
     elif await blocking(encoded_size, value, 1024 * 1024) > 1024 * 1024:

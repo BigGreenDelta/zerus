@@ -231,6 +231,7 @@ private slots:
     void providerErrorsStayVisibleAndStable();
     void providerErrorsStayVisibleAndStable_data();
     void attachmentsStayWithTheirMessageAndOpenExactFile();
+    void voiceMessageRetainsAudioAndExpandableTranscript();
     void attachmentThumbnailArrivesWithoutMovingTranscript();
     void liveCompactionProgressPreservesTranscriptAndClears();
     void sessionClearIsAColoredBoundaryAndSurvivesReload();
@@ -1267,6 +1268,37 @@ void TestActivityView::providerErrorsStayVisibleAndStable()
     text=view.browser()->toPlainText();QCOMPARE(text.count("Selected model is at capacity."),1);
     QVERIFY(text.indexOf("Selected model")<text.indexOf("Retry"));
     view.setSessionKey("codex/other");view.setActivity({},{});QVERIFY(!view.browser()->toPlainText().contains("Selected model"));
+}
+
+void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
+{
+    SettledActivityView view;view.setSessionKey("fixture/conversation");
+    const QString id="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const QJsonObject audio{{"request_id",id},{"index",0},{"name","voice.wav"},{"mime","audio/wav"},{"bytes",32044},{"duration_ms",1000}};
+    QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","transcribing"},{"audio",audio}};
+    QJsonObject row{{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio}}};
+    view.setActivity({{"voice_messages",QJsonArray{row}}},{});
+    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(text.contains("Recognizing"));QVERIFY(text.contains("0:01"));
+    QSignalSpy played(&view,&ActivityView::voicePlaybackRequested);QString play;
+    for(const auto &url:links(view.browser()))if(url.startsWith("hgs-voice:"))play=url;
+    QVERIFY(!play.isEmpty());activate(view.browser(),play);QCOMPARE(played.count(),1);QCOMPARE(played[0][1].toJsonObject(),audio);
+    // Mock attachment retrieval failure: no real media output, still actionable.
+    view.playVoice(played[0][0].toString(),{},"Synthetic audio unavailable");settle(view);
+    QVERIFY(view.browser()->toPlainText().contains("Synthetic audio unavailable"));
+    voice["state"]="submitted";voice["transcript"]="Recognized voice fixture";row["voice"]=voice;row["detail"]="Recognized voice fixture";
+    auto local=row;local["id"]="voice-local";local["submitted_at"]=1791018002.0;local["status"]="sent";
+    view.setTimeline({{"voice_messages",QJsonArray{row}}},{row,journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{local});
+    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(text.contains("Show transcript"));
+    // Similar native text without an exact correlation remains a separate message.
+    QCOMPARE(text.count("Recognized voice fixture"),1);
+    QString toggle;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-activity:voice-text-"))toggle=url;
+    QVERIFY(!toggle.isEmpty());activate(view.browser(),toggle);settle(view);
+    QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),2);QVERIFY(view.browser()->toPlainText().contains("Hide transcript"));
+    voice["native_binding"]=QJsonObject{{"journal_seq",3}};row["voice"]=voice;
+    view.setTimeline({{"voice_messages",QJsonArray{row}},{"prompt","Recognized voice fixture"}},{journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{});
+    QCOMPARE(view.browser()->toPlainText().count("You (voice)"),1);QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),1);
+    view.setSessionKey("fixture/other");view.playVoice(played[0][0].toString(),{},"Stale recording error");settle(view);
+    QVERIFY(!view.browser()->toPlainText().contains("Stale recording error"));
 }
 
 void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()

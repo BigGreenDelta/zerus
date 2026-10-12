@@ -14,7 +14,7 @@ import functools
 import uuid
 
 from .attachments import MAX_QUEUE_BYTES
-from . import speech
+from . import speech, voice
 from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
 from .routes import Registry, RouteError, drive_sync, SCHEMA as ROUTE_SCHEMA, MAX_PEER_SNAPSHOT_BYTES
@@ -238,8 +238,9 @@ class Store:
             # tombstones so an old command can never execute a second time.
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now - min(retention, 3600),))
             self.db.execute(f"UPDATE requests SET body='',body_bytes=0,result=NULL,result_bytes=length('request history expired; delivery must not be retried'),reserved_bytes=0,error='request history expired; delivery must not be retried' WHERE id IN (SELECT id FROM requests WHERE state IN ('completed','failed','uncertain') AND updated<? AND body!='' ORDER BY updated LIMIT {batch_size})", (now - retention,))
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {voice.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {speech.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
-            self.db.execute(f"UPDATE requests SET body='',body_bytes=0 WHERE id IN (SELECT id FROM requests WHERE operation='speech_submit' AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated LIMIT {batch_size})")
+            self.db.execute(f"UPDATE requests SET body='',body_bytes=0 WHERE id IN (SELECT id FROM requests WHERE operation IN ('speech_submit','voice_submit') AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated LIMIT {batch_size})")
             self.db.execute(f"DELETE FROM events WHERE id IN (SELECT id FROM events WHERE created<? ORDER BY created LIMIT {batch_size})", (now - retention,))
             self.db.execute(f"DELETE FROM push_jobs WHERE id IN (SELECT id FROM push_jobs WHERE created<? OR attempts>=5 ORDER BY created LIMIT {batch_size})", (now - 86400,))
             self.db.execute(f"DELETE FROM invitations WHERE code_hash IN (SELECT code_hash FROM invitations WHERE expires<=? ORDER BY expires LIMIT {batch_size})", (now,))
@@ -346,7 +347,7 @@ class Store:
             if size > row["result_bytes"] + row["reserved_bytes"] and usage["payload_bytes"] - row["result_bytes"] - row["reserved_bytes"] + size > usage["budget_bytes"] + 1024*1024:
                 return 429
             self.db.execute("UPDATE requests SET state=?,result=?,error=?,updated=?,result_bytes=?,reserved_bytes=0 WHERE id=?", (body["state"], encoded, body["error"], time.time(), size, request_id))
-            self.db.execute("UPDATE requests SET body='',body_bytes=0 WHERE id=? AND operation='speech_submit'", (request_id,))
+            self.db.execute("UPDATE requests SET body='',body_bytes=0 WHERE id=? AND operation IN ('speech_submit','voice_submit')", (request_id,))
         return 200
 
     @serialized

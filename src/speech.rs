@@ -5,11 +5,7 @@ use crate::{
     config::Config,
 };
 use serde_json::{json, Value};
-use std::{
-    fs,
-    io::Read,
-    path::PathBuf,
-};
+use std::{fs, io::Read, path::PathBuf};
 #[cfg(unix)]
 use std::{io::Write, time::Duration};
 
@@ -86,6 +82,208 @@ pub fn request(config: &Config, input: &Value) -> Result<Value> {
         })),
         Err(error) => Err(error),
     }
+}
+
+/// Bounded child invocation used by the durable voice worker. Input is data,
+/// never shell syntax; the peer helper supervises its own SSH children.
+#[cfg(unix)]
+pub(crate) fn capture(
+    args: &[String],
+    input: &[u8],
+    timeout: Duration,
+) -> std::result::Result<Value, String> {
+    let mut command =
+        std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    command.args(args);
+    capture_command(command, input, timeout)
+}
+
+#[cfg(unix)]
+fn capture_command(
+    mut command: std::process::Command,
+    input: &[u8],
+    timeout: Duration,
+) -> std::result::Result<Value, String> {
+    use std::{os::unix::process::CommandExt, process::Stdio, thread, time::Instant};
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // This group contains only owned CLI/SSH transport children, never the
+    // resident agents reached through their existing PTY/native API.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("Missing child input")?;
+    let mut stdout = child.stdout.take().ok_or("Missing child output")?;
+    let mut stderr = child.stderr.take().ok_or("Missing child errors")?;
+    let bytes = input.to_vec();
+    let writer = thread::spawn(move || stdin.write_all(&bytes));
+    let reader = thread::spawn(move || {
+        let mut v = Vec::new();
+        stdout
+            .by_ref()
+            .take(1_048_577)
+            .read_to_end(&mut v)
+            .map(|_| v)
+    });
+    let errors = thread::spawn(move || {
+        let mut v = Vec::new();
+        stderr.by_ref().take(65_537).read_to_end(&mut v).map(|_| v)
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    // A transport parent can exit while its orphaned SSH child still owns a
+    // pipe. Finish the entire private group before joining pipe readers.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = writer.join();
+    let output = reader
+        .join()
+        .map_err(|_| "Child output failed")?
+        .map_err(|e| e.to_string())?;
+    let _ = errors.join(); // Native errors can contain paths; clients get typed voice errors.
+    if !status.is_some_and(|s| s.success()) {
+        return Err("Speech/native command was unavailable or refused".into());
+    }
+    if output.len() > 1_048_576 {
+        return Err("Speech/native response is too large".into());
+    }
+    serde_json::from_slice(&output).map_err(|_| "Invalid speech/native response".into())
+}
+
+/// Resolve only identities this host verified itself through a direct route.
+#[cfg(unix)]
+pub(crate) fn voice_route(
+    config: &Config,
+    machine_id: &str,
+) -> std::result::Result<String, String> {
+    let local = crate::swarm::local_node_id(config).map_err(|e| e.to_string())?;
+    if machine_id == local {
+        return Ok(String::new());
+    }
+    let mut bindings = crate::swarm::verified_bindings(config, &local);
+    if let Ok(file) = fs::File::open(config.dir.join("swarm/mobile-peers.json")) {
+        let mut bytes = Vec::new();
+        if file.take(65_537).read_to_end(&mut bytes).is_ok() && bytes.len() <= 65_536 {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if value["schema"] == 1 && value["local"] == local {
+                    for (alias, peer) in value["peers"].as_object().into_iter().flatten() {
+                        if let Some(id) = peer["machine_id"].as_str() {
+                            bindings.insert(alias.clone(), id.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bindings
+        .into_iter()
+        .find(|(alias, id)| {
+            id == machine_id && config.peers.contains(alias) && !config.is_self(alias)
+        })
+        .map(|(alias, _)| alias)
+        .ok_or_else(|| {
+            "The speech computer is not a verified direct peer of this conversation computer".into()
+        })
+}
+
+#[cfg(unix)]
+pub(crate) fn voice_request(
+    config: &Config,
+    machine_id: &str,
+    input: &Value,
+) -> std::result::Result<Value, String> {
+    voice_request_timeout(config, machine_id, input, Duration::from_secs(35))
+}
+#[cfg(unix)]
+fn voice_request_timeout(
+    config: &Config,
+    machine_id: &str,
+    input: &Value,
+    timeout: Duration,
+) -> std::result::Result<Value, String> {
+    validate_request(input).map_err(|e| e.to_string())?;
+    let via = voice_route(config, machine_id)?;
+    if via.is_empty() {
+        return request(config, input).map_err(|e| e.message);
+    }
+    let envelope = serde_json::to_vec(&json!({"schema":1,"via":via,"target_machine_id":machine_id,"argv":["speech","--json"],"payload":input})).map_err(|e|e.to_string())?;
+    capture(
+        &["swarm".into(), "mobile-peer".into(), "--json".into()],
+        &envelope,
+        timeout,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn voice_computers(config: &Config) -> std::result::Result<Value, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    // Discovery verifies aliases and refreshes the local identity cache. Its
+    // transport is bounded; unavailable machines remain explicit in the result.
+    let discovery = capture(
+        &["swarm".into(), "mobile-peers".into(), "--json".into()],
+        b"{}",
+        Duration::from_secs(12),
+    )?;
+    let mut candidates = vec![discovery["local"].clone()];
+    candidates.extend(
+        discovery["peers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["machine_id"].is_string())
+            .cloned(),
+    );
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|p| seen.insert(p["machine_id"].clone().to_string()));
+    let mut computers = Vec::new();
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for worker in 0..4 {
+            let candidates = &candidates;
+            let tx = tx.clone();
+            scope.spawn(move || {
+                for computer in candidates.iter().skip(worker).step_by(4) {
+                    let remaining=deadline.saturating_duration_since(std::time::Instant::now());
+                    let result=if remaining<Duration::from_millis(100) {Err("Discovery deadline reached".into())} else {
+                        voice_request_timeout(config,computer["machine_id"].as_str().unwrap_or(""),&json!({"action":"providers"}),remaining.min(Duration::from_secs(8)))
+                    };
+                    let mut row = json!({"machine_id":computer["machine_id"],"name":computer["name"],"profiles":[],"available":false});
+                    match result {
+                        Ok(v) if v["schema"] == 1 => { row["profiles"] = v["profiles"].clone(); row["available"] = v["available"].clone(); if v["reason"].is_string() {row["reason"] = v["reason"].clone();} }
+                        _ => row["reason"] = json!("Speech is unavailable on this computer"),
+                    }
+                    let _ = tx.send(row);
+                }
+            });
+        }
+        drop(tx);
+        computers.extend(rx);
+    });
+    computers.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
+    Ok(json!({"schema":1,"computers":computers}))
 }
 
 pub(crate) fn validate_request(input: &Value) -> anyhow::Result<()> {
@@ -207,6 +405,22 @@ fn exchange(_path: &std::path::Path, _bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_closes_owned_orphan_pipes_and_times_out() {
+        let start = std::time::Instant::now();
+        let mut completed = std::process::Command::new("sh");
+        completed.args(["-c", "sleep 30 & printf '{\"schema\":1}'"]);
+        assert_eq!(
+            capture_command(completed, b"{}", Duration::from_secs(1)).unwrap()["schema"],
+            1
+        );
+        let mut stalled = std::process::Command::new("sh");
+        stalled.args(["-c", "sleep 30 & wait"]);
+        assert!(capture_command(stalled, b"{}", Duration::from_millis(100)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
 
     #[test]
     fn rejects_unscoped_fields_bad_ids_and_audio() {

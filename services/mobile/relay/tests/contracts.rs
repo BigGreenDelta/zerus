@@ -23,6 +23,109 @@ struct Fixture {
     paired: Value,
 }
 
+fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
+    let id = Uuid::new_v4().to_string();
+    let mut payload =
+        json!({"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation"});
+    if op == "voice_submit" {
+        payload["speech"] =
+            json!({"machine_id":Uuid::new_v4().to_string(),"profile_id":"gigaam-ru"});
+        payload["audio"] =
+            json!({"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":"AAAAAA=="});
+    } else if ["voice_status", "voice_cancel"].contains(&op) {
+        payload["message_id"] = json!(message.unwrap());
+    }
+    json!({"request_id":id,"computer_id":computer,"operation":op,"session":"codex/example/tag","payload":payload})
+}
+
+#[test]
+fn voice_wire_requires_bounded_audio_and_stable_machine_route() {
+    let computer = Uuid::new_v4().to_string();
+    for op in [
+        "voice_submit",
+        "voice_profiles",
+        "voice_status",
+        "voice_cancel",
+    ] {
+        let value = voice_command(&computer, op, Some(&Uuid::new_v4().to_string()));
+        protocol::request(&value).unwrap();
+        let mut bad = value.clone();
+        bad["session"] = json!("");
+        assert!(protocol::request(&bad).is_err());
+        let mut bad = value;
+        bad["payload"]["request_id"] = json!(Uuid::new_v4().to_string());
+        assert!(protocol::request(&bad).is_err());
+    }
+    for route in [
+        json!({"machine_id":"arch","profile_id":"gigaam-ru"}),
+        json!({"machine_id":computer,"profile_id":"../model"}),
+        json!({"machine_id":computer,"profile_id":"ok","command":"example"}),
+    ] {
+        let mut value = voice_command(&computer, "voice_submit", None);
+        value["payload"]["speech"] = route;
+        assert!(protocol::request(&value).is_err());
+    }
+    for data in ["AA==", "AA==AA==", "AA B", "AAAA"] {
+        let mut value = voice_command(&computer, "voice_submit", None);
+        value["payload"]["audio"]["data_base64"] = json!(data);
+        assert!(protocol::request(&value).is_err());
+    }
+}
+
+#[tokio::test]
+async fn voice_acceptance_erases_relay_audio_and_preserves_shared_conversation_access() {
+    let f = Fixture::new().await;
+    f.beat(&json!({"sessions":[{"name":"codex/example/tag"}],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS}})).await;
+    let upload = voice_command(&f.node.id, "voice_submit", None);
+    f.submit(&upload).await.unwrap();
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let result = json!({"state":"completed","result":{"schema":1,"message":{"id":upload["request_id"],"state":"queued","revision":1}},"error":null});
+    f.store
+        .result(
+            &f.node,
+            s(&upload, "request_id"),
+            &result,
+            Some(&canonical(&result["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    let row = f
+        .store
+        .db
+        .one(
+            "SELECT body,body_bytes FROM requests WHERE id=?",
+            args![&upload["request_id"]],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["body"], "");
+    assert_eq!(row["body_bytes"], 0);
+    assert_eq!(f.submit(&upload).await.unwrap()["result"], result["result"]);
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
+    let invitation = f.store.invite(&f.phone.workspace).await.unwrap();
+    let paired = f
+        .store
+        .pair(s(&invitation, "pair_code"), "Second phone")
+        .await
+        .unwrap();
+    let other = f
+        .store
+        .authenticate(s(&paired, "device_token"), Role::Device)
+        .await
+        .unwrap();
+    let status = voice_command(&f.node.id, "voice_status", Some(s(&upload, "request_id")));
+    f.store
+        .submit(
+            &other,
+            &zerus_relay::store::Submission::new(status).unwrap(),
+        )
+        .await
+        .unwrap();
+    f.check_accounting().await;
+    f.close().await;
+}
+
 fn speech_command(computer: &str, op: &str, job: Option<&str>) -> Value {
     let id = Uuid::new_v4().to_string();
     let payload = match op {
@@ -1696,6 +1799,37 @@ async fn postgres_cross_worker_speech() {
         .await
         .unwrap()
         .is_none());
+    f.beat(&json!({"sessions":[{"name":"codex/example/tag"}],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS}})).await;
+    let voice = voice_command(&f.node.id, "voice_submit", None);
+    f.submit(&voice).await.unwrap();
+    let (a, b) = tokio::join!(f.store.claim(&f.node, false), second.claim(&f.node, false));
+    assert_eq!(a.unwrap().is_some() as u8 + b.unwrap().is_some() as u8, 1);
+    let accepted = json!({"state":"completed","result":{"schema":1,"message":{"id":voice["request_id"],"state":"queued","revision":1}},"error":null});
+    second
+        .result(
+            &f.node,
+            s(&voice, "request_id"),
+            &accepted,
+            Some(&canonical(&accepted["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    let stored = f
+        .store
+        .db
+        .one(
+            "SELECT body,body_bytes FROM requests WHERE id=?",
+            args![&voice["request_id"]],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored["body"], "");
+    assert_eq!(stored["body_bytes"], 0);
+    assert_eq!(
+        f.submit(&voice).await.unwrap()["result"],
+        accepted["result"]
+    );
     f.check_accounting().await;
     second.db.close().await;
     f.close().await;

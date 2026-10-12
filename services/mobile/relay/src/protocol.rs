@@ -22,6 +22,8 @@ pub const READS: &[&str] = &[
     "speech_profiles",
     "speech_stats",
     "speech_status",
+    "voice_profiles",
+    "voice_status",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
 /// retention class. `attachment_read` is a read with its own shorter class
@@ -37,7 +39,8 @@ pub const SPEECH: &[&str] = &[
     "speech_status",
     "speech_cancel",
 ];
-pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
+pub const SPEECH_READ_SQL: &str =
+    "('speech_profiles','speech_stats','speech_status','voice_profiles','voice_status')";
 pub const SPEECH_AUDIO_MAX: usize = 16000 * 2 * 120;
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
 pub const MOBILE_DELIVERY: &[&str] = &[
@@ -49,6 +52,10 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "voice_profiles",
+    "voice_submit",
+    "voice_status",
+    "voice_cancel",
     "answer",
     "archive",
     "attachment_read",
@@ -328,6 +335,8 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
+            "voice_submit" => &["speech", "audio"],
+            "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
             "interrupt" => &["expected_turn_started"],
             "send_now" => &["queue_id"],
@@ -370,10 +379,26 @@ pub fn request(v: &Value) -> Result<()> {
                 "recovery_action",
                 "send_now",
                 "attachment_read",
+                "voice_submit",
+                "voice_status",
+                "voice_cancel",
             ]
             .contains(&op),
         )?;
         match op {
+            "voice_submit" => {
+                fields(&p["speech"], &["machine_id", "profile_id"], &[])?;
+                uuid(&p["speech"]["machine_id"], true)?;
+                speech(
+                    "speech_submit",
+                    &json!({"request_id":id,
+                    "profile_id":p["speech"]["profile_id"],"audio":p["audio"]}),
+                    id,
+                )?;
+            }
+            "voice_status" | "voice_cancel" => {
+                uuid(&p["message_id"], true)?;
+            }
             "send" => send(p)?,
             "answer" => {
                 for k in ["question_id", "expected_question_hash", "answers"] {
@@ -445,7 +470,7 @@ pub fn request(v: &Value) -> Result<()> {
             uuid(&p["archive_id"], op != "process_output")?;
         }
     }
-    if op == "speech_submit" {
+    if ["speech_submit", "voice_submit"].contains(&op) {
         json::size(v, 6 * MIB)?;
     } else if op != "send" {
         json::size(v, MIB)?;

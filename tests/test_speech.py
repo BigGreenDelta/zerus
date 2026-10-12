@@ -55,6 +55,13 @@ class SpeechService(unittest.TestCase):
             time.sleep(0.01)
         self.fail(str(result))
 
+    def test_unknown_job_has_a_typed_nonacceptance_response(self):
+        jobs = self.jobs()
+        result = jobs.handle({"action": "status", "job_id": str(uuid.uuid4())})
+        self.assertEqual(result["error_code"], "not_found")
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(jobs.handle({"action": "stats"})["totals"]["submitted"], 0)
+
     def test_completion_idempotency_conflict_stats_and_audio_cleanup(self):
         jobs = self.jobs()
         request = self.submit()
@@ -106,6 +113,7 @@ class SpeechService(unittest.TestCase):
         recovered = self.jobs()
         result = recovered.handle(request)
         self.assertEqual(result["state"], "uncertain")
+        self.assertEqual(result["error_code"], "service_restarted")
         self.assertFalse(list((self.root / "private").glob("*.pcm")))
         totals = recovered.handle({"action": "stats"})["totals"]
         self.assertEqual((totals["submitted"], totals["uncertain"], totals["completed"]), (1, 1, 0))
@@ -120,6 +128,7 @@ class SpeechService(unittest.TestCase):
             jobs.db.execute("UPDATE jobs SET updated=0")
         expired = jobs.handle(request)
         self.assertEqual(expired["state"], "uncertain")
+        self.assertEqual(expired["error_code"], "result_expired")
         self.assertNotIn("text", expired)
         self.assertEqual(jobs.handle({"action": "stats"})["totals"]["completed"], 1)
 

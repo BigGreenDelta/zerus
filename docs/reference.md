@@ -291,11 +291,16 @@ adapter is GigaAM with a Russian `v3_e2e_rnnt` profile. Selecting a profile does
 not install or download a model and never falls back to another provider.
 
 Use **Voice** in the message toolbar, allow microphone access, then stop recording
-to transcribe. Recordings are limited to two minutes. Recognized text becomes a
-private draft; it never sends a message automatically. A changed draft or
-conversation requires explicit review before insertion. Interrupted jobs retain
-their identity for status recovery without re-uploading audio. Hiding the composer
-stops unsubmitted capture. Voice settings also show the selected computer's
+to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+are limited to two minutes and remain separate from the typed draft. The preview
+lists speech profiles reachable from the conversation computer. Explicit Send
+stores the original there, starts recognition and delivers recognized text to
+the pinned agent conversation. One history card retains the playable original,
+expandable transcript and processing or delivery errors across devices. Clients
+recover interrupted requests by the original message UUID without blindly
+uploading or sending again. Hiding the composer stops unsubmitted capture.
+See [persistent voice messages](voice-messages.md) for storage and delivery details.
+Voice settings also show the selected computer's
 90-day counters; [analytics](analytics.md) documents their meaning and the planned
 cross-computer agent statistics.
 

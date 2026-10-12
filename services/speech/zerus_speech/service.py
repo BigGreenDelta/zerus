@@ -22,9 +22,9 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(raw)
             result = self.server.jobs.handle(request)
         except (ValueError, TypeError, KeyError, RecursionError) as error:
-            result = {"schema": 1, "state": "failed", "error": str(error)[:256]}
+            result = {"schema": 1, "state": "failed", "error_code": "invalid_request", "error": str(error)[:256]}
         except (OSError, sqlite_error):
-            result = {"schema": 1, "state": "failed", "error": "Speech service request failed"}
+            result = {"schema": 1, "state": "failed", "error_code": "service_failure", "error": "Speech service request failed"}
         if "job_id" not in result and isinstance(request, dict):
             try:
                 result["job_id"] = canonical_uuid(request.get("request_id", request.get("job_id")))

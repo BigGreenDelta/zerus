@@ -718,6 +718,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
     output["message_events_max_bytes"] = json!(MESSAGE_EVENTS_BYTES);
     output["attachment_messages"] = attachments::messages(&record, "");
+    output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::pane_cwds());
     Ok(output)
 }

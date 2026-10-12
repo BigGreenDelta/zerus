@@ -16,7 +16,7 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent) : QWi
     setObjectName("speechSettings");
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0,0,12,0); layout->setSpacing(14);
     auto *heading = new QLabel(tr("Voice input")); heading->setObjectName("heading"); layout->addWidget(heading);
-    auto *hint = new QLabel(tr("Record a message and review the recognized text before sending. Audio is processed on the selected computer using its configured provider. This choice is independent of the agent's computer."));
+    auto *hint = new QLabel(tr("Record a voice message, review the recording, then choose Send voice. Choose a reachable speech computer and provider beside the recording. These preferences also configure provider discovery and statistics."));
     hint->setWordWrap(true); layout->addWidget(hint);
     layout->addWidget(new QLabel(tr("Speech computer")));
     m_host = new QComboBox; m_host->setObjectName("speechComputer"); layout->addWidget(m_host);
@@ -26,13 +26,13 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent) : QWi
     m_microphone = new QComboBox; m_microphone->setObjectName("speechMicrophone"); layout->addWidget(m_microphone);
     m_status = new QLabel; m_status->setObjectName("speechSettingsStatus"); m_status->setWordWrap(true); layout->addWidget(m_status);
     m_refresh = new QPushButton(tr("Refresh providers and microphones")); m_refresh->setObjectName("speechRefresh"); layout->addWidget(m_refresh,0,Qt::AlignLeft);
-    auto *privacy = new QLabel(tr("Provider setup and credentials stay on the speech computer. Recordings are limited to two minutes. Results are saved in private local drafts; voice input never sends a message automatically."));
+    auto *privacy = new QLabel(tr("Provider setup and credentials stay on the speech computer. Recordings are limited to two minutes. Send voice authorizes recognition and delivery to the agent; the original recording and transcript remain in conversation history. Your typed draft stays separate."));
     privacy->setWordWrap(true); layout->addWidget(privacy); layout->addStretch();
     m_statistics = new QLabel; m_statistics->setObjectName("speechStatistics"); m_statistics->setWordWrap(true); layout->insertWidget(layout->count()-1, m_statistics);
     setPeers({}); microphones();
     connect(m_host, &QComboBox::currentIndexChanged, this, [this] {
         QSettings settings; settings.setValue("speech/host", m_host->currentData());
-        settings.remove("speech/profile"); refresh();
+        settings.remove("speech/profile"); settings.remove("speech/machine_id"); refresh();
     });
     connect(m_profile, &QComboBox::currentIndexChanged, this, [this] {
         if (m_profile->currentIndex() >= 0) QSettings().setValue("speech/profile", m_profile->currentData());

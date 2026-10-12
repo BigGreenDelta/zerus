@@ -35,7 +35,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         try {
             require(BuildConfig.DEBUG) { "Run the speech smoke against the debug build." }
             runSmoke()
-            result.putString("stream", "Speech smoke passed: denied microphone settings recovery, explicit retry, metadata-only ack, unmirrored IME edits, exact draft recovery, cancellation, background stop, encrypted persistence.\n")
+            result.putString("stream", "Voice message smoke passed: microphone settings recovery, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Speech smoke failed: ${error.stackTraceToString()}\n")
@@ -67,7 +67,11 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         val deadline = SystemClock.elapsedRealtime() + 15_000
         while (true) {
             find(uiAutomation.rootInActiveWindow)?.let { return it }
-            check(SystemClock.elapsedRealtime() < deadline) { "UI element unavailable: $label" }
+            check(SystemClock.elapsedRealtime() < deadline) {
+                fun labels(root: AccessibilityNodeInfo?): List<String> = if (root == null) emptyList() else
+                    listOfNotNull(root.text?.toString(), root.contentDescription?.toString()) + (0 until root.childCount).flatMap { labels(root.getChild(it)) }
+                "UI element unavailable: $label; fixture labels: ${labels(uiAutomation.rootInActiveWindow)}"
+            }
             SystemClock.sleep(50)
         }
     }
@@ -128,34 +132,71 @@ class SpeechSmokeInstrumentation : Instrumentation() {
     private fun runSmoke() {
         val submitted = AtomicInteger()
         val statusReads = AtomicInteger()
-        val complete = AtomicBoolean(true)
+        val audioReads = AtomicInteger()
+        val complete = AtomicBoolean(false)
+        val interruptSubmit = AtomicBoolean(false)
         val target = Target("session-host", "voice-fixture", "fixture-run", "fixture-conversation", "speech-fixture")
-        val host = MachineKey(target.connectionId, "gpu-fixture")
+        val owner = MachineKey(target.connectionId, target.computerId)
+        val messages = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+        val recordings = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+        val revision = AtomicInteger(1)
+        fun inspect() = JSONObject().put("name", target.session).put("run_id", target.run).put("conversation_id", target.conversation)
+            .put("tracked", true).put("runtime_state", "live").put("process_state", "running").put("activity", "idle").put("phase", "idle")
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             val body = okio.Buffer().also { request.body?.writeTo(it) }.readUtf8()
             val input = if (body.isNotBlank()) JSONObject(body) else JSONObject()
-            val result = when (input.string("operation")) {
-                "inspect" -> JSONObject().put("name", target.session).put("run_id", target.run).put("conversation_id", target.conversation)
-                    .put("tracked", true).put("runtime_state", "live").put("process_state", "running").put("activity", "idle").put("phase", "idle")
-                "speech_profiles" -> JSONObject().put("schema", 1).put("available", true).put("profiles", JSONArray().put(
-                    JSONObject().put("id", "fixture").put("name", "Fixture Russian").put("available", true).put("model", "synthetic").put("max_duration_ms", 120_000)))
-                "speech_submit" -> {
-                    val payload = input.getJSONObject("payload")
-                    check(payload.getString("request_id") == input.getString("request_id"))
-                    check(input.getString("session").isEmpty() && input.getString("computer_id") == host.computerId)
+            val payload = input.optJSONObject("payload") ?: JSONObject()
+            val operation = input.string("operation")
+            if (operation in VoiceProtocol.operations) {
+                check(input.string("computer_id") == target.computerId && input.string("session") == target.session)
+                check(payload.string("request_id") == input.string("request_id"))
+                check(payload.string("expected_run_id") == target.run && payload.string("expected_conversation_id") == target.conversation)
+            }
+            val result = when (operation) {
+                "inspect" -> inspect()
+                "voice_profiles" -> JSONObject().put("schema", 1).put("computers", JSONArray().put(
+                    JSONObject().put("machine_id", "b4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Fixture GPU").put("profiles", JSONArray().put(
+                        JSONObject().put("id", "fixture").put("name", "Fixture Russian").put("available", true).put("model", "synthetic").put("max_duration_ms", 120_000)))))
+                "voice_submit" -> {
+                    val id = input.getString("request_id")
                     val audio = payload.getJSONObject("audio")
-                    check(audio.getInt("sample_rate") == 16_000 && audio.getInt("channels") == 1 && audio.getString("format") == "pcm_s16le")
-                    check(Base64.decode(audio.getString("data_base64"), Base64.NO_WRAP).size in 3_200..SpeechProtocol.maxBytes)
+                    check(payload.getJSONObject("speech").string("machine_id") == "b4075bf0-9c22-4a67-b768-55af2d2936a4")
+                    val pcm = Base64.decode(audio.getString("data_base64"), Base64.NO_WRAP)
+                    check(pcm.size in 3_200..VoiceProtocol.MAX_PCM_BYTES)
+                    val stored = PrivateStore(targetContext).voiceState()
+                    check(stored.draft == null && stored.outgoing.any { it.id == id && it.audio != null }) { "Voice upload preceded durable outbox storage" }
                     submitted.incrementAndGet()
-                    JSONObject().put("schema", 1).put("job_id", input.getString("request_id")).put("state", if (complete.get()) "completed" else "queued")
+                    val wav = VoiceProtocol.wav(pcm); recordings[id] = wav
+                    val message = JSONObject().put("id", id).put("run_id", target.run).put("conversation_id", target.conversation)
+                        .put("created_at", System.currentTimeMillis() / 1000.0).put("revision", revision.incrementAndGet()).put("state", "queued")
+                        .put("audio", JSONObject().put("request_id", id).put("index", 0).put("name", "voice.wav").put("mime", "audio/wav")
+                            .put("bytes", wav.size).put("duration_ms", pcm.size / 32))
+                    messages[id] = message
+                    if (interruptSubmit.getAndSet(false)) throw java.io.IOException("Synthetic lost acceptance")
+                    JSONObject().put("schema", 1).put("message", message)
                 }
-                "speech_status" -> {
+                "voice_status", "voice_cancel" -> {
                     statusReads.incrementAndGet()
-                    JSONObject().put("schema", 1).put("job_id", input.getJSONObject("payload").getString("job_id"))
-                        .put("state", if (complete.get()) "completed" else "running").also { if (complete.get()) it.put("text", "Проверка голоса.") }
+                    val message = JSONObject(checkNotNull(messages[payload.getString("message_id")]).toString())
+                    message.put("revision", revision.incrementAndGet()).put("state", when {
+                        operation == "voice_cancel" -> "cancelled"
+                        complete.get() -> "submitted"
+                        else -> "transcribing"
+                    })
+                    if (complete.get()) message.put("transcript", "Проверка голоса.")
+                    messages[message.getString("id")] = message
+                    JSONObject().put("schema", 1).put("message", message)
                 }
-                "speech_cancel" -> JSONObject().put("schema", 1).put("job_id", input.getJSONObject("payload").getString("job_id")).put("state", "cancelled")
+                "attachment_read" -> {
+                    audioReads.incrementAndGet()
+                    val id = payload.getString("message_id"); val bytes = checkNotNull(recordings[id])
+                    val offset = payload.getInt("offset"); val length = payload.getInt("length")
+                    JSONObject().put("request_id", input.getString("request_id")).put("name", target.session).put("message_id", id)
+                        .put("index", 0).put("bytes", bytes.size).put("sha256", java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
+                        .put("offset", offset).put("length", length).put("data_base64", Base64.encodeToString(bytes.copyOfRange(offset, offset + length), Base64.NO_WRAP))
+                }
+                "send" -> error("The phone must never submit a second native send after recognizing voice")
                 else -> JSONObject()
             }
             val receipt = JSONObject().put("request_id", input.string("request_id")).put("state", "completed").put("result", result)
@@ -167,92 +208,70 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         await("private store") { model.storageReady }
         main {
             model.javaClass.getDeclaredField("api").apply { isAccessible = true }.set(model, RelayApi(client))
+            model.attachments.javaClass.getDeclaredField("api").apply { isAccessible = true }.set(model.attachments, RelayApi(client))
             set(model, "setConnections", listOf(Connection(target.connectionId, "Fixture workspace", "https://relay.example.test", "fixture-token")))
-            set(model, "setMachines", listOf(Machine(target.connectionId, host.computerId, "Fixture GPU", true)))
-            set(model, "setRelayOperations", mapOf(target.connectionId to SpeechProtocol.operations))
-            set(model, "setMachineOperations", mapOf(host to SpeechProtocol.operations))
+            set(model, "setMachines", listOf(Machine(target.connectionId, target.computerId, "Fixture session host", true)))
+            val capabilities = VoiceProtocol.operations + "attachment_read"
+            set(model, "setRelayOperations", mapOf(target.connectionId to capabilities))
+            set(model, "setMachineOperations", mapOf(owner to capabilities))
             set(model, "setSelected", Session(target, "Fixture", "codex", "idle", "", "", 0, JSONObject()))
             model.edit(target, "Исходный текст.")
+            model.refreshActivity()
         }
         await("voice private store") { model.speech.ready }
-        main { model.speech.chooseHost(host) }
+        main { model.speech.refreshProfiles() }
         await("voice profiles") { !model.speech.loading && model.speech.profile?.available == true }
-        val offline = MachineKey(target.connectionId, "offline-fixture")
-        main { model.speech.refreshProfiles(); model.speech.chooseHost(offline) }
-        await("offline host cancels profile loading") { model.speech.selection.host == offline && !model.speech.loading && model.speech.profiles.isEmpty() }
-        main { model.speech.chooseHost(host) }
-        await("voice profiles after changing hosts") { !model.speech.loading && model.speech.profile?.available == true }
-        await("composer bridge") { model.speechComposer?.target == target }
-        main {
-            val bridge = checkNotNull(model.speechComposer)
-            check(bridge.editor.text.toString() == model.draft(target).text)
-            val attempt = SpeechAttempt(UUID.randomUUID().toString(), host, "fixture", model.draft(target), "completed", "Late recognition.")
-            // No main-loop turn separates this IME edit from insertion: snapshotFlow cannot mirror it yet.
-            bridge.editor.edit { replace(0, length, "Unmirrored IME edit.") }
-            var result: Result<Unit>? = null
-            CoroutineScope(Dispatchers.Main.immediate).launch(start = CoroutineStart.UNDISPATCHED) {
-                result = runCatching { model.insertSpeech(attempt, false) }
-            }
-            check(result?.exceptionOrNull()?.message?.contains("draft changed") == true) {
-                "Automatic speech insertion accepted a stale draft before the IME edit was mirrored."
-            }
-            check(bridge.editor.text.toString() == "Unmirrored IME edit.")
-            check(model.draft(target).text == "Unmirrored IME edit.")
-            bridge.editor.edit { replace(0, length, "Исходный текст.") }
-            model.edit(target, "Исходный текст.")
-        }
+        await("fresh session") { model.activityVerified && model.voiceSendReason(target).isBlank() }
         permissionRecovery(model, target)
         await("microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
         main { model.speech.stop() }
-        await("first transcription") { !model.speech.busy && model.speech.attempt == null && submitted.get() == 1 }
-        check(main { model.draft(target).text } == "Исходный текст. Проверка голоса.")
-        check(statusReads.get() >= 1) { "Completed submit acknowledgement was mistaken for a transcript." }
+        await("durable voice preview") { !model.speech.busy && model.speech.draft != null }
+        check(submitted.get() == 0) { "Stopping the recorder uploaded without explicit Send" }
+        check(PrivateStore(targetContext).voiceState().draft != null)
+        tap("Play")
+        await("local audio playback") { model.attachments.playing }
+        main { model.attachments.stopAudio() }
+        tap("Send voice message")
+        await("server transcription") { submitted.get() == 1 && model.speech.outgoing.single().state == "transcribing" }
+        main { checkNotNull(model.speechComposer).editor.edit { replace(0, length, "Edited while voice is processing.") } }
+        await("typed draft mirror") { model.draft(target).text == "Edited while voice is processing." }
+        complete.set(true)
+        await("voice delivery") { model.speech.outgoing.single().state == "submitted" && model.speech.activeRequests.isEmpty() }
+        check(main { model.draft(target).text } == "Edited while voice is processing.")
+        node("Voice message"); tap("Show recognized text"); node("Проверка голоса.")
+        check(submitted.get() == 1 && statusReads.get() > 0)
+        val first = main { model.speech.outgoing.single() }
+        // Download without this phone's encrypted local ID to exercise another device's history playback.
+        main { model.attachments.toggleAudio(target, first.message!!.audio) }
+        await("authenticated remote playback") { model.attachments.playing && audioReads.get() > 0 }
+        main { model.attachments.stopAudio() }
 
-        complete.set(false)
-        main { check(model.speech.startReason(target).isBlank()) { model.speech.startReason(target) }; model.speech.start(target) }
+        // Lost acceptance recovers by stable message ID, never a second create/upload.
+        complete.set(false); interruptSubmit.set(true)
+        main { model.speech.start(target) }
         await("second recording") { model.speech.recording && model.speech.seconds >= 1 }
         main { model.speech.stop() }
-        await("second submission") { submitted.get() == 2 }
-        main { checkNotNull(model.speechComposer).editor.edit { replace(0, length, "Edited during recognition.") } }
-        await("IME mirror during recognition") { model.draft(target).text == "Edited during recognition." }
-        complete.set(true)
-        await("recovered text") { !model.speech.working && model.speech.attempt?.state == "completed" }
-        check(main { model.draft(target).text } == "Edited during recognition.")
-        val finalText = "Reviewed IME edit. Проверка голоса. Next IME edit."
-        main {
-            val bridge = checkNotNull(model.speechComposer)
-            bridge.editor.edit { replace(0, length, "Reviewed IME edit.") }
-            model.speech.insertReviewed()
-            check(bridge.editor.text.toString() == "Reviewed IME edit. Проверка голоса.") {
-                "Reviewed insertion did not synchronously reconcile the actual editor."
-            }
-            // A second keystroke arrives while the durable insertion checkpoint can still be pending.
-            bridge.editor.edit { append(" Next IME edit.") }
-        }
-        await("reviewed insertion") { model.speech.attempt == null }
-        await("IME edit after insertion") { model.draft(target).text == finalText }
-        check(main { model.speechComposer?.editor?.text.toString() } == finalText)
+        await("second preview") { model.speech.draft != null && !model.speech.savingRecording }
+        main { model.speech.submit() }
+        await("status-only recovery") { submitted.get() == 2 && model.speech.outgoing.last().state == "transcribing" }
+        val second = main { model.speech.outgoing.last() }
+        main { model.speech.cancel(second) }
+        await("cancellation") { model.speech.outgoing.last().state == "cancelled" && model.speech.activeRequests.isEmpty() }
+        check(submitted.get() == 2)
 
-        main { check(model.speech.startReason(target).isBlank()) { model.speech.startReason(target) }; model.speech.start(target) }
+        main { model.speech.start(target) }
         await("background recording") { model.speech.recording && model.speech.seconds >= 1 }
         main { model.speech.background() }
-        await("background stop") { !model.speech.recording && model.speech.recorded }
+        await("background saved preview") { model.speech.draft != null && !model.speech.busy }
         check(submitted.get() == 2)
-        main { model.speech.discardRecording() }
-
-        complete.set(false)
-        main { check(model.speech.startReason(target).isBlank()) { model.speech.startReason(target) }; model.speech.start(target) }
-        await("cancel recording") { model.speech.recording && model.speech.seconds >= 1 }
-        main { model.speech.stop() }
-        await("cancel submission") { submitted.get() == 3 }
-        main { model.speech.cancel() }
-        await("cancellation") { !model.speech.working && model.speech.attempt?.state == "cancelled" }
-        check(main { model.draft(target).text } == finalText)
-        main { model.speech.dismiss() }
-        await("dismissal") { model.speech.attempt == null }
-        val saved = PrivateStore(targetContext).messageState()
-        check(saved.drafts.single { it.target == target }.text == finalText)
-        check(saved.speechAppliedIds.size == 2 && saved.outgoing.isEmpty())
+        val persisted = PrivateStore(targetContext).voiceState()
+        check(persisted.draft != null && persisted.outgoing.size == 2)
+        tap("Discard"); node("Discard recording?")
+        check(main { model.speech.draft != null }) { "Opening discard confirmation removed the recording" }
+        tap("Keep recording")
+        check(main { model.speech.draft == persisted.draft })
+        check(PrivateStore(targetContext).messageState().drafts.single { it.target == target }.text == "Edited while voice is processing.")
+        check(main { model.outgoing.isEmpty() })
         main { activity.finish() }
     }
 }

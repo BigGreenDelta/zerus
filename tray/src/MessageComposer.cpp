@@ -844,9 +844,12 @@ void MessageComposer::showSavedDrafts()
         }
         preview->setPlainText(selected.text);
         detail->setText(selected.storageError.isEmpty() ? tr("%1 attachment(s). %2").arg(selected.attachments.size()).arg(selected.notice) : selected.storageError);
+        if(selected.storageError.isEmpty() && selected.formState.value("kind")=="voice_message")
+            detail->setText(tr("Open the original conversation (%1) to review or check this voice message.").arg(selected.formState.value("session").toString()));
         copy->setEnabled(!selected.text.isEmpty());
         restore->setEnabled(!target.isEmpty() && !isSending(target) && !isWaitingToSend(target)
-            && !isDraftLoading(target) && selected.storageError.isEmpty() && list->currentItem());
+            && !isDraftLoading(target) && selected.storageError.isEmpty() && list->currentItem()
+            && selected.formState.value("kind") != "voice_message");
     };
     connect(list, &QListWidget::currentItemChanged, &dialog, [&](QListWidgetItem *item) {
         const auto generation = ++selection;
@@ -867,6 +870,7 @@ void MessageComposer::showSavedDrafts()
     connect(copy, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(selected.text); });
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
+        if(selected.formState.value("kind")=="voice_message")return;
         if (m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target) || isDraftLoading(target)) return;
         const auto current = m_drafts.value(target);
         if ((!current.text.isEmpty() || !current.attachments.isEmpty())

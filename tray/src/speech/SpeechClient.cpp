@@ -38,9 +38,24 @@ void SpeechClient::request(const QString &host, const QJsonObject &payload, Repl
         });
 }
 
-void SpeechClient::dispatch(const QString &host, const QJsonObject &payload, Reply done)
+void SpeechClient::requestVoice(const QString &host, const QString &session, const QJsonObject &payload, Reply done)
 {
-    auto request = command(m_executable, host, {"speech", "--json"});
+    if (session.isEmpty()) { done({}, tr("Choose a conversation before sending voice.")); return; }
+    if (m_voiceSupported.contains(host)) { dispatch(host, payload, std::move(done), session); return; }
+    ProcessRunner::run(command(m_executable, host, {"--help"}), this,
+        [this, host, session, payload, done](const ProcessRunner::Result &result) {
+            const auto error = failure(result);
+            if (!error.isEmpty()) { done({}, error); return; }
+            if (!QRegularExpression(QStringLiteral("\\bvoice\\s+[^\\n]*--json\\b")).match(QString::fromUtf8(result.standardOutput)).hasMatch()) {
+                done({}, tr("Voice messages need an updated hgs CLI on the conversation computer.")); return;
+            }
+            m_voiceSupported.insert(host); dispatch(host, payload, done, session);
+        });
+}
+
+void SpeechClient::dispatch(const QString &host, const QJsonObject &payload, Reply done, const QString &session)
+{
+    auto request = command(m_executable, host, session.isEmpty() ? QStringList{"speech", "--json"} : QStringList{"voice", session, "--json"});
     request.input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
     ProcessRunner::run(std::move(request), this, [done](const ProcessRunner::Result &result) {
         const auto error = failure(result);
