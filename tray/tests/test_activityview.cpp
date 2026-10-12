@@ -461,6 +461,7 @@ void TestActivityView::renderedModelMatchesLaidOutSource()
         for (int i = 0; i < expected->lineCount(); ++i) {
             const auto a = actual->lineAt(i), e = expected->lineAt(i);
             QCOMPARE(a.textStart(), e.textStart()); QCOMPARE(a.textLength(), e.textLength());
+            QCOMPARE(a.leadingIncluded(), e.leadingIncluded());
             for (int offset = e.textStart(); offset <= e.textStart() + e.textLength(); ++offset)
                 QVERIFY2(qAbs(a.cursorToX(offset) - e.cursorToX(offset)) < .1,
                     qPrintable(QString("block %1 line %2 offset %3: %4 vs %5").arg(block.text()).arg(i).arg(offset).arg(a.cursorToX(offset)).arg(e.cursorToX(offset))));

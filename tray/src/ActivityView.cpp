@@ -1515,6 +1515,7 @@ void ActivityView::startRender()
                 const auto from = sourceLayout->lineAt(i);
                 auto line = text->createLine();
                 if (!line.isValid()) break;
+                line.setLeadingIncluded(from.leadingIncluded());
                 line.setLineWidth(from.width());
                 line.setPosition(from.position());
             }
