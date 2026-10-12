@@ -28,7 +28,7 @@ class OvermindOutboxTest {
             check(saves-- > 0) { "synthetic storage failure" }; reduce(state).also { state = it; commits += it } } }
     private var missingFiles = false
     private fun outbox(store: Store) = OvermindOutbox(OvermindRepository(RelayApi(OkHttpClient.Builder().retryOnConnectionFailure(false)
-        .readTimeout(2, TimeUnit.SECONDS).build())), { files -> if (missingFiles) throw AttachmentException("Saved attachment is missing or changed. Select the file again.")
+        .readTimeout(2, TimeUnit.SECONDS).build()), pollDelayMs = 50), { files -> if (missingFiles) throw AttachmentException("Saved attachment is missing or changed. Select the file again.")
             JSONArray(files.map { JSONObject().put("name", it.name).put("mime", it.mime).put("data_base64", "AAAA") }) }, { store.connected }, store.durable)
 
     @Test fun createUsesTheRequestUuidAsTheTaskAndKeepsOnlyItsRequest() {
@@ -222,6 +222,35 @@ class OvermindOutboxTest {
             status = 503
             assertEquals("uncertain", outbox(Store()).submit(gateway, write(id = other)).status)
             assertEquals(12, server.requestCount)
+        } }
+    }
+
+    @Test fun aReceiptThatCannotBeReadAfterTheRelayAcceptedTheWriteLeavesItUnconfirmed() = runBlocking<Unit> {
+        var status = 429
+        val relay = object : Dispatcher() {
+            val posts = mutableListOf<String>()
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.method == "POST") {
+                posts += JSONObject(request.body.readUtf8()).getString("request_id")
+                MockResponse().setResponseCode(202).setBody(JSONObject().put("request_id", posts.last()).put("state", "queued").toString())
+            // Polling its receipt: rate limited, a lapsed credential or a receipt the relay no longer finds.
+            } else MockResponse().setResponseCode(status).setBody("{\"error\":\"synthetic\"}")
+        }
+        overmindServer(relay) { server, gateway -> runBlocking {
+            for (code in listOf(429, 401, 403, 404)) {
+                status = code
+                val before = relay.posts.size
+                val store = Store()
+                val accepted = outbox(store).submit(gateway, write())
+                assertEquals("$code", "uncertain" to true, accepted.status to accepted.retryable)
+                assertEquals("$code", OvermindWrites.UNCONFIRMED, accepted.error)
+                assertEquals("$code", "uncertain", store.state.overmindWrites.single().status)
+                assertEquals("$code", listOf(request), relay.posts.drop(before))
+                // A retry the relay accepts again is unconfirmed too, never failed.
+                val retried = outbox(store).retry(gateway, accepted)
+                assertEquals("$code", "uncertain" to true, retried.status to retried.retryable)
+            }
+            assertEquals(8, relay.posts.size)
+            assertEquals(16, server.requestCount)
         } }
     }
 

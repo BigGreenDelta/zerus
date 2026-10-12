@@ -81,17 +81,20 @@ object OvermindWrites {
     }
     private fun unknown(write: OvermindWrite) = write.copy(status = "uncertain", code = CHECK, field = "", delivery = "", error = CHECK_TASK)
 
+    /** Whether the relay's answer to the submission itself proves it never recorded the write. A first submission refused with
+     * 400/401/403/404/409/413/429 was not recorded. A retry's original may already be recorded. `Store::submit`
+     * (services/mobile/relay/src/store/requests.rs) looks a known request_id up first and answers with its first receipt, or 409
+     * for other content; only 404 (unknown computer) and 409 (identity or route conflict) come solely after that lookup, so only
+     * they prove a retry was never recorded. Everything else on a retry stays unconfirmed: 400/408/413 while the relay reads the
+     * body, 401/403 from authentication, 429 from per-client rate limiting or capacity (both before the lookup), and any 5xx.
+     * Only the submission is classified: once the relay accepted it, an error while polling its receipt proves nothing. */
+    fun refused(status: Int, retry: Boolean) = status in (if (retry) unrecorded else rejected)
     /** A failure after the request may have left the phone stays unconfirmed. Only a first submission becomes `failed` without
-     * a receipt: before the network, or refused by the relay with 400/401/403/404/409/413/429, none of which records it.
-     * A retry's original may already be recorded. `Store::submit` (services/mobile/relay/src/store/requests.rs) looks a known
-     * request_id up first and answers with its first receipt, or 409 for other content; only 404 (unknown computer) and 409
-     * (identity or route conflict) come solely after that lookup, so only they prove a retry was never recorded. Everything else
-     * on a retry stays unconfirmed: no attempt, 400/408/413 while the relay reads the body, 401/403 from authentication, 429 from
-     * per-client rate limiting or capacity (both before the lookup), and any 5xx. */
-    fun failure(write: OvermindWrite, error: Exception, attempted: Boolean, retry: Boolean = false): OvermindWrite = when {
+     * a receipt: before the network, or [refused] by the relay. A retry also fails when the relay [refused] it. */
+    fun failure(write: OvermindWrite, error: Exception, attempted: Boolean, retry: Boolean = false, refused: Boolean = false): OvermindWrite = when {
         !attempted && !retry -> write.copy(status = "failed", error = error.message.orEmpty().ifBlank { "The change was not sent." })
         !attempted -> write.copy(status = "uncertain", error = listOf(error.message.orEmpty(), UNCONFIRMED).filter(String::isNotBlank).joinToString(" "))
-        error is RelayException && error.status in (if (retry) unrecorded else rejected) -> write.copy(status = "failed", error = error.message.orEmpty())
+        refused -> write.copy(status = "failed", error = error.message.orEmpty())
         else -> write.copy(status = "uncertain", error = UNCONFIRMED)
     }
 
@@ -149,12 +152,15 @@ class OvermindOutbox(private val repository: OvermindRepository, private val wir
             .also { if (write.device.isNotEmpty()) it.put("device", write.device) }
     }
     private suspend fun send(gateway: OvermindGateway, write: OvermindWrite, retry: Boolean): OvermindWrite {
-        var attempted = false; var failure: Exception? = null
+        var attempted = false; var refused = false; var failure: Exception? = null
         val settled = try {
             val payload = payload(write)
             attempted = true
-            OvermindWrites.settle(write, repository.await(gateway, repository.submitWrite(gateway, write.requestId, payload)))
-        } catch (e: Exception) { failure = e; OvermindWrites.failure(write, e, attempted, retry) }
+            val receipt = try { repository.submitWrite(gateway, write.requestId, payload) }
+                catch (e: RelayException) { refused = OvermindWrites.refused(e.status, retry); throw e }
+            // Accepted: the relay holds the write under its request_id, so a failed receipt poll leaves it unconfirmed.
+            OvermindWrites.settle(write, repository.await(gateway, receipt))
+        } catch (e: Exception) { failure = e; OvermindWrites.failure(write, e, attempted, retry, refused) }
         val saved = try {
             withContext(NonCancellable) { durable { state -> connectedOnly(OvermindWrites.result(state, write.requestId) { settled }, write) } }
         } catch (e: Exception) { if (attempted || retry) throw OvermindUnsavedResult(e) else throw e }
