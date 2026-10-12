@@ -9,12 +9,17 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QToolButton>
 #include <QUuid>
 
 #include <algorithm>
@@ -22,20 +27,23 @@
 
 #include "FakeCli.h"
 #include "HgsClient.h"
+#include "MarkdownText.h"
 #include "OvermindModel.h"
 #include "SessionOrganization.h"
+#include "TaskPanel.h"
 #include "TasksView.h"
 
 namespace {
 
 // A fake `hgs overmind` serving rev, status, decisions and boards from files
-// next to it (board-<project>.json). Every call is recorded with its argv and
-// stdin. sleep-<command> holds seconds to wait first. A write prints
-// refuse-<command>.json when present and exits 1; otherwise it moves the
-// cursor, so the model reads the board again, and prints reply-<command>.json
-// when present.
+// next to it (board-<project>.json). `show` answers the board's task with a
+// prompt, merged with show-<uuid>.json; `attachment` names image-<sha256>.png.
+// Every call is recorded with its argv and stdin. sleep-<command> holds seconds
+// to wait first. A write prints refuse-<command>.json when present and exits 1;
+// otherwise it moves the cursor, so the model reads the board again, and prints
+// reply-<command>.json when present.
 const QByteArray kFixture = R"(#!/usr/bin/env python3
-import json, os, pathlib, sys, time
+import glob, json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 data = sys.stdin.read()
@@ -64,6 +72,25 @@ elif command == 'board':
     board = json.loads(read('board-' + project + '.json', '{"workflow":{"stages":[]},"tasks":[]}'))
     board.update(ok=True, project=project, cursor=cursor)
     reply(board)
+elif command == 'show':
+    uuid = json.loads(data)['task']
+    found = None
+    for name in sorted(glob.glob(str(root / 'board-*.json'))):
+        for task in json.loads(pathlib.Path(name).read_text()).get('tasks', []):
+            if task['uuid'] == uuid:
+                found = dict(task, prompt='Prompt of ' + task['title'], attachments=[], journal=[], related=[], resume_stage='')
+    if found is None:
+        print(json.dumps({'ok': False, 'error': {'code': 'unknown_task', 'message': 'no task ' + uuid}}))
+        sys.exit(1)
+    found.update(json.loads(read('show-' + uuid + '.json', '{}')))
+    reply({'ok': True, 'task': found})
+elif command == 'attachment':
+    request = json.loads(data)
+    image = root / ('image-' + request['sha256'] + '.png')
+    if not image.exists():
+        print(json.dumps({'ok': False, 'error': {'code': 'attachment_unavailable', 'message': 'the image is not on this machine'}}))
+        sys.exit(1)
+    reply({'ok': True, 'path': str(image), 'name': 'shot.png', 'mime': 'image/png', 'bytes': image.stat().st_size})
 elif read('refuse-' + command + '.json') is not None:
     refusal = read('refuse-' + command + '.json')
     print(refusal)
@@ -94,7 +121,9 @@ QJsonObject workflow(const QList<QPair<QString, QString>> &stages)
     const QJsonArray rules{
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Inbox"}}, {"to", "Ready"}, {"actors", QJsonArray{"human"}}},
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Ready"}}, {"to", "Inbox"}, {"actors", QJsonArray{"human"}}},
+        QJsonObject{{"action", "claim"}, {"from", QJsonArray{"Ready"}}, {"to", "Doing"}, {"actors", QJsonArray{"human", "autopilot"}}},
         QJsonObject{{"action", "unclaim"}, {"from", QJsonArray{"Doing"}}, {"to", "Ready"}, {"actors", QJsonArray{"human", "autopilot"}}},
+        QJsonObject{{"action", "reopen"}, {"from", QJsonArray{"Shipped"}}, {"to", "Ready"}, {"actors", QJsonArray{"human"}}},
         // An agent's move and a move that needs a field are not a person's drag.
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Doing"}}, {"to", "Later"}, {"actors", QJsonArray{"agent"}}},
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Inbox"}}, {"to", "Later"}, {"actors", QJsonArray{"human"}}, {"requires", QJsonArray{"reason"}}},
@@ -124,6 +153,7 @@ QJsonObject demoBoard(const QList<QPair<QString, QString>> &stages = kStages)
     auto t10 = task("t10", "Queued on another machine", "Ready", "d");
     t10["pinned"] = session("m2", "codex/demo/one"); t10["queue_of"] = session("m2", "codex/demo/one");
     auto t5 = task("t5", "Being built", "Doing", "a"); t5["assignee"] = one; t5["markers"] = QJsonArray{"working", "uncertain"};
+    t5["flags"] = QJsonArray{"delivery_uncertain"};
     auto t11 = task("t11", "Rework the cache", "Doing", "b"); t11["assignee"] = session("m2", "codex/demo/two");
     t11["labels"] = QJsonArray{"review-failed"}; t11["markers"] = QJsonArray{"needs_work", "conflict"};
     auto t6 = task("t6", "Check this", "Check", "a"); t6["reviewer"] = session("m1", "claude/demo/review");
@@ -258,6 +288,93 @@ bool takes(QWidget *target, QFrame *column, const QString &uuid, bool *lit = nul
     return enter.isAccepted();
 }
 
+// The sessions a card can go to: the window passes every session it knows.
+QList<TasksView::Recipient> recipients()
+{
+    const auto make = [](const QString &project, const QString &machine, const QString &name, const QString &status, bool working) {
+        TasksView::Recipient recipient;
+        recipient.key = machine + '\n' + name; recipient.project = project; recipient.session = {machine, name};
+        recipient.status = status; recipient.working = working;
+        return recipient;
+    };
+    return {make("demo", "m1", "codex/demo/one", "Working", true), make("demo", "m1", "claude/demo/review", "Ready", false),
+            make("demo", "m2", "codex/demo/two", "Ready", false), make("other", "m1", "codex/other/one", "Ready", false),
+            make("demo", "", "kimi/demo/far", "Ready", false)};
+}
+
+// A view on the demo board with codex/demo/one selected, waiting for the cards.
+struct Board {
+    Fixture f;
+    std::unique_ptr<TasksView> view;
+    bool open(const QSize &size = {1500, 820})
+    {
+        if (!f.setUp()) return false;
+        view = std::make_unique<TasksView>(f.model.get());
+        view->resize(size);
+        view->setProjects(organization().groups());
+        view->setSession(selection("demo", "m1", "codex/demo/one"));
+        view->setRecipients(recipients());
+        view->show();
+        return QTest::qWaitFor([this] { return card(*view, "t1") != nullptr; });
+    }
+    QWidget *panel() const { return view->findChild<QWidget *>("taskPanel"); }
+    template <typename T> T *find(const char *name) const { return view->findChild<T *>(name); }
+    // Opens a card and waits until its details are shown.
+    bool show(const QString &uuid)
+    {
+        const int before = f.calls("show").size();
+        view->openTask(uuid);
+        return QTest::qWaitFor([&] { return f.calls("show").size() > before && find<QWidget>("taskPanel")->property("task").toString() == uuid
+                                           && find<QWidget>("taskPanel")->property("loaded").toBool(); });
+    }
+    QLabel *message() const { return find<QLabel>("tasksMessage"); }
+    QPushButton *anyway() const { return find<QPushButton>("tasksSendAnyway"); }
+};
+
+// The menu action whose data (a session key or a stage) is `data`.
+QAction *action(QMenu *menu, const QString &data)
+{
+    if (!menu) return nullptr;
+    for (auto *candidate : menu->actions()) if (candidate->data().toString() == data) return candidate;
+    return nullptr;
+}
+QStringList actionData(QMenu *menu)
+{
+    QStringList out;
+    if (menu) for (auto *candidate : menu->actions()) if (!candidate->isSeparator()) out << candidate->data().toString();
+    return out;
+}
+
+// Answers the next confirmation dialog, also one that opens later, and keeps
+// its text: "" when none came within three seconds.
+struct Confirmations {
+    QStringList texts;
+    void answer(bool accept)
+    {
+        auto *timer = new QTimer(qApp);
+        auto tries = std::make_shared<int>(0);
+        QObject::connect(timer, &QTimer::timeout, timer, [this, accept, timer, tries] {
+            auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            if (!box && ++*tries < 300) return;
+            timer->stop();
+            timer->deleteLater();
+            texts << (box ? box->text() : QString());
+            if (!box) return;
+            if (box->objectName() != "tasksConfirm") texts.last() = "unexpected dialog " + box->objectName();
+            auto *button = accept ? box->findChild<QAbstractButton *>("tasksConfirmAccept") : box->button(QMessageBox::Cancel);
+            if (button) button->click(); else box->reject();
+        });
+        timer->start(10);
+    }
+};
+
+// A write's request without its request_id, which must be a UUID.
+QJsonObject plain(QJsonObject request)
+{
+    if (QUuid(request.take("request_id").toString()).isNull()) request.insert("request_id", "missing or not a UUID");
+    return request;
+}
+
 } // namespace
 
 class TestTasksView : public QObject {
@@ -276,6 +393,14 @@ private slots:
     void sendAnywayStaysWithItsSession();
     void sendNextSkipsEpics();
     void projectPersistsAcrossSessions();
+    void panelShowsTheTask();
+    void panelEditsRunTheirCommands();
+    void panelActionsRunTheirCommands();
+    void confirmableRefusalsRoundTrip();
+    void destructiveActionsAskFirst();
+    void uncertainDeliveriesOfferResolve();
+    void cardMenuMovesByKeyboard();
+    void promptDraftSurvivesChanges();
 private:
     std::unique_ptr<QTemporaryDir> m_settings;
 };
@@ -287,6 +412,8 @@ void TestTasksView::initTestCase()
     QCoreApplication::setApplicationName("tasks-view");
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings->path());
+    // Opened images are copied to the cache: the test cache, not the user's.
+    QStandardPaths::setTestModeEnabled(true);
 }
 
 void TestTasksView::columnsFollowTheWorkflow()
@@ -741,7 +868,8 @@ void TestTasksView::projectPersistsAcrossSessions()
     Fixture f; QVERIFY(f.setUp());
     QVERIFY(f.put("board-other.json", compact(QJsonObject{{"workflow", workflow(kStages)}, {"tasks", QJsonArray()}})));
     {
-        TasksView view(f.model.get()); view.resize(900, 600);
+        // Wide enough for a board next to the card panel.
+        TasksView view(f.model.get()); view.resize(1300, 600);
         view.setProjects(organization().groups());
         // Accessible projects only, with their color.
         auto *projects = view.findChild<QComboBox *>("tasksProject");
@@ -826,6 +954,507 @@ void TestTasksView::projectPersistsAcrossSessions()
     QCOMPARE(reopened.project(), QString("demo"));
     QCOMPARE(shown.size(), 1);
     QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
+}
+
+// The card panel opens on the right with what `show` says about the task: the
+// prompt, images fetched through `attachment`, labels, priority, relations and
+// the journal rendered as Markdown.
+void TestTasksView::panelShowsTheTask()
+{
+    Board b; QVERIFY(b.open());
+    QImage image(48, 32, QImage::Format_RGB32); image.fill(Qt::red);
+    QVERIFY(image.save(b.f.dir.filePath("image-aaaa.png")));
+    const auto person = QJsonObject{{"kind", "human"}, {"machine", "m1"}};
+    const QJsonArray journal{
+        QJsonObject{{"marker", "[claim]"}, {"text", ""}, {"at", 1791266000}, {"actor", person}, {"event", "e1"}},
+        QJsonObject{{"marker", "[sent?]"}, {"text", "the session did not confirm the input"}, {"at", 1791266010}, {"actor", person}, {"event", "e2"}},
+        QJsonObject{{"marker", "[comment]"}, {"text", "Use the **fast** path"}, {"at", 1791266020},
+                    {"actor", QJsonObject{{"kind", "agent"}, {"machine", "m1"}, {"session", "codex/demo/one"}}}, {"event", "e3"}}};
+    QVERIFY(b.f.put("show-t5.json", compact({{"prompt", "Build the thing\n\nwith care"}, {"journal", journal},
+        {"attachments", QJsonArray{QJsonObject{{"name", "shot.png"}, {"mime", "image/png"}, {"bytes", 100}, {"sha256", "aaaa"}}}},
+        {"parent", "t1"}, {"follows", QJsonArray{"t3"}}, {"related", QJsonArray{"t6"}}, {"labels", QJsonArray{"ui"}}})));
+    auto *panel = b.panel();
+    QVERIFY(panel); QVERIFY(!panel->isVisible());
+    QVERIFY(b.show("t5"));
+    QVERIFY(panel->isVisible());
+    QCOMPARE(b.f.calls("show").last(), (QJsonObject{{"task", "t5"}}));
+    QCOMPARE(b.find<QLabel>("taskPanelRef")->text(), QString("om-t5"));
+    QVERIFY(b.find<QLabel>("taskPanelStage")->text().contains("Doing"));
+    QCOMPARE(b.find<QLineEdit>("taskTitle")->text(), QString("Being built"));
+    QCOMPARE(b.find<QPlainTextEdit>("taskPrompt")->toPlainText(), QString("Build the thing\n\nwith care"));
+    QCOMPARE(b.find<QComboBox>("taskPriority")->currentData().toInt(), 2);
+    // The journal, oldest first, as Markdown, each entry with its author.
+    QStringList texts;
+    for (auto *text : panel->findChildren<MarkdownText *>("taskJournalText")) texts << text->toPlainText().trimmed();
+    QVERIFY2(texts.contains("Use the fast path"), qPrintable(texts.join(" | ")));
+    QStringList headers;
+    for (auto *header : panel->findChildren<QLabel *>("taskJournalHeader")) headers << header->text();
+    QCOMPARE(headers.size(), 3);
+    QVERIFY2(headers.first().contains("[claim]") && headers.last().contains("[comment]") && headers.last().contains("codex/demo/one"),
+             qPrintable(headers.join(" | ")));
+    // The image comes through `attachment`, and a click opens a copy named after it.
+    QTRY_COMPARE(b.f.calls("attachment").size(), 1);
+    QCOMPARE(b.f.calls("attachment").first(), (QJsonObject{{"task", "t5"}, {"sha256", "aaaa"}}));
+    auto *thumbnail = b.find<QToolButton>("taskImage");
+    QVERIFY(thumbnail);
+    QTRY_VERIFY(!thumbnail->icon().isNull());
+    QUrl opened;
+    qobject_cast<TaskPanel *>(panel)->openUrl = [&](const QUrl &url) { opened = url; return true; };
+    thumbnail->click();
+    QVERIFY(opened.isLocalFile());
+    QVERIFY(opened.toLocalFile().endsWith("/shot.png"));
+    QVERIFY(QFile::exists(opened.toLocalFile()));
+    QFile::remove(opened.toLocalFile());
+    // Labels and relations by ref.
+    QStringList labels;
+    for (auto *chip : panel->findChildren<QLabel *>("taskLabel")) labels << chip->text();
+    QCOMPARE(labels, QStringList{"ui"});
+    QStringList relations;
+    for (auto *button : panel->findChildren<QPushButton *>("taskRelation")) relations << button->property("relation").toString() + ":" + button->text();
+    QCOMPARE(relations, (QStringList{"parent:om-t1", "follows:om-t3", "related:om-t6"}));
+    // The unconfirmed delivery names its reason.
+    auto *delivery = b.find<QFrame>("taskDelivery");
+    QVERIFY(delivery->isVisible());
+    QVERIFY(b.find<QLabel>("taskDeliveryText")->text().contains("the session did not confirm the input"));
+    // A relation opens its task.
+    for (auto *button : panel->findChildren<QPushButton *>("taskRelation")) if (button->text() == "om-t1") button->click();
+    QCOMPARE(b.view->openedTask(), QString("t1"));
+    QTRY_COMPARE(b.find<QLineEdit>("taskTitle")->text(), QString("Write the parser"));
+    QVERIFY(!delivery->isVisible());
+    // Closing the panel closes the card.
+    b.find<QAbstractButton>("taskPanelClose")->click();
+    QVERIFY(!panel->isVisible());
+    QVERIFY(b.view->openedTask().isEmpty());
+    QVERIFY(!card(*b.view, "t1")->isSelected());
+}
+
+// Edits run edit, label, pin, unpin and link with a fresh request_id each.
+void TestTasksView::panelEditsRunTheirCommands()
+{
+    Board b; QVERIFY(b.open());
+    QVERIFY(b.f.put("show-t1.json", compact({{"follows", QJsonArray{"t3"}}})));
+    QVERIFY(b.show("t1"));
+    // The title: Enter saves it, once.
+    auto *title = b.find<QLineEdit>("taskTitle");
+    title->setFocus();
+    title->selectAll();
+    QTest::keyClicks(title, "Write the lexer");
+    QTest::keyClick(title, Qt::Key_Return);
+    QTRY_COMPARE(b.f.calls("edit").size(), 1);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t1"}, {"title", "Write the lexer"}}));
+    // The prompt: Save shows once it changed.
+    auto *prompt = b.find<QPlainTextEdit>("taskPrompt");
+    auto *save = b.find<QPushButton>("taskPromptSave");
+    QVERIFY(!save->isVisible());
+    prompt->setPlainText("Write a parser for the config format");
+    QVERIFY(save->isVisible() && save->isEnabled());
+    save->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 2);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t1"}, {"prompt", "Write a parser for the config format"}}));
+    QTRY_VERIFY(!save->isVisible());
+    // Priority.
+    auto *priority = b.find<QComboBox>("taskPriority");
+    priority->setCurrentIndex(priority->findData(0));
+    emit priority->activated(priority->currentIndex());
+    QTRY_COMPARE(b.f.calls("edit").size(), 3);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t1"}, {"priority", 0}}));
+    // Labels: Enter adds one, a chip's button removes it.
+    auto *add = b.find<QLineEdit>("taskLabelAdd");
+    QTest::keyClicks(add, "docs");
+    QTest::keyClick(add, Qt::Key_Return);
+    QTRY_COMPARE(b.f.calls("label").size(), 1);
+    QCOMPARE(plain(b.f.calls("label").last()), (QJsonObject{{"task", "t1"}, {"label", "docs"}, {"present", true}}));
+    QVERIFY(add->text().isEmpty());
+    QToolButton *removeLabel = nullptr;
+    for (auto *button : b.panel()->findChildren<QToolButton *>("taskLabelRemove")) if (button->property("label").toString() == "ui") removeLabel = button;
+    QVERIFY(removeLabel);
+    removeLabel->click();
+    QTRY_COMPARE(b.f.calls("label").size(), 2);
+    QCOMPARE(plain(b.f.calls("label").last()), (QJsonObject{{"task", "t1"}, {"label", "ui"}, {"present", false}}));
+    // Pinning to a session of the project; sessions of other projects are not offered.
+    auto *pin = b.find<QPushButton>("taskPin");
+    QCOMPARE(actionData(pin->menu()), (QStringList{"m1\ncodex/demo/one", "m1\nclaude/demo/review", "m2\ncodex/demo/two", "\nkimi/demo/far"}));
+    QVERIFY(!action(pin->menu(), "\nkimi/demo/far")->isEnabled());
+    QVERIFY(!b.find<QPushButton>("taskUnpin")->isVisible());
+    action(pin->menu(), "m2\ncodex/demo/two")->trigger();
+    QTRY_COMPARE(b.f.calls("pin").size(), 1);
+    QCOMPARE(plain(b.f.calls("pin").last()), (QJsonObject{{"task", "t1"}, {"session", session("m2", "codex/demo/two")}}));
+    // Relations: added by ref, removed with the chip's button.
+    auto *kind = b.find<QComboBox>("taskRelationKind");
+    kind->setCurrentIndex(kind->findData("related"));
+    QTest::keyClicks(b.find<QLineEdit>("taskRelationTarget"), "om-t6");
+    b.find<QPushButton>("taskRelationAdd")->click();
+    QTRY_COMPARE(b.f.calls("link").size(), 1);
+    QCOMPARE(plain(b.f.calls("link").last()), (QJsonObject{{"task", "t1"}, {"relation", "related"}, {"target", "om-t6"}, {"present", true}}));
+    QToolButton *removeRelation = nullptr;
+    for (auto *button : b.panel()->findChildren<QToolButton *>("taskRelationRemove"))
+        if (button->property("target").toString() == "t3") removeRelation = button;
+    QVERIFY(removeRelation);
+    removeRelation->click();
+    QTRY_COMPARE(b.f.calls("link").size(), 2);
+    QCOMPARE(plain(b.f.calls("link").last()), (QJsonObject{{"task", "t1"}, {"relation", "follows"}, {"target", "t3"}, {"present", false}}));
+    // Unpinning a pinned task.
+    QVERIFY(b.show("t2"));
+    QVERIFY(b.find<QLabel>("taskPinned")->text().contains("codex/demo/one"));
+    auto *unpin = b.find<QPushButton>("taskUnpin");
+    QVERIFY(unpin->isVisible());
+    unpin->click();
+    QTRY_COMPARE(b.f.calls("unpin").size(), 1);
+    QCOMPARE(plain(b.f.calls("unpin").last()), (QJsonObject{{"task", "t2"}}));
+    // Leaving the title field after Enter wrote nothing more.
+    QCOMPARE(b.f.calls("edit").size(), 3);
+}
+
+// Actions run send, review-send, rework-send, answer, move, done and
+// resolve-delivery, and each shows only where it applies.
+void TestTasksView::panelActionsRunTheirCommands()
+{
+    Board b; QVERIFY(b.open());
+    // A ready task goes to a session of the project, chosen with its state.
+    QVERIFY(b.show("t3"));
+    auto *send = b.find<QPushButton>("taskSend");
+    QVERIFY(send->isVisible() && send->isEnabled());
+    QVERIFY(!b.find<QPushButton>("taskReviewSend")->isVisible());
+    QVERIFY(!b.find<QPushButton>("taskRework")->isVisible());
+    QVERIFY(!b.find<QWidget>("taskAnswerBox")->isVisible());
+    QCOMPARE(actionData(send->menu()), (QStringList{"m1\ncodex/demo/one", "m1\nclaude/demo/review", "m2\ncodex/demo/two", "\nkimi/demo/far"}));
+    QVERIFY(action(send->menu(), "m1\ncodex/demo/one")->text().contains("Working"));
+    QVERIFY(action(send->menu(), "m2\ncodex/demo/two")->text().contains("Ready"));
+    QVERIFY(!action(send->menu(), "\nkimi/demo/far")->isEnabled());
+    action(send->menu(), "m2\ncodex/demo/two")->trigger();
+    QTRY_COMPARE(b.f.calls("send").size(), 1);
+    QCOMPARE(plain(b.f.calls("send").last()), (QJsonObject{{"task", "t3"}, {"session", session("m2", "codex/demo/two")}}));
+    QTRY_COMPARE(b.message()->text(), QString("Sent om-t3 to codex/demo/two."));
+    // Review goes to a session other than the one that did the work.
+    QVERIFY(b.f.put("show-t6.json", compact({{"assignee", session("m1", "codex/demo/one")}})));
+    QVERIFY(b.show("t6"));
+    auto *review = b.find<QPushButton>("taskReviewSend");
+    QVERIFY(review->isVisible());
+    QVERIFY(!send->isVisible());
+    QVERIFY(!action(review->menu(), "m1\ncodex/demo/one")->isEnabled());
+    action(review->menu(), "m1\nclaude/demo/review")->trigger();
+    QTRY_COMPARE(b.f.calls("review-send").size(), 1);
+    QCOMPARE(plain(b.f.calls("review-send").last()), (QJsonObject{{"task", "t6"}, {"session", session("m1", "claude/demo/review")}}));
+    QTRY_COMPARE(b.message()->text(), QString("Sent om-t6 to claude/demo/review for review."));
+    auto *done = b.find<QPushButton>("taskDone");
+    QVERIFY(done->isVisible());
+    done->click();
+    QTRY_COMPARE(b.f.calls("done").size(), 1);
+    QCOMPARE(plain(b.f.calls("done").last()), (QJsonObject{{"task", "t6"}}));
+    // Rework after a failed review goes back to the session that did the work.
+    QVERIFY(b.show("t11"));
+    auto *rework = b.find<QPushButton>("taskRework");
+    QVERIFY(rework->isVisible());
+    QVERIFY(!done->isVisible());
+    rework->click();
+    QTRY_COMPARE(b.f.calls("rework-send").size(), 1);
+    QCOMPARE(plain(b.f.calls("rework-send").last()), (QJsonObject{{"task", "t11"}}));
+    QTRY_COMPARE(b.message()->text(), QString("Sent the rework of om-t11 to codex/demo/two."));
+    // Your Call: the question and the answer.
+    const QJsonObject question{{"marker", "[needs-human]"}, {"text", "Postgres or **SQLite**?"}, {"at", 1791266000},
+                               {"actor", QJsonObject{{"kind", "agent"}, {"machine", "m1"}, {"session", "codex/demo/one"}}}, {"event", "e9"}};
+    QVERIFY(b.f.put("show-t7.json", compact({{"journal", QJsonArray{question}}})));
+    QVERIFY(b.show("t7"));
+    QVERIFY(b.find<QWidget>("taskAnswerBox")->isVisible());
+    QCOMPARE(b.find<MarkdownText>("taskQuestion")->toPlainText().trimmed(), QString("Postgres or SQLite?"));
+    auto *answer = b.find<QPlainTextEdit>("taskAnswer");
+    auto *reply = b.find<QPushButton>("taskAnswerSend");
+    QVERIFY(!reply->isEnabled());
+    answer->setPlainText("SQLite");
+    QVERIFY(reply->isEnabled());
+    reply->click();
+    QTRY_COMPARE(b.f.calls("answer").size(), 1);
+    QCOMPARE(plain(b.f.calls("answer").last()), (QJsonObject{{"task", "t7"}, {"answer", "SQLite"}}));
+    QTRY_COMPARE(b.message()->text(), QString("Sent your answer on om-t7 to codex/demo/one."));
+    QVERIFY(answer->toPlainText().isEmpty());
+    // Move to…: the stages a person may move the task to.
+    QVERIFY(b.show("t1"));
+    auto *move = b.find<QPushButton>("taskMove");
+    QCOMPARE(actionData(move->menu()), QStringList{"Ready"});
+    action(move->menu(), "Ready")->trigger();
+    QTRY_COMPARE(b.f.calls("move").size(), 1);
+    QCOMPARE(plain(b.f.calls("move").last()), (QJsonObject{{"task", "t1"}, {"to", "Ready"}}));
+    // A person resolves an unconfirmed delivery.
+    QVERIFY(b.show("t5"));
+    b.find<QPushButton>("taskDelivered")->click();
+    QTRY_COMPARE(b.f.calls("resolve-delivery").size(), 1);
+    QCOMPARE(plain(b.f.calls("resolve-delivery").last()), (QJsonObject{{"task", "t5"}, {"delivered", true}}));
+    QTRY_COMPARE(b.message()->text(), QString("Recorded that om-t5 was delivered."));
+}
+
+// A confirmable refusal offers Send anyway, which repeats the request with the
+// same request_id and the refusal's code added to confirm.
+void TestTasksView::confirmableRefusalsRoundTrip()
+{
+    Board b; QVERIFY(b.open());
+    QVERIFY(b.show("t3"));
+    auto *send = b.find<QPushButton>("taskSend");
+    QVERIFY(b.f.put("refuse-send.json", R"json({"ok":false,"error":{"code":"wip_exceeded","message":"codex/demo/one already holds 1 active task(s)","field":"confirm","state":"missing"}})json"));
+    action(send->menu(), "m1\ncodex/demo/one")->trigger();
+    QTRY_VERIFY(b.anyway()->isVisible());
+    QCOMPARE(b.message()->text(), QString("codex/demo/one already holds 1 active task(s)"));
+    QCOMPARE(b.anyway()->text(), QString("Send om-t3 to codex/demo/one anyway"));
+    // The offer names its task and session, so another selected session keeps it.
+    b.view->setSession(selection("demo", "m1", "claude/demo/review"));
+    QVERIFY(b.anyway()->isVisible());
+    // A second confirmation of the same request adds its code.
+    QVERIFY(b.f.put("refuse-send.json", R"({"ok":false,"error":{"code":"agent_busy","message":"codex/demo/one is working; the text will wait in its queue","field":"confirm","state":"missing"}})"));
+    b.anyway()->click();
+    QTRY_COMPARE(b.f.calls("send").size(), 2);
+    QTRY_VERIFY(b.anyway()->isVisible() && b.message()->text().contains("is working"));
+    QVERIFY(QFile::remove(b.f.dir.filePath("refuse-send.json")));
+    b.anyway()->click();
+    QTRY_COMPARE(b.f.calls("send").size(), 3);
+    const auto calls = b.f.calls("send");
+    QCOMPARE(calls[1]["request_id"], calls[0]["request_id"]);
+    QCOMPARE(calls[2]["request_id"], calls[0]["request_id"]);
+    QVERIFY(!calls[0].contains("confirm"));
+    QCOMPARE(calls[1]["confirm"].toArray(), QJsonArray{"wip_exceeded"});
+    QCOMPARE(calls[2]["confirm"].toArray(), (QJsonArray{"wip_exceeded", "agent_busy"}));
+    QCOMPARE(calls[2]["session"].toObject(), session("m1", "codex/demo/one"));
+    QCOMPARE(calls[2]["task"].toString(), QString("t3"));
+    QTRY_COMPARE(b.message()->text(), QString("Sent om-t3 to codex/demo/one."));
+    QVERIFY(!b.anyway()->isVisible());
+    // A refusal that is not a confirmation only shows its message.
+    QVERIFY(b.f.put("refuse-send.json", R"({"ok":false,"error":{"code":"session_unavailable","message":"codex/demo/two is paused","field":"session","state":"invalid"}})"));
+    QTRY_VERIFY(send->isEnabled());
+    action(send->menu(), "m2\ncodex/demo/two")->trigger();
+    QTRY_COMPARE(b.message()->text(), QString("codex/demo/two is paused"));
+    QVERIFY(b.message()->property("error").toBool());
+    QVERIFY(!b.anyway()->isVisible());
+    // A review: the same round trip with its own label.
+    QVERIFY(b.f.put("refuse-review-send.json", R"({"ok":false,"error":{"code":"agent_busy","message":"claude/demo/review is working","field":"confirm","state":"missing"}})"));
+    QVERIFY(b.show("t6"));
+    action(b.find<QPushButton>("taskReviewSend")->menu(), "m1\nclaude/demo/review")->trigger();
+    QTRY_VERIFY(b.anyway()->isVisible());
+    QCOMPARE(b.anyway()->text(), QString("Send om-t6 to claude/demo/review for review anyway"));
+    QVERIFY(QFile::remove(b.f.dir.filePath("refuse-review-send.json")));
+    b.anyway()->click();
+    QTRY_COMPARE(b.f.calls("review-send").size(), 2);
+    QCOMPARE(b.f.calls("review-send")[1]["request_id"], b.f.calls("review-send")[0]["request_id"]);
+    QCOMPARE(b.f.calls("review-send")[1]["confirm"].toArray(), QJsonArray{"agent_busy"});
+    // An answer that did not arrive is recorded: sending it again repeats the request.
+    QVERIFY(b.show("t7"));
+    QVERIFY(b.f.put("refuse-answer.json", R"({"ok":false,"error":{"code":"not_delivered","message":"not delivered: the session is paused; the answer is recorded"}})"));
+    b.find<QPlainTextEdit>("taskAnswer")->setPlainText("SQLite");
+    b.find<QPushButton>("taskAnswerSend")->click();
+    QTRY_VERIFY(b.anyway()->isVisible());
+    QCOMPARE(b.anyway()->text(), QString("Send the answer again"));
+    QCOMPARE(b.find<QPlainTextEdit>("taskAnswer")->toPlainText(), QString("SQLite"));
+    QVERIFY(QFile::remove(b.f.dir.filePath("refuse-answer.json")));
+    b.anyway()->click();
+    QTRY_COMPARE(b.f.calls("answer").size(), 2);
+    QCOMPARE(b.f.calls("answer")[1], b.f.calls("answer")[0]);
+    QTRY_VERIFY(b.find<QPlainTextEdit>("taskAnswer")->toPlainText().isEmpty());
+}
+
+// Delete, taking a running task back, reopening, Not delivered and discarding
+// a changed prompt ask first; Cancel writes nothing.
+void TestTasksView::destructiveActionsAskFirst()
+{
+    Board b; QVERIFY(b.open());
+    Confirmations dialogs;
+    QVERIFY(b.show("t1"));
+    auto *remove = b.find<QPushButton>("taskDelete");
+    dialogs.answer(false);
+    remove->click();
+    QCOMPARE(dialogs.texts.size(), 1);
+    QVERIFY2(dialogs.texts.last().contains("om-t1"), qPrintable(dialogs.texts.last()));
+    QTest::qWait(150);
+    QVERIFY(b.f.calls("delete").isEmpty());
+    dialogs.answer(true);
+    remove->click();
+    QTRY_COMPARE(b.f.calls("delete").size(), 1);
+    QCOMPARE(plain(b.f.calls("delete").last()), (QJsonObject{{"task", "t1"}}));
+    QTRY_VERIFY(!b.panel()->isVisible());
+    QVERIFY(b.view->openedTask().isEmpty());
+    // Taking a running task back from its session.
+    QVERIFY(b.show("t5"));
+    auto *move = b.find<QPushButton>("taskMove");
+    QCOMPARE(actionData(move->menu()), QStringList{"Ready"});
+    dialogs.answer(false);
+    action(move->menu(), "Ready")->trigger();
+    QCOMPARE(dialogs.texts.size(), 3);
+    QVERIFY2(dialogs.texts.last().contains("om-t5") && dialogs.texts.last().contains("codex/demo/one"), qPrintable(dialogs.texts.last()));
+    QTest::qWait(150);
+    QVERIFY(b.f.calls("move").isEmpty());
+    dialogs.answer(true);
+    action(move->menu(), "Ready")->trigger();
+    QTRY_COMPARE(b.f.calls("move").size(), 1);
+    QCOMPARE(plain(b.f.calls("move").last()), (QJsonObject{{"task", "t5"}, {"to", "Ready"}}));
+    // Dragging it there asks too.
+    dialogs.answer(false);
+    auto *ready = list(*b.view, "Ready");
+    drop(ready->viewport(), "t5", QPoint(20, ready->viewport()->height() - 10));
+    QTRY_COMPARE(dialogs.texts.size(), 5);
+    QVERIFY(!dialogs.texts.last().isEmpty());
+    QTest::qWait(150);
+    QCOMPARE(b.f.calls("move").size(), 1);
+    // Reopening a finished task.
+    QVERIFY(b.show("t8"));
+    QCOMPARE(actionData(move->menu()), QStringList{"Ready"});
+    dialogs.answer(true);
+    action(move->menu(), "Ready")->trigger();
+    QTRY_COMPARE(b.f.calls("move").size(), 2);
+    QVERIFY2(dialogs.texts.last().contains("Reopen om-t8"), qPrintable(dialogs.texts.last()));
+    QCOMPARE(plain(b.f.calls("move").last()), (QJsonObject{{"task", "t8"}, {"to", "Ready"}}));
+    // Not delivered takes the send back.
+    QVERIFY(b.show("t5"));
+    dialogs.answer(false);
+    b.find<QPushButton>("taskNotDelivered")->click();
+    QTest::qWait(150);
+    QVERIFY(b.f.calls("resolve-delivery").isEmpty());
+    dialogs.answer(true);
+    b.find<QPushButton>("taskNotDelivered")->click();
+    QTRY_COMPARE(b.f.calls("resolve-delivery").size(), 1);
+    QCOMPARE(plain(b.f.calls("resolve-delivery").last()), (QJsonObject{{"task", "t5"}, {"delivered", false}}));
+    // Discarding a changed prompt.
+    QVERIFY(b.show("t3"));
+    auto *prompt = b.find<QPlainTextEdit>("taskPrompt");
+    prompt->setPlainText("A better prompt");
+    auto *discard = b.find<QPushButton>("taskPromptDiscard");
+    QVERIFY(discard->isVisible());
+    dialogs.answer(false);
+    discard->click();
+    QCOMPARE(prompt->toPlainText(), QString("A better prompt"));
+    dialogs.answer(true);
+    discard->click();
+    QCOMPARE(prompt->toPlainText(), QString("Prompt of From the pool"));
+    QVERIFY(!discard->isVisible());
+    QVERIFY(b.f.calls("edit").isEmpty());
+    QCOMPARE(dialogs.texts.size(), 10);
+    for (const auto &text : std::as_const(dialogs.texts)) QVERIFY2(!text.isEmpty() && !text.startsWith("unexpected"), qPrintable(text));
+}
+
+// A delivery that may not have arrived is a warning with Resolve delivery,
+// never a retry; the same for a deadline.
+void TestTasksView::uncertainDeliveriesOfferResolve()
+{
+    Board b; QVERIFY(b.open());
+    auto *resolve = b.find<QPushButton>("tasksResolveDelivery");
+    QVERIFY(resolve);
+    QVERIFY(!resolve->isVisible());
+    QVERIFY(b.f.put("reply-send.json", R"({"ok":true,"delivery":"uncertain","reason":"the input receipt is missing","task":{"uuid":"t2"}})"));
+    auto *next = b.find<QPushButton>("tasksSendNext");
+    QTRY_VERIFY(next->isEnabled());
+    next->click();
+    QTRY_VERIFY(resolve->isVisible());
+    QVERIFY(!b.anyway()->isVisible());
+    QVERIFY(b.message()->property("warning").toBool());
+    QTest::qWait(200);
+    QCOMPARE(b.f.calls("send").size(), 1);
+    resolve->click();
+    QCOMPARE(b.view->openedTask(), QString("t2"));
+    QVERIFY(b.panel()->isVisible());
+    QVERIFY(!b.message()->isVisible());
+    // From the panel: a review request that may not have arrived.
+    QVERIFY(b.f.put("reply-review-send.json", R"({"ok":true,"delivery":"uncertain","reason":"the session did not confirm the input","task":{"uuid":"t6"}})"));
+    QVERIFY(b.show("t6"));
+    action(b.find<QPushButton>("taskReviewSend")->menu(), "m1\ncodex/demo/one")->trigger();
+    QTRY_VERIFY(resolve->isVisible());
+    QCOMPARE(b.message()->text(), QString("The review request for om-t6 may not have reached codex/demo/one: the session did not confirm the input. "
+                                          "Check the task before sending it again."));
+    // A deadline: it may have been sent. The panel cannot send it again meanwhile.
+    QVERIFY(b.f.put("sleep-send", "1.5"));
+    auto timeouts = b.f.model->timeouts(); timeouts.deliveryLocal = 300; b.f.model->setTimeouts(timeouts);
+    QVERIFY(b.show("t3"));
+    auto *send = b.find<QPushButton>("taskSend");
+    action(send->menu(), "m2\ncodex/demo/two")->trigger();
+    QVERIFY(!send->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(b.message()->isVisible() && b.message()->text().contains("did not answer"), 5000);
+    QCOMPARE(b.message()->text(), QString("The task board did not answer in time: om-t3 may have been sent to codex/demo/two. "
+                                          "Check the task before sending it again."));
+    QVERIFY(resolve->isVisible());
+    QVERIFY(!b.anyway()->isVisible());
+    QTest::qWait(1500);
+    QCOMPARE(b.f.calls("send").size(), 2);
+}
+
+// The keyboard moves a card: the context menu key or Shift+F10 opens a menu
+// with Move to and Open; the panel's Move to offers the same stages.
+void TestTasksView::cardMenuMovesByKeyboard()
+{
+    Board b; QVERIFY(b.open());
+    auto *inbox = list(*b.view, "Inbox");
+    inbox->setFocus();
+    inbox->setCurrentItem(card(*b.view, "t1"));
+    QTest::keyClick(inbox, Qt::Key_Menu);
+    QMenu *menu = nullptr;
+    QTRY_VERIFY((menu = b.view->findChild<QMenu *>("taskCardMenu")) && menu->isVisible());
+    auto *moves = menu->findChild<QMenu *>("taskMoveMenu");
+    QVERIFY(moves);
+    QCOMPARE(actionData(moves), QStringList{"Ready"});
+    action(moves, "Ready")->trigger();
+    QTRY_COMPARE(b.f.calls("move").size(), 1);
+    QCOMPARE(plain(b.f.calls("move").last()), (QJsonObject{{"task", "t1"}, {"to", "Ready"}}));
+    menu->close();
+    QTRY_VERIFY(!b.view->findChild<QMenu *>("taskCardMenu"));
+    auto *check = list(*b.view, "Check");
+    check->setFocus();
+    check->setCurrentItem(card(*b.view, "t6"));
+    QTest::keyClick(check, Qt::Key_F10, Qt::ShiftModifier);
+    QTRY_VERIFY((menu = b.view->findChild<QMenu *>("taskCardMenu")) && menu->isVisible());
+    QCOMPARE(actionData(menu->findChild<QMenu *>("taskMoveMenu")), QStringList{"Shipped"});
+    action(menu, "open")->trigger();
+    QCOMPARE(b.view->openedTask(), QString("t6"));
+    QTRY_VERIFY(b.panel()->isVisible());
+    QCOMPARE(actionData(b.find<QPushButton>("taskMove")->menu()), QStringList{"Shipped"});
+    menu->close();
+}
+
+// An edited prompt is a draft of its task: it survives changes made elsewhere
+// (with a note), other cards and a refused save, and goes once saved.
+void TestTasksView::promptDraftSurvivesChanges()
+{
+    Board b; QVERIFY(b.open());
+    QVERIFY(b.show("t3"));
+    auto *prompt = b.find<QPlainTextEdit>("taskPrompt");
+    auto *save = b.find<QPushButton>("taskPromptSave");
+    auto *note = b.find<QLabel>("taskPromptNote");
+    QCOMPARE(prompt->toPlainText(), QString("Prompt of From the pool"));
+    prompt->setPlainText("My better prompt");
+    // The task changes elsewhere.
+    auto board = demoBoard();
+    auto tasks = board["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["uuid"] == "t3") { task["title"] = "From the pool, renamed"; tasks[i] = task; }
+    }
+    board["tasks"] = tasks;
+    QVERIFY(b.f.put("show-t3.json", compact({{"prompt", "Their prompt"}})));
+    QVERIFY(b.f.put("board-demo.json", compact(board)));
+    QVERIFY(b.f.put("rev", "5"));
+    QTRY_COMPARE(b.find<QLineEdit>("taskTitle")->text(), QString("From the pool, renamed"));
+    QTRY_VERIFY(note->isVisible());
+    QVERIFY2(note->text().contains("changed"), qPrintable(note->text()));
+    QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
+    // Another card and back.
+    QVERIFY(b.show("t1"));
+    QCOMPARE(prompt->toPlainText(), QString("Prompt of Write the parser"));
+    QVERIFY(!save->isVisible());
+    QVERIFY(b.show("t3"));
+    QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
+    QVERIFY(save->isVisible());
+    // A refused save keeps it.
+    QVERIFY(b.f.put("refuse-edit.json", R"({"ok":false,"error":{"code":"read_only","message":"this task was written by a newer version of hgs"}})"));
+    save->click();
+    QTRY_COMPARE(b.message()->text(), QString("this task was written by a newer version of hgs"));
+    QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
+    QVERIFY(save->isVisible());
+    // Over 64 KiB, or empty: it cannot be saved.
+    prompt->setPlainText(QString(64 * 1024 + 1, 'x'));
+    QVERIFY(!save->isEnabled());
+    QVERIFY2(note->text().contains("64 KiB"), qPrintable(note->text()));
+    prompt->setPlainText("   ");
+    QVERIFY(!save->isEnabled());
+    // Saved: the draft is gone.
+    QVERIFY(QFile::remove(b.f.dir.filePath("refuse-edit.json")));
+    prompt->setPlainText("My better prompt");
+    save->click();
+    QTRY_VERIFY(!save->isVisible());
+    QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
+    QVERIFY(!note->isVisible());
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t3"}, {"prompt", "My better prompt"}}));
 }
 
 QTEST_MAIN(TestTasksView)

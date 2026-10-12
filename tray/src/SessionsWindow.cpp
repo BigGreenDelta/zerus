@@ -2673,6 +2673,18 @@ void SessionsWindow::updateTasksView()
         selection.session = {overmindMachine(*entry), entry->session.name};
     }
     m_tasks->setSession(selection);
+    // The sessions a card can go to, with the state the list shows.
+    QList<TasksView::Recipient> recipients;
+    for (const auto &e : std::as_const(m_entries)) {
+        if (e.session.state == "archived") continue;
+        TasksView::Recipient recipient;
+        recipient.key = e.key; recipient.project = m_organization.groupFor(e.identity); recipient.host = e.host;
+        recipient.session = {overmindMachine(e), e.session.name};
+        recipient.status = SessionPresentation::status(e.session, e.online);
+        recipient.working = SessionPresentation::working(e.session, e.online);
+        recipients.append(recipient);
+    }
+    m_tasks->setRecipients(recipients);
 }
 
 void SessionsWindow::renderDetails()

@@ -18,9 +18,11 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QScrollArea;
+class QSplitter;
 class QToolButton;
 class TaskCardDelegate;
 class TaskColumn;
+class TaskPanel;
 
 // Item data of a card in a column's list.
 namespace TaskRoles {
@@ -48,7 +50,15 @@ enum {
 // but the Your Call strip above the board. A card can be dragged only to
 // columns the workflow's human move rules allow from its stage; there it runs
 // `move`. The CLI stays the authority: its refusal is shown inline while the
-// card stays where it was. Dragging inside a column runs `reorder`.
+// card stays where it was. Dragging inside a column runs `reorder`. The card
+// menu (context menu key, Shift+F10 or a right click) moves it by keyboard.
+//
+// An open card shows its panel on the right of the board (TaskPanel). Writes
+// from the board and the panel report in one message bar: a confirmable
+// refusal offers to repeat the request with the same request_id and its code
+// confirmed; a delivery that may have arrived is never repeated, it offers
+// Resolve delivery instead. Moves that take a task from its session or reopen
+// it, and other destructive actions, ask first.
 class TasksView : public QWidget {
     Q_OBJECT
 public:
@@ -69,6 +79,22 @@ public:
         QColor fg, muted, surface, border, accent, hover, selected, column, chip, warning, warningFill, warningBorder, danger, working;
         static Palette of(bool dark);
     };
+    // A session a card can be sent to, pinned to or reviewed by. The window
+    // passes all its sessions; a card offers those of its project.
+    struct Recipient {
+        QString key, project, host;   // as in Selection
+        OvermindModel::Session session;   // machine "" = unknown: offered, but disabled
+        QString status;               // the session's state as the window shows it ("Working", "Ready", ...)
+        bool working = false;
+    };
+    // A write, and what the message bar says about it.
+    struct Write {
+        QString command;
+        QJsonObject request;
+        QString task, ref;   // the task's UUID and ref
+        QString session;     // the receiving session's name, for the delivering commands
+        QString done;        // shown on success; empty: nothing
+    };
 
     explicit TasksView(OvermindModel *model, QWidget *parent = nullptr);
 
@@ -84,11 +110,30 @@ public:
     QString openedTask() const { return m_openTask; }
     // Selects the card, scrolls to it and emits taskOpened.
     void openTask(const QString &uuid);
+    // Closes the open card and its panel.
+    void closeTask();
     void setTheme(bool dark);
+    bool isDark() const { return m_dark; }
+    const Palette &palette() const { return m_palette; }
+    const Selection &selection() const { return m_selection; }
+    void setRecipients(const QList<Recipient> &recipients);
+    // The sessions of the shown project, the selected session first.
+    QList<Recipient> recipients() const;
     // A card dropped on `stage`, before the card `before` (empty: at the end).
-    // Another column runs `move`, the same column `reorder`; a drop where the
-    // card already is writes nothing.
+    // Another column moves it (moveTask), the same column runs `reorder`; a
+    // drop where the card already is writes nothing.
     void dropTask(const QString &uuid, const QString &stage, const QString &before);
+    // The stages a person may move the task to: the workflow's human move rules.
+    QList<OvermindModel::Stage> moveTargets(const QString &uuid) const;
+    // Runs `move`. Taking a task from its session (an active or Your Call
+    // stage) or out of a done stage asks first.
+    void moveTask(const QString &uuid, const QString &stage);
+    // Runs a write and reports it in the message bar; `after` runs last.
+    void perform(const Write &write, OvermindModel::Callback after = {});
+    // A delivering write for the task is running.
+    bool isDelivering(const QString &uuid) const { return m_delivering.value(uuid) > 0; }
+    // Asks before a destructive action: Cancel is the default.
+    static bool confirm(QWidget *parent, const QString &title, const QString &text, const QString &accept);
 
 signals:
     // A card was opened: clicked on the board or in the Your Call strip.
@@ -122,9 +167,27 @@ private:
     bool canDrop(const QString &uuid, const QString &stage) const;
     QString nextTask(const OvermindModel::Board &board) const;
     void sendNext(const QJsonObject &retry = {});
+    // A write; sessionKey: it went to the selected session (Send next), whose
+    // retry is offered only while that session stays selected.
+    void run(const Write &write, OvermindModel::Callback after, const QString &sessionKey);
+    void report(const Write &write, const OvermindModel::Result &result, const OvermindModel::Callback &after, const QString &sessionKey);
+    // The question to ask before moving the task, empty when none is needed.
+    QString moveQuestion(const QString &uuid, const QString &stage, QString *accept) const;
+    void showCardMenu(const QString &uuid, const QPoint &global);
+    // Shows the panel of the open card, if any, at its remembered width.
+    void showPanel(const QString &uuid);
+    // Marks the open card's Your Call button.
+    void markDecisions();
     enum class Tone { Info, Warning, Error };
-    // With a retry, Send anyway (labelled retryLabel) repeats that send.
-    void showMessage(const QString &text, Tone tone, const QJsonObject &retry = {}, const QString &retryLabel = {});
+    // Send anyway repeats `write`, labelled `label`; `sessionKey` as in run().
+    struct Retry {
+        Write write;
+        OvermindModel::Callback after;
+        QString label, sessionKey;
+        bool isEmpty() const { return write.command.isEmpty(); }
+    };
+    // With a retry, Send anyway repeats it; with a task, Resolve delivery opens it.
+    void showMessage(const QString &text, Tone tone, const Retry &retry = {}, const QString &resolveTask = {});
     void clearMessage();
     // Opens a card; revealing scrolls it into view (a click does not).
     void open(const QString &uuid, bool reveal);
@@ -143,15 +206,18 @@ private:
     // stored one returns once it is offered again.
     bool m_fallback = false;
     Palette m_palette;
-    QJsonObject m_retry;                          // the send that Send anyway repeats
-    QString m_retryKey;                           // the session key it was refused for
+    Retry m_retry;                                // what Send anyway repeats
+    QString m_resolveTask;                        // the task Resolve delivery opens
+    QList<Recipient> m_recipients;
+    QHash<QString, int> m_delivering;             // delivering writes running, per task
+    bool m_panelSized = false;
 
     QComboBox *m_projects;
     QLineEdit *m_filter;
     QLabel *m_status;
     QFrame *m_messageBar;
     QLabel *m_message;
-    QPushButton *m_sendAnyway, *m_dismiss;
+    QPushButton *m_sendAnyway, *m_resolve, *m_dismiss;
     QFrame *m_yourCall;
     QLabel *m_yourCallIcon, *m_yourCallTitle;
     QHBoxLayout *m_yourCallItems;
@@ -159,7 +225,9 @@ private:
     QFrame *m_sessionStrip;
     QLabel *m_sessionQueue;
     QPushButton *m_sendNext;
+    QSplitter *m_split;
     QScrollArea *m_board;
     QHBoxLayout *m_boardLayout;
+    TaskPanel *m_panel;
     TaskCardDelegate *m_delegate;
 };

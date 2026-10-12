@@ -1,10 +1,12 @@
 #include "TasksView.h"
 
+#include "TaskPanel.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 
 #include <QAbstractButton>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QCursor>
 #include <QDrag>
 #include <QDragEnterEvent>
@@ -14,10 +16,12 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonArray>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
@@ -26,6 +30,7 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSplitter>
 #include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTextLayout>
@@ -40,6 +45,8 @@ namespace {
 constexpr int ColumnWidth = 244, CollapsedWidth = 44;
 constexpr int CardPadding = 10, CardGap = 3, RefRow = 16, ChipHeight = 18, MaxTitleLines = 3;
 const QString ProjectSetting = QStringLiteral("workspace/tasksProject");
+const QString PanelWidthSetting = QStringLiteral("workspace/tasksPanelWidth");
+constexpr int PanelWidth = 400;
 
 void repolish(QWidget *widget)
 {
@@ -413,8 +420,33 @@ public:
     std::function<void(const QString &uuid, const QString &before)> dropped;
     std::function<void(bool)> hovering;
     std::function<bool(const QString &uuid)> accepts;   // a person may move this card here
+    // The card menu: a right click, the context menu key or Shift+F10.
+    std::function<void(const QString &uuid, const QPoint &global)> menuRequested;
 
 protected:
+    void contextMenuEvent(QContextMenuEvent *event) override
+    {
+        auto *card = event->reason() == QContextMenuEvent::Keyboard ? currentItem() : itemAt(event->pos());
+        if (!card || isRowHidden(row(card)) || !menuRequested) {
+            event->ignore();
+            return;
+        }
+        event->accept();
+        menuRequested(card->data(TaskRoles::Uuid).toString(),
+                      event->reason() == QContextMenuEvent::Keyboard ? viewport()->mapToGlobal(visualItemRect(card).center()) : event->globalPos());
+    }
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        const bool menuKey = event->key() == Qt::Key_Menu || (event->key() == Qt::Key_F10 && event->modifiers() == Qt::ShiftModifier);
+        auto *card = currentItem();
+        if (menuKey && card && !isRowHidden(row(card)) && menuRequested) {
+            event->accept();
+            scrollToItem(card);
+            menuRequested(card->data(TaskRoles::Uuid).toString(), viewport()->mapToGlobal(visualItemRect(card).center()));
+            return;
+        }
+        QListWidget::keyPressEvent(event);
+    }
     void startDrag(Qt::DropActions) override
     {
         auto *item = currentItem();
@@ -631,6 +663,11 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     m_sendAnyway->setObjectName(QStringLiteral("tasksSendAnyway"));
     m_sendAnyway->setAutoDefault(false);
     messageLayout->addWidget(m_sendAnyway);
+    m_resolve = new QPushButton(tr("Resolve delivery"));
+    m_resolve->setObjectName(QStringLiteral("tasksResolveDelivery"));
+    m_resolve->setToolTip(tr("Open the task to record whether it arrived"));
+    m_resolve->setAutoDefault(false);
+    messageLayout->addWidget(m_resolve);
     m_dismiss = new QPushButton;
     m_dismiss->setObjectName(QStringLiteral("tasksDismissMessage"));
     m_dismiss->setToolTip(tr("Dismiss"));
@@ -700,7 +737,17 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     m_boardLayout->setSpacing(10);
     m_boardLayout->addStretch(1);
     m_board->setWidget(content);
-    layout->addWidget(m_board, 1);
+    m_split = new QSplitter(Qt::Horizontal);
+    m_split->setObjectName(QStringLiteral("tasksSplit"));
+    m_split->setChildrenCollapsible(false);
+    m_split->setHandleWidth(10);
+    m_split->addWidget(m_board);
+    m_panel = new TaskPanel(this, model);
+    m_panel->hide();
+    m_split->addWidget(m_panel);
+    m_split->setStretchFactor(0, 1);
+    m_split->setStretchFactor(1, 0);
+    layout->addWidget(m_split, 1);
 
     connect(m_projects, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (index >= 0) setProject(m_projects->itemData(index).toString(), true);
@@ -712,12 +759,23 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     connect(m_filter, &QLineEdit::textChanged, this, &TasksView::applyFilter);
     connect(m_sendNext, &QPushButton::clicked, this, [this] { sendNext(); });
     connect(m_sendAnyway, &QPushButton::clicked, this, [this] {
-        const auto retry = m_retry;
-        const bool same = m_retryKey == m_selection.key;
+        const Retry retry = m_retry;
         clearMessage();
-        if (same) sendNext(retry);
+        if (retry.isEmpty()) return;
+        // Send next repeats only to the session it was refused for, still selected.
+        if (retry.sessionKey.isEmpty()) run(retry.write, retry.after, {});
+        else if (retry.sessionKey == m_selection.key) sendNext(retry.write.request);
+    });
+    connect(m_resolve, &QPushButton::clicked, this, [this] {
+        const QString uuid = m_resolveTask;
+        clearMessage();
+        if (!uuid.isEmpty()) open(uuid, true);
     });
     connect(m_dismiss, &QPushButton::clicked, this, &TasksView::clearMessage);
+    connect(m_panel, &TaskPanel::closeRequested, this, &TasksView::closeTask);
+    connect(m_split, &QSplitter::splitterMoved, this, [this] {
+        if (m_panel->isVisible()) QSettings().setValue(PanelWidthSetting, m_panel->width());
+    });
     if (m_model) {
         connect(m_model, &OvermindModel::boardChanged, this, [this](const QString &project) {
             if (project == m_project) render();
@@ -758,8 +816,9 @@ void TasksView::setSession(const Selection &selection)
     if (selection.key == m_selection.key && selection.project == m_selection.project && selection.host == m_selection.host
         && selection.session.machine == m_selection.session.machine && selection.session.name == m_selection.session.name)
         return;
-    // Send anyway repeats a send to the session it was refused for: never to another one.
-    if (!m_retry.isEmpty() && selection.key != m_retryKey) clearMessage();
+    // Send next's Send anyway repeats a send to the session it was refused for,
+    // never to another one. The panel's name their task and session.
+    if (!m_retry.isEmpty() && !m_retry.sessionKey.isEmpty() && selection.key != m_retry.sessionKey) clearMessage();
     m_selection = selection;
     ensureProject();
     applyHighlights();
@@ -817,6 +876,7 @@ void TasksView::setProject(const QString &project, bool persist)
     rebuildColumns();
     m_board->horizontalScrollBar()->setValue(0);
     if (m_model && !project.isEmpty()) m_model->watchProject(project);
+    showPanel(m_openTask);
     render();
 }
 
@@ -856,6 +916,7 @@ void TasksView::setTheme(bool dark)
     m_palette = Palette::of(dark);
     m_delegate->setPalette(m_palette);
     applyStyle();
+    m_panel->setTheme(dark);
     for (auto *column : std::as_const(m_columns)) {
         column->update();
         column->header->update();
@@ -876,7 +937,7 @@ void TasksView::applyStyle()
         QLabel#tasksMessage { color:{fg}; }
         QLabel#tasksMessage[error="true"] { color:{danger}; }
         QLabel#tasksMessage[warning="true"] { color:{warning}; }
-        QPushButton#tasksSendAnyway { padding:4px 10px; min-height:16px; }
+        QPushButton#tasksSendAnyway, QPushButton#tasksResolveDelivery { padding:4px 10px; min-height:16px; }
         QPushButton#tasksDismissMessage { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; min-height:0; }
         QPushButton#tasksDismissMessage:hover { background:{hover}; }
         QFrame#tasksYourCall { background:{warningFill}; border:1px solid {warningBorder}; border-radius:8px; }
@@ -926,6 +987,7 @@ void TasksView::render()
     renderSession(board);
     renderStatus(board);
     applyFilter();
+    m_panel->refresh();
 }
 
 void TasksView::rebuildColumns()
@@ -943,6 +1005,7 @@ void TasksView::rebuildColumns()
         column->header->dropped = [this, name](const QString &uuid) { dropTask(uuid, name, {}); };
         column->list->dropped = [this, name](const QString &uuid, const QString &before) { dropTask(uuid, name, before); };
         column->header->accepts = column->list->accepts = [this, name](const QString &uuid) { return canDrop(uuid, name); };
+        column->list->menuRequested = [this](const QString &uuid, const QPoint &global) { showCardMenu(uuid, global); };
         auto *list = column->list;
         connect(list, &QListWidget::itemSelectionChanged, this, [this, list] {
             const auto items = list->selectedItems();
@@ -1217,45 +1280,127 @@ void TasksView::sendNext(const QJsonObject &retry)
                    {QStringLiteral("session"), QJsonObject{{QStringLiteral("machine"), m_selection.session.machine},
                                                            {QStringLiteral("name"), m_selection.session.name}}}};
     }
-    QString ref = request.value(QStringLiteral("task")).toString();
-    for (const auto &task : m_model->board(m_project).tasks) if (task.uuid == ref) ref = task.ref;
+    const QString uuid = request.value(QStringLiteral("task")).toString();
+    QString ref = uuid;
+    for (const auto &task : m_model->board(m_project).tasks) if (task.uuid == uuid) ref = task.ref;
     const QString name = request.value(QStringLiteral("session")).toObject().value(QStringLiteral("name")).toString();
-    const QString key = m_selection.key;
-    clearMessage();
     m_sending = true;
     m_sendNext->setEnabled(false);
-    m_model->write(QStringLiteral("send"), request, [this, request, ref, name, key](const OvermindModel::Result &result) {
+    run({QStringLiteral("send"), request, uuid, ref, name, tr("Sent %1 to %2.").arg(ref, name)}, [this](const OvermindModel::Result &) {
         m_sending = false;
-        if (result.ok && result.reply.value(QStringLiteral("delivery")).toString() == QLatin1String("uncertain")) {
-            // Recorded, but typing it into the session was not confirmed: never send twice blindly.
-            const QString reason = result.reply.value(QStringLiteral("reason")).toString();
-            showMessage(reason.isEmpty() ? tr("%1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
-                                         : tr("%1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason),
-                        Tone::Warning);
-        } else if (result.ok) {
-            showMessage(tr("Sent %1 to %2.").arg(ref, name), Tone::Info);
-        } else if (result.uncertain()) {
-            showMessage(tr("The task board did not answer in time: %1 may have been sent to %2. Check the task before sending it again.")
-                            .arg(ref, name), Tone::Warning);
-        } else {
-            const auto &refusal = result.refusal;
-            QJsonObject again;
-            const QString code = refusal.value(QStringLiteral("code")).toString();
-            // A confirmation applies to the session it was asked for, still selected.
-            if (refusal.value(QStringLiteral("field")).toString() == QLatin1String("confirm") && !code.isEmpty() && key == m_selection.key) {
-                again = request;
-                again.insert(QStringLiteral("request_id"), result.requestId);
-                auto confirm = again.value(QStringLiteral("confirm")).toArray();
-                if (!confirm.contains(code)) confirm.append(code);
-                again.insert(QStringLiteral("confirm"), confirm);
-            }
-            showMessage(refusal.value(QStringLiteral("message")).toString(), Tone::Error, again, tr("Send %1 to %2 anyway").arg(ref, name));
-        }
         if (m_model) renderSession(m_model->board(m_project));
+    }, m_selection.key);
+}
+
+void TasksView::perform(const Write &write, OvermindModel::Callback after)
+{
+    run(write, std::move(after), {});
+}
+
+void TasksView::run(const Write &write, OvermindModel::Callback after, const QString &sessionKey)
+{
+    if (!m_model) return;
+    clearMessage();
+    const bool delivering = OvermindModel::delivers(write.command) && !write.task.isEmpty();
+    if (delivering) {
+        ++m_delivering[write.task];
+        m_panel->updateActions();
+    }
+    m_model->write(write.command, write.request, [this, write, after, sessionKey, delivering](const OvermindModel::Result &result) {
+        if (delivering && --m_delivering[write.task] <= 0) m_delivering.remove(write.task);
+        if (delivering) m_panel->updateActions();
+        report(write, result, after, sessionKey);
+        if (after) after(result);
     }, this);
 }
 
-void TasksView::showMessage(const QString &text, Tone tone, const QJsonObject &retry, const QString &retryLabel)
+// Deliveries report what reached the session. One that may have arrived is
+// never repeated: Resolve delivery opens the task, where a person records it.
+void TasksView::report(const Write &write, const OvermindModel::Result &result, const OvermindModel::Callback &after, const QString &sessionKey)
+{
+    const QString &command = write.command;
+    const bool send = command == QLatin1String("send"), review = command == QLatin1String("review-send"),
+               rework = command == QLatin1String("rework-send"), answer = command == QLatin1String("answer");
+    const bool delivery = send || review || rework || answer;
+    const QString ref = write.ref.isEmpty() ? write.task : write.ref;
+    const QString name = write.session.isEmpty() ? tr("its session") : write.session;
+    if (result.ok) {
+        if (delivery && result.reply.value(QStringLiteral("delivery")).toString() == QLatin1String("uncertain")) {
+            // Recorded, but typing it into the session was not confirmed.
+            const QString reason = result.reply.value(QStringLiteral("reason")).toString();
+            QString text;
+            if (send)
+                text = reason.isEmpty() ? tr("%1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
+                                        : tr("%1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason);
+            else if (review)
+                text = reason.isEmpty() ? tr("The review request for %1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
+                                        : tr("The review request for %1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason);
+            else if (rework)
+                text = reason.isEmpty() ? tr("The rework of %1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
+                                        : tr("The rework of %1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason);
+            else
+                text = reason.isEmpty() ? tr("Your answer on %1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
+                                        : tr("Your answer on %1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason);
+            showMessage(text, Tone::Warning, {}, write.task);
+        } else if (!write.done.isEmpty()) {
+            showMessage(write.done, Tone::Info);
+        }
+        return;
+    }
+    const auto &refusal = result.refusal;
+    const QString code = refusal.value(QStringLiteral("code")).toString(), message = refusal.value(QStringLiteral("message")).toString();
+    if (delivery && result.uncertain()) {
+        QString text;
+        if (send)
+            text = tr("The task board did not answer in time: %1 may have been sent to %2. Check the task before sending it again.").arg(ref, name);
+        else if (review)
+            text = tr("The task board did not answer in time: the review request for %1 may have been sent to %2. "
+                      "Check the task before sending it again.").arg(ref, name);
+        else if (rework)
+            text = tr("The task board did not answer in time: the rework of %1 may have been sent to %2. "
+                      "Check the task before sending it again.").arg(ref, name);
+        else
+            text = tr("The task board did not answer in time: your answer on %1 may have been sent to %2. "
+                      "Check the task before sending it again.").arg(ref, name);
+        showMessage(text, Tone::Warning, {}, write.task);
+        return;
+    }
+    // The session's host may have acted before its answer was lost.
+    if (delivery && code == QLatin1String("delivery_unknown")) {
+        showMessage(message, Tone::Warning, {}, write.task);
+        return;
+    }
+    // A timeout's message already says that the change may have been made.
+    if (result.uncertain()) {
+        showMessage(message, Tone::Warning);
+        return;
+    }
+    Retry retry;
+    // A confirmation of a send to the selected session applies while it stays selected.
+    if (delivery && refusal.value(QStringLiteral("field")).toString() == QLatin1String("confirm") && !code.isEmpty()
+        && (sessionKey.isEmpty() || sessionKey == m_selection.key)) {
+        retry.write = write;
+        retry.write.request.insert(QStringLiteral("request_id"), result.requestId);
+        auto confirm = retry.write.request.value(QStringLiteral("confirm")).toArray();
+        if (!confirm.contains(code)) confirm.append(code);
+        retry.write.request.insert(QStringLiteral("confirm"), confirm);
+        retry.after = after;
+        retry.sessionKey = sessionKey;
+        if (send) retry.label = tr("Send %1 to %2 anyway").arg(ref, name);
+        else if (review) retry.label = tr("Send %1 to %2 for review anyway").arg(ref, name);
+        else if (rework) retry.label = tr("Send the rework of %1 anyway").arg(ref);
+        else retry.label = tr("Send the answer anyway");
+    } else if (answer && code == QLatin1String("not_delivered")) {
+        // The answer is recorded: the same request types it again.
+        retry.write = write;
+        retry.write.request.insert(QStringLiteral("request_id"), result.requestId);
+        retry.after = after;
+        retry.label = tr("Send the answer again");
+    }
+    showMessage(message, Tone::Error, retry);
+}
+
+void TasksView::showMessage(const QString &text, Tone tone, const Retry &retry, const QString &resolveTask)
 {
     m_message->setText(text);
     const bool error = tone == Tone::Error, warning = tone == Tone::Warning;
@@ -1265,9 +1410,10 @@ void TasksView::showMessage(const QString &text, Tone tone, const QJsonObject &r
         repolish(m_message);
     }
     m_retry = retry;
-    m_retryKey = retry.isEmpty() ? QString() : m_selection.key;
-    m_sendAnyway->setText(retryLabel.isEmpty() ? tr("Send anyway") : retryLabel);
+    m_resolveTask = resolveTask;
+    m_sendAnyway->setText(retry.label.isEmpty() ? tr("Send anyway") : retry.label);
     m_sendAnyway->setVisible(!retry.isEmpty());
+    m_resolve->setVisible(!resolveTask.isEmpty());
     m_messageBar->show();
 }
 
@@ -1275,7 +1421,7 @@ void TasksView::clearMessage()
 {
     m_messageBar->hide();
     m_retry = {};
-    m_retryKey.clear();
+    m_resolveTask.clear();
 }
 
 void TasksView::dropTask(const QString &uuid, const QString &stage, const QString &before)
@@ -1289,9 +1435,15 @@ void TasksView::dropTask(const QString &uuid, const QString &stage, const QStrin
         if (candidate.stage == stage) column.append(candidate.uuid);
     }
     if (!task) return;
-    QString command;
     QJsonObject request{{QStringLiteral("task"), uuid}};
-    if (task->stage == stage) {
+    if (task->stage != stage) {
+        // A move that asks first waits until the drag has ended.
+        QString accept;
+        if (moveQuestion(uuid, stage, &accept).isEmpty()) moveTask(uuid, stage);
+        else QMetaObject::invokeMethod(this, [this, uuid, stage] { moveTask(uuid, stage); }, Qt::QueuedConnection);
+        return;
+    }
+    {
         // "Already there" is judged among the cards shown: with a filter, a
         // drop just below the card or at the end must not pass hidden cards.
         for (auto *candidate : std::as_const(m_columns)) {
@@ -1303,22 +1455,124 @@ void TasksView::dropTask(const QString &uuid, const QString &stage, const QStrin
         }
         const int at = column.indexOf(uuid);
         if (before == uuid || (before.isEmpty() && at == column.size() - 1) || (!before.isEmpty() && column.indexOf(before) == at + 1)) return;
-        command = QStringLiteral("reorder");
         if (!before.isEmpty()) request.insert(QStringLiteral("before"), before);
-    } else {
-        command = QStringLiteral("move");
-        request.insert(QStringLiteral("to"), stage);
     }
-    clearMessage();
     // The card stays where it is until the board is read again: a refusal leaves it there.
-    m_model->write(command, request, [this](const OvermindModel::Result &result) {
-        if (result.ok) {
-            clearMessage();
-            return;
+    run({QStringLiteral("reorder"), request, uuid, task->ref, {}, {}}, {}, {});
+}
+
+QList<OvermindModel::Stage> TasksView::moveTargets(const QString &uuid) const
+{
+    QList<OvermindModel::Stage> targets;
+    if (!m_model) return targets;
+    const auto &board = m_model->board(m_project);
+    for (const auto &task : board.tasks) {
+        if (task.uuid != uuid) continue;
+        if (task.json.value(QStringLiteral("read_only")).toBool()) return targets;
+        // Your Call is where agents ask; a person answers instead of moving there.
+        for (const auto &stage : board.stages)
+            if (stage.name != task.stage && stage.role != QLatin1String("needs_human") && humanMove(board, task.stage, stage.name))
+                targets.append(stage);
+    }
+    return targets;
+}
+
+QString TasksView::moveQuestion(const QString &uuid, const QString &stage, QString *accept) const
+{
+    if (!m_model) return {};
+    const auto &board = m_model->board(m_project);
+    for (const auto &task : board.tasks) {
+        if (task.uuid != uuid) continue;
+        const QString from = board.role(task.stage), to = board.role(stage);
+        const QString holder = task.assignee.isEmpty() ? tr("its session") : task.assignee.name;
+        if (from == QLatin1String("active")) {
+            *accept = to == QLatin1String("ready") ? tr("Take back") : tr("Move to %1").arg(stage);
+            return tr("Take %1 back from %2 and move it to %3? The session is not told and may keep working on it.").arg(task.ref, holder, stage);
         }
-        // A timeout's message already says that the change may have been made.
-        showMessage(result.refusal.value(QStringLiteral("message")).toString(), result.uncertain() ? Tone::Warning : Tone::Error);
-    }, this);
+        if (from == QLatin1String("needs_human")) {
+            *accept = tr("Move to %1").arg(stage);
+            return tr("Move %1 to %2 without an answer? %3 keeps waiting for one.").arg(task.ref, stage, holder);
+        }
+        if (from == QLatin1String("done")) {
+            *accept = to == QLatin1String("ready") ? tr("Reopen") : tr("Move to %1").arg(stage);
+            return to == QLatin1String("ready") ? tr("Reopen %1? It moves back to %2, and its review verdict is cleared.").arg(task.ref, stage)
+                                                : tr("Move the finished task %1 to %2?").arg(task.ref, stage);
+        }
+        return {};
+    }
+    return {};
+}
+
+void TasksView::moveTask(const QString &uuid, const QString &stage)
+{
+    if (!m_model) return;
+    QString ref;
+    for (const auto &task : m_model->board(m_project).tasks) if (task.uuid == uuid) ref = task.ref;
+    if (ref.isEmpty()) return;
+    QString accept;
+    const QString question = moveQuestion(uuid, stage, &accept);
+    if (!question.isEmpty() && !confirm(this, tr("Move %1").arg(ref), question, accept)) return;
+    run({QStringLiteral("move"), {{QStringLiteral("task"), uuid}, {QStringLiteral("to"), stage}}, uuid, ref, {}, {}}, {}, {});
+}
+
+bool TasksView::confirm(QWidget *parent, const QString &title, const QString &text, const QString &accept)
+{
+    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Cancel, parent);
+    box.setObjectName(QStringLiteral("tasksConfirm"));
+    box.setTextFormat(Qt::PlainText);
+    auto *button = box.addButton(accept, QMessageBox::DestructiveRole);
+    button->setObjectName(QStringLiteral("tasksConfirmAccept"));
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.setEscapeButton(QMessageBox::Cancel);
+    box.exec();
+    return box.clickedButton() == button;
+}
+
+void TasksView::showCardMenu(const QString &uuid, const QPoint &global)
+{
+    if (auto *previous = findChild<QMenu *>(QStringLiteral("taskCardMenu"), Qt::FindDirectChildrenOnly)) previous->close();
+    auto *menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("taskCardMenu"));
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    auto *openCard = menu->addAction(tr("Open"));
+    openCard->setData(QStringLiteral("open"));
+    connect(openCard, &QAction::triggered, this, [this, uuid] { openTask(uuid); });
+    auto *moves = menu->addMenu(tr("Move to…"));
+    moves->setObjectName(QStringLiteral("taskMoveMenu"));
+    const auto targets = moveTargets(uuid);
+    for (const auto &stage : targets) {
+        auto *move = moves->addAction(stage.name);
+        move->setData(stage.name);
+        const QString name = stage.name;
+        connect(move, &QAction::triggered, this, [this, uuid, name] { moveTask(uuid, name); });
+    }
+    moves->setEnabled(!targets.isEmpty());
+    menu->popup(global);
+}
+
+void TasksView::setRecipients(const QList<Recipient> &recipients)
+{
+    bool same = recipients.size() == m_recipients.size();
+    for (int i = 0; same && i < recipients.size(); ++i) {
+        const auto &a = recipients[i], &b = m_recipients[i];
+        same = a.key == b.key && a.project == b.project && a.host == b.host && a.session.machine == b.session.machine
+            && a.session.name == b.session.name && a.status == b.status && a.working == b.working;
+    }
+    if (same) return;
+    m_recipients = recipients;
+    m_panel->updateActions();
+}
+
+QList<TasksView::Recipient> TasksView::recipients() const
+{
+    QList<Recipient> out;
+    if (m_project.isEmpty()) return out;
+    for (const auto &recipient : m_recipients) {
+        if (recipient.project != m_project) continue;
+        if (!m_selection.key.isEmpty() && recipient.key == m_selection.key) out.prepend(recipient);
+        else out.append(recipient);
+    }
+    return out;
 }
 
 void TasksView::openTask(const QString &uuid)
@@ -1331,15 +1585,42 @@ void TasksView::open(const QString &uuid, bool reveal)
     m_openTask = uuid;
     if (!m_project.isEmpty()) m_openTasks.insert(m_project, uuid);
     selectCard(uuid, reveal);
+    markDecisions();
+    showPanel(uuid);
+    emit taskOpened(uuid);
+}
+
+void TasksView::closeTask()
+{
+    m_openTask.clear();
+    if (!m_project.isEmpty()) m_openTasks.insert(m_project, {});
+    selectCard({}, false);
+    markDecisions();
+    showPanel({});
+}
+
+void TasksView::markDecisions()
+{
     for (int i = 0; i < m_yourCallItems->count(); ++i)
         if (auto *button = m_yourCallItems->itemAt(i)->widget()) {
-            const bool opened = button->property("uuid").toString() == uuid;
+            const bool opened = !m_openTask.isEmpty() && button->property("uuid").toString() == m_openTask;
             if (button->property("open").toBool() != opened) {
                 button->setProperty("open", opened);
                 repolish(button);
             }
         }
-    emit taskOpened(uuid);
+}
+
+void TasksView::showPanel(const QString &uuid)
+{
+    const bool shown = m_panel->isVisibleTo(this);
+    m_panel->setTask(m_project, uuid);
+    m_panel->setVisible(!uuid.isEmpty());
+    if (uuid.isEmpty() || shown) return;
+    // The board keeps the rest; a width the person chose is remembered.
+    const int total = m_split->width() - m_split->handleWidth();
+    const int width = qBound(m_panel->minimumSizeHint().width(), QSettings().value(PanelWidthSetting, PanelWidth).toInt(), qMax(PanelWidth, total / 2));
+    if (total > width) m_split->setSizes({total - width, width});
 }
 
 // Selects the card in its column and clears the others. Revealing opens a

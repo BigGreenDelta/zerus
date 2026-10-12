@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDateTime>
+#include <QPainter>
 #include <QContextMenuEvent>
 #include <QDir>
 #include <QClipboard>
@@ -3809,6 +3810,11 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         " elif c=='status':print('{\"ok\":true,\"machine\":\"node-arch\",\"cursor\":1}')\n"
         " elif c=='decisions':print('{\"ok\":true,\"cursor\":1,\"decisions\":[]}')\n"
         " elif c=='board':\n  b=json.load(open(__file__+'.board'));b.update(ok=True,cursor=1,project=json.loads(data)['project']);print(json.dumps(b))\n"
+        " elif c=='show':\n  t=json.loads(data)['task'];d=[x for x in json.load(open(__file__+'.board'))['tasks'] if x['uuid']==t][0]\n"
+        "  d=dict(d,prompt='Do '+d['title'].lower()+'.',attachments=[],journal=[],related=[],resume_stage='')\n"
+        "  try:d.update(json.load(open(__file__+'.show-'+t)))\n  except FileNotFoundError:pass\n"
+        "  print(json.dumps({'ok':True,'task':d}))\n"
+        " elif c=='attachment':\n  r=json.loads(data);print(json.dumps({'ok':True,'path':__file__+'.image-'+r['sha256']+'.png','name':'shot.png','mime':'image/png','bytes':1}))\n"
         " else:print('{\"ok\":false,\"error\":{\"code\":\"refused\",\"message\":\"Not in this test\"}}');sys.exit(1)\n"
         "else:\n sys.argv[0]=" + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n"));
     const QStringList names{"Backlog", "Queue", "Design", "Build", "Review", "Your Call", "Done", "Icebox"};
@@ -3871,6 +3877,20 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         QTRY_VERIFY(window.findChild<QFrame *>("tasksSessionStrip")->isVisible());
         QCOMPARE(window.findChild<QLabel *>("tasksSessionQueue")->text(), QString("This session's queue: 1"));
         auto *projects = view->findChild<QComboBox *>("tasksProject"); QCOMPARE(projects->count(), 2);
+        // The card panel offers the sessions of the card's project, with their state.
+        view->openTask("m2q8a");
+        auto *send = view->findChild<QPushButton *>("taskSend");
+        QTRY_VERIFY(send && send->isVisible() && view->findChild<QWidget *>("taskPanel")->property("loaded").toBool());
+        QStringList offered, disabled; QString dashboardEntry;
+        for (auto *action : send->menu()->actions()) {
+            offered << action->data().toString();
+            if (!action->isEnabled()) disabled << action->data().toString();
+            if (action->data().toString() == "\ncodex/hgs/dashboard") dashboardEntry = action->text();
+        }
+        QVERIFY2(offered.contains("\ncodex/hgs/dashboard") && !offered.contains("\nkimi/docs/research"), qPrintable(offered.join(" | ")));
+        QCOMPARE(dashboardEntry, QString("codex/hgs/dashboard · Using a tool"));
+        // A peer whose Overmind machine is not known yet cannot be chosen.
+        QCOMPARE(disabled, QStringList{"mac\nclaude/infra/review"});
         // Open a card, filter and scroll; then select a session of another project.
         auto *filter = view->findChild<QLineEdit *>("tasksFilter"); filter->setText("o");
         view->openTask("r4t6b");
@@ -3898,15 +3918,50 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
     const auto directory = qEnvironmentVariable("HGS_TASKS_WINDOW_PREVIEW");
     if (directory.isEmpty()) return;
     QDir().mkpath(directory);
+    // The open card: a prompt, an image, labels, relations and a journal; an
+    // unconfirmed delivery and a Your Call question for the panel's notes.
+    QImage shot(320, 200, QImage::Format_RGB32); shot.fill(QColor("#3b82f6"));
+    { QPainter painter(&shot); painter.fillRect(20, 20, 140, 90, QColor("#f59e0b")); painter.fillRect(180, 110, 120, 70, QColor("#10b981")); }
+    QVERIFY(shot.save(hgs + ".image-feed.png"));
+    const auto at = QDateTime::currentSecsSinceEpoch();
+    const auto entry = [&](const QString &marker, const QString &text, const QJsonObject &actor, int minutes) {
+        return QJsonObject{{"marker", marker}, {"text", text}, {"at", at - minutes * 60}, {"actor", actor}, {"event", marker + text}};
+    };
+    const QJsonObject human{{"kind", "human"}, {"machine", "node-arch"}};
+    const QJsonObject agent{{"kind", "agent"}, {"machine", "node-arch"}, {"session", "codex/hgs/dashboard"}};
+    QFile detail(hgs + ".show-m2q8a"); QVERIFY(detail.open(QIODevice::WriteOnly));
+    detail.write(QJsonDocument(QJsonObject{
+        {"prompt", "Measure how long an inspection takes from the click to the first rendered row.\n\nRecord p50 and p95 over 200 runs and keep the script in `tools/`."},
+        {"attachments", QJsonArray{QJsonObject{{"name", "latency.png"}, {"mime", "image/png"}, {"bytes", 2048}, {"sha256", "feed"}}}},
+        {"follows", QJsonArray{"k3f9x"}}, {"related", QJsonArray{"r4t6b"}},
+        {"journal", QJsonArray{entry("[created]", "", human, 90), entry("[comment]", "The **slow** part is the first `inspect` call; see the trace.", agent, 30)}}}).toJson());
+    detail.close();
+    QFile question(hgs + ".show-p7c1d"); QVERIFY(question.open(QIODevice::WriteOnly));
+    question.write(QJsonDocument(QJsonObject{{"flags", QJsonArray{"delivery_uncertain"}},
+        {"journal", QJsonArray{entry("[claim]", "", human, 50), entry("[sent?]", "the session did not confirm the input", human, 49),
+                               entry("[needs-human]", "Keep drafts in **SQLite** or in plain files?", agent, 12)}}}).toJson());
+    question.close();
     for (const QString theme : {"dark", "light"}) {
         QSettings().setValue("workspace/theme", theme);
         SessionsWindow window(FakeCli::program(hgs)); open(window);
         auto *view = window.findChild<TasksView *>("tasksView");
         QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
-        view->openTask("m2q8a"); QTest::qWait(150);
+        view->openTask("m2q8a");
+        QTRY_VERIFY(view->findChild<QWidget *>("taskPanel")->property("loaded").toBool());
+        QTRY_VERIFY(!view->findChild<QToolButton *>("taskImage")->icon().isNull());
+        QTest::qWait(150);
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + ".png"));
+        auto *panelScroll = view->findChild<QScrollArea *>("taskPanelScroll")->verticalScrollBar();
+        panelScroll->setValue(panelScroll->maximum()); QTest::qWait(100);
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-journal.png"));
+        view->openTask("p7c1d");
+        QTRY_VERIFY(view->findChild<QWidget *>("taskPanel")->property("task").toString() == "p7c1d"
+                    && view->findChild<QWidget *>("taskPanel")->property("loaded").toBool());
+        QTest::qWait(150);
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-yourcall.png"));
+        view->openTask("m2q8a"); QTest::qWait(150);
         // A refused drop: the card stays and the reason shows above the board.
-        view->dropTask("h2k9l", "Backlog", {});
+        view->dropTask("s8g4z", "Review", {});
         QTRY_VERIFY(window.findChild<QLabel *>("tasksMessage")->isVisible());
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-refused.png"));
         window.resize(1760, 760); QTest::qWait(150);
