@@ -29,7 +29,7 @@ class Replication(unittest.TestCase):
         (self.root / 'bin').mkdir()
         ssh = self.root / 'bin/ssh'; ssh.write_text(SSH); ssh.chmod(0o755)
         self.env = dict(os.environ, SWARM_TEST_ROOT=str(self.root), SWARM_TEST_HGS=str(swarm.HGS),
-                        PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
+                        HOME=str(self.root), PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
         for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION']:
             self.env.pop(key, None)
         for node, peer in [('a', 'b'), ('b', 'a')]:
@@ -73,35 +73,51 @@ class Replication(unittest.TestCase):
         (self.root / 'calls').write_text('')
         (self.root / 'no-overmind-b').write_text('')
         self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x'})
-        self.call('a', 'sync')
+        self.assertEqual(self.call('a', 'sync'), {'b': {'ok': True}})
         calls = (self.root / 'calls').read_text()
+        self.assertIn('b swarm hello', calls)  # b was reached, so the absence below is not vacuous
         self.assertNotIn('overmind-exchange', calls)
         after = self.overmind('a', 'status')['peers']  # `behind` grows with local events, the exchange record must not change
         self.assertEqual([(p['alias'], p['last_ok'], p['updated']) for p in after], [(p['alias'], p['last_ok'], p['updated']) for p in before])
 
     def test_offline_peer_is_reported_and_recovers(self):
         self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x'})
-        self.call('a', 'sync')
+        self.assertEqual(self.call('a', 'sync'), {'b': {'ok': True}})
+        self.assertEqual(len(self.refs('b')), 1)
         (self.root / 'offline-b').write_text('')
         self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'y'})
-        self.call('a', 'sync')  # the catalog sync reports b offline; Overmind keeps its last good state
+        # The outage shows in the swarm result; Overmind runs only after a successful hello.
+        self.assertFalse(self.call('a', 'sync')['b']['ok'])
         (self.root / 'offline-b').unlink()
-        self.call('a', 'sync')
+        self.assertEqual(len(self.refs('b')), 1)
+        self.assertEqual([p['last_error'] for p in self.overmind('a', 'status')['peers']], [''])
+        self.assertEqual(self.call('a', 'sync'), {'b': {'ok': True}})
         self.assertEqual(self.refs('a'), self.refs('b'))
         self.assertEqual(len(self.refs('b')), 2)
 
     def test_the_worker_exchanges_soon_after_a_local_write(self):
+        (self.root / 'calls').write_text('')
         worker = subprocess.Popen([str(swarm.HGS), 'swarm', 'worker'], env=self.node_env('a'),
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
-            time.sleep(1)
+            # Its first pass exchanges once; later passes exchange only after a change (peers are due every 30 s).
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and 'overmind-exchange' not in (self.root / 'calls').read_text():
+                time.sleep(.1)
+            self.assertIn('overmind-exchange', (self.root / 'calls').read_text())
             ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x'})['task']['ref']
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline and ref not in self.refs('b'):
                 time.sleep(.2)
-            self.assertIn(ref, self.refs('b'))
+            held = ref in self.refs('b')
         finally:
-            worker.terminate(); worker.communicate(timeout=5)
+            worker.terminate()
+            try:
+                _, stderr = worker.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                _, stderr = worker.communicate()
+        self.assertTrue(held, stderr)
 
 
 if __name__ == '__main__':

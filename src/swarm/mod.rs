@@ -143,6 +143,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
 
 /// One swarm transport call for other modules (Overmind replication and delivery).
 // Overmind delivery (Task 6) is its first caller.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn call(config: &Config, alias: &str, action: &str, request: Option<&Value>) -> Result<Value> {
     transport::remote(config, alias, action, request)

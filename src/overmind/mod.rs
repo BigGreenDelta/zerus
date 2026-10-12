@@ -27,9 +27,8 @@ fn open(config: &crate::config::Config) -> anyhow::Result<store::Store> {
 
 /// Serves an Overmind request that arrived over the swarm channel.
 pub fn serve(config: &crate::config::Config, action: &str, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    let mut store = open(config)?;
     match action {
-        "overmind-exchange" => sync::serve(&mut store, request),
+        "overmind-exchange" => sync::serve(&mut open(config)?, request),
         _ => anyhow::bail!("this machine does not know the Overmind request {action}; update HGS on it"),
     }
 }
