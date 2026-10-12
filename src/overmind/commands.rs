@@ -527,7 +527,14 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
         .map(|t| {
             let mut view = view(t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false);
             with_current_pin(&mut view, t, &renames, machine);
-            view["queue_of"] = json!(t.pinned);
+            view["queue_of"] = if wf.role(&t.stage) == Some(Role::Ready) {
+                json!(view["pinned_current"].as_str().map_or_else(
+                    || t.pinned.clone(),
+                    |name| t.pinned.as_ref().map(|pinned| SessionRef { machine: pinned.machine.clone(), name: name.to_owned() })
+                ))
+            } else {
+                Value::Null
+            };
             view["markers"] = json!(markers(t, &wf));
             view
         })
@@ -561,20 +568,27 @@ fn clip(text: &str, max: usize) -> String {
 
 const MAX_DECISIONS: usize = 50;
 
+/// The question the task is parked with: the `[needs-human]` entry written by
+/// its last transition. Anything else (a newer-version transition, say) is not.
 fn last_question(task: &Task) -> Option<&super::fold::JournalEntry> {
-    task.journal.iter().rev().find(|j| j.marker == "[needs-human]")
+    task.journal.iter().rev().find(|j| j.marker == "[needs-human]").filter(|j| j.event == task.head)
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoFields {}
 
 /// Tasks waiting for a person in every project, oldest question first. The log
 /// is folded once. `signature` changes whenever the task does, so a watcher
 /// notifies once per change.
-pub fn decisions(ctx: &mut Ctx) -> Result<Value> {
+pub fn decisions(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    let _: NoFields = parse(&request)?;
     let cursor = ctx.store.cursor()?;
     let events = ctx.store.load(&Filter::All)?;
     let names = refs::refs(&ctx.store.task_ids()?);
     let all: Vec<&Event> = events.iter().collect();
     let mut workflows: BTreeMap<String, Workflow> = BTreeMap::new();
-    let mut waiting: Vec<(u64, Task)> = Vec::new();
+    let mut waiting: Vec<Task> = Vec::new();
     for task in fold_many(&events).into_values() {
         if task.deleted {
             continue;
@@ -583,14 +597,18 @@ pub fn decisions(ctx: &mut Ctx) -> Result<Value> {
         if wf.role(&task.stage) != Some(Role::NeedsHuman) {
             continue;
         }
-        let asked = last_question(&task).map_or(task.updated_at, |j| j.at);
-        waiting.push((asked, task));
+        waiting.push(task);
     }
-    waiting.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.uuid.cmp(&b.1.uuid)));
+    // Oldest first by the position of the task's last transition in the totally
+    // ordered log (event times only have a resolution of one second).
+    let heads: BTreeSet<&str> = waiting.iter().map(|t| t.head.as_str()).collect();
+    let position: BTreeMap<&str, (u64, &str, u64)> =
+        events.iter().filter(|e| heads.contains(e.id.as_str())).map(|e| (e.id.as_str(), e.order())).collect();
+    waiting.sort_by(|a, b| position.get(a.head.as_str()).cmp(&position.get(b.head.as_str())).then(a.uuid.cmp(&b.uuid)));
     let decisions: Vec<Value> = waiting
         .into_iter()
         .take(MAX_DECISIONS)
-        .map(|(_, task)| {
+        .map(|task| {
             let question = last_question(&task).map(|j| clip(&j.text, 500)).unwrap_or_default();
             json!({
                 "task": task.uuid, "ref": names.get(&task.uuid).map(String::as_str).unwrap_or_default(),
@@ -605,7 +623,8 @@ pub fn decisions(ctx: &mut Ctx) -> Result<Value> {
 
 /// Projects that hold tasks, with a count per stage role (every role is
 /// present, zero when empty). Deleted tasks do not count.
-pub fn projects(ctx: &mut Ctx) -> Result<Value> {
+pub fn projects(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    let _: NoFields = parse(&request)?;
     let cursor = ctx.store.cursor()?;
     let events = ctx.store.load(&Filter::All)?;
     let all: Vec<&Event> = events.iter().collect();
@@ -1317,11 +1336,10 @@ mod tests {
             claim(&mut store, task, name);
         }
         ask(&mut store, &b, "w2", "Which API?");
-        std::thread::sleep(std::time::Duration::from_millis(1100)); // event times have a resolution of one second
         ask(&mut store, &a, "w1", &"q".repeat(900));
         ask(&mut store, &gone, "w3", "Dropped?");
         delete(&mut human(&mut store), json!({"task": gone})).unwrap();
-        let result = decisions(&mut human(&mut store)).unwrap();
+        let result = decisions(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["cursor"], store.cursor().unwrap());
         let list = result["decisions"].as_array().unwrap();
@@ -1340,10 +1358,10 @@ mod tests {
         assert_eq!(signature.len(), 64);
         // The signature names the task's last transition: stable across polls
         // and comments, different per task.
-        let again = decisions(&mut human(&mut store)).unwrap();
+        let again = decisions(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(again["decisions"][0]["signature"], signature);
         comment(&mut human(&mut store), json!({"task": b, "text": "More context"})).unwrap();
-        let changed = decisions(&mut human(&mut store)).unwrap();
+        let changed = decisions(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(changed["decisions"][0]["signature"], signature);
         assert_ne!(list[1]["signature"], signature);
     }
@@ -1356,7 +1374,7 @@ mod tests {
             claim(&mut store, &task, &format!("w{i}"));
             ask(&mut store, &task, &format!("w{i}"), "Which?");
         }
-        let result = decisions(&mut human(&mut store)).unwrap();
+        let result = decisions(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(result["decisions"].as_array().unwrap().len(), 50);
     }
 
@@ -1395,6 +1413,18 @@ mod tests {
     }
 
     #[test]
+    fn decisions_and_projects_refuse_unknown_fields_and_the_queue_shows_only_ready_tasks() {
+        let (_dir, mut store) = store();
+        assert_eq!(refusal(decisions(&mut human(&mut store), json!({"x": 1})).unwrap_err()).code, "invalid_request");
+        assert_eq!(refusal(projects(&mut human(&mut store), json!({"x": 1})).unwrap_err()).code, "invalid_request");
+        let backlog = new_task(&mut store, "Backlog");
+        pin(&mut human(&mut store), json!({"task": backlog, "session": {"name": "w9"}})).unwrap();
+        let result = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        assert_eq!(result["tasks"][0]["pinned"]["name"], "w9");
+        assert_eq!(result["tasks"][0]["queue_of"], Value::Null);
+    }
+
+    #[test]
     fn projects_count_tasks_per_role_and_skip_empty_projects() {
         let (_dir, mut store) = store();
         let a = new_task(&mut store, "Queue");
@@ -1404,7 +1434,7 @@ mod tests {
         ask(&mut store, &a, "w1", "Which?");
         let other = create(&mut human(&mut store), json!({"project": "q", "prompt": "Other"})).unwrap()["task"]["uuid"].as_str().unwrap().to_owned();
         delete(&mut human(&mut store), json!({"task": other})).unwrap();
-        let result = projects(&mut human(&mut store)).unwrap();
+        let result = projects(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(result["cursor"], store.cursor().unwrap());
         let list = result["projects"].as_array().unwrap();
         assert_eq!(list.len(), 1);

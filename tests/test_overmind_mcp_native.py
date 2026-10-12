@@ -109,6 +109,8 @@ stream_max_retries=0
         seen = json.loads(started.read_text())
         self.assertEqual(seen['argv'], ['overmind', 'mcp', '--session'])
         self.assertEqual({key: seen['env'].get(key) for key in session}, session)
+        self.assertEqual(seen['env'].get('HOME'), str(self.root))
+        self.assertTrue(seen['env'].get('PATH'), 'PATH reaches the server')
 
 
 if __name__ == '__main__':

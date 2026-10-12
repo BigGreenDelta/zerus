@@ -115,8 +115,8 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     let value = match (command, positional.as_slice()) {
         ("rev", []) => commands::rev(&mut ctx)?,
         ("status", []) => commands::status(&mut ctx)?,
-        ("decisions", []) => commands::decisions(&mut ctx)?,
-        ("projects", []) => commands::projects(&mut ctx)?,
+        ("decisions", []) => commands::decisions(&mut ctx, request)?,
+        ("projects", []) => commands::projects(&mut ctx, request)?,
         ("board", []) => commands::board(&mut ctx, request)?,
         ("show", [reference]) => commands::show(&mut ctx, json!({"task": reference}))?,
         ("show", []) => commands::show(&mut ctx, request)?,

@@ -177,6 +177,15 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
             argv = launches('claude')[-1]
             self.assertEqual(mcp(argv) is not None, attached, argv)
             self.assertIs(self.binding(claude)['overmind_mcp'], attached)
+            # A fork reads the same shell setting (the other sessions keep the tmux server running).
+            self.env['HGS_OVERMIND_MCP'] = value
+            try:
+                branch = self.fork(claude, 'shell-' + value)
+            finally:
+                del self.env['HGS_OVERMIND_MCP']
+            argv = launches('claude')[-1]
+            self.assertEqual(mcp(argv) is not None, attached, argv)
+            self.assertIs(self.binding(branch)['overmind_mcp'], attached)
         (self.root/'cfg/config').write_text('HGS_OVERMIND_MCP=0\n')
         self.env['HGS_OVERMIND_MCP'] = '1'
         try:

@@ -593,7 +593,7 @@ fn session_arguments(
     );
     // A setting of the launching shell must reach the run although the tmux
     // server, which started earlier, has never seen it.
-    if let Some(setting) = nonempty_env("HGS_OVERMIND_MCP") {
+    if let Some(setting) = overmind_mcp_setting() {
         environment.insert("HGS_OVERMIND_MCP", setting);
     }
     let mut arguments = vec![

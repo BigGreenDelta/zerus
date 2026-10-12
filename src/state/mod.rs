@@ -219,6 +219,12 @@ pub(super) fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+/// The `HGS_OVERMIND_MCP` setting of the launching shell, to forward to a new
+/// session with `-e`: the tmux server, which started earlier, has never seen it.
+pub fn overmind_mcp_setting() -> Option<String> {
+    nonempty_env("HGS_OVERMIND_MCP")
+}
+
 pub(super) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/".into()))
 }

@@ -93,12 +93,12 @@ fn tools() -> Value {
     ])
 }
 
-/// Reads an image the agent names and turns it into an `attach` request.
 fn open_nonblocking(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)
 }
 
+/// Reads an image the agent names and turns it into an `attach` request.
 fn attach_request(arguments: &Value) -> Result<Value> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]

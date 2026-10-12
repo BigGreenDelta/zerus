@@ -275,6 +275,9 @@ pub(super) fn start_scoped(
         environment.insert(key, String::new());
     }
     environment.insert(home_var(agent)?, string(&record, "agent_home").into());
+    if let Some(setting) = overmind_mcp_setting() {
+        environment.insert("HGS_OVERMIND_MCP", setting);
+    }
     let mut arguments = vec![
         "new-session".into(),
         "-d".into(),
