@@ -4580,11 +4580,17 @@ void TestSessionsWindow::childTreeKeepsRoutineResultsQuiet()
     box.sessions[0].subagentActiveCount = 1;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
-    // A parent reply waits while another child is still working.
+    // An intermediate parent reply remains unread while work continues.
+    box.sessions[0].activity = "busy"; box.sessions[0].phase = "tool";
     box.sessions[0].replyId = "12:120";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
+    QVERIFY(state.local().sessions[0].unreadReply);
     QVERIFY(readAll->isEnabled()); // The exact unread reply is retained for explicit reading.
+    // Finishing the parent turn still waits for its active child.
+    box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
     // Finishing that child reveals the same unread reply without a new reply ID.
     box.sessions[0].subagents["agent-a"] = QJsonObject{{"name","Review"},{"state","finished"}};
     box.sessions[0].subagentActiveCount = 0;
@@ -6109,12 +6115,13 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
     const auto start=[&](const QString &path,const QString &name,const QString &hint){
         QTimer::singleShot(0,&window,[&,name,hint]{
             auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
-            QTimer::singleShot(3000,dialog,&QDialog::reject);
-            QTRY_COMPARE(dialog->findChild<QLabel *>("muted")->text(),hint);
+            // The safety reject outlasts the waits: slow Windows runners start each fake CLI through Python.
+            QTimer::singleShot(20000,dialog,&QDialog::reject);
+            QTRY_COMPARE_WITH_TIMEOUT(dialog->findChild<QLabel *>("muted")->text(),hint,15000);
             dialog->findChild<QPushButton *>("launchWithoutWorktree")->click();
             dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
             dialog->findChild<QLineEdit *>("launchName")->setText(name);
-            auto *button=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY(button->isEnabled());button->click();
+            auto *button=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(),15000);button->click();
         });
         window.showNewSession("codex",group,"mac",{},path);QVERIFY(!launches.isEmpty());
         SessionInfo created;created.name="codex/infra/"+name;created.cmd="codex";created.project="infra";created.tag=name;
@@ -6416,8 +6423,8 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     auto *client=window.findChild<HgsClient *>();QSignalSpy launched(client,&HgsClient::nativeSessionLaunched);
     QTimer::singleShot(0,&window,[&] {
         auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
-        QTimer::singleShot(3000,dialog,&QDialog::reject);
-        QTRY_VERIFY(dialog->findChild<QPushButton *>("primary")->isEnabled());
+        QTimer::singleShot(20000,dialog,&QDialog::reject);
+        QTRY_VERIFY_WITH_TIMEOUT(dialog->findChild<QPushButton *>("primary")->isEnabled(),15000);
         dialog->findChild<QLineEdit *>("launchName")->setText("native-created");
         dialog->findChild<QComboBox *>("launchProject")->setCurrentIndex(0);
         dialog->findChild<QPushButton *>("primary")->click();
@@ -6516,7 +6523,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     const QString destination = group;
     QTimer::singleShot(0, window.get(), [&] {
         auto *dialog = qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); QVERIFY(dialog);
-        QTimer::singleShot(3000, dialog, &QDialog::reject);
+        QTimer::singleShot(20000, dialog, &QDialog::reject);
         auto *groups = dialog->findChild<QComboBox *>("launchProject"); QVERIFY(groups);
         QCOMPARE(groups->currentData().toString(), group);
         QVERIFY(groups->findData("pinned") < 0); QVERIFY(groups->findData("ungrouped") >= 0);
@@ -6524,7 +6531,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
         QCOMPARE(dialog->findChild<QComboBox *>("launchProjectFolder")->count(), 1);
         dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
         dialog->findChild<QLineEdit *>("launchName")->setText("grouped");
-        auto *start = dialog->findChild<QPushButton *>("primary"); QTRY_VERIFY(start->isEnabled()); start->click();
+        auto *start = dialog->findChild<QPushButton *>("primary"); QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(), 15000); start->click();
     });
     window->showNewSession("codex", group, host); QCOMPARE(launches.size(), 1);
     const QString token = launches[0][5].toString(); QVERIFY(!QUuid(token).isNull()); QCOMPARE(launches[0][0].toString(), host);
@@ -6730,7 +6737,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     QPointer<QMenu> menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);auto *launch=menu->findChild<QAction *>("contextNewProjectFolderSession");
     QVERIFY(launch->isEnabled());table->setCurrentCell(rowFor(localId),0);
     QSignalSpy launched(&window,&SessionsWindow::newSessionRequested);bool remoteOpened=false;
-    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<NewSessionDialog *>();QVERIFY(dialog);QTimer::singleShot(3000,dialog,&QDialog::reject);
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<NewSessionDialog *>();QVERIFY(dialog);QTimer::singleShot(20000,dialog,&QDialog::reject);
         QCOMPARE(dialog->findChild<QComboBox *>("launchProject")->currentData().toString(),project);
         QCOMPARE(dialog->findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));
         auto *folders=dialog->findChild<QComboBox *>("launchProjectFolder");QCOMPARE(folders->currentData().toString(),remoteId);
@@ -6738,7 +6745,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),QString("/remote/work tree"));remoteOpened=true;
         dialog->findChild<QComboBox *>("launchAgent")->setCurrentText("claude");dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
         const auto preview=qEnvironmentVariable("HGS_PROJECT_LAUNCH_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/launch.png"));}
-        auto *start=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();});
+        auto *start=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(),15000);start->click();});
     launch->trigger();QVERIFY(remoteOpened);QCOMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),QString("mac"));
     QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][2].toString(),QString("/remote/work tree"));delete menu.data();
     window.showProjects();page->selectProject(project);table->setCurrentCell(rowFor(remoteId),0);

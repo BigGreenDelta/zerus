@@ -14,11 +14,11 @@ ITEMS=[dict(question='Which release should we prepare?',header='Release',options
  dict(question='What else should we know?',header='Notes',options=[dict(label='Nothing',description='No extra notes'),dict(label='Later',description='Discuss later')]),
  dict(question='Which extra checks should we include?',header='Extras',multiSelect=True,options=[dict(label='Mac',description='Check macOS'),dict(label='Linux',description='Check Linux')])]
 # Synthetic text Claude wraps at the 87 columns of a user's terminal: a token
-# longer than a row, a row that begins "N. " and key hints that wrap once
-# Other has focus.
-WRAPPED_ITEMS=[dict(ITEMS[0],question='Which release should we prepare? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.',
-  options=[dict(label='Stable',description='Use stable build from the release branch of the example repository, then run step 2. Verify the signed tag.'),
-   dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),*ITEMS[1:]]
+# longer than a row, a row that begins "N. ", key hints that wrap once Other
+# has focus, and a review where only the long third question has a gutter.
+WRAPPED_ITEMS=[dict(ITEMS[0],options=[dict(label='Stable',description='Use stable build from the release branch of the example repository, then run step 2. Verify the signed tag.'),
+   dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),ITEMS[1],
+ dict(ITEMS[2],question='What else should we know? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.'),ITEMS[3]]
 
 @unittest.skipUnless(CLAUDE,'Set HGS_CLAUDE_TEST_BIN to test the installed native Claude against a local fake API')
 class NativeClaudeQuestions(unittest.TestCase):
