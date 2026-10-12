@@ -95,6 +95,29 @@ QStringList wrapped(const QString &text, const QFont &font, int width, int maxLi
     return lines;
 }
 
+// Whether the workflow lets a person `move` a task from one stage to another,
+// with the action the CLI's move derives from the two roles (src/overmind/commands.rs).
+bool humanMove(const OvermindModel::Board &board, const QString &from, const QString &to)
+{
+    const QString fromRole = board.role(from), toRole = board.role(to);
+    if (fromRole.isEmpty() || toRole.isEmpty()) return false;
+    QString action = QStringLiteral("move");
+    if (fromRole == QLatin1String("active") && toRole == QLatin1String("ready")) action = QStringLiteral("unclaim");
+    else if (fromRole == QLatin1String("review") && toRole == QLatin1String("done")) action = QStringLiteral("done");
+    else if (fromRole == QLatin1String("done") && toRole == QLatin1String("ready")) action = QStringLiteral("reopen");
+    else if (toRole == QLatin1String("active") && fromRole != QLatin1String("active")) return false;   // send it instead
+    else if (fromRole == QLatin1String("needs_human") && toRole != QLatin1String("parked")) return false;   // answer it instead
+    for (const auto &value : board.workflow.value(QStringLiteral("rules")).toArray()) {
+        const auto rule = value.toObject();
+        if (rule.value(QStringLiteral("action")).toString() == action && rule.value(QStringLiteral("to")).toString() == to
+            && rule.value(QStringLiteral("actors")).toArray().contains(QStringLiteral("human"))
+            && rule.value(QStringLiteral("from")).toArray().contains(from)
+            && rule.value(QStringLiteral("requires")).toArray().isEmpty())
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 TasksView::Palette TasksView::Palette::of(bool dark)
@@ -282,6 +305,7 @@ public:
     QSize minimumSizeHint() const override { return {24, 30}; }
     std::function<void(const QString &uuid)> dropped;
     std::function<void(bool)> hovering;
+    std::function<bool(const QString &uuid)> accepts;   // a person may move this card here
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -329,25 +353,31 @@ protected:
     }
     void dragEnterEvent(QDragEnterEvent *event) override
     {
-        if (!event->mimeData()->hasFormat(QLatin1String(TasksView::MimeType))) { event->ignore(); return; }
-        event->setDropAction(Qt::MoveAction); event->accept();
+        if (!take(event)) return;
         if (hovering) hovering(true);
     }
-    void dragMoveEvent(QDragMoveEvent *event) override
-    {
-        if (!event->mimeData()->hasFormat(QLatin1String(TasksView::MimeType))) { event->ignore(); return; }
-        event->setDropAction(Qt::MoveAction); event->accept();
-    }
+    void dragMoveEvent(QDragMoveEvent *event) override { take(event); }
     void dragLeaveEvent(QDragLeaveEvent *) override { if (hovering) hovering(false); }
     void dropEvent(QDropEvent *event) override
     {
         if (hovering) hovering(false);
-        if (!event->mimeData()->hasFormat(QLatin1String(TasksView::MimeType))) { event->ignore(); return; }
-        event->setDropAction(Qt::MoveAction); event->accept();
+        if (!take(event)) return;
         if (dropped) dropped(QString::fromUtf8(event->mimeData()->data(QLatin1String(TasksView::MimeType))));
     }
 
 private:
+    bool take(QDropEvent *event)
+    {
+        const auto *mime = event->mimeData();
+        if (!mime->hasFormat(QLatin1String(TasksView::MimeType))
+            || (accepts && !accepts(QString::fromUtf8(mime->data(QLatin1String(TasksView::MimeType)))))) {
+            event->ignore();
+            return false;
+        }
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
+        return true;
+    }
     const TasksView::Palette *m_palette;
     QString m_name;
     int m_shown = 0, m_total = 0;
@@ -379,6 +409,7 @@ public:
     }
     std::function<void(const QString &uuid, const QString &before)> dropped;
     std::function<void(bool)> hovering;
+    std::function<bool(const QString &uuid)> accepts;   // a person may move this card here
 
 protected:
     void startDrag(Qt::DropActions) override
@@ -411,13 +442,13 @@ protected:
     }
     void dragEnterEvent(QDragEnterEvent *event) override
     {
-        if (!accepts(event)) return;
+        if (!take(event)) return;
         if (hovering) hovering(true);
         track(event->position().toPoint(), event->mimeData());
     }
     void dragMoveEvent(QDragMoveEvent *event) override
     {
-        if (!accepts(event)) return;
+        if (!take(event)) return;
         const int y = int(event->position().y());
         if (y < 24) verticalScrollBar()->setValue(verticalScrollBar()->value() - 12);
         else if (y > viewport()->height() - 24) verticalScrollBar()->setValue(verticalScrollBar()->value() + 12);
@@ -432,7 +463,7 @@ protected:
     {
         m_line = -1; viewport()->update();
         if (hovering) hovering(false);
-        if (!accepts(event)) return;
+        if (!take(event)) return;
         int line = 0;
         const QString before = beforeAt(event->position().toPoint(), &line);
         if (dropped) dropped(QString::fromUtf8(event->mimeData()->data(QLatin1String(TasksView::MimeType))), before);
@@ -448,9 +479,15 @@ protected:
     }
 
 private:
-    bool accepts(QDropEvent *event)
+    // Takes the drag when it carries a card a person may move here.
+    bool take(QDropEvent *event)
     {
-        if (!event->mimeData()->hasFormat(QLatin1String(TasksView::MimeType))) { event->ignore(); return false; }
+        const auto *mime = event->mimeData();
+        if (!mime->hasFormat(QLatin1String(TasksView::MimeType))
+            || (accepts && !accepts(QString::fromUtf8(mime->data(QLatin1String(TasksView::MimeType)))))) {
+            event->ignore();
+            return false;
+        }
         event->setDropAction(Qt::MoveAction);
         event->accept();
         return true;
@@ -458,7 +495,9 @@ private:
     void track(const QPoint &position, const QMimeData *mime)
     {
         int line = 0;
-        const bool here = QString::fromUtf8(mime->data(QLatin1String(TasksView::StageMimeType))) == m_stage;
+        const QString uuid = QString::fromUtf8(mime->data(QLatin1String(TasksView::MimeType)));
+        bool here = false;
+        for (int row = 0; !here && row < count(); ++row) here = item(row)->data(TaskRoles::Uuid).toString() == uuid;
         beforeAt(here ? position : QPoint(0, viewport()->height() + 1), &line);
         if (line != m_line) { m_line = line; viewport()->update(); }
     }
@@ -497,7 +536,7 @@ public:
         list->setItemDelegate(delegate);
         layout->addWidget(header);
         layout->addWidget(list, 1);
-        list->hovering = header->hovering = [this](bool on) { m_dropTarget = on; update(); };
+        list->hovering = header->hovering = [this](bool on) { m_dropTarget = on; setProperty("dropTarget", on); update(); };
     }
     bool isCollapsed() const { return m_collapsed; }
     void setCollapsed(bool collapsed)
@@ -639,6 +678,7 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     m_sendNext->setObjectName(QStringLiteral("tasksSendNext"));
     m_sendNext->setAutoDefault(false);
     m_sendNext->setCursor(Qt::PointingHandCursor);
+    m_sendNext->setEnabled(false);
     strip->addWidget(m_sendNext);
     strip->addStretch();
     m_sessionStrip->hide();
@@ -662,12 +702,17 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     connect(m_projects, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (index >= 0) setProject(m_projects->itemData(index).toString(), true);
     });
+    // Picking the project already shown (a fallback) makes it the choice.
+    connect(m_projects, &QComboBox::activated, this, [this](int index) {
+        if (index >= 0) setProject(m_projects->itemData(index).toString(), true);
+    });
     connect(m_filter, &QLineEdit::textChanged, this, &TasksView::applyFilter);
     connect(m_sendNext, &QPushButton::clicked, this, [this] { sendNext(); });
     connect(m_sendAnyway, &QPushButton::clicked, this, [this] {
         const auto retry = m_retry;
+        const bool same = m_retryKey == m_selection.key;
         clearMessage();
-        sendNext(retry);
+        if (same) sendNext(retry);
     });
     connect(m_dismiss, &QPushButton::clicked, this, &TasksView::clearMessage);
     if (m_model) {
@@ -710,6 +755,8 @@ void TasksView::setSession(const Selection &selection)
     if (selection.key == m_selection.key && selection.project == m_selection.project && selection.host == m_selection.host
         && selection.session.machine == m_selection.session.machine && selection.session.name == m_selection.session.name)
         return;
+    // Send anyway repeats a send to the session it was refused for: never to another one.
+    if (!m_retry.isEmpty() && selection.key != m_retryKey) clearMessage();
     m_selection = selection;
     ensureProject();
     applyHighlights();
@@ -724,9 +771,13 @@ void TasksView::ensureProject()
         for (const auto &group : std::as_const(m_groups)) if (group.id == id) return true;
         return false;
     };
-    if (offered(m_project)) return;
     const QString stored = QSettings().value(ProjectSetting).toString();
-    if (offered(stored)) { setProject(stored, false); return; }
+    if (offered(m_project) && !(m_fallback && offered(stored))) return;
+    if (offered(stored)) {
+        m_fallback = false;
+        setProject(stored, false);
+        return;
+    }
     const bool firstUse = stored.isEmpty();
     if (firstUse && !m_opened) {
         if (!m_project.isEmpty()) setProject({}, false);
@@ -735,12 +786,17 @@ void TasksView::ensureProject()
     // A chosen project that is no longer offered falls back without
     // forgetting the choice, which returns when it is offered again.
     const QString fallback = offered(m_selection.project) ? m_selection.project : m_groups.isEmpty() ? QString() : m_groups.first().id;
-    setProject(fallback, firstUse && !fallback.isEmpty());
+    const bool persist = firstUse && !fallback.isEmpty();
+    m_fallback = !persist && !fallback.isEmpty();
+    setProject(fallback, persist);
 }
 
 void TasksView::setProject(const QString &project, bool persist)
 {
-    if (persist && !project.isEmpty()) QSettings().setValue(ProjectSetting, project);
+    if (persist && !project.isEmpty()) {
+        QSettings().setValue(ProjectSetting, project);
+        m_fallback = false;
+    }
     if (project == m_project) {
         const QSignalBlocker block(m_projects);
         m_projects->setCurrentIndex(m_projects->findData(project));
@@ -816,6 +872,7 @@ void TasksView::applyStyle()
         QFrame#tasksMessageBar { background:{column}; border:1px solid {border}; border-radius:8px; }
         QLabel#tasksMessage { color:{fg}; }
         QLabel#tasksMessage[error="true"] { color:{danger}; }
+        QLabel#tasksMessage[warning="true"] { color:{warning}; }
         QPushButton#tasksSendAnyway { padding:4px 10px; min-height:16px; }
         QPushButton#tasksDismissMessage { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; min-height:0; }
         QPushButton#tasksDismissMessage:hover { background:{hover}; }
@@ -882,12 +939,13 @@ void TasksView::rebuildColumns()
         connect(column->header, &QAbstractButton::clicked, this, [this, name] { toggleColumn(name); });
         column->header->dropped = [this, name](const QString &uuid) { dropTask(uuid, name, {}); };
         column->list->dropped = [this, name](const QString &uuid, const QString &before) { dropTask(uuid, name, before); };
+        column->header->accepts = column->list->accepts = [this, name](const QString &uuid) { return canDrop(uuid, name); };
         auto *list = column->list;
         connect(list, &QListWidget::itemSelectionChanged, this, [this, list] {
             const auto items = list->selectedItems();
             if (items.isEmpty()) return;
             const QString uuid = items.first()->data(TaskRoles::Uuid).toString();
-            if (uuid != m_openTask) openTask(uuid);
+            if (uuid != m_openTask) open(uuid, false);   // clicked: already in view
         });
         m_boardLayout->insertWidget(m_columns.size(), column);
         m_columns.append(column);
@@ -1003,16 +1061,20 @@ void TasksView::renderSession(const OvermindModel::Board &board)
 {
     const bool here = !m_selection.key.isEmpty() && !m_project.isEmpty() && m_selection.project == m_project && board.loaded;
     m_sessionStrip->setVisible(here);
-    if (!here) return;
+    if (!here) {
+        m_sendNext->setEnabled(false);
+        return;
+    }
     int queued = 0;
     for (const auto &task : board.tasks)
         if (board.role(task.stage) == QLatin1String("ready") && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)) ++queued;
     m_sessionQueue->setText(tr("This session's queue: %1").arg(queued));
     const QString next = nextTask(board);
-    const bool reachable = !m_selection.session.machine.isEmpty() || m_selection.host.isEmpty();
-    m_sendNext->setEnabled(!next.isEmpty() && reachable && !m_sending);
+    // Without the machine's node ID a name may belong to a session elsewhere.
+    const bool known = !m_selection.session.machine.isEmpty();
+    m_sendNext->setEnabled(!next.isEmpty() && known && !m_sending);
     QString tip;
-    if (!reachable) tip = tr("Overmind does not know this session's computer yet.");
+    if (!known) tip = tr("Overmind does not know this session's computer yet.");
     else if (next.isEmpty()) tip = tr("No task waits in this session's queue or in the project pool.");
     else
         for (const auto &task : board.tasks)
@@ -1116,17 +1178,29 @@ void TasksView::toggleColumn(const QString &stage)
 }
 
 // The first task of this session's queue, else the first of the project pool.
+// Epics are never sent, and read-only tasks cannot be. A session whose machine
+// is unknown has no queue of its own: its name could be a session elsewhere.
 QString TasksView::nextTask(const OvermindModel::Board &board) const
 {
+    const auto sendable = [&board](const OvermindModel::Task &task) {
+        return board.role(task.stage) == QLatin1String("ready") && !task.labels.contains(QLatin1String("epic"))
+            && !task.json.value(QStringLiteral("read_only")).toBool();
+    };
+    if (!m_selection.session.machine.isEmpty())
+        for (const auto &task : board.tasks)
+            if (sendable(task) && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)) return task.uuid;
     for (const auto &task : board.tasks)
-        if (board.role(task.stage) == QLatin1String("ready") && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)
-            && !task.json.value(QStringLiteral("read_only")).toBool())
-            return task.uuid;
-    for (const auto &task : board.tasks)
-        if (board.role(task.stage) == QLatin1String("ready") && task.pinned.isEmpty() && !task.labels.contains(QLatin1String("epic"))
-            && !task.json.value(QStringLiteral("read_only")).toBool())
-            return task.uuid;
+        if (sendable(task) && task.pinned.isEmpty()) return task.uuid;
     return {};
+}
+
+bool TasksView::canDrop(const QString &uuid, const QString &stage) const
+{
+    if (!m_model) return false;
+    const auto &board = m_model->board(m_project);
+    for (const auto &task : board.tasks)
+        if (task.uuid == uuid) return task.stage == stage || humanMove(board, task.stage, stage);
+    return false;
 }
 
 void TasksView::sendNext(const QJsonObject &retry)
@@ -1135,49 +1209,61 @@ void TasksView::sendNext(const QJsonObject &retry)
     QJsonObject request = retry;
     if (request.isEmpty()) {
         const QString uuid = nextTask(m_model->board(m_project));
-        if (uuid.isEmpty() || m_selection.session.name.isEmpty()) return;
-        QJsonObject target{{QStringLiteral("name"), m_selection.session.name}};
-        if (!m_selection.session.machine.isEmpty()) target.insert(QStringLiteral("machine"), m_selection.session.machine);
-        else if (!m_selection.host.isEmpty()) return;
-        request = {{QStringLiteral("task"), uuid}, {QStringLiteral("session"), target}};
+        if (uuid.isEmpty() || m_selection.session.name.isEmpty() || m_selection.session.machine.isEmpty()) return;
+        request = {{QStringLiteral("task"), uuid},
+                   {QStringLiteral("session"), QJsonObject{{QStringLiteral("machine"), m_selection.session.machine},
+                                                           {QStringLiteral("name"), m_selection.session.name}}}};
     }
     QString ref = request.value(QStringLiteral("task")).toString();
     for (const auto &task : m_model->board(m_project).tasks) if (task.uuid == ref) ref = task.ref;
     const QString name = request.value(QStringLiteral("session")).toObject().value(QStringLiteral("name")).toString();
+    const QString key = m_selection.key;
     clearMessage();
     m_sending = true;
     m_sendNext->setEnabled(false);
-    m_model->write(QStringLiteral("send"), request, [this, request, ref, name](const OvermindModel::Result &result) {
+    m_model->write(QStringLiteral("send"), request, [this, request, ref, name, key](const OvermindModel::Result &result) {
         m_sending = false;
-        if (result.ok) {
-            showMessage(tr("Sent %1 to %2.").arg(ref, name), false);
+        if (result.ok && result.reply.value(QStringLiteral("delivery")).toString() == QLatin1String("uncertain")) {
+            // Recorded, but typing it into the session was not confirmed: never send twice blindly.
+            const QString reason = result.reply.value(QStringLiteral("reason")).toString();
+            showMessage(reason.isEmpty() ? tr("%1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
+                                         : tr("%1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason),
+                        Tone::Warning);
+        } else if (result.ok) {
+            showMessage(tr("Sent %1 to %2.").arg(ref, name), Tone::Info);
+        } else if (result.uncertain()) {
+            showMessage(tr("The task board did not answer in time: %1 may have been sent to %2. Check the task before sending it again.")
+                            .arg(ref, name), Tone::Warning);
         } else {
             const auto &refusal = result.refusal;
-            QString message = refusal.value(QStringLiteral("message")).toString();
-            if (result.uncertain()) message = tr("%1 It may have been sent: check the task before sending it again.").arg(message);
             QJsonObject again;
             const QString code = refusal.value(QStringLiteral("code")).toString();
-            if (refusal.value(QStringLiteral("field")).toString() == QLatin1String("confirm") && !code.isEmpty()) {
+            // A confirmation applies to the session it was asked for, still selected.
+            if (refusal.value(QStringLiteral("field")).toString() == QLatin1String("confirm") && !code.isEmpty() && key == m_selection.key) {
                 again = request;
                 again.insert(QStringLiteral("request_id"), result.requestId);
                 auto confirm = again.value(QStringLiteral("confirm")).toArray();
                 if (!confirm.contains(code)) confirm.append(code);
                 again.insert(QStringLiteral("confirm"), confirm);
             }
-            showMessage(message, true, again);
+            showMessage(refusal.value(QStringLiteral("message")).toString(), Tone::Error, again, tr("Send %1 to %2 anyway").arg(ref, name));
         }
         if (m_model) renderSession(m_model->board(m_project));
     }, this);
 }
 
-void TasksView::showMessage(const QString &text, bool error, const QJsonObject &retry)
+void TasksView::showMessage(const QString &text, Tone tone, const QJsonObject &retry, const QString &retryLabel)
 {
     m_message->setText(text);
-    if (m_message->property("error").toBool() != error) {
+    const bool error = tone == Tone::Error, warning = tone == Tone::Warning;
+    if (m_message->property("error").toBool() != error || m_message->property("warning").toBool() != warning) {
         m_message->setProperty("error", error);
+        m_message->setProperty("warning", warning);
         repolish(m_message);
     }
     m_retry = retry;
+    m_retryKey = retry.isEmpty() ? QString() : m_selection.key;
+    m_sendAnyway->setText(retryLabel.isEmpty() ? tr("Send anyway") : retryLabel);
     m_sendAnyway->setVisible(!retry.isEmpty());
     m_messageBar->show();
 }
@@ -1186,6 +1272,7 @@ void TasksView::clearMessage()
 {
     m_messageBar->hide();
     m_retry = {};
+    m_retryKey.clear();
 }
 
 void TasksView::dropTask(const QString &uuid, const QString &stage, const QString &before)
@@ -1202,6 +1289,15 @@ void TasksView::dropTask(const QString &uuid, const QString &stage, const QStrin
     QString command;
     QJsonObject request{{QStringLiteral("task"), uuid}};
     if (task->stage == stage) {
+        // "Already there" is judged among the cards shown: with a filter, a
+        // drop just below the card or at the end must not pass hidden cards.
+        for (auto *candidate : std::as_const(m_columns)) {
+            if (candidate->stage != stage) continue;
+            QStringList shown;
+            for (int row = 0; row < candidate->list->count(); ++row)
+                if (!candidate->list->isRowHidden(row)) shown.append(candidate->list->item(row)->data(TaskRoles::Uuid).toString());
+            if (shown.contains(uuid)) column = shown;
+        }
         const int at = column.indexOf(uuid);
         if (before == uuid || (before.isEmpty() && at == column.size() - 1) || (!before.isEmpty() && column.indexOf(before) == at + 1)) return;
         command = QStringLiteral("reorder");
@@ -1217,22 +1313,26 @@ void TasksView::dropTask(const QString &uuid, const QString &stage, const QStrin
             clearMessage();
             return;
         }
-        QString message = result.refusal.value(QStringLiteral("message")).toString();
-        if (result.uncertain()) message = tr("%1 The change may have been made: the board shows it once it is read again.").arg(message);
-        showMessage(message, true);
+        // A timeout's message already says that the change may have been made.
+        showMessage(result.refusal.value(QStringLiteral("message")).toString(), result.uncertain() ? Tone::Warning : Tone::Error);
     }, this);
 }
 
 void TasksView::openTask(const QString &uuid)
 {
+    open(uuid, true);
+}
+
+void TasksView::open(const QString &uuid, bool reveal)
+{
     m_openTask = uuid;
     if (!m_project.isEmpty()) m_openTasks.insert(m_project, uuid);
-    selectCard(uuid, true);
+    selectCard(uuid, reveal);
     for (int i = 0; i < m_yourCallItems->count(); ++i)
         if (auto *button = m_yourCallItems->itemAt(i)->widget()) {
-            const bool open = button->property("uuid").toString() == uuid;
-            if (button->property("open").toBool() != open) {
-                button->setProperty("open", open);
+            const bool opened = button->property("uuid").toString() == uuid;
+            if (button->property("open").toBool() != opened) {
+                button->setProperty("open", opened);
                 repolish(button);
             }
         }
@@ -1240,7 +1340,8 @@ void TasksView::openTask(const QString &uuid)
 }
 
 // Selects the card in its column and clears the others. Revealing opens a
-// collapsed column and scrolls the card into view.
+// collapsed column (without changing the column's remembered state) and
+// scrolls the card into view.
 void TasksView::selectCard(const QString &uuid, bool reveal)
 {
     for (auto *column : std::as_const(m_columns)) {
@@ -1255,7 +1356,7 @@ void TasksView::selectCard(const QString &uuid, bool reveal)
         }
         if (!found->isSelected()) list->setCurrentItem(found);
         if (!reveal) continue;
-        if (column->isCollapsed()) toggleColumn(column->stage);
+        if (column->isCollapsed()) column->setCollapsed(false);
         m_board->ensureWidgetVisible(column);
         list->scrollToItem(found);
     }

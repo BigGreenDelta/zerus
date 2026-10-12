@@ -30,8 +30,10 @@ namespace {
 
 // A fake `hgs overmind` serving rev, status, decisions and boards from files
 // next to it (board-<project>.json). Every call is recorded with its argv and
-// stdin. A write prints refuse-<command>.json when present and exits 1;
-// otherwise it moves the cursor, so the model reads the board again.
+// stdin. sleep-<command> holds seconds to wait first. A write prints
+// refuse-<command>.json when present and exits 1; otherwise it moves the
+// cursor, so the model reads the board again, and prints reply-<command>.json
+// when present.
 const QByteArray kFixture = R"(#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
@@ -47,6 +49,7 @@ def read(name, default=None):
 if args and args[0].startswith('@'):
     args = args[1:]
 command = ' '.join(args[1:-1]) if args and args[0] == 'overmind' and args[-1] == '--json' else '?'
+time.sleep(float(read('sleep-' + command, '0')))
 cursor = int(read('rev'))
 def reply(value):
     print(json.dumps(value))
@@ -75,7 +78,11 @@ else:
             break
         except PermissionError:
             time.sleep(0.02)
-    reply({'ok': True, 'task': {'uuid': json.loads(data).get('task', '')}})
+    answer = read('reply-' + command + '.json')
+    if answer is not None:
+        print(answer)
+    else:
+        reply({'ok': True, 'task': {'uuid': json.loads(data).get('task', '')}})
 )";
 
 QJsonObject session(const QString &machine, const QString &name) { return {{"machine", machine}, {"name", name}}; }
@@ -87,6 +94,10 @@ QJsonObject workflow(const QList<QPair<QString, QString>> &stages)
     const QJsonArray rules{
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Inbox"}}, {"to", "Ready"}, {"actors", QJsonArray{"human"}}},
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Ready"}}, {"to", "Inbox"}, {"actors", QJsonArray{"human"}}},
+        QJsonObject{{"action", "unclaim"}, {"from", QJsonArray{"Doing"}}, {"to", "Ready"}, {"actors", QJsonArray{"human", "autopilot"}}},
+        // An agent's move and a move that needs a field are not a person's drag.
+        QJsonObject{{"action", "move"}, {"from", QJsonArray{"Doing"}}, {"to", "Later"}, {"actors", QJsonArray{"agent"}}},
+        QJsonObject{{"action", "move"}, {"from", QJsonArray{"Inbox"}}, {"to", "Later"}, {"actors", QJsonArray{"human"}}, {"requires", QJsonArray{"reason"}}},
         QJsonObject{{"action", "done"}, {"from", QJsonArray{"Check"}}, {"to", "Shipped"}, {"actors", QJsonArray{"human"}}}};
     return {{"version", 1}, {"stages", list}, {"rules", rules}, {"evidence", "text"}, {"session_wip", 1}};
 }
@@ -234,6 +245,19 @@ void drop(QWidget *target, const QString &uuid, const QPoint &position)
     QApplication::sendEvent(target, &dropped);
 }
 
+// Whether `target` takes a drag of the card, and whether its column lights up meanwhile.
+bool takes(QWidget *target, QFrame *column, const QString &uuid, bool *lit = nullptr)
+{
+    QMimeData mime;
+    mime.setData(TasksView::MimeType, uuid.toUtf8());
+    QDragEnterEvent enter(QPoint(10, 10), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(target, &enter);
+    if (lit) *lit = column->property("dropTarget").toBool();
+    QDragLeaveEvent leave;
+    QApplication::sendEvent(target, &leave);
+    return enter.isAccepted();
+}
+
 } // namespace
 
 class TestTasksView : public QObject {
@@ -245,6 +269,11 @@ private slots:
     void doneAndIceboxStartCollapsed();
     void highlightsTheSelectedSession();
     void refusedDropShowsTheReason();
+    void forbiddenColumnsRejectTheDrag();
+    void filteredReorderSkipsHiddenCards();
+    void sendNextWarnsWhenDeliveryIsUncertain();
+    void sendAnywayStaysWithItsSession();
+    void sendNextSkipsEpics();
     void projectPersistsAcrossSessions();
 private:
     std::unique_ptr<QTemporaryDir> m_settings;
@@ -349,6 +378,23 @@ void TestTasksView::doneAndIceboxStartCollapsed()
     QCOMPARE(view.openedTask(), QString("t3"));
     QCOMPARE(opened.last().first().toString(), QString("t3"));
 
+    // Opening a card in a collapsed column shows it, but the column is still
+    // collapsed the next time the board is built; a header click is remembered.
+    view.openTask("t8");
+    QVERIFY(!column(view, "Shipped")->property("collapsed").toBool());
+    QVERIFY(list(view, "Shipped")->item(0)->isSelected());
+    auto *projects = view.findChild<QComboBox *>("tasksProject");
+    projects->setCurrentIndex(projects->findData("other"));
+    projects->setCurrentIndex(projects->findData("demo"));
+    QTRY_VERIFY(column(view, "Shipped"));
+    QVERIFY(column(view, "Shipped")->property("collapsed").toBool());
+    qobject_cast<QAbstractButton *>(column(view, "Later")->findChild<QWidget *>("taskColumnHeader"))->click();
+    projects->setCurrentIndex(projects->findData("other"));
+    projects->setCurrentIndex(projects->findData("demo"));
+    QTRY_VERIFY(column(view, "Later"));
+    QVERIFY(!column(view, "Later")->property("collapsed").toBool());
+    strip = view.findChild<QFrame *>("tasksYourCall");
+
     // No Your Call task: no strip.
     auto board = demoBoard();
     auto tasks = board["tasks"].toArray();
@@ -403,6 +449,7 @@ void TestTasksView::highlightsTheSelectedSession()
     QVERIFY(message->property("error").toBool());
     auto *anyway = view.findChild<QPushButton *>("tasksSendAnyway");
     QVERIFY(anyway && anyway->isVisible());
+    QCOMPARE(anyway->text(), QString("Send om-t2 to codex/demo/one anyway"));
     QVERIFY(QFile::remove(f.dir.filePath("refuse-send.json")));
     anyway->click();
     QTRY_COMPARE(f.calls("send").size(), 4);
@@ -411,11 +458,16 @@ void TestTasksView::highlightsTheSelectedSession()
     QCOMPARE(retry["confirm"].toArray(), QJsonArray{"agent_busy"});
     QCOMPARE(retry["task"].toString(), QString("t2"));
 
-    // A machine that is not known yet: names still match on the local replica,
-    // but a session on another computer cannot be sent to.
+    // A machine that is not known yet: names still highlight, but nothing is
+    // sent, on this computer or another, since the name may be a session elsewhere.
+    QTRY_VERIFY(next->isEnabled());
     TasksView::Selection remote = selection("demo", "", "codex/demo/one"); remote.host = "mac";
     view.setSession(remote);
     QVERIFY(!next->isEnabled());
+    view.setSession(selection("demo", "", "codex/demo/one"));
+    QVERIFY(!next->isEnabled());
+    QCOMPARE(next->toolTip(), QString("Overmind does not know this session's computer yet."));
+    QVERIFY(highlighted(view).contains("t2"));
 
     // A session of another project highlights nothing and has no strip.
     view.setSession(selection("other", "m1", "codex/other/one"));
@@ -432,26 +484,26 @@ void TestTasksView::refusedDropShowsTheReason()
     view.setSession(selection("demo", "m1", "codex/demo/one"));
     view.show();
     QTRY_VERIFY(card(view, "t1"));
-    QVERIFY(f.put("refuse-move.json", R"({"ok":false,"error":{"code":"transition_not_allowed","message":"move from Inbox to Check is not allowed for human"}})"));
-    auto *check = list(view, "Check");
-    drop(check->viewport(), "t1", QPoint(20, check->viewport()->height() - 10));
+    // The workflow allows the move; the CLI's gates refuse it.
+    QVERIFY(f.put("refuse-move.json", R"({"ok":false,"error":{"code":"conflict","message":"om-t1 has conflicting edits: resolve them first"}})"));
+    auto *ready = list(view, "Ready");
+    drop(ready->viewport(), "t1", QPoint(20, ready->viewport()->height() - 10));
     QTRY_COMPARE(f.calls("move").size(), 1);
     QCOMPARE(f.calls("move").first()["task"].toString(), QString("t1"));
-    QCOMPARE(f.calls("move").first()["to"].toString(), QString("Check"));
+    QCOMPARE(f.calls("move").first()["to"].toString(), QString("Ready"));
     auto *message = view.findChild<QLabel *>("tasksMessage");
     QTRY_VERIFY(message->isVisible());
-    QCOMPARE(message->text(), QString("move from Inbox to Check is not allowed for human"));
+    QCOMPARE(message->text(), QString("om-t1 has conflicting edits: resolve them first"));
     QVERIFY(message->property("error").toBool());
     // The card stayed where it was, also after the next poll.
     QCOMPARE(cards(view, "Inbox"), QStringList{"t1"});
-    QCOMPARE(cards(view, "Check"), QStringList{"t6"});
+    QCOMPARE(cards(view, "Ready"), (QStringList{"t2", "t3", "t4", "t10"}));
     QTest::qWait(200);
     QCOMPARE(cards(view, "Inbox"), QStringList{"t1"});
     QVERIFY(message->isVisible());
 
     // An allowed drop runs move and clears the message.
     QVERIFY(QFile::remove(f.dir.filePath("refuse-move.json")));
-    auto *ready = list(view, "Ready");
     drop(ready->viewport(), "t1", QPoint(20, ready->viewport()->height() - 10));
     QTRY_COMPARE(f.calls("move").size(), 2);
     QCOMPARE(f.calls("move").last()["to"].toString(), QString("Ready"));
@@ -481,6 +533,175 @@ void TestTasksView::refusedDropShowsTheReason()
     QTest::qWait(200);
     QCOMPARE(f.calls("reorder").size(), 2);
     QCOMPARE(f.calls("move").size(), 3);
+
+    // A move that times out shows the model's one sentence about it.
+    QVERIFY(f.put("sleep-move", "1.5"));
+    auto timeouts = f.model->timeouts(); timeouts.local = 300; f.model->setTimeouts(timeouts);
+    drop(ready->viewport(), "t1", QPoint(20, ready->viewport()->height() - 10));
+    QTRY_VERIFY_WITH_TIMEOUT(message->isVisible(), 5000);
+    QCOMPARE(message->text().count("may have been"), 1);
+    QVERIFY(message->property("warning").toBool());
+}
+
+void TestTasksView::forbiddenColumnsRejectTheDrag()
+{
+    Fixture f; QVERIFY(f.setUp());
+    TasksView view(f.model.get()); view.resize(1600, 720);
+    view.setProjects(organization().groups());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    view.show();
+    QTRY_VERIFY(card(view, "t1"));
+    const auto header = [&](const QString &stage) { return column(view, stage)->findChild<QWidget *>("taskColumnHeader"); };
+    bool lit = false;
+    // A person's moves in this workflow: Inbox <-> Ready, Doing -> Ready (take back), Check -> Shipped.
+    QVERIFY(takes(list(view, "Ready")->viewport(), column(view, "Ready"), "t1", &lit)); QVERIFY(lit);
+    QVERIFY(takes(header("Inbox"), column(view, "Inbox"), "t2"));
+    QVERIFY(takes(list(view, "Ready")->viewport(), column(view, "Ready"), "t5"));
+    QVERIFY(takes(header("Shipped"), column(view, "Shipped"), "t6"));
+    // Its own column takes it, to reorder.
+    QVERIFY(takes(list(view, "Ready")->viewport(), column(view, "Ready"), "t2"));
+    // Not allowed: no rule, an active stage (send instead), an agent's rule, a rule that needs a field.
+    QVERIFY(!takes(list(view, "Check")->viewport(), column(view, "Check"), "t1", &lit)); QVERIFY(!lit);
+    QVERIFY(!takes(list(view, "Doing")->viewport(), column(view, "Doing"), "t2"));
+    QVERIFY(!takes(header("Doing"), column(view, "Doing"), "t1"));
+    QVERIFY(!takes(list(view, "Inbox")->viewport(), column(view, "Inbox"), "t5"));
+    QVERIFY(!takes(header("Later"), column(view, "Later"), "t5"));
+    QVERIFY(!takes(header("Later"), column(view, "Later"), "t1"));
+    QVERIFY(!takes(list(view, "Ready")->viewport(), column(view, "Ready"), "unknown"));
+    // A drop there anyway writes nothing.
+    auto *check = list(view, "Check");
+    drop(check->viewport(), "t1", QPoint(20, check->viewport()->height() - 10));
+    drop(header("Later"), "t1", QPoint(10, 10));
+    QTest::qWait(250);
+    QVERIFY(f.calls("move").isEmpty());
+    QVERIFY(!view.findChild<QLabel *>("tasksMessage")->isVisible());
+}
+
+void TestTasksView::filteredReorderSkipsHiddenCards()
+{
+    Fixture f; QVERIFY(f.setUp());
+    TasksView view(f.model.get()); view.resize(1400, 720);
+    view.setProjects(organization().groups());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    view.show();
+    QTRY_VERIFY(card(view, "t2"));
+    auto *ready = list(view, "Ready");
+    auto *filter = view.findChild<QLineEdit *>("tasksFilter");
+    // Shown: t2, t4, t10 (t3 hidden). t2 dropped just above t4 stays where it is.
+    filter->setText("queue");
+    QVERIFY(card(view, "t3")->isHidden());
+    drop(ready->viewport(), "t2", ready->visualItemRect(card(view, "t4")).topLeft() + QPoint(10, 4));
+    // Shown: t4 only. t4 dropped at the end stays before the hidden t10.
+    filter->setText("second");
+    drop(ready->viewport(), "t4", QPoint(20, ready->viewport()->height() - 10));
+    QTest::qWait(250);
+    QVERIFY(f.calls("reorder").isEmpty());
+    // A real move among the shown cards still reorders.
+    filter->setText("queue");
+    drop(ready->viewport(), "t10", ready->visualItemRect(card(view, "t2")).topLeft() + QPoint(10, 4));
+    QTRY_COMPARE(f.calls("reorder").size(), 1);
+    QCOMPARE(f.calls("reorder").first()["task"].toString(), QString("t10"));
+    QCOMPARE(f.calls("reorder").first()["before"].toString(), QString("t2"));
+}
+
+void TestTasksView::sendNextWarnsWhenDeliveryIsUncertain()
+{
+    Fixture f; QVERIFY(f.setUp());
+    TasksView view(f.model.get()); view.resize(1400, 720);
+    view.setProjects(organization().groups());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    view.show();
+    auto *next = view.findChild<QPushButton *>("tasksSendNext");
+    auto *message = view.findChild<QLabel *>("tasksMessage");
+    auto *anyway = view.findChild<QPushButton *>("tasksSendAnyway");
+    QTRY_VERIFY(card(view, "t2"));
+    QTRY_VERIFY(next->isEnabled());
+    // Recorded, but the input was not confirmed: a warning, never a retry.
+    QVERIFY(f.put("reply-send.json", R"({"ok":true,"delivery":"uncertain","reason":"the input receipt is missing","task":{"uuid":"t2"}})"));
+    next->click();
+    QTRY_VERIFY(message->isVisible());
+    QCOMPARE(message->text(), QString("om-t2 may not have reached codex/demo/one: the input receipt is missing. Check the task before sending it again."));
+    QVERIFY(message->property("warning").toBool());
+    QVERIFY(!message->property("error").toBool());
+    QVERIFY(!anyway->isVisible());
+    // A confirmed delivery.
+    QVERIFY(f.put("reply-send.json", R"({"ok":true,"delivery":"sent","reason":"","task":{"uuid":"t2"}})"));
+    QTRY_VERIFY(next->isEnabled());
+    next->click();
+    QTRY_COMPARE(message->text(), QString("Sent om-t2 to codex/demo/one."));
+    QVERIFY(!message->property("warning").toBool());
+    // A deadline: one sentence that it may have been sent.
+    QVERIFY(f.put("sleep-send", "1.5"));
+    auto timeouts = f.model->timeouts(); timeouts.deliveryLocal = 300; f.model->setTimeouts(timeouts);
+    QTRY_VERIFY(next->isEnabled());
+    next->click();
+    QTRY_VERIFY_WITH_TIMEOUT(message->isVisible() && message->text().contains("did not answer"), 5000);
+    QCOMPARE(message->text(), QString("The task board did not answer in time: om-t2 may have been sent to codex/demo/one. Check the task before sending it again."));
+    QVERIFY(!anyway->isVisible());
+}
+
+void TestTasksView::sendAnywayStaysWithItsSession()
+{
+    Fixture f; QVERIFY(f.setUp());
+    TasksView view(f.model.get()); view.resize(1400, 720);
+    view.setProjects(organization().groups());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    view.show();
+    auto *next = view.findChild<QPushButton *>("tasksSendNext");
+    auto *message = view.findChild<QLabel *>("tasksMessage");
+    auto *anyway = view.findChild<QPushButton *>("tasksSendAnyway");
+    QTRY_VERIFY(card(view, "t2"));
+    QTRY_VERIFY(next->isEnabled());
+    QVERIFY(f.put("refuse-send.json", R"({"ok":false,"error":{"code":"wip_exceeded","message":"codex/demo/one already holds a task","field":"confirm","state":"missing"}})"));
+    next->click();
+    QTRY_VERIFY(anyway->isVisible());
+    QCOMPARE(anyway->text(), QString("Send om-t2 to codex/demo/one anyway"));
+    // Another session: the offer and its message go; coming back does not restore them.
+    view.setSession(selection("demo", "m1", "claude/demo/review"));
+    QVERIFY(!message->isVisible());
+    QVERIFY(!anyway->isVisible());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    QVERIFY(!anyway->isVisible());
+    QCOMPARE(f.calls("send").size(), 1);
+    // A refusal that arrives after the switch offers nothing.
+    QVERIFY(f.put("sleep-send", "0.6"));
+    QTRY_VERIFY(next->isEnabled());
+    next->click();
+    view.setSession(selection("demo", "m1", "claude/demo/review"));
+    QTRY_VERIFY_WITH_TIMEOUT(message->isVisible(), 5000);
+    QVERIFY(message->text().contains("already holds a task"));
+    QVERIFY(!anyway->isVisible());
+    QTest::qWait(100);
+    QCOMPARE(f.calls("send").size(), 2);
+    QCOMPARE(f.calls("send").last()["session"].toObject()["name"].toString(), QString("codex/demo/one"));
+}
+
+void TestTasksView::sendNextSkipsEpics()
+{
+    Fixture f; QVERIFY(f.setUp());
+    auto board = demoBoard();
+    auto tasks = board["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["uuid"] == "t2" || task["uuid"] == "t3") { task["labels"] = QJsonArray{"epic"}; tasks[i] = task; }
+    }
+    board["tasks"] = tasks;
+    QVERIFY(f.put("board-demo.json", compact(board)));
+    TasksView view(f.model.get()); view.resize(1400, 720);
+    view.setProjects(organization().groups());
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    view.show();
+    auto *next = view.findChild<QPushButton *>("tasksSendNext");
+    QTRY_VERIFY(card(view, "t2"));
+    QTRY_VERIFY(next->isEnabled());
+    // The queue's epic t2 is skipped for t4.
+    next->click();
+    QTRY_COMPARE(f.calls("send").size(), 1);
+    QCOMPARE(f.calls("send").first()["task"].toString(), QString("t4"));
+    // The pool's epic t3 is skipped too: the review session has nothing to send.
+    view.setSession(selection("demo", "m1", "claude/demo/review"));
+    QTRY_VERIFY(!next->isEnabled());
+    QCOMPARE(next->toolTip(), QString("No task waits in this session's queue or in the project pool."));
 }
 
 void TestTasksView::projectPersistsAcrossSessions()
@@ -529,6 +750,20 @@ void TestTasksView::projectPersistsAcrossSessions()
         QVERIFY(ready->item(0)->isSelected());
         QCOMPARE(board->horizontalScrollBar()->value(), 120);
         QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
+        // A click opens a partly shown card without scrolling the board sideways.
+        filter->clear();
+        board->horizontalScrollBar()->setValue(0);
+        auto *check = list(view, "Check");
+        QVERIFY(check->mapTo(board->viewport(), QPoint(20, 0)).x() < board->viewport()->width());
+        QVERIFY(check->mapTo(board->viewport(), QPoint(check->width(), 0)).x() > board->viewport()->width());
+        QTest::mouseClick(check->viewport(), Qt::LeftButton, {}, check->visualItemRect(card(view, "t6")).topLeft() + QPoint(8, 8));
+        QCOMPARE(view.openedTask(), QString("t6"));
+        QCOMPARE(board->horizontalScrollBar()->value(), 0);
+        // openTask reveals it.
+        view.openTask("t1");
+        board->horizontalScrollBar()->setValue(0);
+        view.openTask("t6");
+        QVERIFY(board->horizontalScrollBar()->value() > 0);
     }
     // A restart opens the chosen project, whatever session is selected.
     TasksView reopened(f.model.get());
@@ -541,9 +776,20 @@ void TestTasksView::projectPersistsAcrossSessions()
     groups[0].accessible = false;
     reopened.setProjects(groups);
     QCOMPARE(reopened.project(), QString("other"));
+    QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
+    // Offered again, the stored choice comes back.
+    reopened.setProjects(organization().groups());
+    QCOMPARE(reopened.project(), QString("demo"));
+    // A choice made during a fallback is kept instead.
+    reopened.setProjects(groups);
+    QCOMPARE(reopened.project(), QString("other"));
+    auto *projects = reopened.findChild<QComboBox *>("tasksProject");
+    emit projects->activated(projects->findData("other"));   // picking the project shown stores it
+    QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("other"));
+    reopened.setProjects(organization().groups());
+    QCOMPARE(reopened.project(), QString("other"));
     // showProject opens a given project and asks for the tab.
     QSignalSpy shown(&reopened, &TasksView::showRequested);
-    reopened.setProjects(organization().groups());
     reopened.showProject("demo", "m1\ncodex/demo/one");
     QCOMPARE(reopened.project(), QString("demo"));
     QCOMPARE(shown.size(), 1);

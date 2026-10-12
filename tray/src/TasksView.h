@@ -45,9 +45,10 @@ enum {
 // workspace/tasksProject; on first use it is the selected session's project.
 //
 // Columns follow the project workflow. The needs_human stages are not columns
-// but the Your Call strip above the board. Dragging a card to another column
-// runs `move`; the CLI checks the workflow and a refusal is shown inline while
-// the card stays where it was. Dragging inside a column runs `reorder`.
+// but the Your Call strip above the board. A card can be dragged only to
+// columns the workflow's human move rules allow from its stage; there it runs
+// `move`. The CLI stays the authority: its refusal is shown inline while the
+// card stays where it was. Dragging inside a column runs `reorder`.
 class TasksView : public QWidget {
     Q_OBJECT
 public:
@@ -60,7 +61,7 @@ public:
         QString project;    // its logical project (SessionOrganization group ID)
         QString host;       // its host as the window names it; empty for this computer
         // The machine is the Overmind node ID, empty while unknown. Names then
-        // match on their own, and a session on another computer cannot be sent to.
+        // match on their own (highlights only): nothing is sent to it.
         OvermindModel::Session session;
     };
     // Colors of SessionsWindow::applyTheme, plus the board's own.
@@ -116,10 +117,17 @@ private:
     bool owned(const QStringList &owners) const;
     bool collapsed(const QString &stage, const QString &role) const;
     void toggleColumn(const QString &stage);
+    // Whether a person may drag the card to `stage`: its own column, or a
+    // column the workflow's human move rules allow from the card's stage.
+    bool canDrop(const QString &uuid, const QString &stage) const;
     QString nextTask(const OvermindModel::Board &board) const;
     void sendNext(const QJsonObject &retry = {});
-    void showMessage(const QString &text, bool error, const QJsonObject &retry = {});
+    enum class Tone { Info, Warning, Error };
+    // With a retry, Send anyway (labelled retryLabel) repeats that send.
+    void showMessage(const QString &text, Tone tone, const QJsonObject &retry = {}, const QString &retryLabel = {});
     void clearMessage();
+    // Opens a card; revealing scrolls it into view (a click does not).
+    void open(const QString &uuid, bool reveal);
     void selectCard(const QString &uuid, bool reveal);
 
     QPointer<OvermindModel> m_model;
@@ -131,8 +139,12 @@ private:
     QList<OvermindModel::Stage> m_stages;         // the columns shown (needs_human excluded)
     QList<TaskColumn *> m_columns;
     bool m_dark = false, m_opened = false, m_sending = false;
+    // The project shown stands in for a stored one that is not offered; the
+    // stored one returns once it is offered again.
+    bool m_fallback = false;
     Palette m_palette;
     QJsonObject m_retry;                          // the send that Send anyway repeats
+    QString m_retryKey;                           // the session key it was refused for
 
     QComboBox *m_projects;
     QLineEdit *m_filter;
