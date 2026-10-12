@@ -1330,6 +1330,10 @@ void TaskPanel::fillSessions(QMenu *menu, Purpose purpose)
     const QString uuid = m_uuid;
     if (uuid.isEmpty()) return;
     const QJsonObject task = current();
+    // A pin follows its session's renames: pinned_current names it now.
+    QJsonObject pinned = task.value(QStringLiteral("pinned")).toObject();
+    const QString renamed = task.value(QStringLiteral("pinned_current")).toString();
+    if (!pinned.isEmpty() && !renamed.isEmpty()) pinned.insert(QStringLiteral("name"), renamed);
     const auto recipients = m_view->recipients();
     if (recipients.isEmpty()) menu->addAction(tr("No sessions in this project"))->setEnabled(false);
     for (const auto &recipient : recipients) {
@@ -1347,7 +1351,7 @@ void TaskPanel::fillSessions(QMenu *menu, Purpose purpose)
         action->setEnabled(enabled);
         if (purpose == Purpose::Pin) {
             action->setCheckable(true);
-            action->setChecked(sameSession(task.value(QStringLiteral("pinned")), recipient.session));
+            action->setChecked(sameSession(pinned, recipient.session));
         }
         const OvermindModel::Session session = recipient.session;
         connect(action, &QAction::triggered, this, [this, uuid, session, purpose] {

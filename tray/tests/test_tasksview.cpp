@@ -1110,6 +1110,13 @@ void TestTasksView::panelEditsRunTheirCommands()
     action(pin->menu(), "m2\ncodex/demo/two")->trigger();
     QTRY_COMPARE(b.f.calls("pin").size(), 1);
     QCOMPARE(plain(b.f.calls("pin").last()), (QJsonObject{{"task", "t1"}, {"session", session("m2", "codex/demo/two")}}));
+    // A pin follows its session's renames: the menu ticks the session by its current name.
+    QVERIFY(b.f.put("show-t2.json", compact({{"pinned", session("m1", "codex/demo/old")}, {"pinned_current", "codex/demo/one"}})));
+    QVERIFY(b.show("t2"));
+    QCOMPARE(b.find<QLabel>("taskPinned")->text(), QString("Pinned to codex/demo/one"));
+    QVERIFY(action(pin->menu(), "m1\ncodex/demo/one")->isChecked());
+    QVERIFY(!action(pin->menu(), "m2\ncodex/demo/two")->isChecked());
+    QVERIFY(b.show("t1"));
     // Relations: added by ref, removed with the chip's button.
     auto *kind = b.find<QComboBox>("taskRelationKind");
     kind->setCurrentIndex(kind->findData("related"));
