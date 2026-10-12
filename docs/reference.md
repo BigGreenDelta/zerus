@@ -1209,6 +1209,9 @@ GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live o
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
+On Linux, client policy refreshes start the configured user service without
+restarting an active executor. A detached worker remains the fallback when no
+installed service or usable user manager is available.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
