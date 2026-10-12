@@ -3189,22 +3189,44 @@ elif args[0]=='answer':
 
 void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
 {
-    SessionsWindow window(program());window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");QTest::qWait(100);
-    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>();
-    setComposerText(composer, "An unrelated follow-up");
     QJsonObject question{{"question_id","optional-one"},{"question_hash","hash"},{"run_id","run-one"},{"conversation_id","conversation-one"},
         {"optional",true},{"can_answer",false},{"can_skip",true},{"questions",QJsonArray{QJsonObject{{"id","q_0"},{"question","Which option?"},{"required",false},{"allow_other",true},{"options",QJsonArray{}}}}}};
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},{"runtime_state","live"},{"process_state","running"},
-        {"activity","idle"},{"phase","idle"},{"pending_questions",QJsonArray{question}}};
-    client->inspectionReady({},"codex/hgs/dashboard",details);
+        {"activity","idle"},{"phase","idle"},{"pending_questions",QJsonArray{}}};
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto fixture = m_dir->filePath("optional-question-hgs");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n",
+        "if False:pass\nelif c=='inspect':print(open(__file__+'.details').read())\n")));
+    QVERIFY(FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson()));
+    SessionsWindow window(FakeCli::program(fixture));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>();
+    const auto applyDetails = [&] {
+        if (!FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson())) return false;
+        // Wait for an inspection started after the atomic update: an older
+        // in-flight reply must not replace the form while its draft loads.
+        QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+        return QTest::qWaitFor([&] {
+            if (issued < 0) {
+                if (!client->requestInspection({}, "codex/hgs/dashboard")) return false;
+                issued = replies.size();
+            }
+            return std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) {
+                return reply[0].toString().isEmpty() && reply[1].toString() == "codex/hgs/dashboard"
+                    && reply[2].toJsonObject() == details && reply[3].toString().isEmpty();
+            });
+        });
+    };
+    QVERIFY(applyDetails());
+    setComposerText(composer, "An unrelated follow-up");
+    details["pending_questions"] = QJsonArray{question}; QVERIFY(applyDetails());
     QVERIFY(card->isVisible());QTRY_VERIFY(!card->isDraftLoading());QVERIFY(composer->isInputVisible());QVERIFY(composer->findChild<QPushButton *>("sendMessage")->isEnabled());
     QVERIFY(card->findChild<QPushButton *>("skipQuestion")->isEnabled());
-    client->inspectionReady({},"codex/hgs/dashboard",details);QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
+    QVERIFY(applyDetails());QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
     auto latest=question;latest["question_id"]="latest";latest["created_at"]=20;
     latest["questions"]=QJsonArray{QJsonObject{{"id","q_0"},{"question","Most recent question?"},{"required",false},{"allow_other",true},{"options",QJsonArray{}}}};
     question["created_at"]=10;question["can_answer"]=true;
     auto olderItems=question["questions"].toArray();auto secondItem=olderItems.first().toObject();secondItem["id"]="q_1";secondItem["question"]="Another older question?";olderItems.append(secondItem);question["questions"]=olderItems;
-    details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};QVERIFY(applyDetails());
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("3 pending"));
     QStringList labels=questionPrompts(card);
     QVERIFY(labels.contains("Most recent question?"));QVERIFY(!labels.contains("Which option?"));
@@ -3217,47 +3239,51 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
             if(editor->property("questionId").toString()=="q_0")return editor;
         return static_cast<QLineEdit *>(nullptr);
     };
-    QTRY_VERIFY(!card->isDraftLoading());firstAnswer()->setText("Latest draft");
+    const auto answerReady = [&](const QString &prompt) {
+        return card->isVisible() && !card->isDraftLoading() && questionPrompts(card).contains(prompt) && firstAnswer();
+    };
+    QTRY_VERIFY(answerReady("Most recent question?"));firstAnswer()->setText("Latest draft");
     next->click();QTRY_VERIFY(!card->isDraftLoading());
     labels=questionPrompts(card);
     QVERIFY(labels.contains("Which option?"));QVERIFY(!labels.contains("Most recent question?"));
     QVERIFY(previous->isEnabled());QVERIFY(!next->isEnabled());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #2/2"));
-    QTRY_VERIFY(!card->isDraftLoading());firstAnswer()->setText("Older draft");
+    QTRY_VERIFY(answerReady("Which option?"));firstAnswer()->setText("Older draft");
     auto *pages=card->findChild<QTabBar *>("questionTabs");pages->setCurrentIndex(1);
     previous->click();QTRY_VERIFY(!card->isDraftLoading());
-    QTRY_COMPARE(firstAnswer()->text(),QString("Latest draft"));
+    QTRY_VERIFY(answerReady("Most recent question?") && firstAnswer()->text() == "Latest draft");
     next->click();QTRY_VERIFY(!card->isDraftLoading());
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     QCOMPARE(card->findChild<QTabBar *>("questionTabs")->currentIndex(),1);
     auto newest=latest;newest["question_id"]="newest";newest["created_at"]=30;
-    details["pending_questions"]=QJsonArray{newest,question,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{newest,question,latest};QVERIFY(applyDetails());
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("4 pending"));
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #3/3"));
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     // A required confirmation preempts browsing, then returns to the chosen draft.
     auto required=latest;required["optional"]=false;required["question_id"]="required";required["can_answer"]=true;
-    details["pending_questions"]=QJsonArray{newest,question,required,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{newest,question,required,latest};QVERIFY(applyDetails());
     QVERIFY(previous->isHidden());QVERIFY(next->isHidden());QVERIFY(!composer->isInputVisible());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Agent needs your answer"));
     card->queueNavigationRequested(1); // Stale navigation cannot bypass a required request.
     QVERIFY(!composer->isInputVisible());QVERIFY(next->isHidden());
-    details["pending_questions"]=QJsonArray{newest,question,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    details["pending_questions"]=QJsonArray{newest,question,latest};QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     QVERIFY(composer->isInputVisible());QCOMPARE(answers.size(),0);
     // A different conversation must start from its own newest question.
-    details["conversation_id"]="conversation-two";client->inspectionReady({},"codex/hgs/dashboard",details);
-    client->inspectionReady({},"codex/hgs/dashboard",details); // Initial history fetch after the conversation changed.
+    details["conversation_id"]="conversation-two";QVERIFY(applyDetails());
+    QVERIFY(applyDetails()); // Initial history fetch after the conversation changed.
+    QTRY_VERIFY(answerReady("Most recent question?"));
     QCOMPARE(firstAnswer()->text(),QString());
     QVERIFY(!previous->isEnabled());
-    details["conversation_id"]="conversation-one";client->inspectionReady({},"codex/hgs/dashboard",details);
-    client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    details["conversation_id"]="conversation-one";QVERIFY(applyDetails());
+    QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     // When the selected request resolves elsewhere, fall back to a pending one.
-    details["pending_questions"]=QJsonArray{latest};client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Latest draft"));
+    details["pending_questions"]=QJsonArray{latest};QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Most recent question?") && firstAnswer()->text() == "Latest draft");
     QVERIFY(previous->isHidden());QVERIFY(next->isHidden());
-    details["pending_questions"]=QJsonArray{};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{};QVERIFY(applyDetails());
     QVERIFY(card->isHidden());QVERIFY(composer->isInputVisible());QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
 }
 
