@@ -159,9 +159,10 @@ its own origin id, created with the store, and numbers its events from `seq` 1.
 therefore never collides with events written earlier, even when it writes
 before its peers refill it. A store restored from an old copy writes under the
 same origin as the original, so its new events could collide with events written
-since. Exchanges carry tips and pushes start at an anchor (Replication below),
-so the collision is found at the next exchange with a peer store that holds
-those positions, however many events the copy wrote; a copy that only lost
+since. Exchanges carry tips, and pushes start at an anchor that the receiver
+compares when it holds that position (Replication below), so the collision is
+found at the next exchange with a peer store that holds those positions,
+however many events the copy wrote; a copy that only lost
 events finds it when a peer holds more events of its origin than it does. The
 store then switches to a fresh origin for later events and records the fact in
 its origin history, which `status` shows. Events written before that exchange
@@ -212,10 +213,14 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   the other side in `collisions`, which both messages carry and which name the
   collisions found in the current exchange. Every push of an origin, in the
   request and in the answer, starts with the event at the receiver's last known
-  position of that origin (the anchor) when that position is past zero, so
-  `insert_raw` compares it before extending the log: an identical anchor is
-  skipped, and a different one is refused, stops the origin and is a collision
-  as well. Detection works per pair of stores, at their next exchange. A store
+  position of that origin (the anchor) when that position is past zero, and
+  `anchors` (optional in both messages) names that position. The receiver
+  compares the anchor when it holds that position and extends the log only
+  after the anchor matched: an identical anchor is skipped, and a different one
+  is refused, stops the origin and is a collision as well. An anchor beyond the
+  receiver's log stops that origin for the round, like a gap, until the next
+  round anchors at the log's real end, where the comparison finds any fork.
+  Detection works per pair of stores, at their next exchange. A store
   whose own current origin collides replaces it before anything is written
   there again, as a store does when a peer holds more events of its origin
   than it does. Both sides record each collision once in the origin history,
@@ -225,7 +230,7 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   the peer carries then. A caller holds back an origin that collided with the
   peer before until the peer's first answer, and a peer that holds nothing of
   the origin, such as a store created again on its machine, gets it again.
-  Both fields are optional, so a machine without them still exchanges.
+  These fields are optional, so a machine without them still exchanges.
 - `status` shows `origin_history`, newest first and at most 20: each change of
   this store's origin (`restored`) and each collision (`collision`), with `at`,
   `origin`, `peer` and, when the store replaced the origin, `replaced_by`. A

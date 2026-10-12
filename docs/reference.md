@@ -1491,9 +1491,11 @@ Each exchange therefore also carries tips: for every origin, the id of the
 sender's last event of it. A side that holds that position with another event
 has found a collision of that origin, and it tells the other side. Every push
 of an origin also starts with the event at the receiver's last known position
-of it, so the receiver compares that event before it extends its log, and a
-different one is a collision too. Detection works per pair of stores, at their
-next exchange. A store whose own origin collides, or whose peer holds more
+of it, the anchor, and names that position. The receiver compares the anchor
+when it holds that position and extends its log only after the anchor matched;
+a different one is a collision too. An anchor beyond the receiver's log stops
+that origin for the round, until the next round anchors at the log's real end.
+Detection works per pair of stores, at their next exchange. A store whose own origin collides, or whose peer holds more
 events of its origin than it does, writes later events under a fresh origin.
 Two stores do not exchange events of an origin while their logs of it differ;
 each exchange checks this again, so a store that was created again on a

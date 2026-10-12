@@ -54,6 +54,16 @@ pub struct Store {
     origin: String,
 }
 
+/// Events to send to a peer (`Store::push`).
+#[derive(Debug, Default)]
+pub struct Batch {
+    pub events: Vec<Value>,
+    /// More events remain after this batch.
+    pub more: bool,
+    /// For each origin that starts with its anchor, the anchor's position.
+    pub anchors: BTreeMap<String, u64>,
+}
+
 /// What `insert_raw` did with a batch from another machine.
 #[derive(Debug, Default, PartialEq)]
 pub struct Received {
@@ -341,18 +351,21 @@ impl Store {
     /// each origin in turn (each origin in `seq` order), so an origin the peer
     /// cannot accept never holds back the others. The flag says whether more remain.
     pub fn missing(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
-        self.collect(peer, max_bytes, false)
+        let batch = self.collect(peer, max_bytes, false)?;
+        Ok((batch.events, batch.more))
     }
 
     /// What to send to a peer: `missing`, where each origin starts with its
     /// anchor, the event at the peer's last known position of it, when that
-    /// position is past zero. The peer compares the anchor before it extends
-    /// its log, so a log that differs there is never extended.
-    pub fn push(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
+    /// position is past zero; `anchors` names those positions. The peer
+    /// compares the anchor when it holds that position and extends its log only
+    /// after the anchor matched. An anchor beyond the peer's log stops that
+    /// origin for the round, until the next round anchors at the log's real end.
+    pub fn push(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<Batch> {
         self.collect(peer, max_bytes, true)
     }
 
-    fn collect(&self, peer: &BTreeMap<String, u64>, max_bytes: usize, anchored: bool) -> Result<(Vec<Value>, bool)> {
+    fn collect(&self, peer: &BTreeMap<String, u64>, max_bytes: usize, anchored: bool) -> Result<Batch> {
         let mut pending: Vec<(String, i64, bool)> = self
             .conn
             .prepare("SELECT DISTINCT origin FROM events ORDER BY origin")?
@@ -367,7 +380,7 @@ impl Store {
         let mut statement =
             self.conn.prepare("SELECT seq, raw FROM events WHERE origin = ?1 AND seq > ?2 ORDER BY seq LIMIT 1")?;
         let mut at = self.conn.prepare("SELECT raw FROM events WHERE origin = ?1 AND seq = ?2")?;
-        let mut out = Vec::new();
+        let mut batch = Batch::default();
         let mut bytes = 0;
         while !pending.is_empty() {
             let mut next = Vec::new();
@@ -377,24 +390,27 @@ impl Store {
                     .optional()?;
                 let Some((seq, raw)) = row else { continue };
                 // The anchor goes only with the first event after it.
-                let mut raws = Vec::new();
-                if anchor {
-                    raws.extend(at.query_row(params![origin, after], |row| row.get::<_, String>(0)).optional()?);
-                }
-                raws.push(raw);
-                let size: usize = raws.iter().map(String::len).sum();
-                if !out.is_empty() && bytes + size > max_bytes {
-                    return Ok((out, true));
+                let anchor = if anchor {
+                    at.query_row(params![origin, after], |row| row.get::<_, String>(0)).optional()?
+                } else {
+                    None
+                };
+                let size = raw.len() + anchor.as_ref().map_or(0, String::len);
+                if !batch.events.is_empty() && bytes + size > max_bytes {
+                    batch.more = true;
+                    return Ok(batch);
                 }
                 bytes += size;
-                for raw in raws {
-                    out.push(serde_json::from_str(&raw)?);
+                if let Some(anchor) = anchor {
+                    batch.events.push(serde_json::from_str(&anchor)?);
+                    batch.anchors.insert(origin.clone(), after as u64);
                 }
+                batch.events.push(serde_json::from_str(&raw)?);
                 next.push((origin, seq, false));
             }
             pending = next;
         }
-        Ok((out, false))
+        Ok(batch)
     }
 
     /// Inserts events from another machine. Known events are skipped, and an
@@ -402,8 +418,11 @@ impl Store {
     /// event is never stored, so its origin stops there; the rest of the batch
     /// is still inserted. Another event at a position stored here means that
     /// the sender's log of that origin differs, so none of its later events of
-    /// that origin are stored: they would continue another history.
-    pub fn insert_raw(&mut self, raws: &[Value]) -> Result<Received> {
+    /// that origin are stored: they would continue another history. An origin
+    /// with an anchor (`push`) is extended only after the batch's event at the
+    /// anchor matched the one stored there: an anchor past this store's end is
+    /// left like a gap, and the sender anchors again at this store's real end.
+    pub fn insert_raw(&mut self, raws: &[Value], anchors: &BTreeMap<String, u64>) -> Result<Received> {
         let mut received = Received::default();
         let mut events = Vec::new();
         for raw in raws {
@@ -413,6 +432,8 @@ impl Store {
             }
         }
         events.sort_by(|a, b| (a.0.origin.as_str(), a.0.seq).cmp(&(b.0.origin.as_str(), b.0.seq)));
+        // Anchored origins whose anchor matched the event stored at its position.
+        let mut confirmed: BTreeSet<&str> = BTreeSet::new();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (event, raw) in &events {
             let max: i64 = tx.query_row(
@@ -430,11 +451,16 @@ impl Store {
                 if stored != event.id {
                     received.refused += 1;
                     received.differing.insert(event.origin.clone());
+                } else if anchors.get(&event.origin) == Some(&event.seq) {
+                    confirmed.insert(&event.origin);
                 }
                 continue;
             }
             if received.differing.contains(&event.origin) {
                 received.refused += 1;
+                continue;
+            }
+            if anchors.contains_key(&event.origin) && !confirmed.contains(event.origin.as_str()) {
                 continue;
             }
             if event.seq != max as u64 + 1 {
@@ -778,9 +804,9 @@ mod tests {
         assert!(!more);
         let mut store = Store::open(dir.path(), MACHINE).unwrap();
         // A gap (seq 1 missing) inserts nothing for that origin.
-        assert_eq!(counts(store.insert_raw(&all[1..]).unwrap()), (0, 0));
-        assert_eq!(counts(store.insert_raw(&all).unwrap()), (3, 0));
-        assert_eq!(counts(store.insert_raw(&all).unwrap()), (0, 0));
+        assert_eq!(counts(store.insert_raw(&all[1..], &BTreeMap::new()).unwrap()), (0, 0));
+        assert_eq!(counts(store.insert_raw(&all, &BTreeMap::new()).unwrap()), (3, 0));
+        assert_eq!(counts(store.insert_raw(&all, &BTreeMap::new()).unwrap()), (0, 0));
         let local = store.write(|tx| tx.append(&draft("t"))).unwrap();
         assert!(local.lamport > 3);
         let (rest, _) = store.missing(&source.version_vector().unwrap(), usize::MAX).unwrap();
@@ -810,7 +836,7 @@ mod tests {
             store.write(|tx| tx.append(&draft("t"))).unwrap();
         }
         let theirs = remote(2);
-        store.insert_raw(&theirs).unwrap();
+        store.insert_raw(&theirs, &BTreeMap::new()).unwrap();
         let mine = store.origin().to_owned();
         let other = theirs[0]["origin"].as_str().unwrap().to_owned();
         let positions = |peer: BTreeMap<String, u64>| -> Vec<(String, u64)> {
@@ -853,13 +879,13 @@ mod tests {
             json!({"id": "damaged"}),
         ];
         batch.extend(theirs.iter().cloned());
-        assert_eq!(counts(store.insert_raw(&batch).unwrap()), (2, 4));
+        assert_eq!(counts(store.insert_raw(&batch, &BTreeMap::new()).unwrap()), (2, 4));
         let vector = store.version_vector().unwrap();
         let other = theirs[0]["origin"].as_str().unwrap().to_owned();
         assert_eq!(vector, BTreeMap::from([(store.origin().to_owned(), 1), (other, 2)]));
         // A clock pushed to the limit fails local writes with a clear error, never an overflow.
         let edge = copy(&origins[0], 1, MAX_POSITION - 1, &fresh());
-        assert_eq!(counts(store.insert_raw(&[edge]).unwrap()), (1, 0));
+        assert_eq!(counts(store.insert_raw(&[edge], &BTreeMap::new()).unwrap()), (1, 0));
         assert_eq!(store.write(|tx| tx.append(&draft("t"))).unwrap().lamport, MAX_POSITION);
         let error = store.write(|tx| tx.append(&draft("t"))).unwrap_err();
         assert!(format!("{error:#}").contains("exhausted"), "{error:#}");
@@ -870,11 +896,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path(), MACHINE).unwrap();
         let theirs = remote(2);
-        assert_eq!(counts(store.insert_raw(&theirs).unwrap()), (2, 0));
+        assert_eq!(counts(store.insert_raw(&theirs, &BTreeMap::new()).unwrap()), (2, 0));
         let mut forged = theirs[0].clone();
         forged["id"] = json!(uuid::Uuid::new_v4().to_string());
         // The identical copy is skipped silently; the different one is counted.
-        let received = store.insert_raw(&[forged, theirs[1].clone()]).unwrap();
+        let received = store.insert_raw(&[forged, theirs[1].clone()], &BTreeMap::new()).unwrap();
         assert_eq!(received.differing.len(), 1);
         assert_eq!(counts(received), (0, 1));
         assert_eq!(store.load(&Filter::All).unwrap().len(), 2);
@@ -885,20 +911,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path(), MACHINE).unwrap();
         let theirs = remote(3);
-        assert_eq!(counts(store.insert_raw(&theirs[..2]).unwrap()), (2, 0));
+        assert_eq!(counts(store.insert_raw(&theirs[..2], &BTreeMap::new()).unwrap()), (2, 0));
         // Another log of the same origin: its second event differs, so its third
         // would continue another history than the one stored here.
         let mut other = theirs[1].clone();
         other["id"] = json!(uuid::Uuid::new_v4().to_string());
         let mut next = theirs[2].clone();
         next["id"] = json!(uuid::Uuid::new_v4().to_string());
-        let received = store.insert_raw(&[theirs[0].clone(), other, next]).unwrap();
+        let received = store.insert_raw(&[theirs[0].clone(), other, next], &BTreeMap::new()).unwrap();
         let origin = theirs[0]["origin"].as_str().unwrap().to_owned();
         assert_eq!(received.differing, BTreeSet::from([origin]));
         assert_eq!(counts(received), (0, 2));
         assert_eq!(store.load(&Filter::All).unwrap().len(), 2);
         // The same log still extends.
-        let received = store.insert_raw(&theirs).unwrap();
+        let received = store.insert_raw(&theirs, &BTreeMap::new()).unwrap();
         assert!(received.differing.is_empty());
         assert_eq!(counts(received), (1, 0));
     }
@@ -911,19 +937,49 @@ mod tests {
             store.write(|tx| tx.append(&draft("t"))).unwrap();
         }
         let theirs = remote(2);
-        store.insert_raw(&theirs).unwrap();
+        store.insert_raw(&theirs, &BTreeMap::new()).unwrap();
         let (mine, other) = (store.origin().to_owned(), theirs[0]["origin"].as_str().unwrap().to_owned());
-        let positions = |peer: BTreeMap<String, u64>, budget: usize| -> (Vec<(String, u64)>, bool) {
-            let (events, more) = store.push(&peer, budget).unwrap();
-            (events.iter().map(|e| (e["origin"].as_str().unwrap().to_owned(), e["seq"].as_u64().unwrap())).collect(), more)
+        let positions = |peer: BTreeMap<String, u64>, budget: usize| -> (Vec<(String, u64)>, bool, BTreeMap<String, u64>) {
+            let batch = store.push(&peer, budget).unwrap();
+            let positions = batch.events.iter().map(|e| (e["origin"].as_str().unwrap().to_owned(), e["seq"].as_u64().unwrap()));
+            (positions.collect(), batch.more, batch.anchors)
         };
         // The anchor goes with the first event after it; an origin the peer holds
         // completely, or does not hold at all, has none.
         let peer = BTreeMap::from([(mine.clone(), 1), (other.clone(), 2)]);
-        assert_eq!(positions(peer.clone(), usize::MAX), (vec![(mine.clone(), 1), (mine.clone(), 2), (mine.clone(), 3)], false));
-        assert_eq!(positions(BTreeMap::from([(other.clone(), 1)]), usize::MAX).0.len(), 3 + 2);
+        let anchored = BTreeMap::from([(mine.clone(), 1)]);
+        let expected = vec![(mine.clone(), 1), (mine.clone(), 2), (mine.clone(), 3)];
+        assert_eq!(positions(peer.clone(), usize::MAX), (expected, false, anchored.clone()));
+        let (all, _, anchors) = positions(BTreeMap::from([(other.clone(), 1)]), usize::MAX);
+        assert_eq!((all.len(), anchors), (3 + 2, BTreeMap::from([(other, 1)])));
         // The anchor and its event never part over the byte budget.
-        assert_eq!(positions(peer, 1), (vec![(mine.clone(), 1), (mine, 2)], true));
+        assert_eq!(positions(peer, 1), (vec![(mine.clone(), 1), (mine, 2)], true, anchored));
+    }
+
+    #[test]
+    fn an_anchored_origin_is_extended_only_after_its_anchor_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let theirs = remote(4);
+        let origin = theirs[0]["origin"].as_str().unwrap().to_owned();
+        store.insert_raw(&theirs[..1], &BTreeMap::new()).unwrap();
+        // The push is anchored at position 2, just past this store's end: it is
+        // meant to continue another store's view of this log, so nothing is stored.
+        let past_the_end = BTreeMap::from([(origin.clone(), 2)]);
+        let received = store.insert_raw(&theirs[1..], &past_the_end).unwrap();
+        assert_eq!((counts(received), store.version_vector().unwrap().get(&origin)), ((0, 0), Some(&1)));
+        // Anchored at this store's end, the anchor matches and the log extends.
+        let at_the_end = BTreeMap::from([(origin.clone(), 1)]);
+        assert_eq!(counts(store.insert_raw(&theirs, &at_the_end).unwrap()), (3, 0));
+        // A batch without the event at its anchor extends nothing either.
+        let more = remote(1);
+        let other = more[0]["origin"].as_str().unwrap().to_owned();
+        store.insert_raw(&more, &BTreeMap::new()).unwrap();
+        let mut second = more[0].clone();
+        second["seq"] = json!(2);
+        second["id"] = json!(uuid::Uuid::new_v4().to_string());
+        assert_eq!(counts(store.insert_raw(&[second], &BTreeMap::from([(other.clone(), 1)])).unwrap()), (0, 0));
+        assert_eq!(store.version_vector().unwrap().get(&other), Some(&1));
     }
 
     #[test]

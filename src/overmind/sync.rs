@@ -2,7 +2,7 @@
 //! peer reachable in one direction only still converges. The transport is the
 //! caller's business: the swarm worker passes its SSH call.
 use super::model::now;
-use super::store::{PeerState, Store};
+use super::store::{Batch, PeerState, Store};
 use anyhow::{anyhow, ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +27,10 @@ struct ExchangeRequest {
     collisions: BTreeSet<String>,
     #[serde(default)]
     events: Vec<Value>,
+    /// For each origin whose events start with an anchor, the anchor's
+    /// position: the receiver's last position of that origin as the sender knows it.
+    #[serde(default)]
+    anchors: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +44,8 @@ struct ExchangeResponse {
     collisions: BTreeSet<String>,
     #[serde(default)]
     events: Vec<Value>,
+    #[serde(default)]
+    anchors: BTreeMap<String, u64>,
     #[serde(default)]
     more: bool,
     /// How many events of the request this side refused.
@@ -212,7 +218,7 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
     let mut recorded = record(store, &request.from, &colliding)?;
     // An anchor of the push that differs from the event stored at its position
     // shows another log of that origin too.
-    let received = store.insert_raw(&except(request.events, &colliding))?;
+    let received = store.insert_raw(&except(request.events, &colliding), &request.anchors)?;
     recorded.add(record(store, &request.from, &received.differing)?);
     colliding.extend(received.differing);
     if restored || !recorded.new.is_empty() {
@@ -231,7 +237,7 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         state.updated = now();
         store.put_peer(&state)?;
     }
-    let (events, more) = store.push(&without(&request.vector, &colliding), BATCH)?;
+    let batch = store.push(&without(&request.vector, &colliding), BATCH)?;
     let vector = store.version_vector()?;
     let response = ExchangeResponse {
         v: 1,
@@ -239,8 +245,9 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         tips: store.tips(&vector)?,
         vector,
         collisions: colliding,
-        events,
-        more,
+        events: batch.events,
+        anchors: batch.anchors,
+        more: batch.more,
         refused: received.refused,
     };
     Ok(serde_json::to_value(response)?)
@@ -281,10 +288,11 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
     while summary.rounds < ROUNDS {
         let known = store.peer(peer)?.and_then(|p| p.vector);
         let skipped = if summary.rounds == 0 { &earlier } else { &colliding };
-        let (events, push_more) = match &known {
+        let batch = match &known {
             Some(vector) => store.push(&without(vector, skipped), BATCH)?,
-            None => (Vec::new(), true),
+            None => Batch { more: true, ..Batch::default() },
         };
+        let (events, push_more, anchors) = (batch.events, batch.more, batch.anchors);
         let pushed = events.len();
         let pushed_origins: BTreeSet<String> = events.iter().filter_map(|e| e["origin"].as_str().map(str::to_owned)).collect();
         summary.sent += pushed;
@@ -296,6 +304,7 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
             vector: own,
             collisions: colliding.clone(),
             events,
+            anchors,
         };
         let response: ExchangeResponse = serde_json::from_value(call(&serde_json::to_value(&request)?)?)
             .map_err(|e| anyhow!("the peer's Overmind answer is not valid: {e}"))?;
@@ -313,7 +322,7 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         let observed = observe(store, &response.vector, &response.tips, &response.collisions)?;
         let mut recorded = record(store, peer, &observed)?;
         colliding.extend(observed);
-        let received = store.insert_raw(&except(response.events, &colliding))?;
+        let received = store.insert_raw(&except(response.events, &colliding), &response.anchors)?;
         recorded.add(record(store, peer, &received.differing)?);
         colliding.extend(received.differing.iter().cloned());
         summary.collided_own |= recorded.rotated;
@@ -337,6 +346,10 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         let lost_data = known
             .as_ref()
             .map_or(false, |k| k.iter().any(|(origin, seq)| response.vector.get(origin).copied().unwrap_or(0) < *seq));
+        // Origins the first round held back that the answer shows no longer
+        // collide go out in the next round, even when the peer refused others.
+        let released = summary.rounds == 1
+            && lacking.iter().any(|e| e["origin"].as_str().is_some_and(|o| earlier.contains(o) && !colliding.contains(o)));
         if pushed > 0 && !lost_data {
             let unmoved = |origin: &str| {
                 let before = known.as_ref().and_then(|k| k.get(origin)).copied().unwrap_or(0);
@@ -345,13 +358,11 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
             let refused = lacking.iter().filter(|e| e["origin"].as_str().map_or(false, |o| pushed_origins.contains(o) && unmoved(o))).count();
             if refused > 0 {
                 summary.not_accepted = refused;
-                break;
+                if !released {
+                    break;
+                }
             }
         }
-        // Origins the first round held back that the answer shows no longer
-        // collide go out in the next round.
-        let released = summary.rounds == 1
-            && lacking.iter().any(|e| e["origin"].as_str().is_some_and(|o| earlier.contains(o) && !colliding.contains(o)));
         if !untold && !released && (!progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty()))) {
             break;
         }
@@ -495,7 +506,7 @@ mod tests {
         let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["seq"] == 1).unwrap();
         let mut forged = first.clone();
         forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
-        b.insert_raw(&[forged]).unwrap();
+        b.insert_raw(&[forged], &BTreeMap::new()).unwrap();
         let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
         assert!(summary.not_accepted > 0, "{summary:?}");
         let peer = a.peer(B).unwrap().unwrap();
@@ -703,34 +714,86 @@ mod tests {
 
     #[test]
     fn a_push_never_extends_a_log_across_a_fork_it_did_not_compare() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("b");
-        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
-        let mut b = Store::open(&path, B).unwrap();
-        comment(&mut b, "t", 10);
-        sync(&mut a, &mut b, false);
-        let origin = b.origin().to_owned();
-        drop(b);
-        let aside = dir.path().join("aside.sqlite3");
-        std::fs::copy(path.join("overmind.sqlite3"), &aside).unwrap();
-        let mut b = Store::open(&path, B).unwrap();
-        comment(&mut b, "t", 10);
-        comment(&mut b, "t", 10);
-        sync(&mut a, &mut b, false); // A's view of B is now 3 events of the origin.
-        comment(&mut b, "t", 10);
-        sync(&mut a, &mut b, true); // B pushes its fourth event itself.
-        assert_eq!(a.version_vector().unwrap().get(&origin), Some(&4));
-        // B is restored to its first event and writes two others.
-        let mut b = restore(b, &path, &aside);
-        comment(&mut b, "t", 10);
-        comment(&mut b, "t", 10);
-        let fork = log(&b, &origin);
-        // A pushes from its view of B: the push starts at B's third position, which differs.
-        sync(&mut a, &mut b, false);
-        assert_eq!(log(&b, &origin), fork, "B's log is not extended");
-        assert_eq!(collisions(&b), vec![(origin.clone(), A.to_owned(), String::new())]);
-        assert_eq!(collisions(&a), vec![(origin.clone(), B.to_owned(), String::new())]);
-        assert_eq!(log(&a, &origin).len(), 4);
+        // The restored B writes two events, so the push's anchor lands on a
+        // position B holds; or one, so it lands just past B's end.
+        for written in [2, 1] {
+            let case = format!("{written} written");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("b");
+            let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+            let mut b = Store::open(&path, B).unwrap();
+            comment(&mut b, "t", 10);
+            sync(&mut a, &mut b, false);
+            let origin = b.origin().to_owned();
+            drop(b);
+            let aside = dir.path().join("aside.sqlite3");
+            std::fs::copy(path.join("overmind.sqlite3"), &aside).unwrap();
+            let mut b = Store::open(&path, B).unwrap();
+            comment(&mut b, "t", 10);
+            comment(&mut b, "t", 10);
+            sync(&mut a, &mut b, false); // A's view of B is now 3 events of the origin.
+            comment(&mut b, "t", 10);
+            sync(&mut a, &mut b, true); // B pushes its fourth event itself.
+            assert_eq!(a.version_vector().unwrap().get(&origin), Some(&4));
+            // B is restored to its first event and writes others.
+            let mut b = restore(b, &path, &aside);
+            for _ in 0..written {
+                comment(&mut b, "t", 10);
+            }
+            let (fork, original) = (log(&b, &origin), log(&a, &origin));
+            // A pushes from its view of B, anchored at B's third position.
+            sync(&mut a, &mut b, false);
+            for b_calls in [true, false, true] {
+                sync(&mut a, &mut b, b_calls);
+            }
+            assert_eq!(log(&b, &origin), fork, "{case}: B's log is not extended");
+            assert_eq!(log(&a, &origin), original, "{case}");
+            assert_eq!(collisions(&b), vec![(origin.clone(), A.to_owned(), String::new())], "{case}");
+            assert_eq!(collisions(&a), vec![(origin.clone(), B.to_owned(), String::new())], "{case}");
+        }
+    }
+
+    #[test]
+    fn healthy_pairs_settle_in_one_or_two_rounds() {
+        let (_dir, mut a, mut b) = stores();
+        comment(&mut a, "t", 10);
+        comment(&mut b, "u", 10);
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        for a_writes in [true, false, true, false] {
+            if a_writes {
+                comment(&mut a, "t", 10);
+            } else {
+                comment(&mut b, "u", 10);
+            }
+            let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+            assert!(summary.rounds <= 2, "{summary:?}");
+            assert_eq!((summary.refused, summary.peer_refused, summary.not_accepted), (0, 0, 0), "{summary:?}");
+            assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap());
+            let summary = exchange(&mut b, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+            assert!(summary.rounds <= 2, "{summary:?}");
+        }
+        assert!(a.origin_history(20).unwrap().is_empty() && b.origin_history(20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_origin_held_back_is_released_even_when_another_is_refused() {
+        let (_dir, mut a, mut b) = stores();
+        // A holds the events of a third store, once noted as colliding with B,
+        // which B lacks entirely; B refuses A's own events.
+        let dir_c = tempfile::tempdir().unwrap();
+        let mut c = Store::open(dir_c.path(), C).unwrap();
+        comment(&mut c, "v", 10);
+        a.insert_raw(&c.missing(&BTreeMap::new(), BATCH).unwrap().0, &BTreeMap::new()).unwrap();
+        a.note_collision(c.origin(), B).unwrap();
+        comment(&mut a, "t", 10);
+        let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == a.origin()).unwrap();
+        let mut forged = first.clone();
+        forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
+        b.insert_raw(&[forged], &BTreeMap::new()).unwrap();
+        a.put_peer(&PeerState { machine: B.into(), vector: Some(b.version_vector().unwrap()), ..PeerState::default() }).unwrap();
+        let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert!(summary.not_accepted > 0, "{summary:?}");
+        assert_eq!(b.version_vector().unwrap().get(c.origin()), Some(&1), "{summary:?}");
     }
 
     #[test]
@@ -781,7 +844,7 @@ mod tests {
         // B holds A's event id at another position, so it refuses A's event.
         let mut forged = sent[0].clone();
         forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
-        b.insert_raw(&[forged]).unwrap();
+        b.insert_raw(&[forged], &BTreeMap::new()).unwrap();
         let request = json!({"v": 1, "from": A, "vector": a.version_vector().unwrap(), "events": sent});
         assert_eq!(serve(&mut b, request).unwrap()["refused"], 1);
         let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
@@ -799,12 +862,12 @@ mod tests {
         let dir_c = tempfile::tempdir().unwrap();
         let mut c = Store::open(dir_c.path(), C).unwrap();
         comment(&mut c, "v", 10);
-        a.insert_raw(&c.missing(&BTreeMap::new(), BATCH).unwrap().0).unwrap();
+        a.insert_raw(&c.missing(&BTreeMap::new(), BATCH).unwrap().0, &BTreeMap::new()).unwrap();
         // B already holds A's first event id at another position, so it refuses A's events.
         let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == a.origin() && e["seq"] == 1).unwrap();
         let mut forged = first.clone();
         forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
-        b.insert_raw(&[forged]).unwrap();
+        b.insert_raw(&[forged], &BTreeMap::new()).unwrap();
         let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
         assert!(summary.rounds <= 2, "{summary:?}");
         assert!(summary.not_accepted > 0, "{summary:?}");
