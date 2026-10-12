@@ -45,24 +45,52 @@ pub fn between(a: &str, b: Option<&str>) -> String {
     String::from_utf8(out).expect("ranks are ASCII")
 }
 
-/// A short rank strictly after `a`: the first digit below the largest one is
-/// incremented and the rest dropped; a rank of only largest digits grows by
-/// one. Successive results grow by one character every 31 steps, so a column
-/// appended to 1,984 times from the empty rank still has valid ranks.
+// Ranks made by `after` are keys: a head digit from `V` to `y` gives the width
+// (1 to 30) of the base-62 number that follows, so wider numbers sort later
+// and a column grows by one character per 62-fold more appends.
+const FIRST_HEAD: usize = 31;
+const LAST_HEAD: usize = 60;
+
+/// A short rank strictly after `a`: the next key above `a`. No rank made here,
+/// by `between` or by `spread` ends in `0`, so `between` always has room.
 pub fn after(a: &str) -> String {
-    if a.is_empty() {
+    let bytes = a.as_bytes();
+    let head = bytes.first().map_or(0, |c| digit(*c));
+    if head < FIRST_HEAD {
         return "V".into();
     }
-    let top = DIGITS.len() - 1;
-    let bytes = a.as_bytes();
-    match bytes.iter().position(|c| digit(*c) < top) {
-        Some(i) => {
-            let mut out = bytes[..i].to_vec();
-            out.push(DIGITS[digit(bytes[i]) + 1]);
-            String::from_utf8(out).expect("ranks are ASCII")
-        }
-        None => format!("{a}V"),
+    if head > LAST_HEAD {
+        return format!("z{}", after(&a[1..]));
     }
+    let top = DIGITS.len() - 1;
+    let width = head - FIRST_HEAD + 1;
+    // The number written after the head, padded or cut to its width, plus one.
+    let mut number: Vec<usize> = (1..=width).map(|i| bytes.get(i).map_or(0, |c| digit(*c))).collect();
+    let mut place = width;
+    loop {
+        if place == 0 {
+            if head == LAST_HEAD {
+                return "z".into();
+            }
+            // Every digit was the largest: the next width starts.
+            let mut out = vec![DIGITS[head + 1]];
+            out.resize(width + 1, b'0');
+            out.push(b'1');
+            return String::from_utf8(out).expect("ranks are ASCII");
+        }
+        place -= 1;
+        if number[place] < top {
+            number[place] += 1;
+            break;
+        }
+        number[place] = 0;
+    }
+    if number[width - 1] == 0 {
+        number[width - 1] = 1;
+    }
+    let mut out = vec![DIGITS[head]];
+    out.extend(number.iter().map(|d| DIGITS[*d]));
+    String::from_utf8(out).expect("ranks are ASCII")
 }
 
 /// `n` evenly spaced valid ranks in increasing order, for renumbering a column.
@@ -112,23 +140,47 @@ mod tests {
     }
 
     #[test]
-    fn after_increments_the_first_digit_below_the_largest() {
+    fn after_counts_up_in_keys_of_growing_width() {
         assert_eq!(after(""), "V");
-        assert_eq!(after("V"), "W");
-        assert_eq!(after("Vk"), "W");
-        assert_eq!(after("zV"), "zW");
-        assert_eq!(after("zz"), "zzV");
+        assert_eq!(after("F"), "V");
+        assert_eq!(after("V"), "V1");
+        assert_eq!(after("Vk"), "Vl");
+        assert_eq!(after("Vk7"), "Vl");
+        assert_eq!(after("Vz"), "W01");
+        assert_eq!(after("W0z"), "W11");
+        assert_eq!(after("zA3"), "zV");
+        assert_eq!(after("z"), "zV");
+        assert_eq!(after(&format!("y{}", "z".repeat(30))), "z");
     }
 
     #[test]
-    fn successive_afters_stay_ordered_and_grow_slowly() {
+    fn successive_afters_stay_ordered_and_short() {
         let mut previous = String::new();
-        for step in 1..=5000 {
+        for _ in 0..200_000 {
             let next = after(&previous);
             assert!(previous.as_bytes() < next.as_bytes(), "{previous} < {next}");
-            // One character per 31 steps: the first 1,984 ranks fit in 64 characters.
-            assert_eq!(valid(&next), step <= 64 * 31, "step {step}: {next}");
+            assert!(valid(&next) && !next.ends_with('0'), "{next}");
             previous = next;
+        }
+        assert!(previous.len() <= 4, "{previous}");
+    }
+
+    #[test]
+    fn after_any_rank_sorts_later_and_leaves_room_before_it() {
+        let mut seed = 11u64;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = 1 + (seed % 32) as usize;
+            let a: String = (0..len)
+                .map(|i| DIGITS[((seed >> (i % 8 * 8)) as usize + i * 7) % DIGITS.len()] as char)
+                .collect();
+            let next = after(&a);
+            assert!(valid(&next) && !next.ends_with('0'), "{a} -> {next}");
+            assert!(a.as_bytes() < next.as_bytes(), "{a} < {next}");
+            let middle = between(&a, Some(&next));
+            assert!(a.as_bytes() < middle.as_bytes() && middle.as_bytes() < next.as_bytes(), "{a} < {middle} < {next}");
         }
     }
 

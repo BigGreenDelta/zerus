@@ -96,7 +96,7 @@ events. Only sending a task into a session runs on the session's host.
 | `attachments` | Up to 8 images, 10 MiB each, 20 MiB total, stored by SHA-256. |
 | `stage` | A stage of the project workflow. |
 | `priority` | P0–P4, default P2. |
-| `rank` | Manual order inside a stage (fractional index string of at most 64 characters 0-9A-Za-z, compared as bytes). A task keeps the order of its column when it changes stage: the transition carries a rank at the end of the target column. A column whose ranks tie or run out is renumbered evenly when a person reorders it. |
+| `rank` | Manual order inside a stage (fractional index string of at most 64 characters 0-9A-Za-z, compared as bytes). A task keeps the order of its column when it changes stage: the transition carries a rank at the end of the target column. Ranks appended to a column grow by one character per 62-fold more tasks. A column whose ranks tie or run out is renumbered evenly when a person reorders it. |
 | `labels` | Plain labels (`ui`) and requirement labels (`agent:codex`, `machine:<name>`). Reserved: `blocked`, `epic`, `epic-ready`, `bug`, `reviewed`, `review-failed`. |
 | `pinned` | Session the task is reserved for: machine uuid + session name. Follows renames. |
 | `assignee` | Session that took the task into an active stage. |
