@@ -418,10 +418,12 @@ global agent configuration. The configuration is inline: Claude Code gets
 `-c mcp_servers.overmind.args=[…]` and `-c mcp_servers.overmind.env_vars=[…]`,
 appended to the spawned argv only, like the permission flags, and never to the
 saved resume recipe; resume and fork attach it again. The name `overmind` is
-reserved: a server of that name in the agent's own configuration is replaced in
-sessions Zerus launches. The run record keeps `overmind_mcp: true|false`, so
-templates name the MCP tools or the CLI commands for that session. Kimi and
-DeepSeek get no MCP injection in stage 1 and use the CLI. The setting is the
+reserved for this server in Zerus launches. The Codex overrides replace only
+`command`, `args` and `env_vars`; other keys of a user's own
+`[mcp_servers.overmind]` (such as `env` or `startup_timeout_sec`) still apply.
+The run record keeps `overmind_mcp: true|false`, so templates name the MCP
+tools or the CLI commands for that session. Kimi and DeepSeek get no MCP
+injection in stage 1 and use the CLI. The setting is the
 machine-local configuration key `HGS_OVERMIND_MCP` (`1`, the default, or `0`)
 in `~/.config/hgs/config` and the environment, like `HGS_TAB`; the file is the
 durable switch, and a value in the environment of the launching `hgs` reaches
@@ -573,10 +575,14 @@ Call), **Move to…**, **Done**, **Delete** (with confirmation).
   tasks highlighted.
 - Session rows show a queue badge.
 - Your Call raises the usual attention notification, from the tray agent with or
-  without the window: one per `decisions` signature, never repeated by polls or
-  restarts, withdrawn when the task leaves the list, consumed silently while
-  Zerus has focus. A click opens the Tasks tab on the task's card with the
-  asking session selected when its machine is known.
+  without the window (a Windows console, which reads another machine, only once
+  the window has selected a session there): one per `decisions` signature,
+  never repeated by polls or restarts or by a task that returns unchanged
+  within a day, withdrawn when the task leaves the list, consumed silently
+  while Zerus has focus. Notices show the project's name, never its ID; more
+  than three new decisions at once become one summary notice. A click opens the
+  Tasks tab on the task's card with the asking session selected when its
+  machine is known, also when the swarm catalog places it shortly after.
 - The inspector tab "Tasks & agents" (provider todo lists) becomes
   "Plan & agents".
 

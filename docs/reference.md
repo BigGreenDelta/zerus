@@ -1437,15 +1437,17 @@ an inline `--mcp-config` for Claude Code and `-c mcp_servers.overmind.*`
 overrides for Codex, added to the started command only. The agent's own
 configuration is not edited and saved resume recipes never contain the server,
 so each launch follows the current setting. Zerus reserves the name
-`overmind`: a server of that name in the agent's own configuration is replaced
-in sessions Zerus launches. With `--session`, every tool call without a
-verified agent session is refused `session_mismatch`, so a server that lost the
-session's identity fails closed. Claude Code passes its environment to MCP
-servers; Codex starts them with an empty environment, so Zerus lists the
-variables Codex passes on (`env_vars`): `HOME`, `PATH`, `HGS_SESSION`,
-`HGS_RUN_ID`, `HGS_STATE_DIR`, `HGS_CONFIG_DIR`, `XDG_STATE_HOME`, `HGS_SELF`,
-`HGS_PEERS`, `HGS_SSH`, `SSH_AUTH_SOCK`, `TMUX` and `TMUX_TMPDIR`. Kimi and
-DeepSeek get no MCP server and use the CLI. The run record keeps
+`overmind` for the server it attaches; do not give a server of your own that
+name. The Codex overrides replace only `command`, `args` and `env_vars`: other
+keys of your own `[mcp_servers.overmind]` table, such as `env` or
+`startup_timeout_sec`, still apply in sessions Zerus launches. With
+`--session`, every tool call without a verified agent session is refused
+`session_mismatch`, so a server that lost the session's identity fails closed.
+Claude Code passes its environment to MCP servers; Codex starts them with an
+empty environment, so Zerus lists the variables Codex passes on (`env_vars`):
+`HOME`, `PATH`, `HGS_SESSION`, `HGS_RUN_ID`, `HGS_STATE_DIR`, `HGS_CONFIG_DIR`,
+`XDG_STATE_HOME`, `HGS_SELF`, `HGS_PEERS`, `HGS_SSH`, `SSH_AUTH_SOCK`, `TMUX`
+and `TMUX_TMPDIR`. Kimi and DeepSeek get no MCP server and use the CLI. The run record keeps
 `overmind_mcp: true|false`, and the `{tools}` text of the templates names the
 MCP tools or the CLI commands accordingly. A running session gains or loses the
 server only when it starts again.
@@ -1482,17 +1484,21 @@ or `null`), `parent`, `follows`, `created_at`, `updated_at`, `read_only`,
   `review-failed`), `conflict`, `uncertain` (flag `delivery_uncertain`) and
   `orphaned`.
 
-With `since`, only tasks changed after that cursor are listed (all of them
-after a change of the workflow), deleted ones included so that a reader can
-drop them. `decisions --json {}` lists the tasks waiting in a stage with role
+With `since`, only tasks with events after that cursor are listed, deleted ones
+included so that a reader can drop them. Any event after the cursor that
+belongs to no task (a workflow or template change, or a session rename, in any
+project) lists every task of the project.
+
+`decisions --json {}` lists the tasks waiting in a stage with role
 `needs_human`, in every project, oldest first and at most 50: `{ok, cursor,
 decisions: [{task, ref, project, title, stage, question, assignee,
-signature}]}`. `title` has at most 120 characters; `question` is the
+signature}]}`. `project` is the project's ID, as everywhere in Overmind (the
+desktop shows its name). `title` has at most 120 characters; `question` is the
 `[needs-human]` text of the task's last transition (at most 500 characters,
 empty when that transition wrote none); `assignee` is `{machine, name}` or
 `null`. `signature` (64 hexadecimal digits) changes with every transition of
 the task but not with comments, so a reader notifies once per signature.
-`projects --json {}` lists the projects that hold tasks, by name: `{ok,
+`projects --json {}` lists the projects that hold tasks, sorted by ID: `{ok,
 cursor, projects: [{project, total, roles: {backlog, ready, active, review,
 needs_human, done, parked}}]}`, every role present and deleted tasks not
 counted. Both refuse unknown request fields.
@@ -1647,8 +1653,9 @@ A card can be dragged only to a stage a person may move it to by the
 workflow's rules, and reordered within its column. The CLI stays the
 authority: a refused move leaves the card where it was and shows the reason
 above the board. Moves that take a running task from its session, take a task
-out of Your Call or reopen a finished one ask first. The context-menu key or
-Shift+F10 on a card offers **Open** and **Move to…**. An open card shows its
+out of Your Call, move a Review task that has a reviewer or reopen a finished
+one ask first. The context-menu key or Shift+F10 on a card offers **Open** and
+**Move to…**. An open card shows its
 panel on the right: the editable title and prompt, images (add a file, paste,
 open or remove), priority, the pin, labels, relations and the journal as
 Markdown, with **Send to session ▾**, **Send for review ▾**, **Send rework**,
@@ -1672,14 +1679,20 @@ one of the session's tasks waits in Your Call; with an empty queue and nothing
 waiting it is hidden. A click opens the Tasks tab on that project with the
 waiting task open. Session rows show the same count as a badge.
 
-Your Call raises the usual attention notification, once per decision: polls
-and restarts do not repeat it, a task parked again notifies again, and the
-notification is withdrawn when the task leaves Your Call. While Zerus has
-focus a new decision is not announced, as for sessions. A click opens the
-Tasks tab on the task's card and selects the asking session when Overmind can
-place its machine; a session is never chosen by its name alone. For a project
-this computer does not list, the click opens the session's Activity and says
-so.
+Your Call raises the usual attention notification, once per decision. It names
+the task, the question, the project and the asking session. Polls and restarts
+do not repeat it, and neither does a task that drops out of the list and
+returns unchanged within a day; a task parked again notifies again. The
+notification is withdrawn when the task leaves Your Call. More than three new
+decisions at once, as on a first start, become one notice that opens the Tasks
+tab on the oldest one's project. While Zerus has focus a new decision is not
+announced, as for sessions. A click (**Open task** on Linux) opens the Tasks tab
+on the task's card and selects the asking session when Overmind can place its
+machine, also when the peers' machines become known within 20 seconds of the
+click. A
+session is never chosen by its name alone, and a session picked in the
+meantime is kept. For a project this computer does not list, the click opens
+the session's Activity and says so.
 
 The desktop reads this computer's replica with `hgs overmind …`, without
 `@host`; every machine holds a full replica, and `send` reaches the session's
