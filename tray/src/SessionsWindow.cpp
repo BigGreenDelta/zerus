@@ -2,6 +2,7 @@
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
+#include "LocalFile.h"
 #include "SessionPresentation.h"
 #include "AccountUsage.h"
 #include "SessionUsage.h"
@@ -691,7 +692,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); dialog.accept(); }
             });
             connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
-                if (!QFileInfo(savedPath).isFile()) { hint->setText(tr("The local copy is no longer available.")); return; }
+                if (!LocalFile::readable(QFileInfo(savedPath))) { hint->setText(tr("The local copy is no longer available.")); return; }
                 desktopTarget = QUrl::fromLocalFile(savedPath); dialog.accept();
             });
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");

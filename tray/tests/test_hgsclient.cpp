@@ -92,6 +92,17 @@ void TestHgsClient::downloadsRequireExactSavedFileReceipts()
     QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready.first()[0].toULongLong(), request); QCOMPARE(ready.first()[1].toString(), destination);
     saved.remove(); ready.clear();
     client.downloadFile("remote", "/remote/file.txt", destination); QTRY_COMPARE(failed.size(), 1); QVERIFY(ready.isEmpty());
+#ifdef Q_OS_WIN
+    // A downloaded shortcut is confirmed by its own size, even when its target is
+    // missing here: Qt otherwise describes a .lnk by the file it points to.
+    failed.clear(); const auto shortcut = fixture.filePath("remote.lnk"), target = fixture.filePath("elsewhere.txt");
+    { QFile file(target); QVERIFY(file.open(QIODevice::WriteOnly)); }
+    QVERIFY(QFile::link(target, shortcut)); QVERIFY(QFile::remove(target));
+    QFile link(shortcut); QVERIFY(link.open(QIODevice::ReadOnly)); const auto size = link.size(); link.close(); QVERIFY(size > 0);
+    reply({{"host", "remote"}, {"path", "/remote/remote.lnk"}, {"local_path", shortcut}, {"bytes", size}});
+    const auto shortcutRequest = client.downloadFile("remote", "/remote/remote.lnk", shortcut);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready.first()[0].toULongLong(), shortcutRequest); QVERIFY(failed.isEmpty());
+#endif
 }
 
 void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()

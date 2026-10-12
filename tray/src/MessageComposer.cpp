@@ -2,6 +2,7 @@
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "ContentScale.h"
+#include "LocalFile.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 
@@ -622,7 +623,7 @@ void MessageComposer::attachDroppedFiles(const QStringList &paths)
 void MessageComposer::attachFile(const QString &path)
 {
     QFile file(path); const QFileInfo info(file);
-    if (!info.isFile() || info.size() > MaxAttachmentBytes) { showError(tr("Choose a file of at most 10 MiB.")); return; }
+    if (!LocalFile::readable(info) || LocalFile::size(info) > MaxAttachmentBytes) { showError(tr("Choose a file of at most 10 MiB.")); return; }
     if (!file.open(QIODevice::ReadOnly)) { showError(tr("Cannot read %1: %2").arg(info.fileName(), file.errorString())); return; }
     const QByteArray bytes = file.read(MaxAttachmentBytes + 1);
     addAttachment(info.fileName(), QMimeDatabase().mimeTypeForData(bytes).name(), bytes);

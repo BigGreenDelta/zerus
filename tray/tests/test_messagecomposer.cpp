@@ -166,6 +166,7 @@ private slots:
     void contentScaleEnlargesOnlyTheMessageField();
     void draftStateFollowsUnsentContent();
     void attachmentsChipSummarizesAndRemoves();
+    void droppedShortcutIsCheckedAsTheFileItReads();
     void attachmentsPopoverFollowsSessionAndSending();
     void attachmentRowOpensStoredCopyAndPreviews();
     void hiddenInputKeepsToolbar();
@@ -1168,6 +1169,21 @@ void TestMessageComposer::draftStateFollowsUnsentContent()
     QTRY_VERIFY(!composer.hasDraft("arch/two")); QVERIFY(composer.hasDraft("arch/renamed"));
     QVERIFY(composer.offerDraft("arch/offered", "Continue the interrupted turn"));
     QVERIFY(composer.hasDraft("arch/offered"));
+}
+
+void TestMessageComposer::droppedShortcutIsCheckedAsTheFileItReads()
+{
+    // Qt describes a Windows .lnk by its target (here a folder); the composer
+    // attaches the shortcut file it reads, so it must check that file.
+    Window window("local/shortcut"); QVERIFY(QTest::qWaitForWindowExposed(&window.widget));
+    QTemporaryDir dir; QVERIFY(dir.isValid()); const auto shortcut = dir.filePath("folder.lnk");
+#ifdef Q_OS_WIN
+    QVERIFY(QFile::link(dir.path(), shortcut));
+#else
+    { QFile file(shortcut); QVERIFY(file.open(QIODevice::WriteOnly)); QVERIFY(file.write("shortcut bytes") > 0); }
+#endif
+    window.composer->attachDroppedFiles({shortcut, dir.path()});
+    QCOMPARE(window.chip()->fullLabel(), QString("1 attached")); QVERIFY(window.chip()->toolTip().contains("folder.lnk"));
 }
 
 void TestMessageComposer::attachmentsChipSummarizesAndRemoves()
