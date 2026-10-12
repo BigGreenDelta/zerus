@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 
 pub const NAMES: [&str; 4] = ["dispatch", "review", "rework", "answer"];
 pub const MAX_TEMPLATE: usize = 16 * 1024;
-/// How agents reach Overmind until the MCP server exists (plan 1c).
+/// How an agent reaches Overmind: the CLI, or the MCP server that Zerus
+/// attached when it launched the session (`{tools}`).
 pub const TOOLS: &str = "`hgs overmind --help`";
+const MCP_TOOLS: &str = "MCP \"overmind\" (tools my_tasks, advance, call_human, ...) or `hgs overmind --help`";
 const MAX_RENDERED: usize = 64 * 1024;
 const TAIL: usize = 5;
 
@@ -21,6 +23,11 @@ const DISPATCH: &str = "[Overmind {task.ref}] {task.title}\n\n{task.prompt}\n\n-
 const REVIEW: &str = "[Overmind {task.ref}] Review: {task.title}\n\n{task.prompt}\n\n---\nReview this task; another session did the work. Recent journal:\n{task.journal_tail}\n\nRecord your verdict with review (approve or needs_work) and a report. Tools: {tools}";
 const REWORK: &str = "[Overmind {task.ref}] Rework: {task.title}\n\nThe review asked for changes:\n{review.report}\n\n---\nFix them, then advance to Review again with a worklog and evidence. Tools: {tools}";
 const ANSWER: &str = "[Overmind {task.ref}] Answer: {task.title}\n\n{answer.text}\n\n---\nContinue the task (stage: {task.stage}). Tools: {tools}";
+
+/// The `{tools}` value for a session, by whether its run has the MCP server.
+pub fn tools(mcp: bool) -> &'static str {
+    if mcp { MCP_TOOLS } else { TOOLS }
+}
 
 pub fn builtin(name: &str) -> &'static str {
     match name {
@@ -255,6 +262,21 @@ mod tests {
         let text = render(builtin("dispatch"), &vars(&t, "")).unwrap();
         assert!(text.starts_with("[Overmind om-abcde] Fix the drafts\n\nFix the drafts\nDetails\n\n---\n"), "{text}");
         assert!(text.contains("(stage: Queue)") && text.ends_with(TOOLS), "{text}");
+    }
+
+    #[test]
+    fn sessions_with_the_mcp_server_are_told_its_tools() {
+        assert_eq!(tools(false), "`hgs overmind --help`");
+        let mcp = tools(true);
+        assert!(mcp.starts_with("MCP \"overmind\" (tools my_tasks, advance, call_human"), "{mcp}");
+        assert!(mcp.ends_with("or `hgs overmind --help`"), "{mcp}");
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let t = task(&mut store, "p");
+        let vars = Vars { task: &t, reference: "om-abcde", answer: "", tools: mcp };
+        for name in NAMES {
+            assert!(render(builtin(name), &vars).unwrap().ends_with(&format!("Tools: {mcp}")), "{name}");
+        }
     }
 
     #[test]

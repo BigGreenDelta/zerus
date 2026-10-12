@@ -113,9 +113,14 @@ fn attach_request(arguments: &Value) -> Result<Value> {
     };
     let limit = super::commands::MAX_ATTACHMENT as u64;
     let unreadable = |e: std::io::Error| Refusal::field("invalid_field", "path", "invalid", format!("cannot read {}: {e}", args.path));
+    let not_a_file = || Refusal::field("invalid_field", "path", "invalid", "the path is not a file");
+    // Checked before opening: opening a FIFO would wait for a writer.
+    if !std::fs::metadata(path).map_err(unreadable)?.is_file() {
+        return Err(not_a_file().into());
+    }
     let file = std::fs::File::open(path).map_err(unreadable)?;
     if !file.metadata().map_err(unreadable)?.is_file() {
-        return Err(Refusal::field("invalid_field", "path", "invalid", "the path is not a file").into());
+        return Err(not_a_file().into());
     }
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes).map_err(unreadable)?;
@@ -167,23 +172,27 @@ fn handle(open: &dyn Fn() -> Result<Session>, message: &Value) -> Option<Value> 
     let Some(object) = message.as_object() else {
         return Some(error(&Value::Null, -32600, "a message must be a JSON object"));
     };
-    let id = object.get("id");
-    let id_value = match id {
-        None => Value::Null,
-        Some(v) if v.is_string() || v.is_number() || v.is_null() => v.clone(),
-        Some(_) => return Some(error(&Value::Null, -32600, "the id must be a string or a number")),
+    let Some(id) = object.get("id") else {
+        // A notification is never answered, not even when it is malformed.
+        let method = object.get("method").and_then(Value::as_str);
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || method.is_none() {
+            eprintln!("hgs overmind mcp: ignored a notification without jsonrpc \"2.0\" or a method");
+        }
+        return None;
     };
+    if !(id.is_string() || id.is_number() || id.is_null()) {
+        return Some(error(&Value::Null, -32600, "the id must be a string or a number"));
+    }
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Some(error(&id_value, -32600, "jsonrpc must be \"2.0\""));
+        return Some(error(id, -32600, "jsonrpc must be \"2.0\""));
     }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         // A response to a request of ours: there are none.
-        if id.is_some() && (object.contains_key("result") || object.contains_key("error")) {
+        if object.contains_key("result") || object.contains_key("error") {
             return None;
         }
-        return Some(error(&id_value, -32600, "a request needs a method"));
+        return Some(error(id, -32600, "a request needs a method"));
     };
-    let id = id?;
     let params = object.get("params");
     let reply = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
     Some(match method {
@@ -437,6 +446,49 @@ mod tests {
         let got = payload(&download[0]);
         assert!(std::path::Path::new(got["path"].as_str().unwrap()).is_file());
         assert!(got.get("data_base64").is_none());
+    }
+
+    #[test]
+    fn a_message_without_an_id_is_never_answered() {
+        let fx = fixture();
+        let input = [
+            json!({"method": "notifications/initialized"}).to_string(),
+            json!({"jsonrpc": "1.0", "method": "notifications/cancelled"}).to_string(),
+            json!({"jsonrpc": 2, "method": "notifications/progress"}).to_string(),
+            json!({"jsonrpc": "2.0"}).to_string(),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string(),
+        ]
+        .join("\n");
+        let replies = talk_raw(&fx, &input, Some("w1"));
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["id"], 1);
+    }
+
+    #[test]
+    fn attach_file_refuses_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let fx = fixture();
+        let files = tempfile::tempdir().unwrap();
+        let fifo = files.path().join("pipe.png");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let request = call(1, "attach_file", json!({"task": fx.task, "path": fifo}));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(talk(&fx, &[request]));
+        });
+        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(replies) => {
+                assert_eq!(replies[0]["result"]["isError"], true, "{replies:?}");
+                assert_eq!(payload(&replies[0])["error"]["field"], "path");
+            }
+            Err(_) => {
+                // Release the blocked reader before failing.
+                let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+                panic!("attach_file waited for a writer on a FIFO");
+            }
+        }
     }
 
     #[test]

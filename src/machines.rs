@@ -625,6 +625,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         // Another editor saves after this process has already loaded Config.
         let bytes = br#"{"machines":{"new-peer":{"hostname":"new.example"}}}"#;

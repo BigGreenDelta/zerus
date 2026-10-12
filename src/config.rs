@@ -23,6 +23,10 @@ pub struct Config {
     pub machines: std::collections::BTreeMap<String, crate::machines::Connection>,
     pub tab: bool,
     pub tab_colors: String,
+    /// `HGS_OVERMIND_MCP`: Zerus attaches the Overmind MCP server when it launches
+    /// Claude Code or Codex (`1`, the default) or leaves agents to the CLI (`0`).
+    #[cfg(unix)]
+    pub overmind_mcp: bool,
 }
 
 impl Config {
@@ -73,7 +77,7 @@ impl Config {
                         ));
                     };
                     let key = key.trim();
-                    if !matches!(key, "HGS_SELF" | "HGS_PEERS" | "HGS_TAB" | "HGS_TAB_COLORS") {
+                    if !matches!(key, "HGS_SELF" | "HGS_PEERS" | "HGS_TAB" | "HGS_TAB_COLORS" | "HGS_OVERMIND_MCP") {
                         continue;
                     }
                     let value = assignment_value(raw, &home, &values).map_err(|message| {
@@ -124,6 +128,8 @@ impl Config {
             machines,
             tab: get("HGS_TAB", "1") == "1",
             tab_colors: get("HGS_TAB_COLORS", ""),
+            #[cfg(unix)]
+            overmind_mcp: get("HGS_OVERMIND_MCP", "1") == "1",
         })
     }
     pub fn host(&self) -> &str {

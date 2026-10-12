@@ -161,6 +161,12 @@ pub(crate) fn delivery_target(name: &str) -> Result<Option<DeliveryTarget>> {
     }))
 }
 
+/// Whether Zerus attached the Overmind MCP server when it launched the current
+/// run of the session `name` on this machine.
+pub(crate) fn overmind_mcp(name: &str) -> bool {
+    record_path(name).exists() && read(name).is_ok_and(|record| record["overmind_mcp"] == true)
+}
+
 /// Whether this machine tracks a session named `name`, running or not.
 pub(crate) fn session_tracked(name: &str) -> bool {
     dsh::exists(name) || record_path(name).exists()

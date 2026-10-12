@@ -24,7 +24,8 @@ NATIVE_RUNNER = '''
 import json, sys, unittest
 suite = unittest.defaultTestLoader.loadTestsFromNames(['test_clear_context_native.NativeCodexClear',
                                                        'test_codex_update.NativeCodexUpdate',
-                                                       'test_external_agents_native.NativeExternalAgents'])
+                                                       'test_external_agents_native.NativeExternalAgents',
+                                                       'test_overmind_mcp_native.NativeCodexMcp'])
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 print('ZERUS_NATIVE_RESULT=' + json.dumps({'tests': result.testsRun, 'skipped': len(result.skipped)}))
 sys.exit(not result.wasSuccessful() or bool(result.skipped) or result.testsRun == 0)
@@ -203,7 +204,7 @@ def write_report(report, results):
             lines.append(f"- {row['name']}: `{row['version']}` ({row['review']}). [Official changes]({row['notes']})")
     lines.extend(['', '## Real Codex contracts', ''])
     for row in report['contracts']:
-        lines.append(f"- `{row['version']}`: {row['status']}; clear, draft preservation, identity, two terminal sizes and animation modes.")
+        lines.append(f"- `{row['version']}`: {row['status']}; clear, draft preservation, identity, the Overmind MCP server, two terminal sizes and animation modes.")
     for label, changes in report.get('capability_changes', {}).items():
         lines.extend(['', '## ' + label + ' protocol changes', '', 'Experimental methods remain separate from supported APIs.'])
         for kind in ('added_methods', 'removed_methods', 'added_schemas', 'removed_schemas', 'changed_schemas'):

@@ -341,6 +341,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         let swarm = config.dir.join("swarm");
         assert_eq!(status(&config), assess(false, None, alive, VERSION));

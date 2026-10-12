@@ -463,6 +463,8 @@ mod tests {
             machines: Default::default(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         let unknown = super::super::serve(&config, "overmind-from-the-future", json!({})).unwrap_err();
         // The caller sees the host's error inside the swarm call's own.

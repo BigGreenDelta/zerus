@@ -94,6 +94,12 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = required_env("TMUX_PANE")?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // Absolute first: the configuration would resolve an empty state directory
+    // against the launch directory instead of using the default.
+    std::env::set_var("HGS_STATE_DIR", absolute_root()?);
+    let config = crate::config::Config::load().map_err(|e| e.message)?;
+    // Decided per run: a resume or fork applies the current setting, never the saved one.
+    let overmind_mcp = config.overmind_mcp && crate::accounts::overmind_mcp_agent(&agent);
     {
         let _guard = lock(None)?;
         let actual_name = tmux(
@@ -136,7 +142,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "shell": nonempty_env("SHELL").unwrap_or_else(|| "/bin/bash".into()), "created": now() as i64,
             "activity": "unknown", "phase": "unknown", "conversation_state": "unknown", "conversation_id": null,
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
-            "process_start": process_start(std::process::id()),
+            "process_start": process_start(std::process::id()), "overmind_mcp": overmind_mcp,
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
             record["fork_parent_id"] = json!(parent);
@@ -219,11 +225,14 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     std::env::set_var("HGS_RUN_ID", &token);
     std::env::set_var("HGS_SESSION", &name);
-    std::env::set_var("HGS_STATE_DIR", absolute_root()?);
     std::env::remove_var("HGS_EXPECTED_ID");
-    let permission_mode = crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,
+    let permission_mode = crate::accounts::permission_mode(&config,
         &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?;
-    for argv in [&mut base, &mut first] { crate::accounts::apply_permissions(&agent, &permission_mode, argv); }
+    let executable = if overmind_mcp { runner_executable()? } else { String::new() };
+    for argv in [&mut base, &mut first] {
+        crate::accounts::apply_permissions(&agent, &permission_mode, argv);
+        crate::accounts::apply_overmind_mcp(&agent, overmind_mcp, &executable, argv);
+    }
     if agent == "codex" {
         for argv in [&mut base, &mut first] {
             let delimiter = argv

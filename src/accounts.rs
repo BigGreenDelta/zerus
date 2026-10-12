@@ -370,6 +370,51 @@ pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
     argv.splice(at..at,values.iter().map(|v|(*v).to_owned()));
 }
 
+/// What `hgs overmind mcp` reads from the agent's environment: the session it
+/// verifies, the state and configuration it opens, the tmux server it checks the
+/// session with and the peers it may fetch images from. Codex starts MCP servers
+/// with a cleared environment and passes on only the variables it is told to.
+#[cfg(unix)]
+const OVERMIND_MCP_ENV: [&str; 11] = [
+    "HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "XDG_STATE_HOME", "HGS_SELF", "HGS_PEERS",
+    "HGS_SSH", "SSH_AUTH_SOCK", "TMUX", "TMUX_TMPDIR",
+];
+
+/// The agents that Zerus attaches the Overmind MCP server to; Kimi and DeepSeek use the CLI.
+#[cfg(unix)]
+pub fn overmind_mcp_agent(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
+
+/// Attach `hgs overmind mcp` as the MCP server "overmind", inline and only to the
+/// spawned argv, like `apply_permissions`: the agent's own configuration is never
+/// edited, and saved resume recipes never contain it, so the setting applies to
+/// every next start. Claude's `--mcp-config` takes several values, so it goes last,
+/// where it cannot swallow a prompt; anything after `--` stays prompt text.
+#[cfg(unix)]
+pub fn apply_overmind_mcp(provider: &str, enabled: bool, executable: &str, argv: &mut Vec<String>) {
+    if !enabled || argv.is_empty() || !overmind_mcp_agent(provider) { return; }
+    let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
+    let values = if provider == "claude" {
+        let server = json!({"type": "stdio", "command": executable, "args": ["overmind", "mcp"]});
+        vec!["--mcp-config".to_owned(), json!({"mcpServers": {"overmind": server}}).to_string()]
+    } else {
+        // Codex reads each override value as TOML.
+        let list = |items: &[&str]| toml_edit::Value::Array(items.iter().copied().collect()).to_string();
+        let mut values = Vec::new();
+        for (key, value) in [
+            ("command", toml_edit::Value::from(executable).to_string()),
+            ("args", list(&["overmind", "mcp"])),
+            ("env_vars", list(&OVERMIND_MCP_ENV)),
+        ] {
+            values.push("-c".to_owned());
+            values.push(format!("mcp_servers.overmind.{key}={value}"));
+        }
+        values
+    };
+    argv.splice(at..at, values);
+}
+
 #[cfg(unix)]
 pub fn prepare_claude_settings() -> Result<()> {
     let account = env::var("HGS_ACCOUNT_ID").unwrap_or_default();
@@ -954,5 +999,85 @@ mod permission_tests {
             assert!(prompt.iter().position(|s|s=="--").unwrap()>1);assert_eq!(prompt.last().unwrap(),flag);
             let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt);assert_eq!(prompt,saved);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod overmind_mcp_tests {
+    use super::*;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    /// Reads `key=value` overrides the way Codex does: the value is TOML.
+    fn codex_overrides(argv: &[String]) -> BTreeMap<String, Value> {
+        let mut overrides = BTreeMap::new();
+        let mut words = argv.iter();
+        while let Some(word) = words.next() {
+            if word == "--" {
+                break;
+            }
+            if word == "-c" {
+                let (key, value) = words.next().unwrap().split_once('=').unwrap();
+                let document: toml_edit::DocumentMut = format!("value = {value}").parse().unwrap();
+                overrides.insert(key.to_owned(), mcp_servers_value(&document["value"]));
+            }
+        }
+        overrides
+    }
+
+    fn mcp_servers_value(item: &toml_edit::Item) -> Value {
+        match item.as_value().unwrap() {
+            toml_edit::Value::String(text) => json!(text.value()),
+            toml_edit::Value::Array(values) => Value::Array(values.iter().map(|v| json!(v.as_str().unwrap())).collect()),
+            other => panic!("unexpected TOML value {other}"),
+        }
+    }
+
+    #[test]
+    fn claude_gets_one_inline_config_before_the_prompt_delimiter() {
+        let executable = "/opt/z erus/\"hgs\"\\bin";
+        let mut argv = strings(&["claude", "--resume", "id", "--", "--mcp-config"]);
+        apply_overmind_mcp("claude", true, executable, &mut argv);
+        assert_eq!(argv[..4], strings(&["claude", "--resume", "id", "--mcp-config"]));
+        let config: Value = serde_json::from_str(&argv[4]).unwrap();
+        assert_eq!(config, json!({"mcpServers": {"overmind": {"type": "stdio", "command": executable, "args": ["overmind", "mcp"]}}}));
+        assert_eq!(argv[5..], strings(&["--", "--mcp-config"]), "prompt text stays after the delimiter");
+        let mut prompt = strings(&["claude", "initial prompt"]);
+        apply_overmind_mcp("claude", true, "/usr/bin/hgs", &mut prompt);
+        // The variadic option comes last, so it never swallows the prompt.
+        assert_eq!(prompt[..3], strings(&["claude", "initial prompt", "--mcp-config"]));
+        assert_eq!(prompt.len(), 4);
+    }
+
+    #[test]
+    fn codex_gets_toml_overrides_with_the_session_environment() {
+        let executable = "/opt/z erus/\"hgs\"\\bin 'q'";
+        let mut argv = strings(&["codex", "resume", "id", "--", "-c"]);
+        apply_overmind_mcp("codex", true, executable, &mut argv);
+        assert_eq!(argv[..3], strings(&["codex", "resume", "id"]));
+        assert_eq!(argv[argv.len() - 2..], strings(&["--", "-c"]), "prompt text stays after the delimiter");
+        let overrides = codex_overrides(&argv);
+        assert_eq!(overrides["mcp_servers.overmind.command"], json!(executable));
+        assert_eq!(overrides["mcp_servers.overmind.args"], json!(["overmind", "mcp"]));
+        let names = overrides["mcp_servers.overmind.env_vars"].as_array().unwrap();
+        for name in ["HGS_SESSION", "HGS_RUN_ID", "HGS_STATE_DIR", "HGS_CONFIG_DIR", "TMUX"] {
+            assert!(names.contains(&json!(name)), "{name} reaches the server: {names:?}");
+        }
+        assert_eq!(overrides.len(), 3, "{overrides:?}");
+    }
+
+    #[test]
+    fn other_agents_and_a_disabled_setting_get_nothing() {
+        for (provider, enabled) in [("kimi", true), ("dsh", true), ("deepseek", true), ("claude", false), ("codex", false)] {
+            let mut argv = strings(&[provider, "--model", "m", "--", "prompt"]);
+            let saved = argv.clone();
+            apply_overmind_mcp(provider, enabled, "/usr/bin/hgs", &mut argv);
+            assert_eq!(argv, saved, "{provider} {enabled}");
+        }
+        let mut empty = Vec::new();
+        apply_overmind_mcp("claude", true, "/usr/bin/hgs", &mut empty);
+        assert!(empty.is_empty());
     }
 }

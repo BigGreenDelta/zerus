@@ -236,6 +236,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         let (older, newer) = (new_id(), new_id());
         let mut store = LockedStore::load(&config).unwrap();

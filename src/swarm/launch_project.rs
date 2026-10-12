@@ -455,6 +455,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         std::fs::create_dir_all(config.dir.join("swarm")).unwrap();
         std::fs::write(
@@ -506,6 +508,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         };
         std::fs::create_dir_all(config.dir.join("swarm")).unwrap();
         let bytes = serde_json::to_vec(&store).unwrap();

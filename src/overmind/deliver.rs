@@ -107,10 +107,13 @@ pub fn deliver(session: &SessionRef, target: &DeliveryTarget, input_id: &str, te
     }
 }
 
-pub fn render(tx: &Tx, task: &Task, name: &str, answer: &str) -> Result<String> {
+/// The template `name` for `task`, as typed into `session`: its `{tools}` name
+/// the MCP server only when Zerus attached it to the session's current run.
+pub fn render(tx: &Tx, task: &Task, name: &str, answer: &str, session: &SessionRef) -> Result<String> {
     let template = templates::effective(tx, &task.project, name)?;
     let reference = reference(tx, &task.uuid)?;
-    Ok(templates::render(&template, &templates::Vars { task, reference: &reference, answer, tools: templates::TOOLS })?)
+    let tools = templates::tools(crate::state::overmind_mcp(&session.name));
+    Ok(templates::render(&template, &templates::Vars { task, reference: &reference, answer, tools })?)
 }
 
 pub fn journal(tx: &mut Tx, actor: &Actor, task: &Task, marker: &str, text: &str, transition: &str) -> Result<()> {
@@ -324,7 +327,7 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
             }
         };
         // A text that `hgs send` would refuse rolls the claim back.
-        let text = render(tx, &load(tx, &uuid)?, "dispatch", "")?;
+        let text = render(tx, &load(tx, &uuid)?, "dispatch", "", &session)?;
         Ok((claim, text))
     })?;
     let outcome = match (target, attachments) {
@@ -630,7 +633,7 @@ pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
             review_gates(tx, &task, &session)?;
             simple(tx, &actor, &task, "reviewer_set", json!({"session": session}), "")?;
         }
-        lenient(render(tx, &load(tx, &uuid)?, "review", ""), resumed)
+        lenient(render(tx, &load(tx, &uuid)?, "review", "", &session), resumed)
     })?;
     let outcome = deliver_resumed(&session, target, attachments, text, &input_id(&req.request_id));
     settle(ctx, "review-send", &request, &uuid, "review", &session, outcome, "", "", |tx, actor, task| {
@@ -682,7 +685,8 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
         let session = if resumed { assignee_of(&task)? } else { assignee_for(&task, "rework")? };
-        Ok((uuid, session, lenient(render(tx, &task, "rework", ""), resumed)?, files(&dir, &task)))
+        let text = lenient(render(tx, &task, "rework", "", &session), resumed)?;
+        Ok((uuid, session, text, files(&dir, &task)))
     })?;
     let attachments = if resumed { attachments } else { Ok(attachments?) };
     // The assignee changed meanwhile: the new one is checked too.
@@ -748,7 +752,7 @@ pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Valu
                 (text, event.id)
             }
         };
-        Ok((lenient(render(tx, &load(tx, &uuid)?, "answer", &text), resumed)?, settles))
+        Ok((lenient(render(tx, &load(tx, &uuid)?, "answer", &text, &session), resumed)?, settles))
     })?;
     let outcome = deliver_resumed(&session, target, Ok(Vec::new()), typed, &input);
     // The answer stays recorded; the person can repeat the request to send it again.

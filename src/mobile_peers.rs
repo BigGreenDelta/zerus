@@ -1356,6 +1356,8 @@ mod tests {
             machines: BTreeMap::new(),
             tab: false,
             tab_colors: String::new(),
+            #[cfg(unix)]
+            overmind_mcp: true,
         }
     }
 

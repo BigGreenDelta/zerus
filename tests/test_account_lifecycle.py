@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import unittest
 import subprocess
+import tomllib
 import test_fork
 import test_pause
 
@@ -94,6 +95,74 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
             self.hgs('account','permissions',account,'--mode','provider')
             self.hgs('pause',source);self.resume(source)
             self.assertNotIn(flag,json.loads((self.root/'argv.jsonl').read_text().splitlines()[-1])['argv'])
+
+    def test_mcp_flags_on_start_resume_and_fork_never_in_the_recipe(self):
+        self.script('shell', '#!/bin/sh\nshift\nexec /bin/bash -c "$@"\n')
+        hgs = str(test_pause.HGS)
+        def launches(provider):
+            return [v['argv'] for v in map(json.loads, (self.root/'argv.jsonl').read_text().splitlines())
+                    if v['agent'] == provider]
+        def mcp(argv):
+            """The Overmind server an argv attaches, as Claude Code or Codex would read it."""
+            options = argv[:argv.index('--')] if '--' in argv else argv
+            if '--mcp-config' in options:
+                return json.loads(options[options.index('--mcp-config') + 1])['mcpServers']['overmind']
+            overrides = {}
+            for at, word in enumerate(options):
+                if word == '-c' and options[at + 1].startswith('mcp_servers.overmind.'):
+                    key, value = options[at + 1].split('=', 1)
+                    overrides[key.removeprefix('mcp_servers.overmind.')] = tomllib.loads('value = ' + value)['value']
+            self.assertFalse(any('overmind' in word for word in argv[len(options):]), argv)
+            return overrides or None
+        def assert_attached(provider, argv):
+            server = mcp(argv)
+            self.assertIsNotNone(server, argv)
+            self.assertEqual((server['command'], server['args']), (hgs, ['overmind', 'mcp']))
+            if provider == 'claude':
+                self.assertEqual(server['type'], 'stdio')
+            else:
+                self.assertLessEqual({'HGS_SESSION', 'HGS_RUN_ID', 'HGS_STATE_DIR', 'TMUX'}, set(server['env_vars']))
+        def assert_recipe_clean(name):
+            record = self.binding(name)
+            self.assertIsNone(mcp(record['base']), record['base'])
+            for dry in (self.hgs('resume', name, '--dry-run'), self.hgs('resume', name, '--fresh', '-d', '--dry-run')):
+                self.assertNotIn('mcp_servers', dry)
+                self.assertNotIn('--mcp-config', dry)
+        sources = {}
+        for provider in ('claude', 'codex'):
+            with self.subTest(provider=provider):
+                source = sources[provider] = self.start(provider, 'mcp')
+                self.hgs('pause', source); self.resume(source)
+                branch = self.fork(source, 'mcp-branch')
+                self.hgs('pause', source)
+                run, sid = self.binding(source)['run_id'], self.binding(source)['conversation_id']
+                self.hgs('resume', source, '--fresh', '--expected-run-id', run, '-d')
+                self.wait(lambda: self.binding(source).get('conversation_id') not in (None, sid))
+                argvs = launches(provider)
+                self.assertEqual(len(argvs), 4, argvs)  # start, resume, fork, fresh
+                for argv in argvs:
+                    assert_attached(provider, argv)
+                for name in (source, branch):
+                    self.assertIs(self.binding(name)['overmind_mcp'], True)
+                    self.hgs('pause', name)
+                    assert_recipe_clean(name)
+        kimi = self.start('kimi', 'mcp')
+        self.hgs('pause', kimi); self.resume(kimi)
+        self.assertTrue(launches('kimi'))
+        for argv in launches('kimi'):
+            self.assertIsNone(mcp(argv), argv)
+        self.assertIs(self.binding(kimi)['overmind_mcp'], False)
+        # Turning the setting off removes the server from the next launch only.
+        (self.root/'cfg/config').write_text('HGS_OVERMIND_MCP=0\n')
+        for provider, source in sources.items():
+            self.resume(source)
+            self.assertIsNone(mcp(launches(provider)[-1]), launches(provider)[-1])
+            self.assertIs(self.binding(source)['overmind_mcp'], False)
+        # The environment wins over the configuration file.
+        self.t('set-environment', '-g', 'HGS_OVERMIND_MCP', '1')
+        self.hgs('pause', sources['claude']); self.resume(sources['claude'])
+        assert_attached('claude', launches('claude')[-1])
+        self.assertIs(self.binding(sources['claude'])['overmind_mcp'], True)
 
     def test_managed_claude_inherits_user_settings_on_start_and_resume(self):
         native=self.root/'.claude/settings.json';native.parent.mkdir(exist_ok=True)

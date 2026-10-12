@@ -348,6 +348,21 @@ class AgentSession(unittest.TestCase):
         self.assertIn(f'[Overmind {ref}] Fix the drafts'.encode(), typed)
         self.assertIn(b'Inspect the attached image', typed)
 
+    def typed_tools(self):
+        """The tools hint that a send types into this session."""
+        code, body = self.send(self.task())
+        self.assertEqual((code, body.get('delivery')), (0, 'sent'), body)
+        self.wait_for(lambda: b'\r' in self.received())
+        return self.received().split(b'Tools: ', 1)[1].split(b'\x1b', 1)[0].strip()
+
+    def test_the_text_names_the_cli_for_a_session_without_the_mcp_server(self):
+        self.assertEqual(self.typed_tools(), b'`hgs overmind --help`')
+
+    def test_the_text_names_mcp_tools_for_a_session_launched_with_them(self):
+        self.record['overmind_mcp'] = True
+        self.write_record()
+        self.assertEqual(self.typed_tools(), b'MCP "overmind" (tools my_tasks, advance, call_human, ...) or `hgs overmind --help`')
+
     def test_send_retry_with_the_same_request_never_types_twice(self):
         request_id = str(uuid.uuid4())
         ref = self.task()
