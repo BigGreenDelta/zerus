@@ -25,7 +25,19 @@ private slots:
     void foregroundRepliesStayUnreadWithoutReplay();
     void actualApplicationFocusSuppressesBanners();
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
+    void replyWaitsForLiveBackgroundShellToFinish();
 };
+
+void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
+{
+    SessionInfo s; s.name="codex/project/session"; s.runId="run"; s.conversationId="conversation";
+    s.phase="idle"; s.activity="idle"; s.replyId="reply"; s.unreadReply=true; s.backgroundProcesses=1;
+    BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
+    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
+    box.sessions[0].backgroundProcesses=0;
+    QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
+    QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
+}
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
 {

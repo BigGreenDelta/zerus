@@ -99,6 +99,11 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    const auto work = obj.value("process_work").toObject();
+    s.backgroundProcesses = work.value("count").toInt(-1);
+    s.backgroundStarted = work.value("started_at").toDouble();
+    s.backgroundObservedAt = work.value("sampled_at").toDouble();
+    s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();

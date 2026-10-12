@@ -40,6 +40,7 @@ mod codex_questions;
 mod codex_trust;
 mod codex_hooks_trust;
 mod codex_update;
+mod codex_goal_resume;
 mod read_marks;
 mod recipes;
 mod rename;
@@ -214,6 +215,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
     }
     // Bounds question indexing for the whole listing.
     let budget = read_marks::question_budget();
+    let mut process_work = processes::WorkSample::default();
     for record in records()? {
         if archive::equivalent(&record, &archived) {
             continue;
@@ -227,6 +229,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
                         && string(&record, "error").is_empty()
                 );
                 let summary = journal::summary(&record, true);
+                session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
                 session
                     .as_object_mut()
                     .ok_or("invalid session")?

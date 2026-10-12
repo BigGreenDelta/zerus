@@ -28,19 +28,12 @@ fn identity(pid: u32) -> Option<(u32, u32, String, f64)> {
     if fields.len() < 20 || matches!(fields[0], "Z" | "X") {
         return None;
     }
-    let ticks = fields[19].parse::<f64>().ok()?;
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
-    let uptime = std::fs::read_to_string("/proc/uptime")
-        .ok()?
-        .split_whitespace()
-        .next()?
-        .parse::<f64>()
-        .ok()?;
+    let started = crate::platform::process_started_at(pid)?? as f64;
     Some((
         fields[1].parse().ok()?,
         fields[2].parse().ok()?,
         fields[19].into(),
-        now() - uptime + ticks / hz,
+        started,
     ))
 }
 #[cfg(target_os = "macos")]
@@ -167,10 +160,7 @@ fn descendant(pid: u32, root: u32, rows: &BTreeMap<u32, Process>) -> bool {
     }
     false
 }
-fn table(record: &Value) -> Result<BTreeMap<u32, Process>> {
-    if !process_alive(record) {
-        return Err("The owning agent process changed".into());
-    }
+fn process_table() -> Result<BTreeMap<u32, Process>> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,pgid="])
         .output()
@@ -200,6 +190,12 @@ fn table(record: &Value) -> Result<BTreeMap<u32, Process>> {
             },
         );
     }
+    Ok(rows)
+}
+fn verified_table(record: &Value, mut rows: BTreeMap<u32, Process>) -> Result<BTreeMap<u32, Process>> {
+    if !process_alive(record) {
+        return Err("The owning agent process changed".into());
+    }
     let root = record["pid"].as_u64().unwrap_or(0) as u32;
     let eligible: Vec<_> = rows
         .keys()
@@ -222,6 +218,36 @@ fn table(record: &Value) -> Result<BTreeMap<u32, Process>> {
         false
     });
     Ok(rows)
+}
+fn table(record: &Value) -> Result<BTreeMap<u32, Process>> {
+    if !process_alive(record) {
+        return Err("The owning agent process changed".into());
+    }
+    verified_table(record, process_table()?)
+}
+
+// One lazy OS table per fleet listing, with identities revalidated for each
+// owner. This path never scans native transcripts or treats recorded jobs as
+// current work. Do not retain this sample across separate listing requests.
+#[derive(Default)]
+pub(crate) struct WorkSample {
+    rows: Option<Result<BTreeMap<u32, Process>>>,
+}
+impl WorkSample {
+    pub(crate) fn summary(&mut self, record: &Value, live: bool) -> Value {
+        let unavailable = || json!({"count":null,"started_at":null,"command":"","sampled_at":now()});
+        if !live || !process_alive(record) || string(record, "run_id").is_empty()
+            || string(record, "conversation_id").is_empty() {
+            return unavailable();
+        }
+        let Ok(rows) = self.rows.get_or_insert_with(process_table).clone()
+            .and_then(|rows| verified_table(record, rows)) else { return unavailable(); };
+        let current = roots(record, &rows);
+        let first = current.iter().map(|pid| &rows[pid])
+            .min_by(|a,b| a.started.total_cmp(&b.started));
+        json!({"count":current.len(),"started_at":first.map(|p|p.started),
+            "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now()})
+    }
 }
 fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
     let root = record["pid"].as_u64().unwrap_or(0) as u32;

@@ -295,8 +295,18 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. Working
-and compacting timers use native start evidence and update locally without extra
+**Ready** means a reply ended, not that a long-running task is complete. An idle
+agent with confirmed live shell commands shows **Background work**, with the
+command preview and elapsed time. Open **Processes** to follow output or inspect
+the running commands. The session remains in **Active** and still accepts new
+messages. Input/approval requests take precedence; ordinary agent work takes
+precedence over background work, followed by Scheduled and Ready. Offline and
+historical/unconfirmed process records never establish background work. The CLI's
+additive `process_work` summary uses current owned OS trees (one process-table
+sample per fleet listing) or the native DeepSeek job registry; it does not scan
+native transcripts on each fleet poll.
+
+Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
 `CronCreate`) is **Scheduled**: its badge and detail show the next run time
 instead of a timer, or "due" once that time has passed. A question, approval or
@@ -598,6 +608,14 @@ then exits and the session needs an explicit resume. **Skip** and **Skip until
 next version** continue startup, and Codex records the dismissal itself. Only
 reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
 recognized; other or clipped commands stay in Terminal.
+After a resume, Codex asks **Resume paused goal?** when the conversation's goal
+is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
+database once the centered dialog over the transcript shows the same goal and
+both choices; the session waits for this choice instead of Restoring
+conversation. **Resume goal** marks the goal active, and Codex continues it by
+itself when idle. **Leave paused** keeps it paused and the conversation waits
+for your message. A dialog too narrow to read, or for another goal, stays in
+Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
 Queue arrows navigate optional requests from newest to oldest while retaining
@@ -623,6 +641,8 @@ account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Claude controls and unverified states fall back to Terminal with an explanation.
+A choice that the agent's status line already shows is confirmed without typing
+anything into Terminal.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.
@@ -1168,6 +1188,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
+The small **Background work** summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. A
+background session's context menu offers **Show running commands** when Processes
+is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal

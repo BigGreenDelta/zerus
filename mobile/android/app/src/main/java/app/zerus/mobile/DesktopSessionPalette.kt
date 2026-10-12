@@ -22,7 +22,7 @@ object DesktopSessionPalette {
             else -> DesktopBadgeKind.Neutral
         }
         val caption = when {
-            working -> if (raw.string("phase") == "compacting") "Compacting" else "Working"
+            working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background work" else "Working"
             unread && !attention -> "New reply"
             online && !SessionFilters.archived(session) && SessionFilters.state(session) !in listOf("paused", "stopped") &&
                 raw.string("process_state") != "exited" && !raw.optBoolean("tracked") && raw.string("activity").isBlank() -> "Untracked"
@@ -62,7 +62,7 @@ object DesktopSessionPalette {
             raw.optJSONObject("recovery")?.string("state") in listOf("waiting", "dispatching", "retrying") -> DetailKind.Neutral
             phase == "error" -> DetailKind.Error
             phase in listOf("interrupted", "starting") -> DetailKind.Neutral
-            phase in listOf("compacting", "tool") || raw.string("activity") == "busy" -> DetailKind.Working
+            phase in listOf("compacting", "tool") || raw.string("activity") == "busy" || SessionFilters.backgroundIdle(session) -> DetailKind.Working
             raw.string("activity") == "idle" -> DetailKind.Ready
             else -> DetailKind.Neutral
         }
