@@ -101,13 +101,14 @@ pub fn now() -> u64 {
 }
 
 /// A refused action. `state` says how a field arrived: missing, empty or invalid.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// A session's host returns its refusals to the caller, which reads them back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
     pub code: String,
     pub message: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub field: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub state: String,
 }
 
@@ -154,5 +155,7 @@ mod tests {
         let field = serde_json::to_value(Refusal::field("missing_field", "spec", "missing", "m")).unwrap();
         assert_eq!(field["field"], "spec");
         assert_eq!(field["state"], "missing");
+        assert_eq!(serde_json::from_value::<Refusal>(plain).unwrap(), Refusal::new("stale", "changed"));
+        assert_eq!(serde_json::from_value::<Refusal>(field).unwrap(), Refusal::field("missing_field", "spec", "missing", "m"));
     }
 }

@@ -227,12 +227,40 @@ struct SendRequest {
     confirm: Confirmed,
 }
 
+/// Runs a sending command on the host of a session on another machine, before
+/// anything is written here. On a host (`local_only`) it refuses instead: a
+/// forwarded command is never forwarded again.
+fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &SessionRef, local_only: bool) -> Result<Value> {
+    if local_only {
+        return Err(Refusal::field("remote_session", "session", "invalid", "this session is not on this machine").into());
+    }
+    // The host may know more tasks, so a short reference could be ambiguous there.
+    let uuid = ctx.store.read(|tx| resolve(tx, task))?;
+    let mut forwarded = request.clone();
+    forwarded["task"] = json!(uuid);
+    super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine)
+}
+
+/// The session that receives a rework or an answer: the task's assignee.
+fn assignee_on_another_machine(ctx: &mut Ctx, task: &str) -> Result<Option<SessionRef>> {
+    let assignee = ctx.store.read(|tx| Ok(load(tx, &resolve(tx, task)?)?.assignee))?;
+    Ok(assignee.filter(|session| session.machine != ctx.store.machine()))
+}
+
 pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    send_on(ctx, request, false)
+}
+
+/// `send`; `local_only` refuses a session on another machine instead of forwarding.
+pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: SendRequest = parse(&request)?;
     let session = local_session("session", Some(SessionRef { machine: req.session.machine.clone(), name: req.session.name.clone() }), ctx.store.machine())?.expect("a session was given");
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "send", &request))? {
         return Ok(result);
+    }
+    if session.machine != ctx.store.machine() {
+        return route(ctx, "send", &request, &req.task, &session, local_only);
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
     let dir = ctx.store.dir().to_owned();
@@ -479,11 +507,19 @@ struct ReviewSendRequest {
 }
 
 pub fn review_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    review_send_on(ctx, request, false)
+}
+
+/// `review-send`; `local_only` as in `send_on`.
+pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: ReviewSendRequest = parse(&request)?;
     let session = local_session("session", Some(SessionRef { machine: req.session.machine.clone(), name: req.session.name.clone() }), ctx.store.machine())?.expect("a session was given");
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "review-send", &request))? {
         return Ok(result);
+    }
+    if session.machine != ctx.store.machine() {
+        return route(ctx, "review-send", &request, &req.task, &session, local_only);
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
@@ -528,10 +564,18 @@ struct ReworkRequest {
 }
 
 pub fn rework_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    rework_send_on(ctx, request, false)
+}
+
+/// `rework-send`; `local_only` as in `send_on`.
+pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: ReworkRequest = parse(&request)?;
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "rework-send", &request))? {
         return Ok(result);
+    }
+    if let Some(session) = assignee_on_another_machine(ctx, &req.task)? {
+        return route(ctx, "rework-send", &request, &req.task, &session, local_only);
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
@@ -563,10 +607,18 @@ struct AnswerRequest {
 }
 
 pub fn answer(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    answer_on(ctx, request, false)
+}
+
+/// `answer`; `local_only` as in `send_on`.
+pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: AnswerRequest = parse(&request)?;
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "answer", &request))? {
         return Ok(result);
+    }
+    if let Some(session) = assignee_on_another_machine(ctx, &req.task)? {
+        return route(ctx, "answer", &request, &req.task, &session, local_only);
     }
     let input = input_id(&req.request_id);
     let resumed = typed_before(&req.request_id);

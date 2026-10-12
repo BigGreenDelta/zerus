@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Overmind replication through the swarm worker, with isolated nodes and fake SSH."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,9 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
+import test_input as fixtures
 import test_swarm as swarm
 
 # Like the swarm fixture, plus a marker that hides the overmind feature of a peer.
@@ -22,13 +25,21 @@ SSH = swarm.SSH.replace(
 assert 'no-overmind-' in SSH
 
 
-class Replication(unittest.TestCase):
+class Nodes(unittest.TestCase):
+    """Two swarm nodes `a` and `b` on this machine, joined through the fake SSH."""
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='hgs-overmind-sync-')
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         (self.root / 'bin').mkdir()
         ssh = self.root / 'bin/ssh'; ssh.write_text(SSH); ssh.chmod(0o755)
+        # Every tmux call of both nodes, also through the fake SSH, reaches only this socket:
+        # hgs puts $HOME/.local/bin first in PATH, and HOME is this directory.
+        if fixtures.TMUX:
+            tmux = self.root / '.local/bin/tmux'
+            tmux.parent.mkdir(parents=True)
+            tmux.write_text('#!/bin/sh\nexec ' + fixtures.TMUX + ' -S "' + str(self.root / 'socket') + '" -f /dev/null "$@"\n')
+            tmux.chmod(0o755)
         self.env = dict(os.environ, SWARM_TEST_ROOT=str(self.root), SWARM_TEST_HGS=str(swarm.HGS),
                         HOME=str(self.root), PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
         for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION']:
@@ -68,6 +79,8 @@ class Replication(unittest.TestCase):
         data = bytes(range(256)) * (size // 256)
         return {'name': 'shot.png', 'mime': 'image/png', 'data_base64': base64.b64encode(data).decode()}, data
 
+
+class Replication(Nodes):
     def test_images_are_fetched_in_ranges_when_needed(self):
         attachment, data = self.image(700 * 1024)
         task = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment]})['task']
@@ -145,6 +158,120 @@ class Replication(unittest.TestCase):
                 worker.kill()
                 _, stderr = worker.communicate()
         self.assertTrue(held, stderr)
+
+
+@unittest.skipUnless(fixtures.TMUX, 'tmux is required')
+class RemoteDelivery(Nodes):
+    """A live agent session that only node b tracks, on the nodes' isolated tmux socket."""
+    wait_for = fixtures.InputTransport.wait_for
+    received = fixtures.InputTransport.received
+
+    def setUp(self):
+        super().setUp()
+        self.env['INPUT_FIXTURE'] = str(self.root)
+        (self.root / 'agent.py').write_text(fixtures.FAKE_AGENT)
+        self.name = 'codex/input-test'
+        self.addCleanup(self.stop_agent)
+        self.tmux('new-session', '-d', '-s', self.name, '-x', '100', '-y', '30', 'python3', str(self.root / 'agent.py'))
+        self.wait_for(lambda: (self.root / 'agent-pid').exists() and (self.root / 'agent-pid').read_text().strip())
+        pid = int((self.root / 'agent-pid').read_text())
+        start = subprocess.check_output(['ps', '-p', str(pid), '-o', 'lstart='],
+                                        env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip()
+        pane = self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{pane_id}').strip()
+        run_id = str(uuid.uuid4())
+        self.tmux('set-option', '-t', '=' + self.name + ':', '@hgs_run', run_id)
+        record = dict(version=1, name=self.name, agent='codex', run_id=run_id, conversation_id=str(uuid.uuid4()),
+                      pane=pane, pid=pid, process_start=start, activity='idle', phase='idle', active_tools={},
+                      subagents={}, last_event_at=time.time(), created=time.time())
+        state = self.root / 'b' / 'state'
+        state.mkdir(exist_ok=True)
+        (state / (hashlib.sha256(self.name.encode()).hexdigest() + '.json')).write_text(json.dumps(record))
+
+    def tmux(self, *args, check=True):
+        result = subprocess.run([str(self.root / '.local/bin/tmux'), *args], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def stop_agent(self):
+        # Like InputTransport.tearDown: only this socket's server, then wait for its panes.
+        pids = {pid for pid in self.tmux('list-panes', '-a', '-F', '#{pane_pid}', check=False).splitlines() if pid.isdigit()}
+        self.tmux('kill-server', check=False)
+        deadline = time.monotonic() + 2
+        while pids:
+            status = subprocess.run(['ps', '-p', ','.join(sorted(pids)), '-o', 'pid=,stat='],
+                                    capture_output=True, text=True, timeout=5)
+            pids = {parts[0] for line in status.stdout.splitlines()
+                    if len(parts := line.split()) >= 2 and not parts[1].startswith(('Z', 'X'))}
+            if not pids or time.monotonic() >= deadline:
+                break
+            time.sleep(.02)
+        self.assertFalse(pids, 'owned fixture panes survived tmux shutdown')
+
+    def test_send_reaches_a_session_on_another_machine(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'Fix the drafts', 'stage': 'Queue'})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        result = self.overmind('a', 'send', '--json', data={'task': ref, 'session': {'machine': b, 'name': self.name}})
+        self.assertEqual(result['delivery'], 'sent', result)
+        self.wait_for(lambda: f'[Overmind {ref}]'.encode() in self.received())
+        on_a = self.overmind('a', 'show', ref)['task']
+        self.assertEqual((on_a['stage'], on_a['assignee']['machine']), ('Design', b))
+        self.assertIn('[sent]', [j['marker'] for j in on_a['journal']])
+        claim = next(j for j in on_a['journal'] if j['marker'] == '[claim]')
+        self.assertEqual(claim['actor']['machine'], b)  # the host wrote the claim
+
+    def test_a_remote_send_brings_the_task_images_along(self):
+        attachment, _ = self.image(1024)
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'Look', 'stage': 'Queue', 'attachments': [attachment]})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        (self.root / 'calls').write_text('')
+        result = self.overmind('a', 'send', '--json', data={'task': ref, 'session': {'machine': b, 'name': self.name}})
+        self.assertEqual(result['delivery'], 'sent', result)
+        self.wait_for(lambda: b'Inspect the attached image' in self.received())
+        calls = (self.root / 'calls').read_text()
+        self.assertIn('b swarm overmind-blobs\n', calls)  # a pushed the image it holds
+        self.assertNotIn('swarm overmind-blob\n', calls)  # and b never had to fetch it
+
+    def test_unreachable_and_outdated_hosts_refuse(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        request = {'task': ref, 'session': {'machine': b, 'name': self.name}}
+        (self.root / 'no-overmind-b').write_text('')
+        self.assertEqual(json.loads(self.overmind_raw('a', 'send', '--json', data=request).stdout)['error']['code'], 'host_outdated')
+        (self.root / 'no-overmind-b').unlink()
+        (self.root / 'offline-b').write_text('')
+        offline = self.overmind_raw('a', 'send', '--json', data=request)
+        self.assertEqual((offline.returncode, json.loads(offline.stdout)['error']['code']), (1, 'host_unreachable'))
+        self.assertEqual(self.overmind('a', 'show', ref)['task']['stage'], 'Queue')
+        stranger = dict(request, session={'machine': str(uuid.uuid4()), 'name': self.name})
+        refused = json.loads(self.overmind_raw('a', 'send', '--json', data=stranger).stdout)['error']
+        self.assertEqual((refused['code'], refused['field']), ('host_unreachable', 'session'))
+        self.assertEqual(self.received(), b'')
+
+    def test_a_host_never_forwards_a_delivery_again(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        self.call('a', 'sync')
+        a = self.overmind('a', 'status')['machine']
+        request = {'task': ref, 'session': {'machine': a, 'name': self.name}}
+        (self.root / 'calls').write_text('')
+        # What a's forward would ask of b, for a session that is not on b.
+        answer = self.call('b', 'overmind-deliver', data={'command': 'send', 'request': request})
+        self.assertEqual((answer['ok'], answer['error']['code']), (False, 'remote_session'))
+        self.assertEqual((self.root / 'calls').read_text(), '')  # b called no other machine
+        self.assertEqual(self.overmind('b', 'show', ref)['task']['stage'], 'Queue')
+
+    def test_an_image_no_machine_holds_refuses_the_send_before_claiming(self):
+        attachment, _ = self.image(1024)
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment], 'stage': 'Queue'})['task']['ref']
+        self.call('a', 'sync')
+        (self.root / 'offline-a').write_text('')
+        result = self.overmind_raw('b', 'send', '--json', data={'task': ref, 'session': {'name': self.name}})
+        self.assertEqual(json.loads(result.stdout)['error']['code'], 'attachment_unavailable', result.stderr)
+        task = self.overmind('b', 'show', ref)['task']
+        self.assertEqual(task['stage'], 'Queue')
+        self.assertNotIn('[claim]', [j['marker'] for j in task['journal']])
+        self.assertEqual(self.received(), b'')
 
 
 if __name__ == '__main__':
