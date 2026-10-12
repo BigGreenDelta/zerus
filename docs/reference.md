@@ -641,6 +641,8 @@ account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Claude controls and unverified states fall back to Terminal with an explanation.
+A choice that the agent's status line already shows is confirmed without typing
+anything into Terminal.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.
