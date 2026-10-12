@@ -1467,32 +1467,40 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
 
 // Called under the existing input transaction lock; never a mutation from ls or
 // inspect. It deliberately does nothing while the agent is still working.
-pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+/// Settings that `apply_pending` would apply now, after every check it makes.
+struct Pending {
+    request: Request,
+    model: ModelOption,
+    path: PathBuf,
+    receipt: Value,
+}
+
+fn pending(record: &Value) -> Result<Option<Pending>> {
     let pending = &record["pending_settings"];
-    if !pending.is_object() || !ready(&record) {
-        return Ok(record);
+    if !pending.is_object() || !ready(record) {
+        return Ok(None);
     }
-    if string(pending, "run_id") != string(&record, "run_id")
-        || string(pending, "conversation_id") != string(&record, "conversation_id")
+    if string(pending, "run_id") != string(record, "run_id")
+        || string(pending, "conversation_id") != string(record, "conversation_id")
     {
         return Err("pending settings belong to a different session; refresh settings".into());
     }
     let request = SettingsRequest {
         request_id: string(pending, "request_id").into(),
-        expected_run_id: string(&record, "run_id").into(),
-        expected_conversation_id: string(&record, "conversation_id").into(),
+        expected_run_id: string(record, "run_id").into(),
+        expected_conversation_id: string(record, "conversation_id").into(),
         model: Some(string(pending, "model").into()),
         effort: Some(string(pending, "effort").into()),
         expected_pending_id: None,
     };
-    let (model, effort) = requested_model(&record, &request)?;
+    let (model, effort) = requested_model(record, &request)?;
     let id = uuid::Uuid::parse_str(&request.request_id)
         .map_err(|_| "invalid pending settings ID")?
         .to_string();
     let path = absolute_root()?
         .join("settings_receipts")
         .join(format!("{id}.json"));
-    let mut receipt: Value =
+    let receipt: Value =
         serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     if string(&receipt, "status") != "scheduled"
@@ -1502,13 +1510,25 @@ pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
     {
         return Err("pending settings are not safe to retry; inspect Terminal".into());
     }
-    let native = Request {
+    let request = Request {
         request_id: id,
         expected_run_id: request.expected_run_id,
         expected_conversation_id: request.expected_conversation_id,
         effort,
     };
-    apply_settings(name, &native, &model, &path, &mut receipt)
+    Ok(Some(Pending { request, model, path, receipt }))
+}
+
+/// Refuses as `apply_pending` would, without applying or writing anything.
+pub(super) fn check_pending(record: &Value) -> Result<()> {
+    pending(record).map(|_| ())
+}
+
+pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+    let Some(mut pending) = pending(&record)? else {
+        return Ok(record);
+    };
+    apply_settings(name, &pending.request, &pending.model, &pending.path, &mut pending.receipt)
 }
 
 // Kimi has a per-invocation model flag but no effort flag. Restore its saved
@@ -1836,5 +1856,19 @@ mod tests {
         );
         assert!(kimi_picker(&panel.replace("Alt+S session-only · ", "")).is_none());
         assert!(kimi_picker(&panel.replace("[ High ]", "[ Low ]")).is_none());
+    }
+
+    #[test]
+    fn pending_settings_are_checked_without_being_applied() {
+        let record = json!({"activity":"idle","phase":"idle","run_id":"run-2","conversation_id":"c",
+            "pending_settings":{"request_id":"r","run_id":"run-1","conversation_id":"c"}});
+        let refused = check_pending(&record).unwrap_err();
+        assert!(refused.contains("different session"), "{refused}");
+        assert_eq!(apply_pending("codex/x", record.clone()).unwrap_err(), refused);
+        // Settings wait for a ready agent, so a working one has nothing to refuse yet.
+        let mut working = record.clone();
+        working["activity"] = json!("busy");
+        assert!(check_pending(&working).is_ok());
+        assert!(check_pending(&json!({"activity":"idle","phase":"idle","run_id":"run-2"})).is_ok());
     }
 }

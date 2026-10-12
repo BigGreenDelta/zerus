@@ -433,6 +433,21 @@ fn task_uuid(request_id: &str) -> String {
         .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
 }
 
+/// A session as a person names it; an empty or missing machine means this one.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedSession {
+    #[serde(default)]
+    machine: String,
+    name: String,
+}
+
+impl From<NamedSession> for SessionRef {
+    fn from(session: NamedSession) -> Self {
+        SessionRef { machine: session.machine, name: session.name }
+    }
+}
+
 /// Validates a session reference and fills in this machine when none is named.
 pub fn local_session(field: &str, session: Option<SessionRef>, machine: &str) -> Result<Option<SessionRef>, Refusal> {
     let Some(mut session) = session else {
@@ -502,11 +517,28 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
             .then(a.rank.cmp(&b.rank))
             .then(a.uuid.cmp(&b.uuid))
     });
+    let machine = ctx.store.machine();
     let views: Vec<Value> = tasks
         .iter()
-        .map(|t| view(t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false))
+        .map(|t| {
+            let mut view = view(t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false);
+            with_current_pin(&mut view, t, &events, machine);
+            view
+        })
         .collect();
     Ok(json!({"ok": true, "project": req.project, "cursor": cursor, "workflow": wf, "tasks": views}))
+}
+
+/// Adds `pinned_current` to a task's view when the task is pinned to a session
+/// of this machine that has another name now: a pin written on another machine
+/// can miss a rename there. Other machines show the pin as written.
+fn with_current_pin(view: &mut Value, task: &Task, events: &[Event], machine: &str) {
+    if let Some(pinned) = task.pinned.as_ref().filter(|pinned| pinned.machine == machine) {
+        let name = super::sessions::current_name(events, machine, &pinned.name, &crate::state::session_tracked);
+        if name != pinned.name {
+            view["pinned_current"] = json!(name);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -519,9 +551,13 @@ struct TaskRequest {
 
 pub fn show(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: TaskRequest = parse(&request)?;
+    let machine = ctx.store.machine().to_owned();
     ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
-        task_result(tx, &uuid)
+        let task = load(tx, &uuid)?;
+        let mut view = view(&task, &reference(tx, &uuid)?, true);
+        with_current_pin(&mut view, &task, &tx.load(&Filter::Shared(String::new()))?, &machine);
+        Ok(json!({"ok": true, "task": view}))
     })
 }
 
@@ -542,7 +578,7 @@ struct CreateRequest {
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
-    pinned: Option<SessionRef>,
+    pinned: Option<NamedSession>,
     #[serde(default)]
     attachments: Vec<NewAttachment>,
     #[serde(default)]
@@ -559,7 +595,7 @@ pub fn create(ctx: &mut Ctx, request: Value) -> Result<Value> {
     for label in &req.labels {
         check_reserved(label)?;
     }
-    let pinned = local_session("pinned", req.pinned.clone(), ctx.store.machine())?;
+    let pinned = local_session("pinned", req.pinned.clone().map(Into::into), ctx.store.machine())?;
     if pinned.is_none() && req.project.is_empty() {
         return Err(Refusal::field("missing_field", "project", "missing", "choose a project or pin the task to a session").into());
     }
@@ -781,13 +817,13 @@ struct PinRequest {
     request_id: String,
     task: String,
     #[serde(default)]
-    session: Option<SessionRef>,
+    session: Option<NamedSession>,
 }
 
 pub fn pin(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: PinRequest = parse(&request)?;
-    let session = local_session("session", req.session.clone(), ctx.store.machine())?;
+    let session = local_session("session", req.session.clone().map(Into::into), ctx.store.machine())?;
     write(ctx, "pin", &request, |tx, actor| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
@@ -1261,6 +1297,20 @@ mod tests {
         assert_eq!(refusal(label(&mut human(&mut store), json!({"task": a, "label": "reviewed", "present": true})).unwrap_err()).code, "reserved_label");
         delete(&mut human(&mut store), json!({"task": a})).unwrap();
         assert_eq!(refusal(show(&mut human(&mut store), json!({"task": a})).unwrap_err()).code, "unknown_task");
+    }
+
+    #[test]
+    fn pins_name_this_machine_without_a_machine_and_unpin_removes_them() {
+        let (_dir, mut store) = store();
+        let task = new_task(&mut store, "Queue");
+        let pinned = pin(&mut human(&mut store), json!({"task": task, "session": {"name": "w1"}})).unwrap();
+        assert_eq!(pinned["task"]["pinned"], json!({"machine": MACHINE, "name": "w1"}));
+        let unpinned = unpin(&mut human(&mut store), json!({"task": task})).unwrap();
+        assert_eq!(unpinned["task"]["pinned"], Value::Null);
+        let created = create(&mut human(&mut store), json!({"prompt": "x", "pinned": {"name": "w2"}})).unwrap();
+        assert_eq!(created["task"]["pinned"], json!({"machine": MACHINE, "name": "w2"}));
+        let unknown = pin(&mut human(&mut store), json!({"task": task, "session": {"name": "w1", "extra": 1}})).unwrap_err();
+        assert_eq!(refusal(unknown).code, "invalid_request");
     }
 
     #[test]

@@ -269,6 +269,7 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
     if own && event.actor.session_ref() != task.assignee {
         return Err(Refusal::new("not_assigned", "this task is not assigned to your session"));
     }
+    let by_assignee = event.actor.session_ref().is_some() && event.actor.session_ref() == task.assignee;
     let text = |name: &str| field(&p.fields, name);
     match p.action {
         Action::Create => return Err(Refusal::new("invalid_event", "tasks are created by task_created")),
@@ -361,10 +362,11 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
         }
         Action::Move => task.journal("[moved]", format!("{from} -> {to}"), event),
     }
-    // `orphaned` describes the assignee, so it goes when the assignee changes.
+    // `orphaned` describes the assignee, so it goes when the assignee changes
+    // and when the assignee session acts, which proves that it is alive.
     // Changed within version 1 before the first release; see the spec's
     // Compatibility section.
-    if matches!(p.action, Action::Claim | Action::Unclaim | Action::Return | Action::Decompose) {
+    if by_assignee || matches!(p.action, Action::Claim | Action::Unclaim | Action::Return | Action::Decompose) {
         task.flags.remove("orphaned");
     }
     if p.action != Action::Answer && wf.role(&from) == Some(Role::NeedsHuman) {
@@ -545,6 +547,11 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
         }
         "flag_set" => {
             let flag = text("flag");
+            // A flag that names a session describes it as the assignee, so it
+            // applies only while that session holds the task.
+            if p.get("session").is_some_and(|s| !s.is_null()) && session("session") != Some(task.assignee.clone()) {
+                return;
+            }
             if p.get("value").and_then(Value::as_bool).unwrap_or(false) {
                 task.flags.insert(flag);
             } else {
@@ -1049,6 +1056,7 @@ mod tests {
         assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3)]), ["orphaned"]);
         // Moves keep the assignee and the flag; so does a refused unclaim.
         let park = transition(A, 4, 4, human(), &claim.id, "move", "Icebox", json!({}), Value::Null);
+        assert_eq!(run(&[c.clone(), claim.clone(), orphan(3), park.clone()]).stage, "Icebox");
         assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3), park]), ["orphaned"]);
         let stale = transition(A, 4, 4, human(), &c.id, "unclaim", "Queue", json!({}), Value::Null);
         assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3), stale]), ["orphaned"]);
@@ -1061,6 +1069,54 @@ mod tests {
         assert_eq!((task.assignee.unwrap().name.as_str(), task.flags.len()), ("w2", 0));
         let back = transition(A, 4, 4, agent("w1"), &claim.id, "return", "Backlog", json!({"reason": "blocked"}), Value::Null);
         assert_eq!(flags(&[c, claim, orphan(3), back]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_orphaned_flag_that_names_a_session_lands_only_on_its_tasks() {
+        let (c, claim) = claimed();
+        let orphan = |seq: u64, name: &str| {
+            ev(A, seq, seq, human(), "flag_set", "", json!({"flag": "orphaned", "value": true, "session": session(name)}))
+        };
+        let flags = |events: &[Event]| run(events).flags.into_iter().collect::<Vec<_>>();
+        assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3, "w1")]), ["orphaned"]);
+        assert!(flags(&[c.clone(), claim.clone(), orphan(3, "w2")]).is_empty());
+        // The session lost its claim to a concurrent one before its flag sorts.
+        let lost = transition(B, 1, 2, Actor::human(B), &c.id, "claim", "Design", json!({}), session("w2"));
+        assert!(flags(&[c.clone(), claim.clone(), lost, orphan(3, "w2")]).is_empty());
+        // The task was taken back before the flag sorts.
+        let unclaim = transition(A, 3, 3, human(), &claim.id, "unclaim", "Queue", json!({}), Value::Null);
+        assert!(flags(&[c.clone(), claim.clone(), unclaim, orphan(4, "w1")]).is_empty());
+        let junk = ev(A, 3, 3, human(), "flag_set", "", json!({"flag": "orphaned", "value": true, "session": 5}));
+        assert!(flags(&[c, claim, junk]).is_empty());
+    }
+
+    #[test]
+    fn an_accepted_action_of_the_assignee_clears_orphaned() {
+        let (c, claim) = claimed();
+        let orphan = ev(A, 3, 3, human(), "flag_set", "", json!({"flag": "orphaned", "value": true, "session": session("w1")}));
+        let flags = |events: &[Event]| run(events).flags.into_iter().collect::<Vec<_>>();
+        // A refused action proves nothing.
+        let refused = transition(A, 4, 4, agent("w1"), &claim.id, "advance", "Build", json!({}), Value::Null);
+        assert_eq!(flags(&[c.clone(), claim.clone(), orphan.clone(), refused]), ["orphaned"]);
+        let spec = transition(A, 4, 4, agent("w1"), &claim.id, "advance", "Build", json!({"spec": "s"}), Value::Null);
+        assert!(flags(&[c.clone(), claim.clone(), orphan.clone(), spec.clone()]).is_empty());
+        let flag = |seq: u64| ev(A, seq, seq, human(), "flag_set", "", json!({"flag": "orphaned", "value": true, "session": session("w1")}));
+        let ask = transition(A, 6, 6, agent("w1"), &spec.id, "call_human", "Your Call", json!({"question": "q"}), Value::Null);
+        let mut events = vec![c, claim, orphan, spec, flag(5), ask.clone()];
+        let task = run(&events);
+        assert_eq!((task.stage.as_str(), task.flags.len()), ("Your Call", 0));
+        // A person's answer is not the assignee acting.
+        let answer = transition(A, 8, 8, human(), &ask.id, "answer", "", json!({"answer": "a"}), Value::Null);
+        events.extend([flag(7), answer.clone()]);
+        assert_eq!(flags(&events), ["orphaned"]);
+        // Neither is the reviewer's verdict.
+        let review = transition(A, 9, 9, agent("w1"), &answer.id, "advance", "Review", json!({"worklog": "w", "evidence": "e"}), Value::Null);
+        let reviewer = ev(A, 10, 10, human(), "reviewer_set", "", json!({"session": session("w2")}));
+        let verdict = transition(A, 12, 12, agent("w2"), &review.id, "approve", "Review", json!({"report": "r"}), Value::Null);
+        events.extend([review, reviewer, flag(11), verdict]);
+        let task = run(&events);
+        assert!(task.labels.contains("reviewed"));
+        assert_eq!(task.flags.into_iter().collect::<Vec<_>>(), ["orphaned"]);
     }
 
     #[test]

@@ -160,6 +160,8 @@ fn checked_record(name: &str, request: &Request) -> Result<Value> {
 pub(super) fn preflight(name: &str, run_id: &str, conversation_id: &str) -> Result<()> {
     let record = checked_input(name, run_id, conversation_id, true)?;
     compact_context::check_continuation(&record, "")?;
+    // `submit` applies pending model settings first and refuses when it cannot.
+    effort::check_pending(&record)?;
     checked_terminal(&record, true)
 }
 

@@ -230,8 +230,10 @@ only when its actor's machine is the renamed session's machine.
 
 Before the first release, how existing kinds fold may still change within
 version 1, since no released machine folds them yet: `claim`, `unclaim`,
-`return` and `decompose` now also clear `orphaned`. After the release such a
-change needs a new event version.
+`return` and `decompose` now also clear `orphaned`, as does any accepted
+transition of the assignee session, and a `flag_set` that names a session
+applies only while that session is the task's assignee. After the release such
+a change needs a new event version.
 
 ### Who writes what
 
@@ -327,8 +329,8 @@ Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`, `review-send`,
 `rework-send`, `answer`, `resolve-delivery`, `done`, `reopen`, `delete`,
 `workflow get|set`, `templates get|set`, `status`, `attachment`, `rev`, `mcp`.
-`send` and `review-send` take `session: {machine?, name}`; `machine` defaults to
-the local computer. Peers advertise `overmind:1` in the `features` of swarm `hello`.
+`send`, `review-send` and `pin` take `session: {machine?, name}`, and `create`
+takes `pinned` in the same form; `machine` defaults to the local computer. Peers advertise `overmind:1` in the `features` of swarm `hello`.
 
 Agent commands: `mine`, `show`, `comment`, `advance`, `call-human`, `return`,
 `decompose`, `file`, `attach`, `attachment`, `review`. `attachment` is open to
@@ -410,7 +412,8 @@ phone runs it through the connector on the gateway.
    and the same `request_id` with another request is refused on the caller.
 3. On the session's host: gate check against the merged state, then the existing
    `checked_input` preflight (run and conversation identity, pause, blocking
-   dialogs). A failure returns the reason; nothing is written. The gates run
+   dialogs, pending model settings that `hgs send` would refuse). A failure
+   returns the reason; nothing is written. The gates and the preflight run
    before the host fetches images it lacks, so a refused request reaches no
    other machine. A lost answer from the host, which may have acted already,
    refuses with `delivery_unknown`, and the person checks the task before
@@ -450,7 +453,8 @@ receives it as a queued message. `review-send`, `rework-send` and `answer`
 follow the same path with their templates. `hgs send`'s request schema does not
 change.
 
-Deferred: the rename-ordering question `zerus-89h.2.4`.
+The host resolves a pin that missed a rename of the session before the
+`pinned_elsewhere` gate; see Part 8, Session renamed.
 
 ## Part 6. Desktop GUI
 
@@ -572,8 +576,8 @@ payloads never contain task content.
 | Delivery failed without a receipt | `[unclaim]`, back to Queue, reason in the journal. |
 | Delivery uncertain | Stays in Design with `delivery_uncertain`; human resolves. |
 | Host's answer lost after it may have acted | `delivery_unknown`; the person checks the task before sending again. |
-| Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag. |
-| Session renamed | `session_renamed` event inside the rename; pins and assignee follow. |
+| Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. The flag names the session and applies only while that session holds the task, so a session that lost a concurrent claim, or a task taken back meanwhile, is not flagged. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag, as does an accepted action of the assignee session itself (`advance`, `call_human`), which proves that it is alive, for example after its archive was restored. A task in Your Call keeps the flag through Icebox and back to Queue until it is sent again. |
+| Session renamed | `session_renamed` event inside the rename; pins, assignees and reviewers follow. The host writes assignees and reviewers with the current name, so only a pin written on another machine can miss a concurrent rename: the rename sorts before the pin, and the fold keeps the name as written. The host resolves such a pin through its own renames, oldest first, past every name that no session there uses: `send` compares the resolved name for `pinned_elsewhere`, and `show` and `board` add it as `pinned_current`. Other machines show the pin as written until the host resolves it. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |
 | Cache corrupted or schema changed | Rebuilt from `events`. |
 | Unknown event kind or version | Task read-only on that machine. |

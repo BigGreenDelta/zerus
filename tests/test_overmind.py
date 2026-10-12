@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -220,6 +221,13 @@ class Overmind(unittest.TestCase):
         self.assertEqual(len(list((self.state / 'archives').glob('*.json'))), 1)
         self.assertEqual(self.ok('show', task['ref'])['task']['flags'], ['orphaned'])
 
+    def test_pin_without_a_machine_and_unpin(self):
+        ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        pinned = self.ok('pin', '--json', data={'task': ref, 'session': {'name': 'codex/demo/w1'}})['task']['pinned']
+        self.assertEqual(pinned, {'machine': self.ok('status')['machine'], 'name': 'codex/demo/w1'})
+        self.assertIsNone(self.ok('unpin', '--json', data={'task': ref})['task']['pinned'])
+        self.assertIsNone(self.ok('show', ref)['task']['pinned'])
+
     def test_templates_round_trip(self):
         self.ok('templates', 'set', '--json', data={'project': 'demo', 'templates': {'review': 'Check {task.ref}'}})
         listed = self.ok('templates', 'get', '--json', data={'project': 'demo'})['templates']
@@ -348,6 +356,124 @@ class AgentSession(unittest.TestCase):
         task = self.person('show', ref)['task']
         self.assertEqual((task['stage'], [j['marker'] for j in task['journal']]), ('Queue', ['[created]']))
         self.assertEqual(self.received(), b'')
+
+    def nothing_written(self, ref, stage='Queue', journal=('[created]',)):
+        task = self.person('show', ref)['task']
+        self.assertEqual((task['stage'], [j['marker'] for j in task['journal']]), (stage, list(journal)))
+        self.assertEqual(self.received(), b'')
+        return task
+
+    def test_pending_settings_hgs_send_would_refuse_write_nothing(self):
+        ref = self.task()
+        # Settings scheduled for another run of the session: `hgs send` refuses before typing.
+        self.record['pending_settings'] = {'request_id': str(uuid.uuid4()), 'run_id': str(uuid.uuid4()),
+                                           'conversation_id': self.record['conversation_id']}
+        self.write_record()
+        code, body = self.send(ref)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        self.assertIn('pending settings', body['error']['message'])
+        self.nothing_written(ref)
+
+    def test_deepseek_and_unknown_sessions_refuse_and_write_nothing(self):
+        ref = self.task()
+        native = 'dsh/demo/w1'
+        bindings = self.state / 'dsh/bindings'
+        bindings.mkdir(parents=True)
+        (bindings / f'{hashlib.sha256(native.encode()).hexdigest()}.json').write_text('{}')
+        for name, expected in [(native, 'session_unavailable'), ('codex/demo/nobody', 'unknown_session')]:
+            code, body = self.overmind('send', '--json', data={'task': ref, 'session': {'name': name}}, agent=False)
+            self.assertEqual((code, body['error']['code'], body['error']['field']), (1, expected, 'session'), body)
+        self.nothing_written(ref)
+
+    def image_not_here(self, ref):
+        """Removes the task's only image from this machine; no other machine holds it."""
+        sha = self.person('show', ref)['task']['attachments'][0]['sha256']
+        (self.state / 'overmind/blobs' / sha[:2] / sha).unlink()
+
+    def image_task(self):
+        image = base64.b64encode(b'\x89PNG fixture').decode()
+        return self.task(attachments=[{'name': 'shot.png', 'mime': 'image/png', 'data_base64': image}])
+
+    def test_paused_and_stopped_sessions_refuse_before_images_are_fetched(self):
+        ref = self.image_task()
+        self.image_not_here(ref)
+        # A pause in progress, then a session whose agent is gone after the pause.
+        self.record['pausing'] = {'pid': self.record['pid'], 'start': self.record['process_start']}
+        self.write_record()
+        code, body = self.send(ref)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        self.nothing_written(ref)
+        self.stop_agent()
+        self.record.pop('pausing')
+        self.record['paused'] = True
+        self.write_record()
+        code, body = self.send(ref)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        self.nothing_written(ref)
+
+    def test_review_send_to_a_stopped_session_fetches_no_images(self):
+        ref = self.image_task()
+        self.agent_reaches_review(ref, 'codex/other')
+        self.image_not_here(ref)
+        self.stop_agent()
+        code, body = self.overmind('review-send', '--json', data={'task': ref, 'session': {'name': self.name}}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        self.assertIsNone(self.person('show', ref)['task']['reviewer'])
+
+    def test_rework_send_to_a_stopped_session_fetches_no_images(self):
+        ref = self.image_task()
+        self.review_failed(ref)
+        self.image_not_here(ref)
+        self.stop_agent()
+        journal = [j['marker'] for j in self.person('show', ref)['task']['journal']]
+        code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        self.nothing_written(ref, 'Build', journal)
+
+    def test_a_retry_after_typing_records_a_text_that_no_longer_renders_as_uncertain(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task(prompt='x' * (40 * 1024))
+        self.review_failed(ref)
+        self.person('templates', 'set', '--json', data={'project': 'demo', 'templates': {'rework': '{task.prompt}{task.prompt}'}})
+        code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'invalid_template'), body)
+        # The text of the first attempt may be typed already: the retry never refuses it.
+        self.type_directly(request_id)
+        before = self.received()
+        code, body = self.overmind('rework-send', '--json', data={'task': ref, 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
+        self.assertIn('delivery_uncertain', body['task']['flags'])
+        self.assertEqual(self.received(), before)
+
+    def test_an_undelivered_answer_names_the_request_that_sends_it_again(self):
+        ref = self.task()
+        self.asks_a_question(ref)
+        shim = (self.bin / 'tmux').read_text()
+        # Staging the text fails: nothing reaches the session and no input receipt exists.
+        self.script('tmux', '#!/bin/sh\nif [ "$1" = load-buffer ]; then exit 1; fi\n' + shim.split('\n', 1)[1])
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST'}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'not_delivered'), body)
+        request_id = re.search(r'request_id ([0-9a-f-]{36})', body['error']['message']).group(1)
+        self.script('tmux', shim)
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body['delivery'], body['task']['stage']), (0, 'sent', 'Build'), body)
+        self.assertEqual([j['marker'] for j in body['task']['journal']].count('[answer]'), 1)
+        self.wait_for(lambda: b'REST' in self.received())
+
+    def test_a_pin_that_missed_a_rename_follows_it_on_the_host(self):
+        ref = self.task()
+        old, new = self.name, self.name + '/renamed'
+        renamed = self.hgs('rename', old, new)
+        self.assertEqual(renamed.returncode, 0, renamed.stderr)
+        self.name = new
+        # Written on a machine that had not seen the rename yet: it sorts after the rename and names the old session.
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.append('pin_set', {'session': {'machine': machine, 'name': old}}, actor={'kind': 'human', 'machine': str(uuid.uuid4())})
+        task = self.person('show', ref)['task']
+        self.assertEqual((task['pinned']['name'], task['pinned_current']), (old, new))
+        self.assertEqual(self.person('board', '--json', data={'project': 'demo'})['tasks'][0]['pinned_current'], new)
+        code, body = self.send(ref)
+        self.assertEqual((code, body.get('delivery')), (0, 'sent'), body)
 
     def test_a_busy_agent_and_a_second_task_need_confirmation(self):
         first, second = self.task(), self.task()
@@ -546,6 +672,11 @@ class AgentSession(unittest.TestCase):
         self.assertEqual([self.flags(r) for r in (ref, elsewhere, waiting)], [['orphaned'], [], []])
         task = self.person('show', ref)['task']
         self.assertEqual((task['stage'], task['assignee']['name']), ('Design', self.name))
+        # The flag names the session, so it never lands on a task another session took meanwhile.
+        db = sqlite3.connect(self.state / 'overmind/overmind.sqlite3')
+        flags = [json.loads(raw)['payload'] for (raw,) in db.execute("SELECT raw FROM events WHERE kind = 'flag_set'")]
+        db.close()
+        self.assertEqual(flags, [{'flag': 'orphaned', 'value': True, 'session': task['assignee']}])
         moved = self.person('move', '--json', data={'task': ref, 'to': 'Queue'})['task']
         self.assertEqual((moved['stage'], moved['assignee'], moved['flags']), ('Queue', None, []))
 

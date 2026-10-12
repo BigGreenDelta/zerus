@@ -5,9 +5,9 @@
 use super::blobs;
 use super::commands::{
     self, human_only, load, load_writable, local_session, parse, reference, refuse, resolve, simple, transition, view,
-    workflow, Ctx,
+    workflow, Ctx, NamedSession,
 };
-use super::fold::{fold_many, Task};
+use super::fold::Task;
 use super::model::*;
 use super::store::{Filter, Store, Tx};
 use super::templates;
@@ -138,25 +138,22 @@ fn reason(text: &str) -> BTreeMap<String, String> {
 
 /// Tasks the session holds in active or needs-human stages, in every project.
 fn active_tasks(tx: &Tx, session: &SessionRef) -> Result<usize> {
-    let events = tx.load(&Filter::All)?;
-    let mut count = 0;
-    for task in fold_many(&events).values().filter(|t| !t.deleted && t.assignee.as_ref() == Some(session)) {
-        if matches!(workflow(tx, &task.project)?.role(&task.stage), Some(Role::Active | Role::NeedsHuman)) {
-            count += 1;
-        }
-    }
-    Ok(count)
+    Ok(super::sessions::holding(tx, session)?.len())
 }
 
-/// The stage a send claims the task into, after the gates of Part 3.
+/// The stage a send claims the task into, after the gates of Part 3. It runs on
+/// the session's host, which resolves a pin that missed one of its renames.
 fn send_gates(tx: &Tx, wf: &Workflow, task: &Task, session: &SessionRef, confirmed: &Confirmed) -> Result<String> {
     if task.labels.contains("epic") {
         return refuse("epic", "an epic is a container and is never sent to a session");
     }
     let to = rule_target(wf, Action::Claim, &task.stage)
         .ok_or_else(|| Refusal::new("transition_not_allowed", format!("a task in {} cannot be sent", task.stage)))?;
-    if let Some(pinned) = task.pinned.as_ref().filter(|pinned| *pinned != session) {
-        confirmable("pinned_elsewhere", confirmed, format!("this task is reserved for {}", pinned.name))?;
+    if let Some(pinned) = task.pinned.as_ref() {
+        let pinned = super::sessions::current_pin(tx, pinned, &session.machine)?;
+        if pinned != *session {
+            confirmable("pinned_elsewhere", confirmed, format!("this task is reserved for {}", pinned.name))?;
+        }
     }
     let mut open = Vec::new();
     for uuid in &task.follows {
@@ -205,15 +202,6 @@ fn outcome_recorded(events: &[Event], claim: &Event) -> bool {
 fn unsettled(tx: &Tx, task: &Task, claim: &Event) -> Result<bool> {
     let events = tx.load(&Filter::Task(task.uuid.clone()))?;
     Ok(task.head == claim.id && !outcome_recorded(&events, claim))
-}
-
-/// A session as a person names it; no machine means this one.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NamedSession {
-    #[serde(default)]
-    machine: String,
-    name: String,
 }
 
 #[derive(Deserialize)]
@@ -280,7 +268,7 @@ pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
 pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: SendRequest = parse(&request)?;
-    let session = local_session("session", Some(SessionRef { machine: req.session.machine.clone(), name: req.session.name.clone() }), ctx.store.machine())?.expect("a session was given");
+    let session = local_session("session", Some(req.session.clone().into()), ctx.store.machine())?.expect("a session was given");
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "send", &request))? {
         return Ok(result);
     }
@@ -289,8 +277,10 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
     let dir = ctx.store.dir().to_owned();
-    // The gates refuse before images this machine lacks are fetched, so a
-    // refused request reaches no other machine; a resumed claim fetches nothing.
+    // The gates and the session checks refuse before images this machine lacks
+    // are fetched, so a refused request reaches no other machine. A claim this
+    // request already wrote is resumed without fetching and without the session
+    // checks: its text may be typed already, and `submit` decides from its receipt.
     let (fresh, loaded) = ctx.store.read(|tx| {
         let task = load_writable(tx, &resolve(tx, &req.task)?)?;
         let fresh = pending_claim(tx, &task, &request_id)?.is_none();
@@ -299,12 +289,11 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
         }
         Ok((fresh, task))
     })?;
+    let target = target_for(ctx.store, &session, &req.confirm, !fresh)?;
     if fresh {
         super::remote::ensure_blobs(ctx.store, &loaded)?;
     }
-    // Everything that can refuse runs before the claim is written. A claim this
-    // request already wrote is resumed without the session checks: its text may
-    // be typed already, and `submit` decides from its receipt.
+    // Everything that can refuse runs before the claim is written.
     let (uuid, attachments, resumed) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
@@ -314,15 +303,9 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
         }
         Ok((uuid, files(&dir, &task), resumed))
     })?;
-    let target = local_target(ctx.store, &session);
     let attachments = if resumed { attachments } else { Ok(attachments?) };
-    let target = if resumed {
-        target
-    } else {
-        let target = target?;
-        check_session(&session, &target, &req.confirm)?;
-        Ok(target)
-    };
+    // The claim was settled by a retry meanwhile: this request claims afresh.
+    let target = if fresh || resumed { target } else { target_for(ctx.store, &session, &req.confirm, false)? };
     let actor = ctx.actor.clone();
     let (claim, text) = ctx.store.write(|tx| {
         let task = load_writable(tx, &uuid)?;
@@ -587,7 +570,7 @@ pub fn review_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
 pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: ReviewSendRequest = parse(&request)?;
-    let session = local_session("session", Some(SessionRef { machine: req.session.machine.clone(), name: req.session.name.clone() }), ctx.store.machine())?.expect("a session was given");
+    let session = local_session("session", Some(req.session.clone().into()), ctx.store.machine())?.expect("a session was given");
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "review-send", &request))? {
         return Ok(result);
     }
@@ -596,14 +579,19 @@ pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
-    if !resumed {
-        // The gates refuse before images are fetched.
-        let task = ctx.store.read(|tx| {
+    // The gates and the session checks refuse before images are fetched.
+    let gated = if resumed {
+        None
+    } else {
+        Some(ctx.store.read(|tx| {
             let task = load_writable(tx, &resolve(tx, &req.task)?)?;
             review_gates(tx, &task, &session)?;
             Ok(task)
-        })?;
-        super::remote::ensure_blobs(ctx.store, &task)?;
+        })?)
+    };
+    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    if let Some(task) = &gated {
+        super::remote::ensure_blobs(ctx.store, task)?;
     }
     let (uuid, attachments) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
@@ -614,7 +602,6 @@ pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
         Ok((uuid, files(&dir, &task)))
     })?;
     let attachments = if resumed { attachments } else { Ok(attachments?) };
-    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
     let actor = ctx.actor.clone();
     let text = ctx.store.write(|tx| {
         let task = load_writable(tx, &uuid)?;
@@ -657,15 +644,19 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
-    if !resumed {
-        // The gates refuse before images are fetched.
-        let task = ctx.store.read(|tx| {
+    // The gates and the session checks refuse before images are fetched.
+    let checked = if resumed {
+        None
+    } else {
+        let (task, session) = ctx.store.read(|tx| {
             let task = load_writable(tx, &resolve(tx, &req.task)?)?;
-            assignee_for(&task, "rework")?;
-            Ok(task)
+            let session = assignee_for(&task, "rework")?;
+            Ok((task, session))
         })?;
+        let target = target_for(ctx.store, &session, &req.confirm, false)?;
         super::remote::ensure_blobs(ctx.store, &task)?;
-    }
+        Some((session, target))
+    };
     let (uuid, session, text, attachments) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
@@ -673,7 +664,11 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
         Ok((uuid, session, lenient(render(tx, &task, "rework", ""), resumed)?, files(&dir, &task)))
     })?;
     let attachments = if resumed { attachments } else { Ok(attachments?) };
-    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    // The assignee changed meanwhile: the new one is checked too.
+    let target = match checked {
+        Some((checked, target)) if checked == session => target,
+        _ => target_for(ctx.store, &session, &req.confirm, resumed)?,
+    };
     let outcome = deliver_resumed(&session, target, attachments, text, &input_id(&req.request_id));
     settle(ctx, "rework-send", &request, &uuid, "rework", &session, outcome, "", "", |_, _, _| Ok(()))
 }
@@ -839,6 +834,37 @@ mod tests {
             })
             .unwrap();
         assert_eq!(code(gates(&mut store, &epic, &both)), "epic");
+    }
+
+    #[test]
+    fn active_tasks_count_working_and_waiting_tasks_in_every_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let in_project = |store: &mut Store, project: &str| -> String {
+            let mut ctx = Ctx { store, actor: Actor::human(MACHINE), cwd: None };
+            let created = create(&mut ctx, json!({"project": project, "prompt": "Do it", "stage": "Queue"})).unwrap();
+            created["task"]["uuid"].as_str().unwrap().to_owned()
+        };
+        let designing = in_project(&mut store, "p");
+        claim(&mut store, &designing, "w1", "");
+        let building = in_project(&mut store, "q");
+        claim(&mut store, &building, "w1", "");
+        agent_step(&mut store, &building, Action::Advance, "Build", &[("spec", "s")]);
+        let reviewed = in_project(&mut store, "q");
+        claim(&mut store, &reviewed, "w1", "");
+        agent_step(&mut store, &reviewed, Action::Advance, "Build", &[("spec", "s")]);
+        agent_step(&mut store, &reviewed, Action::Advance, "Review", &[("worklog", "w"), ("evidence", "e")]);
+        let asking = in_project(&mut store, "p");
+        claim(&mut store, &asking, "w1", "");
+        agent_step(&mut store, &asking, Action::Advance, "Build", &[("spec", "s")]);
+        agent_step(&mut store, &asking, Action::CallHuman, "Your Call", &[("question", "q")]);
+        let elsewhere = in_project(&mut store, "p");
+        claim(&mut store, &elsewhere, "w2", "");
+        let deleted = in_project(&mut store, "q");
+        claim(&mut store, &deleted, "w1", "");
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        commands::delete(&mut ctx, json!({"task": deleted})).unwrap();
+        assert_eq!(store.read(|tx| active_tasks(tx, &session("w1"))).unwrap(), 3);
     }
 
     #[test]

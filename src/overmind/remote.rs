@@ -10,6 +10,8 @@ use anyhow::{anyhow, bail, ensure, Result};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 
 pub const RANGE: usize = 512 * 1024;
 const MAX_WANT: usize = 64;
@@ -19,18 +21,32 @@ fn unavailable(attachment: &Attachment, last: &str) -> anyhow::Error {
     Refusal::field("attachment_unavailable", "attachments", "missing", format!("no reachable machine holds the image {}{detail}", attachment.name)).into()
 }
 
-/// Serves one range of a stored blob. A blob this machine lacks is an answer,
-/// not a failed call, so the caller still asks this machine for other images.
+/// Serves one range of a stored blob, reading only that range. A blob this
+/// machine lacks is an answer, not a failed call, so the caller still asks this
+/// machine for other images.
 pub fn serve_blob(store: &Store, request: &Value) -> Result<Value> {
     let sha256 = request["sha256"].as_str().unwrap_or_default();
-    let offset = request["offset"].as_u64().unwrap_or(0) as usize;
-    let length = (request["length"].as_u64().unwrap_or(RANGE as u64) as usize).min(RANGE);
-    let Ok(bytes) = std::fs::read(blobs::path(store.dir(), sha256)?) else {
+    let offset = request["offset"].as_u64().unwrap_or(0);
+    let length = request["length"].as_u64().unwrap_or(RANGE as u64).min(RANGE as u64);
+    let Ok(mut file) = File::open(blobs::path(store.dir(), sha256)?) else {
         return Ok(json!({"missing": true}));
     };
-    let end = offset.saturating_add(length).min(bytes.len());
-    ensure!(offset <= end, "invalid range");
-    Ok(json!({"size": bytes.len(), "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end])}))
+    let size = file.metadata()?.len();
+    ensure!(offset <= size, "invalid range");
+    // Blobs never change, so the range is read exactly.
+    let mut bytes = vec![0; length.min(size - offset) as usize];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    Ok(json!({"size": size, "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes)}))
+}
+
+/// Decodes base64 that may hold at most `max` bytes, refusing a longer text
+/// before decoding it.
+fn decode_at_most(text: &str, max: usize, too_long: &str) -> Result<Vec<u8>> {
+    ensure!(text.len() <= max.div_ceil(3) * 4, "{too_long}");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(text)?;
+    ensure!(bytes.len() <= max, "{too_long}");
+    Ok(bytes)
 }
 
 /// Stores pushed blobs after checking their digests; answers which wanted ones are missing.
@@ -42,8 +58,8 @@ pub fn serve_blobs(store: &Store, request: &Value) -> Result<Value> {
     let mut decoded = Vec::new();
     let mut total = 0usize;
     for item in puts {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(item["data_base64"].as_str().unwrap_or_default())?;
-        ensure!(bytes.len() <= MAX_ATTACHMENT, "a pushed image exceeds the per-image limit");
+        let text = item["data_base64"].as_str().unwrap_or_default();
+        let bytes = decode_at_most(text, MAX_ATTACHMENT, "a pushed image exceeds the per-image limit")?;
         total += bytes.len();
         ensure!(total <= MAX_ATTACHMENTS_TOTAL, "the pushed images exceed the total limit");
         ensure!(format!("{:x}", Sha256::digest(&bytes)) == item["sha256"].as_str().unwrap_or_default(), "a pushed image does not match its digest");
@@ -83,7 +99,8 @@ fn fetch(store: &Store, attachment: &Attachment, call: &mut dyn FnMut(&Value) ->
     while (bytes.len() as u64) < attachment.bytes {
         let part = call(&json!({"sha256": attachment.sha256, "offset": bytes.len(), "length": RANGE}))?;
         ensure!(part["missing"] != true, "the peer does not hold the image");
-        let chunk = base64::engine::general_purpose::STANDARD.decode(part["data_base64"].as_str().unwrap_or_default())?;
+        let text = part["data_base64"].as_str().unwrap_or_default();
+        let chunk = decode_at_most(text, RANGE, "the peer returned more than the requested range")?;
         accept_chunk(&mut bytes, &chunk, part["size"].as_u64(), attachment.bytes)?;
     }
     ensure!(format!("{:x}", Sha256::digest(&bytes)) == attachment.sha256, "a fetched image does not match its digest");
@@ -216,7 +233,7 @@ pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, ma
         .map_err(|error| -> anyhow::Error {
             let text = format!("{error:#}");
             // An old host rejected the call before running anything.
-            if text.contains("does not know the Overmind") {
+            if outdated(&text) {
                 return Refusal::field("host_outdated", field, "invalid", "update HGS on the session's machine").into();
             }
             let message = format!("the session's machine {alias} did not report the delivery ({text}); check the task before sending it again");
@@ -233,6 +250,12 @@ pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, ma
         }
     }
     Ok(result)
+}
+
+/// Whether a failed call's text is a host's answer to a request or delivery
+/// that its version does not know.
+fn outdated(text: &str) -> bool {
+    text.contains(super::UNKNOWN)
 }
 
 /// The host's result, or its refusal as the same refusal here. Only an
@@ -263,7 +286,7 @@ pub fn serve_deliver(store: &mut Store, request: &Value) -> Result<Value> {
         "review-send" => deliver::review_send_on(&mut ctx, inner, true),
         "rework-send" => deliver::rework_send_on(&mut ctx, inner, true),
         "answer" => deliver::answer_on(&mut ctx, inner, true),
-        command => bail!("this machine does not know the Overmind delivery {command}; update HGS on it"),
+        command => bail!("{} delivery {command}; update HGS on it", super::UNKNOWN),
     };
     result.or_else(|error| match error.downcast::<Refusal>() {
         Ok(refusal) => Ok(json!({"ok": false, "error": refusal})),
@@ -383,6 +406,65 @@ mod tests {
         assert_eq!(serve_blob(&store, &json!({"sha256": one.sha256})).unwrap(), json!({"missing": true}));
         blobs::put(store.dir(), &bytes).unwrap();
         assert_eq!(serve_blob(&store, &json!({"sha256": one.sha256})).unwrap()["size"], 100);
+    }
+
+    #[test]
+    fn a_blob_is_served_by_ranges() {
+        let (_dir, store) = store();
+        let bytes: Vec<u8> = (0..=255).cycle().take(RANGE + 100).collect();
+        let sha = blobs::put(store.dir(), &bytes).unwrap();
+        let range = |offset: usize, length: Option<usize>| {
+            let mut request = json!({"sha256": sha, "offset": offset});
+            if let Some(length) = length {
+                request["length"] = json!(length);
+            }
+            let answer = serve_blob(&store, &request)?;
+            assert_eq!(answer["size"], bytes.len());
+            Ok::<_, anyhow::Error>(base64::engine::general_purpose::STANDARD.decode(answer["data_base64"].as_str().unwrap()).unwrap())
+        };
+        assert_eq!(range(10, Some(20)).unwrap(), &bytes[10..30]);
+        assert_eq!(range(0, None).unwrap(), &bytes[..RANGE], "at most one range");
+        assert_eq!(range(RANGE, Some(RANGE * 4)).unwrap(), &bytes[RANGE..]);
+        assert!(range(bytes.len(), Some(10)).unwrap().is_empty());
+        assert!(range(bytes.len() + 1, Some(10)).is_err());
+    }
+
+    #[test]
+    fn oversized_base64_is_refused_before_it_is_decoded() {
+        let (_dir, store) = store();
+        // Not even base64, but too long to hold an allowed image.
+        let pushed = "!".repeat(MAX_ATTACHMENT.div_ceil(3) * 4 + 4);
+        let error = serve_blobs(&store, &json!({"put": [{"sha256": "a", "data_base64": pushed}]})).unwrap_err();
+        assert!(format!("{error:#}").contains("per-image limit"), "{error:#}");
+        let (_, one) = image(1);
+        let served = "!".repeat(RANGE.div_ceil(3) * 4 + 4);
+        let error = fetch(&store, &one, &mut |_| Ok(json!({"size": 100, "data_base64": served}))).unwrap_err();
+        assert!(format!("{error:#}").contains("more than the requested range"), "{error:#}");
+    }
+
+    #[test]
+    fn a_request_the_host_does_not_know_reads_as_an_outdated_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let unknown = super::super::serve(&config, "overmind-from-the-future", json!({})).unwrap_err();
+        // The caller sees the host's error inside the swarm call's own.
+        assert!(outdated(&format!("swarm call failed: hgs: {unknown:#}")), "{unknown:#}");
+        let (_dir, mut store) = store();
+        let delivery = serve_deliver(&mut store, &json!({"command": "edit", "request": {}})).unwrap_err();
+        assert!(outdated(&format!("{delivery:#}")), "{delivery:#}");
+        assert!(!outdated("the session's machine is unreachable: connection refused"));
+        assert!(!dir.path().join("state").exists(), "an unknown request opens no store");
     }
 
     #[test]

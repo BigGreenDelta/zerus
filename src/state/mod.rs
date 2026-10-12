@@ -161,6 +161,11 @@ pub(crate) fn delivery_target(name: &str) -> Result<Option<DeliveryTarget>> {
     }))
 }
 
+/// Whether this machine tracks a session named `name`, running or not.
+pub(crate) fn session_tracked(name: &str) -> bool {
+    dsh::exists(name) || record_path(name).exists()
+}
+
 /// Refuses when `hgs send` would refuse now; writes nothing.
 pub(crate) fn delivery_preflight(name: &str, target: &DeliveryTarget) -> Result<()> {
     input::preflight(name, &target.run_id, &target.conversation_id)

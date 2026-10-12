@@ -1389,13 +1389,21 @@ read-only and refuses changes until hgs is updated.
 
 Tasks are referenced by `om-` plus at least five characters, or by UUID. A
 reference grows when needed to stay unambiguous. Pins, assignees and reviewers
-follow a session when it is renamed on its machine. When a session stops taking
-input for good on its machine (it is archived, also after the user quits its
-agent; terminated; forgotten or killed), the tasks it holds in an active or
-needs-human stage get the flag `orphaned`. The session command never fails
-because of Overmind and waits for it at most about a second; pausing orphans
-nothing. Moving the task back to Queue clears the flag, as does any other change
-of assignee.
+follow a session when it is renamed on its machine. A pin written on another
+machine before that machine learned of the rename keeps the old name; the
+session's machine resolves it, so `send` there accepts the session under its
+current name, and `show` and `board` there add the current name as
+`pinned_current`. Other machines show the pin as written.
+
+When a session stops taking input for good on its machine (it is archived, also
+after the user quits its agent; terminated; forgotten or killed), the tasks it
+holds in an active or needs-human stage get the flag `orphaned`. The session
+command never fails because of Overmind and waits for it at most about a
+second; pausing orphans nothing. The flag lands only on tasks that the session
+still holds. Moving the task back to Queue clears the flag, as does any other
+change of assignee or an accepted action of the assignee session itself, for
+example after its archive was restored. A task in Your Call keeps the flag
+through Icebox and back to Queue until it is sent again.
 
 Agents in Zerus sessions use their own commands (`mine`, `show`, `comment`,
 `advance`, `call-human`, `return`, `decompose`, `file`, `attach`, `review`).
@@ -1420,10 +1428,12 @@ computer. A refusal that a person may overrule has `state: "missing"` and the
 field `confirm`; repeat the request with `confirm` listing its code. The
 confirmable codes are `agent_busy`, `wip_exceeded`, `predecessors_open` and
 `pinned_elsewhere`. Other refusals, such as `session_unavailable` (the session
-is stopped, paused, blocked by a dialog or a DeepSeek native session, which is
-not supported yet) and `attachment_unavailable` (no reachable machine holds an
-image of the task), are never confirmable, and nothing is written when one
-occurs. The gates refuse before any image is fetched from another machine. A
+is stopped, paused, blocked by a dialog, holds pending model settings that
+`hgs send` would refuse, or is a DeepSeek native session, which is not
+supported yet), `unknown_session` (this computer tracks no session of that name)
+and `attachment_unavailable` (no reachable machine holds an image of the task),
+are never confirmable, and nothing is written when one occurs. The gates and the
+session checks refuse before any image is fetched from another machine. A
 successful result has `delivery` set to `sent` (the text was submitted) or
 `uncertain`, which sets the flag `delivery_uncertain`; a person settles it with
 `resolve-delivery --json {task, delivered: true|false}`. `delivered: true`
@@ -1446,8 +1456,10 @@ template to the assignee, and `answer --json {task, answer, confirm?}` records
 the answer to a question in Your Call and sends the `answer` template. The
 answer is recorded before it is typed; if it was not delivered, repeat the
 request with the same `request_id`, which the refusal names; the same
-`request_id` with another answer is refused `request_reused`. `unpin --json
-{task}` removes a pin.
+`request_id` with another answer is refused `request_reused`. `pin --json
+{task, session: {machine?, name}}` reserves a task for a session, with `machine`
+defaulting to this computer as for `send`, and `unpin --json {task}` removes the
+pin.
 
 `templates get --json {project}` shows the templates of a project and
 `templates set --json {project, templates: {dispatch|review|rework|answer:

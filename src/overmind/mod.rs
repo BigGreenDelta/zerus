@@ -26,6 +26,10 @@ fn open(config: &crate::config::Config) -> anyhow::Result<store::Store> {
     store::Store::open(&config.state.join("overmind"), &crate::swarm::local_node_id(config)?)
 }
 
+/// How a machine answers an Overmind request or delivery it does not know. A
+/// caller that meets it reports an outdated host, so the text never changes.
+const UNKNOWN: &str = "this machine does not know the Overmind";
+
 /// Serves an Overmind request that arrived over the swarm channel.
 pub fn serve(config: &crate::config::Config, action: &str, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     match action {
@@ -33,7 +37,7 @@ pub fn serve(config: &crate::config::Config, action: &str, request: serde_json::
         "overmind-blob" => remote::serve_blob(&open(config)?, &request),
         "overmind-blobs" => remote::serve_blobs(&open(config)?, &request),
         "overmind-deliver" => remote::serve_deliver(&mut open(config)?, &request),
-        _ => anyhow::bail!("this machine does not know the Overmind request {action}; update HGS on it"),
+        _ => anyhow::bail!("{UNKNOWN} request {action}; update HGS on it"),
     }
 }
 
