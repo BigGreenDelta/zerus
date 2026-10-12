@@ -21,6 +21,9 @@
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
 #include "SingleInstance.h"
+#ifndef Q_OS_WIN
+#include "TerminationSignals.h"
+#endif
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
 #include "MessageBoxIcons.h"
@@ -276,6 +279,10 @@ int main(int argc, char *argv[])
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
+#ifndef Q_OS_WIN
+    // A service stop (SIGTERM) quits like the tray menu, so aboutToQuit flushes drafts.
+    TerminationSignals termination([](int) { QCoreApplication::quit(); });
+#endif
 #ifdef Q_OS_MACOS
     MacAppVisibility appVisibility(app);
 #endif

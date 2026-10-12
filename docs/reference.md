@@ -1393,7 +1393,17 @@ variables and application/service IDs stay compatible with existing installation
 [third-party notices](../THIRD_PARTY_NOTICES.md) for dependency licensing.
 
 The GUI installer updates only Zerus and its desktop integration. It never
-restarts native agents, tmux servers or DeepSeek hosts. Use
+restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces a
+running Zerus through `tray/update-installed.py`, the only supported live update:
+Zerus quits as its Quit action does, so drafts are saved, then starts again through
+systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
+hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
+restores it when the new GUI does not start, and confirms the running image,
+unchanged nonempty drafts and native agent and tmux processes. It records the
+installed builds in `~/.local/share/hgs/build-provenance.json`. A failed check
+leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
+is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 

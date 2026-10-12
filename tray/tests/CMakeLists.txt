@@ -241,6 +241,14 @@ target_include_directories(test_watchdog PRIVATE ../src)
 target_link_libraries(test_watchdog PRIVATE Qt6::Test Qt6::Core Threads::Threads)
 add_test(NAME watchdog COMMAND test_watchdog)
 
+# Service stops quit like the tray menu (TerminationSignals.h); Unix only.
+if(NOT WIN32)
+    add_executable(test_terminationsignals test_terminationsignals.cpp ../src/TerminationSignals.cpp)
+    target_include_directories(test_terminationsignals PRIVATE ../src)
+    target_link_libraries(test_terminationsignals PRIVATE Qt6::Test Qt6::Core)
+    add_test(NAME terminationsignals COMMAND test_terminationsignals)
+endif()
+
 add_executable(test_sessionswindow test_sessionswindow.cpp ../src/SessionsWindow.cpp ../src/SessionSelection.cpp ../src/MachinesPage.cpp ../src/SessionSearch.cpp
                ../src/MachineFilter.cpp ../src/DashboardPage.cpp ../src/AccountsPage.cpp ../src/AccountUsageStore.cpp
                ../src/SessionOrganization.cpp ../src/SessionList.cpp ../src/SwarmController.cpp ../src/SwarmDialog.cpp ../src/SwarmConflictReview.cpp

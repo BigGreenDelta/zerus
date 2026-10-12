@@ -164,6 +164,9 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" packaging/windows/hgs-tray.manifest)
     # A GUI program: no console window opens with it (see attachParentConsole in main.cpp).
     set_target_properties(hgs-tray PROPERTIES WIN32_EXECUTABLE TRUE)
+else()
+    # Service stops and terminal signals quit like the tray menu (main.cpp).
+    target_sources(hgs-tray PRIVATE src/TerminationSignals.cpp)
 endif()
 if(APPLE)
     # Тот же принцип, что и для Konsole: osascript и Terminal.app существуют только на маке.

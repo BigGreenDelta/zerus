@@ -12,8 +12,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHANGED=0
-# Staging an update must not discard in-memory message drafts in a running UI.
+# A changed build replaces the installed GUI through update-installed.py: it quits a
+# running GUI like its Quit action (drafts are saved), keeps one rollback copy, starts
+# it again and checks drafts and native agents. HGS_TRAY_RESTART=0 only stages the
+# build on disk; the running GUI keeps its drafts and the new UI opens on next launch.
 RESTART_RUNNING="${HGS_TRAY_RESTART:-1}"
+UPDATE=0
 case "$RESTART_RUNNING" in 0|1) ;; *) echo "HGS_TRAY_RESTART must be 0 or 1" >&2; exit 1 ;; esac
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
@@ -85,14 +89,19 @@ echo "[2/4] Installing the .app bundle to ~/Applications..."
 codesign --force --deep --sign - "${BUILD_APP}"
 mkdir -p "${HOME}/Applications"
 if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; then
-    # rm перед cp: cp -R поверх существующего бандла смешал бы старые файлы с новыми.
-    rm -rf "${APP_DEST}"
-    cp -R "${BUILD_APP}" "${APP_DEST}"
-    # Refresh this bundle's registration after replacing its icon/resources.
-    # Do not reset LaunchServices globally or restart the user's Dock.
-    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-    if [ -x "${LSREGISTER}" ]; then "${LSREGISTER}" -f "${APP_DEST}"; fi
-    RELOAD=1
+    if [ "${RESTART_RUNNING}" = "1" ]; then
+        # Replaced in step 4, once the LaunchAgent below is current.
+        UPDATE=1
+    else
+        # rm перед cp: cp -R поверх существующего бандла смешал бы старые файлы с новыми.
+        rm -rf "${APP_DEST}"
+        cp -R "${BUILD_APP}" "${APP_DEST}"
+        # Refresh this bundle's registration after replacing its icon/resources.
+        # Do not reset LaunchServices globally or restart the user's Dock.
+        LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        if [ -x "${LSREGISTER}" ]; then "${LSREGISTER}" -f "${APP_DEST}"; fi
+        RELOAD=1
+    fi
     CHANGED=1
 fi
 
@@ -127,6 +136,11 @@ fi
 
 # --- 4. load --------------------------------------------------------------------
 echo "[4/4] Loading ${LABEL}..."
+if [ "${UPDATE}" = "1" ]; then
+    # Quits a running GUI, swaps the bundle and bootstraps the current LaunchAgent.
+    python3 "${SCRIPT_DIR}/update-installed.py" "${BUILD_APP}" "${APP_DEST}"
+    RELOAD=0
+fi
 # launchctl list печатает "PID<TAB>Status<TAB>Label"; PID "-" значит, что агент
 # зарегистрирован, но не работает (Status -- код его последнего выхода).
 AGENT_PID="$(launchctl list 2>/dev/null | awk -v l="${LABEL}" '$3 == l { print $1 }')"
@@ -158,9 +172,14 @@ BIN_DEST="${HOME}/.local/bin/hgs-tray"
 RELOAD=0
 mkdir -p "${HOME}/.local/bin"
 if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
-    install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"
-    mv -f "${BIN_DEST}.new" "${BIN_DEST}"
-    RELOAD=1
+    if [ "${RESTART_RUNNING}" = "1" ]; then
+        # Replaced in step 4, once the unit below is current.
+        UPDATE=1
+    else
+        install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"
+        mv -f "${BIN_DEST}.new" "${BIN_DEST}"
+        RELOAD=1
+    fi
     CHANGED=1
 fi
 
@@ -233,11 +252,12 @@ fi
 if [ "$(systemctl --user is-active hgs-tray.service 2>/dev/null || true)" != "active" ]; then
     CHANGED=1
 fi
+if [ "${UPDATE}" = "1" ]; then
+    # Quits a running GUI, swaps the binary and starts the unit again.
+    python3 "${SCRIPT_DIR}/update-installed.py" "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}"
+fi
 # enable --now: start -- не restart, поэтому уже активный трей второй раз не дёргает.
 systemctl --user enable --now hgs-tray.service
-if [ "${RELOAD}" = "1" ] && [ "${RESTART_RUNNING}" = "1" ]; then
-    systemctl --user restart hgs-tray.service
-fi
 
 HINT_SELFTEST="Check without a display:  ~/.local/bin/hgs-tray --selftest"
 HINT_STATUS="Unit status:              systemctl --user status hgs-tray.service"
