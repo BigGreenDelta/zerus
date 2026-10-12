@@ -148,9 +148,11 @@ private:
     void openSessionTasks();
     // A Your Call session placed by its Overmind machine (see showDecision).
     bool decisionSession(const QString &machine, const QString &session, QString *host) const;
-    // A decision click whose session was not placed yet selects it when it can.
+    // A decision click whose session was not placed yet selects it when it can,
+    // and opens the Tasks tab on the card when the click could not (shown).
     void resolvePendingDecision();
-    struct PendingDecision { QString machine, session, selectedKey; QElapsedTimer age; };
+    void openDecision(const QString &project, const QString &task);
+    struct PendingDecision { QString project, task, machine, session, selectedKey; bool shown = false; QElapsedTimer age; };
     PendingDecision m_pendingDecision;
     static constexpr qint64 PendingDecisionMs = 20000;
     void updateWorktrees();

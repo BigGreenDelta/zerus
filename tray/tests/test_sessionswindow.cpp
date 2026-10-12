@@ -4112,6 +4112,30 @@ void TestSessionsWindow::decisionNotificationOpensItsCard()
     auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
     QVERIFY(notice->isVisible());
     QCOMPARE(notice->text(), QString("This task's project is not listed on this computer."));
+
+    // A window that lists no session yet keeps the decision as well: once the
+    // fleet lists the sessions and the catalog places the asking one on its
+    // peer, that session is selected and the Tasks tab opens on its card. The
+    // window's own first choice of a session does not count as the person's.
+    OvermindModel freshModel(&client); freshModel.setEnabled(true);
+    SessionsWindow fresh(FakeCli::program(hgs), nullptr, &freshModel); fresh.resize(1240, 760); fresh.show();
+    auto *freshTabs = fresh.findChild<QTabWidget *>("sessionDetailTabs"); auto *freshView = fresh.findChild<TasksView *>("tasksView");
+    auto *freshList = fresh.findChild<QListWidget *>("sessionList"); auto *freshSwarm = fresh.findChild<SwarmController *>();
+    QVERIFY(freshTabs && freshView && freshList && freshSwarm);
+    const auto freshCurrent = [&] { return freshList->currentItem() ? freshList->currentItem()->data(SessionRoles::Key).toString() : QString(); };
+    freshTabs->setCurrentIndex(0);
+    fresh.showDecision("beta", "b8n7m", "node-mac", "claude/infra/review");
+    QVERIFY(freshCurrent().isEmpty());
+    QCOMPARE(freshTabs->currentIndex(), 0);
+    fresh.setFleet(fleet());
+    QVERIFY(!freshCurrent().isEmpty()); QVERIFY(freshCurrent() != QString("mac\nclaude/infra/review"));
+    QTRY_VERIFY(!freshSwarm->busy());
+    freshSwarm->acceptExternal({{"schema", 1}, {"conflicts", QJsonArray()}, {"machines", mac},
+        {"organization", QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()}});
+    QTRY_COMPARE(freshCurrent(), QString("mac\nclaude/infra/review"));
+    QCOMPARE(freshTabs->currentWidget(), static_cast<QWidget *>(freshView));
+    QCOMPARE(freshView->project(), QString("beta"));
+    QCOMPARE(freshView->openedTask(), QString("b8n7m"));
 }
 
 // Add as task, the Tasks chip and the session rows' queue badges. The window

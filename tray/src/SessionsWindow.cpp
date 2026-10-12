@@ -1961,34 +1961,50 @@ void SessionsWindow::showDecision(const QString &project, const QString &task, c
         return;
     }
     if (found) showSession(host, session); else showSessionList();
-    if (!selected()) {
-        showNotice(tr("Select a session to open the Tasks tab."), false);
-        return;
-    }
-    updateTasksView();
-    m_tasks->showProject(project, m_selectedKey);
-    if (!task.isEmpty() && m_tasks->project() == project) m_tasks->openTask(task);
     // A window the click has just created may not know the peers' machines
     // yet: the session is selected once the catalog, the board's machine or
     // the fleet places it, unless the person chose another one meanwhile.
     if (!found && !machine.isEmpty() && !session.isEmpty()) {
-        m_pendingDecision.machine = machine; m_pendingDecision.session = session; m_pendingDecision.selectedKey = m_selectedKey;
+        m_pendingDecision.project = project; m_pendingDecision.task = task;
+        m_pendingDecision.machine = machine; m_pendingDecision.session = session;
+        m_pendingDecision.selectedKey = selected() ? m_selectedKey : QString();
         m_pendingDecision.age.start();
     }
+    if (!selected()) {
+        showNotice(tr("Select a session to open the Tasks tab."), false);
+        return;
+    }
+    m_pendingDecision.shown = true;
+    openDecision(project, task);
+}
+
+void SessionsWindow::openDecision(const QString &project, const QString &task)
+{
+    updateTasksView();
+    m_tasks->showProject(project, m_selectedKey);
+    if (!task.isEmpty() && m_tasks->project() == project) m_tasks->openTask(task);
 }
 
 void SessionsWindow::resolvePendingDecision()
 {
-    if (m_pendingDecision.session.isEmpty()) return;
-    if (m_pendingDecision.age.elapsed() > PendingDecisionMs || m_selectedKey != m_pendingDecision.selectedKey) {
-        m_pendingDecision = {};
+    auto &pending = m_pendingDecision;
+    if (pending.session.isEmpty()) return;
+    if (pending.age.elapsed() > PendingDecisionMs || (!pending.selectedKey.isEmpty() && m_selectedKey != pending.selectedKey)) {
+        pending = {};
         return;
     }
     QString host;
-    if (!decisionSession(m_pendingDecision.machine, m_pendingDecision.session, &host)) return;
-    const QString session = m_pendingDecision.session;
-    m_pendingDecision = {};
-    showSession(host, session);
+    if (!decisionSession(pending.machine, pending.session, &host)) {
+        // Nothing was selected at the click: the session the window then
+        // selects by itself is the one a person's choice is measured against.
+        if (pending.selectedKey.isEmpty() && selected()) pending.selectedKey = m_selectedKey;
+        return;
+    }
+    const auto decision = pending;
+    pending = {};
+    showSession(host, decision.session);
+    // The Tasks tab was not opened at the click, with no session to show it for.
+    if (!decision.shown && selected()) openDecision(decision.project, decision.task);
 }
 
 void SessionsWindow::populateBatchActions(QMenu *menu)
