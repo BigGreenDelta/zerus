@@ -367,7 +367,10 @@ versions, as for any native lifecycle change.
 
 Four templates render the text sent to a session: `dispatch`, `review`,
 `rework`, `answer`. They live in settings (built-in → project in stage 1;
-profiles and sessions in stage 2). Variables: `{task.ref}`, `{task.title}`,
+profiles and sessions in stage 2). A project stores each replacement as its own
+setting, one `settings_set` event per template name (`null` restores the
+built-in text), so two machines editing different templates both keep their
+edit; for one name the latest event in the total order wins. Variables: `{task.ref}`, `{task.title}`,
 `{task.prompt}`, `{task.stage}`, `{task.journal_tail}`, `{review.report}`,
 `{answer.text}`, `{tools}` (MCP or CLI hint). Default `dispatch`:
 

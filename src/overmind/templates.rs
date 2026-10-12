@@ -31,20 +31,32 @@ pub fn builtin(name: &str) -> &'static str {
     }
 }
 
-/// The project's replacements: the latest `templates` setting written by a person.
+/// The project's replacements: for each name, the latest `template` setting
+/// written by a person (total order); a `null` value restores the built-in text.
+/// Older whole-map `templates` settings are not read.
 fn custom(tx: &Tx, project: &str) -> Result<BTreeMap<String, String>> {
-    let events = tx.load(&Filter::Shared(project.into()))?;
-    let latest = events.iter().rev().find(|e| {
-        e.kind == "settings_set"
-            && e.project == project
-            && e.v <= EVENT_VERSION
-            && e.actor.kind == ActorKind::Human
-            && e.payload.get("key").and_then(Value::as_str) == Some("templates")
-    });
-    let map: BTreeMap<String, String> = latest
-        .and_then(|e| serde_json::from_value(e.payload["value"].clone()).ok())
-        .unwrap_or_default();
-    Ok(map.into_iter().filter(|(name, _)| NAMES.contains(&name.as_str())).collect())
+    let mut map = BTreeMap::new();
+    for e in tx.load(&Filter::Shared(project.into()))? {
+        if e.kind != "settings_set"
+            || e.project != project
+            || e.v > EVENT_VERSION
+            || e.actor.kind != ActorKind::Human
+            || e.payload.get("key").and_then(Value::as_str) != Some("template")
+        {
+            continue;
+        }
+        let Some(name) = e.payload.get("name").and_then(Value::as_str).filter(|n| NAMES.contains(n)) else { continue };
+        match e.payload.get("value") {
+            Some(Value::String(text)) => {
+                map.insert(name.to_owned(), text.clone());
+            }
+            Some(Value::Null) => {
+                map.remove(name);
+            }
+            _ => {}
+        }
+    }
+    Ok(map)
 }
 
 pub fn effective(tx: &Tx, project: &str, name: &str) -> Result<String> {
@@ -169,8 +181,8 @@ pub fn get(ctx: &mut Ctx, request: Value) -> Result<Value> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetRequest {
-    #[serde(default)]
-    request_id: String,
+    #[serde(default, rename = "request_id")]
+    _request_id: String,
     project: String,
     templates: BTreeMap<String, Option<String>>,
 }
@@ -198,26 +210,21 @@ pub fn set(ctx: &mut Ctx, request: Value) -> Result<Value> {
         changes.insert(name.clone(), text);
     }
     write(ctx, "templates set", &request, |tx, actor| {
-        let mut custom = custom(tx, &req.project)?;
+        let current = custom(tx, &req.project)?;
         for (name, text) in &changes {
-            match text {
-                Some(text) => {
-                    custom.insert(name.clone(), text.clone());
-                }
-                None => {
-                    custom.remove(name);
-                }
+            if current.get(name) == text.as_ref() {
+                continue;
             }
+            tx.append(&Draft {
+                actor: actor.clone(),
+                task: String::new(),
+                project: req.project.clone(),
+                kind: "settings_set".into(),
+                base: String::new(),
+                request_id: String::new(),
+                payload: json!({"key": "template", "name": name, "value": text}),
+            })?;
         }
-        tx.append(&Draft {
-            actor: actor.clone(),
-            task: String::new(),
-            project: req.project.clone(),
-            kind: "settings_set".into(),
-            base: String::new(),
-            request_id: req.request_id.clone(),
-            payload: json!({"key": "templates", "value": custom}),
-        })?;
         listing(tx, &req.project)
     })
 }
@@ -311,5 +318,92 @@ mod tests {
         // Settings never change tasks.
         let after = store.read(|tx| load(tx, &before.uuid)).unwrap();
         assert_eq!((after.read_only, after.head.clone()), (false, before.head.clone()));
+    }
+
+    const OTHER: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn settings_events(store: &mut Store) -> usize {
+        store.read(|tx| Ok(tx.load(&Filter::Shared("p".into()))?.iter().filter(|e| e.kind == "settings_set").count())).unwrap()
+    }
+    fn text_of(store: &mut Store, name: &str) -> (String, bool) {
+        let mut ctx = Ctx { store, actor: Actor::human(MACHINE), cwd: None };
+        let listed = get(&mut ctx, json!({"project": "p"})).unwrap();
+        (listed["templates"][name]["text"].as_str().unwrap().to_owned(), listed["templates"][name]["custom"].as_bool().unwrap())
+    }
+    fn raw_setting(store: &mut Store, actor: Actor, version: u32, payload: Value) {
+        store
+            .write(|tx| {
+                let mut event = tx.preview(&Draft {
+                    actor,
+                    task: String::new(),
+                    project: "p".into(),
+                    kind: "settings_set".into(),
+                    base: String::new(),
+                    request_id: String::new(),
+                    payload,
+                })?;
+                event.v = version;
+                tx.insert(&event)
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_edits_of_different_templates_both_survive() {
+        use crate::overmind::sync::{exchange, serve};
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Store::open(&dir.path().join("a"), MACHINE).unwrap();
+        let mut b = Store::open(&dir.path().join("b"), OTHER).unwrap();
+        let mut ctx = Ctx { store: &mut a, actor: Actor::human(MACHINE), cwd: None };
+        set(&mut ctx, json!({"project": "p", "templates": {"dispatch": "A says {task.ref}"}})).unwrap();
+        let mut ctx = Ctx { store: &mut b, actor: Actor::human(OTHER), cwd: None };
+        set(&mut ctx, json!({"project": "p", "templates": {"review": "B says {task.ref}"}})).unwrap();
+        exchange(&mut a, OTHER, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        exchange(&mut b, MACHINE, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+        for store in [&mut a, &mut b] {
+            assert_eq!(text_of(store, "dispatch"), ("A says {task.ref}".to_owned(), true));
+            assert_eq!(text_of(store, "review"), ("B says {task.ref}".to_owned(), true));
+        }
+    }
+
+    #[test]
+    fn a_rendered_text_with_control_characters_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let t = task(&mut store, "p");
+        let refused = render("{task.ref}\u{7}", &vars(&t, "")).unwrap_err();
+        assert_eq!(refused.code, "invalid_template");
+        assert!(refused.message.contains("control characters"), "{}", refused.message);
+        assert!(render("{task.ref}\tok\nfine", &vars(&t, "")).is_ok());
+    }
+
+    #[test]
+    fn only_current_people_events_define_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let value = |text: &str| json!({"key": "template", "name": "dispatch", "value": text});
+        raw_setting(&mut store, Actor::agent(MACHINE, "w1"), EVENT_VERSION, value("agent"));
+        raw_setting(&mut store, Actor::human(MACHINE), EVENT_VERSION + 1, value("newer"));
+        raw_setting(&mut store, Actor::human(MACHINE), EVENT_VERSION, json!({"key": "templates", "value": {"dispatch": "old map"}}));
+        assert!(!text_of(&mut store, "dispatch").1);
+        raw_setting(&mut store, Actor::human(MACHINE), EVENT_VERSION, value("person"));
+        raw_setting(&mut store, Actor::agent(MACHINE, "w1"), EVENT_VERSION, value("agent later"));
+        assert_eq!(text_of(&mut store, "dispatch"), ("person".to_owned(), true));
+    }
+
+    #[test]
+    fn a_set_that_changes_nothing_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        set(&mut ctx, json!({"project": "p", "templates": {"dispatch": null}})).unwrap();
+        assert_eq!(settings_events(&mut store), 0);
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        set(&mut ctx, json!({"project": "p", "templates": {"dispatch": "X {task.ref}", "review": "Y"}})).unwrap();
+        assert_eq!(settings_events(&mut store), 2);
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        let listed = set(&mut ctx, json!({"project": "p", "templates": {"dispatch": "X {task.ref}", "rework": null}})).unwrap();
+        assert_eq!(listed["templates"]["dispatch"]["custom"], true);
+        assert_eq!(settings_events(&mut store), 2);
     }
 }
