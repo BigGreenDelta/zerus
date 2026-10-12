@@ -83,7 +83,13 @@ impl Store {
         {
             return Err("Voice storage must be private to this user".into());
         }
-        let path = directory.join("messages.sqlite3");
+        // SQLite NOFOLLOW rejects symlinks in every path component, including
+        // macOS's ordinary /var -> /private/var parent. Resolve the verified
+        // directory only; keep refusing a symlink at the database itself.
+        let path = directory
+            .canonicalize()
+            .map_err(err)?
+            .join("messages.sqlite3");
         if !path.try_exists().map_err(err)? {
             match OpenOptions::new()
                 .create_new(true)
@@ -1234,5 +1240,26 @@ mod tests {
         assert!(worker.save(&mut job).unwrap());
         let reopened = Store::open_at(&path).unwrap();
         assert_eq!(reopened.get(ID).unwrap().unwrap()["state"], "transcribing");
+    }
+
+    #[test]
+    fn parent_symlink_is_supported_but_database_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real");
+        fs::create_dir(&target).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&target, &alias).unwrap();
+        let path = alias.join("private");
+        {
+            let mut store = Store::open_at(&path).unwrap();
+            store.insert(&job(), "hash", &wav(&[0, 0])).unwrap();
+        }
+        assert!(Store::open_at(&path).unwrap().get(ID).unwrap().is_some());
+        let db = path.join("messages.sqlite3");
+        let moved = path.join("saved.sqlite3");
+        fs::rename(&db, &moved).unwrap();
+        symlink(&moved, &db).unwrap();
+        assert!(Store::open_at(&path).is_err());
     }
 }
