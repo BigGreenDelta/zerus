@@ -98,10 +98,8 @@ pub fn deliver(session: &SessionRef, target: &DeliveryTarget, input_id: &str, te
     match crate::state::deliver_input(&session.name, &request) {
         Ok(receipt) if receipt["status"] == "submitted" => Outcome::Sent,
         Ok(_) => Outcome::Uncertain("the session did not confirm the input".into()),
-        // A retry whose text changed since the first attempt may already be typed.
-        Err(error) if error.starts_with("delivery uncertain") || error.contains("already used for different content") => {
-            Outcome::Uncertain(error)
-        }
+        // Without a receipt nothing was typed; with one, the text may have been.
+        Err(error) if crate::state::input_receipt_exists(input_id) => Outcome::Uncertain(error),
         Err(error) => Outcome::NotSent(error),
     }
 }
@@ -190,8 +188,17 @@ fn pending_claim(tx: &Tx, task: &Task, request_id: &str) -> Result<Option<Event>
     }) else {
         return Ok(None);
     };
-    let settled = events.iter().any(|e| e.kind == "journal" && e.payload["transition"] == claim.id.as_str());
-    Ok((!settled).then(|| claim.clone()))
+    Ok((!outcome_recorded(&events, claim)).then(|| claim.clone()))
+}
+
+fn outcome_recorded(events: &[Event], claim: &Event) -> bool {
+    events.iter().any(|e| e.kind == "journal" && e.payload["transition"] == claim.id.as_str())
+}
+
+/// The claim is still the task's head and has no recorded outcome.
+fn unsettled(tx: &Tx, task: &Task, claim: &Event) -> Result<bool> {
+    let events = tx.load(&Filter::Task(task.uuid.clone()))?;
+    Ok(task.head == claim.id && !outcome_recorded(&events, claim))
 }
 
 /// A session as a person names it; no machine means this one.
@@ -222,18 +229,28 @@ pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
         return Ok(result);
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
-    let target = local_target(ctx.store, &session)?;
     let dir = ctx.store.dir().to_owned();
-    // Everything that can refuse runs before the claim is written.
-    let (uuid, attachments) = ctx.store.read(|tx| {
+    // Everything that can refuse runs before the claim is written. A claim this
+    // request already wrote is resumed without the session checks: its text may
+    // be typed already, and `submit` decides from its receipt.
+    let (uuid, attachments, resumed) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
-        if pending_claim(tx, &task, &request_id)?.is_none() {
+        let resumed = pending_claim(tx, &task, &request_id)?.is_some();
+        if !resumed {
             send_gates(tx, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
         }
-        Ok((uuid, files(&dir, &task)?))
+        Ok((uuid, files(&dir, &task), resumed))
     })?;
-    check_session(&session, &target, &req.confirm)?;
+    let target = local_target(ctx.store, &session);
+    let attachments = if resumed { attachments } else { Ok(attachments?) };
+    let target = if resumed {
+        target
+    } else {
+        let target = target?;
+        check_session(&session, &target, &req.confirm)?;
+        Ok(target)
+    };
     let actor = ctx.actor.clone();
     let (claim, text) = ctx.store.write(|tx| {
         let task = load_writable(tx, &uuid)?;
@@ -248,7 +265,11 @@ pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let text = render(tx, &load(tx, &uuid)?, "dispatch", "")?;
         Ok((claim, text))
     })?;
-    let outcome = deliver(&session, &target, &request_id, &text, attachments);
+    let outcome = match (target, attachments) {
+        (Ok(target), Ok(files)) => deliver(&session, &target, &request_id, &text, files),
+        (Err(error), _) => Outcome::Uncertain(format!("{error:#}")),
+        (_, Err(error)) => Outcome::Uncertain(format!("{error:#}")),
+    };
     settle_send(ctx, &request, &uuid, &claim, &session, outcome)
 }
 
@@ -257,8 +278,14 @@ pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
 fn settle_send(ctx: &mut Ctx, request: &Value, uuid: &str, claim: &Event, session: &SessionRef, outcome: Outcome) -> Result<Value> {
     let actor = ctx.actor.clone();
     let result = ctx.store.write(|tx| {
+        // Two retries of one request: the first to settle wins.
+        if let Some(result) = commands::replay(tx, "send", request)? {
+            return Ok(result);
+        }
         let task = load(tx, uuid)?;
+        let open = unsettled(tx, &task, claim)?;
         match &outcome {
+            _ if !open => {}
             Outcome::Sent => journal(tx, &actor, &task, "[sent]", &session.name, &claim.id)?,
             Outcome::Uncertain(why) => {
                 journal(tx, &actor, &task, "[sent?]", why, &claim.id)?;
@@ -368,6 +395,23 @@ mod tests {
         let refusal = gates(&mut store, &third, &wip).unwrap_err().downcast::<Refusal>().unwrap();
         assert_eq!((refusal.field.as_str(), refusal.state.as_str()), ("confirm", "missing"));
         assert_eq!(code(gates(&mut store, &first, &wip)), "transition_not_allowed");
+
+        let reserved = new_task(&mut store, "Queue");
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        commands::pin(&mut ctx, json!({"task": reserved, "session": {"machine": MACHINE, "name": "w9"}})).unwrap();
+        assert_eq!(code(gates(&mut store, &reserved, &wip)), "pinned_elsewhere");
+        let both = Confirmed::from(["wip_exceeded".to_string(), "pinned_elsewhere".to_string()]);
+        assert!(gates(&mut store, &reserved, &both).is_ok());
+
+        let epic = new_task(&mut store, "Queue");
+        store
+            .write(|tx| {
+                let task = load(tx, &epic)?;
+                commands::simple(tx, &Actor::human(MACHINE), &task, "label_set", json!({"label": "epic", "present": true}), "")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(code(gates(&mut store, &epic, &both)), "epic");
     }
 
     #[test]

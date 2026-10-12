@@ -625,6 +625,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Whether `submit` stored a receipt for this request ID, that is whether the
+/// text may already have been typed.
+pub(super) fn receipt_exists(request_id: &str) -> bool {
+    let Ok(id) = uuid::Uuid::parse_str(request_id) else { return false };
+    absolute_root()
+        .map(|root| root.join("input_receipts").join(format!("{id}.json")).exists())
+        .unwrap_or(false)
+}
+
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(&input).map_err(|e| format!("invalid send payload: {e}"))?;

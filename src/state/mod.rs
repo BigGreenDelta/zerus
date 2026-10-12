@@ -166,6 +166,11 @@ pub(crate) fn delivery_preflight(name: &str, target: &DeliveryTarget) -> Result<
     input::preflight(name, &target.run_id, &target.conversation_id)
 }
 
+/// Whether `hgs send` holds a receipt for this input request ID.
+pub(crate) fn input_receipt_exists(request_id: &str) -> bool {
+    input::receipt_exists(request_id)
+}
+
 /// Types `request` (the `hgs send` JSON) into the session exactly like `hgs send`.
 pub(crate) fn deliver_input(name: &str, request: &Value) -> Result<Value> {
     input::submit(name, request.to_string().as_bytes(), None)

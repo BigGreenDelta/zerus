@@ -242,6 +242,27 @@ class AgentSession(unittest.TestCase):
         markers = [j['marker'] for j in body['task']['journal']]
         self.assertEqual((markers.count('[claim]'), markers.count('[sent]')), (1, 1))
 
+    def test_a_resumed_claim_is_not_gated_by_the_session_state(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.claim(request_id=request_id)
+        typed = subprocess.run(
+            [str(HGS), 'send', self.name, '--json'], env=self.env, text=True, capture_output=True, timeout=20,
+            input=json.dumps({'request_id': request_id, 'text': 'typed before the crash',
+                              'expected_run_id': self.record['run_id'],
+                              'expected_conversation_id': self.record['conversation_id']}))
+        self.assertEqual(typed.returncode, 0, typed.stderr)
+        self.wait_for(lambda: b'\r' in self.received())
+        before = self.received()
+        self.record['activity'] = 'busy'  # the agent now works on the text
+        self.write_record()
+        code, body = self.send(ref, request_id=request_id)
+        self.assertEqual((code, body['delivery']), (0, 'uncertain'), body)
+        markers = [j['marker'] for j in body['task']['journal']]
+        self.assertEqual((markers.count('[claim]'), markers.count('[sent?]')), (1, 1))
+        self.assertIn('delivery_uncertain', body['task']['flags'])
+        self.assertEqual(self.received(), before)
+
     def test_an_unready_session_writes_nothing(self):
         ref = self.task()
         self.record['expected_id'] = 'pending'
