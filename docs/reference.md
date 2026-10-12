@@ -1213,6 +1213,9 @@ GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live o
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
+On Linux, client policy refreshes start the configured user service without
+restarting an active executor. A detached worker remains the fallback when no
+installed service or usable user manager is available.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
@@ -1408,8 +1411,10 @@ systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin
 hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
 restores it when the new GUI does not start, and confirms the running image,
 unchanged nonempty drafts and native agent and tmux processes. It records the
-installed builds in `~/.local/share/hgs/build-provenance.json`. A failed check
-leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
+`.zerus-*` staging folders left beside the GUI by earlier hand-made updates once
+they are an hour old, hold only installer copies and no process uses them. A
+failed check leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
 gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
 is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running

@@ -210,6 +210,43 @@ class TrayUpdate(unittest.TestCase):
         self.assertFalse((self.root / 'systemctl').exists())
         self.assertEqual(self.running(), [])
 
+    def test_update_removes_only_old_unused_leftover_folders(self):
+        folder = self.installed.parent
+
+        def leftover(name, files=(), age=7200):
+            path = folder / name
+            path.mkdir()
+            for file in files:
+                (path / file).parent.mkdir(parents=True, exist_ok=True)
+                (path / file).write_text('copy')
+            then = time.time() - age
+            for item in [*path.rglob('*'), path]:
+                os.utime(item, (then, then))
+            return path
+
+        leftover('.zerus-main-500e966')
+        leftover('.zerus-previous-500e966', ['hgs-tray'])
+        leftover('.zerus-0.41.Abm', ['previous/hgs-tray', 'previous/hgs_state.py'])
+        leftover('.hgs-tray-update-interrupted', ['hgs-tray'])
+        kept = [leftover('.zerus-notes', ['notes.txt']), leftover('.zerus-recent', age=0),
+                leftover('.zerus-deep', ['a/b/hgs-tray']), leftover('.other-stage')]
+        running = leftover('.zerus-running', ['hgs-tray'])
+        self.script(running / 'hgs-tray', '#!/bin/sh\nsleep 60\n')
+        os.utime(running, (time.time() - 7200,) * 2)
+        process = subprocess.Popen([str(running / 'hgs-tray')], start_new_session=True)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        (folder / '.zerus-link').symlink_to(self.root)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(p.name for p in folder.iterdir() if p.name.startswith('.')),
+                         sorted([p.name for p in kept] + ['.zerus-running', '.zerus-link']))
+        self.assertIn('removed 4 leftover folders', result.stdout)
+        self.assertIn('.zerus-notes: it holds files other than installer copies', result.stdout)
+        self.assertIn('.zerus-running: a process still uses it', result.stdout)
+        self.assertTrue((self.root / 'builds').exists())
+
     def test_lost_drafts_are_reported_with_their_snapshot(self):
         self.launch('first')
         self.draft('kept', 'unsent text')

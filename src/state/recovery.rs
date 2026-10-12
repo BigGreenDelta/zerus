@@ -1077,6 +1077,13 @@ fn worker() -> Result<i32> {
     }
 }
 fn ensure_worker() -> Result<()> {
+    // Policy refresh must not race the installed supervisor with a detached
+    // executor. Starting an active unit preserves its PID and current delivery.
+    #[cfg(target_os = "linux")]
+    if home().join(".config/systemd/user/hgs-recovery.service").is_file()
+        && crate::platform::silent("systemctl", &["--user", "start", "--no-block", "hgs-recovery.service"]) {
+        return Ok(());
+    }
     // Detached from both SSH and GUI lifetime; service installation additionally
     // restarts the worker after login. The worker lock handles competing GUIs.
     use std::os::unix::process::CommandExt;

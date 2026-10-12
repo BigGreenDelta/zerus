@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -138,6 +139,19 @@ class Recovery(unittest.TestCase):
         result=self.command('recovery','set',payload=policy);self.assertEqual(result['policy']['revision'],1)
         self.assertEqual(result['policy']['version'],3)
         self.assertIn('changed',self.command('recovery','set',payload=policy,ok=False))
+        self.assertEqual(self.received(),b'')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'),'Linux user service ownership')
+    def test_policy_refresh_prefers_existing_service_without_starting_detached_worker(self):
+        self.prepare()
+        unit=self.root/'.config/systemd/user/hgs-recovery.service';unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nType=simple\n')
+        self.script('systemctl',"#!/usr/bin/env python3\nimport json,pathlib,sys\n"
+            "with pathlib.Path(__file__+'.calls').open('a') as out:out.write(json.dumps(sys.argv[1:])+'\\n')\n")
+        for _ in range(3):self.assertTrue(self.command('recovery','get')['policy']['enabled'])
+        calls=[json.loads(line) for line in (self.bin/'systemctl.calls').read_text().splitlines()]
+        self.assertEqual(calls,[['--user','start','--no-block','hgs-recovery.service']]*3)
+        self.assertFalse((self.state/'recovery/worker.lock').exists())
         self.assertEqual(self.received(),b'')
 
     def session_limit(self):
