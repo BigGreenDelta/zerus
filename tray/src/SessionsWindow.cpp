@@ -2861,7 +2861,7 @@ void SessionsWindow::updateComposerTasks()
     QString machine;
     const bool known = live && overmindKnown(*entry, &machine);
     // Add as task needs a task board; the session's queue also needs its computer.
-    if (!m_overmind->isEnabled()) m_composer->setTaskAvailability(false, tr("This computer has no task board. Select a session on a machine with Overmind."));
+    if (!m_overmind->isEnabled()) m_composer->setTaskAvailability(false, OvermindModel::unavailableText());
     else m_composer->setTaskAvailability(true);
     if (entry && !live) m_composer->setTaskQueueAvailability(false, tr("This session is archived: add the task to the project pool or to Backlog."));
     else if (entry && !known) m_composer->setTaskQueueAvailability(false, tr("Overmind does not know this session's computer yet."));

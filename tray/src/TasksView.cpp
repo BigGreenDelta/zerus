@@ -399,7 +399,7 @@ private:
 // the cursor inside the card's own column, at the end of another one.
 class TaskList : public QListWidget {
 public:
-    TaskList(const QString &stage, const TasksView::Palette *palette) : m_stage(stage), m_palette(palette)
+    TaskList(const QString &stage, const TasksView::Palette *palette) : m_palette(palette)
     {
         setObjectName(QStringLiteral("taskList"));
         setProperty("stage", stage);
@@ -453,7 +453,6 @@ protected:
         if (!item || !(item->flags() & Qt::ItemIsDragEnabled)) return;
         auto *mime = new QMimeData;
         mime->setData(QLatin1String(TasksView::MimeType), item->data(TaskRoles::Uuid).toString().toUtf8());
-        mime->setData(QLatin1String(TasksView::StageMimeType), m_stage.toUtf8());
         auto *drag = new QDrag(this);
         drag->setMimeData(mime);
         const QRect rect = visualItemRect(item);
@@ -549,7 +548,6 @@ private:
         *line = qMin(bottom + 1, viewport()->height() - 2);
         return {};
     }
-    QString m_stage;
     const TasksView::Palette *m_palette;
     int m_line = -1;
 };
@@ -1157,7 +1155,7 @@ void TasksView::renderStatus(const OvermindModel::Board &board)
     QString text;
     bool error = false;
     if (!m_model || !m_model->isEnabled()) {
-        text = tr("This computer has no task board. Select a session on a machine with Overmind.");
+        text = OvermindModel::unavailableText();
     } else if (m_project.isEmpty()) {
         text = m_groups.isEmpty() ? tr("No projects yet.") : tr("Choose a project to see its tasks.");
     } else if (!board.loaded) {
@@ -1598,7 +1596,6 @@ void TasksView::open(const QString &uuid, bool reveal)
     selectCard(uuid, reveal);
     markDecisions();
     showPanel(uuid);
-    emit taskOpened(uuid);
 }
 
 void TasksView::closeTask()

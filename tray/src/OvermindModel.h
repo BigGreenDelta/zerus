@@ -36,6 +36,8 @@ public:
     };
     // send, review-send, rework-send, answer, resolve-delivery.
     static bool delivers(const QString &command);
+    // What a disabled model refuses with, and the views say in its place.
+    static QString unavailableText();
 
     // A session as Overmind names it: the machine's swarm node ID and the name.
     struct Session {

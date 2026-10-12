@@ -521,16 +521,12 @@ void TestTasksView::doneAndIceboxStartCollapsed()
     auto decisions = strip->findChildren<QPushButton *>("tasksDecision");
     QCOMPARE(decisions.size(), 1);
     QVERIFY(decisions.first()->text().contains("Pick a database"));
-    QSignalSpy opened(&view, &TasksView::taskOpened);
     decisions.first()->click();
-    QCOMPARE(opened.size(), 1);
-    QCOMPARE(opened.first().first().toString(), QString("t7"));
     QCOMPARE(view.openedTask(), QString("t7"));
     // A card click opens that card.
     auto *ready = list(view, "Ready");
     QTest::mouseClick(ready->viewport(), Qt::LeftButton, {}, ready->visualItemRect(ready->item(1)).center());
     QCOMPARE(view.openedTask(), QString("t3"));
-    QCOMPARE(opened.last().first().toString(), QString("t3"));
 
     // Opening a card in a collapsed column shows it, but the column is still
     // collapsed the next time the board is built; a header click is remembered.

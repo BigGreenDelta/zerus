@@ -112,6 +112,11 @@ bool OvermindModel::delivers(const QString &command)
     return commands.contains(command);
 }
 
+QString OvermindModel::unavailableText()
+{
+    return tr("This computer has no task board. Select a session on a machine with Overmind.");
+}
+
 QString OvermindModel::Board::role(const QString &stage) const
 {
     for (const auto &candidate : stages)
@@ -314,7 +319,7 @@ void OvermindModel::failLater(Pending pending)
     QMetaObject::invokeMethod(this, [this, pending = std::move(pending)]() {
         Result result;
         result.refusal = {{QStringLiteral("code"), QStringLiteral("unavailable")},
-                          {QStringLiteral("message"), tr("This computer has no task board. Select a session on a machine with Overmind.")}};
+                          {QStringLiteral("message"), unavailableText()}};
         result.requestId = pending.requestId;
         if (pending.kind == Kind::Write) emit writeFailed(pending.name, result.refusal, result.requestId);
         finish(pending, result);

@@ -63,8 +63,6 @@ class TasksView : public QWidget {
     Q_OBJECT
 public:
     static constexpr const char *MimeType = "application/x-zerus-overmind-task";
-    // The stage a dragged card comes from, next to MimeType.
-    static constexpr const char *StageMimeType = "application/x-zerus-overmind-stage";
     // The session selected in the window.
     struct Selection {
         QString key;        // the window's session key; empty when none is selected
@@ -108,7 +106,7 @@ public:
     QString project() const { return m_project; }
     // The card that is open (selected), empty when none.
     QString openedTask() const { return m_openTask; }
-    // Selects the card, scrolls to it and emits taskOpened.
+    // Selects the card, scrolls to it and shows its panel.
     void openTask(const QString &uuid);
     // Closes the open card and its panel.
     void closeTask();
@@ -138,8 +136,6 @@ public:
     void notify(const QString &text, bool error = true);
 
 signals:
-    // A card was opened: clicked on the board or in the Your Call strip.
-    void taskOpened(const QString &uuid);
     // showProject asks the window to show this tab.
     void showRequested();
     // The project shown changed (its board is watched; the previous one is
