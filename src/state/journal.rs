@@ -460,13 +460,14 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         // Native startup choosers have no hook. A later recognized panel wins;
         // an unrecognized chooser before a conversation stays visible read-only.
         type Current = fn(&Value) -> Option<Value>;
-        let choosers: [(Current, &str, &str); 8] = [
+        let choosers: [(Current, &str, &str); 9] = [
             (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
             (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
             (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
             (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
             (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
             (codex_update::current, "input", "Codex is waiting for an update choice"),
+            (codex_goal_resume::current, "input", "Codex is waiting for your paused goal choice"),
             (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
             (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
         ];
@@ -479,6 +480,11 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
                 output["attention_id"] = question["question_id"].clone();
                 output["status_detail"] = json!(detail);
             }
+        }
+        // A resumed conversation reported this panel as an unknown terminal state.
+        if output["attention_id"].as_str().is_some_and(|id| id.starts_with("codex-goal-resume:")) {
+            output["activity_detail"] = output["status_detail"].clone();
+            output["resume_message_reason"] = json!(codex_goal_resume::WAIT);
         }
         let fallback = if recognized { None } else { startup_choice::current(record) };
         if let Some(question) = fallback {

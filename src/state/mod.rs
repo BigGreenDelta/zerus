@@ -40,6 +40,7 @@ mod codex_questions;
 mod codex_trust;
 mod codex_hooks_trust;
 mod codex_update;
+mod codex_goal_resume;
 mod read_marks;
 mod recipes;
 mod rename;

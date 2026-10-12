@@ -598,6 +598,14 @@ then exits and the session needs an explicit resume. **Skip** and **Skip until
 next version** continue startup, and Codex records the dismissal itself. Only
 reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
 recognized; other or clipped commands stay in Terminal.
+After a resume, Codex asks **Resume paused goal?** when the conversation's goal
+is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
+database once the centered dialog over the transcript shows the same goal and
+both choices; the session waits for this choice instead of Restoring
+conversation. **Resume goal** marks the goal active, and Codex continues it by
+itself when idle. **Leave paused** keeps it paused and the conversation waits
+for your message. A dialog too narrow to read, or for another goal, stays in
+Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
 Queue arrows navigate optional requests from newest to oldest while retaining
