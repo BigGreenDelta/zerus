@@ -16,6 +16,25 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whether terminal rows show `expected` as text the TUI wrapped to its
+/// width. A row boundary stands for one space or splits a word longer than
+/// its row; every visible character must still match in order.
+pub(super) fn wrapped<S: AsRef<str>>(rows: &[S], expected: &str) -> bool {
+    let expected = normalize(expected);
+    let mut remaining = expected.as_str();
+    let rows = rows.iter().map(|row| normalize(row.as_ref()));
+    for (index, row) in rows.filter(|row| !row.is_empty()).enumerate() {
+        if index > 0 {
+            remaining = remaining.strip_prefix(' ').unwrap_or(remaining);
+        }
+        let Some(rest) = remaining.strip_prefix(row.as_str()) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    remaining.is_empty()
+}
+
 // capture-pane -e preserves SGR styling and OSC 8 hyperlinks. Strip only this
 // presentation metadata, preserving the visible label for identity checks.
 // Reject other controls rather than interpreting them as application state.

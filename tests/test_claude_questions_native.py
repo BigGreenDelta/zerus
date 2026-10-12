@@ -13,6 +13,12 @@ ITEMS=[dict(question='Which release should we prepare?',header='Release',options
  dict(question='Which checks should we run?',header='Checks',multiSelect=True,options=[dict(label='Unit',description='Unit checks'),dict(label='Integration',description='Integration checks'),dict(label='UI',description='UI checks')]),
  dict(question='What else should we know?',header='Notes',options=[dict(label='Nothing',description='No extra notes'),dict(label='Later',description='Discuss later')]),
  dict(question='Which extra checks should we include?',header='Extras',multiSelect=True,options=[dict(label='Mac',description='Check macOS'),dict(label='Linux',description='Check Linux')])]
+# Synthetic text Claude wraps at the 87 columns of a user's terminal: a token
+# longer than a row, a row that begins "N. " and key hints that wrap once
+# Other has focus.
+WRAPPED_ITEMS=[dict(ITEMS[0],question='Which release should we prepare? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.',
+  options=[dict(label='Stable',description='Use stable build from the release branch of the example repository, then run step 2. Verify the signed tag.'),
+   dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),*ITEMS[1:]]
 
 @unittest.skipUnless(CLAUDE,'Set HGS_CLAUDE_TEST_BIN to test the installed native Claude against a local fake API')
 class NativeClaudeQuestions(unittest.TestCase):
@@ -38,7 +44,8 @@ class NativeClaudeQuestions(unittest.TestCase):
   self.root=Path(self.temp.name).resolve();self.bin=self.root/'.local/bin';self.bin.mkdir(parents=True);self.state=self.root/'state';self.state.mkdir()
   work=self.root/'work';work.mkdir();(self.root/'.claude').mkdir()
   self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
-  self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else ITEMS
+  wrapped=self._testMethodName.startswith('test_wrapped_')
+  self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else WRAPPED_ITEMS if wrapped else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
   (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':'default' if self.approval_fixture or self.message_fixture else 'bypassPermissions'}}))
   fixture=self;self.native_requests=[]
@@ -72,7 +79,7 @@ class NativeClaudeQuestions(unittest.TestCase):
   # Claude can flush files after kill-server returns; remove HOME only after
   # its owned process has exited. This also runs when native startup fails.
   self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
-  self.tmux('new-session','-d','-s',self.name,'-x','120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*([] if self.approval_fixture or self.message_fixture else ['--dangerously-skip-permissions']),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  self.tmux('new-session','-d','-s',self.name,'-x','87' if wrapped else '120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*([] if self.approval_fixture or self.message_fixture else ['--dangerously-skip-permissions']),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
   self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Which release should we prepare?') in self.screen())
   transcript=next((self.root/'.claude/projects').glob('*/*.jsonl'));self.conversation_id=transcript.stem
@@ -258,6 +265,10 @@ sys.exit(result.returncode)
   payload=self.payload();receipt=self.answer(payload);self.assertEqual(receipt['status'],'answered')
   self.assertEqual(self.answer(payload),receipt)
   self.assertIn('Fixture complete.',self.wait_for(lambda:self.screen() if 'Fixture complete.' in self.screen() else ''))
+ def test_wrapped_text_and_key_hints_at_a_narrow_terminal(self):
+  self.assertTrue(self.card['can_answer'],self.card['answer_unavailable_reason'])
+  payload=self.payload();receipt=self.answer(payload);self.assertEqual(receipt['status'],'answered')
+  self.assert_native_answer(payload);self.assertEqual(self.answer(payload),receipt)
  def test_gutter_on_questions_and_review_confirms_exact_native_receipt(self):
   self.enable_gutter_capture()
   self.assertTrue(self.inspect()['pending_questions'][0]['can_answer'])

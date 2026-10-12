@@ -577,6 +577,10 @@ Compaction or clearing can invalidate the pending question, so this confirmation
 offers neither action. A changed question, session or draft cancels consent.
 
 Unsupported or truncated native prompts remain in Terminal.
+Claude wraps prompts, options, review answers, key hints and Bash commands to
+the terminal width and splits words longer than a row. Zerus matches the wrapped
+rows against the exact request at any width; only a clipped panel needs a
+larger Terminal.
 
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the

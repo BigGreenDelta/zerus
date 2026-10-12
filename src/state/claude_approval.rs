@@ -45,9 +45,11 @@ fn visible(screen:&str)->bool {
 fn chooser(rows:&[&str])->Option<(usize,Vec<String>,usize)> {
     let mut end=rows.len();
     while end>0&&rows[end-1].is_empty(){end-=1;}
-    if end>0&&rows[end-1].starts_with("Esc to ") {
-        end-=1;
-        if end==0||!rows[end-1].is_empty(){return None;}
+    // Ink wraps the footer like any other text, so it is the last block.
+    let block=rows[..end].iter().rposition(|r|r.is_empty()).map_or(0,|i|i+1);
+    if let Some(footer)=(block..end).find(|&i|rows[i].starts_with("Esc to ")) {
+        if footer!=block||block==0 {return None;}
+        end=block;
         while end>0&&rows[end-1].is_empty(){end-=1;}
     }
     let first=(0..end).rev().find(|&i|numbered(rows[i]).is_some_and(|(_,n,_)|n==1))?;
@@ -97,15 +99,16 @@ fn matches(request:&Value,panel:&Panel)->bool {
         let command=string(input,"command");
         if command.trim().is_empty()||command.len()>64000 {return false;}
         let dividers:Vec<_>=panel.body.iter().enumerate().filter(|(_,r)|rule(r,'╌')).map(|(i,_)|i).collect();
+        // Rows are wrapped to the terminal: a long path continues on the
+        // next row without a space, so compare across row boundaries.
         return match dividers[..] {
-            [first,second] => label(&panel.body[first+1..second].join("\n"))==label(command),
+            [first,second] => question_terminal::wrapped(&panel.body[first+1..second],command),
             // Claude 2.1.284 renders the command and its description without
             // code fences. Match the entire body, including the optional tip.
             [] => {
                 const TIP:&str="Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below";
-                let content=panel.body.join("\n");let content=content.trim();
-                let content=content.strip_prefix(TIP).unwrap_or(content);
-                label(content)==label(&format!("{command}\n{}",string(input,"description")))
+                let content=format!("{command}\n{}",string(input,"description"));
+                question_terminal::wrapped(&panel.body,&content)||question_terminal::wrapped(&panel.body,&format!("{TIP}\n{content}"))
             }
             _ => false,
         };
@@ -464,6 +467,28 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
         assert!(terminal_choice(&waiting,IDLE).is_none());
         assert!(terminal_choice(&waiting,&PAUSED.replace("  ❯ 1.","    1.")).is_none());
         waiting["phase"]=json!("working");assert!(terminal_choice(&waiting,PAUSED).is_none());
+    }
+
+    #[test] fn wrapped_commands_tips_and_footers_still_match_the_request() {
+        // Claude 2.1.296 fills the row with a token longer than its width and
+        // continues it on the next row without a space.
+        let long="cat /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html";
+        let bash=record("Bash",json!({"command":long,"description":"Show the template"}));
+        let split=BASH.replace(" printf hi > out.txt\n╌",
+            " cat /work/example/projects/a-really-long-directory-name/contrac\n ts/template-with-a-long-name.html\n╌");
+        assert_eq!(card(&bash,&split)["can_answer"],true);
+        for changed in [split.replace("contrac\n","contra\n"),split.replace(" cat /work"," cut /work"),
+            split.replace("\n ts/","\n ts /")] {
+            assert_eq!(card(&bash,&changed)["can_answer"],false,"{changed}");
+        }
+        // Claude 2.1.284 draws the tip, command and description unfenced.
+        let hi=record("Bash",json!({"command":"printf hi > out.txt","description":"Write \"hi\" into out.txt without a trailing newline"}));
+        let unfenced="────────────────────────────────────────\n Bash command\n Tip: auto mode handles these prompts for you — choose \"switch to\n auto mode\" below\n printf hi > out.txt\n Write \"hi\" into out.txt without a\n trailing newline\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to\n amend\n";
+        assert_eq!(card(&hi,unfenced)["can_answer"],true);
+        assert_eq!(card(&hi,&unfenced.replace(" auto mode\" below\n",""))["can_answer"],false);
+        assert_eq!(card(&hi,&unfenced.replace("printf hi","printf ho"))["can_answer"],false);
+        assert!(parse(&OUTSIDE.replace(" Esc to cancel · Tab to amend"," Esc to cancel · Tab to\n amend")).is_some());
+        assert!(parse(&OUTSIDE.replace("\n\n Esc to cancel · Tab to amend","\n Esc to cancel · Tab to\n amend")).is_none());
     }
 
     #[test] fn any_bottom_chooser_counts_as_visible_for_dismissal() {
