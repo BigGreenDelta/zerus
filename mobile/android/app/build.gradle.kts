@@ -12,6 +12,13 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val speechSetupGuideSource = rootProject.file("../../docs/speech-local-setup.json")
+val speechSetupGuideAssets = layout.buildDirectory.dir("generated/speechSetupGuideAssets")
+val prepareSpeechSetupGuide by tasks.registering(Copy::class) {
+    from(speechSetupGuideSource)
+    into(speechSetupGuideAssets)
+    doFirst { require(speechSetupGuideSource.isFile) { "The canonical speech setup guide is missing." } }
+}
 val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
     require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
 }
@@ -58,6 +65,7 @@ android {
         }
     }
     buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main").assets.srcDir(speechSetupGuideAssets)
     if (firebaseEnabled) {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")
         sourceSets.getByName("debug").manifest.srcFile("src/firebase/AndroidManifest.xml")
@@ -70,6 +78,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
+tasks.named("preBuild") { dependsOn(prepareSpeechSetupGuide) }
 gradle.taskGraph.whenReady {
     if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })
         require(privateSigningFile.isFile) { "Distributable builds require private development signing configuration." }

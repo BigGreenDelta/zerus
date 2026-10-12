@@ -40,7 +40,7 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
         val result = Bundle()
         try {
             check(BuildConfig.DEBUG); smoke()
-            result.putString("stream", "Speech configuration smoke passed: capability gate, no active conversation, native encrypted-key form, conflict edit retention, lost-response status-only recovery including missing receipts, saved-profile test, explicit default without preview retargeting, confirmed removal, unchanged pinned voice/typed drafts and Android P256 interoperability.\n")
+            result.putString("stream", "Speech configuration smoke passed: capability gate, no active conversation, native encrypted-key form, bundled offline guide and explicit command copy without changing unsaved fields/key, conflict edit retention, lost-response status-only recovery including missing receipts, saved-profile test, explicit default without preview retargeting, confirmed removal, unchanged pinned voice/typed drafts and Android P256 interoperability.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             uiAutomation.takeScreenshot()?.let { bitmap ->
@@ -68,12 +68,17 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
     private fun node(label: String): AccessibilityNodeInfo {
         val deadline = SystemClock.elapsedRealtime() + 15_000
         var nextScroll = 0L
+        var scrollAction = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         while (true) {
             val all = nodes()
             all.find { it.text?.toString() == label || it.contentDescription?.toString() == label || it.hintText?.toString() == label }?.let { return it }
             val now = SystemClock.elapsedRealtime()
             check(now < deadline) { "UI element unavailable: $label" }
-            if (now >= nextScroll) { all.firstOrNull { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD); nextScroll = now + 500 }
+            if (now >= nextScroll) {
+                val moved = all.firstOrNull { it.isScrollable }?.performAction(scrollAction)
+                if (moved != true) scrollAction = if (scrollAction == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                nextScroll = now + 500
+            }
             SystemClock.sleep(50)
         }
     }
@@ -102,6 +107,7 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
             VoiceDraft(target, host.machineId, "saved", audio, 200, 100.0, 7))
         PrivateStore(targetContext).saveVoiceState(before)
         PrivateStore(targetContext).saveMessageState(MessageState(drafts = listOf(Draft(target, "Typed before provider setup."))))
+        val capabilitiesEnabled = AtomicBoolean(false)
         val configReads = AtomicInteger(); val writes = AtomicInteger(); val tests = AtomicInteger(); val deletes = AtomicInteger()
         val revision = AtomicInteger(7); val conflict = AtomicBoolean(true); val loseReply = AtomicBoolean(true); val foreign = AtomicBoolean(false)
         val missingReceipt = AtomicBoolean(true)
@@ -134,6 +140,14 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request(); val body = okio.Buffer().also { request.body?.writeTo(it) }.readUtf8()
             check(!body.contains("synthetic-private-key")) { "Plaintext key reached transport" }
+            if (body.isBlank()) {
+                val capabilities = JSONObject().put("protocol_version", 1).put("operations", JSONArray(if (capabilitiesEnabled.get()) (SpeechConfigProtocol.operations + VoiceProtocol.operations).toList() else emptyList<String>()))
+                val result = if (request.url.encodedPath == "/v1/computers") JSONObject().put("computers", JSONArray().put(JSONObject()
+                    .put("id", host.key.computerId).put("machine_id", host.machineId).put("name", host.name).put("online", true)
+                    .put("snapshot", JSONObject().put("mobile_capabilities", capabilities).put("sessions", JSONArray())))) else capabilities
+                return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(result.toString().toResponseBody("application/json".toMediaType())).build()
+            }
             val input = JSONObject(body); val payload = input.getJSONObject("payload"); val operation = input.string("operation"); val id = input.getString("request_id")
             if (operation in SpeechConfigProtocol.operations) {
                 check(input.string("computer_id") == host.key.computerId && input.string("session").isEmpty())
@@ -193,16 +207,40 @@ class SpeechConfigurationSmokeInstrumentation : Instrumentation() {
         main { manager.select(host) }
         check(configReads.get() == 0 && main { manager.notice.contains("gateway") }) { "Old gateway received guessed operations" }
         main {
+            capabilitiesEnabled.set(true)
             val capabilities = SpeechConfigProtocol.operations + VoiceProtocol.operations
             set(model, "setRelayOperations", mapOf(host.key.connectionId to capabilities)); set(model, "setMachineOperations", mapOf(host.key to capabilities))
             activity.setContent { MaterialTheme { SpeechConfigurationScreen(model, before.selection) {} } }
         }
         await("configuration without active conversation") { manager.configuration != null }
         check(main { model.selected == null })
-        tap("Add provider"); text("Name", "Remote fixture")
+        val bundled = targetContext.assets.open("speech-local-setup.json").bufferedReader().use { SpeechSetupGuide.parse(it.readText()) }
+        fun screenshot(name: String) {
+            waitForIdleSync(); SystemClock.sleep(500) // Capture after the native dialog enter animation.
+            val bitmap = checkNotNull(uiAutomation.takeScreenshot())
+            File(targetContext.getExternalFilesDir(null), name).outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
+        }
+        val readsBeforeGuide = configReads.get()
+        tap("Local setup guide"); node("Run these steps on ${host.name}."); node(bundled.title)
+        screenshot("speech-local-setup-guide.png")
+        tap("Close setup guide")
+        check(configReads.get() == readsBeforeGuide && writes.get() == 0 && tests.get() == 0 && deletes.get() == 0)
+        tap("Add provider"); node("Processing computer: ${host.name}")
+        node(speechServiceReadiness(host, main { manager.configuration }, false))
+        screenshot("speech-local-setup-editor.png")
+        text("Name", "Remote fixture")
         tap("Type: Local GigaAM"); tap("OpenAI-compatible server")
         text("Server base URL", "https://remote.example.test/v1"); text("Model", "gigaam")
         tap("API key: No key"); tap("Enter new key"); text("New API key", "synthetic-private-key")
+        tap("Local setup guide"); node("Run these steps on ${host.name}.")
+        val firstCommands = bundled.steps.first { it.commands.isNotEmpty() }
+        val copyLabel = if (firstCommands.commands.size == 1) "Copy commands: ${firstCommands.title}" else "Copy commands 1: ${firstCommands.title}"
+        tap(copyLabel)
+        val copied = main { targetContext.getSystemService(android.content.ClipboardManager::class.java).primaryClip?.getItemAt(0)?.text?.toString() }
+        check(copied == firstCommands.commands.first()) { "Setup command changed during explicit copy" }
+        tap("Close setup guide"); node("Remote fixture")
+        check(writes.get() == 0 && tests.get() == 0 && deletes.get() == 0)
+        // The same unsaved key must still decrypt after opening and closing help.
         tap("Save provider")
         await("conflict retained editor") { manager.result?.errorCode == "revision_conflict" && manager.pending.isEmpty() }
         node("Remote fixture")

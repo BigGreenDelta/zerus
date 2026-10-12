@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/hgs">
+        <file alias="speech-local-setup.json">../docs/speech-local-setup.json</file>
         <file alias="icons/github-mark.svg">resources/icons/github-mark.svg</file>
         <file alias="icons/hgs-zerus-symbolic.svg">resources/icons/hgs-zerus-symbolic.svg</file>
         <file alias="chevron-down.svg">resources/chevron-down.svg</file>

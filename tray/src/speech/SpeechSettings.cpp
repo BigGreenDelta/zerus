@@ -1,6 +1,13 @@
 #include "SpeechSettings.h"
 #include "SpeechClient.h"
 #include <QAudioDevice>
+#include <QApplication>
+#include <QClipboard>
+#include <QFile>
+#include <QFontDatabase>
+#include <QPlainTextEdit>
+#include <QScreen>
+#include <QScrollArea>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -33,17 +40,61 @@ QPushButton *button(const QString &text, const QString &name, QHBoxLayout *row) 
     auto *result = new QPushButton(text); result->setObjectName(name); result->setAutoDefault(false); row->addWidget(result); return result;
 }
 
+QString localComputerName() {
+#ifdef Q_OS_MACOS
+    return QObject::tr("This Mac");
+#elif defined(Q_OS_WIN)
+    return QObject::tr("This Windows computer");
+#else
+    return QObject::tr("This computer (Linux)");
+#endif
+}
+void showLocalSetupGuide(const QString &computer, QWidget *parent) {
+    QFile file(":/hgs/speech-local-setup.json");
+    const auto guide = file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject{};
+    QDialog dialog(parent); dialog.setObjectName("speechSetupGuide"); dialog.setWindowTitle(guide.value("title").toString(QObject::tr("Local speech setup")));
+    auto *layout = new QVBoxLayout(&dialog); layout->setSpacing(12);
+    auto *host = label(QObject::tr("Processing computer: %1").arg(computer)); host->setObjectName("speechSetupComputer"); layout->addWidget(host);
+    auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); layout->addWidget(scroll, 1);
+    auto *content = new QWidget; content->setObjectName("speechSetupContent"); auto *body = new QVBoxLayout(content); body->setSpacing(14); body->setContentsMargins(0,0,12,0); scroll->setWidget(content);
+    if (guide.value("schema").toInt() != 1) body->addWidget(label(QObject::tr("The setup guide is missing from this installation. Update or reinstall Zerus.")));
+    else {
+        body->addWidget(label(guide.value("intro").toString()));
+        for (const auto &value : guide.value("steps").toArray()) {
+            const auto step = value.toObject(); auto *title = label(step.value("title").toString()); title->setObjectName("heading"); body->addWidget(title);
+            body->addWidget(label(step.value("body").toString()));
+            for (const auto &entry : step.value("commands").toArray()) {
+                const auto command = entry.toString();
+                auto *code = new QPlainTextEdit(command); code->setObjectName("speechSetupCommand"); code->setReadOnly(true); code->setLineWrapMode(QPlainTextEdit::NoWrap); code->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+                code->setFixedHeight(qBound(72, (command.count('\n') + 1) * code->fontMetrics().lineSpacing() + 48, 210)); body->addWidget(code);
+                auto *copy = new QPushButton(QObject::tr("Copy command")); copy->setObjectName("speechSetupCopyCommand"); copy->setAutoDefault(false); body->addWidget(copy, 0, Qt::AlignLeft);
+                QObject::connect(copy, &QPushButton::clicked, &dialog, [command, copy] { QApplication::clipboard()->setText(command); copy->setText(QObject::tr("Copied")); });
+            }
+        }
+        for (const auto &note : guide.value("notes").toArray()) body->addWidget(label(note.toString()));
+    }
+    body->addStretch();
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close); layout->addWidget(buttons); QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.resize(680, qMin(680, dialog.screen()->availableGeometry().height()-80)); dialog.exec();
+}
+
 // All editor values are transient. A stored key is represented only by its
 // presence; replacement text is cleared as soon as its request is dispatched.
 class ProfileEditor : public QDialog {
 public:
-    ProfileEditor(const QString &computer, const QJsonArray &adapters, const QJsonObject &saved, QWidget *parent)
+    ProfileEditor(const QString &computer, const QJsonObject &service, const QJsonArray &adapters, const QJsonObject &saved, QWidget *parent)
         : QDialog(parent), original(saved) {
         setObjectName("speechProfileEditor"); setWindowTitle(saved.isEmpty() ? tr("Add speech provider") : tr("Edit speech provider"));
         auto *layout = new QVBoxLayout(this); layout->setSpacing(12);
-        layout->addWidget(label(tr("Configured on %1").arg(computer)));
-        auto *form = new QFormLayout; form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow); layout->addLayout(form);
-        name = new QLineEdit(saved.value("name").toString()); name->setObjectName("speechEditName"); name->setMaxLength(128); form->addRow(tr("Name"), name);
+        auto *host = label(tr("Processing computer: %1").arg(computer)); host->setObjectName("speechEditComputer"); layout->addWidget(host);
+        auto *readiness = label(service.value("available").toBool()
+            ? tr("Recognition service is available on %1. The selected model and device still need a successful Test after saving.").arg(computer)
+            : tr("Recognition service is not ready on %1. %2").arg(computer, service.value("reason").toString(tr("Prepare the local service before testing this provider."))));
+        readiness->setObjectName("speechEditReadiness"); layout->addWidget(readiness);
+        auto *formScroll = new QScrollArea; formScroll->setWidgetResizable(true); formScroll->setFrameShape(QFrame::NoFrame); layout->addWidget(formScroll, 1);
+        auto *content = new QWidget; content->setObjectName("speechEditorContent"); auto *fields = new QVBoxLayout(content); fields->setContentsMargins(0,0,12,0); fields->setSpacing(12); formScroll->setWidget(content);
+        form = new QFormLayout; form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow); fields->addLayout(form);
+        name = new QLineEdit(saved.value("name").toString()); name->setObjectName("speechEditName"); name->setMaxLength(128); name->setPlaceholderText(tr("e.g. Russian on %1").arg(computer)); form->addRow(tr("Name"), name);
         id = new QLineEdit(saved.value("id").toString(saved.isEmpty() ? "provider-" + uuid().left(8) : QString()));
         id->setObjectName("speechEditId"); id->setMaxLength(64); id->setReadOnly(!saved.isEmpty()); form->addRow(tr("Profile ID"), id);
         type = new QComboBox; type->setObjectName("speechEditType"); form->addRow(tr("Type"), type);
@@ -58,7 +109,9 @@ public:
         credential->addItem(configured ? tr("Keep stored API key") : tr("No API key"), "keep");
         credential->addItem(tr("Replace API key"), "replace"); credential->addItem(tr("Remove API key"), "remove"); form->addRow(tr("API key"), credential);
         key = new QLineEdit; key->setObjectName("speechEditKey"); key->setEchoMode(QLineEdit::Password); key->setMaxLength(8192); form->addRow(tr("New API key"), key);
-        help = label({}); help->setObjectName("speechEditHelp"); layout->addWidget(help);
+        help = label({}); help->setObjectName("speechEditHelp"); fields->addWidget(help);
+        auto *guide = new QPushButton(tr("Local setup guide")); guide->setObjectName("speechEditSetupGuide"); guide->setAutoDefault(false); fields->addWidget(guide, 0, Qt::AlignLeft);
+        connect(guide, &QPushButton::clicked, this, [this, computer] { showLocalSetupGuide(computer, this); });
         status = label({}); status->setObjectName("speechEditStatus"); layout->addWidget(status);
         check = new QPushButton(tr("Check operation status")); check->setObjectName("speechEditCheckOperation"); check->setAutoDefault(false); check->hide(); layout->addWidget(check, 0, Qt::AlignLeft);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout->addWidget(buttons);
@@ -83,7 +136,7 @@ public:
         else if (!saved.isEmpty()) { const auto value = saved.value("model").toString(); int index = model->findText(value); if (index < 0) { model->addItem(value); index = model->count()-1; } model->setCurrentIndex(index); }
         const auto savedDevice = saved.value("device").toString("cpu"); int deviceIndex = device->findText(savedDevice);
         if (!saved.isEmpty() && !remote() && deviceIndex < 0) { device->addItem(savedDevice); deviceIndex = device->count()-1; } if (deviceIndex >= 0) device->setCurrentIndex(deviceIndex);
-        validate(); resize(540, sizeHint().height());
+        validate(); resize(580, qMin(700, screen()->availableGeometry().height()-80));
     }
     QJsonObject profile() const {
         QJsonObject result{{"id", id->text().trimmed()}, {"name", name->text().trimmed()}, {"adapter", type->currentData().toString()},
@@ -126,13 +179,13 @@ private:
             for (const auto &entry : adapter.value("devices").toArray()) { device->addItem(entry.toString()); allowedDevices.insert(entry.toString()); }
         }
         if (remote() && original.value("adapter").toString() == selected) model->setEditText(original.value("model").toString());
-        auto *form = qobject_cast<QFormLayout *>(layout()->itemAt(1)->layout());
         for (QWidget *field : QList<QWidget *>{url, insecure, credential, key}) { field->setVisible(remote()); if (auto *caption = form->labelForField(field)) caption->setVisible(remote()); }
         device->setVisible(!remote()); form->labelForField(device)->setVisible(!remote());
         help->setText(remote() ? tr("The processing computer sends audio to the server's /audio/transcriptions endpoint. The API key stays on the processing computer after saving. Saving does not send audio. HTTP exposes audio and the key in transit; only enable it for a trusted private connection.")
-            : tr("Uses the GigaAM runtime and model weights already prepared on this computer. Saving a profile does not install packages or download models. Check the provider's readiness after saving."));
+            : tr("Local inference runs on the processing computer named above. Saving creates a profile; it does not install the service or download model weights.\n\nv3_e2e_rnnt is the default for Russian with punctuation; use ru for Russian.\n\nCPU uses the processor. CUDA requires a supported NVIDIA GPU and CUDA-enabled PyTorch. MPS requires a supported Apple GPU/runtime. Use Test to verify the chosen model and device."));
         validate();
     }
+    QFormLayout *form;
     QJsonArray capabilities;
     QSet<QString> allowedModels, allowedDevices;
     bool locked = false;
@@ -157,6 +210,8 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent) : QWi
     m_default = label({}); m_default->setObjectName("speechDefault"); layout->addWidget(m_default);
     m_status = label({}); m_status->setObjectName("speechSettingsStatus"); layout->addWidget(m_status);
     m_result = label({}); m_result->setObjectName("speechOperationResult"); m_result->hide(); layout->addWidget(m_result);
+    auto *setup = new QPushButton(tr("Local setup guide")); setup->setObjectName("speechSetupGuideButton"); layout->addWidget(setup,0,Qt::AlignLeft);
+    connect(setup, &QPushButton::clicked, this, [this] { showLocalSetupGuide(m_host->currentText(), this); });
     m_refresh = new QPushButton(tr("Refresh providers and microphones")); m_refresh->setObjectName("speechRefresh"); layout->addWidget(m_refresh,0,Qt::AlignLeft);
     m_pendingStatus = label({}); m_pendingStatus->setObjectName("speechPendingOperation"); layout->addWidget(m_pendingStatus);
     m_check = new QPushButton(tr("Check operation status")); m_check->setObjectName("speechCheckOperation"); layout->addWidget(m_check,0,Qt::AlignLeft);
@@ -183,7 +238,7 @@ void SpeechSettings::setPeers(const QStringList &peers)
     QStringList available = peers; if (!selected.isEmpty() && !available.contains(selected)) available.append(selected);
     QStringList current; for (int index = 1; index < m_host->count(); ++index) current.append(m_host->itemData(index).toString());
     if (m_host->count() && current == available && m_host->currentData().toString() == selected) return;
-    m_host->clear(); m_host->addItem(tr("This computer"), QString());
+    m_host->clear(); m_host->addItem(localComputerName(), QString());
     for (const auto &host : available) m_host->addItem(host, host);
     m_host->setCurrentIndex(qMax(0, m_host->findData(selected)));
 }
@@ -241,7 +296,7 @@ void SpeechSettings::refresh()
         if (!error.isEmpty() || !validMachine(reply.value("machine_id").toString()) || !reply.value("revision").isDouble() || reply.value("revision").toInteger(-1) < 0) {
             m_status->setText(!error.isEmpty() ? error : tr("The computer returned an invalid provider configuration. Update hgs and refresh.")); controls(); return;
         }
-        m_machine = reply.value("machine_id").toString(); m_revision = reply.value("revision").toInteger(); m_adapters = reply.value("adapters").toArray();
+        m_machine = reply.value("machine_id").toString(); m_revision = reply.value("revision").toInteger(); m_adapters = reply.value("adapters").toArray(); m_service = reply.value("service").toObject();
         m_profiles->clear(); int row = -1;
         const QSettings settings; const auto preferred = settings.value("speech/machine_id").toString() == m_machine ? settings.value("speech/profile").toString() : QString();
         for (const auto &value : reply.value("profiles").toArray()) {
@@ -269,7 +324,7 @@ void SpeechSettings::editProfile(bool create)
     const auto original = create ? QJsonObject{} : selectedProfile(); if (!create && original.isEmpty()) return;
     const auto host = m_host->currentData().toString(); const auto machine = m_machine; const auto revision = m_revision;
     QStringList ids; for (int row = 0; row < m_profiles->count(); ++row) ids.append(m_profiles->item(row)->data(Qt::UserRole).toJsonObject().value("id").toString());
-    ProfileEditor dialog(m_host->currentText(), m_adapters, original, this);
+    ProfileEditor dialog(m_host->currentText(), m_service, m_adapters, original, this);
     connect(dialog.check, &QPushButton::clicked, this, &SpeechSettings::checkOperation);
     connect(m_client, &SpeechClient::requestFinished, &dialog, [this, &dialog] { dialog.check->setVisible(!m_pending.isEmpty()); dialog.check->setEnabled(!m_busy); if (!m_pending.isEmpty() && !m_busy && !m_waiting) dialog.status->setText(tr("The operation is not confirmed. Check its status before making another change.")); });
     connect(dialog.save, &QPushButton::clicked, &dialog, [this, &dialog, host, machine, revision, ids, create] {
@@ -309,7 +364,7 @@ void SpeechSettings::operation(const QString &host, const QString &machine, QJso
     if (!m_pending.isEmpty() || m_busy) return;
     m_result->clear(); m_result->hide();
     const auto request = uuid(); payload["request_id"] = request; payload["expected_machine_id"] = machine;
-    m_pending = {{"host", host}, {"computer", host.isEmpty() ? tr("This computer") : host}, {"machine_id", machine}, {"request_id", request}, {"action", payload.value("action")}};
+    m_pending = {{"host", host}, {"computer", host.isEmpty() ? localComputerName() : host}, {"machine_id", machine}, {"request_id", request}, {"action", payload.value("action")}};
     QSettings settings; settings.setValue(pendingKey, QJsonDocument(m_pending).toJson(QJsonDocument::Compact)); settings.sync();
     if (settings.status() != QSettings::NoError) { m_pending = {}; if (done) done({}, tr("Could not save the operation identity. No provider request was sent.")); controls(); return; }
     m_operationDone = std::move(done); m_busy = true; m_waiting = false; m_statusPolls = 0; m_statusClock.start(); controls();

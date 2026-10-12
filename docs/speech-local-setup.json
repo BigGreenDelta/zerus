@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "title": "Set up local GigaAM",
+  "intro": "Run these commands on the selected processing computer, as the same operating-system user that runs Zerus or its connector. Local GigaAM runs through Python and PyTorch in a private service. Nothing runs merely by opening this guide.",
+  "steps": [
+    {
+      "title": "1. Check the prerequisites",
+      "body": "Install Python 3.11 or newer, Git and FFmpeg using your operating system package manager, then check them below. The reviewed GigaAM loader invokes ffmpeg even for WAV recordings; it must be on the speech service PATH. Package installation and the first model download need internet access.",
+      "commands": [
+        "python3 -c 'import sys; assert sys.version_info >= (3, 11), \"Python 3.11 or newer is required\"; print(sys.version)'\ngit --version\nffmpeg -version"
+      ]
+    },
+    {
+      "title": "2. Open a Zerus source checkout",
+      "body": "If you already have a reviewed Zerus checkout matching your installed version, open a terminal in its root and skip this clone. Otherwise, these commands obtain the public source in a new dedicated directory and enter it. The destination must not exist; no existing checkout is overwritten or reset. Run the remaining commands in that same terminal.",
+      "commands": [
+        "mkdir -p \"$HOME/.local/share/zerus-speech\"\ngit clone --depth 1 https://github.com/ufna/zerus.git \"$HOME/.local/share/zerus-speech/source\" && cd \"$HOME/.local/share/zerus-speech/source\""
+      ]
+    },
+    {
+      "title": "3. Prepare a private Python environment",
+      "body": "Run from the Zerus checkout root. The environment stays outside the repository. PyTorch and torchaudio must have matching versions; 2.10.0 is the reviewed pair. The GigaAM extra installs the pinned upstream adapter dependencies.",
+      "commands": [
+        "python3 -m venv \"$HOME/.local/share/zerus-speech/venv\"\n\"$HOME/.local/share/zerus-speech/venv/bin/python\" -m pip install --upgrade pip\n\"$HOME/.local/share/zerus-speech/venv/bin/python\" -m pip install torch==2.10.0 torchaudio==2.10.0\n\"$HOME/.local/share/zerus-speech/venv/bin/python\" -m pip install './services/speech[gigaam]'"
+      ]
+    },
+    {
+      "title": "4. Download and verify the model explicitly",
+      "body": "This downloads Russian GigaAM v3 E2E RNNT, including its tokenizer, to this user's ~/.cache/gigaam. Loading it on CPU provides a baseline without requiring a GPU. For another supported model, prepare its weights explicitly before selecting it. Saving a profile does not download weights.",
+      "commands": [
+        "\"$HOME/.local/share/zerus-speech/venv/bin/python\" -c 'import gigaam; gigaam.load_model(\"v3_e2e_rnnt\", device=\"cpu\", use_flash=False)'"
+      ]
+    },
+    {
+      "title": "5. Choose CPU or a verified GPU explicitly",
+      "body": "Use device cpu for the baseline profile. For an NVIDIA GPU, first verify that this environment reports CUDA as available, then choose cuda (or the intended cuda:0/cuda:1 device) in the profile and run its Test. A false result needs a compatible NVIDIA driver and PyTorch CUDA installation; see the official PyTorch installation selector. Zerus does not automatically choose CUDA or Apple MPS, and availability alone does not prove this model works on that device.",
+      "commands": [
+        "\"$HOME/.local/share/zerus-speech/venv/bin/python\" -c 'import torch; print(\"CUDA available:\", torch.cuda.is_available())'"
+      ]
+    },
+    {
+      "title": "6. Start the private speech service",
+      "body": "This foreground command works on supported Unix hosts, including Linux and macOS. Keep the terminal open; Ctrl+C stops this speech service. Use only one running instance for this user. A speech.json file is optional: profiles saved in Zerus use its managed private store. Discovery and recognition require the service to be running.",
+      "commands": [
+        "\"$HOME/.local/share/zerus-speech/venv/bin/python\" -m zerus_speech"
+      ]
+    },
+    {
+      "title": "7. Optional: keep the service running on Linux",
+      "body": "On Linux with systemd user services, stop the foreground instance with Ctrl+C first, then run this installer from the same checkout. It enables and starts only zerus-speech.service. It does not restart native agents. On macOS, use the foreground command or your own service supervisor.",
+      "commands": [
+        "python3 services/speech/install-user-service.py --python \"$HOME/.local/share/zerus-speech/venv/bin/python\" --start",
+        "systemctl --user status zerus-speech.service --no-pager"
+      ]
+    },
+    {
+      "title": "8. Save, test and select the profile in Zerus",
+      "body": "Return to this processing computer's Voice settings. Choose Local GigaAM, model v3_e2e_rnnt, language ru and device cpu (or the GPU you explicitly prepared). Save, then select the saved profile and run Test. Test sends a short synthetic sound and may load the model; it uses no microphone recording. After success, explicitly choose the profile as the default for new recordings. Existing recorded previews keep their original selection and may require an explicit provider reselect.",
+      "commands": []
+    }
+  ],
+  "notes": [
+    "Local GigaAM uses the optional Python/PyTorch service. It is not an Ollama model or an OpenAI-compatible HTTP endpoint. To use a separate HTTP server, choose OpenAI-compatible server and configure that server's transcription API.",
+    "Keep the same user account and HGS_CONFIG_DIR for the CLI, connector and speech service. The default is ~/.config/hgs. Saved profiles live in speech-profiles/profiles.sqlite3; speech.json remains optional for advanced service paths and limits. Do not overwrite an existing speech.json or managed store.",
+    "A reachable service only confirms the service is running. The saved profile's explicit Test verifies the selected model and device. No package installation, model download or device selection happens merely by opening settings or saving a profile.",
+    "PyTorch installation selector: https://pytorch.org/get-started/locally/ . NVIDIA support depends on the installed driver and wheel build. Apple MPS is an explicit, separately tested choice; use CPU if it has not been verified.",
+    "If a step fails, keep the original recording and inspect the command output on the processing computer. Linux service diagnostics: journalctl --user -u zerus-speech.service -n 50 --no-pager . Refresh profile availability after the runtime or model is ready."
+  ]
+}

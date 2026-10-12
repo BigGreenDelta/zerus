@@ -48,7 +48,7 @@ function(zerus_test_environment)
     endforeach()
 endfunction()
 
-add_executable(test_speech test_speech.cpp ../src/ProcessRunner.cpp ../src/MessageComposer.cpp
+add_executable(test_speech test_speech.cpp ../resources.qrc ../src/ProcessRunner.cpp ../src/MessageComposer.cpp
     ../src/ComposerDraftStore.cpp ../src/ComposerToolbar.cpp)
 target_include_directories(test_speech PRIVATE ../src)
 target_link_libraries(test_speech PRIVATE Qt6::Test hgs-speech)
