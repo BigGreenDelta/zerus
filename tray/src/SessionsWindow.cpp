@@ -20,6 +20,8 @@
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
+#include "OvermindModel.h"
+#include "TasksView.h"
 #include "AttachmentViewer.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
@@ -915,6 +917,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_nativeUi = new NativeUiView(&m_client); tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
+    // Tasks come last: Native UI keeps its index (2) and the Processes tab its place.
+    m_overmind = new OvermindModel(&m_client, this);
+    m_tasks = new TasksView(m_overmind); tabs->addTab(m_tasks, tr("Tasks"));
+    connect(m_tasks, &TasksView::showRequested, this, [this] { if (selected()) m_detailTabs->setCurrentWidget(m_tasks); });
+    connect(m_overmind, &OvermindModel::machineChanged, this, &SessionsWindow::updateTasksView);
     for(auto *view:{m_activityView,m_subagentView})connect(view,&ActivityView::processRequested,this,[this](const QString &id){if(!ProcessSettings::enabled())return;m_detailTabs->setCurrentWidget(m_processes);m_processes->selectProcess(id);});
     connect(m_nativeUi, &NativeUiView::responseRequested, this, [this] { closeSubagent(); m_detailTabs->setCurrentWidget(m_activityStack); });
     m_workSplitter = new QSplitter(Qt::Horizontal); m_workSplitter->setObjectName("sessionWorkSplitter");
@@ -1064,7 +1071,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
-    connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
+    connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);updateTasksView();});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
         m_processes->applyPreferences();m_processPollAge.invalidate();
@@ -1263,7 +1270,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         updateDashboard();
     });
     m_timer.setInterval(500); connect(&m_timer, &QTimer::timeout, this, [this]() {
-        const bool background=m_detailTabs->currentWidget()==m_terminal || m_detailTabs->currentWidget()==m_nativeUi;
+        const bool background=m_detailTabs->currentWidget()==m_terminal || m_detailTabs->currentWidget()==m_nativeUi || m_detailTabs->currentWidget()==m_tasks;
         const int interval=background?ProcessSettings::backgroundMs():m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():2500;
         if(!m_inspectionAge.isValid() || m_inspectionAge.elapsed()>=interval)inspect();
         if (++m_tick % 10 == 0) {
@@ -1473,7 +1480,7 @@ void SessionsWindow::applyTheme()
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
     m_machineFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
-    m_processes->setTheme(m_dark);
+    m_processes->setTheme(m_dark); m_tasks->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
 }
 
@@ -2633,10 +2640,46 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
 }
 
+// A local session's machine is the replica's; a peer's comes from the swarm
+// catalog, whose machines name the connection the window uses as their host.
+QString SessionsWindow::overmindMachine(const Entry &entry) const
+{
+    if (entry.host == m_overmind->host() && !m_overmind->machine().isEmpty()) return m_overmind->machine();
+    const auto snapshot = m_swarm ? m_swarm->snapshot() : QJsonObject();
+    if (entry.host.isEmpty()) return snapshot.value("node_id").toString();
+    for (const auto &value : snapshot.value("machines").toArray()) {
+        const auto machine = value.toObject();
+        if (machine.value("connection").toString() == entry.host) return machine.value("id").toString();
+    }
+    return {};
+}
+
+void SessionsWindow::updateTasksView()
+{
+    if (!m_tasks) return;
+    m_tasks->setProjects(m_organization.groups());
+    const auto *entry = selected();
+    // A computer without sessions of its own (a Windows console) has no
+    // replica: it reads the board on the selected session's machine. Every
+    // machine holds the full replica, so it keeps that machine while it is
+    // reachable rather than reloading the board on every selection.
+    if (entry && !entry->host.isEmpty() && !m_fleet.local().localSessions && entry->host != m_overmind->host()) {
+        const auto *current = m_overmind->host().isEmpty() ? nullptr : m_fleet.peer(m_overmind->host());
+        if (!current || !current->ok) m_overmind->setHost(entry->host);
+    }
+    TasksView::Selection selection;
+    if (entry) {
+        selection.key = entry->key; selection.project = m_organization.groupFor(entry->identity); selection.host = entry->host;
+        selection.session = {overmindMachine(*entry), entry->session.name};
+    }
+    m_tasks->setSession(selection);
+}
+
 void SessionsWindow::renderDetails()
 {
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
+    updateTasksView();
     const auto recoveryDetails=entry && entry->session.state != "archived"
         && m_details.value("provider_status_at").toDouble() >= entry->session.providerStatusAt ? m_details : QJsonObject();
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();

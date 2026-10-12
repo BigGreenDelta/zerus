@@ -90,6 +90,13 @@ target_link_libraries(test_overmindmodel PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME overmindmodel COMMAND test_overmindmodel)
 set_tests_properties(overmindmodel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_tasksview test_tasksview.cpp ../src/TasksView.cpp ../src/OvermindModel.cpp ../src/SessionOrganization.cpp
+               ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
+target_include_directories(test_tasksview PRIVATE ../src)
+target_link_libraries(test_tasksview PRIVATE Qt6::Test Qt6::Widgets)
+add_test(NAME tasksview COMMAND test_tasksview)
+set_tests_properties(tasksview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_readmarksync test_readmarksync.cpp ../src/ReadMarkSync.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
 target_include_directories(test_readmarksync PRIVATE ../src)
 target_link_libraries(test_readmarksync PRIVATE Qt6::Test Qt6::Core)
@@ -250,7 +257,7 @@ add_test(NAME watchdog COMMAND test_watchdog)
 add_executable(test_sessionswindow test_sessionswindow.cpp ../src/SessionsWindow.cpp ../src/SessionSelection.cpp ../src/MachinesPage.cpp ../src/SessionSearch.cpp
                ../src/MachineFilter.cpp ../src/DashboardPage.cpp ../src/AccountsPage.cpp ../src/AccountUsageStore.cpp
                ../src/SessionOrganization.cpp ../src/SessionList.cpp ../src/SwarmController.cpp ../src/SwarmDialog.cpp ../src/SwarmConflictReview.cpp
-               ../src/ActivityView.cpp ../src/ProcessView.cpp ../src/NativeUiView.cpp ../src/MessageComposer.cpp ../src/ComposerToolbar.cpp ../src/ComposerDraftStore.cpp ../src/QuestionCard.cpp
+               ../src/ActivityView.cpp ../src/ProcessView.cpp ../src/TasksView.cpp ../src/OvermindModel.cpp ../src/NativeUiView.cpp ../src/MessageComposer.cpp ../src/ComposerToolbar.cpp ../src/ComposerDraftStore.cpp ../src/QuestionCard.cpp
                ../src/FleetState.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp ../src/DirectoryDialog.cpp
                ../src/NewSessionDialog.cpp ../src/ProjectsDialog.cpp ../resources.qrc)
 target_include_directories(test_sessionswindow PRIVATE ../src)

@@ -91,6 +91,7 @@ add_executable(hgs-tray
     src/SessionList.cpp
     src/ActivityView.cpp
     src/ProcessView.cpp
+    src/TasksView.cpp
     src/NativeUiView.cpp
     src/MessageComposer.cpp
     src/ComposerToolbar.cpp

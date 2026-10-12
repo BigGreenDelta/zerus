@@ -24,6 +24,7 @@
 #include <QStackedWidget>
 #include <QSplitter>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QListWidget>
 #include <QPushButton>
 #include <QPlainTextEdit>
@@ -74,6 +75,7 @@
 #include "AccountsPage.h"
 #include "FakeCli.h"
 #include "ProcessRunner.h"
+#include "TasksView.h"
 
 class FolderUrlRecorder : public QObject {
     Q_OBJECT
@@ -196,6 +198,7 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
+    void tasksTabKeepsItsProjectAcrossSessions();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -3730,8 +3733,9 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
-    QCOMPARE(tabs->count(), 4); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
+    QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
     QCOMPARE(tabs->tabText(3),QString("Processes"));QVERIFY(tabs->isTabVisible(3));
+    QCOMPARE(tabs->tabText(4),QString("Tasks"));QVERIFY(tabs->isTabVisible(4));
     QVERIFY(tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2));
     QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
@@ -3790,6 +3794,127 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     const auto inspectorPreview=qEnvironmentVariable("HGS_INSPECTOR_PREVIEW");if(!inspectorPreview.isEmpty())QVERIFY(reopened.grab().save(inspectorPreview));
     reopened.showSession({}, "kimi/docs/research"); QTest::qWait(50);
     QVERIFY(!reopened.findChild<QTextBrowser *>("subagents")->toPlainText().contains("Implement right panel"));
+}
+
+// The Tasks tab belongs to a project: selecting another session keeps the
+// board, its scroll position, filter and open card; only highlights change.
+// HGS_TASKS_WINDOW_PREVIEW=<directory> saves the tab in both themes.
+void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto hgs = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, "#!/usr/bin/env python3\nimport json,runpy,sys\na=sys.argv[1:]\n"
+        "if a[:1]==['overmind']:\n data=sys.stdin.read();c=' '.join(a[1:-1])\n"
+        " if c=='rev':print('{\"ok\":true,\"cursor\":1}')\n"
+        " elif c=='status':print('{\"ok\":true,\"machine\":\"node-arch\",\"cursor\":1}')\n"
+        " elif c=='decisions':print('{\"ok\":true,\"cursor\":1,\"decisions\":[]}')\n"
+        " elif c=='board':\n  b=json.load(open(__file__+'.board'));b.update(ok=True,cursor=1,project=json.loads(data)['project']);print(json.dumps(b))\n"
+        " else:print('{\"ok\":false,\"error\":{\"code\":\"refused\",\"message\":\"Not in this test\"}}');sys.exit(1)\n"
+        "else:\n sys.argv[0]=" + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n"));
+    const QStringList names{"Backlog", "Queue", "Design", "Build", "Review", "Your Call", "Done", "Icebox"};
+    const QStringList roles{"backlog", "ready", "active", "active", "review", "needs_human", "done", "parked"};
+    QJsonArray stages; for (int i = 0; i < names.size(); ++i) stages.append(QJsonObject{{"name", names[i]}, {"role", roles[i]}});
+    const auto person = [](const QString &machine, const QString &name) { return QJsonObject{{"machine", machine}, {"name", name}}; };
+    const auto dashboard = person("node-arch", "codex/hgs/dashboard"), review = person("node-mac", "claude/infra/review");
+    QJsonArray tasks;
+    const auto add = [&](const QString &id, const QString &title, const QString &stage, QJsonObject extra) {
+        QJsonObject task{{"uuid", id}, {"ref", "om-" + id}, {"project", "alpha"}, {"title", title}, {"stage", stage}, {"rank", id},
+            {"priority", 2}, {"labels", QJsonArray()}, {"flags", QJsonArray()}, {"markers", QJsonArray()}, {"pinned", QJsonValue::Null},
+            {"assignee", QJsonValue::Null}, {"reviewer", QJsonValue::Null}, {"queue_of", QJsonValue::Null}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) task[it.key()] = it.value();
+        tasks.append(task);
+    };
+    add("k3f9x", "Stream logs to the Activity tab without blocking the composer", "Queue", {{"pinned", dashboard}, {"queue_of", dashboard}, {"labels", QJsonArray{"ui"}}});
+    add("m2q8a", "Measure inspection latency", "Queue", {{"priority", 1}, {"labels", QJsonArray{"perf"}}});
+    add("p7c1d", "Pick a store for drafts", "Your Call", {{"assignee", dashboard}});
+    add("r4t6b", "Resize columns with the window", "Build", {{"assignee", dashboard}, {"markers", QJsonArray{"working"}}});
+    add("e9w2h", "Explain recovery in the docs", "Design", {{"assignee", review}, {"markers", QJsonArray{"working", "uncertain"}}});
+    add("u5n3j", "Unify toolbar chips", "Review", {{"reviewer", review}, {"labels", QJsonArray{"reviewed"}}, {"markers", QJsonArray{"reviewed"}}});
+    add("y1v7s", "Retry failed pushes after a network change", "Build", {{"assignee", person("node-mac", "codex/hgs/sync")},
+        {"labels", QJsonArray{"review-failed", "bug"}}, {"markers", QJsonArray{"needs_work", "conflict"}}});
+    add("s8g4z", "Sketch the phone layout", "Backlog", {{"labels", QJsonArray{"mobile", "blocked"}}});
+    add("o6d5f", "Drop the old migration", "Backlog", {{"priority", 0}, {"markers", QJsonArray{"orphaned"}}});
+    add("h2k9l", "Ship 1.4", "Done", {});
+    add("c3x8m", "Dark charts", "Icebox", {});
+    QFile board(hgs + ".board"); QVERIFY(board.open(QIODevice::WriteOnly));
+    board.write(QJsonDocument(QJsonObject{{"workflow", QJsonObject{{"version", 1}, {"stages", stages}, {"rules", QJsonArray()},
+        {"evidence", "git_sha_or_text"}, {"session_wip", 1}}}, {"tasks", tasks}}).toJson(QJsonDocument::Compact)); board.close();
+    const QByteArray organization = R"({"projects":[
+        {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
+        {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research"]}],"default_project":"alpha"})";
+    const auto open = [&](SessionsWindow &window) {
+        window.resize(1240, 760); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+        auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
+        if (tabs && view) tabs->setCurrentWidget(view);
+    };
+    const auto highlighted = [](TasksView *view) {
+        QStringList out;
+        for (auto *list : view->findChildren<QListWidget *>("taskList"))
+            for (int row = 0; row < list->count(); ++row)
+                if (list->item(row)->data(TaskRoles::Highlighted).toBool()) out << list->item(row)->data(TaskRoles::Uuid).toString();
+        std::sort(out.begin(), out.end()); return out;
+    };
+
+    QSettings().setValue("workspace/organization", organization);
+    {
+        SessionsWindow window(FakeCli::program(hgs));
+        auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
+        QVERIFY(tabs && view);
+        // After Processes; Native UI keeps index 2.
+        QCOMPARE(tabs->indexOf(view), 4); QCOMPARE(tabs->tabText(4), QString("Tasks")); QCOMPARE(tabs->tabText(2), QString("Native UI"));
+        QVERIFY(view->project().isEmpty());
+        open(window);
+        // First use opens the selected session's project.
+        QCOMPARE(view->project(), QString("alpha"));
+        QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("alpha"));
+        QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
+        QTRY_VERIFY(window.findChild<QFrame *>("tasksSessionStrip")->isVisible());
+        QCOMPARE(window.findChild<QLabel *>("tasksSessionQueue")->text(), QString("This session's queue: 1"));
+        auto *projects = view->findChild<QComboBox *>("tasksProject"); QCOMPARE(projects->count(), 2);
+        // Open a card, filter and scroll; then select a session of another project.
+        auto *filter = view->findChild<QLineEdit *>("tasksFilter"); filter->setText("o");
+        view->openTask("r4t6b");
+        auto *board = view->findChild<QScrollArea *>("tasksBoard");
+        window.resize(900, 760); QTRY_VERIFY(board->horizontalScrollBar()->maximum() > 0);
+        board->horizontalScrollBar()->setValue(board->horizontalScrollBar()->maximum());
+        const int scroll = board->horizontalScrollBar()->value();
+        window.showSession({}, "kimi/docs/research"); QTest::qWait(60);
+        QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+        QCOMPARE(view->project(), QString("alpha"));
+        QVERIFY(highlighted(view).isEmpty());
+        QVERIFY(!window.findChild<QFrame *>("tasksSessionStrip")->isVisible());
+        QCOMPARE(view->openedTask(), QString("r4t6b"));
+        QCOMPARE(filter->text(), QString("o"));
+        QCOMPARE(board->horizontalScrollBar()->value(), scroll);
+        window.showSession({}, "codex/hgs/dashboard");
+        QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
+        QCOMPARE(board->horizontalScrollBar()->value(), scroll);
+    }
+    // The chosen project survives a restart, whatever session is selected.
+    SessionsWindow reopened(FakeCli::program(hgs));
+    reopened.resize(1240, 760); reopened.setFleet(fleet()); reopened.show(); reopened.showSession({}, "kimi/docs/research");
+    QCOMPARE(reopened.findChild<TasksView *>("tasksView")->project(), QString("alpha"));
+
+    const auto directory = qEnvironmentVariable("HGS_TASKS_WINDOW_PREVIEW");
+    if (directory.isEmpty()) return;
+    QDir().mkpath(directory);
+    for (const QString theme : {"dark", "light"}) {
+        QSettings().setValue("workspace/theme", theme);
+        SessionsWindow window(FakeCli::program(hgs)); open(window);
+        auto *view = window.findChild<TasksView *>("tasksView");
+        QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
+        view->openTask("m2q8a"); QTest::qWait(150);
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + ".png"));
+        // A refused drop: the card stays and the reason shows above the board.
+        view->dropTask("h2k9l", "Backlog", {});
+        QTRY_VERIFY(window.findChild<QLabel *>("tasksMessage")->isVisible());
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-refused.png"));
+        window.resize(1760, 760); QTest::qWait(150);
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-wide.png"));
+        window.resize(820, 640); QTest::qWait(150);
+        QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-narrow.png"));
+    }
+    QSettings().remove("workspace/theme");
 }
 
 void TestSessionsWindow::detailsPollingPreservesReadingPosition()

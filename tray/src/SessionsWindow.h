@@ -34,6 +34,8 @@ class MessageComposer;
 class QuestionCard;
 class TerminalView;
 class NativeUiView;
+class OvermindModel;
+class TasksView;
 class QTabWidget;
 class QFrame;
 class SessionList;
@@ -117,6 +119,10 @@ private:
     bool entryNeedsAttention(const Entry &entry) const;
     bool entryHasDraft(const Entry &entry) const;
     void renderDetails();
+    // Pushes the projects and the selected session into the Tasks tab.
+    void updateTasksView();
+    // The Overmind node ID of an entry's machine; empty while unknown.
+    QString overmindMachine(const Entry &entry) const;
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);
@@ -337,6 +343,8 @@ private:
     QTextBrowser *m_children = nullptr, *m_info = nullptr;
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
+    OvermindModel *m_overmind = nullptr;
+    TasksView *m_tasks = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;
