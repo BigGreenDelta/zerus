@@ -21,7 +21,8 @@ struct ExchangeRequest {
     /// For every origin of `vector`, the id of the event at that position.
     #[serde(default)]
     tips: BTreeMap<String, String>,
-    /// Origins whose events differ between the two stores, as the sender knows.
+    /// Origins whose events the sender found to differ between the two stores
+    /// in this exchange.
     #[serde(default)]
     collisions: BTreeSet<String>,
     #[serde(default)]
@@ -123,33 +124,34 @@ fn outgrown(own: &BTreeMap<String, u64>, theirs: &BTreeMap<String, u64>, origin:
     theirs.get(origin).copied().unwrap_or(0) > own.get(origin).copied().unwrap_or(0)
 }
 
-/// Origins whose events differ between this store and a peer, after one message.
+/// What noting collisions changed.
 #[derive(Default)]
-struct Collisions {
-    /// Every origin known to differ with this peer, now or in an earlier
-    /// exchange: its events are neither sent to the peer nor taken from it.
-    known: BTreeSet<String>,
+struct Recorded {
     /// The origins noted for the first time.
     new: Vec<String>,
     /// This store's own origin collided, and it now writes under a fresh one.
     rotated: bool,
 }
 
-/// Compares the other side's tips with this store before anything of theirs is
-/// stored. A tip names the other side's event at the end of its log of an
-/// origin; when this store holds that position with another event, the two
-/// logs of that origin differ there or earlier. The shorter log's tip always
-/// lies inside the longer one, so the side holding the longer log finds it and
-/// tells the other in `collisions`. A colliding origin of this store's own is
-/// replaced before anything is written here again, and every collision is
-/// noted in the origin history once.
-fn collide(
-    store: &mut Store,
-    peer: &str,
+impl Recorded {
+    fn add(&mut self, other: Recorded) {
+        self.new.extend(other.new);
+        self.rotated |= other.rotated;
+    }
+}
+
+/// The origins whose logs differ between this store and the other side, as
+/// what the other side carries now shows. A tip names the other side's event
+/// at the end of its log of an origin; when this store holds that position
+/// with another event, the two logs differ there or earlier. The side holding
+/// the longer log finds it and tells the other in `collisions`, which counts
+/// here for origins this store holds. Nothing of the other side is stored yet.
+fn observe(
+    store: &Store,
     vector: &BTreeMap<String, u64>,
     tips: &BTreeMap<String, String>,
     told: &BTreeSet<String>,
-) -> Result<Collisions> {
+) -> Result<BTreeSet<String>> {
     let held = store.version_vector()?;
     let mut found = BTreeSet::new();
     for (origin, tip) in tips {
@@ -158,20 +160,25 @@ fn collide(
             found.insert(origin.clone());
         }
     }
-    // The other side compared this store's tips, so only origins held here can differ.
     found.extend(told.iter().filter(|origin| held.contains_key(*origin)).cloned());
+    Ok(found)
+}
+
+/// Notes each colliding origin in the origin history once. This store's own
+/// origin among them is replaced before anything is written here again. The
+/// history is a record: whether an origin is exchanged is decided anew in
+/// every exchange from what the peer carries then.
+fn record(store: &mut Store, peer: &str, origins: &BTreeSet<String>) -> Result<Recorded> {
     let (current, _) = store.current()?;
-    let mut collisions = Collisions::default();
-    for origin in &found {
+    let mut recorded = Recorded::default();
+    for origin in origins {
         let replaced = if *origin == current { store.rotate_origin_from(origin, "collision", peer)? } else { None };
-        collisions.rotated |= replaced.is_some();
+        recorded.rotated |= replaced.is_some();
         if replaced.is_some() || store.note_collision(origin, peer)? {
-            collisions.new.push(origin.clone());
+            recorded.new.push(origin.clone());
         }
     }
-    collisions.known = store.collisions_with(peer)?;
-    collisions.known.extend(found);
-    Ok(collisions)
+    Ok(recorded)
 }
 
 /// `vector` with the `skipped` origins marked as complete, so that `missing`
@@ -201,8 +208,14 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
     let (origin, current) = store.current()?;
     let restored = outgrown(&current, &request.vector, &origin)
         && store.rotate_origin_from(&origin, "restored", &request.from)?.is_some();
-    let collisions = collide(store, &request.from, &request.vector, &request.tips, &request.collisions)?;
-    if restored || !collisions.new.is_empty() {
+    let mut colliding = observe(store, &request.vector, &request.tips, &request.collisions)?;
+    let mut recorded = record(store, &request.from, &colliding)?;
+    // An anchor of the push that differs from the event stored at its position
+    // shows another log of that origin too.
+    let received = store.insert_raw(&except(request.events, &colliding))?;
+    recorded.add(record(store, &request.from, &received.differing)?);
+    colliding.extend(received.differing);
+    if restored || !recorded.new.is_empty() {
         let mut state = store
             .peer(&request.from)?
             .unwrap_or_else(|| PeerState { machine: request.from.clone(), ..PeerState::default() });
@@ -211,22 +224,21 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         if restored {
             notes.push(restored_note(&name));
         }
-        if !collisions.new.is_empty() {
-            notes.push(collision_note(&name, &collisions.new, collisions.rotated));
+        if !recorded.new.is_empty() {
+            notes.push(collision_note(&name, &recorded.new, recorded.rotated));
         }
         state.last_error = notes.join("; ");
         state.updated = now();
         store.put_peer(&state)?;
     }
-    let received = store.insert_raw(&except(request.events, &collisions.known))?;
-    let (events, more) = store.missing(&without(&request.vector, &collisions.known), BATCH)?;
+    let (events, more) = store.push(&without(&request.vector, &colliding), BATCH)?;
     let vector = store.version_vector()?;
     let response = ExchangeResponse {
         v: 1,
         machine: store.machine().into(),
         tips: store.tips(&vector)?,
         vector,
-        collisions: collisions.known,
+        collisions: colliding,
         events,
         more,
         refused: received.refused,
@@ -260,14 +272,17 @@ pub fn exchange(store: &mut Store, peer: &str, alias: &str, call: &mut dyn FnMut
 
 fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<Summary> {
     let mut summary = Summary::default();
-    // Origins found to differ with this peer during this exchange.
-    let mut found: BTreeSet<String> = BTreeSet::new();
+    // Origins found to differ with this peer during this exchange: neither
+    // sent to it nor taken from it for the rest of the exchange.
+    let mut colliding: BTreeSet<String> = BTreeSet::new();
+    // Origins that collided with this peer before wait for its first answer,
+    // which shows whether they still do.
+    let earlier = store.collisions_with(peer)?;
     while summary.rounds < ROUNDS {
         let known = store.peer(peer)?.and_then(|p| p.vector);
-        let mut colliding = store.collisions_with(peer)?;
-        colliding.extend(found.iter().cloned());
+        let skipped = if summary.rounds == 0 { &earlier } else { &colliding };
         let (events, push_more) = match &known {
-            Some(vector) => store.missing(&without(vector, &colliding), BATCH)?,
+            Some(vector) => store.push(&without(vector, skipped), BATCH)?,
             None => (Vec::new(), true),
         };
         let pushed = events.len();
@@ -295,13 +310,16 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         if outgrown(&current, &response.vector, &origin) && store.rotate_origin_from(&origin, "restored", peer)?.is_some() {
             summary.rotated = true;
         }
-        let collisions = collide(store, peer, &response.vector, &response.tips, &response.collisions)?;
-        summary.collided_own |= collisions.rotated;
-        summary.collisions.extend(collisions.new);
+        let observed = observe(store, &response.vector, &response.tips, &response.collisions)?;
+        let mut recorded = record(store, peer, &observed)?;
+        colliding.extend(observed);
+        let received = store.insert_raw(&except(response.events, &colliding))?;
+        recorded.add(record(store, peer, &received.differing)?);
+        colliding.extend(received.differing.iter().cloned());
+        summary.collided_own |= recorded.rotated;
+        summary.collisions.extend(recorded.new);
         // A collision the peer has not been told of yet takes one more round.
-        let untold = collisions.known.iter().any(|origin| !colliding.contains(origin));
-        found.extend(collisions.known.iter().cloned());
-        let received = store.insert_raw(&except(response.events, &collisions.known))?;
+        let untold = colliding.iter().any(|origin| !request.collisions.contains(origin));
         summary.inserted += received.inserted;
         summary.refused += received.refused;
         summary.rounds += 1;
@@ -311,11 +329,11 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         store.put_peer(&state)?;
         // What the peer still lacks according to its fresh answer: a peer that
         // lost its data is refilled from here on.
-        let (lacking, _) = store.missing(&without(&response.vector, &collisions.known), BATCH)?;
+        let (lacking, _) = store.missing(&without(&response.vector, &colliding), BATCH)?;
         // A peer below the vector this round assumed lost data: push from its
         // fresh vector next round. Otherwise events of an origin we pushed to
         // that did not move the peer's seq were refused, whether or not more
-        // batches remain: each pushed origin starts right after the peer's seq.
+        // batches remain: each pushed origin starts at the peer's seq.
         let lost_data = known
             .as_ref()
             .map_or(false, |k| k.iter().any(|(origin, seq)| response.vector.get(origin).copied().unwrap_or(0) < *seq));
@@ -330,7 +348,11 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
                 break;
             }
         }
-        if !untold && (!progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty()))) {
+        // Origins the first round held back that the answer shows no longer
+        // collide go out in the next round.
+        let released = summary.rounds == 1
+            && lacking.iter().any(|e| e["origin"].as_str().is_some_and(|o| earlier.contains(o) && !colliding.contains(o)));
+        if !untold && !released && (!progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty()))) {
             break;
         }
     }
@@ -519,12 +541,27 @@ mod tests {
         comment(&mut b, "t", 10);
         comment(&mut b, "t", 10);
         exchange(a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
-        drop(b);
+        (restore(b, &path, &aside), old)
+    }
+
+    /// Replaces the store at `path` with the copy `aside`, as a restore from a backup does.
+    fn restore(store: Store, path: &std::path::Path, aside: &std::path::Path) -> Store {
+        drop(store);
         for suffix in ["-wal", "-shm"] {
             let _ = std::fs::remove_file(path.join(format!("overmind.sqlite3{suffix}")));
         }
-        std::fs::copy(&aside, path.join("overmind.sqlite3")).unwrap();
-        (Store::open(&path, B).unwrap(), old)
+        std::fs::copy(aside, path.join("overmind.sqlite3")).unwrap();
+        Store::open(path, B).unwrap()
+    }
+
+    /// One exchange between A and B, started by B or by A.
+    fn sync(a: &mut Store, b: &mut Store, b_calls: bool) {
+        let summary = if b_calls {
+            exchange(b, A, "a", &mut |request| serve(a, request.clone()))
+        } else {
+            exchange(a, B, "b", &mut |request| serve(b, request.clone()))
+        };
+        summary.unwrap();
     }
 
     #[test]
@@ -595,14 +632,6 @@ mod tests {
                 }
                 let fork = log(&b, &old);
                 assert_eq!((original.len(), fork.len(), fork[0] == original[0]), (3, 1 + written, true), "{case}");
-                let sync = |a: &mut Store, b: &mut Store, b_calls: bool| {
-                    let summary = if b_calls {
-                        exchange(b, A, "a", &mut |request| serve(a, request.clone()))
-                    } else {
-                        exchange(a, B, "b", &mut |request| serve(b, request.clone()))
-                    };
-                    summary.unwrap();
-                };
                 sync(&mut a, &mut b, restored_calls);
                 assert_ne!(b.origin(), old, "{case}: the restored side writes under a fresh origin");
                 assert_eq!(collisions(&b), vec![(old.clone(), A.to_owned(), b.origin().to_owned())], "{case}");
@@ -633,11 +662,7 @@ mod tests {
             comment(&mut b, "t", 10);
             let fork = log(&b, &old);
             for b_calls in [restored_calls, !restored_calls, restored_calls] {
-                if b_calls {
-                    exchange(&mut b, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
-                } else {
-                    exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
-                }
+                sync(&mut a, &mut b, b_calls);
             }
             let history = b.origin_history(20).unwrap();
             let kinds: BTreeSet<_> = history.iter().map(|n| (n.kind.as_str(), n.origin.as_str(), n.peer.as_str())).collect();
@@ -646,6 +671,66 @@ mod tests {
             assert_eq!(collisions(&a), vec![(old.clone(), B.to_owned(), String::new())]);
             assert_eq!((log(&a, &old), log(&b, &old)), (original, fork), "no mixed log");
         }
+    }
+
+    #[test]
+    fn a_collision_blocks_an_origin_only_while_the_logs_still_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+        let (mut b, old) = restored_b(&dir, &mut a);
+        comment(&mut b, "t", 10);
+        comment(&mut b, "t", 10);
+        let (original, fork) = (log(&a, &old), log(&b, &old));
+        // A peer that still holds another log of the origin stays blocked.
+        for b_calls in [false, true, false, true] {
+            sync(&mut a, &mut b, b_calls);
+        }
+        assert_eq!((log(&a, &old), log(&b, &old)), (original.clone(), fork));
+        assert_eq!(collisions(&a), vec![(old.clone(), B.to_owned(), String::new())]);
+        // B's store is lost and created again on the same machine: it holds
+        // nothing of the old origin, so it gets it again.
+        drop(b);
+        let mut b = Store::open(&dir.path().join("b-again"), B).unwrap();
+        for b_calls in [false, true, false, true] {
+            sync(&mut a, &mut b, b_calls);
+        }
+        assert_eq!(log(&b, &old), original, "the recreated store is refilled");
+        assert_eq!(log(&a, &old), original);
+        assert_eq!(collisions(&a).len(), 1, "the history still records the collision");
+        assert!(collisions(&b).is_empty());
+        assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap());
+    }
+
+    #[test]
+    fn a_push_never_extends_a_log_across_a_fork_it_did_not_compare() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b");
+        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+        let mut b = Store::open(&path, B).unwrap();
+        comment(&mut b, "t", 10);
+        sync(&mut a, &mut b, false);
+        let origin = b.origin().to_owned();
+        drop(b);
+        let aside = dir.path().join("aside.sqlite3");
+        std::fs::copy(path.join("overmind.sqlite3"), &aside).unwrap();
+        let mut b = Store::open(&path, B).unwrap();
+        comment(&mut b, "t", 10);
+        comment(&mut b, "t", 10);
+        sync(&mut a, &mut b, false); // A's view of B is now 3 events of the origin.
+        comment(&mut b, "t", 10);
+        sync(&mut a, &mut b, true); // B pushes its fourth event itself.
+        assert_eq!(a.version_vector().unwrap().get(&origin), Some(&4));
+        // B is restored to its first event and writes two others.
+        let mut b = restore(b, &path, &aside);
+        comment(&mut b, "t", 10);
+        comment(&mut b, "t", 10);
+        let fork = log(&b, &origin);
+        // A pushes from its view of B: the push starts at B's third position, which differs.
+        sync(&mut a, &mut b, false);
+        assert_eq!(log(&b, &origin), fork, "B's log is not extended");
+        assert_eq!(collisions(&b), vec![(origin.clone(), A.to_owned(), String::new())]);
+        assert_eq!(collisions(&a), vec![(origin.clone(), B.to_owned(), String::new())]);
+        assert_eq!(log(&a, &origin).len(), 4);
     }
 
     #[test]
