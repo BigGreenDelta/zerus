@@ -1415,10 +1415,13 @@ confirmable codes are `agent_busy`, `wip_exceeded`, `predecessors_open` and
 is stopped, paused, blocked by a dialog or a DeepSeek native session, which is
 not supported yet) and `attachment_unavailable` (no reachable machine holds an
 image of the task), are never confirmable, and nothing is written when one
-occurs. The result reports an outcome. `sent` means the text was submitted.
-`not_delivered` means it definitely was not, and the task returns to Queue.
-`uncertain` sets the flag `delivery_uncertain`; a person settles it with
-`resolve-delivery --json {task, delivered: true|false}`. Overmind never resends
+occurs. A successful result has `delivery` set to `sent` (the text was submitted) or
+`uncertain`, which sets the flag `delivery_uncertain`; a person settles it with
+`resolve-delivery --json {task, delivered: true|false}`. A definite failure is
+not a result but the refusal `not_delivered` (`ok: false`). After it, `send`
+takes its claim back and the task returns to Queue; `review-send` clears the
+reviewer; `rework-send` changes nothing; for `answer` the answer stays recorded
+and is sent again by repeating the request. Overmind never resends
 by itself. Retrying with the same `request_id` never types twice: an
 interrupted send resumes its claim, and a delivery is reported as not sent only
 when the session has no input receipt for the request.
@@ -1443,7 +1446,8 @@ follows the `hgs send` rules: at most 64 KiB, not starting with `/` or `!`.
 peer whose version runs Overmind, and does so within seconds of a local write.
 One call pushes and pulls, so it works when SSH goes in one direction only. An
 exchange continues while the peer still lacks events, so a peer that lost its
-data is refilled in one exchange; it ends when a round makes no progress.
+data is refilled over several rounds; it ends when a round makes no progress or
+after 8 rounds, and the worker continues on its next pass.
 `hgs overmind status` shows each peer's last exchange and last error, including
 events the peer did not accept. An unreachable peer appears in the swarm sync
 result, and its Overmind status keeps the last good state. Images are not part

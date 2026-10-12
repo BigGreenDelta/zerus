@@ -190,7 +190,8 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   every pass (3 s) and exchanges at once when it changed, like a changed catalog
   digest. There is no extra socket or signal.
 - An exchange continues while the peer still lacks events and ends when a round
-  makes no progress; events a peer did not accept are reported in `status`.
+  makes no progress or after 8 rounds (the worker continues on its next
+  pass); events a peer did not accept are reported in `status`.
 - A local write nudges the worker to exchange with reachable peers right away.
 - Blobs are not part of the exchange. They are fetched by hash on demand, in
   ranges of at most 512 KiB verified by SHA-256, when a card is opened or a task
