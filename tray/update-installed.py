@@ -18,6 +18,9 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    previous one again. Then confirm the running image, the unchanged nonempty
    drafts and the native agent and tmux processes, and record
    ~/.local/share/hgs/build-provenance.json.
+5. Remove hidden leftover folders of earlier hand-made updates beside the
+   installed GUI (.zerus-*, stale .hgs-tray-update-*) when they are at least an
+   hour old, hold only installer copies and no process uses them.
 
 Native agents, tmux servers and other services are never signalled. When a check
 fails, the private draft snapshot is kept and its location printed.
@@ -50,6 +53,11 @@ LABEL = 'com.hgdev.hgs-tray'
 PLIST = HOME / f'Library/LaunchAgents/{LABEL}.plist'
 UNIT = 'hgs-tray.service'
 NATIVE = {'codex', 'claude', 'kimi', 'dsh', 'node', 'codex-code-mode'}
+# Hidden folders that earlier hand-made updates (and an interrupted run of this
+# one) left beside the installed GUI, and the installer copies they may hold.
+LEGACY = ('.zerus-', '.hgs-tray-update-')
+LEGACY_FILES = {'hgs-tray', 'hgs', 'hgs_state.py'}
+LEGACY_AGE = 3600
 # Slow machines may allow longer; the defaults match the verified manual updates.
 QUIT_SECONDS = float(os.environ.get('HGS_TRAY_QUIT_TIMEOUT') or 35)
 START_SECONDS = float(os.environ.get('HGS_TRAY_START_TIMEOUT') or 35)
@@ -400,6 +408,83 @@ def provenance(installed, info, installed_at, preserved, retained):
     write_json(PROVENANCE, record)
 
 
+# --- leftovers of earlier updates -------------------------------------------------
+
+def legacy_copies(folder):
+    """Installer copies inside a leftover folder, or None when it holds anything else."""
+    copies = []
+    for root, dirs, files in os.walk(folder):
+        base = Path(root)
+        depth = len(base.relative_to(folder).parts)
+        for name in list(dirs):
+            path = base / name
+            if path.is_symlink():
+                return None
+            if MAC and name == 'hgs-tray.app':
+                copies.append(path)
+                dirs.remove(name)
+            elif depth >= 1:
+                return None
+        for name in files:
+            path = base / name
+            if MAC and name == '.DS_Store':
+                continue
+            if path.is_symlink() or name not in LEGACY_FILES:
+                return None
+            copies.append(path)
+    return copies
+
+
+def in_use(folder):
+    """Whether a process of this user runs from, or sits in, the folder."""
+    prefix = str(folder) + os.sep
+    if MAC:
+        return any(line.strip().partition(' ')[2].strip().startswith(prefix)
+                   for line in run(['ps', '-x', '-o', 'pid=,comm=']).splitlines())
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            paths = [os.readlink(process / 'exe'), os.readlink(process / 'cwd')]
+            paths += [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0')[:3]]
+        except OSError:
+            continue
+        if any(path.startswith(prefix) for path in paths):
+            return True
+    return False
+
+
+def sweep(parent, current):
+    """Remove leftover staging folders that are empty or hold only unused installer copies."""
+    removed = []
+    for folder in sorted(parent.iterdir()):
+        if (not folder.name.startswith(LEGACY) or folder == current or folder.is_symlink()
+                or not folder.is_dir()):
+            continue
+        # A concurrent update may still be using a recent folder.
+        if time.time() - folder.stat().st_mtime < LEGACY_AGE:
+            continue
+        copies = legacy_copies(folder)
+        if copies is None:
+            say(f'kept {folder}: it holds files other than installer copies')
+            continue
+        if in_use(folder):
+            say(f'kept {folder}: a process still uses it')
+            continue
+        if MAC:
+            register = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/'
+                            'LaunchServices.framework/Support/lsregister')
+            for bundle in copies:
+                if bundle.suffix == '.app' and register.exists():
+                    subprocess.run([str(register), '-u', str(bundle)], capture_output=True)
+        shutil.rmtree(folder)
+        removed.append(folder.name)
+    if removed:
+        say(f'removed {len(removed)} leftover folders of earlier updates: {", ".join(removed)}')
+
+
 # --- the update ---------------------------------------------------------------
 
 def replace(stage, installed):
@@ -457,6 +542,7 @@ def update(built, installed):
         if not pids:
             replace(stage, installed)
             say(f'replaced the stopped GUI with {info.get("versionName", info["version"])}')
+            sweep(installed.parent, folder)
             return 0
         pid = pids[0]
         path, before = socket_path(pid), native()
@@ -497,6 +583,7 @@ def update(built, installed):
         provenance(installed, info, installed_at, preserved, retained)
         shutil.rmtree(saved)
         saved = None
+        sweep(installed.parent, folder)
         say(f'Zerus {info.get("versionName", info["version"])} runs as pid {new}; {preserved} nonempty drafts kept, '
             f'{retained} native processes untouched; previous GUI kept in {ROLLBACK}')
         return 0
