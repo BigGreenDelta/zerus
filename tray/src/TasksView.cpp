@@ -1133,13 +1133,15 @@ void TasksView::renderSession(const OvermindModel::Board &board)
         m_sendNext->setEnabled(false);
         return;
     }
+    // Without the machine's node ID a name may belong to a session elsewhere:
+    // no count, no highlights (see belongs) and nothing to send.
+    const bool known = !m_selection.session.machine.isEmpty();
     int queued = 0;
     for (const auto &task : board.tasks)
         if (board.role(task.stage) == QLatin1String("ready") && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)) ++queued;
     m_sessionQueue->setText(tr("This session's queue: %1").arg(queued));
+    m_sessionQueue->setVisible(known);
     const QString next = nextTask(board);
-    // Without the machine's node ID a name may belong to a session elsewhere.
-    const bool known = !m_selection.session.machine.isEmpty();
     m_sendNext->setEnabled(!next.isEmpty() && known && !m_sending);
     QString tip;
     if (!known) tip = tr("Overmind does not know this session's computer yet.");
@@ -1195,10 +1197,12 @@ void TasksView::applyFilter()
     }
 }
 
+// Only a session whose machine is known: the same name may be a session on
+// another machine.
 bool TasksView::belongs(const QString &machine, const QString &name) const
 {
-    if (m_selection.session.name.isEmpty() || name != m_selection.session.name) return false;
-    return m_selection.session.machine.isEmpty() || machine == m_selection.session.machine;
+    if (m_selection.session.name.isEmpty() || m_selection.session.machine.isEmpty()) return false;
+    return name == m_selection.session.name && machine == m_selection.session.machine;
 }
 
 bool TasksView::owned(const QStringList &owners) const
@@ -1254,9 +1258,8 @@ QString TasksView::nextTask(const OvermindModel::Board &board) const
         return board.role(task.stage) == QLatin1String("ready") && !task.labels.contains(QLatin1String("epic"))
             && !task.json.value(QStringLiteral("read_only")).toBool();
     };
-    if (!m_selection.session.machine.isEmpty())
-        for (const auto &task : board.tasks)
-            if (sendable(task) && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)) return task.uuid;
+    for (const auto &task : board.tasks)
+        if (sendable(task) && !task.queueOf.isEmpty() && belongs(task.queueOf.machine, task.queueOf.name)) return task.uuid;
     for (const auto &task : board.tasks)
         if (sendable(task) && task.pinned.isEmpty()) return task.uuid;
     return {};

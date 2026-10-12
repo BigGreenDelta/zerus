@@ -101,7 +101,8 @@ public:
     void setProjects(const QList<SessionOrganization::Group> &groups);
     void setSession(const Selection &selection);
     // Opens the board of `project` and asks for the tab (showRequested). The
-    // selected session's tasks are highlighted when it belongs to the project;
+    // selected session's tasks are highlighted when it belongs to the project
+    // and Overmind knows its machine;
     // when sessionKey is that session, the board scrolls to its first task.
     void showProject(const QString &project, const QString &sessionKey = {});
     QString project() const { return m_project; }

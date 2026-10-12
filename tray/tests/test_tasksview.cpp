@@ -612,8 +612,9 @@ void TestTasksView::highlightsTheSelectedSession()
     QCOMPARE(retry["confirm"].toArray(), QJsonArray{"agent_busy"});
     QCOMPARE(retry["task"].toString(), QString("t2"));
 
-    // A machine that is not known yet: names still highlight, but nothing is
-    // sent, on this computer or another, since the name may be a session elsewhere.
+    // A machine that is not known yet: nothing is highlighted, counted or sent,
+    // on this computer or another, since the name may be a session elsewhere
+    // (t10 is queued for the same name on m2).
     QTRY_VERIFY(next->isEnabled());
     TasksView::Selection remote = selection("demo", "", "codex/demo/one"); remote.host = "mac";
     view.setSession(remote);
@@ -621,7 +622,15 @@ void TestTasksView::highlightsTheSelectedSession()
     view.setSession(selection("demo", "", "codex/demo/one"));
     QVERIFY(!next->isEnabled());
     QCOMPARE(next->toolTip(), QString("Overmind does not know this session's computer yet."));
-    QVERIFY(highlighted(view).contains("t2"));
+    QVERIFY(strip->isVisible());
+    QVERIFY(!view.findChild<QLabel *>("tasksSessionQueue")->isVisible());
+    QCOMPARE(highlighted(view), QStringList());
+    QCOMPARE(view.findChild<QPushButton *>("tasksDecision")->property("highlighted").toBool(), false);
+    // Once known, the count and the highlights return.
+    view.setSession(selection("demo", "m1", "codex/demo/one"));
+    QVERIFY(view.findChild<QLabel *>("tasksSessionQueue")->isVisible());
+    QCOMPARE(view.findChild<QLabel *>("tasksSessionQueue")->text(), QString("This session's queue: 2"));
+    QCOMPARE(highlighted(view), (QStringList{"t2", "t4", "t5"}));
 
     // A session of another project highlights nothing and has no strip.
     view.setSession(selection("other", "m1", "codex/other/one"));
