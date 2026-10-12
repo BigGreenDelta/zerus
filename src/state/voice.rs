@@ -62,12 +62,18 @@ pub(crate) fn validate_request(value: &Value) -> Result<()> {
         return Err("Invalid voice message UUID".into());
     }
     if string(value, "action") == "submit" {
-        if value["speech"].as_object().is_none_or(|o| o.len() != 2)
-            || !uuid(&value["speech"]["machine_id"])
+        if value["speech"].as_object().is_none_or(|o| {
+            o.len() != 2 + usize::from(o.contains_key("profile_revision"))
+                || !o.contains_key("profile_id")
+        }) || !uuid(&value["speech"]["machine_id"])
         {
             return Err("Choose a speech computer and profile".into());
         }
-        crate::speech::validate_request(&json!({"action":"submit","request_id":value["request_id"],"profile_id":value["speech"]["profile_id"],"audio":value["audio"]})).map_err(err)?;
+        let mut asr = json!({"action":"submit","request_id":value["request_id"],"profile_id":value["speech"]["profile_id"],"audio":value["audio"]});
+        if let Some(revision) = value["speech"].get("profile_revision") {
+            asr["profile_revision"] = revision.clone();
+        }
+        crate::speech::validate_request(&asr).map_err(err)?;
     }
     Ok(())
 }
@@ -927,11 +933,11 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
             {
                 return Ok(());
             }
-            response = match crate::speech::voice_request(
-                config,
-                &machine,
-                &json!({"action":"submit","request_id":job["asr_id"],"profile_id":job["speech"]["profile_id"],"audio":{"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":STANDARD.encode(&audio[44..])}}),
-            ) {
+            let mut asr = json!({"action":"submit","request_id":job["asr_id"],"profile_id":job["speech"]["profile_id"],"audio":{"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":STANDARD.encode(&audio[44..])}});
+            if let Some(revision) = job["speech"].get("profile_revision") {
+                asr["profile_revision"] = revision.clone();
+            }
+            response = match crate::speech::voice_request(config, &machine, &asr) {
                 Ok(v) => v,
                 Err(_) => return speech_unavailable(store, &mut job),
             };
@@ -1237,6 +1243,22 @@ mod tests {
         assert!(validate_request(&v).is_err());
         v = json!({"action":"profiles","request_id":ID,"expected_run_id":"run","expected_conversation_id":""});
         assert!(validate_request(&v).is_ok());
+    }
+    #[test]
+    fn request_pins_exact_positive_profile_revision() {
+        let mut value = request();
+        value["speech"]["profile_revision"] = json!(7);
+        assert!(validate_request(&value).is_ok());
+        for invalid in [
+            json!(0),
+            json!(-1),
+            json!(1.0),
+            json!("7"),
+            json!(9_007_199_254_740_992u64),
+        ] {
+            value["speech"]["profile_revision"] = invalid;
+            assert!(validate_request(&value).is_err());
+        }
     }
     #[test]
     fn accept_is_atomic_persistent_and_idempotent() {

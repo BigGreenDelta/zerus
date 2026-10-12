@@ -285,10 +285,19 @@ account quotas are grouped by verified identity instead of adding machine usage.
 **Settings → Voice input** selects the speech computer, its recognition profile
 and the local microphone. The speech computer is independent of the agent's
 computer: a laptop can record locally and use a configured GPU peer over SSH.
-Configure providers and their credentials only on that processing computer; see
-[the optional speech host](../services/speech/README.md). The first built-in
-adapter is GigaAM with a Russian `v3_e2e_rnnt` profile. Selecting a profile does
-not install or download a model and never falls back to another provider.
+The provider manager creates, edits, tests and removes profiles on the selected
+processing computer. Choose **Local GigaAM** (model and CPU/GPU) or an
+**OpenAI-compatible server** (API base URL, model, language and optional API key).
+An empty language lets the server detect it; an explicit language uses a two-letter
+code such as `ru`. Keys remain on the processing computer and are never shown
+again; Keep, Replace and Remove are explicit choices. Test checks the saved
+profile with synthetic audio and cannot send input to an agent. Removing a
+profile requires confirmation. Choosing a default is separate from browsing or
+editing profiles. Configuration is available even when inference is not running.
+See [provider management](speech-providers.md) and
+[host installation](../services/speech/README.md). Local GigaAM starts with the
+Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
+download a model and never falls back to another provider.
 
 Use **Voice** in the message toolbar, allow microphone access, then stop recording
 to review the recording with **Play**, **Discard** or **Send voice**. Recordings
@@ -297,6 +306,8 @@ opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
 available for playback; refresh providers in the preview before sending.
 An unavailable selected provider stays selected until you explicitly change it.
+A retained recording also pins a versioned provider's configuration revision;
+editing that profile requires explicit reselection before sending the recording.
 During capture, the typed draft stays visible and read-only, and ordinary message
 submission and attachment changes are blocked. History remains readable.
 **Space** or **Escape** stops recording into the retained preview; neither sends

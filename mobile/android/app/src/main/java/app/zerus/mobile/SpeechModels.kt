@@ -3,9 +3,9 @@ package app.zerus.mobile
 import org.json.JSONObject
 import java.util.UUID
 
-internal data class SpeechSelection(val host: MachineKey? = null, val profileId: String = "")
+internal data class SpeechSelection(val host: MachineKey? = null, val profileId: String = "", val profileRevision: Long? = null)
 internal data class SpeechProfile(val id: String, val name: String, val model: String, val available: Boolean,
-    val reason: String = "", val maxDurationMs: Int = 120_000)
+    val reason: String = "", val maxDurationMs: Int = 120_000, val profileRevision: Long? = null)
 internal data class SpeechAttempt(val id: String, val host: MachineKey, val profileId: String, val origin: Draft,
     val state: String = "uncertain", val text: String = "", val error: String = "")
 internal data class SpeechState(val selection: SpeechSelection = SpeechSelection(), val attempt: SpeechAttempt? = null)
@@ -13,6 +13,12 @@ internal data class SpeechState(val selection: SpeechSelection = SpeechSelection
 internal object SpeechProtocol {
     val operations = setOf("speech_profiles", "speech_submit", "speech_status", "speech_cancel")
     const val maxBytes = 3_840_000
+    fun revision(raw: JSONObject): Long? {
+        if (!raw.has("profile_revision") || raw.isNull("profile_revision")) return null
+        val value = raw.get("profile_revision")
+        require(value is Int || value is Long)
+        return (value as Number).toLong().also { require(it in 1..9_007_199_254_740_991L) }
+    }
     fun profiles(value: JSONObject): List<SpeechProfile> {
         require(value.optInt("schema") == 1) { "This computer uses an unsupported voice protocol." }
         val rows = value.optJSONArray("profiles")?.objects().orEmpty()
@@ -21,7 +27,7 @@ internal object SpeechProtocol {
             val id = it.getString("id")
             require(id.isNotBlank() && id.length <= 128)
             SpeechProfile(id, it.string("name").ifBlank { id }, it.string("model"), it.optBoolean("available"),
-                it.string("reason"), it.optInt("max_duration_ms", 120_000).coerceIn(1_000, 120_000))
+                it.string("reason"), it.optInt("max_duration_ms", 120_000).coerceIn(1_000, 120_000), revision(it))
         }
     }
     fun job(value: JSONObject, attempt: SpeechAttempt): SpeechAttempt {
@@ -35,7 +41,7 @@ internal object SpeechProtocol {
     fun decode(value: JSONObject): SpeechState {
         fun host(raw: JSONObject) = MachineKey(raw.getString("connection"), raw.getString("computer"))
         val selection = value.optJSONObject("selection")?.let {
-            SpeechSelection(it.optJSONObject("host")?.let(::host), it.string("profile"))
+            SpeechSelection(it.optJSONObject("host")?.let(::host), it.string("profile"), revision(it))
         } ?: SpeechSelection()
         val attempt = value.optJSONObject("attempt")?.let {
             val id = it.getString("id"); require(UUID.fromString(id).toString() == id)
@@ -47,7 +53,7 @@ internal object SpeechProtocol {
     fun encode(value: SpeechState): JSONObject {
         fun host(key: MachineKey) = JSONObject().put("connection", key.connectionId).put("computer", key.computerId)
         return JSONObject().put("selection", JSONObject().put("host", value.selection.host?.let(::host))
-            .put("profile", value.selection.profileId)).put("attempt", value.attempt?.let {
+            .put("profile", value.selection.profileId).put("profile_revision", value.selection.profileRevision)).put("attempt", value.attempt?.let {
                 JSONObject().put("id", it.id).put("host", host(it.host)).put("profile", it.profileId)
                     .put("origin", MessageCodec.draftJson(it.origin.copy(attachments = emptyList())))
                     .put("state", it.state).put("text", it.text).put("error", it.error)

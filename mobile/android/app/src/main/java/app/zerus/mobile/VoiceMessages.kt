@@ -15,12 +15,12 @@ data class VoiceMessage(val id: String, val runId: String, val conversationId: S
 }
 internal data class VoiceComputer(val id: String, val name: String, val profiles: List<SpeechProfile>)
 internal data class VoiceDraft(val target: Target, val machineId: String, val profileId: String,
-    val audio: Attachment, val durationMs: Int, val createdAt: Double) {
-    val selection get() = SpeechSelection(machineId.takeIf { it.isNotBlank() }?.let { MachineKey(target.connectionId, it) }, profileId)
+    val audio: Attachment, val durationMs: Int, val createdAt: Double, val profileRevision: Long? = null) {
+    val selection get() = SpeechSelection(machineId.takeIf { it.isNotBlank() }?.let { MachineKey(target.connectionId, it) }, profileId, profileRevision)
 }
 internal data class VoiceOutgoing(val id: String, val target: Target, val machineId: String, val profileId: String,
     val audio: Attachment?, val durationMs: Int, val createdAt: Double, val message: VoiceMessage? = null,
-    val uploadState: String = "uploading", val error: String = "") {
+    val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null) {
     val state get() = message?.state ?: uploadState
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
     val needsStatus get() = message == null && uploadState == "uncertain" || !terminal
@@ -40,6 +40,8 @@ internal data class VoiceState(val selection: SpeechSelection = SpeechSelection(
 object VoiceProtocol {
     val operations = setOf("voice_profiles", "voice_submit", "voice_status", "voice_cancel")
     val states = setOf("queued", "transcribing", "ready", "waiting_agent", "delivering", "submitted", "failed", "cancelled", "uncertain")
+    internal fun provider(draft: VoiceDraft) = JSONObject().put("machine_id", draft.machineId).put("profile_id", draft.profileId)
+        .put("profile_revision", draft.profileRevision)
     const val MAX_PCM_BYTES = 3_840_000
     fun payload(target: Target, requestId: String) = JSONObject().put("request_id", requestId)
         .put("expected_run_id", target.run).put("expected_conversation_id", target.conversation)
@@ -127,6 +129,7 @@ internal object VoiceRoutes {
         if (draft.machineId.isBlank() || draft.profileId.isBlank()) return "Choose a voice computer and profile before sending."
         val computer = computers.find { it.id == draft.machineId } ?: return "The selected voice computer is unavailable. Choose a provider or refresh."
         val profile = computer.profiles.find { it.id == draft.profileId } ?: return "The selected voice profile is unavailable. Choose a provider or refresh."
+        if (profile.profileRevision != draft.profileRevision) return "This provider has changed. Select it again to confirm where this recording will be sent."
         if (!profile.available) return profile.reason.ifBlank { "The selected voice profile is unavailable." }
         if (draft.durationMs > profile.maxDurationMs) return "This recording exceeds the selected profile's duration limit. Choose another profile."
         return ""
@@ -145,13 +148,13 @@ internal object VoiceRoutes {
 
 internal object VoiceCodec {
     private fun draft(value: VoiceDraft) = MessageCodec.targetJson(value.target).put("machine", value.machineId)
-        .put("profile", value.profileId).put("audio", value.audio.toJson()).put("duration_ms", value.durationMs).put("created", value.createdAt)
+        .put("profile", value.profileId).put("profile_revision", value.profileRevision).put("audio", value.audio.toJson()).put("duration_ms", value.durationMs).put("created", value.createdAt)
     private fun draft(raw: JSONObject) = VoiceDraft(MessageCodec.target(raw), raw.getString("machine"), raw.getString("profile"),
-        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"))
+        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw))
     fun encode(value: VoiceState) = JSONObject().put("schema", 1)
         .put("selection", SpeechProtocol.encode(SpeechState(value.selection)).getJSONObject("selection"))
         .put("draft", value.draft?.let(::draft)).put("outgoing", JSONArray(value.outgoing.map { entry ->
-            MessageCodec.targetJson(entry.target).put("id", entry.id).put("machine", entry.machineId).put("profile", entry.profileId)
+            MessageCodec.targetJson(entry.target).put("id", entry.id).put("machine", entry.machineId).put("profile", entry.profileId).put("profile_revision", entry.profileRevision)
                 .put("audio", entry.audio?.toJson()).put("duration_ms", entry.durationMs).put("created", entry.createdAt)
                 .put("message", entry.message?.let(VoiceProtocol::json)).put("upload_state", entry.uploadState).put("error", entry.error)
         }))
@@ -164,7 +167,7 @@ internal object VoiceCodec {
                 val target = MessageCodec.target(row)
                 val message = row.optJSONObject("message")?.let { VoiceProtocol.response(JSONObject().put("schema", 1).put("message", it), target, id) }
                 VoiceOutgoing(id, target, row.getString("machine"), row.getString("profile"), row.optJSONObject("audio")?.let(Attachment::fromJson),
-                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error")).recover()
+                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row)).recover()
             }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) })
     }
 }

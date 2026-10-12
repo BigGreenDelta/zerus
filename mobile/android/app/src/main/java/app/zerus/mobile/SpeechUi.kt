@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
     val speech = model.speech
     var hostsOpen by remember { mutableStateOf(false) }
     var profilesOpen by remember { mutableStateOf(false) }
+    var manage by remember { mutableStateOf(false) }
     val choicePreview = speech.draft?.takeIf { it.target == target && (preview == null || it.audio.id == preview.audio.id) }
     val currentPreview = preview == null || choicePreview != null
     val choice = choicePreview?.selection ?: speech.selection
@@ -42,6 +43,7 @@ import androidx.compose.ui.unit.dp
             return@Column
         }
         Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { manage = true }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) { Text("Manage speech providers") }
         Box {
             OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
                 modifier = Modifier.fillMaxWidth()) {
@@ -85,6 +87,7 @@ import androidx.compose.ui.unit.dp
             }
         }
     }
+    if (manage) SpeechConfigurationScreen(model, choice) { manage = false }
 }
 
 @Composable internal fun SpeechComposerButton(model: ZerusViewModel, target: Target, saveEditor: () -> Unit) {

@@ -72,7 +72,7 @@ private:
     QString m_profileError;
     QJsonObject m_selectedProfile;
     bool m_loading = false, m_syncing = false;
-    bool m_profilesLoading = false, m_profilesValidated = false;
+    bool m_profilesLoading = false, m_profilesValidated = false, m_profileBound = false;
     State m_state = State::Idle;
     Notice m_noticeKind = Notice::General;
     quint64 m_generation = 0;

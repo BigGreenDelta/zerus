@@ -12,7 +12,7 @@ to orchestrate this service and native delivery. That worker retains original
 audio and transcript for synchronized playback; this ASR service keeps its
 existing short-lived jobs. See [persistent voice messages](../../docs/voice-messages.md).
 
-The first adapter is GigaAM, pinned to upstream commit
+The local adapter is GigaAM, pinned to upstream commit
 `7447938d791c4f3e643386ee22c33777004293a5`. Its reviewed short-audio API supports
 `v3_e2e_rnnt`, `v3_e2e_ctc`, `v3_rnnt`, `v3_ctc`, `multilingual_ctc` and
 `multilingual_large_ctc`. Russian dictation starts with `v3_e2e_rnnt`, including
@@ -20,6 +20,66 @@ punctuation. The multilingual alternatives can be advertised as additional host
 profiles after explicitly preparing their weights. Adapters are first-party
 Python modules implementing `providers/base.py`; profile data cannot name an
 executable, an import path or a client-supplied model file.
+
+The `openai_http` adapter sends a WAV file to an explicitly configured
+OpenAI-compatible transcription server. The base URL includes its API prefix,
+for example `https://asr.example/v1`; the adapter appends
+`/audio/transcriptions`. It sends multipart `file`, `model`, optional ISO 639-1
+`language`, and `response_format=json`, and expects a bounded JSON `text` string.
+An optional API key becomes a Bearer header on the processing computer. This
+does not require an OpenAI account or SDK, and does not imply that an arbitrary
+GigaAM server implements this protocol. The existing local service remains a
+private Unix-socket service; it is not automatically exposed over HTTP.
+
+HTTPS verifies the server certificate. Explicit `allow_insecure_http: true`
+permits plain HTTP only when the actual connected address is private or loopback.
+The adapter resolves once, connects to that checked address, ignores ambient
+proxy configuration and never follows redirects. A recognition attempt has a
+60-second absolute deadline, bounded DNS/connect work and a 64 KiB response
+limit. A cancelled or ambiguous POST is never retried automatically. Endpoint
+response bodies, credentials and raw network exceptions do not enter public
+errors or analytics.
+
+## Managing profiles in Zerus
+
+Desktop and Android Voice settings can add, edit, remove and explicitly test
+profiles on a selected computer, without opening a conversation. Configuration
+management works even if that computer's optional inference service is stopped
+or its GigaAM packages are absent. Saving a profile does not install packages,
+download weights, start a service or run recognition. The processing computer
+must run this service before its profiles can accept audio.
+
+On first management access, the CLI imports existing `speech.json` profiles
+into `$HGS_CONFIG_DIR/speech-profiles/profiles.sqlite3` (default
+`~/.config/hgs/speech-profiles/profiles.sqlite3`). This private child directory
+is mode 0700 and the database is mode 0600; the surrounding configuration
+directory's permissions stay unchanged. Existing profile IDs and private model
+cache paths survive import. This database then owns profiles and credentials;
+later edits to the old JSON `profiles` array do not overwrite managed settings.
+Keep `speech.json` for service socket/state paths, limits and analytics settings.
+Hosts without a managed store continue reading legacy JSON profiles.
+
+Changes use a durable request UUID and an expected configuration revision.
+Concurrent edits conflict instead of overwriting one another. Removed IDs are
+retired, so an old selection cannot silently identify a different endpoint.
+API keys are write-only: Keep, Replace or Remove are explicit choices and reads
+return only whether a key is configured. Android seals replacement keys to the
+selected host before relay transport; desktop sends them through its configured
+SSH channel. See the [management contract](../../docs/speech-providers.md).
+
+Discovery reads only configuration and local runtime metadata. An explicit Test
+submits a short synthetic sound to the saved exact profile revision and can load
+an already installed local model or contact the configured HTTP server. It never
+records the microphone, sends a person's saved audio, returns the synthetic
+transcript or increments voice-usage counters. Test status remains recoverable
+by its original UUID; a lost acknowledgement does not repeat recognition.
+
+The service observes committed profile changes on subsequent discovery and
+submission without restart. New clients pin the selected profile revision in
+their recorded preview. A changed revision is refused before inference or HTTP
+upload; the original recording remains available for explicit review. Already
+accepted ASR jobs use their immutable configuration snapshot even if the profile
+is edited or removed. Legacy unversioned requests retain their previous behavior.
 
 ## Host installation
 
@@ -48,7 +108,9 @@ files are trusted code/data installed by the computer's owner; clients cannot
 upload or select arbitrary checkpoint paths. The normal inference path uses the
 prepared cache and does not install packages.
 
-Create `$HGS_CONFIG_DIR/speech.json` (default `~/.config/hgs/speech.json`):
+For an initial local runtime, create `$HGS_CONFIG_DIR/speech.json` (default
+`~/.config/hgs/speech.json`). Its profiles are bootstrap configuration until the
+first management access imports them:
 
 ```json
 {
@@ -83,8 +145,9 @@ python3 services/speech/install-user-service.py \
 ```
 
 The first command runs in the foreground; use one launch method at a time. The
-installer only enables `zerus-speech.service` when `--start` is supplied. After
-editing profiles, restart that service to reload the configuration. Package
+installer only enables `zerus-speech.service` when `--start` is supplied. Managed
+profile edits take effect without restarting the service. Changes to socket,
+state, limits or analytics settings still require a service restart. Package
 installation itself never starts or restarts a service. Native agents, tmux and
 DeepSeek processes are independent of this service. Other Unix hosts may run it
 with their existing supervisor or use a configured remote GPU computer.
@@ -105,6 +168,8 @@ printf '%s\n' '{"action":"stats"}' | hgs speech --json
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64: ...}`.
   Audio is at most 120 seconds / 3,840,000 bytes. Its accepted `job_id` always
   equals `request_id`.
+  Managed discovery adds `profile_revision`; new submissions may supply that
+  positive integer to require the exact selected revision.
 - Submit replies, including duplicates, omit transcripts. If the returned state
   is already `completed`, fetch the text with `status`; only status carries text.
 - `status` and `cancel` require `job_id`. Job replies include `state`
@@ -162,6 +227,7 @@ the trusted relay; API v1 has TLS transport and is not end-to-end encrypted.
 cargo test --locked speech
 cargo build --locked
 python3 -m unittest discover -s tests -p test_speech.py -v
+python3 -m unittest discover -s tests -p test_speech_profiles.py -v
 ```
 
 The synthetic fixture adapter is only registered with the hidden `--test-mode`

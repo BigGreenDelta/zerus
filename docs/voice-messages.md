@@ -13,6 +13,10 @@ capture, discard its preview or send anything. The capture limit remains
 120 seconds even when no provider has responded.
 
 The preview keeps its intended conversation and selected speech machine/profile.
+Versioned profiles additionally pin `profile_revision`. Refreshing discovery or
+editing settings cannot silently change that pin: a changed profile requires
+explicit reselection. The queued voice worker passes the pin through ASR
+acceptance, where a mismatch fails before audio is sent to the provider.
 Discovery must not replace an unavailable explicit selection with another
 provider. A preview recorded before choosing a provider can be assigned one
 before sending. Only an explicit **Send voice**, with a confirmed available
@@ -56,6 +60,8 @@ contains `action`, `request_id`, `expected_run_id` and
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`.
   Recording duration is bounded to 120 seconds. The request UUID is the permanent
   message UUID.
+  `speech.profile_revision` is an optional exact configuration revision returned
+  by provider discovery. Older clients and unversioned providers may omit it.
 * `status` and `cancel`: also contain `message_id`. Each operation has a new
   request UUID while retaining the original message UUID.
 

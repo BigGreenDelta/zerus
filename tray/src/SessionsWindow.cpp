@@ -1462,7 +1462,7 @@ void SessionsWindow::applyTheme()
     const QString hover = m_dark ? "#2b3540" : "#edf2f5";
     const QString selected = m_dark ? "#233d35" : "#e0f0e9";
     setStyleSheet(QString(R"(
-        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog { background:%1; color:%2; }
+        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QWidget { font-size:13px; }
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
@@ -1545,10 +1545,10 @@ void SessionsWindow::applyTheme()
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
         QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
-        QListWidget#machineProfiles, QListWidget#accountProfiles { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
-        QListWidget#machineProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
+        QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
+        QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
-        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected { background:%10; color:%2; }
+        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected { background:%10; color:%2; }
         QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
         QPushButton#machineFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }

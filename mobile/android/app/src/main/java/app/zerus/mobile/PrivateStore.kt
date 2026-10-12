@@ -54,6 +54,8 @@ class PrivateStore(context: Context) {
     internal fun voiceState(): VoiceState = read("voice_messages_v1").optJSONObject(0)?.let(VoiceCodec::decode)
         ?: VoiceState(selection = speechState().selection)
     internal fun saveVoiceState(state: VoiceState) = write("voice_messages_v1", JSONArray().put(VoiceCodec.encode(state)))
+    internal fun speechConfigOperations() = SpeechConfigProtocol.decode(read("speech_configuration_ops_v1"))
+    internal fun saveSpeechConfigOperations(pending: List<SpeechConfigOperation>) = write("speech_configuration_ops_v1", SpeechConfigProtocol.encode(pending))
     fun accounts()=AccountSnapshots.decode(read("account_catalog_v1"))
     fun saveAccounts(state:List<AccountCatalog>)=write("account_catalog_v1",AccountSnapshots.encode(state))
     fun readState()=ConversationReadPolicies.decode(read("conversation_read_v1"))

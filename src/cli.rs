@@ -43,6 +43,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
+       Speech profile management v1
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
        hgs [@host] ls                 sessions here and on peers

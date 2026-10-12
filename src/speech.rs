@@ -6,6 +6,8 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{fs, io::Read, path::PathBuf};
+#[path = "speech_profiles.rs"]
+mod profiles;
 #[cfg(unix)]
 use std::{io::Write, time::Duration};
 
@@ -64,6 +66,10 @@ fn socket_path(config: &Config) -> Result<PathBuf> {
 pub fn request(config: &Config, input: &Value) -> Result<Value> {
     validate_request(input).map_err(|e| Error::new(1, e.to_string()))?;
     let action = input.get("action").and_then(Value::as_str).unwrap_or("");
+    if profiles::is_action(action) {
+        return profiles::request(config, input)
+            .map_err(|_| Error::new(1, "Speech profile management failed on this computer"));
+    }
     if !matches!(
         action,
         "providers" | "submit" | "status" | "cancel" | "stats"
@@ -287,6 +293,9 @@ pub(crate) fn voice_computers(config: &Config) -> std::result::Result<Value, Str
 }
 
 pub(crate) fn validate_request(input: &Value) -> anyhow::Result<()> {
+    if profiles::is_action(input["action"].as_str().unwrap_or("")) {
+        return profiles::validate(input);
+    }
     use base64::Engine;
     let object = input
         .as_object()
@@ -298,10 +307,20 @@ pub(crate) fn validate_request(input: &Value) -> anyhow::Result<()> {
         "status" | "cancel" => &["action", "job_id"],
         _ => anyhow::bail!("Unknown speech action"),
     };
+    let has_revision = action == "submit" && object.contains_key("profile_revision");
     anyhow::ensure!(
-        object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field)),
+        object.len() == fields.len() + usize::from(has_revision)
+            && fields.iter().all(|field| object.contains_key(*field)),
         "Invalid speech request fields"
     );
+    if has_revision {
+        anyhow::ensure!(
+            input["profile_revision"]
+                .as_u64()
+                .is_some_and(|r| (1..=9_007_199_254_740_991).contains(&r)),
+            "Invalid speech profile revision"
+        );
+    }
     if action == "submit" || action == "status" || action == "cancel" {
         let key = if action == "submit" {
             "request_id"

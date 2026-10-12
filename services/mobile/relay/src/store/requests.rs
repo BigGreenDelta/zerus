@@ -46,6 +46,7 @@ pub struct Submission {
     agent: bool,
     attachments: bool,
     speech_job: Option<String>,
+    speech_config_operation: Option<String>,
 }
 impl Submission {
     pub fn new(body: Value) -> Result<Self> {
@@ -63,6 +64,11 @@ impl Submission {
                 .is_some_and(|v| !v.is_empty()),
             speech_job: if ["speech_status", "speech_cancel"].contains(&s(&body, "operation")) {
                 body["payload"]["job_id"].as_str().map(str::to_owned)
+            } else {
+                None
+            },
+            speech_config_operation: if s(&body, "operation") == "speech_config_status" {
+                body["payload"]["operation_id"].as_str().map(str::to_owned)
             } else {
                 None
             },
@@ -121,6 +127,22 @@ impl Store {
             if owner["workspace_id"] != c.workspace
                 || owner["device_id"] != c.id
                 || owner["operation"] != "speech_submit"
+                || owner["target_computer_id"] != node["id"]
+                || owner["target_machine_id"] != node["machine_id"]
+            {
+                return Err(Error::NOT_FOUND);
+            }
+        }
+        if let Some(operation_id) = &b.speech_config_operation {
+            let owner = t.one("SELECT workspace_id,device_id,operation,target_computer_id,target_machine_id FROM requests WHERE id=?", args![operation_id]).await?.ok_or(Error::NOT_FOUND)?;
+            if owner["workspace_id"] != c.workspace
+                || owner["device_id"] != c.id
+                || ![
+                    "speech_profile_upsert",
+                    "speech_profile_remove",
+                    "speech_profile_test",
+                ]
+                .contains(&s(&owner, "operation"))
                 || owner["target_computer_id"] != node["id"]
                 || owner["target_machine_id"] != node["machine_id"]
             {
@@ -366,7 +388,15 @@ impl Store {
             }
             return Err(Error::CONFLICT);
         }
-        let audio_bytes = if ["speech_submit", "voice_submit"].contains(&s(&row, "operation")) {
+        let audio_bytes = if [
+            "speech_submit",
+            "voice_submit",
+            "speech_profile_upsert",
+            "speech_profile_remove",
+            "speech_profile_test",
+        ]
+        .contains(&s(&row, "operation"))
+        {
             i(&row, "body_bytes")
         } else {
             0

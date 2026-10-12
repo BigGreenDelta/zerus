@@ -7,4 +7,5 @@ pub mod json;
 pub mod protocol;
 pub mod push;
 pub mod registry;
+mod speech_config;
 pub mod store;
