@@ -296,8 +296,13 @@ are limited to two minutes and remain separate from the typed draft. The preview
 lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
 the pinned agent conversation. One history card retains the playable original,
-expandable transcript and processing or delivery errors across devices. Clients
-recover interrupted requests by the original message UUID without blindly
+expandable transcript and processing or delivery errors across devices. Its
+circular play/pause control sits beside the recording's amplitude waveform;
+the played portion is highlighted, and selecting a point on the waveform seeks
+within the recording and keeps paused audio paused. The time display follows
+playback. Older recordings gain their waveform in the background without
+recognition or delivery being repeated.
+Clients recover interrupted requests by the original message UUID without blindly
 uploading or sending again. Hiding the composer stops unsubmitted capture.
 See [persistent voice messages](voice-messages.md) for storage and delivery details.
 Voice settings also show the selected computer's

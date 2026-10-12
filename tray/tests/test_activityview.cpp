@@ -5,6 +5,7 @@
 #include "SessionFileReference.h"
 #include "SessionUsage.h"
 #include "WorkspaceFocus.h"
+#include "speech/VoicePlayerImage.h"
 
 #include <QApplication>
 #include <QElapsedTimer>
@@ -18,6 +19,10 @@
 #include <QFontInfo>
 #include <QGuiApplication>
 #include <QJsonDocument>
+#include <QMediaPlayer>
+#include <QAudioOutput>
+#include <QFile>
+#include <QtEndian>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -41,6 +46,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 #include <limits>
 #include <QKeySequence>
@@ -232,6 +238,10 @@ private slots:
     void providerErrorsStayVisibleAndStable_data();
     void attachmentsStayWithTheirMessageAndOpenExactFile();
     void voiceMessageRetainsAudioAndExpandableTranscript();
+    void voiceWaveformSeeksWithoutRelayout_data();
+    void voiceWaveformSeeksWithoutRelayout();
+    void voiceWaveformAppearance_data();
+    void voiceWaveformAppearance();
     void attachmentThumbnailArrivesWithoutMovingTranscript();
     void liveCompactionProgressPreservesTranscriptAndClears();
     void sessionClearIsAColoredBoundaryAndSurvivesReload();
@@ -1278,7 +1288,11 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","transcribing"},{"audio",audio}};
     QJsonObject row{{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio}}};
     view.setActivity({{"voice_messages",QJsonArray{row}}},{});
-    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(text.contains("Recognizing"));QVERIFY(text.contains("0:01"));
+    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(text.contains("Recognizing"));
+    bool accessiblePlayer=false;
+    for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+        accessiblePlayer|=it.fragment().charFormat().property(QTextFormat::ImageAltText).toString().contains("Play or pause voice message (0:01)");
+    QVERIFY(accessiblePlayer);
     QSignalSpy played(&view,&ActivityView::voicePlaybackRequested);QString play;
     for(const auto &url:links(view.browser()))if(url.startsWith("hgs-voice:"))play=url;
     QVERIFY(!play.isEmpty());activate(view.browser(),play);QCOMPARE(played.count(),1);QCOMPARE(played[0][1].toJsonObject(),audio);
@@ -1299,6 +1313,117 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     QCOMPARE(view.browser()->toPlainText().count("You (voice)"),1);QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),1);
     view.setSessionKey("fixture/other");view.playVoice(played[0][0].toString(),{},"Stale recording error");settle(view);
     QVERIFY(!view.browser()->toPlainText().contains("Stale recording error"));
+}
+
+namespace {
+QJsonObject waveformMessage(bool envelope=true) {
+    const QString id="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    QJsonObject audio{{"request_id",id},{"index",0},{"name","voice.wav"},{"mime","audio/wav"},{"bytes",320044},{"duration_ms",10000}};
+    if(envelope){QJsonArray bins;for(int i=0;i<64;++i)bins.append(128);audio["waveform"]=bins;}
+    const QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","submitted"},{"audio",audio},{"transcript","Synthetic voice recording for player verification."}};
+    return {{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio}}};
+}
+QPair<QUrl,QRect> waveformImage(QTextBrowser *browser) {
+    for(auto block=browser->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto fragment=it.fragment();const auto image=fragment.charFormat().toImageFormat();const QUrl url(image.name());
+        if(url.scheme()!="hgs-voice-player")continue;
+        QTextCursor cursor(browser->document());cursor.setPosition(fragment.position());
+        return {url,QRect(browser->cursorRect(cursor).topLeft(),QSize(qRound(image.width()),qRound(image.height())))};
+    }
+    return {};
+}
+}
+
+void TestActivityView::voiceWaveformSeeksWithoutRelayout_data()
+{
+    QTest::addColumn<double>("scale");QTest::newRow("normal")<<1.;QTest::newRow("large")<<1.5;
+}
+void TestActivityView::voiceWaveformSeeksWithoutRelayout()
+{
+    QFETCH(double,scale);SettledActivityView view;view.resize(560,360);view.setTheme(true);view.setContentScale(scale);view.setSessionKey("fixture/waveform");
+    QJsonArray events;for(int i=0;i<12;++i)events.append(journalEvent(i+1,"Stop",QString("Earlier fixture reply %1").arg(i)));
+    view.setActivity({{"voice_messages",QJsonArray{waveformMessage()}}},events);view.jumpToLatest();
+    auto *browser=view.browser();const auto image=waveformImage(browser);QVERIFY(!image.first.isEmpty());
+    browser->verticalScrollBar()->setValue(browser->verticalScrollBar()->value()+image.second.top()-40);
+    const auto bounds=waveformImage(browser).second;
+    const auto area=VoicePlayerImage::waveformRect(bounds.width(),bounds.height()/52.);
+    const QPoint seek=bounds.topLeft()+QPoint(qRound(area.left()+area.width()*.7),qRound(area.bottom()-4));
+    const auto original=browser->document()->resource(QTextDocument::ImageResource,image.first).value<QImage>();
+    QSignalSpy requested(&view,&ActivityView::voicePlaybackRequested);
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,seek);
+    QCOMPARE(requested.count(),1);
+    const auto loading=browser->document()->resource(QTextDocument::ImageResource,image.first).value<QImage>();
+    QVERIFY(original!=loading);
+    // Seeking while the immutable original is downloading does not fetch again.
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,seek-QPoint(40,0));QCOMPARE(requested.count(),1);
+    // A silent fixture is loaded paused: this test never produces audible output.
+    QTemporaryDir directory;QFile file(directory.filePath("silent.wav"));QVERIFY(file.open(QIODevice::WriteOnly));
+    QByteArray wav(320044,'\0');wav.replace(0,4,"RIFF");wav.replace(8,8,"WAVEfmt ");wav.replace(36,4,"data");
+    qToLittleEndian<quint32>(320036,wav.data()+4);qToLittleEndian<quint32>(16,wav.data()+16);
+    qToLittleEndian<quint16>(1,wav.data()+20);qToLittleEndian<quint16>(1,wav.data()+22);qToLittleEndian<quint32>(16000,wav.data()+24);
+    qToLittleEndian<quint32>(32000,wav.data()+28);qToLittleEndian<quint16>(2,wav.data()+32);qToLittleEndian<quint16>(16,wav.data()+34);qToLittleEndian<quint32>(320000,wav.data()+40);
+    QCOMPARE(file.write(wav),wav.size());file.close();view.playVoice(requested[0][0].toString(),file.fileName());
+    auto *player=view.findChild<QMediaPlayer *>();QVERIFY(player);view.findChild<QAudioOutput *>()->setMuted(true);
+    // Loading media can finish after further clicks: latest seek and pause win.
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,seek);
+    const QPoint button=bounds.topLeft()+QPoint(qRound(22*scale),qRound(22*scale));
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,button);
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,button);
+    QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+    QTest::qWait(100);QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+#ifndef Q_OS_MAC
+    // Darwin's backend requires a native application event loop; offscreen
+    // qualification still exercises hit testing and resource updates below.
+    QTRY_VERIFY_WITH_TIMEOUT(player->mediaStatus()==QMediaPlayer::LoadedMedia || player->mediaStatus()==QMediaPlayer::BufferedMedia,5000);
+    QVERIFY(qAbs(player->position()-7000)<100);
+#endif
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,seek);QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+    settle(view);auto *document=browser->document();auto *layout=document->documentLayout();const auto size=layout->documentSize();const int passes=view.renderPasses();
+    const int scroll=browser->verticalScrollBar()->value();
+    QTextCursor selection(document);selection.setPosition(1);selection.setPosition(8,QTextCursor::KeepAnchor);browser->setTextCursor(selection);
+    browser->verticalScrollBar()->setValue(scroll);
+    const auto before=document->resource(QTextDocument::ImageResource,image.first).value<QImage>();
+    // Drive the same native signal used by playback; there is no timer-driven HTML path.
+    for(qint64 position=100;position<=5000;position+=100)player->positionChanged(position);
+    player->playbackStateChanged(QMediaPlayer::PlayingState);QCoreApplication::processEvents();
+    QVERIFY(before!=document->resource(QTextDocument::ImageResource,image.first).value<QImage>());
+    QCOMPARE(browser->document(),document);QCOMPARE(document->documentLayout(),layout);QCOMPARE(layout->documentSize(),size);
+    QCOMPARE(view.renderPasses(),passes);QCOMPARE(browser->verticalScrollBar()->value(),scroll);
+    QCOMPARE(browser->textCursor().anchor(),selection.anchor());QCOMPARE(browser->textCursor().position(),selection.position());
+    const auto screenshots=qEnvironmentVariable("ZERUS_VOICE_PLAYER_SCREENSHOTS");
+    if(!screenshots.isEmpty())QVERIFY(view.grab().save(screenshots+"/progress-"+QString::fromLatin1(QTest::currentDataTag())+".png"));
+    // A tick during asynchronous scaling keeps the committed image dimensions.
+    const auto committed=document->resource(QTextDocument::ImageResource,image.first).value<QImage>().size();
+    view.ActivityView::setContentScale(scale==1.?1.5:1.);
+    player->positionChanged(6000);
+    QCOMPARE(document->resource(QTextDocument::ImageResource,image.first).value<QImage>().size(),committed);
+    settle(view);
+    view.hide();QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+    view.setSessionKey("fixture/another");view.playVoice(requested[0][0].toString(),file.fileName());QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+}
+
+void TestActivityView::voiceWaveformAppearance_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<int>("width");
+    QTest::newRow("dark-normal")<<true<<620;QTest::newRow("dark-narrow")<<true<<340;
+    QTest::newRow("light-normal")<<false<<620;QTest::newRow("light-narrow")<<false<<340;
+}
+void TestActivityView::voiceWaveformAppearance()
+{
+    QFETCH(bool,dark);QFETCH(int,width);SettledActivityView view;view.resize(width,290);view.setTheme(dark);view.setSessionKey("fixture/appearance");
+    auto row=waveformMessage();auto voice=row["voice"].toObject();auto audio=voice["audio"].toObject();QJsonArray envelope;
+    for(int i=0;i<64;++i)envelope.append(i<4 || (i>23 && i<28)?0:qRound(255*std::abs(std::sin(i*.27))*std::abs(std::sin(i*.091))));
+    audio["waveform"]=envelope;voice["audio"]=audio;row["voice"]=voice;
+    view.setActivity({{"voice_messages",QJsonArray{row}}},{});
+    const auto image=waveformImage(view.browser());QVERIFY(!image.first.isEmpty());
+    const auto rendered=view.browser()->document()->resource(QTextDocument::ImageResource,image.first).value<QImage>();QVERIFY(!rendered.isNull());
+    QVERIFY(image.second.right()<=view.browser()->viewport()->width());
+    auto invalid=audio;invalid["waveform"]=QJsonArray{1,2,3};QVERIFY(VoicePlayerImage::waveform(invalid).isEmpty());
+    auto invalidBins=envelope;invalidBins[10]=1.5;invalid["waveform"]=invalidBins;QVERIFY(VoicePlayerImage::waveform(invalid).isEmpty());
+    invalidBins[10]=256;invalid["waveform"]=invalidBins;QVERIFY(VoicePlayerImage::waveform(invalid).isEmpty());
+    const auto placeholder=VoicePlayerImage::draw(240,1,1,dark,invalid,0,false,false);QVERIFY(!placeholder.isNull());
+    const auto screenshots=qEnvironmentVariable("ZERUS_VOICE_PLAYER_SCREENSHOTS");
+    if(!screenshots.isEmpty()){QDir().mkpath(screenshots);QVERIFY(view.grab().save(screenshots+"/"+QString::fromLatin1(QTest::currentDataTag())+".png"));}
 }
 
 void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()

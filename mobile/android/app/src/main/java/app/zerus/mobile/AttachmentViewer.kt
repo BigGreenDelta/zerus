@@ -71,6 +71,10 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
     private var player: android.media.MediaPlayer? = null
     private var audioJob: Job? = null
     private var focus: android.media.AudioFocusRequest? = null
+    private var audioPrepared = false
+    private var playRequested = false
+    private var seekInFlight = false
+    private var audioRowKey = ""
     var playingKey by mutableStateOf(""); private set
     var playing by mutableStateOf(false); private set
     var audioPositionMs by mutableStateOf(0); private set
@@ -78,19 +82,60 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
     /** Playback only begins after a user's Play tap and authenticated byte verification. */
     fun toggleAudio(target: Target?, file: DisplayedAttachment) {
         if (file.mime != "audio/wav") return
-        val key = AttachmentIdentity.rowKey(target, file)
+        val key = AttachmentIdentity.playbackKey(target, file)
         val current = player
         if (playingKey == key && current != null) {
-            runCatching { if (playing) current.pause() else current.start(); playing = !playing }
-                .onFailure { stopAudio(); failed(key, "Could not play this recording. Try again.") }
+            if (!audioPrepared) return
+            runCatching {
+                if (playing) { current.pause(); playing = false; playRequested = false }
+                else {
+                    playRequested = true
+                    if (audioPositionMs >= current.duration) seekPrepared(current, 0)
+                    else if (!seekInFlight) startAudio(current, key)
+                }
+            }
+                .onFailure { audioFailed(key, "Could not play this recording. Try again.") }
             return
         }
         if (audioJob?.isActive == true && playingKey == key) return
+        prepareAudio(target, file, key, true, 0)
+    }
+    /** Seeking is a read of this exact recording; a stopped recording remains paused. */
+    fun seekAudio(target: Target?, file: DisplayedAttachment, fraction: Float, durationMs: Int) {
+        if (file.mime != "audio/wav") return
+        val position = VoiceWaveform.seekPosition(fraction, durationMs) ?: return
+        val key = AttachmentIdentity.playbackKey(target, file)
+        if (playingKey != key) { prepareAudio(target, file, key, false, position); return }
+        audioPositionMs = position
+        val current = player
+        if (current != null && audioPrepared) runCatching { seekPrepared(current, position) }
+            .onFailure { audioFailed(key, "Could not seek this recording. Try again.") }
+    }
+    private fun seekPrepared(current: android.media.MediaPlayer, position: Int) {
+        audioPositionMs = position.coerceIn(0, current.duration.coerceAtLeast(0))
+        seekInFlight = true
+        current.seekTo(audioPositionMs.toLong(), android.media.MediaPlayer.SEEK_CLOSEST)
+    }
+    private fun startAudio(current: android.media.MediaPlayer, key: String) {
+        if (player !== current || playingKey != key || !playRequested) return
+        if (focus != null) { current.start(); playing = true; return }
+        val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setOnAudioFocusChangeListener { change -> if (change < 0 && player === current) stopAudio() }.build()
+        focus = request
+        if (audioManager.requestAudioFocus(request) != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            audioFailed(key, "Audio is in use. Tap Play again when it is available.")
+        } else { current.start(); playing = true }
+    }
+    private fun prepareAudio(target: Target?, file: DisplayedAttachment, key: String, startPlaying: Boolean, positionMs: Int) {
         stopAudio(); playingKey = key
-        rows = rows + (key to AttachmentRowState(loading = true))
+        val rowKey = AttachmentIdentity.rowKey(target, file); audioRowKey = rowKey
+        playRequested = startPlaying; audioPositionMs = positionMs
+        rows = rows + (rowKey to AttachmentRowState(loading = true))
         audioJob = scope.launch {
             try {
-                val entry = load(key, target, file)
+                val entry = load(rowKey, target, file)
                 if (playingKey != key) return@launch
                 val next = android.media.MediaPlayer()
                 player = next
@@ -99,30 +144,45 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
                 withContext(Dispatchers.IO) { next.setDataSource(entry.file.absolutePath) }
                 next.setOnPreparedListener {
                     if (player !== next || playingKey != key) return@setOnPreparedListener
-                    val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                        .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                        .setOnAudioFocusChangeListener { change -> if (change < 0) stopAudio() }.build()
-                    focus = request
-                    if (audioManager.requestAudioFocus(request) != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                        stopAudio(); failed(key, "Audio is in use. Tap Play again when it is available.")
-                    } else { rows = rows - key; next.start(); playing = true }
+                    audioPrepared = true; rows = rows - rowKey
+                    if (audioPositionMs > 0) seekPrepared(next, audioPositionMs)
+                    else if (playRequested) startAudio(next, key)
                 }
-                next.setOnCompletionListener { stopAudio() }
-                next.setOnErrorListener { _, _, _ -> stopAudio(); failed(key, "Could not play this recording. Try again."); true }
+                next.setOnSeekCompleteListener {
+                    if (player === next && playingKey == key) {
+                        seekInFlight = false
+                        audioPositionMs = next.currentPosition
+                        if (playRequested && !playing) startAudio(next, key)
+                    }
+                }
+                next.setOnCompletionListener {
+                    if (player === next && playingKey == key) {
+                        if (playRequested) stopAudio() else audioPositionMs = next.duration
+                    }
+                }
+                next.setOnErrorListener { _, _, _ ->
+                    if (player === next && playingKey == key) audioFailed(key, "Could not play this recording. Try again.")
+                    true
+                }
                 next.prepareAsync()
                 while (playingKey == key) {
                     kotlinx.coroutines.delay(200)
-                    if (playing) audioPositionMs = runCatching { next.currentPosition }.getOrDefault(0)
+                    if (playing && !seekInFlight) audioPositionMs = runCatching { next.currentPosition }.getOrDefault(0)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { stopAudio(); failed(key, "The recording could not be loaded. Reconnect and try again.") }
+            catch (_: Exception) { audioFailed(key, "The recording could not be loaded. Reconnect and try again.") }
         }
+    }
+    private fun audioFailed(key: String, message: String) {
+        if (playingKey != key) return
+        val rowKey = audioRowKey
+        stopAudio(); failed(rowKey, message)
     }
     fun stopAudio() {
         audioJob?.cancel(); audioJob = null
-        rows = rows - playingKey
+        rows = rows - audioRowKey; audioRowKey = ""
         playingKey = ""; playing = false; audioPositionMs = 0
+        audioPrepared = false; playRequested = false; seekInFlight = false
         player?.let { runCatching { it.release() } }; player = null
         focus?.let { audioManager.abandonAudioFocusRequest(it) }; focus = null
     }

@@ -33,6 +33,20 @@ class VoiceMessagesTest {
         assertThrows(IllegalArgumentException::class.java) { VoiceProtocol.wav(ByteArray(3199)) }
         assertThrows(IllegalArgumentException::class.java) { VoiceProtocol.wav(ByteArray(VoiceProtocol.MAX_PCM_BYTES + 2)) }
     }
+    @Test fun waveformBackfillSurvivesHistoryAndReceiptCachesWithoutChangingAudioIdentity() {
+        val previous = message("submitted", 5)
+        val backfilled = previous.copy(revision = 6, waveform = List(64) { it * 4 })
+        assertEquals(backfilled, VoiceProtocol.message(VoiceProtocol.json(backfilled)))
+        val stored = VoiceState(outgoing = listOf(entry(backfilled)))
+        assertEquals(stored, VoiceCodec.decode(VoiceCodec.encode(stored)))
+        val cached = EventHistoryCodec.decode(EventHistoryCodec.encode(listOf(event(backfilled)))).single()
+        assertEquals(backfilled, cached.voice)
+        val merged = RollingConversationHistory.merge(target, target, listOf(event(previous)), listOf(cached)).events.single()
+        assertEquals(backfilled.waveform, merged.voice!!.waveform)
+        assertEquals(previous.audio, merged.voice.audio)
+        val malformed = VoiceProtocol.json(previous).apply { getJSONObject("audio").put("waveform", JSONArray().put(255)) }
+        assertEquals(previous, VoiceProtocol.message(malformed))
+    }
     @Test fun previewAndUploadIdentitySurviveRecoveryWithoutCreatingDelivery() {
         val preview = VoiceDraft(target, "b4075bf0-9c22-4a67-b768-55af2d2936a4", "russian", audio, 200, 50.0)
         val saved = VoiceState(SpeechSelection(MachineKey("workspace", "b4075bf0-9c22-4a67-b768-55af2d2936a4"), "russian"), preview)

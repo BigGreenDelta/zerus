@@ -16,6 +16,8 @@ const MAX_JOBS: i64 = 10_000;
 const MAX_AUDIO: i64 = 2 * 1024 * 1024 * 1024;
 const TERMINAL: &[&str] = &["submitted", "failed", "cancelled", "uncertain"];
 const MAX_AGE: f64 = 24. * 60. * 60.;
+const WAVEFORM_BINS: usize = 64;
+const WAVEFORM_BATCH: usize = 4;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -113,7 +115,7 @@ impl Store {
         }
         // Never open/close a raw descriptor for an existing SQLite inode: that
         // would release POSIX locks owned by another connection in this process.
-        let db = Connection::open_with_flags(
+        let mut db = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -125,14 +127,14 @@ impl Store {
             CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,digest TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,revision INTEGER NOT NULL,conversation TEXT NOT NULL,body TEXT NOT NULL,audio BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS voice_pending ON messages(state,created);
             CREATE INDEX IF NOT EXISTS voice_conversation ON messages(conversation,created);").map_err(err)?;
-        let has_sequence = db
+        let columns = db
             .prepare("PRAGMA table_info(messages)")
             .map_err(err)?
             .query_map([], |r| r.get::<_, String>(1))
             .map_err(err)?
-            .filter_map(|r| r.ok())
-            .any(|name| name == "change_seq");
-        if !has_sequence {
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(err)?;
+        if !columns.iter().any(|name| name == "change_seq") {
             db.execute_batch(
                 "ALTER TABLE messages ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0;
                 UPDATE messages SET change_seq=rowid;",
@@ -142,6 +144,26 @@ impl Store {
         db.execute_batch("CREATE TABLE IF NOT EXISTS voice_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),value INTEGER NOT NULL);
             INSERT OR IGNORE INTO voice_clock SELECT 1,COALESCE(max(change_seq),0) FROM messages;
             CREATE INDEX IF NOT EXISTS voice_changes ON messages(conversation,change_seq);").map_err(err)?;
+        if !columns.iter().any(|name| name == "waveform_version") {
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(err)?;
+            // Another client can finish the one-time migration while this
+            // opener waits for the writer; recheck under the transaction.
+            let migrated: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='waveform_version')",
+                [], |row| row.get(0),
+            ).map_err(err)?;
+            if !migrated {
+                tx.execute_batch(
+                    "ALTER TABLE messages ADD COLUMN waveform_version INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(err)?;
+            }
+            tx.commit().map_err(err)?;
+        }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS voice_waveform_pending ON messages(id) WHERE waveform_version=0;")
+            .map_err(err)?;
         Ok(Self { db })
     }
     fn open() -> Result<Self> {
@@ -169,12 +191,13 @@ impl Store {
             .map_err(err)?;
         let n = tx
             .execute(
-                "UPDATE messages SET body=?,state=?,revision=?,change_seq=? WHERE id=? AND revision=?",
+                "UPDATE messages SET body=?,state=?,revision=?,change_seq=?,waveform_version=? WHERE id=? AND revision=?",
                 params![
                     job.to_string(),
                     string(job, "state"),
                     previous + 1,
                     sequence,
+                    waveform_version(job),
                     string(job, "id"),
                     previous
                 ],
@@ -224,7 +247,7 @@ impl Store {
             )
             .map_err(err)?;
         tx.execute(
-            "INSERT INTO messages(id,digest,state,created,revision,conversation,body,audio,change_seq) VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id,digest,state,created,revision,conversation,body,audio,change_seq,waveform_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
             params![
                 string(job, "id"),
                 digest,
@@ -234,7 +257,8 @@ impl Store {
                 string(job, "conversation_id"),
                 job.to_string(),
                 audio,
-                sequence
+                sequence,
+                waveform_version(job)
             ],
         )
         .map_err(err)?;
@@ -245,6 +269,33 @@ impl Store {
         self.db
             .query_row("SELECT audio FROM messages WHERE id=?", [id], |r| r.get(0))
             .map_err(err)
+    }
+    fn backfill_waveforms(&self) -> Result<usize> {
+        // The partial index bounds every idle pass, including after completion.
+        // Read only one accepted WAV at a time (at most 3,840,044 bytes).
+        let candidates = self.db.prepare(
+            "SELECT id,body,length(audio) FROM messages WHERE waveform_version=0 ORDER BY id LIMIT ?"
+        ).map_err(err)?.query_map([WAVEFORM_BATCH], |row| Ok((
+            row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,usize>(2)?
+        ))).map_err(err)?.collect::<std::result::Result<Vec<_>,_>>().map_err(err)?;
+        let mut changed = 0;
+        for (id, body, bytes) in candidates {
+            let mut job: Value = serde_json::from_str(&body).map_err(err)?;
+            if !(44..=3_840_044).contains(&bytes) || bytes % 2 != 0 {
+                self.db.execute("UPDATE messages SET waveform_version=-1 WHERE id=? AND revision=? AND waveform_version=0",
+                    params![id,job["revision"].as_i64()]).map_err(err)?;
+                continue;
+            }
+            let audio = self.audio(&id)?;
+            if audio[..44] != wav_header(audio.len() - 44) {
+                self.db.execute("UPDATE messages SET waveform_version=-1 WHERE id=? AND revision=? AND waveform_version=0",
+                    params![id,job["revision"].as_i64()]).map_err(err)?;
+                continue;
+            }
+            job["audio"]["waveform"] = json!(waveform(&audio[44..]));
+            changed += usize::from(self.save(&mut job)?);
+        }
+        Ok(changed)
     }
     fn jobs(&self, conversation: Option<&str>, pending: bool) -> Result<Vec<Value>> {
         let sql = if pending {
@@ -316,9 +367,15 @@ impl Store {
 }
 
 fn wav(pcm: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(pcm.len() + 44);
+    let mut bytes = wav_header(pcm.len());
+    bytes.reserve(pcm.len());
+    bytes.extend(pcm);
+    bytes
+}
+fn wav_header(pcm_bytes: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(44);
     bytes.extend(b"RIFF");
-    bytes.extend((pcm.len() as u32 + 36).to_le_bytes());
+    bytes.extend((pcm_bytes as u32 + 36).to_le_bytes());
     bytes.extend(b"WAVEfmt ");
     bytes.extend(16u32.to_le_bytes());
     bytes.extend(1u16.to_le_bytes());
@@ -328,9 +385,45 @@ fn wav(pcm: &[u8]) -> Vec<u8> {
     bytes.extend(2u16.to_le_bytes());
     bytes.extend(16u16.to_le_bytes());
     bytes.extend(b"data");
-    bytes.extend((pcm.len() as u32).to_le_bytes());
-    bytes.extend(pcm);
+    bytes.extend((pcm_bytes as u32).to_le_bytes());
     bytes
+}
+fn waveform(pcm: &[u8]) -> Vec<u8> {
+    let samples = pcm.len() / 2;
+    if samples == 0 {
+        return vec![0; WAVEFORM_BINS];
+    }
+    let mut rms = [0u32; WAVEFORM_BINS];
+    for (index, value) in rms.iter_mut().enumerate() {
+        let start = index * samples / WAVEFORM_BINS;
+        let end = ((index + 1) * samples / WAVEFORM_BINS).max(start + 1);
+        let power: u64 = pcm[start * 2..end * 2]
+            .chunks_exact(2)
+            .map(|sample| {
+                let value = i64::from(i16::from_le_bytes([sample[0], sample[1]]));
+                (value * value) as u64
+            })
+            .sum();
+        *value = (power / (end - start) as u64).isqrt() as u32;
+    }
+    let peak = rms.iter().copied().max().unwrap_or(0);
+    rms.into_iter()
+        .map(|value| {
+            if peak == 0 {
+                0
+            } else {
+                ((value * 255 + peak / 2) / peak) as u8
+            }
+        })
+        .collect()
+}
+fn waveform_version(job: &Value) -> i64 {
+    i64::from(job["audio"]["waveform"].as_array().is_some_and(|bins| {
+        bins.len() == WAVEFORM_BINS
+            && bins
+                .iter()
+                .all(|value| value.as_u64().is_some_and(|v| v <= 255))
+    }))
 }
 fn public(job: &Value) -> Value {
     let mut value = json!({});
@@ -436,7 +529,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let id = string(&request, "request_id");
         let job = json!({"id":id,"name":args[0],"run_id":target["run_id"],"conversation_id":target["conversation_id"],"agent":target["agent"],"backend":target["backend"],"agent_home":target["agent_home"],"account_id":target["account_id"],
             "created_at":now(),"revision":1,"state":"queued","speech":request["speech"],"attempt":0,
-            "audio":{"request_id":id,"index":0,"name":"voice.wav","mime":"audio/wav","bytes":audio.len(),"duration_ms":(pcm.len()*1000/32000).max(1)}});
+            "audio":{"request_id":id,"index":0,"name":"voice.wav","mime":"audio/wav","bytes":audio.len(),"duration_ms":(pcm.len()*1000/32000).max(1),"waveform":waveform(&pcm)}});
         let accepted = store.insert(&job, &digest, &audio)?;
         // Failure to start a worker must not hide an accepted durable message.
         if ensure_worker().is_err() {
@@ -950,6 +1043,9 @@ fn worker() -> Result<i32> {
             return Ok(0);
         }
         let config = crate::config::Config::load().map_err(|e| e.message)?;
+        if store.backfill_waveforms().is_err() {
+            eprintln!("hgs voice: waveform metadata backfill postponed");
+        }
         let mut active = std::collections::HashSet::new();
         for job in store.jobs(None, true)? {
             let key = json!([
@@ -1004,6 +1100,111 @@ fn ensure_worker() -> Result<()> {
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn waveform_is_exact_rms_envelope_and_handles_silence_and_short_audio() {
+        assert_eq!(waveform(&[]), vec![0; 64]);
+        assert_eq!(waveform(&[0; 256]), vec![0; 64]);
+        assert_eq!(waveform(&i16::MIN.to_le_bytes()), vec![255; 64]);
+        let mut pcm = Vec::new();
+        for index in 1..=64i16 {
+            for sample in [index * 100, -index * 100, index * 100, -index * 100] {
+                pcm.extend(sample.to_le_bytes());
+            }
+        }
+        let expected: Vec<u8> = (1..=64)
+            .map(|value| ((value * 255 + 32) / 64) as u8)
+            .collect();
+        assert_eq!(waveform(&pcm), expected);
+        let mut impulse = vec![0; 128];
+        impulse[32..34].copy_from_slice(&i16::MIN.to_le_bytes());
+        let bins = waveform(&impulse);
+        assert_eq!(bins.iter().filter(|value| **value > 0).count(), 1);
+        assert_eq!(bins[16], 255);
+    }
+
+    #[test]
+    fn waveform_backfill_is_bounded_revisioned_and_skips_malformed_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("private")).unwrap();
+        let original = wav(&[1, 0, 2, 0]);
+        for index in 0..6 {
+            let mut value = job();
+            value["id"] = json!(format!("00000000-0000-4000-8000-{index:012}"));
+            value["state"] = json!("submitted");
+            value["transcript"] = json!("Synthetic retained text");
+            value["native_payload"] = json!("exact native receipt bytes");
+            store
+                .insert(
+                    &value,
+                    "fingerprint",
+                    if index == 0 { &[0; 46] } else { &original },
+                )
+                .unwrap();
+        }
+        let (_, before, _) = store.changes("conversation", 0).unwrap();
+        assert_eq!(store.backfill_waveforms().unwrap(), 3);
+        assert_eq!(store.backfill_waveforms().unwrap(), 2);
+        assert_eq!(store.backfill_waveforms().unwrap(), 0);
+        let (changed, after, complete) = store.changes("conversation", before).unwrap();
+        assert!(complete && after > before);
+        assert_eq!(changed.len(), 5);
+        for value in changed {
+            assert_eq!(value["revision"], 2);
+            assert_eq!(value["state"], "submitted");
+            assert_eq!(value["native_payload"], "exact native receipt bytes");
+            assert_eq!(value["audio"]["waveform"], json!(waveform(&original[44..])));
+            assert_eq!(store.audio(string(&value, "id")).unwrap(), original);
+            let row = message_row(&value);
+            assert_eq!(
+                row["voice"]["audio"]["waveform"],
+                row["attachments"][0]["waveform"]
+            );
+        }
+        let skipped: i64 = store
+            .db
+            .query_row(
+                "SELECT count(*) FROM messages WHERE waveform_version=-1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn waveform_schema_upgrade_preserves_legacy_rows_with_concurrent_openers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private");
+        let audio = wav(&[1, 0]);
+        {
+            let mut old = Store::open_at(&path).unwrap();
+            old.insert(&job(), "fingerprint", &audio).unwrap();
+            old.db.execute_batch("DROP INDEX voice_waveform_pending; ALTER TABLE messages DROP COLUMN waveform_version;").unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let reopened = Store::open_at(&path).unwrap();
+                    assert_eq!(reopened.get(ID).unwrap().unwrap()["revision"], 1);
+                })
+            })
+            .collect();
+        for opener in openers {
+            opener.join().unwrap();
+        }
+        let upgraded = Store::open_at(&path).unwrap();
+        assert_eq!(upgraded.audio(ID).unwrap(), audio);
+        assert_eq!(upgraded.backfill_waveforms().unwrap(), 1);
+        assert_eq!(
+            upgraded.get(ID).unwrap().unwrap()["audio"]["waveform"],
+            json!(vec![255; 64])
+        );
+    }
     fn job() -> Value {
         json!({"id":ID,"name":"codex/fixture","run_id":"run","conversation_id":"conversation","agent":"codex","agent_home":"/private/fixture","account_id":"fixture","created_at":1.,"revision":1,"state":"queued","attempt":1,"asr_id":ID,"speech":{"machine_id":ID,"profile_id":"fixture"},"audio":{"request_id":ID,"index":0,"name":"voice.wav","mime":"audio/wav","bytes":48,"duration_ms":1}})
     }

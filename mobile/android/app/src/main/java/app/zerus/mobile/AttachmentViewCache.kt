@@ -50,6 +50,10 @@ object AttachmentIdentity {
         ?: if (target != null && remote(file)) remoteKey(target, file)
         else JSONArray(listOf("none", target?.key.orEmpty(), file.name, file.mime, file.bytes, file.reference)).toString()
 
+    /** Playback belongs to one displayed message even when its encrypted bytes share a cache entry. */
+    fun playbackKey(target: Target?, file: DisplayedAttachment): String =
+        JSONArray(listOf("audio", target?.key.orEmpty(), file.messageId, file.index, rowKey(target, file))).toString()
+
     /** Native rows of this phone's own message keep its private copies, by position. */
     fun withLocal(native: List<DisplayedAttachment>, local: List<Attachment>) = native.mapIndexed { index, file ->
         local.getOrNull(file.index.takeIf { it >= 0 } ?: index)?.takeIf { it.name == file.name && it.bytes == file.bytes }

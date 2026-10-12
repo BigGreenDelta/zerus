@@ -8,6 +8,7 @@
 #include <QWidget>
 #include <QImage>
 #include <memory>
+#include <optional>
 
 namespace ActivityWidth { class ColumnLayout; }
 class QAction;
@@ -100,6 +101,10 @@ private:
     void addColumnActions(QMenu *menu);
     void showColumnMenu(const QPoint &position);
     void updateColumnActions();
+    void activateVoice(const QString &key,std::optional<qreal> fraction = {});
+    QString voiceKeyAt(const QPoint &position) const;
+    QRect voiceRect(const QString &key) const;
+    void updateVoiceImage(const QString &key);
 
     QTextBrowser *m_browser;
     QWidget *m_queue;
@@ -120,6 +125,10 @@ private:
     QMediaPlayer *m_voicePlayer = nullptr;
     QAudioOutput *m_voiceOutput = nullptr;
     QString m_voiceKey, m_voicePlaying, m_voiceLoading, m_voiceError;
+    QString m_voicePressed;
+    QHash<QString,int> m_voicePositions;
+    qint64 m_voicePosition = 0, m_voicePendingSeek = -1;
+    bool m_voiceStartAfterLoad = false;
     QHash<QString, QJsonObject> m_previewFiles;
     QHash<QString, QImage> m_previews;
     QHash<QString, QPair<QString, QString>> m_messageActions;

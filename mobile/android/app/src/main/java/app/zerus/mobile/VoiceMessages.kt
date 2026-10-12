@@ -9,7 +9,8 @@ import java.util.UUID
 /** A session-owned voice message. Audio identity is independent of the ASR worker. */
 data class VoiceMessage(val id: String, val runId: String, val conversationId: String, val createdAt: Double,
     val revision: Long, val state: String, val audio: DisplayedAttachment, val durationMs: Int,
-    val transcript: String = "", val error: String = "", val errorCode: String = "", val nativeBinding: String = "") {
+    val transcript: String = "", val error: String = "", val errorCode: String = "", val nativeBinding: String = "",
+    val waveform: List<Int> = emptyList()) {
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
 }
 internal data class VoiceComputer(val id: String, val name: String, val profiles: List<SpeechProfile>)
@@ -66,7 +67,8 @@ object VoiceProtocol {
         return VoiceMessage(id, run, conversation, created, revision, state,
             DisplayedAttachment(name, "audio/wav", bytes, messageId = id, index = 0),
             duration, transcript, raw.string("error").take(2000), raw.string("error_code").take(128),
-            raw.optJSONObject("native_binding")?.toString()?.also { require(it.length <= 4096) }.orEmpty())
+            raw.optJSONObject("native_binding")?.toString()?.also { require(it.length <= 4096) }.orEmpty(),
+            VoiceWaveform.decode(audio.opt("waveform")))
     }
     fun response(raw: JSONObject, target: Target, id: String): VoiceMessage {
         require(raw.optInt("schema") == 1) { "Unsupported voice message response." }
@@ -81,7 +83,8 @@ object VoiceProtocol {
         .put("state", message.state).put("transcript", message.transcript).put("error", message.error).put("error_code", message.errorCode)
         .put("native_binding", message.nativeBinding.takeIf { it.isNotBlank() }?.let(::JSONObject))
         .put("audio", JSONObject().put("request_id", message.id).put("index", 0).put("name", message.audio.name)
-            .put("mime", "audio/wav").put("bytes", message.audio.bytes).put("duration_ms", message.durationMs))
+            .put("mime", "audio/wav").put("bytes", message.audio.bytes).put("duration_ms", message.durationMs)
+            .put("waveform", message.waveform.takeIf(VoiceWaveform::valid)?.let(::JSONArray)))
     fun newer(previous: VoiceMessage?, next: VoiceMessage): VoiceMessage {
         if (previous == null) return next
         require(previous.id == next.id && previous.runId == next.runId &&

@@ -165,6 +165,7 @@ class VoiceWorker(unittest.TestCase):
         payload = self.payload()
         accepted = self.voice(payload)
         self.assertIn(accepted["state"], {"queued", "transcribing"})
+        self.assertEqual(accepted["audio"]["waveform"], [255] * 64)
         # The submitting CLI has already exited; only the independent worker remains.
         result = self.settle(accepted["id"], {"submitted"})
         self.assertEqual(result["transcript"], "Voice fixture transcript")
@@ -195,6 +196,45 @@ class VoiceWorker(unittest.TestCase):
         self.assertEqual(len(events),1,events)
         self.assertEqual(events[0]["source"],"hgs_voice")
         self.assertEqual(events[0]["message_id"],accepted["id"])
+        self.assertEqual(events[0]["attachments"][0]["waveform"], accepted["audio"]["waveform"])
+
+    def test_legacy_waveform_backfill_updates_index_without_redelivery(self):
+        payload = self.payload()
+        accepted = self.voice(payload)
+        completed = self.settle(accepted["id"], {"submitted"})
+        self.stop_worker()
+        # Represent an accepted message from the previous schema, then build
+        # its public history before the new worker can backfill metadata.
+        database = self.state / "voice/messages.sqlite3"
+        with sqlite3.connect(database) as db:
+            body = json.loads(db.execute("SELECT body FROM messages WHERE id=?", (accepted["id"],)).fetchone()[0])
+            body["audio"].pop("waveform")
+            db.execute("UPDATE messages SET body=?,waveform_version=0 WHERE id=?", (json.dumps(body),accepted["id"]))
+        self.emit_native(completed["transcript"], 1)
+        previous = self.history()
+        self.assertEqual(len(previous), 1)
+        self.assertNotIn("waveform", previous[0]["attachments"][0])
+        before = self.status(accepted["id"])
+        with sqlite3.connect(database) as db:
+            old_sequence = db.execute("SELECT change_seq FROM messages WHERE id=?", (accepted["id"],)).fetchone()[0]
+        self.start_worker()
+        self.wait_for(lambda: len(self.status(accepted["id"])["audio"].get("waveform", [])) == 64)
+        updated = self.status(accepted["id"])
+        self.assertEqual(updated["state"], "submitted")
+        self.assertGreater(updated["revision"], before["revision"])
+        self.assertEqual(updated["audio"]["waveform"], [255] * 64)
+        with sqlite3.connect(database) as db:
+            self.assertGreater(db.execute("SELECT change_seq FROM messages WHERE id=?", (accepted["id"],)).fetchone()[0], old_sequence)
+        history = self.history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["message_id"], accepted["id"])
+        self.assertEqual(history[0]["attachments"][0]["waveform"], updated["audio"]["waveform"])
+        self.assertEqual(history[0]["voice"]["audio"]["waveform"], updated["audio"]["waveform"])
+        audio = self.command(["attachment", self.name, "--request", accepted["id"], "--index", "0",
+                              "--conversation", self.conversation_id])
+        self.assertEqual(base64.b64decode(audio["data_base64"])[44:], base64.b64decode(payload["audio"]["data_base64"]))
+        self.assertEqual(self.received().count(completed["transcript"].encode()), 1)
+        self.assertEqual(self.server.jobs.handle({"action": "stats"})["totals"]["submitted"], 1)
 
     def test_repeated_voice_keeps_ordinary_identical_text_separate(self):
         one=self.voice(self.payload());first=self.settle(one["id"],{"submitted"})

@@ -291,6 +291,11 @@ errors, and expandable recognized text. Another device can open the same card an
 fetch audio using authenticated `attachment_read` ranges, verifying identity,
 length and SHA-256 before playback. Status updates use monotonic revisions; exact
 native bindings suppress duplicate user rows without matching on transcript text.
+The circular play/pause control sits beside the recording's measured waveform.
+Tap or drag the waveform to seek; Android accessibility controls expose the same
+position and elapsed/total duration. Seeking a paused recording keeps it paused.
+Older messages show a plain seek track until their computer supplies waveform
+metadata; the phone never invents amplitude bars or downloads audio just to draw them.
 The phone retains encrypted voice receipts and local audio copies in Drafts; removing
 a local copy does not remove the computer's history or cancel delivery. New capture
 is bounded by a 100 MiB local audio budget and the outbox holds at most 100 receipts.

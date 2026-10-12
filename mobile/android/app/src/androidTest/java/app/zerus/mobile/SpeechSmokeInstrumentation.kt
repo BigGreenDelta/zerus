@@ -10,10 +10,19 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -26,16 +35,23 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.io.FileInputStream
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.*
 
 /** Explicit emulator-only smoke: real microphone and encrypted drafts, synthetic in-process gateway. */
 class SpeechSmokeInstrumentation : Instrumentation() {
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+    private var playerOnly = false
+    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); playerOnly = arguments?.getString("waveform_only") == "true"; start() }
     override fun onStart() {
         val result = Bundle()
         try {
             require(BuildConfig.DEBUG) { "Run the speech smoke against the debug build." }
-            runSmoke()
-            result.putString("stream", "Voice message smoke passed: microphone settings recovery, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop.\n")
+            if (!playerOnly) runSmoke()
+            runPlayerSmoke()
+            result.putString("stream", if (playerOnly) "Voice player smoke passed: waveform tap/drag/accessibility seeking, paused/end/replay/playing seek, scoped playback, retained drafts and narrow light/dark screenshots.\n"
+                else "Voice message smoke passed: microphone settings recovery, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop, waveform tap/drag/accessibility seeking, scoped playback and narrow light/dark player screenshots.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Speech smoke failed: ${error.stackTraceToString()}\n")
@@ -273,5 +289,81 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(PrivateStore(targetContext).messageState().drafts.single { it.target == target }.text == "Edited while voice is processing.")
         check(main { model.outgoing.isEmpty() })
         main { activity.finish() }
+    }
+    private fun runPlayerSmoke() {
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+        val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }
+        await("player private store") { model.storageReady && model.speech.ready }
+        val before = PrivateStore(targetContext).voiceState()
+        val draftBefore = PrivateStore(targetContext).messageState().drafts
+        // A deterministic audible fixture; displayed RMS bins derive from these actual PCM samples.
+        val duration = 16_000
+        val samples = IntArray(duration * 16) { sample ->
+            val time = sample / 16_000.0
+            if (sample / 4000 % 13 == 0) 0 else (sin(time * 2 * PI * 220) * (0.08 + .82 * abs(sin(time * 2 * PI * .713))) * 22_000).toInt()
+        }
+        val pcm = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN).apply { samples.forEach { putShort(it.toShort()) } }.array()
+        val rms = List(64) { bin ->
+            val start = bin * samples.size / 64; val end = (bin + 1) * samples.size / 64
+            sqrt((start until end).sumOf { samples[it].toDouble().pow(2) } / (end - start))
+        }
+        val bins = rms.map { (it / rms.max() * 255).roundToInt() }
+        check(bins.distinct().size > 20 && bins.contains(0))
+        val audio = runBlocking { AttachmentStore(targetContext).importRecording(VoiceProtocol.wav(pcm)) }
+        val target = Target("player-host", "voice-player-fixture", "player-run", "player-conversation", "player-workspace")
+        val id = UUID.randomUUID().toString()
+        val voice = VoiceMessage(id, target.run, target.conversation, 100.0, 1, "submitted",
+            audio.displayed().copy(messageId = id, index = 0), duration, "Synthetic audio used to verify the waveform player.", waveform = bins)
+        val dark = mutableStateOf(true)
+        main { activity.setContent {
+            MaterialTheme(colorScheme = if (dark.value) darkColorScheme(primary = Color(0xFF67E8CB), onPrimary = Color(0xFF101517),
+                surface = Color(0xFF1A2225), onSurface = Color(0xFFE9F0F2), onSurfaceVariant = Color(0xFF9AACB2))
+            else lightColorScheme(primary = Color(0xFF086C58), onPrimary = Color.White)) {
+                Surface(Modifier.fillMaxSize()) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(Modifier.widthIn(max = 320.dp).fillMaxWidth().padding(16.dp)) {
+                        Text("You (voice)", style = MaterialTheme.typography.titleMedium)
+                        VoiceMessageContent(model, target, voice)
+                    }
+                } }
+            }
+        } }
+        val position = node("Recording playback position")
+        check(position.rangeInfo != null)
+        check(position.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id,
+            Bundle().apply { putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, .25f) }))
+        await("accessible paused seek") { model.attachments.audioPositionMs in 3_800..4_200 && !model.attachments.playing && model.attachments.state(target, voice.audio)?.loading != true }
+        val bounds = android.graphics.Rect(); node("Recording playback position").getBoundsInScreen(bounds)
+        fun touch(fraction: Float) = (bounds.left + bounds.width() * fraction).roundToInt()
+        uiAutomation.executeShellCommand("input tap ${touch(.6f)} ${bounds.centerY()}").use { FileInputStream(it.fileDescriptor).readBytes() }
+        await("waveform tap seek") { model.attachments.audioPositionMs in 9_000..10_200 && !model.attachments.playing }
+        uiAutomation.executeShellCommand("input swipe ${touch(.2f)} ${bounds.centerY()} ${touch(.8f)} ${bounds.centerY()} 350").use { FileInputStream(it.fileDescriptor).readBytes() }
+        await("waveform drag seek") { model.attachments.audioPositionMs in 12_000..13_500 && !model.attachments.playing }
+        tap("Play"); await("seeked playback") { model.attachments.playing }
+        tap("Pause"); await("paused playback") { !model.attachments.playing }
+        main { model.attachments.seekAudio(target, voice.audio, 1f, duration) }
+        await("paused end seek") { !model.attachments.playing && model.attachments.audioPositionMs >= 15_900 }
+        tap("Play"); await("play from completed position restarts at beginning") { model.attachments.playing && model.attachments.audioPositionMs < 2_000 }
+        tap("Pause"); await("paused after replay") { !model.attachments.playing }
+        main { model.attachments.seekAudio(target, voice.audio, .35f, duration); model.attachments.toggleAudio(target, voice.audio) }
+        await("play waits for seek completion") { model.attachments.playing && model.attachments.audioPositionMs in 5_400..6_600 }
+        main { model.attachments.seekAudio(target, voice.audio, .5f, duration) }
+        await("playing seek continues playback") { model.attachments.playing && model.attachments.audioPositionMs in 7_800..9_000 }
+        val other = target.copy(conversation = "other-conversation")
+        main { model.attachments.seekAudio(other, voice.audio, .1f, duration) }
+        await("seek remains scoped and never autoplays a different message") {
+            model.attachments.playingKey == AttachmentIdentity.playbackKey(other, voice.audio) && !model.attachments.playing && model.attachments.audioPositionMs in 1_400..1_800
+        }
+        main { model.attachments.seekAudio(target, voice.audio, .4f, duration) }
+        await("screenshot progress") { !model.attachments.playing && model.attachments.audioPositionMs in 6_200..6_600 }
+        tap("Show recognized text"); node(voice.transcript); tap("Hide recognized text")
+        for ((name, isDark) in listOf("dark" to true, "light" to false)) {
+            main { dark.value = isDark }; waitForIdleSync(); SystemClock.sleep(300)
+            val screenshot = checkNotNull(uiAutomation.takeScreenshot())
+            File(targetContext.getExternalFilesDir(null), "voice-player-$name.png").outputStream().use { screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            screenshot.recycle()
+        }
+        check(PrivateStore(targetContext).voiceState() == before)
+        check(PrivateStore(targetContext).messageState().drafts == draftBefore)
+        main { model.attachments.stopAudio(); activity.finish() }
     }
 }

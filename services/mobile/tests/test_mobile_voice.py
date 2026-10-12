@@ -27,9 +27,13 @@ def command(operation="voice_submit", message_id=None):
 
 def message(request, state="queued"):
     p = request["payload"]
-    return {"schema": 1, "message": {"id": p.get("message_id", p["request_id"]),
+    identity = p.get("message_id", p["request_id"])
+    return {"schema": 1, "message": {"id": identity,
             "run_id": p["expected_run_id"], "conversation_id": p["expected_conversation_id"],
-            "revision": 1, "state": state}}
+            "revision": 1, "state": state,
+            "audio": {"request_id": identity, "index": 0, "name": "voice.wav",
+                      "mime": "audio/wav", "bytes": 364, "duration_ms": 10,
+                      "waveform": [0] * 64}}}
 
 
 class VoiceValidationTests(unittest.TestCase):
@@ -68,9 +72,11 @@ class VoiceConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native(self):
         request = command()
-        with patch.object(self.connector, "native", AsyncMock(return_value=message(request))) as native:
+        result = message(request)
+        with patch.object(self.connector, "native", AsyncMock(return_value=result)) as native:
             response = await self.connector.execute(request)
             self.assertEqual(response["state"], "completed", response)
+            self.assertEqual(response["result"], result)
             self.assertEqual(await self.connector.execute(request), response)
             native.assert_awaited_once_with(["voice", request["session"], "--json"],
                                            {"action": "submit", **request["payload"]}, timeout=30)

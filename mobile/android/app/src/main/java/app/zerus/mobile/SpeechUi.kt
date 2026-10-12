@@ -13,7 +13,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -179,19 +178,16 @@ import androidx.compose.ui.unit.dp
     }
 }
 
-@Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int) {
+@Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int,
+    waveform: List<Int> = emptyList()) {
     val viewer = model.attachments
-    val key = AttachmentIdentity.rowKey(target, audio)
+    val key = AttachmentIdentity.playbackKey(target, audio)
     val row = viewer.state(target, audio)
     val active = viewer.playingKey == key
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        TextButton(onClick = { viewer.toggleAudio(target, audio) }, enabled = row?.loading != true) {
-            Text(if (active && viewer.playing) "Pause" else "Play")
-        }
-        val position = if (active) viewer.audioPositionMs else 0
-        Text("${position / 60_000}:${(position / 1_000 % 60).toString().padStart(2, '0')} / ${durationMs / 60_000}:${(durationMs / 1_000 % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.bodySmall)
-        if (row?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-    }
+    VoicePlayer(key, waveform, durationMs, if (active) viewer.audioPositionMs else 0,
+        active && viewer.playing, row?.loading == true,
+        onToggle = { viewer.toggleAudio(target, audio) },
+        onSeek = { viewer.seekAudio(target, audio, it, durationMs) })
     row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 }
 
@@ -199,7 +195,7 @@ import androidx.compose.ui.unit.dp
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
     Text("Voice message", style = MaterialTheme.typography.labelMedium)
-    VoiceAudio(model, target, voice.audio, voice.durationMs)
+    VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform)
     Text(VoiceProtocol.label(voice.state), style = MaterialTheme.typography.bodySmall)
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
     if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

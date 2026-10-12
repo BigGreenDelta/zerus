@@ -55,7 +55,29 @@ Message responses have `schema: 1` and `message`, containing `id`, `run_id`,
 `conversation_id`, `created_at`, monotonic `revision`, `state`, and `audio`.
 Optional fields are `transcript`, `error_code` and `error`. Audio metadata uses
 `request_id` equal to the message UUID, `index: 0`, `name: "voice.wav"`,
-`mime: "audio/wav"`, `bytes` and `duration_ms`.
+`mime: "audio/wav"`, `bytes`, `duration_ms` and an additive `waveform` array.
+The same array appears in the history audio attachment. It contains exactly
+64 integers from 0 through 255, computed from the original mono PCM16 samples.
+
+For `N` samples, bin `i` (0 through 63) starts at `floor(i*N/64)` and ends
+exclusively at `max(start+1, floor((i+1)*N/64))`. Very short clips therefore
+reuse a sample for an otherwise empty bin. Each bin's amplitude is
+`floor(sqrt(floor(sum(sample*sample)/sample_count)))`, using signed samples and
+integer arithmetic. Let `peak` be the largest bin amplitude. If it is zero,
+all 64 output values are zero; otherwise each output value is
+`floor((255*amplitude + floor(peak/2))/peak)`. This normalization keeps quiet
+recordings visible while preserving their relative RMS envelope. Empty audio
+also produces 64 zeros. No random or synthesized speech pattern is used.
+
+New messages persist waveform metadata with acceptance. The independent voice
+worker backfills retained older messages in indexed batches of at most four
+recordings per pass, reading at most 15,360,176 bytes of original WAV data per
+pass and one recording at a time. Each successful backfill increments the
+existing message revision and history change sequence; it never repeats ASR or
+native delivery. Invalid legacy audio is marked privately and skipped so it
+cannot block later recordings. Inspection and history read stored metadata
+without reading audio. Older hosts or records awaiting backfill can omit the
+field; clients should use a neutral playback placeholder until it arrives.
 
 History exposes `source: "hgs_voice"`, `type: "UserMessage"`, `message_id` and
 `request_id` equal to the voice UUID, `voice` containing the authoritative
