@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Overmind tasks through the real CLI with isolated state."""
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -112,6 +113,19 @@ class Overmind(unittest.TestCase):
         # Events are numbered under the store's own origin, not the machine identity.
         self.assertEqual(list(status['vector']), [status['origin']])
         self.assertNotEqual(status['origin'], status['machine'])
+
+    def test_commands_never_wait_for_the_swarm_catalog(self):
+        machine = self.ok('status')['machine']  # the first use saves the machine identity
+        catalog = self.root / 'config/swarm/catalog.json'
+        saved = catalog.read_bytes()
+        with open(self.root / 'config/swarm/catalog.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # a swarm sync in progress
+            for args in (('rev',), ('status',)):
+                result = subprocess.run([str(HGS), 'overmind', *args], env=self.env, text=True,
+                                        capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['machine'], machine)
+        self.assertEqual(catalog.read_bytes(), saved)
 
     def test_receipts_replay(self):
         request = {'request_id': '0b9c5c1e-34c4-4d5e-9a64-1d2a3b4c5d6e', 'project': 'demo', 'prompt': 'x'}

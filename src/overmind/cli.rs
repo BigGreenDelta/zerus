@@ -94,7 +94,7 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         print!("{}", usage());
         return Ok(None);
     }
-    let machine = crate::swarm::local_node_id(config)?;
+    let machine = super::machine(config)?;
     let (actor, cwd) = super::identity::caller(&machine)?;
     let positional: Vec<&str> = words[1..].to_vec();
     // `show <ref>` names its task on the command line and never reads stdin.

@@ -23,7 +23,16 @@ pub use sessions::{session_ended, session_renamed};
 pub use sync::FEATURE;
 
 fn open(config: &crate::config::Config) -> anyhow::Result<store::Store> {
-    store::Store::open(&config.state.join("overmind"), &crate::swarm::local_node_id(config)?)
+    store::Store::open(&config.state.join("overmind"), &machine(config)?)
+}
+
+/// This machine's identity, read without the swarm catalog lock: commands and
+/// polls never wait for a swarm sync. Only the first use creates and saves it.
+fn machine(config: &crate::config::Config) -> anyhow::Result<String> {
+    match crate::swarm::saved_node_id(config) {
+        Some(machine) => Ok(machine),
+        None => crate::swarm::local_node_id(config),
+    }
 }
 
 /// How a machine answers an Overmind request or delivery it does not know. A
