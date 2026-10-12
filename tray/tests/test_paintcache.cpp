@@ -137,7 +137,7 @@ private slots:
     {
         QStandardItemModel model; auto *item = new QStandardItem; model.appendRow(item);
         item->setData("codex/hgs/dashboard", SessionRoles::Key); item->setData("dashboard", SessionRoles::Title);
-        item->setData("hgs / main", SessionRoles::Meta); item->setData(true, SessionRoles::BranchIcon); item->setData("Waiting", SessionRoles::Status);
+        item->setData("hgs / main", SessionRoles::Meta); item->setData("git-branch", SessionRoles::MetaIcon); item->setData("Waiting", SessionRoles::Status);
         item->setData("Choose the deployment target", SessionRoles::Detail); item->setData("codex", SessionRoles::Agent);
         item->setData("arch", SessionRoles::Host); item->setData("arch", SessionRoles::MachineName);
         item->setData(MachineAppearance::color("arch"), SessionRoles::MachineColor); item->setData(true, SessionRoles::Attention);

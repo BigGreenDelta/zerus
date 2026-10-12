@@ -872,10 +872,13 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Worktrees and ordinary folders
 
-Session cards show only the Git branch, or **detached HEAD**, in their checkout
-line, preceded by a small Git branch icon. The opened session's header and
-**Details** retain the worktree name and folder path. Ordinary folders without
-Git metadata have no branch label.
+Session cards show a checkout line of the form `folder / branch`, such as
+`zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
+replaces a missing branch. A linked worktree names its main checkout folder
+rather than its own generated folder. Ordinary folders without Git metadata
+show only their name, preceded by a folder icon. The opened session's header and
+**Details** show the same line, marked `· worktree` for a linked worktree; the
+full folder path stays in the header tooltip and **Details**.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.

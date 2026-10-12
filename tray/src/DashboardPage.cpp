@@ -159,8 +159,8 @@ public:
         auto *item = m_model.item(0); bool changed = false;
         const auto set = [&](int role, const QVariant &value) { if (item->data(role) != value) { item->setData(value, role); changed = true; } };
         set(SessionRoles::Title, sessionLabel(session));
-        set(SessionRoles::Meta, branchContext(session));
-        set(SessionRoles::BranchIcon, !branchContext(session).isEmpty());
+        set(SessionRoles::Meta, checkoutLine(session));
+        set(SessionRoles::MetaIcon, checkoutIcon(session));
         set(SessionRoles::GitStatus, session.gitStatus);
         set(SessionRoles::Status, status(session, online));
         set(SessionRoles::Failure, session.phase=="error");

@@ -13,25 +13,41 @@ class SessionCardPresentationTest {
         SessionCardPresentation.childCount(it, online, false, includeCompleted) to SessionCardPresentation.childCount(it, online, true, includeCompleted)
     }
 
-    @Test fun checkoutLineShowsOnlyTheBranchOrDetachedHead() {
-        val raw = JSONObject("""{"git_branch":"work-76f5c0ef","git_worktree":true,"git_worktree_name":"zerus-work-76f5c0ef","git_metadata_state":"ok"}""")
+    @Test fun checkoutLineNamesTheFolderBesideTheBranch() {
+        val raw = JSONObject("""{"cwd":"/work/zerus-work-76f5c0ef","git_root":"/work/zerus-work-76f5c0ef","git_branch":"work-76f5c0ef","git_worktree":true,
+            "git_worktree_name":"zerus-work-76f5c0ef","git_common_dir":"/work/zerus/.git","git_metadata_state":"ok"}""")
         assertEquals("work-76f5c0ef", SessionCardPresentation.branch(raw))
-        assertEquals("work-76f5c0ef / worktree: zerus-work-76f5c0ef", SessionCardPresentation.checkout(raw))
-        assertEquals("Git branch work-76f5c0ef, linked worktree zerus-work-76f5c0ef", SessionCardPresentation.checkoutDescription(raw))
-        val detached = JSONObject("""{"git_branch":"","git_detached":true,"git_worktree":true,"git_metadata_state":"ok"}""")
+        assertEquals("zerus", SessionCardPresentation.folder(raw))
+        assertEquals("zerus / work-76f5c0ef", SessionCardPresentation.line(raw))
+        assertEquals("zerus / work-76f5c0ef · worktree", SessionCardPresentation.checkout(raw))
+        assertEquals("Folder zerus, Git branch work-76f5c0ef, linked worktree zerus-work-76f5c0ef", SessionCardPresentation.checkoutDescription(raw))
+        // Bare and dot-folder repositories and Windows paths name the repository.
+        for (common in listOf("/srv/git/zerus.git", "/srv/zerus/.bare/", "C:\\Users\\user\\zerus\\.git"))
+            assertEquals(common, "zerus / work-76f5c0ef", SessionCardPresentation.line(JSONObject(raw.toString()).put("git_common_dir", common)))
+        // Without the common directory the worktree folder itself is the best evidence.
+        assertEquals("zerus-work-76f5c0ef / work-76f5c0ef", SessionCardPresentation.line(JSONObject(raw.toString()).apply { remove("git_common_dir") }))
+        val detached = JSONObject("""{"git_root":"/work/zerus-ui","git_branch":"","git_detached":true,"git_worktree":true,"git_common_dir":"/work/zerus/.git","git_metadata_state":"ok"}""")
         assertEquals("detached HEAD", SessionCardPresentation.branch(detached))
-        assertEquals("detached HEAD / worktree", SessionCardPresentation.checkout(detached))
-        assertEquals("Detached HEAD, linked worktree", SessionCardPresentation.checkoutDescription(detached))
+        assertEquals("zerus / detached HEAD · worktree", SessionCardPresentation.checkout(detached))
+        assertEquals("Folder zerus, Detached HEAD, linked worktree", SessionCardPresentation.checkoutDescription(detached))
+        // A main checkout names its own folder, also from a subfolder.
+        val main = JSONObject("""{"cwd":"/work/zerus/tray","git_root":"/work/zerus","git_branch":"main","git_common_dir":"/work/zerus/.git"}""")
+        assertEquals("zerus / main", SessionCardPresentation.line(main))
+        assertEquals("zerus / main", SessionCardPresentation.checkout(main))
         // A reported branch wins over the detached flag, as in branchContext.
         assertEquals("main", SessionCardPresentation.branch(JSONObject("""{"git_branch":"main","git_detached":true}""")))
         assertEquals("Git branch main", SessionCardPresentation.checkoutDescription(JSONObject("""{"git_branch":"main"}""")))
     }
 
-    @Test fun ordinaryFoldersAndMissingMetadataHaveNoCheckoutLine() {
-        listOf("""{"git_branch":"","git_metadata_state":"not_repo"}""", """{"git_branch":"main","git_detached":true,"git_worktree":true,"git_metadata_state":"not_repo"}""",
-            """{}""", """{"git_branch":null,"git_detached":"true"}""", """{"git_branch":7}""").forEach {
+    @Test fun ordinaryFoldersShowOnlyTheirName() {
+        val folder = JSONObject("""{"cwd":"/home/user/notes/","git_branch":"main","git_worktree":true,"git_root":"/repo","git_common_dir":"/repo/.git","git_metadata_state":"not_repo"}""")
+        assertEquals("", SessionCardPresentation.branch(folder))
+        assertEquals("notes", SessionCardPresentation.line(folder))
+        assertEquals("notes", SessionCardPresentation.checkout(folder))
+        assertEquals("Folder notes", SessionCardPresentation.checkoutDescription(folder))
+        listOf("""{"git_branch":"","git_metadata_state":"not_repo"}""", """{}""", """{"git_branch":null,"git_detached":"true","cwd":7}""", """{"git_branch":7}""").forEach {
             val raw = JSONObject(it)
-            assertEquals(it, "", SessionCardPresentation.branch(raw))
+            assertEquals(it, "", SessionCardPresentation.line(raw))
             assertEquals(it, "", SessionCardPresentation.checkout(raw))
             assertEquals(it, "", SessionCardPresentation.checkoutDescription(raw))
         }

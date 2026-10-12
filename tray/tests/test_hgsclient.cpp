@@ -25,6 +25,7 @@ private slots:
     void parsesActivityMetadata();
     void providerFailuresRequireAttentionAndPreserveSpecificStatus();
     void scheduledAgentsShowTheirNextRunInsteadOfReady();
+    void checkoutLinesNameTheFolderBesideTheBranch();
     void questionReplyPreviews_data();
     void questionReplyPreviews();
     void unrecognizedQuestionPreviewsStayLiteral();
@@ -200,6 +201,45 @@ void TestHgsClient::unrecognizedQuestionPreviewsStayLiteral()
         session.activitySummary.clear();session.activityDetail.clear();
         QCOMPARE(SessionPresentation::currentAction(session),"Working: "+prompt);
     }
+}
+
+void TestHgsClient::checkoutLinesNameTheFolderBesideTheBranch()
+{
+    const auto parse=[](const QJsonObject &fields) {
+        QJsonObject raw{{"name","claude/zerus-work-1a2b/mobile"},{"project","zerus-work-1a2b"}};
+        for(auto it=fields.begin();it!=fields.end();++it)raw[it.key()]=it.value();
+        QString error;const auto box=HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","local"},{"sessions",QJsonArray{raw}}}).toJson(),&error);
+        return box.sessions.first();
+    };
+    const QJsonObject linked{{"cwd","/work/zerus-work-1a2b"},{"git_root","/work/zerus-work-1a2b"},{"git_branch","work-1a2b"},{"git_worktree",true},
+        {"git_worktree_name","zerus-work-1a2b"},{"git_common_dir","/work/zerus/.git"},{"git_metadata_state","ok"}};
+    auto session=parse(linked);
+    QCOMPARE(SessionPresentation::checkoutLine(session),QString("zerus / work-1a2b"));
+    QCOMPARE(SessionPresentation::checkoutIcon(session),QString("git-branch"));
+    QCOMPARE(SessionPresentation::projectContext(session),QString("zerus / work-1a2b · worktree"));
+    // Bare and dot-folder repositories, Windows paths, and detached checkouts.
+    auto fields=linked;fields["git_common_dir"]="/srv/git/zerus.git";
+    QCOMPARE(SessionPresentation::checkoutLine(parse(fields)),QString("zerus / work-1a2b"));
+    fields["git_common_dir"]="/srv/zerus/.bare/";
+    QCOMPARE(SessionPresentation::checkoutLine(parse(fields)),QString("zerus / work-1a2b"));
+    fields["git_common_dir"]="C:\\Users\\user\\zerus\\.git";
+    QCOMPARE(SessionPresentation::checkoutLine(parse(fields)),QString("zerus / work-1a2b"));
+    fields["git_branch"]="";fields["git_detached"]=true;
+    QCOMPARE(SessionPresentation::checkoutLine(parse(fields)),QString("zerus / detached HEAD"));
+    // Without the common directory the worktree folder itself is the best evidence.
+    fields=linked;fields.remove("git_common_dir");
+    QCOMPARE(SessionPresentation::checkoutLine(parse(fields)),QString("zerus-work-1a2b / work-1a2b"));
+    // A main checkout names its own folder; a subfolder still names the checkout.
+    session=parse({{"cwd","/work/zerus/tray"},{"git_root","/work/zerus"},{"git_branch","main"},{"git_common_dir","/work/zerus/.git"},{"git_metadata_state","ok"}});
+    QCOMPARE(SessionPresentation::checkoutLine(session),QString("zerus / main"));
+    QCOMPARE(SessionPresentation::projectContext(session),QString("zerus / main"));
+    // Ordinary folders show their name with a folder icon.
+    session=parse({{"cwd","/home/user/notes/"},{"git_metadata_state","not_repo"}});
+    QCOMPARE(SessionPresentation::checkoutLine(session),QString("notes"));
+    QCOMPARE(SessionPresentation::checkoutIcon(session),QString("folder"));
+    session=parse({});
+    QVERIFY(SessionPresentation::checkoutLine(session).isEmpty());QVERIFY(SessionPresentation::checkoutIcon(session).isEmpty());
+    QCOMPARE(SessionPresentation::projectContext(session),QString("zerus-work-1a2b"));
 }
 
 void TestHgsClient::scheduledAgentsShowTheirNextRunInsteadOfReady()

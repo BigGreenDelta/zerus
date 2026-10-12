@@ -28,16 +28,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-/** The desktop card's checkout line: a Git branch mark and the branch, or detached HEAD. */
+/** The desktop card's checkout line: folder / branch with a Git branch mark, or an ordinary folder's name. */
 @Composable internal fun SessionCheckoutLine(session: Session) {
-    val branch = SessionCardPresentation.branch(session.raw)
-    if (branch.isEmpty()) return
+    val line = SessionCardPresentation.line(session.raw)
+    if (line.isEmpty()) return
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Row(Modifier.fillMaxWidth().clearAndSetSemantics {
         contentDescription = SessionCardPresentation.checkoutDescription(session.raw)
     }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        Icon(DesktopIcons.GitBranch, null, Modifier.size(14.dp), tint = muted)
-        Text(branch, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, color = muted, style = MaterialTheme.typography.bodySmall)
+        val icon = if (SessionCardPresentation.branch(session.raw).isEmpty()) DesktopIcons.Folder else DesktopIcons.GitBranch
+        Icon(icon, null, Modifier.size(14.dp), tint = muted)
+        Text(line, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, color = muted, style = MaterialTheme.typography.bodySmall)
     }
 }
 

@@ -108,8 +108,8 @@ void TestWorkspace::gitStatusCardsKeepMetadataAndMachineReadable()
         list.setFrameShape(QFrame::NoFrame); list.setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         for (int i = 0; i < titles.size(); ++i) {
             auto *item = new QListWidgetItem(&list);
-            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "main");
-            item->setData(SessionRoles::BranchIcon, true);
+            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "zerus / main");
+            item->setData(SessionRoles::MetaIcon, "git-branch");
             item->setData(SessionRoles::Host, "arch"); item->setData(SessionRoles::MachineName, "arch");
             item->setData(SessionRoles::Agent, "codex"); item->setData(SessionRoles::Status, "Ready");
             item->setData(SessionRoles::Detail, "Git status follows this checkout and branch");

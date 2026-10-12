@@ -240,10 +240,11 @@ private:
         if (!gitBadge.isEmpty()) GitStatusBadge::paint(p, gitBadge,
             GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), option.font, gitBadge.width()), option.font, dark);
         const int metadataWidth = qMax(0, (gitBadge.isEmpty() ? machineBadge.left() : gitBadge.left()) - textX - 8);
-        const int branchInset = index.data(SessionRoles::BranchIcon).toBool() && metadataWidth >= 32 ? 18 : 0;
-        if (branchInset) workspaceIcon("git-branch", muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
-        CachedText::draw(p, QRect(textX + branchInset, metadataY, qMax(0, metadataWidth - branchInset), 18), Qt::AlignVCenter,
-                    CachedText::elided(font, index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - branchInset)));
+        const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
+        const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;
+        if (iconInset) workspaceIcon(metaIcon, muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
+        CachedText::draw(p, QRect(textX + iconInset, metadataY, qMax(0, metadataWidth - iconInset), 18), Qt::AlignVCenter,
+                    CachedText::elided(font, index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - iconInset)));
 
         QString detail = index.data(SessionRoles::Detail).toString();
         // Status is already beside the title. Keep the activity excerpt useful
