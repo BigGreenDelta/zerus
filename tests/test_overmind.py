@@ -207,6 +207,34 @@ class Overmind(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)['task']['ref'], ref)
 
+    def test_device_label_lands_on_the_actor_of_every_event(self):
+        created = self.ok('create', '--json', '--device', 'Pixel 9', data={'project': 'demo', 'prompt': 'From the phone'})
+        ref = created['task']['ref']
+        self.ok('comment', '--device', 'Pixel 9', '--json', data={'task': ref, 'text': 'hi'})
+        self.ok('comment', '--json', data={'task': ref, 'text': 'from the desk'})
+        db = sqlite3.connect(self.state / 'overmind/overmind.sqlite3')
+        actors = [json.loads(raw)['actor'] for (raw,) in db.execute('SELECT raw FROM events ORDER BY lamport')]
+        db.close()
+        self.assertEqual([a.get('device', '') for a in actors], ['Pixel 9', 'Pixel 9', ''])
+        self.assertEqual(self.ok('show', ref, '--device', 'x')['task']['ref'], ref)
+
+    def test_device_label_is_validated_and_refused_for_sessions(self):
+        for label in ('', 'x' * 65, 'tab\there', 'new\nline'):
+            error = self.refused('board', '--json', '--device', label, data={'project': 'demo'})
+            self.assertEqual((error['code'], error.get('field')), ('invalid_request', 'device'), label)
+        error = self.refused('board', '--json', '--device', data={'project': 'demo'})
+        self.assertEqual((error['code'], error.get('field')), ('invalid_request', 'device'))
+        error = self.refused('board', '--json', '--device', 'a', '--device', 'b', data={'project': 'demo'})
+        self.assertEqual((error['code'], error.get('field')), ('invalid_request', 'device'))
+        self.assertEqual(self.ok('board', '--json', '--device', 'x' * 64, data={'project': 'demo'})['tasks'], [])
+        for extra in ({'HGS_SESSION': 'claude/demo/w1'}, {'HGS_RUN_ID': 'run-that-does-not-exist'}):
+            error = self.refused('mine', '--device', 'Pixel 9', env=dict(self.env, **extra))
+            self.assertEqual((error['code'], error.get('field')), ('invalid_request', 'device'), extra)
+
+    def test_help_carries_the_mobile_abi_marker(self):
+        result = subprocess.run([str(HGS), '--help'], env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertIn('overmind <command> --json (mobile ABI overmind-v1)', result.stdout + result.stderr)
+
     def test_session_environment_must_match_a_live_session(self):
         for extra in ({'HGS_SESSION': 'claude/demo/w1', 'HGS_RUN_ID': 'run-that-does-not-exist'},
                       {'HGS_SESSION': 'claude/demo/w1'}, {'HGS_RUN_ID': 'run-that-does-not-exist'}):

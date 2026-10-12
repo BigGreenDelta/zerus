@@ -151,6 +151,13 @@ fn input<T: serde::de::DeserializeOwned>() -> Result<T> {
     serde_json::from_slice(&bytes).context("invalid mobile request")
 }
 
+/// The `hgs overmind` commands of mobile ABI overmind-v1: reads, then writes.
+const OVERMIND_COMMANDS: &[&str] = &[
+    "projects", "board", "show", "decisions", "attachment", "create", "edit", "move", "reorder", "pin", "unpin",
+    "label", "link", "comment", "send", "review-send", "rework-send", "answer", "resolve-delivery", "done",
+    "reopen", "delete",
+];
+
 fn options<'a>(
     args: &'a [String],
     switches: &[&str],
@@ -509,6 +516,23 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 );
             }
             no_payload()?;
+        }
+        "overmind" => {
+            // The phone's reads and writes; agent commands and administration stay off the wire.
+            ensure!(
+                rest.first().is_some_and(|command| OVERMIND_COMMANDS.contains(&command.as_str())),
+                "overmind command is not allowed"
+            );
+            let flags = options(&rest[1..], &["--json"], &["--device"])?;
+            ensure!(flags.contains_key("--json"), "overmind requests are JSON");
+            ensure!(
+                flags.get("--device").is_none_or(|v| v.chars().count() <= 64 && !v.chars().any(char::is_control)),
+                "invalid overmind device label"
+            );
+            ensure!(
+                request.payload.as_ref().is_some_and(Value::is_object),
+                "overmind payload must be an object"
+            );
         }
         _ => bail!("native operation is not allowed"),
     }
@@ -1326,6 +1350,60 @@ mod tests {
             "",
         ] {
             assert!(!alias(route));
+        }
+    }
+
+    #[test]
+    fn overmind_accepts_only_the_phone_commands_in_their_exact_shapes() {
+        let body = || Some(json!({"project": "fixture"}));
+        for command in [
+            "projects", "board", "show", "decisions", "attachment", "create", "edit", "move", "reorder", "pin",
+            "unpin", "label", "link", "comment", "send", "review-send", "rework-send", "answer",
+            "resolve-delivery", "done", "reopen", "delete",
+        ] {
+            assert!(validate(&request(&["overmind", command, "--json"], body())).is_ok(), "{command}");
+            assert!(
+                validate(&request(&["overmind", command, "--json", "--device", "Pixel 9"], body())).is_ok(),
+                "{command} with a device"
+            );
+            assert!(validate(&request(&["overmind", command, "--json"], None)).is_err(), "{command} needs a payload");
+            assert!(
+                validate(&request(&["overmind", command, "--json"], Some(json!(["x"])))).is_err(),
+                "{command} payload object"
+            );
+        }
+        for argv in [
+            vec!["overmind"],
+            vec!["overmind", "--json"],
+            vec!["overmind", "board"],
+            vec!["overmind", "--json", "board"],
+            vec!["overmind", "board", "--json", "--device"],
+            vec!["overmind", "board", "--json", "--device", "--json"],
+            vec!["overmind", "board", "--json", "--device", "@peer"],
+            vec!["overmind", "board", "--json", "--device", ""],
+            vec!["overmind", "board", "--json", "--device", "a", "--device", "b"],
+            vec!["overmind", "board", "--json", "extra"],
+            vec!["overmind", "board", "--json", "--device", "a", "extra"],
+            vec!["overmind", "board", "--json", "--local"],
+            vec!["overmind", "show", "om-1", "--json"],
+            vec!["@peer", "overmind", "board", "--json"],
+            vec!["overmind", "advance", "--json"],
+            vec!["overmind", "call-human", "--json"],
+            vec!["overmind", "return", "--json"],
+            vec!["overmind", "decompose", "--json"],
+            vec!["overmind", "file", "--json"],
+            vec!["overmind", "attach", "--json"],
+            vec!["overmind", "review", "--json"],
+            vec!["overmind", "mine", "--json"],
+            vec!["overmind", "my-tasks", "--json"],
+            vec!["overmind", "mcp", "--json"],
+            vec!["overmind", "workflow", "get", "--json"],
+            vec!["overmind", "templates", "set", "--json"],
+            vec!["overmind", "rev", "--json"],
+            vec!["overmind", "status", "--json"],
+            vec!["overmind", "unknown", "--json"],
+        ] {
+            assert!(validate(&request(&argv, body())).is_err(), "{argv:?}");
         }
     }
 

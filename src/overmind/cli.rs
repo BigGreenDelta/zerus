@@ -29,6 +29,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   comment --json {task, text}  |  delete --json {task}
   workflow get --json {project}  |  workflow set --json {project, workflow, moves?}
   templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
+  Any command takes --device <label> (1-64 characters) to record the client a person acts from.
   rev                                      change cursor for watchers
   status                                   replication state with every peer
   mcp [--session]                          serve the agent commands as an MCP server on stdio (--session: only for a verified agent session)
@@ -90,10 +91,45 @@ fn read_stdin() -> Result<Value> {
         .map_err(|e| Refusal::new("invalid_request", format!("the request is not valid JSON: {e}")).into())
 }
 
+/// `--device <label>` names the phone or other client a person acts from. It is
+/// informational and refused inside a session environment, which is an agent.
+fn split_device(args: &[String]) -> Result<(Vec<&str>, Option<&str>)> {
+    let invalid = |why: &str| Refusal::field("invalid_request", "device", "invalid", why);
+    let mut words = Vec::new();
+    let mut device = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {}
+            "--device" => {
+                if device.is_some() {
+                    return Err(invalid("--device may be given once").into());
+                }
+                let label = args.get(index + 1).map(String::as_str).unwrap_or("");
+                let chars = label.chars().count();
+                if !(1..=64).contains(&chars) || label.chars().any(char::is_control) {
+                    return Err(invalid("--device takes a label of 1 to 64 printable characters").into());
+                }
+                device = Some(label);
+                index += 1;
+            }
+            word => words.push(word),
+        }
+        index += 1;
+    }
+    if device.is_some()
+        && (std::env::var("HGS_SESSION").is_ok_and(|s| !s.is_empty())
+            || std::env::var("HGS_RUN_ID").is_ok_and(|s| !s.is_empty()))
+    {
+        return Err(invalid("--device is for people; agents cannot set a device label").into());
+    }
+    Ok((words, device))
+}
+
 fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     // `--json` may appear anywhere; it says that the request comes on stdin.
     let json_flag = args.iter().any(|a| a == "--json");
-    let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+    let (words, device) = split_device(args)?;
     let command = words.first().copied().unwrap_or("--help");
     if matches!(command, "-h" | "--help" | "help") {
         print!("{}", usage());
@@ -106,7 +142,10 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         return Ok(None);
     }
     let machine = super::machine(config)?;
-    let (actor, cwd) = super::identity::caller(&machine)?;
+    let (mut actor, cwd) = super::identity::caller(&machine)?;
+    if let Some(label) = device {
+        actor.device = label.into();
+    }
     let positional: Vec<&str> = words[1..].to_vec();
     // `show <ref>` names its task on the command line and never reads stdin.
     let reads_request = json_flag && !(command == "show" && !positional.is_empty());

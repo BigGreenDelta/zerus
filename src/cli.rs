@@ -68,6 +68,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
        hgs [@host] overmind <command> [--json]   Overmind tasks (see hgs overmind --help)
+       hgs overmind <command> --json (mobile ABI overmind-v1)   JSON in, JSON out; the mobile connector probes this line
        hgs machine ls | set <alias> --json <profile> | remove <alias> | reset <alias>
        hgs machine resolve <alias>          effective SSH settings (no connection)
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
