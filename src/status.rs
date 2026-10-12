@@ -8,10 +8,7 @@ use crate::{
     platform,
 };
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    process::{Command, Stdio},
-};
+use std::{path::PathBuf, process::Stdio};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HELP: &str = "usage: hgs [@host] status [--json] [--local]";
@@ -107,7 +104,7 @@ fn counts(sessions: &Value) -> Value {
 fn desktop() -> Option<&'static str> {
     // The desktop app keeps its executable name on every Unix (hgs-tray).
     let uid = unsafe { libc::getuid() }.to_string();
-    let status = Command::new("pgrep").args(["-x", "-u", &uid, "hgs-tray"])
+    let status = std::process::Command::new("pgrep").args(["-x", "-u", &uid, "hgs-tray"])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?;
     match status.code() {
         Some(0) => Some("running"),

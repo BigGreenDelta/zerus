@@ -46,13 +46,14 @@ class Status(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='hgs-status-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.bin = self.root / 'bin'
-        self.bin.mkdir()
         self.home = self.root / 'home'
         self.state = self.root / 'state'
         self.config = self.root / 'config'
         for path in (self.home, self.state, self.config):
             path.mkdir()
+        # hgs puts ~/.local/bin ahead of Homebrew, which has a real tmux on macOS.
+        self.bin = self.home / '.local/bin'
+        self.bin.mkdir(parents=True)
         self.env = dict(os.environ, HOME=str(self.home), STATUS_FIXTURE=str(self.root),
                         HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.state),
                         HGS_SELF='local', HGS_PEERS='new old down', HGS_TAB='0',
@@ -67,6 +68,7 @@ class Status(unittest.TestCase):
         new = self.root / 'remote-new/.local/bin'
         new.mkdir(parents=True)
         (new / 'hgs').symlink_to(HGS)
+        (new / 'tmux').symlink_to(self.bin / 'tmux')
         old = self.root / 'remote-old/.local/bin'
         old.mkdir(parents=True)
         (old / 'hgs').write_text(OLD_HGS)
