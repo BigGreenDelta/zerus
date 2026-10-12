@@ -434,8 +434,34 @@ class AgentSession(unittest.TestCase):
         self.stop_agent()
         journal = [j['marker'] for j in self.person('show', ref)['task']['journal']]
         code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
-        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'), body)
+        # The request names the receiving session only by its task, as on a forwarding machine.
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'session_unavailable', 'task'), body)
         self.nothing_written(ref, 'Build', journal)
+
+    def test_an_answer_to_a_stopped_session_names_the_task(self):
+        ref = self.task()
+        self.asks_a_question(ref)
+        self.stop_agent()
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST'}, agent=False)
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'session_unavailable', 'task'), body)
+        self.assertEqual(self.person('show', ref)['task']['stage'], 'Your Call')
+
+    def test_rework_and_answer_for_an_unknown_session_name_the_task_and_this_machine(self):
+        ref = self.task()
+        gone = 'codex/demo/gone'
+        self.agent_reaches_review(ref, gone)
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.append('reviewer_set', {'session': {'machine': machine, 'name': 'codex/other'}})
+        self.append('transition', {'action': 'needs_work', 'to': 'Build', 'fields': {'report': 'r'}},
+                    actor={'kind': 'agent', 'machine': machine, 'session': 'codex/other'})
+        code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'unknown_session', 'task'), body)
+        self.assertIn(machine, body['error']['message'])
+        self.append('transition', {'action': 'call_human', 'to': 'Your Call', 'fields': {'question': 'q'}},
+                    actor={'kind': 'agent', 'machine': machine, 'session': gone})
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST'}, agent=False)
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'unknown_session', 'task'), body)
+        self.assertEqual(self.person('show', ref)['task']['stage'], 'Your Call')
 
     def test_a_retry_after_typing_records_a_text_that_no_longer_renders_as_uncertain(self):
         request_id = str(uuid.uuid4())

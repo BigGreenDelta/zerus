@@ -59,7 +59,10 @@ pub fn local_target(store: &Store, session: &SessionRef) -> Result<DeliveryTarge
     }
     crate::state::delivery_target(&session.name)
         .map_err(|e| Refusal::field("session_unavailable", "session", "invalid", e))?
-        .ok_or_else(|| Refusal::field("unknown_session", "session", "invalid", format!("there is no session {} on this machine", session.name)).into())
+        .ok_or_else(|| {
+            let message = format!("there is no session {} on {}", session.name, store.machine());
+            Refusal::field("unknown_session", "session", "invalid", message).into()
+        })
 }
 
 /// Refuses, writing nothing, when the session cannot take input now.
@@ -237,6 +240,9 @@ fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &Se
 /// that carries a `request_id`. The host has acted already, so a failure to
 /// write the receipt is a warning and the host's result is still returned.
 fn record_forwarded(store: &mut Store, command: &str, request: &Value, result: Value) -> Result<Value> {
+    if request.get("request_id").and_then(Value::as_str).unwrap_or_default().is_empty() {
+        return Ok(result);
+    }
     let recorded = store.write(|tx| {
         // Two retries of one request: the first to finish wins.
         if let Some(stored) = commands::replay(tx, command, request)? {
@@ -493,6 +499,20 @@ fn target_for(store: &Store, session: &SessionRef, confirmed: &Confirmed, resume
     Ok(Ok(target))
 }
 
+/// `rework-send` and `answer` name the receiving session only by the task, so
+/// their refusals about it use the field `task`, here as on a forwarding caller.
+fn about_task<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|error| match error.downcast::<Refusal>() {
+        Ok(mut refusal) => {
+            if refusal.field == "session" {
+                refusal.field = "task".into();
+            }
+            refusal.into()
+        }
+        Err(error) => error,
+    })
+}
+
 fn deliver_resumed(session: &SessionRef, target: Result<DeliveryTarget>, attachments: Result<Vec<Value>>, text: Result<String>, input: &str) -> Outcome {
     match (target, attachments, text) {
         (Ok(target), Ok(files), Ok(text)) => deliver(session, &target, input, &text, files),
@@ -654,7 +674,7 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
             let session = assignee_for(&task, "rework")?;
             Ok((task, session))
         })?;
-        let target = target_for(ctx.store, &session, &req.confirm, false)?;
+        let target = about_task(target_for(ctx.store, &session, &req.confirm, false))?;
         super::remote::ensure_blobs(ctx.store, &task)?;
         Some((session, target))
     };
@@ -668,7 +688,7 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
     // The assignee changed meanwhile: the new one is checked too.
     let target = match checked {
         Some((checked, target)) if checked == session => target,
-        _ => target_for(ctx.store, &session, &req.confirm, resumed)?,
+        _ => about_task(target_for(ctx.store, &session, &req.confirm, resumed))?,
     };
     let outcome = deliver_resumed(&session, target, attachments, text, &input_id(&req.request_id));
     settle(ctx, "rework-send", &request, &uuid, "rework", &session, outcome, "", "", |_, _, _| Ok(()))
@@ -713,7 +733,7 @@ pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Valu
         let session = if resumed || pending.is_some() { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
         Ok((uuid, session, pending))
     })?;
-    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    let target = about_task(target_for(ctx.store, &session, &req.confirm, resumed))?;
     let actor = ctx.actor.clone();
     let recorded = pending.as_ref().map(|e| e.payload["fields"]["answer"].as_str().unwrap_or_default().to_owned());
     let (typed, settles) = ctx.store.write(|tx| {
@@ -789,6 +809,11 @@ mod tests {
         store.wait_for_writers(std::time::Duration::from_millis(20)).unwrap();
         let again = json!({"task": "t", "request_id": "44444444-4444-4444-8444-444444444444"});
         assert_eq!(record_forwarded(&mut store, "send", &again, result.clone()).unwrap(), result);
+        // Without a request_id nothing is written, so another writer is never waited for.
+        store.wait_for_writers(std::time::Duration::from_secs(5)).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(record_forwarded(&mut store, "send", &anonymous, result.clone()).unwrap(), result);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "waited for the other writer");
         other.execute_batch("ROLLBACK").unwrap();
         assert_eq!(receipts(), 1, "the failed receipt was not written");
     }

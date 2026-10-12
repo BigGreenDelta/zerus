@@ -241,7 +241,7 @@ pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, ma
         })?;
     // A failure here only delays the board: the worker exchanges again soon.
     let pulled = super::sync::exchange(store, machine, &alias, &mut exchange).is_ok();
-    let mut result = host_answer(answer, field)?;
+    let mut result = host_answer(answer, field, &alias)?;
     if pulled && result.get("task").is_some() {
         // The host's view carries the host's reference; this machine's is the one the caller can use.
         let local = store.read(|tx| Ok(commands::view(&commands::load(tx, task)?, &commands::reference(tx, task)?, true)));
@@ -260,14 +260,21 @@ fn outdated(text: &str) -> bool {
 
 /// The host's result, or its refusal as the same refusal here. Only an
 /// explicit `ok: true` is a result. `field` is what the caller calls the
-/// receiving session; the host's refusals about it use that name.
-fn host_answer(answer: Value, field: &str) -> Result<Value> {
+/// receiving session; the host's refusals about it use that name. An answer
+/// that is neither leaves the outcome unknown: the host may have acted.
+fn host_answer(answer: Value, field: &str, alias: &str) -> Result<Value> {
     if answer["ok"] == true {
         return Ok(answer);
     }
-    ensure!(answer["ok"] == false, "the session's machine sent an invalid answer");
-    let mut refusal: Refusal = serde_json::from_value(answer["error"].clone())
-        .map_err(|error| anyhow!("the session's machine sent an invalid refusal: {error}"))?;
+    let refusal = (answer["ok"] == false)
+        .then(|| serde_json::from_value::<Refusal>(answer["error"].clone()).ok())
+        .flatten();
+    let Some(mut refusal) = refusal else {
+        let message = format!(
+            "the session's machine {alias} sent an answer that is neither a result nor a refusal; check the task before sending it again"
+        );
+        return Err(Refusal::new("delivery_unknown", message).into());
+    };
     if refusal.field == "session" {
         refusal.field = field.into();
     }
@@ -470,18 +477,20 @@ mod tests {
     #[test]
     fn a_host_refusal_becomes_the_same_refusal() {
         let sent = json!({"ok": true, "delivery": "sent"});
-        assert_eq!(host_answer(sent.clone(), "session").unwrap(), sent);
+        assert_eq!(host_answer(sent.clone(), "session", "b").unwrap(), sent);
         let refused = json!({"ok": false, "error": {"code": "agent_busy", "message": "busy", "field": "confirm", "state": "missing"}});
-        let refusal = host_answer(refused, "session").unwrap_err().downcast::<Refusal>().unwrap();
+        let refusal = host_answer(refused, "session", "b").unwrap_err().downcast::<Refusal>().unwrap();
         assert_eq!(refusal, Refusal::field("agent_busy", "confirm", "missing", "busy"));
         // A request without a session names the receiving session by its task.
         let about_session = json!({"ok": false, "error": {"code": "unknown_session", "message": "m", "field": "session", "state": "invalid"}});
-        assert_eq!(host_answer(about_session.clone(), "task").unwrap_err().downcast::<Refusal>().unwrap().field, "task");
-        assert_eq!(host_answer(about_session, "session").unwrap_err().downcast::<Refusal>().unwrap().field, "session");
-        assert!(host_answer(json!({"ok": false, "error": "garbage"}), "session").unwrap_err().downcast::<Refusal>().is_err());
-        // Only an explicit success is one.
-        for answer in [json!({"delivery": "sent"}), json!({"ok": "yes"}), json!(null)] {
-            assert!(host_answer(answer.clone(), "session").unwrap_err().downcast::<Refusal>().is_err(), "{answer}");
+        assert_eq!(host_answer(about_session.clone(), "task", "b").unwrap_err().downcast::<Refusal>().unwrap().field, "task");
+        assert_eq!(host_answer(about_session, "session", "b").unwrap_err().downcast::<Refusal>().unwrap().field, "session");
+        // Only an explicit success is one. Anything else that is no refusal leaves
+        // the outcome unknown: the host may have acted.
+        for answer in [json!({"ok": false, "error": "garbage"}), json!({"delivery": "sent"}), json!({"ok": "yes"}), json!(null)] {
+            let refusal = host_answer(answer.clone(), "session", "host-b").unwrap_err().downcast::<Refusal>().unwrap();
+            assert_eq!(refusal.code, "delivery_unknown", "{answer}");
+            assert!(refusal.message.contains("host-b") && refusal.message.contains("check the task"), "{}", refusal.message);
         }
     }
 
