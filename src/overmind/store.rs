@@ -395,6 +395,54 @@ impl Tx<'_> {
     }
 }
 
+/// What this machine learned about a peer in exchanges. Local only.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeerState {
+    pub machine: String,
+    pub alias: String,
+    /// The peer's version vector after the last exchange; None before the first.
+    pub vector: Option<BTreeMap<String, u64>>,
+    pub last_ok: u64,
+    pub last_error: String,
+    pub updated: u64,
+}
+
+fn peer_row(row: &rusqlite::Row) -> rusqlite::Result<PeerState> {
+    let vector: Option<String> = row.get(2)?;
+    Ok(PeerState {
+        machine: row.get(0)?,
+        alias: row.get(1)?,
+        vector: vector.and_then(|v| serde_json::from_str(&v).ok()),
+        last_ok: row.get::<_, i64>(3)? as u64,
+        last_error: row.get(4)?,
+        updated: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+impl Store {
+    pub fn peer(&self, machine: &str) -> Result<Option<PeerState>> {
+        Ok(self
+            .conn
+            .query_row("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers WHERE machine = ?1", params![machine], peer_row)
+            .optional()?)
+    }
+
+    pub fn peers(&self) -> Result<Vec<PeerState>> {
+        let mut statement = self.conn.prepare("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers ORDER BY machine")?;
+        let peers = statement.query_map([], peer_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(peers)
+    }
+
+    pub fn put_peer(&self, peer: &PeerState) -> Result<()> {
+        let vector = peer.vector.as_ref().map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO peers(machine, alias, vector, last_ok, last_error, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![peer.machine, peer.alias, vector, peer.last_ok as i64, peer.last_error, peer.updated as i64],
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,53 +686,5 @@ mod tests {
         fs::create_dir(dir.path().join("rev")).unwrap();
         store.write(|tx| tx.append(&draft("t"))).unwrap();
         assert_eq!(store.load(&Filter::All).unwrap().len(), 1);
-    }
-}
-
-/// What this machine learned about a peer in exchanges. Local only.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PeerState {
-    pub machine: String,
-    pub alias: String,
-    /// The peer's version vector after the last exchange; None before the first.
-    pub vector: Option<BTreeMap<String, u64>>,
-    pub last_ok: u64,
-    pub last_error: String,
-    pub updated: u64,
-}
-
-fn peer_row(row: &rusqlite::Row) -> rusqlite::Result<PeerState> {
-    let vector: Option<String> = row.get(2)?;
-    Ok(PeerState {
-        machine: row.get(0)?,
-        alias: row.get(1)?,
-        vector: vector.and_then(|v| serde_json::from_str(&v).ok()),
-        last_ok: row.get::<_, i64>(3)? as u64,
-        last_error: row.get(4)?,
-        updated: row.get::<_, i64>(5)? as u64,
-    })
-}
-
-impl Store {
-    pub fn peer(&self, machine: &str) -> Result<Option<PeerState>> {
-        Ok(self
-            .conn
-            .query_row("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers WHERE machine = ?1", params![machine], peer_row)
-            .optional()?)
-    }
-
-    pub fn peers(&self) -> Result<Vec<PeerState>> {
-        let mut statement = self.conn.prepare("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers ORDER BY machine")?;
-        let peers = statement.query_map([], peer_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(peers)
-    }
-
-    pub fn put_peer(&self, peer: &PeerState) -> Result<()> {
-        let vector = peer.vector.as_ref().map(serde_json::to_string).transpose()?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO peers(machine, alias, vector, last_ok, last_error, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![peer.machine, peer.alias, vector, peer.last_ok as i64, peer.last_error, peer.updated as i64],
-        )?;
-        Ok(())
     }
 }

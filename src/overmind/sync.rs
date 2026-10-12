@@ -40,6 +40,8 @@ pub struct Summary {
     pub sent: usize,
     pub inserted: usize,
     pub refused: usize,
+    /// Events pushed that the peer still lacks after its answer.
+    pub not_accepted: usize,
 }
 
 /// The peer's side of one call: store what arrived, answer with what the caller lacks.
@@ -57,22 +59,32 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
     Ok(serde_json::to_value(response)?)
 }
 
-/// Exchanges with one peer until both sides are current or the rounds run out;
-/// the outcome is kept for `status`.
+/// Exchanges with one peer until both sides are current, a round makes no
+/// progress or the rounds run out; the outcome is kept for `status`.
 pub fn exchange(store: &mut Store, peer: &str, alias: &str, call: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<Summary> {
     let result = rounds(store, peer, call);
-    let mut state = store.peer(peer)?.unwrap_or_else(|| PeerState { machine: peer.into(), ..PeerState::default() });
-    state.alias = alias.into();
-    state.updated = now();
-    match &result {
-        Ok(_) => {
-            state.last_ok = state.updated;
-            state.last_error.clear();
+    let bookkeeping = || -> Result<()> {
+        let mut state = store.peer(peer)?.unwrap_or_else(|| PeerState { machine: peer.into(), ..PeerState::default() });
+        state.alias = alias.into();
+        state.updated = now();
+        match &result {
+            Ok(summary) => {
+                state.last_ok = state.updated;
+                state.last_error = if summary.not_accepted > 0 {
+                    format!("the peer did not accept {} events; it may run an older or damaged store", summary.not_accepted)
+                } else {
+                    String::new()
+                };
+            }
+            Err(error) => state.last_error = format!("{error:#}"),
         }
-        Err(error) => state.last_error = format!("{error:#}"),
+        store.put_peer(&state)
+    };
+    match bookkeeping() {
+        // A failed call reports its own error, not the bookkeeping's.
+        Err(error) if result.is_ok() => Err(error),
+        _ => result,
     }
-    store.put_peer(&state)?;
-    result
 }
 
 fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<Summary> {
@@ -83,19 +95,29 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
             Some(vector) => store.missing(vector, BATCH)?,
             None => (Vec::new(), true),
         };
-        summary.sent += events.len();
+        let pushed = events.len();
+        summary.sent += pushed;
         let request = ExchangeRequest { v: 1, from: store.machine().into(), vector: store.version_vector()?, events };
         let response: ExchangeResponse = serde_json::from_value(call(&serde_json::to_value(&request)?)?)
             .map_err(|e| anyhow!("the peer's Overmind answer is not valid: {e}"))?;
-        ensure!(response.v == 1 && response.machine == peer, "the machine behind this peer changed identity");
+        ensure!(response.v == 1, "this peer speaks another Overmind exchange version; update HGS on the older machine");
+        ensure!(response.machine == peer, "the machine behind this peer changed identity");
         let received = store.insert_raw(&response.events)?;
         summary.inserted += received.inserted;
         summary.refused += received.refused;
         summary.rounds += 1;
+        let progress = known.as_ref() != Some(&response.vector) || received.inserted > 0;
         let mut state = store.peer(peer)?.unwrap_or_else(|| PeerState { machine: peer.into(), ..PeerState::default() });
-        state.vector = Some(response.vector);
+        state.vector = Some(response.vector.clone());
         store.put_peer(&state)?;
-        if !push_more && !response.more {
+        // What the peer still lacks according to its fresh answer: a peer that
+        // lost its data is refilled from here on.
+        let (lacking, _) = store.missing(&response.vector, BATCH)?;
+        if pushed > 0 && !push_more && !lacking.is_empty() {
+            summary.not_accepted = lacking.len();
+            break;
+        }
+        if !progress || !(push_more || response.more || (pushed == 0 && !lacking.is_empty())) {
             break;
         }
     }
@@ -184,5 +206,34 @@ mod tests {
         assert!(serve(&mut b, json!({"v": 2, "from": A, "vector": {}})).is_err());
         assert!(serve(&mut b, json!({"v": 1, "from": B, "vector": {}})).is_err());
         assert!(serve(&mut b, json!({"v": 1, "from": A, "vector": {}, "later": true})).is_ok());
+    }
+
+    #[test]
+    fn a_peer_that_lost_its_data_is_refilled_in_one_exchange() {
+        let (dir, mut a, mut b) = stores();
+        for _ in 0..3 { comment(&mut a, "t", 10); }
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        drop(b);
+        let mut fresh = Store::open(&dir.path().join("fresh"), B).unwrap();
+        exchange(&mut a, B, "b", &mut |request| serve(&mut fresh, request.clone())).unwrap();
+        assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
+    }
+
+    #[test]
+    fn a_peer_that_refuses_events_stops_the_exchange_and_is_reported() {
+        let (_dir, mut a, mut b) = stores();
+        for _ in 0..3 { comment(&mut a, "t", 10); }
+        comment(&mut b, "u", 10);
+        // B already holds A's first event id at another position, so it refuses A's events.
+        let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == A && e["seq"] == 1).unwrap();
+        let mut forged = first.clone();
+        forged["origin"] = json!("33333333-3333-4333-8333-333333333333");
+        b.insert_raw(&[forged]).unwrap();
+        let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert!(summary.rounds <= 2, "{summary:?}");
+        assert!(summary.not_accepted > 0, "{summary:?}");
+        let peer = a.peer(B).unwrap().unwrap();
+        assert!(peer.last_error.contains("did not accept"), "{peer:?}");
+        assert!(a.version_vector().unwrap().get(B).copied().unwrap_or(0) >= 1, "other origins still arrived");
     }
 }
