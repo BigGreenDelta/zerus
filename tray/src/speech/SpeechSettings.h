@@ -37,7 +37,7 @@ private:
     QString m_machine, m_selectAfterRefresh;
     qint64 m_revision = 0;
     QJsonArray m_adapters;
-    QJsonObject m_pending;
+    QJsonObject m_pending, m_service;
     OperationReply m_operationDone;
     bool m_loaded = false, m_busy = false, m_waiting = false;
     int m_statusPolls = 0;

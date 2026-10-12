@@ -16,12 +16,17 @@ def unit_argument(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", required=True, type=Path, help="Python in the prepared speech environment")
-    parser.add_argument("--config", type=Path, default=Path(os.environ.get("HGS_CONFIG_DIR", str(Path.home() / ".config/hgs"))) / "speech.json")
+    parser.add_argument("--config", type=Path,
+                        help="Existing service configuration; omitted uses the optional default speech.json")
     parser.add_argument("--start", action="store_true", help="Enable and start only zerus-speech.service")
     args = parser.parse_args()
-    runtime, config = args.python.absolute(), args.config.absolute()
-    if not runtime.is_file() or not os.access(runtime, os.X_OK) or not config.is_file():
-        parser.error("Prepare the Python environment and speech.json first")
+    runtime = args.python.absolute()
+    config = (args.config if args.config is not None else
+              Path(os.environ.get("HGS_CONFIG_DIR", str(Path.home() / ".config/hgs"))) / "speech.json").absolute()
+    if not runtime.is_file() or not os.access(runtime, os.X_OK):
+        parser.error("Prepare an executable Python environment first")
+    if (args.config is not None or config.exists() or config.is_symlink()) and not config.is_file():
+        parser.error("An explicit or existing service configuration must be a regular file")
     subprocess.run([str(runtime), "-c", "import zerus_speech"], check=True)
     directory = Path.home() / ".config/systemd/user"
     directory.mkdir(parents=True, exist_ok=True)

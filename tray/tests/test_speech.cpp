@@ -80,7 +80,7 @@ else:
         if action=='config_list':
             (root/'config-started').write_text('started')
             while (root/'config-gate').exists():time.sleep(.01)
-            print(json.dumps(dict(schema=1,machine_id=machine,service={'available':True},adapters=[{'id':'gigaam','models':['v3_e2e_rnnt','v3_e2e_ctc'],'devices':['cpu','cuda','mps']},{'id':'openai_http'}],**state)))
+            print(json.dumps(dict(schema=1,machine_id=machine,service=json.loads((root/'service').read_text()) if (root/'service').exists() else {'available':True},adapters=[{'id':'gigaam','models':['v3_e2e_rnnt','v3_e2e_ctc'],'devices':['cpu','cuda','mps']},{'id':'openai_http'}],**state)))
             sys.exit(0)
         ops_path=root/'operations';ops=json.loads(ops_path.read_text()) if ops_path.exists() else {}
         if action=='config_status':
@@ -258,6 +258,35 @@ private slots:
         auto *list=settings.findChild<QListWidget *>("speechProfiles");bool found=false;
         for(int row=0;row<list->count();++row){const auto profile=list->item(row)->data(Qt::UserRole).toJsonObject();if(profile.value("id").toString()==expected){QVERIFY(profile.value("available").toBool());found=true;}}
         QVERIFY(found);
+    }
+    void setupGuideIsAvailableWithoutProfilesAndCopiesOnlyOnClick() {
+        QTemporaryDir dir;SpeechSettings settings(fixture(dir.path()));settings.setPeers({"speech-host"});
+        auto *host=settings.findChild<QComboBox *>("speechComputer");const QSignalBlocker block(host);host->setCurrentIndex(host->findData("speech-host"));
+        auto *open=settings.findChild<QPushButton *>("speechSetupGuideButton");QVERIFY(open->isEnabled());
+        QApplication::clipboard()->setText("untouched fixture clipboard");QSignalSpy clipboard(QApplication::clipboard(),&QClipboard::dataChanged);bool checked=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *guide=settings.findChild<QDialog *>("speechSetupGuide");QVERIFY(guide);QVERIFY(guide->findChild<QLabel *>("speechSetupComputer")->text().contains("speech-host"));
+            QCOMPARE(QApplication::clipboard()->text(),"untouched fixture clipboard");QCOMPARE(clipboard.count(),0);
+            auto *code=guide->findChild<QPlainTextEdit *>("speechSetupCommand");auto *copy=guide->findChild<QPushButton *>("speechSetupCopyCommand");QVERIFY(code);QVERIFY(copy);QVERIFY(code->isReadOnly());QVERIFY(!code->toPlainText().isEmpty());
+            copy->click();QCOMPARE(QApplication::clipboard()->text(),code->toPlainText());QCOMPARE(clipboard.count(),1);checked=true;guide->reject();
+        });open->click();QVERIFY(checked);QVERIFY(!QFile::exists(dir.path()+"/calls"));QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+    }
+    void editorSetupGuideKeepsPinnedComputerAndUnsavedCredential() {
+        QTemporaryDir dir;QFile service(dir.path()+"/service");QVERIFY(service.open(QIODevice::WriteOnly));service.write("{\"available\":false,\"reason\":\"Fixture service needs preparation\"}");service.close();
+        QSettings().setValue("speech/manage_host","speech-host");SpeechSettings settings(fixture(dir.path()));settings.setPeers({"speech-host","other-host"});settings.refresh();
+        auto *add=settings.findChild<QPushButton *>("speechAdd");QTRY_VERIFY(add->isEnabled());bool checked=false;
+        QTimer::singleShot(0,&settings,[&]{
+            auto *editor=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(editor);QVERIFY(editor->findChild<QLabel *>("speechEditComputer")->text().contains("speech-host"));
+            QVERIFY(editor->findChild<QLabel *>("speechEditReadiness")->text().contains("Fixture service needs preparation"));
+            auto *type=editor->findChild<QComboBox *>("speechEditType");type->setCurrentIndex(type->findData("openai_http"));auto *name=editor->findChild<QLineEdit *>("speechEditName");name->setText("Unsaved remote provider");
+            auto *credential=editor->findChild<QComboBox *>("speechEditCredential");credential->setCurrentIndex(credential->findData("replace"));auto *key=editor->findChild<QLineEdit *>("speechEditKey");key->setText("synthetic-unsaved-key");
+            auto *host=settings.findChild<QComboBox *>("speechComputer");const QSignalBlocker block(host);host->setCurrentIndex(host->findData("other-host"));
+            QApplication::clipboard()->setText("preserved fixture clipboard");
+            QTimer::singleShot(0,editor,[&]{auto *guide=editor->findChild<QDialog *>("speechSetupGuide");QVERIFY(guide);QVERIFY(guide->findChild<QLabel *>("speechSetupComputer")->text().contains("speech-host"));guide->reject();});
+            editor->findChild<QPushButton *>("speechEditSetupGuide")->click();
+            QCOMPARE(name->text(),"Unsaved remote provider");QCOMPARE(key->text(),"synthetic-unsaved-key");QCOMPARE(credential->currentData().toString(),"replace");QCOMPARE(type->currentData().toString(),"openai_http");
+            QCOMPARE(QApplication::clipboard()->text(),"preserved fixture clipboard");checked=true;editor->reject();
+        });add->click();QVERIFY(checked);QVERIFY(!QFile::exists(dir.path()+"/management-actions"));QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
     }
     void managementRequiresItsOwnCapabilityBeforeSendingAKey() {
         QTemporaryDir dir;const auto executable=fixture(dir.path());QFile legacy(dir.path()+"/management-legacy");QVERIFY(legacy.open(QIODevice::WriteOnly));legacy.close();

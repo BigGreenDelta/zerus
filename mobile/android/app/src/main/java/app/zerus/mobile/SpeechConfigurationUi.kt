@@ -24,6 +24,7 @@ import java.util.UUID
     var editor by remember { mutableStateOf<Pair<SpeechConfiguration, SpeechConfigProfile>?>(null) }
     var removal by remember { mutableStateOf<Pair<SpeechConfiguration, SpeechConfigProfile>?>(null) }
     var actionError by remember { mutableStateOf("") }
+    var guideHost by remember { mutableStateOf<String?>(null) }
     val hosts = model.machines.filter { machine -> model.connections.any { it.id == machine.connectionId } }
         .map { SpeechConfigHost(MachineKey(it.connectionId, it.id), it.machineId, it.name) }
     val selected = manager.host
@@ -55,6 +56,7 @@ import java.util.UUID
                             } }, onClick = { hostMenu = false; editor = null; removal = null; actionError = ""; manager.select(host) }) }
                         }
                     }
+                    TextButton(onClick = { guideHost = selected?.name.orEmpty() }) { Text("Local setup guide") }
                     if (hosts.isEmpty()) Text("Connect a computer to manage its speech providers.")
                     if (selected != null) {
                         manager.reason(selected).takeIf { it.isNotBlank() }?.let { Text(it) }
@@ -71,7 +73,7 @@ import java.util.UUID
                         } }
                     }
                     if (selected != null && config != null) {
-                        if (!config.serviceAvailable) Text(config.serviceReason.ifBlank { "Recognition service is unavailable. You can still edit providers." }, style = MaterialTheme.typography.bodySmall)
+                        Text(speechServiceReadiness(selected, config, manager.loading), style = MaterialTheme.typography.bodySmall)
                         config.profiles.forEach { profile ->
                             Card { Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(profile.name, style = MaterialTheme.typography.titleMedium)
@@ -103,6 +105,7 @@ import java.util.UUID
             }
         }
     }
+    guideHost?.let { SpeechLocalSetupDialog(it) { guideHost = null } }
     if (selected != null) editor?.let { (baseline, profile) ->
         SpeechConfigurationEditor(manager, selected, baseline, profile) { editor = null }
     }
@@ -137,6 +140,7 @@ import java.util.UUID
     var secret by remember(host, original.id) { mutableStateOf("") } // Never saved into instance state or private preferences.
     var error by remember(host, original.id) { mutableStateOf("") }
     var operationId by remember(host, original.id) { mutableStateOf<String?>(null) }
+    var guideOpen by remember(host, original.id) { mutableStateOf(false) }
     val pending = manager.pending.find { it.id == operationId }
     val editable = pending == null && manager.canMutate(host)
     val latest = manager.configuration
@@ -149,7 +153,9 @@ import java.util.UUID
     fun dismiss() { secret = ""; onDismiss() }
     AlertDialog(onDismissRequest = ::dismiss, title = { Text(if (original.revision == 0L) "Add speech provider" else "Edit speech provider") },
         text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Saved on ${host.name}", style = MaterialTheme.typography.labelMedium)
+            Text("Processing computer: ${host.name}", style = MaterialTheme.typography.labelMedium)
+            Text(speechServiceReadiness(host, latest, manager.loading), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { guideOpen = true }) { Text("Local setup guide") }
             Text("Provider ID: ${profile.id}", style = MaterialTheme.typography.labelSmall)
             OutlinedTextField(profile.name, { profile = profile.copy(name = it) }, label = { Text("Name") }, singleLine = true, enabled = editable)
             ProviderMenu("Type", profile.adapter, baseline.adapters.filter { it.id in setOf("gigaam", "openai_http") }.map {
@@ -161,8 +167,16 @@ import java.util.UUID
             }
             if (profile.adapter == "gigaam") {
                 val adapter = baseline.adapters.find { it.id == "gigaam" }
+                Text("Local inference runs on ${host.name}. Prepare its Python/PyTorch speech service before testing this profile.", style = MaterialTheme.typography.bodySmall)
                 ProviderMenu("Model", profile.model, adapter?.models.orEmpty().map { it to it }, editable) { profile = profile.copy(model = it) }
+                Text("v3_e2e_rnnt is the GigaAM v3 end-to-end model used by the standard Russian setup.", style = MaterialTheme.typography.bodySmall)
                 ProviderMenu("Device", profile.device, adapter?.devices.orEmpty().map { it to it }, editable) { profile = profile.copy(device = it) }
+                Text(when {
+                    profile.device == "cpu" -> "CPU runs without a GPU. It is the baseline setup choice."
+                    profile.device.startsWith("cuda") -> "CUDA requires an NVIDIA GPU, compatible driver and PyTorch build on ${host.name}. A numbered device selects that GPU index."
+                    profile.device == "mps" -> "MPS requires a compatible Apple GPU and installed runtime. Verify this model with Test before using it."
+                    else -> "Choose a device prepared on ${host.name}, then verify the saved profile with Test."
+                }, style = MaterialTheme.typography.bodySmall)
                 Text("Saving does not install packages or download model weights.", style = MaterialTheme.typography.bodySmall)
             } else if (profile.adapter == "openai_http") {
                 OutlinedTextField(profile.baseUrl, { profile = profile.copy(baseUrl = it) }, label = { Text("Server base URL") },
@@ -181,6 +195,7 @@ import java.util.UUID
                 Text("The key is encrypted for ${host.name} before upload. Saved keys are never returned to this phone.", style = MaterialTheme.typography.bodySmall)
             }
             OutlinedTextField(profile.language, { profile = profile.copy(language = it) }, label = { Text("Language") }, singleLine = true, enabled = editable)
+            if (profile.adapter == "gigaam") Text("Use ru for Russian speech.", style = MaterialTheme.typography.bodySmall)
             if (latest != null && latest.machineId == baseline.machineId && latest.revision != baseline.revision) {
                 Text("The configuration has changed. Review your edits against revision ${latest.revision} before saving.")
                 TextButton(onClick = { baseline = latest; error = "" }, enabled = pending == null) { Text("Use refreshed revision") }
@@ -201,4 +216,5 @@ import java.util.UUID
             } catch (failure: Exception) { error = failure.message ?: "Check the provider fields." }
         }, enabled = editable) { Text("Save provider") } },
         dismissButton = { TextButton(onClick = ::dismiss) { Text("Close") } })
+    if (guideOpen) SpeechLocalSetupDialog(host.name) { guideOpen = false }
 }
