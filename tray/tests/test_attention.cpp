@@ -28,6 +28,7 @@ private slots:
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
     void decisionsNotifyOncePerSignature();
     void decisionsFollowFocusAndRetryFailedDelivery();
+    void decisionsReturnQuietlyAndBurstsAreSummarized();
 };
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
@@ -449,9 +450,13 @@ void TestAttention::scheduledTicksStayUnreadUntilTheScheduleEnds()
 }
 
 namespace {
+// Overmind names projects by their group ID, a UUID for a project people made.
+const QString kProject = "6f1c2d3e-5b4a-4c3d-8e2f-0a1b2c3d4e5f";
+const AttentionTracker::ProjectNames kNames{{kProject, "Alpha"}};
+
 OvermindModel::Decision decision(const QString &task, const QString &ref, const QString &title, const QString &signature)
 {
-    OvermindModel::Decision d; d.task = task; d.ref = ref; d.project = "alpha"; d.title = title; d.stage = "Your Call";
+    OvermindModel::Decision d; d.task = task; d.ref = ref; d.project = kProject; d.title = title; d.stage = "Your Call";
     d.question = "SQLite or plain files?"; d.signature = signature; d.assignee = {"node-arch", "codex/hgs/dashboard"};
     return d;
 }
@@ -463,15 +468,17 @@ void TestAttention::decisionsNotifyOncePerSignature()
 {
     auto first = decision("uuid-1", "om-k3f9x", "Pick a store for drafts", "s1");
     AttentionTracker tracker;
-    QVERIFY(tracker.observeDecisions(false, {first}, 100, false).raised.isEmpty());
-    auto changes = tracker.observeDecisions(true, {first}, 100, false);
+    QVERIFY(tracker.observeDecisions(false, {first}, 100, false, kNames).raised.isEmpty());
+    auto changes = tracker.observeDecisions(true, {first}, 100, false, kNames);
     QCOMPARE(changes.raised.size(), 1); QVERIFY(changes.cleared.isEmpty());
     QCOMPARE(changes.raised[0].title, QString("Zerus — Your Call"));
-    QCOMPARE(changes.raised[0].body, QString("om-k3f9x: Pick a store for drafts\nSQLite or plain files?\nalpha / codex/hgs/dashboard"));
+    // The project's name, never its ID.
+    QCOMPARE(changes.raised[0].body, QString("om-k3f9x: Pick a store for drafts\nSQLite or plain files?\nAlpha / codex/hgs/dashboard"));
+    QCOMPARE(changes.raised[0].action, QString("Open task"));
     const auto token = changes.raised[0].token;
     const auto target = AttentionTracker::decision(token);
     QCOMPARE(target.value("task").toString(), QString("uuid-1"));
-    QCOMPARE(target.value("project").toString(), QString("alpha"));
+    QCOMPARE(target.value("project").toString(), kProject);
     QCOMPARE(target.value("machine").toString(), QString("node-arch"));
     QCOMPARE(target.value("name").toString(), QString("codex/hgs/dashboard"));
     // A decision notice is not a session notice, and the reverse.
@@ -479,7 +486,7 @@ void TestAttention::decisionsNotifyOncePerSignature()
     SessionInfo s; s.name = "session"; s.runId = "run"; s.phase = "input";
     BoxState box; box.ok = true; box.sessions = {s};
     const auto session = tracker.observe({}, box, 100, false);
-    QCOMPARE(session.raised.size(), 1); QVERIFY(session.cleared.isEmpty());
+    QCOMPARE(session.raised.size(), 1); QVERIFY(session.cleared.isEmpty()); QVERIFY(session.raised[0].action.isEmpty());
     QVERIFY(AttentionTracker::decision(session.raised[0].token).isEmpty());
     QVERIFY(AttentionTracker::decision("malformed token").isEmpty());
     // Polls and restarts do not repeat it, and a failed read resolves nothing.
@@ -496,11 +503,12 @@ void TestAttention::decisionsNotifyOncePerSignature()
     QCOMPARE(changes.cleared, QStringList{token}); QCOMPARE(changes.raised.size(), 1);
     QVERIFY(changes.raised[0].token != token);
     const auto again = changes.raised[0].token;
-    // Without a question or an assignee the notice still names the task.
+    // Without a question, an assignee or a known project name the notice still names the task.
     auto bare = decision("uuid-2", "om-b8n7m", "Name the menus", "t1"); bare.question.clear(); bare.assignee = {};
     changes = restarted.observeDecisions(true, {first, bare}, 106, false);
     QCOMPARE(changes.raised.size(), 1); QVERIFY(changes.cleared.isEmpty());
-    QCOMPARE(changes.raised[0].body, QString("om-b8n7m: Name the menus\nA task waits for your call.\nalpha"));
+    QCOMPARE(changes.raised[0].body, QString("om-b8n7m: Name the menus\nA task waits for your call."));
+    QVERIFY(!changes.raised[0].body.contains(kProject));
     QCOMPARE(AttentionTracker::decision(changes.raised[0].token).value("name").toString(), QString());
     const auto second = changes.raised[0].token;
     // Answered or moved on: the task leaves the list and its notice is withdrawn.
@@ -508,9 +516,12 @@ void TestAttention::decisionsNotifyOncePerSignature()
     QCOMPARE(changes.cleared, QStringList{again}); QVERIFY(changes.raised.isEmpty());
     changes = restarted.observeDecisions(true, {}, 108, false);
     QCOMPARE(changes.cleared, QStringList{second});
-    QVERIFY(restarted.decisionState().isEmpty());
-    // Parked once more later: a new notice.
-    QCOMPARE(restarted.observeDecisions(true, {first}, 109, false).raised.size(), 1);
+    QVERIFY(restarted.decisionState().value("tasks").toObject().isEmpty());
+    // Parked once more later (a new signature): a new notice, with the project's name alone.
+    first.signature = "s3"; first.assignee = {};
+    changes = restarted.observeDecisions(true, {first}, 109, false, kNames);
+    QCOMPARE(changes.raised.size(), 1);
+    QCOMPARE(changes.raised[0].body, QString("om-k3f9x: Pick a store for drafts\nSQLite or plain files?\nAlpha"));
 }
 
 void TestAttention::decisionsFollowFocusAndRetryFailedDelivery()
@@ -532,6 +543,60 @@ void TestAttention::decisionsFollowFocusAndRetryFailedDelivery()
     const auto retried = restarted.observeDecisions(true, {second}, 260, false);
     QCOMPARE(retried.raised.size(), 1); QCOMPARE(retried.cleared, QStringList{changes.raised[0].token});
     QVERIFY(restarted.observeDecisions(true, {second}, 999, false).raised.isEmpty());
+}
+
+// A decision that drops out of the list and returns unchanged (a stale or
+// capped read) is not announced again for a day; more than three new ones in
+// one pass are one summary notice.
+void TestAttention::decisionsReturnQuietlyAndBurstsAreSummarized()
+{
+    const auto first = decision("uuid-1", "om-k3f9x", "Pick a store for drafts", "s1");
+    AttentionTracker tracker;
+    QCOMPARE(tracker.observeDecisions(true, {first}, 100, false).raised.size(), 1);
+    QCOMPARE(tracker.observeDecisions(true, {}, 101, false).cleared.size(), 1);
+    AttentionTracker restarted(tracker.state(), tracker.decisionState());
+    auto changes = restarted.observeDecisions(true, {first}, 102, false);
+    QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    // Leaving again and returning after a day: the signature is forgotten.
+    QVERIFY(restarted.observeDecisions(true, {}, 103, false).cleared.isEmpty());
+    QCOMPARE(restarted.observeDecisions(true, {first}, 103 + 24 * 60 * 60 + 1, false).raised.size(), 1);
+
+    // A burst: one summary that opens the oldest decision's project.
+    QList<OvermindModel::Decision> burst;
+    for (int i = 0; i < 5; ++i) burst << decision(QString("b%1").arg(i), QString("om-b%1").arg(i), QString("Task %1").arg(i), QString("x%1").arg(i));
+    burst[0].project = "ungrouped";
+    AttentionTracker fresh;
+    changes = fresh.observeDecisions(true, burst, 500, false, kNames);
+    QCOMPARE(changes.raised.size(), 1);
+    QCOMPARE(changes.raised[0].title, QString("Zerus — Your Call"));
+    QVERIFY2(changes.raised[0].body.startsWith("5 tasks wait for your call.\nom-b0: Task 0\nom-b1: Task 1\nom-b2: Task 2"),
+             qPrintable(changes.raised[0].body));
+    QCOMPARE(changes.raised[0].action, QString("Open tasks"));
+    const auto summary = changes.raised[0].token;
+    QCOMPARE(AttentionTracker::decision(summary).value("task").toString(), QString());
+    QCOMPARE(AttentionTracker::decision(summary).value("project").toString(), QString("ungrouped"));
+    QVERIFY(AttentionTracker::target(summary).isEmpty());
+    // Its decisions are recorded: no repeat, also after a restart.
+    QVERIFY(fresh.observeDecisions(true, burst, 501, false).raised.isEmpty());
+    AttentionTracker again(fresh.state(), fresh.decisionState());
+    QVERIFY(again.observeDecisions(true, burst, 502, false).raised.isEmpty());
+    // A failed summary is retried for the decisions that still wait.
+    again.deliveryFailed(summary, 502);
+    const auto rest = burst.mid(1);
+    changes = again.observeDecisions(true, rest, 503, false);
+    QVERIFY(changes.raised.isEmpty()); QVERIFY(!changes.cleared.contains(summary));
+    changes = again.observeDecisions(true, rest, 562, false);
+    QCOMPARE(changes.raised.size(), 1); QCOMPARE(changes.cleared, QStringList{summary});
+    QCOMPARE(changes.raised[0].body, QString("4 tasks wait for your call."));
+    const auto retried = changes.raised[0].token;
+    // The summary goes when none of its decisions waits any more.
+    QVERIFY(!again.observeDecisions(true, burst.mid(4), 563, false).cleared.contains(retried));
+    QVERIFY(again.observeDecisions(true, {}, 564, false).cleared.contains(retried));
+    // Three at once are three notices.
+    AttentionTracker three;
+    changes = three.observeDecisions(true, burst.mid(0, 3), 600, false);
+    QCOMPARE(changes.raised.size(), 3);
+    for (const auto &notice : changes.raised) QCOMPARE(notice.action, QString("Open task"));
 }
 
 QTEST_APPLESS_MAIN(TestAttention)

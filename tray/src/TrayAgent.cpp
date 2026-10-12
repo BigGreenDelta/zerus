@@ -15,6 +15,7 @@
 #include "SessionsWindow.h"
 #include "UpdateController.h"
 #include "SessionCommands.h"
+#include "SessionOrganization.h"
 #ifdef Q_OS_LINUX
 #include "KonsoleBackend.h"
 #include "SniTrayIcon.h"
@@ -164,8 +165,10 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
 #endif
             return;
         }
-        // Your Call: the Tasks tab on the task's card, the asking session selected.
+        // Your Call: the Tasks tab on the task's card, the asking session selected
+        // (a summary opens its project). An earlier session click no longer waits.
         if (const auto decision = AttentionTracker::decision(token); !decision.isEmpty()) {
+            m_pendingAttention.clear();
             showSessions();
 #ifdef Q_OS_LINUX
             if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
@@ -473,7 +476,7 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
     if (m_attention.state() != before)
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
     for (const auto &token : changes.cleared) m_notifier->withdraw(token);
-    for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body);
+    for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body, notice.action);
     if (m_sessionsWindow && !m_pendingAttention.isEmpty()) {
         m_sessionsWindow->setFleet(m_state);
         const auto target = AttentionTracker::target(m_pendingAttention);
@@ -483,14 +486,21 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
 
 void TrayAgent::observeDecisions()
 {
+    // Overmind names a project by its ID (a UUID); notices show the name the
+    // window saved. The organization is parsed again only when it changed.
+    const auto organization = QSettings().value("workspace/organization").toByteArray();
+    if (organization != m_organizationSeen || m_projectNames.isEmpty()) {
+        m_organizationSeen = organization;
+        m_projectNames.clear();
+        for (const auto &group : SessionOrganization(QJsonDocument::fromJson(organization).object()).groups())
+            m_projectNames.insert(group.id, group.name);
+    }
     const auto before = m_attention.decisionState();
-    // Not loaded yet, a failed read or a reset after a host change: no resolution.
-    const bool read = m_overmind.decisionsLoaded() && m_overmind.decisionsError().isEmpty();
-    const auto changes = m_attention.observeDecisions(read, m_overmind.decisions());
+    const auto changes = m_attention.observeDecisions(m_overmind, m_projectNames);
     if (m_attention.decisionState() != before)
         QSettings().setValue("attention/decisions", QJsonDocument(m_attention.decisionState()).toJson(QJsonDocument::Compact));
     for (const auto &token : changes.cleared) m_notifier->withdraw(token);
-    for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body);
+    for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body, notice.action);
 }
 
 void TrayAgent::migrateReadMarks(const QString &host)

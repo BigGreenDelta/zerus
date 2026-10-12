@@ -48,7 +48,9 @@ public:
         m_delegate.clicked = nil;
         if (m_center.delegate == m_delegate) m_center.delegate = nil;
     }
-    void post(const QString &token, const QString &title, const QString &body) override {
+    // Notification Center opens the app on a click; it shows no action button.
+    void post(const QString &token, const QString &title, const QString &body, const QString &action = {}) override {
+        Q_UNUSED(action);
         if (m_desired.contains(token)) return;
         m_desired.insert(token); m_pending[token] = {title, body};
         if (m_checking) return;

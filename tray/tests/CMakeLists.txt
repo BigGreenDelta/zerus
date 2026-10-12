@@ -84,9 +84,11 @@ target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME hgsclient COMMAND test_hgsclient)
 
-add_executable(test_overmindmodel test_overmindmodel.cpp ../src/OvermindModel.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
+add_executable(test_overmindmodel test_overmindmodel.cpp ../src/OvermindModel.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp
+               ../src/AttentionTracker.cpp)
 target_include_directories(test_overmindmodel PRIVATE ../src)
-target_link_libraries(test_overmindmodel PRIVATE Qt6::Test Qt6::Core)
+# Gui: AttentionTracker asks QGuiApplication whether Zerus has focus.
+target_link_libraries(test_overmindmodel PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME overmindmodel COMMAND test_overmindmodel)
 set_tests_properties(overmindmodel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

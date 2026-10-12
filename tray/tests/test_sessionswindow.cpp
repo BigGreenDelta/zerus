@@ -4069,15 +4069,47 @@ void TestSessionsWindow::decisionNotificationOpensItsCard()
     QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
     QCOMPARE(view->project(), QString("beta"));
     QCOMPARE(view->openedTask(), QString("b8n7m"));
+    // A window the click has just created may not know the peers' machines
+    // yet: once the swarm catalog places the asking session, it is selected,
+    // and the board and the open card stay.
+    auto *swarm = window.findChild<SwarmController *>(); QVERIFY(swarm);
+    const QJsonArray mac{QJsonObject{{"id", "node-mac"}, {"connection", "mac"}}};
+    const auto catalog = [&](const QJsonArray &machines) {
+        QTRY_VERIFY(!swarm->busy());
+        swarm->acceptExternal({{"schema", 1}, {"conflicts", QJsonArray()}, {"machines", machines},
+            {"organization", QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()}});
+        QCOMPARE(swarm->snapshot().value("machines").toArray(), machines);
+    };
+    catalog(mac);
+    QTRY_COMPARE(current(), QString("mac\nclaude/infra/review"));
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->project(), QString("beta")); QCOMPARE(view->openedTask(), QString("b8n7m"));
+    // A session the person chose meanwhile is kept.
+    catalog({});
+    window.showSession({}, "kimi/docs/research");
+    window.showDecision("beta", "b8n7m", "node-mac", "claude/infra/review");
+    QCOMPARE(current(), QString("\nkimi/docs/research"));
+    window.showSession({}, "codex/hgs/dashboard");
+    catalog(mac);
+    QTest::qWait(50);
+    QCOMPARE(current(), QString("\ncodex/hgs/dashboard"));
+
+    // A summary of several decisions opens the Tasks tab on its project.
+    tabs->setCurrentIndex(0);
+    window.showDecision("alpha", {}, {}, {});
+    QCOMPARE(current(), QString("\ncodex/hgs/dashboard"));
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->project(), QString("alpha"));
 
     // A project this computer does not list says so and shows the session's
-    // Activity instead; the board stays as it was.
-    window.showDecision("gamma", "g1h2j", "node-arch", "codex/hgs/dashboard");
+    // Activity instead; the board stays as it was. Its ID is never shown.
+    window.showDecision("6f1c2d3e-5b4a-4c3d-8e2f-0a1b2c3d4e5f", "g1h2j", "node-arch", "codex/hgs/dashboard");
     QCOMPARE(current(), QString("\ncodex/hgs/dashboard"));
     QCOMPARE(tabs->currentIndex(), 0);
-    QCOMPARE(view->project(), QString("beta")); QCOMPARE(view->openedTask(), QString("b8n7m"));
+    QCOMPARE(view->project(), QString("alpha"));
     auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
-    QVERIFY2(notice->isVisible() && notice->text().contains("gamma"), qPrintable(notice->text()));
+    QVERIFY(notice->isVisible());
+    QCOMPARE(notice->text(), QString("This task's project is not listed on this computer."));
 }
 
 // Add as task, the Tasks chip and the session rows' queue badges. The window

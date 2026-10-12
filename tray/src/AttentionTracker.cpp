@@ -1,10 +1,21 @@
 #include "AttentionTracker.h"
 
 #include <QGuiApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QSet>
 #include <QUuid>
 
 namespace {
+// How long and how many signatures of decisions that left the list are kept.
+constexpr qint64 RecentSeconds = 24 * 60 * 60;
+constexpr int RecentLimit = 200;
+QString encode(const QJsonObject &target)
+{
+    return QString::fromLatin1(QJsonDocument(target).toJson(QJsonDocument::Compact)
+        .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+}
+QString noticeId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 QString identity(const SessionInfo &s)
 {
     return !s.runId.isEmpty() ? "run:" + s.runId : "name:" + s.name + ':' + QString::number(s.created);
@@ -16,6 +27,18 @@ QString concise(QString value, int limit)
         if (value[i].category() == QChar::Other_Control) value[i] = ' ';
     return value.size() > limit ? value.left(limit - 1) + QChar(0x2026) : value;
 }
+}
+
+AttentionTracker::AttentionTracker(QJsonObject saved, QJsonObject decisions) : m_hosts(std::move(saved))
+{
+    // The first builds kept only the tasks.
+    if (!decisions.contains("tasks")) {
+        m_decisions = decisions;
+        return;
+    }
+    m_decisions = decisions.value("tasks").toObject();
+    m_summary = decisions.value("summary").toObject();
+    m_recent = decisions.value("recent").toObject();
 }
 
 AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now)
@@ -117,6 +140,10 @@ void AttentionTracker::deliveryFailed(const QString &token, qint64 now)
         m_decisions[entry.key()] = value;
         return;
     }
+    if (!token.isEmpty() && m_summary.value("token").toString() == token) {
+        m_summary["retry_at"] = now + 60;
+        return;
+    }
     for (auto host = m_hosts.begin(); host != m_hosts.end(); ++host) {
         auto entries = host.value().toObject();
         for (auto entry = entries.begin(); entry != entries.end(); ++entry) {
@@ -139,18 +166,33 @@ QJsonObject AttentionTracker::target(const QString &token)
     return result;
 }
 
-AttentionChanges AttentionTracker::observeDecisions(bool read, const QList<OvermindModel::Decision> &decisions, qint64 now)
+AttentionChanges AttentionTracker::observeDecisions(const OvermindModel &model, const ProjectNames &names)
 {
     const auto *application = qobject_cast<QGuiApplication *>(QCoreApplication::instance());
-    return observeDecisions(read, decisions, now, application && application->applicationState() == Qt::ApplicationActive);
+    return observeDecisions(model, names, QDateTime::currentSecsSinceEpoch(),
+                            application && application->applicationState() == Qt::ApplicationActive);
+}
+
+AttentionChanges AttentionTracker::observeDecisions(const OvermindModel &model, const ProjectNames &names, qint64 now,
+                                                    bool applicationFocused)
+{
+    // Not loaded yet, a failed read, or the reset after a host change.
+    const bool read = model.decisionsLoaded() && model.decisionsError().isEmpty();
+    return observeDecisions(read, model.decisions(), now, applicationFocused, names);
 }
 
 AttentionChanges AttentionTracker::observeDecisions(bool read, const QList<OvermindModel::Decision> &decisions, qint64 now,
-                                                    bool applicationFocused)
+                                                    bool applicationFocused, const ProjectNames &names)
 {
     AttentionChanges changes;
     if (!read) return changes;
+    for (auto it = m_recent.begin(); it != m_recent.end();) {
+        if (it.value().toInteger() < now - RecentSeconds) it = m_recent.erase(it);
+        else ++it;
+    }
     QJsonObject current;
+    QList<AttentionNotice> fresh;
+    QString firstProject;
     for (const auto &d : decisions) {
         if (d.task.isEmpty() || current.contains(d.task)) continue;
         const auto old = m_decisions.value(d.task).toObject();
@@ -159,35 +201,105 @@ AttentionChanges AttentionTracker::observeDecisions(bool read, const QList<Overm
             current[d.task] = old;
             continue;
         }
-        const QJsonObject target{{"decision", d.task}, {"project", d.project}, {"machine", d.assignee.machine},
-            {"name", d.assignee.name}, {"notice", QUuid::createUuid().toString(QUuid::WithoutBraces)}};
-        const QString token = QString::fromLatin1(QJsonDocument(target).toJson(QJsonDocument::Compact)
-            .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+        // Back unchanged after it left the list (a stale or capped read): it
+        // was announced already.
+        if (old.isEmpty() && !d.signature.isEmpty() && m_recent.contains(d.signature)) {
+            current[d.task] = QJsonObject{{"signature", d.signature}};
+            m_recent.remove(d.signature);
+            continue;
+        }
+        const QString token = encode({{"decision", d.task}, {"project", d.project}, {"machine", d.assignee.machine},
+                                      {"name", d.assignee.name}, {"notice", noticeId()}});
         current[d.task] = QJsonObject{{"signature", d.signature}, {"token", token}};
         // As for sessions: a decision that arrives while Zerus has focus is
         // consumed, never shown later; the Tasks tab and the badges show it.
         if (applicationFocused) continue;
-        QString where = concise(d.project, 60);
-        if (!d.assignee.name.isEmpty()) where += " / " + concise(d.assignee.name, 120);
-        const QString body = concise(d.ref + ": " + d.title, 160) + '\n'
-            + (d.question.isEmpty() ? QObject::tr("A task waits for your call.") : concise(d.question, 240)) + '\n' + where;
-        changes.raised.append({token, QObject::tr("Zerus — Your Call"), body});
+        QString where = concise(names.value(d.project), 60);
+        if (!d.assignee.name.isEmpty()) where += (where.isEmpty() ? QString() : QStringLiteral(" / ")) + concise(d.assignee.name, 120);
+        QString body = concise(d.ref + ": " + d.title, 160) + '\n'
+            + (d.question.isEmpty() ? QObject::tr("A task waits for your call.") : concise(d.question, 240));
+        if (!where.isEmpty()) body += '\n' + where;
+        if (fresh.isEmpty()) firstProject = d.project;
+        fresh.append({token, QObject::tr("Zerus — Your Call"), body, QObject::tr("Open task")});
     }
+    for (auto it = m_decisions.begin(); it != m_decisions.end(); ++it) {
+        const auto signature = it.value().toObject().value("signature").toString();
+        if (!current.contains(it.key()) && !signature.isEmpty()) m_recent[signature] = now;
+    }
+    while (m_recent.size() > RecentLimit) {
+        auto oldest = m_recent.begin();
+        for (auto it = m_recent.begin(); it != m_recent.end(); ++it)
+            if (it.value().toInteger() < oldest.value().toInteger()) oldest = it;
+        m_recent.erase(oldest);
+    }
+
+    // A burst (the first start, say) is one summary notice; its decisions
+    // keep their own tokens so that they are never announced again.
+    QJsonObject summary;
+    if (fresh.size() > DecisionBurst) {
+        QJsonArray tokens;
+        QStringList lines;
+        for (const auto &notice : std::as_const(fresh)) {
+            tokens.append(notice.token);
+            if (lines.size() < DecisionBurst) lines << notice.body.section('\n', 0, 0);
+        }
+        const QString token = encode({{"decisions", int(fresh.size())}, {"project", firstProject}, {"notice", noticeId()}});
+        summary = QJsonObject{{"token", token}, {"tokens", tokens}, {"project", firstProject}};
+        changes.raised.append({token, QObject::tr("Zerus — Your Call"),
+            QObject::tr("%1 tasks wait for your call.").arg(fresh.size()) + '\n' + lines.join('\n') + '\n' + QChar(0x2026),
+            QObject::tr("Open tasks")});
+    } else {
+        changes.raised = fresh;
+        // An earlier summary stays while one of its decisions still waits as announced.
+        QSet<QString> waiting;
+        for (auto it = current.begin(); it != current.end(); ++it) waiting.insert(it.value().toObject().value("token").toString());
+        QJsonArray tokens;
+        for (const auto &token : m_summary.value("tokens").toArray())
+            if (waiting.contains(token.toString())) tokens.append(token);
+        if (!tokens.isEmpty()) {
+            summary = m_summary;
+            summary["tokens"] = tokens;
+            const auto retry = summary.value("retry_at").toInteger();
+            if (retry && retry <= now) {
+                summary.remove("retry_at");
+                if (!applicationFocused) {
+                    const QString token = encode({{"decisions", int(tokens.size())}, {"project", summary.value("project")}, {"notice", noticeId()}});
+                    summary["token"] = token;
+                    changes.raised.append({token, QObject::tr("Zerus — Your Call"),
+                        QObject::tr("%1 tasks wait for your call.").arg(tokens.size()), QObject::tr("Open tasks")});
+                }
+            }
+        }
+    }
+
     for (auto it = m_decisions.begin(); it != m_decisions.end(); ++it) {
         const QString token = it.value().toObject().value("token").toString();
         if (!token.isEmpty() && current.value(it.key()).toObject().value("token").toString() != token)
             changes.cleared << token;
     }
+    const QString previous = m_summary.value("token").toString();
+    if (!previous.isEmpty() && summary.value("token").toString() != previous) changes.cleared << previous;
     m_decisions = current;
+    m_summary = summary;
     return changes;
+}
+
+QJsonObject AttentionTracker::decisionState() const
+{
+    QJsonObject state{{"tasks", m_decisions}};
+    if (!m_summary.isEmpty()) state["summary"] = m_summary;
+    if (!m_recent.isEmpty()) state["recent"] = m_recent;
+    return state;
 }
 
 QJsonObject AttentionTracker::decision(const QString &token)
 {
     if (token.size() > 8192) return {};
     const auto result = QJsonDocument::fromJson(QByteArray::fromBase64(token.toLatin1(), QByteArray::Base64UrlEncoding)).object();
-    if (result.value("decision").toString().isEmpty() || !result.value("project").isString()
-        || result.value("notice").toString().isEmpty()) return {};
+    if (!result.value("project").isString() || result.value("notice").toString().isEmpty()) return {};
+    if (result.value("decisions").toInt() > 0) return QJsonObject{{"task", QString()}, {"project", result.value("project")},
+        {"machine", QString()}, {"name", QString()}};
+    if (result.value("decision").toString().isEmpty()) return {};
     return QJsonObject{{"task", result.value("decision")}, {"project", result.value("project")},
         {"machine", result.value("machine").toString()}, {"name", result.value("name").toString()}};
 }

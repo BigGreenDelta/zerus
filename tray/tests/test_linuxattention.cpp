@@ -71,6 +71,12 @@ void TestLinuxAttention::exactTargetsPersistenceAndCancellation()
     QVERIFY(failed[0][1].toString().contains("Test delivery failure"));
     notifier->post("failed-delivery", "Attention", "Retry later");
     QTRY_COMPARE(server.calls.size(), 4);
+    // A notice may name its action: a Your Call task opens a task, not a session.
+    notifier->post("decision", "Zerus — Your Call", "om-k3f9x: Pick a store", "Open task");
+    QTRY_COMPARE(server.calls.size(), 5); QTest::qWait(30);
+    QCOMPARE(server.calls[4].actions, QStringList({"default", "Open task", "open-session", "Open task"}));
+    emit server.ActionInvoked(server.calls[4].id, "open-session");
+    QTRY_COMPARE(afterRestart.size(), 2); QCOMPARE(afterRestart[1][0].toString(), QString("decision"));
 }
 QTEST_GUILESS_MAIN(TestLinuxAttention)
 #include "test_linuxattention.moc"

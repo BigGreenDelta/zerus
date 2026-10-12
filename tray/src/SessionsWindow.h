@@ -146,6 +146,13 @@ private:
     void addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments,
                  MessageComposer::TaskDestination destination);
     void openSessionTasks();
+    // A Your Call session placed by its Overmind machine (see showDecision).
+    bool decisionSession(const QString &machine, const QString &session, QString *host) const;
+    // A decision click whose session was not placed yet selects it when it can.
+    void resolvePendingDecision();
+    struct PendingDecision { QString machine, session, selectedKey; QElapsedTimer age; };
+    PendingDecision m_pendingDecision;
+    static constexpr qint64 PendingDecisionMs = 20000;
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);

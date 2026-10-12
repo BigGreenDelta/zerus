@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <functional>
 
+#include "AttentionTracker.h"
 #include "FakeCli.h"
 #include "HgsClient.h"
 #include "OvermindModel.h"
@@ -226,6 +227,7 @@ private slots:
     void aSlowRevLeavesOnePollInFlight();
     void destroyingTheModelWithRequestsInFlightIsSafe();
     void disabledModelNeverCallsTheCli();
+    void yourCallNoticesSurviveResetsAndFailedReads();
 };
 
 void TestOvermindModel::requestOvermindParsesRepliesAndRefusals()
@@ -779,6 +781,42 @@ void TestOvermindModel::disabledModelNeverCallsTheCli()
     const int calls = settled([&] { return int(f.calls().size()); });
     QVERIFY(calls > 0);
     QCOMPARE(settled([&] { return int(f.calls().size()); }), calls);
+}
+
+// The tray's Your Call notices read the model: a list that is not loaded, a
+// failed read and the reset of a host change withdraw nothing and repeat nothing.
+void TestOvermindModel::yourCallNoticesSurviveResetsAndFailedReads()
+{
+    Fixture f; QVERIFY(f.setUp());
+    HgsClient client(FakeCli::program(f.script));
+    OvermindModel model(&client); model.setIntervals(50, 50);
+    AttentionTracker tracker;
+    const AttentionTracker::ProjectNames names{{"demo", "Demo"}};
+    QVERIFY(!model.decisionsLoaded());
+    QVERIFY(tracker.observeDecisions(model, names, 100, false).raised.isEmpty());
+    QTRY_VERIFY(model.decisionsLoaded());
+    auto changes = tracker.observeDecisions(model, names, 101, false);
+    QCOMPARE(changes.raised.size(), 1);
+    QCOMPARE(changes.raised[0].body, QString("om-3: Pick a database\nPostgres or SQLite?\nDemo / codex/demo"));
+    // A failed read keeps the last list and changes nothing.
+    QVERIFY(f.put("broken", "decisions")); QVERIFY(f.put("rev", "2"));
+    QTRY_VERIFY(!model.decisionsError().isEmpty());
+    changes = tracker.observeDecisions(model, names, 102, false);
+    QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    // A host change clears the model: an empty, unloaded list is no resolution.
+    QVERIFY(f.remove("broken"));
+    model.setHost("mac");
+    QVERIFY(!model.decisionsLoaded()); QVERIFY(model.decisions().isEmpty());
+    changes = tracker.observeDecisions(model, names, 103, false);
+    QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    // Read again on the other machine: the same decision, not announced twice.
+    QTRY_VERIFY(model.decisionsLoaded() && model.decisionsError().isEmpty());
+    changes = tracker.observeDecisions(model, names, 104, false);
+    QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    // Answered: it leaves the list and its notice is withdrawn.
+    QVERIFY(f.put("decisions.json", "[]")); QVERIFY(f.put("rev", "3"));
+    QTRY_VERIFY(model.decisions().isEmpty());
+    QCOMPARE(tracker.observeDecisions(model, names, 105, false).cleared.size(), 1);
 }
 
 QTEST_GUILESS_MAIN(TestOvermindModel)

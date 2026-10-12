@@ -13,8 +13,10 @@ class WindowsAttentionNotifier final : public AttentionNotifier {
 public:
     explicit WindowsAttentionNotifier(TrayIcon &tray) : m_tray(tray) {}
 
-    void post(const QString &token, const QString &title, const QString &body) override
+    // A tray message has no action button; a click on it opens the target.
+    void post(const QString &token, const QString &title, const QString &body, const QString &action = {}) override
     {
+        Q_UNUSED(action);
         if (!QSystemTrayIcon::supportsMessages()) {
             emit failed(token, tr("This desktop does not show tray notifications."));
             return;

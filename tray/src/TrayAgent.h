@@ -92,6 +92,9 @@ private:
     // window or not, and the window reads its boards with it (one poller).
     // Declared after m_client, which it uses, and destroyed after the window.
     OvermindModel m_overmind;
+    // Project names for Your Call notices, from the saved organization.
+    QByteArray m_organizationSeen;
+    AttentionTracker::ProjectNames m_projectNames;
     IconFactory m_icons;
     // Терминал прячется за интерфейсом целиком: в TrayAgent нет ни строчки D-Bus, и
     // замена Konsole на что угодно другое не трогает меню.

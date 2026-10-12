@@ -954,7 +954,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_overmind = overmind ? overmind : new OvermindModel(&m_client, this);
     m_tasks = new TasksView(m_overmind); tabs->addTab(m_tasks, tr("Tasks"));
     connect(m_tasks, &TasksView::showRequested, this, [this] { if (selected()) m_detailTabs->setCurrentWidget(m_tasks); });
-    connect(m_overmind, &OvermindModel::machineChanged, this, &SessionsWindow::updateTasksView);
+    connect(m_overmind, &OvermindModel::machineChanged, this, [this] { updateTasksView(); resolvePendingDecision(); });
     // Queues and decisions feed the Tasks chip and the session rows' badges.
     for (const auto signal : {&OvermindModel::machineChanged, &OvermindModel::decisionsChanged})
         connect(m_overmind, signal, this, &SessionsWindow::refreshOvermind);
@@ -1110,7 +1110,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
-    connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);updateTasksView();});
+    connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);updateTasksView();resolvePendingDecision();});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
         m_processes->applyPreferences();m_processPollAge.invalidate();
@@ -1820,6 +1820,7 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
             m_nativeLaunchToOpen.clear();showSession(host,name);break;
         }
     }
+    resolvePendingDecision();
 }
 void SessionsWindow::setClipboardMode(bool clipboard) { m_clipboard = clipboard; renderDetails(); }
 void SessionsWindow::updateDashboard()
@@ -1929,34 +1930,65 @@ void SessionsWindow::showAttentionSession(const QString &host, const QString &na
     inspect();
 }
 
+// The session that asked, placed by its Overmind machine: a same-named session
+// elsewhere is another one. A live session wins over an archived one.
+bool SessionsWindow::decisionSession(const QString &machine, const QString &session, QString *host) const
+{
+    if (machine.isEmpty() || session.isEmpty()) return false;
+    bool found = false, live = false;
+    for (const auto &entry : std::as_const(m_entries)) {
+        QString id;
+        if (entry.session.name != session || !overmindKnown(entry, &id)) continue;
+        if ((id.isEmpty() ? m_overmind->machine() : id) != machine || (found && live)) continue;
+        *host = entry.host; found = true; live = entry.session.state != "archived";
+    }
+    return found;
+}
+
 void SessionsWindow::showDecision(const QString &project, const QString &task, const QString &machine, const QString &session)
 {
-    // The session that asked, placed by its Overmind machine: a same-named
-    // session elsewhere is another one. Without it the selection stays.
-    QString host, name; bool found = false, live = false;
-    if (!machine.isEmpty() && !session.isEmpty())
-        for (const auto &entry : std::as_const(m_entries)) {
-            QString id;
-            if (entry.session.name != session || !overmindKnown(entry, &id)) continue;
-            if ((id.isEmpty() ? m_overmind->machine() : id) != machine || (found && live)) continue;
-            host = entry.host; name = entry.session.name; found = true; live = entry.session.state != "archived";
-        }
+    m_pendingDecision = {};
+    QString host;
+    const bool found = decisionSession(machine, session, &host);
     bool listed = false;
     for (const auto &group : m_organization.groups()) listed |= group.accessible && group.id == project;
     if (!listed) {
         // No board to open here: the session's Activity shows the question.
-        if (found) showAttentionSession(host, name); else showSessionList();
-        showNotice(tr("The project %1 of this task is not listed on this computer.").arg(project), false);
+        if (found) showAttentionSession(host, session); else showSessionList();
+        const auto *group = m_organization.group(project);
+        showNotice(group && !group->name.isEmpty() ? tr("The project %1 of this task is not listed on this computer.").arg(group->name)
+                                                   : tr("This task's project is not listed on this computer."), false);
         return;
     }
-    if (found) showSession(host, name); else showSessionList();
+    if (found) showSession(host, session); else showSessionList();
     if (!selected()) {
         showNotice(tr("Select a session to open the Tasks tab."), false);
         return;
     }
     updateTasksView();
     m_tasks->showProject(project, m_selectedKey);
-    if (m_tasks->project() == project) m_tasks->openTask(task);
+    if (!task.isEmpty() && m_tasks->project() == project) m_tasks->openTask(task);
+    // A window the click has just created may not know the peers' machines
+    // yet: the session is selected once the catalog, the board's machine or
+    // the fleet places it, unless the person chose another one meanwhile.
+    if (!found && !machine.isEmpty() && !session.isEmpty()) {
+        m_pendingDecision.machine = machine; m_pendingDecision.session = session; m_pendingDecision.selectedKey = m_selectedKey;
+        m_pendingDecision.age.start();
+    }
+}
+
+void SessionsWindow::resolvePendingDecision()
+{
+    if (m_pendingDecision.session.isEmpty()) return;
+    if (m_pendingDecision.age.elapsed() > PendingDecisionMs || m_selectedKey != m_pendingDecision.selectedKey) {
+        m_pendingDecision = {};
+        return;
+    }
+    QString host;
+    if (!decisionSession(m_pendingDecision.machine, m_pendingDecision.session, &host)) return;
+    const QString session = m_pendingDecision.session;
+    m_pendingDecision = {};
+    showSession(host, session);
 }
 
 void SessionsWindow::populateBatchActions(QMenu *menu)

@@ -8,7 +8,7 @@ class LinuxAttentionNotifier : public AttentionNotifier {
     Q_OBJECT
 public:
     explicit LinuxAttentionNotifier(const QDBusConnection &bus = QDBusConnection::sessionBus());
-    void post(const QString &token, const QString &title, const QString &body) override;
+    void post(const QString &token, const QString &title, const QString &body, const QString &action = {}) override;
     void withdraw(const QString &token) override;
 private slots:
     void action(uint id, const QString &action);

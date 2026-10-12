@@ -40,15 +40,16 @@ void LinuxAttentionNotifier::save()
     settings.setValue("attention/linuxTokens", QJsonDocument(tokens).toJson(QJsonDocument::Compact));
 }
 
-void LinuxAttentionNotifier::post(const QString &token, const QString &title, const QString &body)
+void LinuxAttentionNotifier::post(const QString &token, const QString &title, const QString &body, const QString &action)
 {
     if (m_pending.contains(token) || m_tokens.values().contains(token)) return;
     m_pending.insert(token);
     auto message = call("Notify");
     const QVariantMap hints{{"desktop-entry", "hgs-tray"}, {"urgency", QVariant::fromValue(uchar(1))},
         {"category", "im.received"}};
+    const QString label = action.isEmpty() ? tr("Open session") : action;
     message.setArguments({"Zerus", uint(0), "hgs-zerus-swarm-symbolic", title,
-        body.toHtmlEscaped(), QStringList{"default", tr("Open session"), "open-session", tr("Open session")}, hints, -1});
+        body.toHtmlEscaped(), QStringList{"default", label, "open-session", label}, hints, -1});
     auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(message, 5000), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, token](QDBusPendingCallWatcher *watcher) {
         const QDBusPendingReply<uint> reply = *watcher; watcher->deleteLater();

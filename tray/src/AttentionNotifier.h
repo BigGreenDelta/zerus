@@ -10,7 +10,9 @@ class AttentionNotifier : public QObject {
     Q_OBJECT
 public:
     using QObject::QObject;
-    virtual void post(const QString &token, const QString &title, const QString &body) = 0;
+    // `action` labels the action button where the platform shows one; empty
+    // keeps the notifier's own ("Open session").
+    virtual void post(const QString &token, const QString &title, const QString &body, const QString &action = {}) = 0;
     virtual void withdraw(const QString &token) = 0;
 signals:
     void activated(const QString &token, const QString &activationToken);
