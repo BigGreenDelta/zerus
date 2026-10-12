@@ -1398,7 +1398,9 @@ name a live session, and a session environment that does not verify is refused.
 An agent acts on tasks assigned to its session; the session a task was sent to
 for review may also comment on it, attach images to it and record its verdict.
 In a Git repository, the evidence for review is a commit that exists there.
-Agents use `hgs overmind` on their own machine; `@host` is for people.
+Agents use `hgs overmind` on their own machine; `@host` is for people. The
+`hgs swarm overmind-*` requests that peers make over SSH refuse a caller with
+`HGS_SESSION` or `HGS_RUN_ID` set.
 
 Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
 blobs by SHA-256 and a `rev` file that changes with every write). The desktop

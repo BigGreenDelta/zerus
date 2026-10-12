@@ -137,6 +137,17 @@ class Overmind(unittest.TestCase):
         self.assertIn('agents use hgs overmind on their own machine; @host is for people', result.stderr)
         self.assertFalse(marker.exists())
 
+    def test_swarm_requests_never_come_from_sessions(self):
+        def swarm(env):
+            return subprocess.run([str(HGS), 'swarm', 'overmind-blobs'], input=json.dumps({'want': []}), env=env,
+                                  text=True, capture_output=True, timeout=20)
+        self.assertEqual(json.loads(swarm(self.env).stdout), {'missing': []})
+        self.assertEqual(swarm(dict(self.env, HGS_SESSION='', HGS_RUN_ID='')).returncode, 0)
+        for extra in ({'HGS_SESSION': 'claude/demo/w1'}, {'HGS_RUN_ID': str(uuid.uuid4())}):
+            result = swarm(dict(self.env, **extra))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn('Overmind swarm requests come from other machines, not from sessions', result.stderr)
+
     def test_people_cannot_use_agent_commands(self):
         created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})
         error = self.refused('advance', '--json', data={'task': created['task']['ref'], 'to': 'Build', 'spec': 's'})

@@ -214,6 +214,13 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         action if action.starts_with("overmind-") => {
             #[cfg(unix)]
             {
+                // Peers call these over SSH, which carries no session environment;
+                // an agent must never reach another machine's tasks this way.
+                let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+                ensure!(
+                    !set("HGS_SESSION") && !set("HGS_RUN_ID"),
+                    "Overmind swarm requests come from other machines, not from sessions"
+                );
                 crate::overmind::serve(config, action, input()?)
             }
             #[cfg(not(unix))]
