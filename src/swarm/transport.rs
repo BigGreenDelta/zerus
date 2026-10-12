@@ -125,6 +125,10 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     let mut store = LockedStore::load(config)?;
     store.save()?;
     let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::kinds()});
+    #[cfg(unix)]
+    {
+        result["features"] = json!([crate::overmind::FEATURE]);
+    }
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
@@ -246,7 +250,21 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
         peer.last_sync = now();
         peer.error.clear();
     }
-    local.save()
+    let saved = local.save();
+    // `replicate` opens the Overmind store, which takes the catalog lock too.
+    drop(local);
+    #[cfg(unix)]
+    if identity["features"]
+        .as_array()
+        .is_some_and(|features| features.iter().any(|f| f == crate::overmind::FEATURE))
+    {
+        let node = identity["node_id"].as_str().unwrap_or_default().to_owned();
+        let mut call = |request: &Value| remote(config, alias, "overmind-exchange", Some(request));
+        if let Err(error) = crate::overmind::replicate(config, alias, &node, &mut call) {
+            eprintln!("hgs swarm: Overmind exchange with {alias}: {error:#}");
+        }
+    }
+    saved
 }
 
 pub fn sync(config: &Config) -> Result<Value> {
@@ -452,6 +470,7 @@ pub fn worker() -> Result<()> {
     }
     let mut schedule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut last_digest = String::new();
+    let mut last_overmind = String::new();
     loop {
         // An upgrade replaced this program: exit so that the service manager
         // starts the new version. Catalog errors never end the loop.
@@ -465,7 +484,11 @@ pub fn worker() -> Result<()> {
                 let mut store = LockedStore::load(&config)?;
                 store.save()?;
                 let digest = store.data.catalog.digest();
-                let changed = digest != last_digest;
+                #[cfg(unix)]
+                let overmind = crate::overmind::revision(&config);
+                #[cfg(not(unix))]
+                let overmind = String::new();
+                let changed = digest != last_digest || overmind != last_overmind;
                 let peers: Vec<_> = store.data.peers.keys().cloned().collect();
                 drop(store);
                 for alias in peers {
@@ -490,6 +513,7 @@ pub fn worker() -> Result<()> {
                     }
                 }
                 last_digest = LockedStore::load(&config)?.data.catalog.digest();
+                last_overmind = overmind;
                 Ok(())
             }) {
             Ok(()) => {}

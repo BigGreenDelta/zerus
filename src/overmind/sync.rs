@@ -1,7 +1,6 @@
 //! Replication between machines (spec Part 2). One call pushes and pulls, so a
 //! peer reachable in one direction only still converges. The transport is the
 //! caller's business: the swarm worker passes its SSH call.
-#![allow(dead_code)] // The swarm worker calls this from Task 5.
 use super::model::now;
 use super::store::{PeerState, Store};
 use anyhow::{anyhow, ensure, Result};

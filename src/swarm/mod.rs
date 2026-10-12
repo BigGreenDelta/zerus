@@ -141,6 +141,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
     }
 }
 
+/// One swarm transport call for other modules (Overmind replication and delivery).
+// Overmind delivery (Task 6) is its first caller.
+#[allow(dead_code)]
+pub(crate) fn call(config: &Config, alias: &str, action: &str, request: Option<&Value>) -> Result<Value> {
+    transport::remote(config, alias, action, request)
+}
+
 fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let action = args.first().map(String::as_str).unwrap_or("get");
     let alias = || {
@@ -194,6 +201,16 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             }
             snapshot["written"] = json!(written);
             Ok(snapshot)
+        }
+        action if action.starts_with("overmind-") => {
+            #[cfg(unix)]
+            {
+                crate::overmind::serve(config, action, input()?)
+            }
+            #[cfg(not(unix))]
+            {
+                bail!("Overmind is not available on this machine")
+            }
         }
         _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set"),
     }
