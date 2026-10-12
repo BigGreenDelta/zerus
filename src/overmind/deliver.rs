@@ -342,6 +342,223 @@ pub fn resolve_delivery(ctx: &mut Ctx, request: Value) -> Result<Value> {
         commands::task_result(tx, &uuid)
     })
 }
+/// Review goes to another session, for a task in a review stage.
+fn review_gates(tx: &Tx, task: &Task, session: &SessionRef) -> Result<()> {
+    if task.labels.contains("epic") {
+        return refuse("epic", "an epic is a container and is never reviewed");
+    }
+    if workflow(tx, &task.project)?.role(&task.stage) != Some(Role::Review) {
+        return refuse("transition_not_allowed", "only a task in review can be sent for review");
+    }
+    if task.assignee.as_ref() == Some(session) {
+        return refuse("not_independent", "the session that did the work cannot review it");
+    }
+    Ok(())
+}
+
+fn assignee_of(task: &Task) -> Result<SessionRef> {
+    task.assignee
+        .clone()
+        .ok_or_else(|| Refusal::new("transition_not_allowed", "this task is not assigned to a session").into())
+}
+
+/// The session that rework or an answer goes to.
+fn assignee_for(task: &Task, purpose: &str) -> Result<SessionRef> {
+    let assignee = assignee_of(task)?;
+    match purpose {
+        "rework" if !task.labels.contains("review-failed") => refuse("not_reviewed", "rework follows a review that asked for changes"),
+        "answer" if task.resume_stage.is_empty() => refuse("no_question", "this task is not waiting for an answer"),
+        _ => Ok(assignee),
+    }
+}
+
+/// A retry after typing: the input receipt of this request exists, so the
+/// gates, the session checks and the intent were done by the first attempt.
+fn typed_before(request_id: &str) -> bool {
+    !request_id.is_empty() && crate::state::input_receipt_exists(request_id)
+}
+
+fn input_id(request_id: &str) -> String {
+    if request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { request_id.to_owned() }
+}
+
+/// The session's delivery target after the session checks. A retry after
+/// typing skips the checks and keeps a lookup error for `deliver_resumed`.
+fn target_for(store: &Store, session: &SessionRef, confirmed: &Confirmed, resumed: bool) -> Result<Result<DeliveryTarget>> {
+    let target = local_target(store, session);
+    if resumed {
+        return Ok(target);
+    }
+    let target = target?;
+    check_session(session, &target, confirmed)?;
+    Ok(Ok(target))
+}
+
+fn deliver_resumed(session: &SessionRef, target: Result<DeliveryTarget>, attachments: Result<Vec<Value>>, input: &str, text: &str) -> Outcome {
+    match (target, attachments) {
+        (Ok(target), Ok(files)) => deliver(session, &target, input, text, files),
+        (Err(error), _) | (_, Err(error)) => Outcome::Uncertain(format!("{error:#}")),
+    }
+}
+
+/// Records a delivery that is not a claim; `undo` runs when it surely failed.
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    ctx: &mut Ctx,
+    command: &str,
+    request: &Value,
+    uuid: &str,
+    purpose: &str,
+    session: &SessionRef,
+    outcome: Outcome,
+    undo: impl FnOnce(&mut Tx, &Actor, &Task) -> Result<()>,
+) -> Result<Value> {
+    let actor = ctx.actor.clone();
+    let result = ctx.store.write(|tx| {
+        // Two retries of one request: the first to settle wins.
+        if let Some(result) = commands::replay(tx, command, request)? {
+            return Ok(result);
+        }
+        let task = load(tx, uuid)?;
+        match &outcome {
+            Outcome::Sent => journal(tx, &actor, &task, "[sent]", &format!("{purpose}: {}", session.name), "")?,
+            Outcome::Uncertain(why) => {
+                journal(tx, &actor, &task, "[sent?]", &format!("{purpose}: {why}"), "")?;
+                flag(tx, &actor, &task, "delivery_uncertain", true)?;
+            }
+            Outcome::NotSent(_) => undo(tx, &actor, &task)?,
+        }
+        let task = load(tx, uuid)?;
+        let result = json!({"ok": true, "delivery": outcome.name(), "reason": outcome.reason(), "task": view(&task, &reference(tx, uuid)?, true)});
+        if !matches!(outcome, Outcome::NotSent(_)) {
+            commands::remember(tx, command, request, &result)?;
+        }
+        Ok(result)
+    })?;
+    if let Outcome::NotSent(why) = outcome {
+        return Err(Refusal::new("not_delivered", format!("not delivered: {why}")).into());
+    }
+    Ok(result)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewSendRequest {
+    #[serde(default)]
+    request_id: String,
+    task: String,
+    session: NamedSession,
+    #[serde(default)]
+    confirm: Confirmed,
+}
+
+pub fn review_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    human_only(&ctx.actor)?;
+    let req: ReviewSendRequest = parse(&request)?;
+    let session = local_session("session", Some(SessionRef { machine: req.session.machine.clone(), name: req.session.name.clone() }), ctx.store.machine())?.expect("a session was given");
+    if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "review-send", &request))? {
+        return Ok(result);
+    }
+    let resumed = typed_before(&req.request_id);
+    let dir = ctx.store.dir().to_owned();
+    let (uuid, attachments) = ctx.store.read(|tx| {
+        let uuid = resolve(tx, &req.task)?;
+        let task = load_writable(tx, &uuid)?;
+        if !resumed {
+            review_gates(tx, &task, &session)?;
+        }
+        Ok((uuid, files(&dir, &task)))
+    })?;
+    let attachments = if resumed { attachments } else { Ok(attachments?) };
+    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    let actor = ctx.actor.clone();
+    let text = ctx.store.write(|tx| {
+        let task = load_writable(tx, &uuid)?;
+        if !resumed {
+            review_gates(tx, &task, &session)?;
+            simple(tx, &actor, &task, "reviewer_set", json!({"session": session}), "")?;
+        }
+        render(tx, &load(tx, &uuid)?, "review", "")
+    })?;
+    let outcome = deliver_resumed(&session, target, attachments, &input_id(&req.request_id), &text);
+    settle(ctx, "review-send", &request, &uuid, "review", &session, outcome, |tx, actor, task| {
+        simple(tx, actor, task, "reviewer_set", json!({"session": null}), "")?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReworkRequest {
+    #[serde(default)]
+    request_id: String,
+    task: String,
+    #[serde(default)]
+    confirm: Confirmed,
+}
+
+pub fn rework_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    human_only(&ctx.actor)?;
+    let req: ReworkRequest = parse(&request)?;
+    if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "rework-send", &request))? {
+        return Ok(result);
+    }
+    let resumed = typed_before(&req.request_id);
+    let dir = ctx.store.dir().to_owned();
+    let (uuid, session, text, attachments) = ctx.store.read(|tx| {
+        let uuid = resolve(tx, &req.task)?;
+        let task = load_writable(tx, &uuid)?;
+        let session = if resumed { assignee_of(&task)? } else { assignee_for(&task, "rework")? };
+        Ok((uuid, session, render(tx, &task, "rework", "")?, files(&dir, &task)))
+    })?;
+    let attachments = if resumed { attachments } else { Ok(attachments?) };
+    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    let outcome = deliver_resumed(&session, target, attachments, &input_id(&req.request_id), &text);
+    settle(ctx, "rework-send", &request, &uuid, "rework", &session, outcome, |_, _, _| Ok(()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerRequest {
+    #[serde(default)]
+    request_id: String,
+    task: String,
+    answer: String,
+    #[serde(default)]
+    confirm: Confirmed,
+}
+
+pub fn answer(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    human_only(&ctx.actor)?;
+    let req: AnswerRequest = parse(&request)?;
+    if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "answer", &request))? {
+        return Ok(result);
+    }
+    let resumed = typed_before(&req.request_id);
+    let text = commands::normalize(&req.answer);
+    let (uuid, session) = ctx.store.read(|tx| {
+        let uuid = resolve(tx, &req.task)?;
+        let task = load_writable(tx, &uuid)?;
+        let session = if resumed { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
+        Ok((uuid, session))
+    })?;
+    let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
+    let actor = ctx.actor.clone();
+    let typed = ctx.store.write(|tx| {
+        let task = load_writable(tx, &uuid)?;
+        if !resumed {
+            let fields = BTreeMap::from([("answer".to_owned(), text.clone())]);
+            transition(tx, &actor, &task, Action::Answer, super::workflow::RESUME, fields, None, vec![], "")?;
+        }
+        render(tx, &load(tx, &uuid)?, "answer", &text)
+    })?;
+    let outcome = deliver_resumed(&session, target, Ok(Vec::new()), &input_id(&req.request_id), &typed);
+    // The answer stays recorded; the person sees it was not delivered.
+    settle(ctx, "answer", &request, &uuid, "answer", &session, outcome, |tx, actor, task| {
+        journal(tx, actor, task, "[comment]", &format!("the answer was not delivered to {}", session.name), "")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +689,38 @@ mod tests {
             assert!(!result["task"]["flags"].as_array().unwrap().contains(&json!("delivery_uncertain")));
             assert_eq!(result["task"]["stage"], if delivered { "Design" } else { "Queue" });
         }
+    }
+
+    #[test]
+    fn review_needs_another_session_and_a_task_in_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let uuid = new_task(&mut store, "Queue");
+        claim(&mut store, &uuid, "w1", "");
+        let gate = |store: &mut Store, name: &str| store.read(|tx| review_gates(tx, &load(tx, &uuid)?, &session(name)));
+        assert_eq!(code(gate(&mut store, "w2")), "transition_not_allowed");
+        store
+            .write(|tx| {
+                let agent = Actor::agent(MACHINE, "w1");
+                let task = load(tx, &uuid)?;
+                transition(tx, &agent, &task, Action::Advance, "Build", BTreeMap::from([("spec".to_owned(), "s".to_owned())]), None, vec![], "")?;
+                let task = load(tx, &uuid)?;
+                let fields = BTreeMap::from([("worklog".to_owned(), "w".to_owned()), ("evidence".to_owned(), "e".to_owned())]);
+                transition(tx, &agent, &task, Action::Advance, "Review", fields, None, vec![], "")
+            })
+            .unwrap();
+        assert_eq!(code(gate(&mut store, "w1")), "not_independent");
+        assert!(gate(&mut store, "w2").is_ok());
+    }
+
+    #[test]
+    fn rework_and_answer_go_to_the_assignee() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let uuid = new_task(&mut store, "Queue");
+        assert_eq!(code(store.read(|tx| assignee_for(&load(tx, &uuid)?, "rework"))), "transition_not_allowed");
+        claim(&mut store, &uuid, "w1", "");
+        assert_eq!(code(store.read(|tx| assignee_for(&load(tx, &uuid)?, "rework"))), "not_reviewed");
+        assert_eq!(code(store.read(|tx| assignee_for(&load(tx, &uuid)?, "answer"))), "no_question");
     }
 }

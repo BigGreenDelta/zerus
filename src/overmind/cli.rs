@@ -19,6 +19,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   move --json {task, to}  |  done --json {task}  |  reopen --json {task}
   reorder --json {task, before?}  |  pin --json {task, session?}  |  unpin --json {task}
   send --json {task, session: {machine?, name}, confirm?: [codes]}   claim and type the task into a session
+  review-send --json {task, session, confirm?}  |  rework-send --json {task, confirm?}  |  answer --json {task, answer, confirm?}
   resolve-delivery --json {task, delivered: true|false}
   label --json {task, label, present}  |  link --json {task, relation, target, present}
   comment --json {task, text}  |  delete --json {task}
@@ -112,6 +113,9 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("pin", []) => commands::pin(&mut ctx, request)?,
         ("unpin", []) => commands::unpin(&mut ctx, request)?,
         ("send", []) => super::deliver::send(&mut ctx, request)?,
+        ("review-send", []) => super::deliver::review_send(&mut ctx, request)?,
+        ("rework-send", []) => super::deliver::rework_send(&mut ctx, request)?,
+        ("answer", []) => super::deliver::answer(&mut ctx, request)?,
         ("resolve-delivery", []) => super::deliver::resolve_delivery(&mut ctx, request)?,
         ("label", []) => commands::label(&mut ctx, request)?,
         ("link", []) => commands::link(&mut ctx, request)?,

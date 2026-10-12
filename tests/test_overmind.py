@@ -189,20 +189,30 @@ class AgentSession(unittest.TestCase):
         self.assertEqual(code, 0, body)
         return body
 
-    def claim(self, request_id=''):
-        """Claims the only task for this session; plan 1a has no command for it."""
+    def append(self, kind, payload, actor=None, base=None, request_id=''):
+        """Appends one event to the only task; plan 1a has no command for some of them."""
         db = sqlite3.connect(self.state / 'overmind/overmind.sqlite3')
         with db:
             created = json.loads(db.execute("SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])
+            if base is None:
+                rows = db.execute("SELECT raw FROM events WHERE kind = 'transition' ORDER BY seq").fetchall()
+                base = json.loads(rows[-1][0])['id'] if rows else created['id']
             seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
-            event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind='transition',
-                         base=created['id'], request_id=request_id,
-                         payload={'action': 'claim', 'to': 'Design', 'fields': {},
-                                  'session': {'machine': created['origin'], 'name': self.name}})
+            event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind=kind,
+                         base=base, request_id=request_id, payload=payload)
+            if actor is not None:
+                event['actor'] = actor
             db.execute('INSERT INTO events(origin, seq, id, lamport, task, project, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                        (event['origin'], seq, event['id'], lamport, event['task'], event['project'], event['kind'],
                         json.dumps(event)))
         db.close()
+
+    def claim(self, request_id='', name=None):
+        """Claims the only task for a session (this one by default)."""
+        machine = json.loads(sqlite3.connect(self.state / 'overmind/overmind.sqlite3').execute(
+            "SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])['origin']
+        self.append('transition', {'action': 'claim', 'to': 'Design', 'fields': {},
+                                   'session': {'machine': machine, 'name': name or self.name}}, request_id=request_id)
 
     def person(self, *args, data=None):
         return self.ok(*args, data=data, agent=False)
@@ -289,6 +299,68 @@ class AgentSession(unittest.TestCase):
         code, body = self.send(ref)
         self.assertEqual((code, body['error']['code']), (1, 'invalid_template'))
         self.assertEqual(self.person('show', ref)['task']['stage'], 'Queue')
+
+    def agent_reaches_review(self, ref, assignee):
+        """The task moves to Review as if `assignee` did the work."""
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.claim(name=assignee)
+        agent = {'kind': 'agent', 'machine': machine, 'session': assignee}
+        self.append('transition', {'action': 'advance', 'to': 'Build', 'fields': {'spec': 's'}}, actor=agent)
+        self.append('transition', {'action': 'advance', 'to': 'Review', 'fields': {'worklog': 'w', 'evidence': 'e'}}, actor=agent)
+
+    def test_review_send_types_the_review_text_to_another_session(self):
+        ref = self.task()
+        self.agent_reaches_review(ref, 'codex/other')
+        code, body = self.overmind('review-send', '--json', data={'task': ref, 'session': {'name': self.name}}, agent=False)
+        self.assertEqual((code, body['delivery'], body['task']['reviewer']['name']), (0, 'sent', self.name), body)
+        self.wait_for(lambda: b'Review: Fix the drafts' in self.received())
+        verdict = self.ok('review', '--json', data={'task': ref, 'verdict': 'needs_work', 'report': 'Add tests'})
+        self.assertEqual(verdict['task']['stage'], 'Build')
+
+    def test_rework_and_answer_reach_the_assignee(self):
+        ref = self.task()
+        self.claim()
+        self.ok('advance', '--json', data={'task': ref, 'to': 'Build', 'spec': 's'})
+        self.ok('call-human', '--json', data={'task': ref, 'question': 'REST or gRPC?'})
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST'}, agent=False)
+        self.assertEqual((code, body['delivery'], body['task']['stage']), (0, 'sent', 'Build'), body)
+        self.wait_for(lambda: b'REST' in self.received())
+        code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'not_reviewed'))
+
+    def test_an_answer_retry_replays_and_types_nothing_new(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.claim()
+        self.ok('advance', '--json', data={'task': ref, 'to': 'Build', 'spec': 's'})
+        self.ok('call-human', '--json', data={'task': ref, 'question': 'REST or gRPC?'})
+        data = {'task': ref, 'answer': 'REST', 'request_id': request_id}
+        first = self.overmind('answer', '--json', data=data, agent=False)
+        self.wait_for(lambda: b'REST' in self.received())
+        typed = self.received()
+        self.assertEqual(self.overmind('answer', '--json', data=data, agent=False), first)
+        self.assertEqual(self.received(), typed)
+
+    def test_a_retry_after_typing_skips_the_gates(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.claim(name='codex/other')  # not in review: the review gate would refuse
+        typed = subprocess.run(
+            [str(HGS), 'send', self.name, '--json'], env=self.env, text=True, capture_output=True, timeout=20,
+            input=json.dumps({'request_id': request_id, 'text': 'typed before the crash',
+                              'expected_run_id': self.record['run_id'],
+                              'expected_conversation_id': self.record['conversation_id']}))
+        self.assertEqual(typed.returncode, 0, typed.stderr)
+        self.wait_for(lambda: b'\r' in self.received())
+        self.record['activity'] = 'busy'  # agent_busy would refuse a fresh request
+        self.write_record()
+        code, body = self.overmind('review-send', '--json', agent=False,
+                                   data={'task': ref, 'session': {'name': self.name}, 'request_id': request_id})
+        self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
+        markers = [j['marker'] for j in body['task']['journal']]
+        self.assertEqual(markers.count('[sent?]'), 1)
+        self.assertNotIn('reviewer_set', json.dumps(body['task']['journal']))
+        self.assertIn('delivery_uncertain', body['task']['flags'])
 
     def commit(self, repo):
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
