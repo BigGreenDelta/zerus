@@ -181,40 +181,73 @@ pub fn push_blobs(config: &Config, alias: &str, store: &Store, task: &Task) -> R
 /// command there as a person and pulls the claim and its outcome back.
 pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, machine: &str) -> Result<Value> {
     let config = Config::load().map_err(|e| anyhow!(e.message))?;
-    let unreachable = |message: String| -> anyhow::Error { Refusal::field("host_unreachable", "session", "invalid", message).into() };
+    // The request names the receiving session itself, or (rework, answer) only the task.
+    let field = if request.get("session").is_some() { "session" } else { "task" };
+    let unreachable = |message: String| -> anyhow::Error { Refusal::field("host_unreachable", field, "invalid", message).into() };
     let alias = crate::swarm::alias_for(&config, machine).ok_or_else(|| {
         unreachable("this machine has no verified route to the session's machine; connect it in the swarm".into())
     })?;
     let hello = crate::swarm::call(&config, &alias, "hello", None)
         .map_err(|error| unreachable(format!("the session's machine cannot be reached: {error:#}")))?;
-    ensure!(hello["node_id"] == machine, "the machine behind {alias} changed identity");
-    if !hello["features"].as_array().is_some_and(|features| features.iter().any(|f| f == super::sync::FEATURE)) {
-        return Err(Refusal::field("host_outdated", "session", "invalid", "update HGS on the session's machine").into());
+    if hello["node_id"] != machine {
+        let message = format!("the machine behind {alias} is no longer the session's machine; nothing was attempted on it");
+        return Err(Refusal::field("host_changed", field, "invalid", message).into());
     }
+    if !hello["features"].as_array().is_some_and(|features| features.iter().any(|f| f == super::sync::FEATURE)) {
+        return Err(Refusal::field("host_outdated", field, "invalid", "update HGS on the session's machine").into());
+    }
+    // Everything up to the delivery call leaves the host untouched.
+    let not_attempted = |what: &str, error: anyhow::Error| -> anyhow::Error {
+        match error.downcast::<Refusal>() {
+            Ok(refusal) => refusal.into(),
+            Err(error) => {
+                let message = format!("{what} {alias} failed ({error:#}); nothing was attempted on the session's machine");
+                Refusal::new("host_sync_failed", message).into()
+            }
+        }
+    };
     let mut exchange = |request: &Value| crate::swarm::call(&config, &alias, "overmind-exchange", Some(request));
-    super::sync::exchange(store, machine, &alias, &mut exchange)?;
+    super::sync::exchange(store, machine, &alias, &mut exchange)
+        .map_err(|error| not_attempted("bringing the task up to date on", error))?;
     let loaded = store.read(|tx| commands::load(tx, task))?;
-    push_blobs(&config, &alias, store, &loaded)?;
+    push_blobs(&config, &alias, store, &loaded).map_err(|error| not_attempted("giving the task's images to", error))?;
     // The host may have acted before the call failed, so the outcome is unknown.
     let answer = crate::swarm::call(&config, &alias, "overmind-deliver", Some(&json!({"command": command, "request": request})))
         .map_err(|error| -> anyhow::Error {
-            let message = format!("the session's machine {alias} did not report the delivery ({error:#}); check the task before sending it again");
+            let text = format!("{error:#}");
+            // An old host rejected the call before running anything.
+            if text.contains("does not know the Overmind") {
+                return Refusal::field("host_outdated", field, "invalid", "update HGS on the session's machine").into();
+            }
+            let message = format!("the session's machine {alias} did not report the delivery ({text}); check the task before sending it again");
             Refusal::new("delivery_unknown", message).into()
         })?;
     // A failure here only delays the board: the worker exchanges again soon.
-    let _ = super::sync::exchange(store, machine, &alias, &mut exchange);
-    host_answer(answer)
+    let pulled = super::sync::exchange(store, machine, &alias, &mut exchange).is_ok();
+    let mut result = host_answer(answer, field)?;
+    if pulled && result.get("task").is_some() {
+        // The host's view carries the host's reference; this machine's is the one the caller can use.
+        let local = store.read(|tx| Ok(commands::view(&commands::load(tx, task)?, &commands::reference(tx, task)?, true)));
+        if let Ok(view) = local {
+            result["task"] = view;
+        }
+    }
+    Ok(result)
 }
 
 /// The host's result, or its refusal as the same refusal here. Only an
-/// explicit `ok: true` is a result.
-fn host_answer(answer: Value) -> Result<Value> {
+/// explicit `ok: true` is a result. `field` is what the caller calls the
+/// receiving session; the host's refusals about it use that name.
+fn host_answer(answer: Value, field: &str) -> Result<Value> {
     if answer["ok"] == true {
         return Ok(answer);
     }
     ensure!(answer["ok"] == false, "the session's machine sent an invalid answer");
-    let refusal: Refusal = serde_json::from_value(answer["error"].clone())
+    let mut refusal: Refusal = serde_json::from_value(answer["error"].clone())
         .map_err(|error| anyhow!("the session's machine sent an invalid refusal: {error}"))?;
+    if refusal.field == "session" {
+        refusal.field = field.into();
+    }
     Err(refusal.into())
 }
 
@@ -355,14 +388,18 @@ mod tests {
     #[test]
     fn a_host_refusal_becomes_the_same_refusal() {
         let sent = json!({"ok": true, "delivery": "sent"});
-        assert_eq!(host_answer(sent.clone()).unwrap(), sent);
+        assert_eq!(host_answer(sent.clone(), "session").unwrap(), sent);
         let refused = json!({"ok": false, "error": {"code": "agent_busy", "message": "busy", "field": "confirm", "state": "missing"}});
-        let refusal = host_answer(refused).unwrap_err().downcast::<Refusal>().unwrap();
+        let refusal = host_answer(refused, "session").unwrap_err().downcast::<Refusal>().unwrap();
         assert_eq!(refusal, Refusal::field("agent_busy", "confirm", "missing", "busy"));
-        assert!(host_answer(json!({"ok": false, "error": "garbage"})).unwrap_err().downcast::<Refusal>().is_err());
+        // A request without a session names the receiving session by its task.
+        let about_session = json!({"ok": false, "error": {"code": "unknown_session", "message": "m", "field": "session", "state": "invalid"}});
+        assert_eq!(host_answer(about_session.clone(), "task").unwrap_err().downcast::<Refusal>().unwrap().field, "task");
+        assert_eq!(host_answer(about_session, "session").unwrap_err().downcast::<Refusal>().unwrap().field, "session");
+        assert!(host_answer(json!({"ok": false, "error": "garbage"}), "session").unwrap_err().downcast::<Refusal>().is_err());
         // Only an explicit success is one.
         for answer in [json!({"delivery": "sent"}), json!({"ok": "yes"}), json!(null)] {
-            assert!(host_answer(answer.clone()).unwrap_err().downcast::<Refusal>().is_err(), "{answer}");
+            assert!(host_answer(answer.clone(), "session").unwrap_err().downcast::<Refusal>().is_err(), "{answer}");
         }
     }
 

@@ -101,7 +101,8 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         uuid::Uuid::parse_str(&request.from).is_ok() && request.from != store.machine(),
         "invalid Overmind exchange request"
     );
-    if outgrown(&store.version_vector()?, &request.vector, store.origin()) {
+    let (origin, current) = store.current()?;
+    if outgrown(&current, &request.vector, &origin) {
         store.rotate_origin()?;
         let mut state = store
             .peer(&request.from)?
@@ -168,8 +169,10 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         ensure!(response.machine == peer, "the machine behind this peer changed identity");
         summary.peer_refused += response.refused;
         // Before anything is written here again: peers hold more of this
-        // store's origin than this store does.
-        if outgrown(&own, &response.vector, store.origin()) {
+        // store's origin than this store does. Another process may have written
+        // or rotated since the call began, so the store is read again now.
+        let (origin, current) = store.current()?;
+        if outgrown(&current, &response.vector, &origin) {
             store.rotate_origin()?;
             summary.rotated = true;
         }
@@ -426,6 +429,30 @@ mod tests {
         comment(&mut b, "t", 10);
         assert!(b.version_vector().unwrap().contains_key(b.origin()));
         assert_eq!(b.version_vector().unwrap().get(&old), Some(&3), "the events the old origin lost came back");
+    }
+
+    #[test]
+    fn a_concurrent_write_during_the_exchange_does_not_rotate_the_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+        let mut other = Store::open(&dir.path().join("a"), A).unwrap();
+        let mut b = Store::open(&dir.path().join("b"), B).unwrap();
+        comment(&mut a, "t", 10);
+        let origin = a.origin().to_owned();
+        let summary = exchange(&mut a, B, "b", &mut |request| {
+            // A second process writes and passes the event on while this call is under way.
+            comment(&mut other, "t", 10);
+            exchange(&mut other, B, "b", &mut |inner| serve(&mut b, inner.clone()))?;
+            serve(&mut b, request.clone())
+        })
+        .unwrap();
+        assert!(!summary.rotated, "{summary:?}");
+        assert_eq!(a.origin(), origin);
+        assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
+        // A handle follows an origin another process rotated.
+        let fresh = other.rotate_origin().unwrap();
+        assert_eq!(a.current().unwrap().0, fresh);
+        assert_eq!(a.origin(), fresh);
     }
 
     #[test]

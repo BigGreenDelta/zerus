@@ -194,6 +194,24 @@ impl Store {
         Ok(fresh)
     }
 
+    /// The origin and version vector as stored now, from one snapshot. Another
+    /// process may have written or rotated the origin since this handle last
+    /// looked, so the cached origin is refreshed.
+    pub fn current(&mut self) -> Result<(String, BTreeMap<String, u64>)> {
+        let (origin, vector) = {
+            let tx = self.conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            let origin: String = tx.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0))?;
+            let mut statement = tx.prepare("SELECT origin, MAX(seq) FROM events GROUP BY origin")?;
+            let vector = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)))?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            drop(statement);
+            (origin, vector)
+        };
+        self.origin = origin.clone();
+        Ok((origin, vector))
+    }
+
     /// How long a write waits for other writers (10 seconds after `open`).
     pub fn wait_for_writers(&self, timeout: Duration) -> Result<()> {
         self.conn.busy_timeout(timeout)?;

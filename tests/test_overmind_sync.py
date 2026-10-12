@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -31,6 +32,35 @@ SSH = SSH.replace(
     "    print('fixture connection lost', file=sys.stderr); sys.exit(255)\n"
     "if not (root / ('old-' + alias)).exists():", 1)
 assert 'lost-deliver-' in SSH
+# Markers for a host that rejects a call before running anything: from before forwarded
+# deliveries, and one whose exchange fails after its hello.
+SSH = SSH.replace(
+    "if not (root / ('old-' + alias)).exists():",
+    "if args[1:] == ['overmind-deliver'] and (root / ('no-deliver-' + alias)).exists():\n"
+    "    print('this machine does not know the Overmind request overmind-deliver; update HGS on it', file=sys.stderr); sys.exit(1)\n"
+    "if args[1:] == ['overmind-exchange'] and (root / ('bad-exchange-' + alias)).exists():\n"
+    "    print('fixture exchange failure', file=sys.stderr); sys.exit(1)\n"
+    "if not (root / ('old-' + alias)).exists():", 1)
+assert 'no-deliver-' in SSH and 'bad-exchange-' in SSH
+
+
+def append(state, kind, payload, actor=None, base=None, request_id=''):
+    """Appends one event to the only task of a node's store; no command exists for some of them."""
+    db = sqlite3.connect(Path(state) / 'overmind/overmind.sqlite3')
+    with db:
+        created = json.loads(db.execute("SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])
+        if base is None:
+            rows = db.execute("SELECT raw FROM events WHERE kind = 'transition' ORDER BY seq").fetchall()
+            base = json.loads(rows[-1][0])['id'] if rows else created['id']
+        seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+        event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind=kind,
+                     base=base, request_id=request_id, payload=payload)
+        if actor is not None:
+            event['actor'] = actor
+        db.execute('INSERT INTO events(origin, seq, id, lamport, task, project, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                   (event['origin'], seq, event['id'], lamport, event['task'], event['project'], event['kind'],
+                    json.dumps(event)))
+    db.close()
 
 
 def tmux_shim(home, socket, tmux=fixtures.TMUX):
@@ -236,7 +266,9 @@ class RemoteDelivery(Nodes):
                       subagents={}, last_event_at=time.time(), created=time.time())
         state = self.root / 'b' / 'state'
         state.mkdir(exist_ok=True)
-        (state / (hashlib.sha256(self.name.encode()).hexdigest() + '.json')).write_text(json.dumps(record))
+        self.record = record
+        self.record_path = state / (hashlib.sha256(self.name.encode()).hexdigest() + '.json')
+        self.record_path.write_text(json.dumps(record))
 
     def tmux(self, *args, check=True):
         result = subprocess.run([str(self.root / '.local/bin/tmux'), *args], env=self.env,
@@ -271,6 +303,128 @@ class RemoteDelivery(Nodes):
         self.assertIn('[sent]', [j['marker'] for j in on_a['journal']])
         claim = next(j for j in on_a['journal'] if j['marker'] == '[claim]')
         self.assertEqual(claim['actor']['machine'], b)  # the host wrote the claim
+        self.assertEqual([j['marker'] for j in on_a['journal']].count('[claim]'), 1)
+        sent = next(j for j in on_a['journal'] if j['marker'] == '[sent]')
+        self.assertEqual(sent['actor']['machine'], b)
+        self.assertEqual(result['task']['ref'], ref)
+
+    def made_on_b(self):
+        """A task created on b, where `append` sets it up; returns its uuid."""
+        return self.overmind('b', 'create', '--json', data={'project': 'demo', 'prompt': 'Fix the drafts', 'stage': 'Queue'})['task']['uuid']
+
+    def b_state(self):
+        return self.root / 'b' / 'state'
+
+    def b_machine(self):
+        return self.overmind('b', 'status')['machine']
+
+    def agent_on_b(self, session):
+        return {'kind': 'agent', 'machine': self.b_machine(), 'session': session}
+
+    def build_on_b(self, session):
+        append(self.b_state(), 'transition', {'action': 'claim', 'to': 'Design', 'fields': {},
+                                              'session': {'machine': self.b_machine(), 'name': session}})
+        append(self.b_state(), 'transition', {'action': 'advance', 'to': 'Build', 'fields': {'spec': 's'}}, actor=self.agent_on_b(session))
+
+    def reach_review_on_b(self, session):
+        self.build_on_b(session)
+        append(self.b_state(), 'transition', {'action': 'advance', 'to': 'Review', 'fields': {'worklog': 'w', 'evidence': 'e'}},
+               actor=self.agent_on_b(session))
+
+    def ref_on_a(self, task):
+        self.call('a', 'sync')
+        return next(t['ref'] for t in self.overmind('a', 'board', '--json', data={'project': 'demo'})['tasks'] if t['uuid'] == task)
+
+    def test_review_send_reaches_a_session_on_another_machine(self):
+        task = self.made_on_b()
+        self.reach_review_on_b('codex/other')
+        ref = self.ref_on_a(task)
+        result = self.overmind('a', 'review-send', '--json', data={'task': ref, 'session': {'machine': self.b_machine(), 'name': self.name}})
+        self.assertEqual((result['delivery'], result['task']['reviewer']['name'], result['task']['ref']), ('sent', self.name, ref), result)
+        self.wait_for(lambda: b'Review: Fix the drafts' in self.received())
+        on_a = self.overmind('a', 'show', ref)['task']
+        self.assertEqual((on_a['stage'], on_a['reviewer']['name']), ('Review', self.name))
+
+    def test_rework_send_reaches_the_assignee_on_another_machine(self):
+        task = self.made_on_b()
+        self.reach_review_on_b(self.name)
+        append(self.b_state(), 'reviewer_set', {'session': {'machine': self.b_machine(), 'name': 'codex/other'}})
+        append(self.b_state(), 'transition', {'action': 'needs_work', 'to': 'Build', 'fields': {'report': 'tests missing'}},
+               actor=self.agent_on_b('codex/other'))
+        ref = self.ref_on_a(task)
+        result = self.overmind('a', 'rework-send', '--json', data={'task': ref})
+        self.assertEqual((result['delivery'], result['task']['ref']), ('sent', ref), result)
+        self.wait_for(lambda: b'tests missing' in self.received())
+        self.assertIn(b'Rework: Fix the drafts', self.received())
+
+    def test_answer_reaches_the_assignee_on_another_machine(self):
+        task = self.made_on_b()
+        self.build_on_b(self.name)
+        append(self.b_state(), 'transition', {'action': 'call_human', 'to': 'Your Call', 'fields': {'question': 'REST or gRPC?'}},
+               actor=self.agent_on_b(self.name))
+        ref = self.ref_on_a(task)
+        result = self.overmind('a', 'answer', '--json', data={'task': ref, 'answer': 'REST'})
+        self.assertEqual((result['delivery'], result['task']['stage'], result['task']['ref']), ('sent', 'Build', ref), result)
+        self.wait_for(lambda: b'REST' in self.received())
+
+    def test_a_refusal_about_the_assignee_names_the_task_field(self):
+        task = self.made_on_b()
+        self.build_on_b(self.name)
+        append(self.b_state(), 'transition', {'action': 'call_human', 'to': 'Your Call', 'fields': {'question': 'q'}},
+               actor=self.agent_on_b(self.name))
+        ref = self.ref_on_a(task)
+        self.record_path.unlink()  # b no longer tracks the session
+        result = self.overmind_raw('a', 'answer', '--json', data={'task': ref, 'answer': 'REST'})
+        error = json.loads(result.stdout)['error']
+        self.assertEqual((result.returncode, error['code'], error['field']), (1, 'unknown_session', 'task'), result.stdout)
+
+    def test_a_host_refusal_comes_back_and_a_confirmation_goes_through(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        self.record['activity'] = 'busy'
+        self.record_path.write_text(json.dumps(self.record))
+        request = {'task': ref, 'session': {'machine': self.b_machine(), 'name': self.name}}
+        refused = self.overmind_raw('a', 'send', '--json', data=request)
+        error = json.loads(refused.stdout)['error']
+        self.assertEqual((refused.returncode, error['code'], error['field']), (1, 'agent_busy', 'confirm'), refused.stdout)
+        self.assertEqual(self.overmind('a', 'show', ref)['task']['stage'], 'Queue')
+        sent = self.overmind('a', 'send', '--json', data=dict(request, confirm=['agent_busy']))
+        self.assertEqual(sent['delivery'], 'sent', sent)
+
+    def test_forward_failures_are_refusals(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        request = {'task': ref, 'session': {'machine': self.b_machine(), 'name': self.name}}
+
+        def refusal():
+            result = self.overmind_raw('a', 'send', '--json', data=request)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            return json.loads(result.stdout)['error']
+        # A host from before forwarded deliveries rejects the call before running anything.
+        (self.root / 'no-deliver-b').write_text('')
+        error = refusal()
+        self.assertEqual((error['code'], error['field']), ('host_outdated', 'session'), error)
+        (self.root / 'no-deliver-b').unlink()
+        # The exchange fails after hello: nothing was attempted on the host.
+        (self.root / 'bad-exchange-b').write_text('')
+        error = refusal()
+        self.assertEqual(error['code'], 'host_sync_failed', error)
+        self.assertIn('nothing was attempted', error['message'])
+        (self.root / 'bad-exchange-b').unlink()
+        # The machine behind the alias is another one now.
+        catalog = self.root / 'b' / 'swarm' / 'catalog.json'
+        data = json.loads(catalog.read_text())
+        data['node_id'] = str(uuid.uuid4())
+        catalog.write_text(json.dumps(data))
+        error = refusal()
+        self.assertEqual((error['code'], error['field']), ('host_changed', 'session'), error)
+        self.assertEqual(self.overmind('a', 'show', ref)['task']['stage'], 'Queue')
+        self.assertEqual(self.received(), b'')
+
+    def test_a_host_refuses_a_session_on_another_machine_in_the_callers_words(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        self.call('a', 'sync')
+        a = self.overmind('a', 'status')['machine']
+        answer = self.call('b', 'overmind-deliver', data={'command': 'send', 'request': {'task': ref, 'session': {'machine': a, 'name': self.name}}})
+        self.assertEqual(answer['error']['message'], f'the session is not on {self.b_machine()}; no further forwarding')
 
     def test_a_forwarded_result_is_remembered_on_the_caller(self):
         ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']

@@ -234,7 +234,8 @@ struct SendRequest {
 /// the same `request_id` with another request is refused here.
 fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &SessionRef, local_only: bool) -> Result<Value> {
     if local_only {
-        return Err(Refusal::field("remote_session", "session", "invalid", "this session is not on this machine").into());
+        let message = format!("the session is not on {}; no further forwarding", ctx.store.machine());
+        return Err(Refusal::field("remote_session", "session", "invalid", message).into());
     }
     // The host may know more tasks, so a short reference could be ambiguous there.
     let uuid = ctx.store.read(|tx| resolve(tx, task))?;
