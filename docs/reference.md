@@ -1498,6 +1498,9 @@ desktop shows its name). `title` has at most 120 characters; `question` is the
 empty when that transition wrote none); `assignee` is `{machine, name}` or
 `null`. `signature` (64 hexadecimal digits) changes with every transition of
 the task but not with comments, so a reader notifies once per signature.
+`show` adds `head`, the event ID of the task's last transition: the question a
+task in Your Call waits with is the `[needs-human]` journal entry whose `event`
+is the head; an older one belongs to an earlier stay.
 `projects --json {}` lists the projects that hold tasks, sorted by ID: `{ok,
 cursor, projects: [{project, total, roles: {backlog, ready, active, review,
 needs_human, done, parked}}]}`, every role present and deleted tasks not

@@ -197,6 +197,22 @@ QString latest(const QJsonObject &task, const QString &marker)
     return {};
 }
 
+// The question the task waits with, as `hgs overmind decisions` reads it: the
+// latest [needs-human] entry, only when its event is the task's last
+// transition (head). An older one belongs to an earlier stay in Your Call.
+QString question(const QJsonObject &task)
+{
+    const QString head = task.value(QStringLiteral("head")).toString();
+    const auto journal = task.value(QStringLiteral("journal")).toArray();
+    for (int i = int(journal.size()); i-- > 0;) {
+        const auto entry = journal[i].toObject();
+        if (entry.value(QStringLiteral("marker")).toString() != QLatin1String("[needs-human]")) continue;
+        const bool current = !head.isEmpty() && entry.value(QStringLiteral("event")).toString() == head;
+        return current ? entry.value(QStringLiteral("text")).toString() : QString();
+    }
+    return {};
+}
+
 QString author(const QJsonObject &actor)
 {
     const QString kind = actor.value(QStringLiteral("kind")).toString(), session = actor.value(QStringLiteral("session")).toString();
@@ -778,8 +794,8 @@ void TaskPanel::renderAnswer(const QJsonObject &task)
     const bool waiting = m_model && m_model->board(m_project).role(task.value(QStringLiteral("stage")).toString()) == QLatin1String("needs_human");
     m_answerBox->setVisible(waiting && !m_gone);
     if (!waiting) return;
-    const QString question = latest(task, QStringLiteral("[needs-human]"));
-    const QString shown = question.isEmpty() ? (m_loaded ? tr("The question is in the journal below.") : tr("Loading the question…")) : question;
+    const QString asked = question(task);
+    const QString shown = asked.isEmpty() ? (m_loaded ? tr("The question is in the journal below.") : tr("Loading the question…")) : asked;
     if (m_question->markdownSource() != shown) renderMarkdown(m_question, shown);
 }
 

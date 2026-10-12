@@ -3961,9 +3961,9 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         {"journal", QJsonArray{entry("[created]", "", human, 90), entry("[comment]", "The **slow** part is the first `inspect` call; see the trace.", agent, 30)}}}).toJson());
     detail.close();
     QFile question(hgs + ".show-p7c1d"); QVERIFY(question.open(QIODevice::WriteOnly));
-    question.write(QJsonDocument(QJsonObject{{"flags", QJsonArray{"delivery_uncertain"}},
-        {"journal", QJsonArray{entry("[claim]", "", human, 50), entry("[sent?]", "the session did not confirm the input", human, 49),
-                               entry("[needs-human]", "Keep drafts in **SQLite** or in plain files?", agent, 12)}}}).toJson());
+    const auto asked = entry("[needs-human]", "Keep drafts in **SQLite** or in plain files?", agent, 12);
+    question.write(QJsonDocument(QJsonObject{{"flags", QJsonArray{"delivery_uncertain"}}, {"head", asked["event"]},
+        {"journal", QJsonArray{entry("[claim]", "", human, 50), entry("[sent?]", "the session did not confirm the input", human, 49), asked}}}).toJson());
     question.close();
     for (const QString theme : {"dark", "light"}) {
         QSettings().setValue("workspace/theme", theme);

@@ -1207,10 +1207,13 @@ void TestTasksView::panelActionsRunTheirCommands()
     QTRY_COMPARE(b.f.calls("rework-send").size(), 1);
     QCOMPARE(plain(b.f.calls("rework-send").last()), (QJsonObject{{"task", "t11"}}));
     QTRY_COMPARE(b.message()->text(), QString("Sent the rework of om-t11 to codex/demo/two."));
-    // Your Call: the question and the answer.
+    // Your Call: the question of the transition that parked the task (its
+    // head), and the answer.
     const QJsonObject question{{"marker", "[needs-human]"}, {"text", "Postgres or **SQLite**?"}, {"at", 1791266000},
                                {"actor", QJsonObject{{"kind", "agent"}, {"machine", "m1"}, {"session", "codex/demo/one"}}}, {"event", "e9"}};
-    QVERIFY(b.f.put("show-t7.json", compact({{"journal", QJsonArray{question}}})));
+    const QJsonObject later{{"marker", "[comment]"}, {"text", "More context"}, {"at", 1791266100},
+                            {"actor", QJsonObject{{"kind", "human"}, {"machine", "m1"}}}, {"event", "e10"}};
+    QVERIFY(b.f.put("show-t7.json", compact({{"journal", QJsonArray{question, later}}, {"head", "e9"}})));
     QVERIFY(b.show("t7"));
     QVERIFY(b.find<QWidget>("taskAnswerBox")->isVisible());
     QCOMPARE(b.find<MarkdownText>("taskQuestion")->toPlainText().trimmed(), QString("Postgres or SQLite?"));
@@ -1224,6 +1227,12 @@ void TestTasksView::panelActionsRunTheirCommands()
     QCOMPARE(plain(b.f.calls("answer").last()), (QJsonObject{{"task", "t7"}, {"answer", "SQLite"}}));
     QTRY_COMPARE(b.message()->text(), QString("Sent your answer on om-t7 to codex/demo/one."));
     QVERIFY(answer->toPlainText().isEmpty());
+    // Moved back into Your Call by a person, the task waits with no question:
+    // the one in the journal belongs to an earlier stay.
+    QVERIFY(b.f.put("show-t7.json", compact({{"journal", QJsonArray{question, later}}, {"head", "e12"}})));
+    QVERIFY(b.show("t1"));
+    QVERIFY(b.show("t7"));
+    QCOMPARE(b.find<MarkdownText>("taskQuestion")->toPlainText().trimmed(), QString("The question is in the journal below."));
     // Move to…: the stages a person may move the task to.
     QVERIFY(b.show("t1"));
     auto *move = b.find<QPushButton>("taskMove");

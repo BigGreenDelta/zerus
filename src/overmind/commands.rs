@@ -280,6 +280,8 @@ pub fn view(task: &Task, reference: &str, full: bool) -> Value {
         out["prompt"] = json!(task.prompt);
         out["attachments"] = json!(task.attachments);
         out["journal"] = json!(task.journal);
+        // The event of the last transition: its journal entries are the current ones.
+        out["head"] = json!(task.head);
         out["related"] = json!(task.related);
         out["resume_stage"] = json!(task.resume_stage);
         out["created_by"] = json!(task.created_by);
@@ -1434,6 +1436,24 @@ mod tests {
         let changed = decisions(&mut human(&mut store), json!({})).unwrap();
         assert_eq!(changed["decisions"][0]["signature"], signature);
         assert_ne!(list[1]["signature"], signature);
+    }
+
+    #[test]
+    fn show_names_the_transition_the_task_is_in() {
+        let (_dir, mut store) = store();
+        let task = new_task(&mut store, "Queue");
+        claim(&mut store, &task, "w1");
+        ask(&mut store, &task, "w1", "Which API?");
+        // A comment is newer but no transition: the question stays the current one.
+        comment(&mut human(&mut store), json!({"task": task, "text": "More context"})).unwrap();
+        let shown = show(&mut human(&mut store), json!({"task": task})).unwrap();
+        let journal = shown["task"]["journal"].as_array().unwrap();
+        let question = journal.iter().rev().find(|j| j["marker"] == "[needs-human]").unwrap();
+        assert_eq!(shown["task"]["head"], question["event"]);
+        assert_ne!(journal.last().unwrap()["event"], question["event"]);
+        // Boards carry no journal and so no head.
+        let listed = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        assert!(listed["tasks"][0].get("head").is_none(), "{listed}");
     }
 
     #[test]
