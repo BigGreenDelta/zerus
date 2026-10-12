@@ -479,8 +479,11 @@ pub fn status(ctx: &mut Ctx) -> Result<Value> {
                    "last_error": peer.last_error, "updated": peer.updated, "behind": behind})
         })
         .collect();
+    // Changes of this store's origin and collisions found in exchanges, newest
+    // first: unlike a peer's last error, a clean exchange never clears them.
+    let history = ctx.store.origin_history(20)?;
     Ok(json!({"ok": true, "machine": ctx.store.machine(), "origin": ctx.store.origin(), "cursor": ctx.store.cursor()?,
-              "vector": vector, "peers": peers}))
+              "vector": vector, "peers": peers, "origin_history": history}))
 }
 
 #[derive(Deserialize)]
@@ -1043,6 +1046,28 @@ mod tests {
         assert!(first["task"]["ref"].as_str().unwrap().starts_with("om-"));
         let second = create(&mut human(&mut store), json!({"project": "p", "prompt": "Second"})).unwrap();
         assert!(second["task"]["rank"].as_str().unwrap() > first["task"]["rank"].as_str().unwrap());
+    }
+
+    #[test]
+    fn status_shows_the_origin_history_newest_first() {
+        let (_dir, mut store) = store();
+        let peer = "22222222-2222-4222-8222-222222222222";
+        let old = store.origin().to_owned();
+        let fresh = store.rotate_origin_from(&old, "restored", peer).unwrap().unwrap();
+        for _ in 0..25 {
+            store.note_collision(&uuid::Uuid::new_v4().to_string(), peer).unwrap();
+        }
+        let shown = status(&mut human(&mut store)).unwrap();
+        let history = shown["origin_history"].as_array().unwrap();
+        assert_eq!(history.len(), 20, "at most 20");
+        assert_eq!((history[0]["kind"].as_str(), history[0]["peer"].as_str()), (Some("collision"), Some(peer)));
+        assert!(history[0].get("replaced_by").is_none() && history[0]["at"].as_u64().unwrap() > 0);
+        let (_dir, mut other) = self::store();
+        let first = other.origin().to_owned();
+        other.rotate_origin_from(&first, "restored", peer).unwrap();
+        let only = status(&mut human(&mut other)).unwrap()["origin_history"].clone();
+        assert_eq!((only[0]["kind"].as_str(), only[0]["replaced_by"].as_str()), (Some("restored"), Some(other.origin())));
+        assert_ne!(fresh, old);
     }
 
     #[test]

@@ -195,6 +195,8 @@ class Replication(Nodes):
         self.assertEqual(set(self.refs('a')), {made_on_a, made_on_b})
         peers = self.overmind('a', 'status')['peers']
         self.assertEqual([(p['alias'], p['last_error'], p['behind']) for p in peers], [('b', '', 0)])
+        # A healthy pair never collides.
+        self.assertEqual([self.overmind(node, 'status')['origin_history'] for node in 'ab'], [[], []])
 
     def test_peers_without_overmind_are_skipped(self):
         before = self.overmind('a', 'status')['peers']  # setUp joins already exchanged once

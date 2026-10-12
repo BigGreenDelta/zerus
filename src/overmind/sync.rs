@@ -6,7 +6,7 @@ use super::store::{PeerState, Store};
 use anyhow::{anyhow, ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Advertised in swarm `hello`; peers without it are skipped.
 pub const FEATURE: &str = "overmind:1";
@@ -18,6 +18,12 @@ struct ExchangeRequest {
     v: u32,
     from: String,
     vector: BTreeMap<String, u64>,
+    /// For every origin of `vector`, the id of the event at that position.
+    #[serde(default)]
+    tips: BTreeMap<String, String>,
+    /// Origins whose events differ between the two stores, as the sender knows.
+    #[serde(default)]
+    collisions: BTreeSet<String>,
     #[serde(default)]
     events: Vec<Value>,
 }
@@ -27,6 +33,10 @@ struct ExchangeResponse {
     v: u32,
     machine: String,
     vector: BTreeMap<String, u64>,
+    #[serde(default)]
+    tips: BTreeMap<String, String>,
+    #[serde(default)]
+    collisions: BTreeSet<String>,
     #[serde(default)]
     events: Vec<Value>,
     #[serde(default)]
@@ -50,6 +60,10 @@ pub struct Summary {
     pub peer_refused: usize,
     /// This store was older than the peer's copy and now writes under a fresh origin.
     pub rotated: bool,
+    /// Origins found for the first time to hold other events here than on the peer.
+    pub collisions: Vec<String>,
+    /// This store's own origin was among them, and it now writes under a fresh one.
+    pub collided_own: bool,
 }
 
 impl Summary {
@@ -58,6 +72,9 @@ impl Summary {
         let mut problems = Vec::new();
         if self.rotated {
             problems.push(restored_note(peer));
+        }
+        if !self.collisions.is_empty() {
+            problems.push(collision_note(peer, &self.collisions, self.collided_own));
         }
         if self.peer_refused > 0 {
             problems.push(format!(
@@ -85,11 +102,91 @@ fn restored_note(peer: &str) -> String {
     )
 }
 
+fn collision_note(peer: &str, origins: &[String], own: bool) -> String {
+    let mut note = format!(
+        "the events of origin {} differ between this store and {peer}; they are no longer exchanged with it",
+        origins.join(", ")
+    );
+    if own {
+        note.push_str(
+            "; this store's origin was among them, so new events use a fresh origin; \
+             tasks changed here before the exchange may differ from the other machines",
+        );
+    }
+    note
+}
+
 /// The other side holds more events of this store's own origin than this store
 /// does: this is an older copy (restored from a backup) that peers have outgrown,
 /// and writing on under the same origin would collide with what they hold.
 fn outgrown(own: &BTreeMap<String, u64>, theirs: &BTreeMap<String, u64>, origin: &str) -> bool {
     theirs.get(origin).copied().unwrap_or(0) > own.get(origin).copied().unwrap_or(0)
+}
+
+/// Origins whose events differ between this store and a peer, after one message.
+#[derive(Default)]
+struct Collisions {
+    /// Every origin known to differ with this peer, now or in an earlier
+    /// exchange: its events are neither sent to the peer nor taken from it.
+    known: BTreeSet<String>,
+    /// The origins noted for the first time.
+    new: Vec<String>,
+    /// This store's own origin collided, and it now writes under a fresh one.
+    rotated: bool,
+}
+
+/// Compares the other side's tips with this store before anything of theirs is
+/// stored. A tip names the other side's event at the end of its log of an
+/// origin; when this store holds that position with another event, the two
+/// logs of that origin differ there or earlier. The shorter log's tip always
+/// lies inside the longer one, so the side holding the longer log finds it and
+/// tells the other in `collisions`. A colliding origin of this store's own is
+/// replaced before anything is written here again, and every collision is
+/// noted in the origin history once.
+fn collide(
+    store: &mut Store,
+    peer: &str,
+    vector: &BTreeMap<String, u64>,
+    tips: &BTreeMap<String, String>,
+    told: &BTreeSet<String>,
+) -> Result<Collisions> {
+    let held = store.version_vector()?;
+    let mut found = BTreeSet::new();
+    for (origin, tip) in tips {
+        let Some(&seq) = vector.get(origin) else { continue };
+        if held.get(origin).copied().unwrap_or(0) >= seq && store.id_at(origin, seq)?.is_some_and(|id| id != *tip) {
+            found.insert(origin.clone());
+        }
+    }
+    // The other side compared this store's tips, so only origins held here can differ.
+    found.extend(told.iter().filter(|origin| held.contains_key(*origin)).cloned());
+    let (current, _) = store.current()?;
+    let mut collisions = Collisions::default();
+    for origin in &found {
+        let replaced = if *origin == current { store.rotate_origin_from(origin, "collision", peer)? } else { None };
+        collisions.rotated |= replaced.is_some();
+        if replaced.is_some() || store.note_collision(origin, peer)? {
+            collisions.new.push(origin.clone());
+        }
+    }
+    collisions.known = store.collisions_with(peer)?;
+    collisions.known.extend(found);
+    Ok(collisions)
+}
+
+/// `vector` with the `skipped` origins marked as complete, so that `missing`
+/// offers none of their events.
+fn without(vector: &BTreeMap<String, u64>, skipped: &BTreeSet<String>) -> BTreeMap<String, u64> {
+    let mut vector = vector.clone();
+    for origin in skipped {
+        vector.insert(origin.clone(), u64::MAX);
+    }
+    vector
+}
+
+/// Events whose origin is not among the `skipped` ones.
+fn except(events: Vec<Value>, skipped: &BTreeSet<String>) -> Vec<Value> {
+    events.into_iter().filter(|e| !e["origin"].as_str().is_some_and(|origin| skipped.contains(origin))).collect()
 }
 
 /// The peer's side of one call: store what arrived, answer with what the caller lacks.
@@ -102,22 +199,34 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         "invalid Overmind exchange request"
     );
     let (origin, current) = store.current()?;
-    if outgrown(&current, &request.vector, &origin) {
-        store.rotate_origin()?;
+    let restored = outgrown(&current, &request.vector, &origin)
+        && store.rotate_origin_from(&origin, "restored", &request.from)?.is_some();
+    let collisions = collide(store, &request.from, &request.vector, &request.tips, &request.collisions)?;
+    if restored || !collisions.new.is_empty() {
         let mut state = store
             .peer(&request.from)?
             .unwrap_or_else(|| PeerState { machine: request.from.clone(), ..PeerState::default() });
         let name = if state.alias.is_empty() { request.from.clone() } else { state.alias.clone() };
-        state.last_error = restored_note(&name);
+        let mut notes = Vec::new();
+        if restored {
+            notes.push(restored_note(&name));
+        }
+        if !collisions.new.is_empty() {
+            notes.push(collision_note(&name, &collisions.new, collisions.rotated));
+        }
+        state.last_error = notes.join("; ");
         state.updated = now();
         store.put_peer(&state)?;
     }
-    let received = store.insert_raw(&request.events)?;
-    let (events, more) = store.missing(&request.vector, BATCH)?;
+    let received = store.insert_raw(&except(request.events, &collisions.known))?;
+    let (events, more) = store.missing(&without(&request.vector, &collisions.known), BATCH)?;
+    let vector = store.version_vector()?;
     let response = ExchangeResponse {
         v: 1,
         machine: store.machine().into(),
-        vector: store.version_vector()?,
+        tips: store.tips(&vector)?,
+        vector,
+        collisions: collisions.known,
         events,
         more,
         refused: received.refused,
@@ -151,32 +260,48 @@ pub fn exchange(store: &mut Store, peer: &str, alias: &str, call: &mut dyn FnMut
 
 fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<Summary> {
     let mut summary = Summary::default();
+    // Origins found to differ with this peer during this exchange.
+    let mut found: BTreeSet<String> = BTreeSet::new();
     while summary.rounds < ROUNDS {
         let known = store.peer(peer)?.and_then(|p| p.vector);
+        let mut colliding = store.collisions_with(peer)?;
+        colliding.extend(found.iter().cloned());
         let (events, push_more) = match &known {
-            Some(vector) => store.missing(vector, BATCH)?,
+            Some(vector) => store.missing(&without(vector, &colliding), BATCH)?,
             None => (Vec::new(), true),
         };
         let pushed = events.len();
-        let pushed_origins: std::collections::BTreeSet<String> =
-            events.iter().filter_map(|e| e["origin"].as_str().map(str::to_owned)).collect();
+        let pushed_origins: BTreeSet<String> = events.iter().filter_map(|e| e["origin"].as_str().map(str::to_owned)).collect();
         summary.sent += pushed;
         let own = store.version_vector()?;
-        let request = ExchangeRequest { v: 1, from: store.machine().into(), vector: own.clone(), events };
+        let request = ExchangeRequest {
+            v: 1,
+            from: store.machine().into(),
+            tips: store.tips(&own)?,
+            vector: own,
+            collisions: colliding.clone(),
+            events,
+        };
         let response: ExchangeResponse = serde_json::from_value(call(&serde_json::to_value(&request)?)?)
             .map_err(|e| anyhow!("the peer's Overmind answer is not valid: {e}"))?;
         ensure!(response.v == 1, "this peer speaks another Overmind exchange version; update HGS on the older machine");
         ensure!(response.machine == peer, "the machine behind this peer changed identity");
         summary.peer_refused += response.refused;
         // Before anything is written here again: peers hold more of this
-        // store's origin than this store does. Another process may have written
-        // or rotated since the call began, so the store is read again now.
+        // store's origin than this store does, or other events of it. Another
+        // process may have written or rotated since the call began, so the
+        // store is read again now.
         let (origin, current) = store.current()?;
-        if outgrown(&current, &response.vector, &origin) {
-            store.rotate_origin()?;
+        if outgrown(&current, &response.vector, &origin) && store.rotate_origin_from(&origin, "restored", peer)?.is_some() {
             summary.rotated = true;
         }
-        let received = store.insert_raw(&response.events)?;
+        let collisions = collide(store, peer, &response.vector, &response.tips, &response.collisions)?;
+        summary.collided_own |= collisions.rotated;
+        summary.collisions.extend(collisions.new);
+        // A collision the peer has not been told of yet takes one more round.
+        let untold = collisions.known.iter().any(|origin| !colliding.contains(origin));
+        found.extend(collisions.known.iter().cloned());
+        let received = store.insert_raw(&except(response.events, &collisions.known))?;
         summary.inserted += received.inserted;
         summary.refused += received.refused;
         summary.rounds += 1;
@@ -186,7 +311,7 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         store.put_peer(&state)?;
         // What the peer still lacks according to its fresh answer: a peer that
         // lost its data is refilled from here on.
-        let (lacking, _) = store.missing(&response.vector, BATCH)?;
+        let (lacking, _) = store.missing(&without(&response.vector, &collisions.known), BATCH)?;
         // A peer below the vector this round assumed lost data: push from its
         // fresh vector next round. Otherwise events of an origin we pushed to
         // that did not move the peer's seq were refused, whether or not more
@@ -205,7 +330,7 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
                 break;
             }
         }
-        if !progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty())) {
+        if !untold && (!progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty()))) {
             break;
         }
     }
@@ -264,6 +389,7 @@ mod tests {
         let peer = a.peer(B).unwrap().unwrap();
         assert_eq!((peer.alias.as_str(), peer.last_error.as_str(), peer.vector.is_some()), ("b", "", true));
         assert!(peer.last_ok > 0);
+        assert!(a.origin_history(20).unwrap().is_empty() && b.origin_history(20).unwrap().is_empty(), "a healthy pair never collides");
     }
 
     #[test]
@@ -375,6 +501,7 @@ mod tests {
         assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
         assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
         assert_eq!(fresh.peer(A).unwrap().unwrap().last_error, "");
+        assert!(a.origin_history(20).unwrap().is_empty() && fresh.origin_history(20).unwrap().is_empty());
     }
 
     /// B holds one event, exchanges with A, is copied aside, writes and exchanges
@@ -417,6 +544,14 @@ mod tests {
         assert_eq!(a.version_vector().unwrap().get(&old), Some(&3));
         exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
         assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap());
+        // A clean exchange clears the note, but the origin history keeps it.
+        exchange(&mut b, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+        assert_eq!(b.peer(A).unwrap().unwrap().last_error, "");
+        let history = b.origin_history(20).unwrap();
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert_eq!((history[0].kind.as_str(), history[0].origin.as_str(), history[0].peer.as_str()), ("restored", old.as_str(), A));
+        assert_eq!(history[0].replaced_by, b.origin());
+        assert!(a.origin_history(20).unwrap().is_empty(), "nothing collided: B wrote nothing before the exchange");
 
         // The restored store makes the call.
         let dir = tempfile::tempdir().unwrap();
@@ -429,6 +564,104 @@ mod tests {
         comment(&mut b, "t", 10);
         assert!(b.version_vector().unwrap().contains_key(b.origin()));
         assert_eq!(b.version_vector().unwrap().get(&old), Some(&3), "the events the old origin lost came back");
+    }
+
+    /// The ids of the events of `origin` in `store`, by position.
+    fn log(store: &Store, origin: &str) -> Vec<String> {
+        let mut events: Vec<_> = store.load(&Filter::All).unwrap().into_iter().filter(|e| e.origin == origin).collect();
+        events.sort_by_key(|e| e.seq);
+        events.into_iter().map(|e| e.id).collect()
+    }
+
+    /// The collisions in a store's origin history: origin, peer and the origin that replaced it.
+    fn collisions(store: &Store) -> Vec<(String, String, String)> {
+        let notes = store.origin_history(20).unwrap().into_iter().filter(|n| n.kind == "collision");
+        notes.map(|n| (n.origin, n.peer, n.replaced_by)).collect()
+    }
+
+    #[test]
+    fn a_restored_store_that_wrote_as_much_as_it_lost_collides_on_both_sides() {
+        // B is restored from a copy without its last 2 events and writes 2 or 3 new
+        // ones under its origin before the next exchange, which either side starts.
+        for written in [2, 3] {
+            for restored_calls in [false, true] {
+                let case = format!("{written} written, restored side calls: {restored_calls}");
+                let dir = tempfile::tempdir().unwrap();
+                let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+                let (mut b, old) = restored_b(&dir, &mut a);
+                let original = log(&a, &old);
+                for _ in 0..written {
+                    comment(&mut b, "t", 10);
+                }
+                let fork = log(&b, &old);
+                assert_eq!((original.len(), fork.len(), fork[0] == original[0]), (3, 1 + written, true), "{case}");
+                let sync = |a: &mut Store, b: &mut Store, b_calls: bool| {
+                    let summary = if b_calls {
+                        exchange(b, A, "a", &mut |request| serve(a, request.clone()))
+                    } else {
+                        exchange(a, B, "b", &mut |request| serve(b, request.clone()))
+                    };
+                    summary.unwrap();
+                };
+                sync(&mut a, &mut b, restored_calls);
+                assert_ne!(b.origin(), old, "{case}: the restored side writes under a fresh origin");
+                assert_eq!(collisions(&b), vec![(old.clone(), A.to_owned(), b.origin().to_owned())], "{case}");
+                assert_eq!(collisions(&a), vec![(old.clone(), B.to_owned(), String::new())], "{case}");
+                // Later exchanges never mix the two logs of the old origin, and B's
+                // new events still reach A.
+                comment(&mut b, "u", 10);
+                for b_calls in [true, false, true] {
+                    sync(&mut a, &mut b, b_calls);
+                }
+                assert_eq!(log(&a, &old), original, "{case}");
+                assert_eq!(log(&b, &old), fork, "{case}");
+                assert_eq!(a.version_vector().unwrap().get(b.origin()), Some(&1), "{case}");
+                assert_eq!((collisions(&a).len(), collisions(&b).len()), (1, 1), "{case}: noted once");
+                let note = if restored_calls { b.peer(A) } else { a.peer(B) }.unwrap().unwrap().last_error;
+                assert_eq!(note, "", "{case}: the history keeps what the last error no longer says");
+            }
+        }
+    }
+
+    #[test]
+    fn a_restored_store_that_wrote_less_than_it_lost_is_outgrown_and_collides() {
+        for restored_calls in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+            let (mut b, old) = restored_b(&dir, &mut a);
+            let original = log(&a, &old);
+            comment(&mut b, "t", 10);
+            let fork = log(&b, &old);
+            for b_calls in [restored_calls, !restored_calls, restored_calls] {
+                if b_calls {
+                    exchange(&mut b, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+                } else {
+                    exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+                }
+            }
+            let history = b.origin_history(20).unwrap();
+            let kinds: BTreeSet<_> = history.iter().map(|n| (n.kind.as_str(), n.origin.as_str(), n.peer.as_str())).collect();
+            assert_eq!(kinds, BTreeSet::from([("restored", old.as_str(), A), ("collision", old.as_str(), A)]), "{history:?}");
+            assert_eq!(history.iter().find(|n| n.kind == "restored").unwrap().replaced_by, b.origin());
+            assert_eq!(collisions(&a), vec![(old.clone(), B.to_owned(), String::new())]);
+            assert_eq!((log(&a, &old), log(&b, &old)), (original, fork), "no mixed log");
+        }
+    }
+
+    #[test]
+    fn a_peer_without_tips_still_exchanges() {
+        let (_dir, mut a, mut b) = stores();
+        for _ in 0..2 { comment(&mut a, "t", 10); }
+        comment(&mut b, "u", 10);
+        let strip = |mut message: Value| {
+            let object = message.as_object_mut().unwrap();
+            object.remove("tips");
+            object.remove("collisions");
+            message
+        };
+        exchange(&mut a, B, "b", &mut |request| Ok(strip(serve(&mut b, strip(request.clone()))?))).unwrap();
+        assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap());
+        assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
     }
 
     #[test]
@@ -450,7 +683,7 @@ mod tests {
         assert_eq!(a.origin(), origin);
         assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
         // A handle follows an origin another process rotated.
-        let fresh = other.rotate_origin().unwrap();
+        let fresh = other.rotate_origin_from(&origin, "restored", B).unwrap().unwrap();
         assert_eq!(a.current().unwrap().0, fresh);
         assert_eq!(a.origin(), fresh);
     }

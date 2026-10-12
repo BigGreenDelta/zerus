@@ -109,7 +109,7 @@ class Overmind(unittest.TestCase):
     def test_status_on_a_lone_machine(self):
         self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})
         status = self.ok('status')
-        self.assertEqual((status['peers'], list(status['vector'].values())), ([], [1]))
+        self.assertEqual((status['peers'], list(status['vector'].values()), status['origin_history']), ([], [1], []))
         # Events are numbered under the store's own origin, not the machine identity.
         self.assertEqual(list(status['vector']), [status['origin']])
         self.assertNotEqual(status['origin'], status['machine'])

@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS peers(
   machine TEXT PRIMARY KEY, alias TEXT NOT NULL, vector TEXT,
   last_ok INTEGER NOT NULL, last_error TEXT NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS origin_history(
+  n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL,
+  origin TEXT NOT NULL, peer TEXT NOT NULL, replaced_by TEXT NOT NULL);
 ";
 
 /// Which events to load. Shared events have no task: workflows, settings, renames.
@@ -184,14 +187,68 @@ impl Store {
         &self.origin
     }
 
-    /// Replaces the origin with a fresh one: local events written afterwards
-    /// use it. For a store that peers have outgrown, whose old origin would
-    /// collide with events they hold.
-    pub fn rotate_origin(&mut self) -> Result<String> {
+    /// Replaces the origin `old` with a fresh one, if it is still the current
+    /// origin, and notes why in the origin history: local events written
+    /// afterwards use the fresh one. For a store whose events under `old`
+    /// collide, or would collide, with events that `peer` holds. Returns the
+    /// fresh origin, or None when another process replaced `old` first.
+    pub fn rotate_origin_from(&mut self, old: &str, kind: &str, peer: &str) -> Result<Option<String>> {
         let fresh = uuid::Uuid::new_v4().to_string();
-        self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('origin', ?1)", params![fresh])?;
-        self.origin = fresh.clone();
-        Ok(fresh)
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let replaced =
+            tx.execute("UPDATE meta SET value = ?1 WHERE key = 'origin' AND value = ?2", params![fresh, old])? > 0;
+        if replaced {
+            tx.execute(
+                "INSERT INTO origin_history(at, kind, origin, peer, replaced_by) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![now() as i64, kind, old, peer, fresh],
+            )?;
+        }
+        let current: String = tx.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0))?;
+        tx.commit()?;
+        self.origin = current;
+        Ok(replaced.then_some(fresh))
+    }
+
+    /// Notes that the events of `origin` differ between this store and `peer`,
+    /// once per origin and peer. Returns whether the note is new.
+    pub fn note_collision(&self, origin: &str, peer: &str) -> Result<bool> {
+        let added = self.conn.execute(
+            "INSERT INTO origin_history(at, kind, origin, peer, replaced_by) SELECT ?1, 'collision', ?2, ?3, '' \
+             WHERE NOT EXISTS(SELECT 1 FROM origin_history WHERE kind = 'collision' AND origin = ?2 AND peer = ?3)",
+            params![now() as i64, origin, peer],
+        )?;
+        Ok(added > 0)
+    }
+
+    /// The origins whose events differ between this store and `peer`: they
+    /// are never exchanged with it again.
+    pub fn collisions_with(&self, peer: &str) -> Result<BTreeSet<String>> {
+        let mut statement =
+            self.conn.prepare("SELECT origin FROM origin_history WHERE kind = 'collision' AND peer = ?1")?;
+        let origins = statement
+            .query_map(params![peer], |row| row.get(0))?
+            .collect::<rusqlite::Result<BTreeSet<String>>>()?;
+        Ok(origins)
+    }
+
+    /// The latest changes of origin and collisions, newest first. Exchanges
+    /// never clear them.
+    pub fn origin_history(&self, limit: usize) -> Result<Vec<OriginNote>> {
+        let mut statement = self.conn.prepare(
+            "SELECT at, kind, origin, peer, replaced_by FROM origin_history ORDER BY n DESC LIMIT ?1",
+        )?;
+        let notes = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok(OriginNote {
+                    at: row.get::<_, i64>(0)? as u64,
+                    kind: row.get(1)?,
+                    origin: row.get(2)?,
+                    peer: row.get(3)?,
+                    replaced_by: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(notes)
     }
 
     /// The origin and version vector as stored now, from one snapshot. Another
@@ -252,6 +309,30 @@ impl Store {
         Ok(vector)
     }
 
+    /// The id of the event stored at `seq` of `origin`, if this store holds it.
+    pub fn id_at(&self, origin: &str, seq: u64) -> Result<Option<String>> {
+        let Ok(seq) = i64::try_from(seq) else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM events WHERE origin = ?1 AND seq = ?2", params![origin, seq], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// For every origin of `vector`, the id of the event at that position: the
+    /// last one of the origin when `vector` is this store's. Events never
+    /// change position, so a write since `vector` was read changes nothing.
+    pub fn tips(&self, vector: &BTreeMap<String, u64>) -> Result<BTreeMap<String, String>> {
+        let mut tips = BTreeMap::new();
+        for (origin, seq) in vector {
+            if let Some(id) = self.id_at(origin, *seq)? {
+                tips.insert(origin.clone(), id);
+            }
+        }
+        Ok(tips)
+    }
+
     /// Raw events the peer lacks, up to about `max_bytes`, taking one event of
     /// each origin in turn (each origin in `seq` order), so an origin the peer
     /// cannot accept never holds back the others. The flag says whether more remain.
@@ -293,7 +374,9 @@ impl Store {
     /// Inserts events from another machine. Known events are skipped, and an
     /// origin's events after a gap are left for a later exchange. A refused
     /// event is never stored, so its origin stops there; the rest of the batch
-    /// is still inserted.
+    /// is still inserted. Another event at a position stored here means that
+    /// the sender's log of that origin differs, so none of its later events of
+    /// that origin are stored: they would continue another history.
     pub fn insert_raw(&mut self, raws: &[Value]) -> Result<Received> {
         let mut received = Received::default();
         let mut events = Vec::new();
@@ -304,6 +387,7 @@ impl Store {
             }
         }
         events.sort_by(|a, b| (a.0.origin.as_str(), a.0.seq).cmp(&(b.0.origin.as_str(), b.0.seq)));
+        let mut differing: BTreeSet<&str> = BTreeSet::new();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (event, raw) in &events {
             let max: i64 = tx.query_row(
@@ -320,7 +404,12 @@ impl Store {
                 )?;
                 if stored != event.id {
                     received.refused += 1;
+                    differing.insert(&event.origin);
                 }
+                continue;
+            }
+            if differing.contains(event.origin.as_str()) {
+                received.refused += 1;
                 continue;
             }
             if event.seq != max as u64 + 1 {
@@ -466,6 +555,21 @@ impl Tx<'_> {
     }
 }
 
+/// A change of this store's origin or a collision found in an exchange. Local only.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct OriginNote {
+    pub at: u64,
+    /// `restored`: a peer held more events of this store's origin than it did.
+    /// `collision`: the events of `origin` differ between this store and `peer`.
+    pub kind: String,
+    pub origin: String,
+    /// The machine of the peer.
+    pub peer: String,
+    /// The origin this store writes under since, when it replaced `origin`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub replaced_by: String,
+}
+
 /// What this machine learned about a peer in exchanges. Local only.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PeerState {
@@ -556,12 +660,49 @@ mod tests {
         let mut store = Store::open(dir.path(), MACHINE).unwrap();
         let first = store.write(|tx| tx.append(&draft("t"))).unwrap();
         let old = store.origin().to_owned();
-        let fresh = store.rotate_origin().unwrap();
+        let fresh = store.rotate_origin_from(&old, "restored", OTHER).unwrap().unwrap();
         assert_ne!(fresh, old);
         assert_eq!(store.origin(), fresh);
         let second = store.write(|tx| tx.append(&draft("t"))).unwrap();
-        assert_eq!((first.origin, second.origin.clone(), second.seq), (old, fresh.clone(), 1));
+        assert_eq!((first.origin, second.origin.clone(), second.seq), (old.clone(), fresh.clone(), 1));
         assert_eq!(Store::open(dir.path(), MACHINE).unwrap().origin(), fresh, "reopening keeps the new origin");
+        // Another process replaced the old origin already: nothing changes again.
+        assert_eq!(store.rotate_origin_from(&old, "restored", OTHER).unwrap(), None);
+        assert_eq!(store.origin(), fresh);
+        let notes = store.origin_history(20).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].kind.as_str(), notes[0].origin.as_str(), notes[0].peer.as_str()), ("restored", old.as_str(), OTHER));
+        assert_eq!(notes[0].replaced_by, fresh);
+    }
+
+    #[test]
+    fn collisions_are_noted_once_per_origin_and_peer_and_listed_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), MACHINE).unwrap();
+        let (one, two) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        assert!(store.note_collision(&one, OTHER).unwrap());
+        assert!(!store.note_collision(&one, OTHER).unwrap());
+        assert!(store.note_collision(&one, MACHINE).unwrap());
+        assert!(store.note_collision(&two, OTHER).unwrap());
+        assert_eq!(store.collisions_with(OTHER).unwrap(), BTreeSet::from([one.clone(), two.clone()]));
+        let notes = store.origin_history(2).unwrap();
+        assert_eq!(notes.iter().map(|n| n.origin.as_str()).collect::<Vec<_>>(), vec![two.as_str(), one.as_str()]);
+        assert_eq!(serde_json::to_value(&notes[0]).unwrap().get("replaced_by"), None);
+        assert_eq!(store.origin_history(20).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn tips_name_the_event_at_each_position_of_a_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let first = store.write(|tx| tx.append(&draft("t"))).unwrap();
+        let vector = store.version_vector().unwrap();
+        let second = store.write(|tx| tx.append(&draft("t"))).unwrap();
+        assert_eq!(store.tips(&vector).unwrap(), BTreeMap::from([(first.origin.clone(), first.id.clone())]));
+        let now = store.version_vector().unwrap();
+        assert_eq!(store.tips(&now).unwrap(), BTreeMap::from([(second.origin.clone(), second.id.clone())]));
+        assert_eq!(store.id_at(&first.origin, 3).unwrap(), None);
+        assert_eq!(store.id_at(&first.origin, u64::MAX).unwrap(), None);
     }
 
     #[test]
@@ -709,6 +850,24 @@ mod tests {
         // The identical copy is skipped silently; the different one is counted.
         assert_eq!(store.insert_raw(&[forged, theirs[1].clone()]).unwrap(), received(0, 1));
         assert_eq!(store.load(&Filter::All).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_origin_that_differs_at_a_known_position_is_not_extended() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let theirs = remote(3);
+        assert_eq!(store.insert_raw(&theirs[..2]).unwrap(), received(2, 0));
+        // Another log of the same origin: its second event differs, so its third
+        // would continue another history than the one stored here.
+        let mut other = theirs[1].clone();
+        other["id"] = json!(uuid::Uuid::new_v4().to_string());
+        let mut next = theirs[2].clone();
+        next["id"] = json!(uuid::Uuid::new_v4().to_string());
+        assert_eq!(store.insert_raw(&[theirs[0].clone(), other, next]).unwrap(), received(0, 2));
+        assert_eq!(store.load(&Filter::All).unwrap().len(), 2);
+        // The same log still extends.
+        assert_eq!(store.insert_raw(&theirs).unwrap(), received(1, 0));
     }
 
     #[test]
