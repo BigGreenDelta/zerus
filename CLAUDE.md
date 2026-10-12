@@ -49,7 +49,13 @@ and service identifiers compatible. A repository rename must not reset accounts,
 project catalogs, native agent processes or saved conversations.
 
 Never restart or kill native agents, tmux servers or DeepSeek hosts as part of a
-GUI update. Test tmux operations with an existing isolated socket directory.
+GUI update. Update local installations only with `install.sh`, `tray/install.sh`
+and `mac-install.sh`; a running GUI is replaced through `tray/update-installed.py`,
+which saves drafts and keeps one rollback copy. Never stage GUI copies in
+`~/Applications` or `~/.local/bin` by hand. Another session may be testing its own
+build: check the running GUI's `--build-info` and
+`~/.local/share/hgs/build-provenance.json`, and coordinate before replacing it.
+Test tmux operations with an existing isolated socket directory.
 Do not hot-reload a DeepSeek bridge that owns live agents: its disposal closes
 them. Use the native API compatibility path for resident adapters and keep
 unconfirmed permission setup blocked until an explicit resume verifies it.

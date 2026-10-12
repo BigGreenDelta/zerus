@@ -1432,8 +1432,10 @@ systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin
 hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
 restores it when the new GUI does not start, and confirms the running image,
 unchanged nonempty drafts and native agent and tmux processes. It records the
-installed builds in `~/.local/share/hgs/build-provenance.json`. A failed check
-leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
+`.zerus-*` staging folders left beside the GUI by earlier hand-made updates once
+they are an hour old, hold only installer copies and no process uses them. A
+failed check leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
 gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
 is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
