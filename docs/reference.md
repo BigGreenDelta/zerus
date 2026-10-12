@@ -292,8 +292,12 @@ not install or download a model and never falls back to another provider.
 
 Use **Voice** in the message toolbar, allow microphone access, then stop recording
 to review the recording with **Play**, **Discard** or **Send voice**. Recordings
-are limited to two minutes and remain separate from the typed draft. During
-capture, the typed draft stays visible and read-only, and ordinary message
+are limited to two minutes and remain separate from the typed draft. Capture
+opens the local microphone without waiting for speech computers or providers.
+Provider discovery runs in the background. If it fails, the recording remains
+available for playback; refresh providers in the preview before sending.
+An unavailable selected provider stays selected until you explicitly change it.
+During capture, the typed draft stays visible and read-only, and ordinary message
 submission and attachment changes are blocked. History remains readable.
 **Space** or **Escape** stops recording into the retained preview; neither sends
 nor discards it. Recording takes priority over Escape's agent-interruption

@@ -1,6 +1,7 @@
 #include "SpeechClient.h"
 #include "ProcessRunner.h"
 #include <QJsonDocument>
+#include <QPointer>
 #include <QRegularExpression>
 
 namespace {
@@ -24,8 +25,17 @@ QString failure(const ProcessRunner::Result &result)
 
 SpeechClient::SpeechClient(QString executable, QObject *parent) : QObject(parent), m_executable(std::move(executable)) {}
 
+SpeechClient::Reply SpeechClient::reportCompletion(Reply done)
+{
+    return [guard = QPointer<SpeechClient>(this), done = std::move(done)](const QJsonObject &reply, const QString &error) {
+        done(reply, error);
+        if (guard) emit guard->requestFinished();
+    };
+}
+
 void SpeechClient::request(const QString &host, const QJsonObject &payload, Reply done)
 {
+    done = reportCompletion(std::move(done));
     if (m_supported.contains(host)) { dispatch(host, payload, std::move(done)); return; }
     ProcessRunner::run(command(m_executable, host, {"--help"}), this,
         [this, host, payload, done](const ProcessRunner::Result &result) {
@@ -40,6 +50,7 @@ void SpeechClient::request(const QString &host, const QJsonObject &payload, Repl
 
 void SpeechClient::requestVoice(const QString &host, const QString &session, const QJsonObject &payload, Reply done)
 {
+    done = reportCompletion(std::move(done));
     if (session.isEmpty()) { done({}, tr("Choose a conversation before sending voice.")); return; }
     if (m_voiceSupported.contains(host)) { dispatch(host, payload, std::move(done), session); return; }
     ProcessRunner::run(command(m_executable, host, {"--help"}), this,

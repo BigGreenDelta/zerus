@@ -1101,7 +1101,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        SpeechComposerStatus(model)
+        // Measure the editor and its controls first. A voice preview uses only the
+        // remaining height, with its controls reachable by scrolling.
+        if (model.speech.recording || model.speech.savingRecording || model.speech.draft != null) {
+            Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
+                .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
+        }
         ContextFooter(model, session) {
             model.edit(target, editor.text.toString())
             model.draft(target)

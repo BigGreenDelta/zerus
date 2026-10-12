@@ -263,13 +263,24 @@ displays the selected processing computer's aggregate local counts. Audio and
 transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
 and [analytics](../../docs/analytics.md).
 
-Tap the composer microphone, speak, then **Stop recording**. Capture lasts at most
-two minutes. Stopping, leaving the foreground and returning from system settings
+Tap the composer microphone, speak, then **Stop recording**. Local capture starts
+without waiting for provider discovery; discovery refreshes in the background.
+Capture lasts at most two minutes. Stopping, leaving the foreground and returning from system settings
 never send a message. The preview is an encrypted durable WAV file on this phone;
 it offers **Play**, **Discard** and **Send voice message**. A process killed before
 capture finishes can lose the unfinished recording. Completed previews survive
 restart and remain accessible in Drafts. Capture and bounded 48 kHz fallback
 conversion run off the main thread.
+
+A preview recorded before choosing a provider remains saved without a fabricated
+selection. Use **Transcription provider** on that preview to choose its computer
+and profile. This dialog always addresses the recording's original conversation.
+Send requires fresh confirmation of that exact available provider; discovery
+failure or an unavailable selection keeps the audio and never chooses a fallback
+or sends automatically. The conversation must have a confirmed run and conversation
+identity before recording.
+The composer preview scrolls within a bounded area while the software keyboard is
+open, keeping the typed draft visible and editable after capture stops.
 
 While recording, the typed draft stays visible and read-only, and ordinary message
 sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
@@ -334,7 +345,9 @@ adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobi
 ```
 
 The clear command removes app data on that emulator. The smoke checks durable
-preview without implicit upload, explicit Send, local and authenticated remote
+preview without implicit upload, real PCM capture during delayed, failed and
+unavailable provider discovery, explicit preview-scoped provider selection without
+fallback, explicit Send, local and authenticated remote
 playback, processing/history cards, recognized text, concurrent typed-draft
 preservation, lost-submit status-only recovery, cancellation and background capture
 stop. Hardware Space/Escape coverage verifies the read-only draft, blocked ordinary

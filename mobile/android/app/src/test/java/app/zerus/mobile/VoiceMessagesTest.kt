@@ -61,6 +61,34 @@ class VoiceMessagesTest {
         assertEquals("b4075bf0-9c22-4a67-b768-55af2d2936a4", recovered.outgoing.single().machineId)
         assertEquals("owner", recovered.outgoing.single().target.computerId)
     }
+    @Test fun recordingWithoutDiscoveredProviderRemainsAnExactDurablePreview() {
+        val preview = VoiceDraft(target, "", "", audio, 200, 50.0)
+        val saved = VoiceState(draft = preview)
+        assertEquals(saved, VoiceCodec.decode(VoiceCodec.encode(saved)))
+        assertEquals(SpeechSelection(), preview.selection)
+        assertTrue(VoiceCodec.decode(VoiceCodec.encode(saved)).outgoing.isEmpty())
+    }
+    @Test fun sendingRequiresFreshExactProviderAndConversationWithoutFallback() {
+        val machine = "b4075bf0-9c22-4a67-b768-55af2d2936a4"
+        val draft = VoiceDraft(target, machine, "chosen", audio, 2_000, 50.0)
+        val chosen = SpeechProfile("chosen", "Chosen", "synthetic", true)
+        val fallback = SpeechProfile("other", "Other", "synthetic", true)
+        val computers = listOf(VoiceComputer(machine, "GPU", listOf(chosen, fallback)))
+        fun reason(value: VoiceDraft = draft, confirmed: Target? = target, loading: Boolean = false,
+            profiles: List<VoiceComputer> = computers) = VoiceRoutes.providerReason(value, confirmed, loading, profiles)
+        assertEquals("", reason())
+        assertTrue(reason(loading = true).isNotBlank())
+        for (other in listOf<Target?>(null, target.copy(run = "different"), target.copy(conversation = "different"),
+            target.copy(computerId = "different"), target.copy(connectionId = "different"))) assertTrue(reason(confirmed = other).isNotBlank())
+        assertTrue(reason(draft.copy(machineId = "")).isNotBlank())
+        assertTrue(reason(draft.copy(profileId = "")).isNotBlank())
+        assertTrue(reason(draft.copy(profileId = "missing")).isNotBlank())
+        assertTrue(reason(draft.copy(machineId = UUID.randomUUID().toString())).isNotBlank())
+        assertEquals("Chosen worker offline", reason(profiles = listOf(computers.single().copy(profiles =
+            listOf(chosen.copy(available = false, reason = "Chosen worker offline"), fallback)))))
+        assertTrue(reason(profiles = listOf(computers.single().copy(profiles = listOf(chosen.copy(maxDurationMs = 1_000))))).isNotBlank())
+        assertEquals(SpeechSelection(MachineKey(target.connectionId, machine), "chosen"), draft.selection)
+    }
     @Test fun rejectsForeignIdentityAndUnboundedAudio() {
         val raw = JSONObject().put("schema", 1).put("message", VoiceProtocol.json(message()))
         assertEquals(message(), VoiceProtocol.response(raw, target, id))

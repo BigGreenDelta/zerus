@@ -6,6 +6,19 @@ authorizes recognition and delivery of the recognized text to the selected
 conversation. The original recording and expandable transcript remain together
 in conversation history on desktop and Android.
 
+Capture depends on local microphone permission and storage, not on provider
+discovery. Clients open the microphone first and refresh available speech
+computers asynchronously. An unsuccessful or delayed refresh must not stop
+capture, discard its preview or send anything. The capture limit remains
+120 seconds even when no provider has responded.
+
+The preview keeps its intended conversation and selected speech machine/profile.
+Discovery must not replace an unavailable explicit selection with another
+provider. A preview recorded before choosing a provider can be assigned one
+before sending. Only an explicit **Send voice**, with a confirmed available
+provider for that conversation, authorizes submission. Refreshing providers
+alone never submits the recording.
+
 ## Authority and processing
 
 The conversation computer owns each voice message. It retains its original WAV,

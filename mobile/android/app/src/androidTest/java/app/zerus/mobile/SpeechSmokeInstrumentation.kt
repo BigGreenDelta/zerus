@@ -34,6 +34,8 @@ import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.UUID
 import java.io.FileInputStream
 import java.io.File
@@ -52,7 +54,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
             if (!playerOnly) runSmoke()
             runPlayerSmoke()
             result.putString("stream", if (playerOnly) "Voice player smoke passed: waveform tap/drag/accessibility seeking, paused/end/replay/playing seek, scoped playback, retained drafts and narrow light/dark screenshots.\n"
-                else "Voice message smoke passed: microphone settings recovery, recording editor/send lock, hardware Space/Escape with held-key and modifier handling, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop, waveform tap/drag/accessibility seeking, scoped playback and narrow light/dark player screenshots.\n")
+                else "Voice message smoke passed: immediate PCM capture during delayed/failed/unavailable discovery, exact preview provider selection without fallback, microphone settings recovery, recording editor/send lock, hardware Space/Escape with held-key and modifier handling, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop, waveform tap/drag/accessibility seeking, scoped playback and narrow light/dark player screenshots.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Speech smoke failed: ${error.stackTraceToString()}\n")
@@ -94,9 +96,15 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         }
     }
     private fun tap(label: String) {
-        var target = node(label)
-        while (!target.isClickable) target = checkNotNull(target.parent) { "UI element is not clickable: $label" }
-        check(target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Could not click: $label" }
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        while (true) {
+            var target: AccessibilityNodeInfo? = node(label)
+            while (target != null && !target.isClickable) target = target.parent
+            if (target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return
+            // A closing dialog can expose its same-named title for one accessibility frame.
+            check(SystemClock.elapsedRealtime() < deadline) { "UI element is not clickable: $label" }
+            SystemClock.sleep(50)
+        }
     }
     private fun back() {
         SystemClock.sleep(300) // Let the newly opened system page finish its transition.
@@ -159,11 +167,27 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(main { model.draft(target).text == edited && model.speechComposer?.editor?.text.toString() == edited }) {
             main { "Resumed text reverted: editor=${model.speechComposer?.editor?.text}; draft=${model.draft(target).text}; generation=${model.draft(target).generation}" }
         }
+        waitForIdleSync(); SystemClock.sleep(500) // Inspect the fully expanded IME viewport.
+        val editedNode = node(edited)
+        val editedBounds = android.graphics.Rect(); editedNode.getBoundsInScreen(editedBounds)
+        check(editedNode.isVisibleToUser && editedBounds.height() > 0)
+        if (code == KeyEvent.KEYCODE_ESCAPE) check(editedBounds.height() >= 46 * targetContext.resources.displayMetrics.scaledDensity) {
+            "Resumed two-line editor was clipped by the voice preview"
+        }
+        val keyboardTop = main { activity.window.decorView.let { it.height - (it.rootWindowInsets?.getInsets(android.view.WindowInsets.Type.ime())?.bottom ?: 0) } }
+        check(editedBounds.bottom <= keyboardTop) { "Resumed editor is covered by the software keyboard" }
+        val editingScreenshot = checkNotNull(uiAutomation.takeScreenshot())
+        File(targetContext.getExternalFilesDir(null), "voice-resumed-editor-$code.png").outputStream().use {
+            editingScreenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+        editingScreenshot.recycle()
         // Restore the fixture's exact prior text for the remaining transport/recovery checks.
         check(node(edited).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, original.text)
         }))
         await("restored original typed draft") { model.draft(target).text == original.text }
+        // Editing was visibly verified above; dismiss IME for the following preview actions.
+        main { activity.window.insetsController?.hide(android.view.WindowInsets.Type.ime()) }
     }
     private fun permissionRecovery(model: ZerusViewModel, target: Target) {
         var settingsIntent: Intent? = null
@@ -216,6 +240,11 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         val ordinarySends = AtomicInteger()
         val complete = AtomicBoolean(false)
         val interruptSubmit = AtomicBoolean(false)
+        val profilesGate = CountDownLatch(1)
+        val profileRequests = AtomicInteger()
+        val failProfiles = AtomicBoolean(false)
+        val unavailableProfile = AtomicBoolean(false)
+        val lastProfileConversation = AtomicReference<String>()
         val target = Target("session-host", "voice-fixture", "fixture-run", "fixture-conversation", "speech-fixture")
         val owner = MachineKey(target.connectionId, target.computerId)
         val messages = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
@@ -232,17 +261,29 @@ class SpeechSmokeInstrumentation : Instrumentation() {
             if (operation in VoiceProtocol.operations) {
                 check(input.string("computer_id") == target.computerId && input.string("session") == target.session)
                 check(payload.string("request_id") == input.string("request_id"))
-                check(payload.string("expected_run_id") == target.run && payload.string("expected_conversation_id") == target.conversation)
+                check(payload.string("expected_run_id") == target.run)
+                check(payload.string("expected_conversation_id") == target.conversation ||
+                    operation == "voice_profiles" && payload.string("expected_conversation_id") == "other-conversation")
             }
             val result = when (operation) {
                 "inspect" -> inspect()
-                "voice_profiles" -> JSONObject().put("schema", 1).put("computers", JSONArray().put(
-                    JSONObject().put("machine_id", "b4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Fixture GPU").put("profiles", JSONArray().put(
-                        JSONObject().put("id", "fixture").put("name", "Fixture Russian").put("available", true).put("model", "synthetic").put("max_duration_ms", 120_000)))))
+                "voice_profiles" -> {
+                    profileRequests.incrementAndGet()
+                    lastProfileConversation.set(payload.string("expected_conversation_id"))
+                    check(profilesGate.await(90, TimeUnit.SECONDS)) { "Held discovery fixture was not released" }
+                    if (failProfiles.get()) throw java.io.IOException("Synthetic discovery failure")
+                    JSONObject().put("schema", 1).put("computers", JSONArray().put(
+                        JSONObject().put("machine_id", "b4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Fixture GPU").put("profiles", JSONArray().put(
+                            JSONObject().put("id", "fixture").put("name", "Fixture Russian").put("available", !unavailableProfile.get())
+                                .put("reason", "Chosen fixture unavailable").put("model", "synthetic").put("max_duration_ms", 120_000))))
+                        .put(JSONObject().put("machine_id", "c4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Other GPU").put("profiles", JSONArray().put(
+                            JSONObject().put("id", "other").put("name", "Other profile").put("available", true)))))
+                }
                 "voice_submit" -> {
                     val id = input.getString("request_id")
                     val audio = payload.getJSONObject("audio")
                     check(payload.getJSONObject("speech").string("machine_id") == "b4075bf0-9c22-4a67-b768-55af2d2936a4")
+                    check(payload.getJSONObject("speech").string("profile_id") == "fixture")
                     val pcm = Base64.decode(audio.getString("data_base64"), Base64.NO_WRAP)
                     check(pcm.size in 3_200..VoiceProtocol.MAX_PCM_BYTES)
                     val stored = PrivateStore(targetContext).voiceState()
@@ -301,7 +342,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         }
         await("voice private store") { model.speech.ready }
         main { model.speech.refreshProfiles() }
-        await("voice profiles") { !model.speech.loading && model.speech.profile?.available == true }
+        await("held voice discovery") { model.speech.loading && profileRequests.get() > 0 }
         await("fresh session") { model.activityVerified && model.voiceSendReason(target).isBlank() }
         val retainedAttachment = runBlocking { AttachmentStore(targetContext).importRecording(VoiceProtocol.wav(ByteArray(6_400))) }
         main {
@@ -310,10 +351,36 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         }
         permissionRecovery(model, target)
         await("microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
+        check(main { model.speech.loading && model.speech.selection == SpeechSelection() }) { "Recording waited for provider discovery" }
         keyboardStop(activity, model, target, KeyEvent.KEYCODE_SPACE)
         await("durable voice preview") { !model.speech.busy && model.speech.draft != null }
         check(submitted.get() == 0) { "Stopping the recorder uploaded without explicit Send" }
-        check(PrivateStore(targetContext).voiceState().draft != null)
+        val unbound = checkNotNull(PrivateStore(targetContext).voiceState().draft)
+        check(unbound.durationMs >= 1_000 && unbound.machineId.isBlank() && unbound.profileId.isBlank())
+        val capturedBytes = runBlocking { AttachmentStore(targetContext).payload(listOf(unbound.audio)) }
+        check(capturedBytes.length() == 1 && unbound.audio.bytes >= 32_044) { "Delayed discovery did not capture durable PCM" }
+        main { model.speech.submit() }
+        check(submitted.get() == 0 && main { model.speech.draft } == unbound)
+        profilesGate.countDown()
+        await("discovered profiles without automatic selection") { !model.speech.loading && model.speech.computers.size == 2 }
+        check(main { model.speech.selection == SpeechSelection() && model.speech.draft == unbound })
+        tap("Transcription provider")
+        await("preview profile discovery") { !model.speech.loading }
+        tap("Choose voice computer"); tap("Fixture GPU")
+        tap("Choose voice profile"); tap("Fixture Russian"); tap("Done")
+        await("explicit bound preview") { model.speech.draft?.machineId == "b4075bf0-9c22-4a67-b768-55af2d2936a4" && model.speech.draft?.profileId == "fixture" }
+        // Changing the global preference must not replace a retained preview's tuple.
+        main {
+            model.speech.chooseHost(MachineKey(target.connectionId, "c4075bf0-9c22-4a67-b768-55af2d2936a4"), target)
+            model.speech.chooseProfile("other", target)
+        }
+        check(main { model.speech.selection.profileId == "other" && model.speech.draft?.profileId == "fixture" })
+        tap("Transcription provider")
+        await("pinned preview profiles") { !model.speech.loading }
+        node("Fixture GPU"); tap("Fixture Russian"); node("synthetic"); tap("Fixture Russian")
+        await("preview host owns explicit profile choice") { model.speech.selection.profileId == "fixture" }
+        tap("Done")
+        check(main { model.speech.selection.profileId == "fixture" && model.speech.draft?.audio == unbound.audio })
         tap("Play")
         await("local audio playback") { model.attachments.playing }
         main { model.attachments.stopAudio() }
@@ -352,11 +419,29 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         await("cancellation") { model.speech.outgoing.last().state == "cancelled" && model.speech.activeRequests.isEmpty() }
         check(submitted.get() == 2)
 
+        failProfiles.set(true)
         main { model.speech.start(target) }
         await("background recording") { model.speech.recording && model.speech.seconds >= 1 }
+        await("failed discovery while microphone continues") { !model.speech.loading && model.speech.profileNotice.isNotBlank() }
+        check(main { model.speech.recording && model.speech.notice.isBlank() })
         main { model.speech.background() }
         await("background saved preview") { model.speech.draft != null && !model.speech.busy }
         check(submitted.get() == 2)
+        val failedDiscoveryPreview = main { model.speech.draft }
+        main { model.speech.submit() }
+        check(main { model.speech.draft == failedDiscoveryPreview && model.speech.outgoing.size == 2 })
+        failProfiles.set(false); unavailableProfile.set(true)
+        main { model.speech.refreshProfiles(target) }
+        await("unavailable chosen profile") { !model.speech.loading && model.speech.computers.size == 2 }
+        check(main { model.speech.selection.profileId == "fixture" && model.speech.sendReason() == "Chosen fixture unavailable" })
+        main { model.speech.submit() }
+        check(submitted.get() == 2 && main { model.speech.draft == failedDiscoveryPreview })
+        tap("Discard"); tap("Discard recording")
+        await("discard saved fixture") { model.speech.draft == null && !model.speech.busy }
+        main { model.speech.start(target) }
+        await("capture with unavailable chosen provider") { model.speech.recording && model.speech.seconds >= 1 }
+        main { model.speech.stop() }
+        await("unavailable provider retained preview") { model.speech.draft != null && !model.speech.busy }
         val persisted = PrivateStore(targetContext).voiceState()
         check(persisted.draft != null && persisted.outgoing.size == 2)
         tap("Discard"); node("Discard recording?")
@@ -367,6 +452,17 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(main { model.draft(target).attachments } == listOf(retainedAttachment))
         check(main { model.outgoing.isEmpty() })
         check(ordinarySends.get() == 0) { "Recording dispatched an ordinary send" }
+        val pinned = checkNotNull(main { model.speech.draft })
+        main {
+            set(model, "setSelected", checkNotNull(model.selected).copy(target = target.copy(conversation = "other-conversation")))
+            model.speech.refreshProfiles(target.copy(conversation = "other-conversation"))
+        }
+        await("other conversation profile discovery") { !model.speech.loading && lastProfileConversation.get() == "other-conversation" }
+        main { activity.setContent { MaterialTheme { Surface { SpeechSettingsContent(model, target, pinned, showPreview = false) } } } }
+        await("preview settings query original conversation") { !model.speech.loading && lastProfileConversation.get() == target.conversation }
+        node("Fixture GPU"); node("Fixture Russian")
+        main { model.speech.chooseHost(MachineKey(target.connectionId, "c4075bf0-9c22-4a67-b768-55af2d2936a4"), target, UUID.randomUUID().toString()) }
+        check(main { model.speech.draft == pinned }) { "A stale preview changed the retained recording" }
         main { activity.finish() }
     }
     private fun runPlayerSmoke() {

@@ -16,6 +16,7 @@
 #include <QMediaPlayer>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QTimer>
 #include <QUuid>
@@ -31,6 +32,10 @@ QByteArray wav(const QByteArray &pcm) {
     result.append("data",4);u32(pcm.size());result.append(pcm);return result;
 }
 QString duration(int seconds) { return QString("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QLatin1Char('0')); }
+QJsonObject preferredProfile() {
+    const QSettings settings;const auto machine=settings.value("speech/machine_id").toString();const auto profile=settings.value("speech/profile").toString();
+    return machine.isEmpty() && profile.isEmpty()?QJsonObject{}:QJsonObject{{"machine_id",machine},{"profile_id",profile}};
+}
 }
 
 SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *composer, std::function<Target()> target,
@@ -51,23 +56,25 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     m_previewLabel=new QLabel;m_previewLabel->setTextFormat(Qt::PlainText);row->addWidget(m_previewLabel);
     m_play=new QPushButton(tr("Play"));m_play->setObjectName("voicePreviewPlay");row->addWidget(m_play);
     m_provider=new QComboBox;m_provider->setObjectName("voiceProvider");m_provider->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);m_provider->setMinimumContentsLength(12);row->addWidget(m_provider,1);
+    m_refresh=new QPushButton(tr("Refresh"));m_refresh->setObjectName("voiceRefreshProviders");m_refresh->setToolTip(tr("Refresh available voice providers without recording again"));row->addWidget(m_refresh);
     m_discard=new QPushButton(tr("Discard"));m_discard->setObjectName("voiceDiscard");row->addWidget(m_discard);
     m_send=new QPushButton(tr("Send voice"));m_send->setObjectName("voiceSend");row->addWidget(m_send);
     qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_preview);
     m_recordingHint=new QLabel(tr("Space / Esc to stop"),composer);m_recordingHint->setObjectName("voiceRecordingHint");
     m_recordingHint->setContentsMargins(0,4,0,4);m_recordingHint->setTextFormat(Qt::PlainText);
     qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_recordingHint);
-    for(auto *button:{m_play,m_discard,m_send})button->setAutoDefault(false);
+    for(auto *button:{m_play,m_discard,m_send,m_refresh})button->setAutoDefault(false);
     connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)stopRecording();else start();});
     connect(m_cancel,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_result,&QPushButton::clicked,this,&SpeechComposer::showResult);
     connect(m_send,&QPushButton::clicked,this,[this]{if(m_state==State::Uncertain)check();else send();});
     connect(m_discard,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_play,&QPushButton::clicked,this,&SpeechComposer::play);
+    connect(m_refresh,&QPushButton::clicked,this,&SpeechComposer::loadProfiles);
     connect(m_provider,&QComboBox::currentIndexChanged,this,[this]{
         if(m_syncing)return;
         const auto profile=m_provider->currentData().toJsonObject();
-        if(!profile.isEmpty()){QSettings s;s.setValue("speech/machine_id",profile.value("machine_id").toString());s.setValue("speech/profile",profile.value("profile_id").toString());}
+        if(!profile.isEmpty()){m_selectedProfile=profile;m_profileError.clear();QSettings s;s.setValue("speech/machine_id",profile.value("machine_id").toString());s.setValue("speech/profile",profile.value("profile_id").toString());saveProfileSelection();}
         update();
     });
     connect(composer,&MessageComposer::controlsChanged,this,[this]{syncTarget();update();});
@@ -87,7 +94,7 @@ QJsonObject SpeechComposer::identityPayload(const QString &action) const {
         {"expected_run_id",m_target.run},{"expected_conversation_id",m_target.conversation}};
 }
 bool SpeechComposer::eventFilter(QObject *watched,QEvent *event) {
-    if(watched==m_composer && event->type()==QEvent::Hide){stopPlayback();if(m_state==State::Checking || m_state==State::Starting || m_state==State::Recording)discard();}
+    if(watched==m_composer && event->type()==QEvent::Hide){stopPlayback();if(m_state==State::Starting || m_state==State::Recording)discard();}
     if(event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress || event->type()==QEvent::KeyRelease){
         auto *widget=qobject_cast<QWidget *>(watched);auto *key=static_cast<QKeyEvent *>(event);
         // Window-scoped, before Qt chooses the agent's Escape shortcut. Other
@@ -119,6 +126,7 @@ void SpeechComposer::syncTarget() {
     const auto key=m_composer->sessionKey();if(key==m_loadedKey)return;
     ++m_generation;m_recorder->cancel();stopPlayback();m_loadedKey=key;m_target=m_currentTarget();
     m_pcm.clear();m_id.clear();m_notice.clear();m_noticeKind=Notice::General;m_state=State::Idle;m_loading=!key.isEmpty();
+    m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();m_selectedProfile=preferredProfile();
     m_syncing=true;m_provider->clear();m_syncing=false;
     if(key.isEmpty())return;
     const auto generation=m_generation;
@@ -126,58 +134,75 @@ void SpeechComposer::syncTarget() {
         if(generation!=m_generation)return;m_loading=false;
         if(!draft.attachments.isEmpty()){
             const auto meta=draft.formState;
+            if(!meta.value("speech").toObject().isEmpty())m_selectedProfile=meta.value("speech").toObject();
             m_target={m_loadedKey,meta.value("host").toString(),meta.value("session").toString(),meta.value("run").toString(),meta.value("conversation").toString(),{},false};
             const auto audio=draft.attachments.first().data;
             if(!audio.startsWith("RIFF") || audio.mid(8,8)!="WAVEfmt " || audio.mid(36,4)!="data" || audio.size()<3244){m_notice=tr("The saved voice recording is invalid.");update();return;}
             m_pcm=audio.mid(44);m_id=meta.value("id").toString();m_seconds=m_pcm.size()/32000;
             m_state=meta.value("submitted").toBool()?State::Uncertain:State::Preview;
             if(m_state==State::Uncertain)m_notice=tr("Submission was interrupted. Check this message; audio is never sent twice automatically.");
-            loadProfiles([](bool){});
+            loadProfiles();
         }
         update();
     });
 }
-void SpeechComposer::loadProfiles(std::function<void(bool)> done) {
-    const auto generation=m_generation;
-    m_client->requestVoice(m_target.host,m_target.session,identityPayload("profiles"),[this,generation,done](const QJsonObject &reply,const QString &error){
-        if(generation!=m_generation)return;
-        if(!error.isEmpty()){m_notice=error;update();done(false);return;}
-        const QSettings settings;const auto preferredMachine=settings.value("speech/machine_id").toString();const auto preferredProfile=settings.value("speech/profile").toString();
-        const auto previous=m_provider->currentData().toJsonObject();int selected=-1,profileMatch=-1;
+void SpeechComposer::loadProfiles() {
+    if(m_profilesLoading)return;
+    const auto generation=m_generation;const auto request=++m_profileGeneration;const auto target=m_target;
+    m_profilesLoading=true;m_profilesValidated=false;m_profileError.clear();update();
+    m_client->requestVoice(target.host,target.session,identityPayload("profiles"),[this,generation,request,target](const QJsonObject &reply,const QString &error){
+        if(generation!=m_generation || request!=m_profileGeneration)return;
+        m_profilesLoading=false;
+        if(!m_currentTarget().sameConversation(target) || !m_target.sameConversation(target)){
+            m_profileError=tr("The conversation changed. The recording is kept without sending.");update();return;
+        }
+        if(!error.isEmpty()){m_profileError=error;update();return;}
+        const auto preferredMachine=m_selectedProfile.value("machine_id").toString();const auto preferredId=m_selectedProfile.value("profile_id").toString();
+        int selected=-1,profileMatch=-1,profileMatches=0;
         m_syncing=true;m_provider->clear();
         for(const auto &computerValue:reply.value("computers").toArray()){
             const auto computer=computerValue.toObject();const auto machine=computer.value("machine_id").toString();
             for(const auto &value:computer.value("profiles").toArray()){
-                const auto profile=value.toObject();if(!profile.value("available").toBool() || machine.isEmpty())continue;
-                const auto id=profile.value("id").toString();if(id.isEmpty())continue;
+                const auto profile=value.toObject();if(!profile.value("available").toBool() || QUuid(machine).isNull() || QUuid(machine).toString(QUuid::WithoutBraces)!=machine)continue;
+                const auto id=profile.value("id").toString();if(!QRegularExpression("^[A-Za-z0-9_-]{1,64}$").match(id).hasMatch())continue;
                 const QJsonObject data{{"machine_id",machine},{"profile_id",id}};
                 m_provider->addItem(computer.value("name").toString()+" / "+profile.value("name").toString(id),QVariant::fromValue(data));
                 const auto index=m_provider->count()-1;
-                if(data==previous || (machine==preferredMachine && id==preferredProfile))selected=index;
-                if(profileMatch<0 && preferredMachine.isEmpty() && id==preferredProfile)profileMatch=index;
+                if(data==m_selectedProfile)selected=index;
+                if(preferredMachine.isEmpty() && id==preferredId){profileMatch=index;++profileMatches;}
             }
         }
-        if(selected<0)selected=profileMatch;
-        if(selected>=0)m_provider->setCurrentIndex(selected);
-        else if(!preferredProfile.isEmpty()){
+        if(selected<0 && profileMatches==1)selected=profileMatch;
+        if(selected<0 && m_selectedProfile.isEmpty() && m_provider->count())selected=0;
+        if(selected>=0){m_provider->setCurrentIndex(selected);m_selectedProfile=m_provider->currentData().toJsonObject();}
+        else if(!m_selectedProfile.isEmpty()){
             m_provider->addItem(tr("Selected provider (unavailable)"),QVariant::fromValue(QJsonObject{}));
             m_provider->setCurrentIndex(m_provider->count()-1);
         }
         m_syncing=false;
-        if(!m_provider->count())m_notice=tr("No speech provider is available from this conversation computer.");
-        update();done(m_provider->count()>0);
+        m_profilesValidated=true;
+        if(selected<0)m_profileError=m_selectedProfile.isEmpty()?tr("No speech provider is available. Refresh to try again; your recording is kept.")
+            :tr("The selected voice provider is unavailable. Refresh or explicitly choose another provider; your recording is kept.");
+        saveProfileSelection();update();
     });
+}
+QJsonObject SpeechComposer::selectedProfile() const {
+    const auto selected=m_provider->currentData().toJsonObject();
+    return m_profilesValidated && !m_profilesLoading && selected==m_selectedProfile && !selected.value("machine_id").toString().isEmpty()
+        && !selected.value("profile_id").toString().isEmpty()?selected:QJsonObject{};
+}
+void SpeechComposer::saveProfileSelection() {
+    if(m_pcm.isEmpty() || (m_state!=State::Preview && m_state!=State::Saving))return;
+    saveVoice([this](bool okay){if(!okay){m_notice=tr("Could not save the voice provider selection. Keep Zerus open and try again.");update();}});
 }
 void SpeechComposer::start() {
     syncTarget();const auto target=m_currentTarget();
     if(m_loading || m_state!=State::Idle || !target.available || target.run.isEmpty() || target.conversation.isEmpty() || !m_composer->isInputVisible())return;
-    m_target=target;m_notice.clear();m_noticeKind=Notice::General;m_state=State::Checking;const auto generation=++m_generation;update();
-    loadProfiles([this,generation](bool okay){
-        if(generation!=m_generation)return;
-        if(!okay){m_state=State::Idle;update();return;}
-        if(!m_currentTarget().sameConversation(m_target)){fail(tr("The conversation changed. Start recording again in the intended conversation."));return;}
-        m_state=State::Starting;update();m_recorder->start(QSettings().value("speech/microphone").toByteArray());
-    });
+    m_target=target;m_notice.clear();m_noticeKind=Notice::General;m_state=State::Starting;++m_generation;
+    m_selectedProfile=preferredProfile();m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();
+    m_syncing=true;m_provider->clear();m_syncing=false;update();
+    m_recorder->start(QSettings().value("speech/microphone").toByteArray());
+    loadProfiles();
 }
 void SpeechComposer::recorded(const QByteArray &base64) {
     const auto decoded=QByteArray::fromBase64Encoding(base64,QByteArray::AbortOnBase64DecodingErrors);
@@ -191,12 +216,13 @@ void SpeechComposer::saveVoice(std::function<void(bool)> done,bool requireGenera
     draft.notice=tr("Open the original conversation to review or check this voice message.");
     draft.attachments.append({"voice.wav","audio/wav",wav(m_pcm),{}});
     draft.formState={{"kind","voice_message"},{"id",m_id},{"host",m_target.host},{"session",m_target.session},{"run",m_target.run},{"conversation",m_target.conversation},
-        {"submitted",m_state==State::Submitting || m_state==State::Uncertain}};
+        {"speech",m_selectedProfile},{"submitted",m_state==State::Submitting || m_state==State::Uncertain}};
     const auto generation=m_generation;
     m_store.saveDurableAsync(storageKey(),draft,this,[this,generation,done,requireGeneration](bool okay,const ComposerDraft &){if(!requireGeneration || generation==m_generation)done(okay);});
 }
 void SpeechComposer::send() {
-    if(m_state!=State::Preview || m_pcm.isEmpty() || m_provider->currentData().toJsonObject().value("machine_id").toString().isEmpty())return;
+    const auto chosen=selectedProfile();
+    if(m_state!=State::Preview || m_pcm.isEmpty() || chosen.isEmpty())return;
     const auto current=m_currentTarget();
     if(!current.available || !current.sameConversation(m_target)){m_notice=tr("The conversation changed or cannot receive input. The recording is kept without sending.");update();return;}
     if(!current.warning.isEmpty()){
@@ -207,11 +233,11 @@ void SpeechComposer::send() {
         auto *cancel=confirm.addButton(QMessageBox::Cancel);confirm.setDefaultButton(cancel);confirm.setEscapeButton(cancel);confirm.exec();
         const auto after=m_currentTarget();
         if(confirm.clickedButton()!=send || m_generation!=originalGeneration || m_id!=originalId || m_state!=State::Preview
-            || !m_target.sameConversation(originalTarget) || !after.available || !after.sameConversation(originalTarget))return;
+            || !m_target.sameConversation(originalTarget) || !after.available || !after.sameConversation(originalTarget) || selectedProfile()!=chosen)return;
     }
     stopPlayback();m_notice.clear();m_state=State::Submitting;update();
-    const auto generation=m_generation;auto payload=identityPayload("submit");payload["request_id"]=m_id;payload["speech"]=m_provider->currentData().toJsonObject();
-    const auto chosen=m_provider->currentData().toJsonObject();QSettings settings;
+    const auto generation=m_generation;auto payload=identityPayload("submit");payload["request_id"]=m_id;payload["speech"]=chosen;
+    QSettings settings;
     settings.setValue("speech/machine_id",chosen.value("machine_id").toString());settings.setValue("speech/profile",chosen.value("profile_id").toString());
     payload["audio"]=QJsonObject{{"format","pcm_s16le"},{"sample_rate",16000},{"channels",1},{"data_base64",QString::fromLatin1(m_pcm.toBase64())}};
     const auto target=m_target;const auto key=storageKey();
@@ -263,7 +289,7 @@ void SpeechComposer::discard() {
         auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=confirm || m_generation!=originalGeneration || m_id!=originalId
             || !m_target.sameConversation(originalTarget) || m_state!=State::Preview)return;
-        stopPlayback();const auto generation=m_generation;m_state=State::Saving;update();
+        stopPlayback();++m_profileGeneration;m_profilesLoading=false;m_profilesValidated=false;const auto generation=m_generation;m_state=State::Saving;update();
         m_store.saveDurableAsync(storageKey(),{},this,[this,generation](bool saved,const ComposerDraft&){
             if(generation!=m_generation)return;
             if(!saved){m_state=State::Preview;m_notice=tr("Could not discard the saved recording. Try again.");update();return;}
@@ -294,23 +320,25 @@ void SpeechComposer::update() {
     m_recordingHint->setVisible(recording);
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
     m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?"stop":"microphone");
-    m_voice->setLabels(recording?tr("Stop voice (%1)").arg(duration(m_seconds)):m_state==State::Checking?tr("Checking voice…"):m_state==State::Starting?tr("Opening microphone…"):tr("Voice"));
+    m_voice->setLabels(recording?tr("Stop voice (%1)").arg(duration(m_seconds)):m_state==State::Starting?tr("Opening microphone…"):tr("Voice"));
     m_voice->setDetail(tr("Record a voice message, review it, then choose Send voice. Your text draft stays separate."));
-    m_cancel->setActive(m_state==State::Checking || m_state==State::Starting || recording);
+    m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));
-    m_play->setEnabled(preview && m_state!=State::Submitting);m_discard->setEnabled(m_state==State::Preview || m_state==State::Uncertain);m_provider->setEnabled(m_state==State::Preview);
+    m_play->setEnabled(preview && m_state!=State::Submitting);m_discard->setEnabled(m_state==State::Preview || m_state==State::Uncertain);m_provider->setEnabled(m_state==State::Preview && m_profilesValidated && !m_profilesLoading);
+    m_refresh->setEnabled(m_state==State::Preview && !m_profilesLoading);m_refresh->setText(m_profilesLoading?tr("Checking…"):tr("Refresh"));
+    m_provider->setPlaceholderText(m_profilesLoading?tr("Checking providers…"):tr("Choose a voice provider"));m_provider->setToolTip(m_profileError);
     m_discard->setText(m_state==State::Uncertain?tr("Cancel message"):tr("Discard"));
     m_send->setText(m_state==State::Uncertain?tr("Check message"):m_state==State::Submitting?tr("Sending voice…"):tr("Send voice"));
     m_send->setEnabled(m_state==State::Uncertain || (m_state==State::Preview && current.available && current.sameConversation(m_target)
-        && !m_provider->currentData().toJsonObject().value("machine_id").toString().isEmpty()));
-    m_result->setActive(!m_notice.isEmpty());m_result->setLabels(m_noticeKind==Notice::MicrophonePermission?tr("Microphone access"):tr("Voice notice"));m_result->setDetail(m_notice);
+        && !selectedProfile().isEmpty()));
+    m_result->setActive(!m_notice.isEmpty() || !m_profileError.isEmpty());m_result->setLabels(m_noticeKind==Notice::MicrophonePermission?tr("Microphone access"):tr("Voice notice"));m_result->setDetail(m_notice.isEmpty()?m_profileError:m_notice);
 }
 void SpeechComposer::showResult() {
     if(m_noticeKind==Notice::MicrophonePermission){showPermissionRecovery();return;}
     QDialog dialog(m_composer);dialog.setObjectName("voiceResultDialog");dialog.setWindowTitle(tr("Voice message"));
     auto *layout=new QVBoxLayout(&dialog);layout->setSizeConstraint(QLayout::SetFixedSize);
-    auto *hint=new QLabel(m_notice);hint->setWordWrap(true);hint->setFixedWidth(420);layout->addWidget(hint);
+    auto *hint=new QLabel(m_notice.isEmpty()?m_profileError:m_notice);hint->setWordWrap(true);hint->setFixedWidth(420);layout->addWidget(hint);
     auto *close=new QPushButton(tr("Close"));layout->addWidget(close,0,Qt::AlignRight);connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);dialog.exec();
 }
 QUrl SpeechComposer::microphoneSettingsUrl()

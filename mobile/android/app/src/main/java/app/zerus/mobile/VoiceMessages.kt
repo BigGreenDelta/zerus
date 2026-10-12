@@ -15,7 +15,9 @@ data class VoiceMessage(val id: String, val runId: String, val conversationId: S
 }
 internal data class VoiceComputer(val id: String, val name: String, val profiles: List<SpeechProfile>)
 internal data class VoiceDraft(val target: Target, val machineId: String, val profileId: String,
-    val audio: Attachment, val durationMs: Int, val createdAt: Double)
+    val audio: Attachment, val durationMs: Int, val createdAt: Double) {
+    val selection get() = SpeechSelection(machineId.takeIf { it.isNotBlank() }?.let { MachineKey(target.connectionId, it) }, profileId)
+}
 internal data class VoiceOutgoing(val id: String, val target: Target, val machineId: String, val profileId: String,
     val audio: Attachment?, val durationMs: Int, val createdAt: Double, val message: VoiceMessage? = null,
     val uploadState: String = "uploading", val error: String = "") {
@@ -119,6 +121,16 @@ object VoiceProtocol {
 }
 
 internal object VoiceRoutes {
+    fun providerReason(draft: VoiceDraft, confirmedTarget: Target?, loading: Boolean, computers: List<VoiceComputer>): String {
+        if (loading) return "Loading voice profiles. Your recording is saved."
+        if (confirmedTarget != draft.target) return "Refresh voice profiles for this recording's conversation before sending."
+        if (draft.machineId.isBlank() || draft.profileId.isBlank()) return "Choose a voice computer and profile before sending."
+        val computer = computers.find { it.id == draft.machineId } ?: return "The selected voice computer is unavailable. Choose a provider or refresh."
+        val profile = computer.profiles.find { it.id == draft.profileId } ?: return "The selected voice profile is unavailable. Choose a provider or refresh."
+        if (!profile.available) return profile.reason.ifBlank { "The selected voice profile is unavailable." }
+        if (draft.durationMs > profile.maxDurationMs) return "This recording exceeds the selected profile's duration limit. Choose another profile."
+        return ""
+    }
     fun statistics(selection: MachineKey, machines: List<Machine>): MachineKey? = machines
         .filter { it.connectionId == selection.connectionId && it.machineId == selection.computerId }
         .singleOrNull()?.let { MachineKey(it.connectionId, it.id) }

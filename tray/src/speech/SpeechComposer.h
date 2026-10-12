@@ -31,7 +31,7 @@ signals:
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
-    enum class State { Idle, Checking, Starting, Recording, Saving, Preview, Submitting, Uncertain };
+    enum class State { Idle, Starting, Recording, Saving, Preview, Submitting, Uncertain };
     enum class Notice { General, MicrophonePermission };
     void start();
     void stopRecording();
@@ -42,7 +42,9 @@ private:
     void discard();
     void syncTarget();
     void saveVoice(std::function<void(bool)> done, bool requireGeneration = true);
-    void loadProfiles(std::function<void(bool)> done);
+    void loadProfiles();
+    QJsonObject selectedProfile() const;
+    void saveProfileSelection();
     void update();
     void play();
     void stopPlayback();
@@ -57,7 +59,7 @@ private:
     ToolbarChip *m_voice, *m_cancel, *m_result;
     QWidget *m_preview;
     QLabel *m_previewLabel, *m_recordingHint;
-    QPushButton *m_play, *m_send, *m_discard;
+    QPushButton *m_play, *m_send, *m_discard, *m_refresh;
     QComboBox *m_provider;
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_output = nullptr;
@@ -67,10 +69,14 @@ private:
     ComposerDraftStore m_store;
     QByteArray m_pcm;
     QString m_id, m_notice, m_loadedKey;
+    QString m_profileError;
+    QJsonObject m_selectedProfile;
     bool m_loading = false, m_syncing = false;
+    bool m_profilesLoading = false, m_profilesValidated = false;
     State m_state = State::Idle;
     Notice m_noticeKind = Notice::General;
     quint64 m_generation = 0;
+    quint64 m_profileGeneration = 0;
     int m_seconds = 0;
     QSet<int> m_stopKeys;
 };

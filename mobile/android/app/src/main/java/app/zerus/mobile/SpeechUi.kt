@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -22,48 +23,59 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-@Composable internal fun SpeechSettingsContent(model: ZerusViewModel) {
+@Composable internal fun SpeechSettingsContent(model: ZerusViewModel, target: Target? = model.selected?.target,
+    preview: VoiceDraft? = null, showPreview: Boolean = true) {
     val speech = model.speech
     var hostsOpen by remember { mutableStateOf(false) }
     var profilesOpen by remember { mutableStateOf(false) }
-    val selected = speech.computers.find { it.id == speech.selection.host?.computerId }
-    LaunchedEffect(speech.ready, model.selected?.target) { if (speech.ready) speech.refreshProfiles() }
+    val choicePreview = speech.draft?.takeIf { it.target == target && (preview == null || it.audio.id == preview.audio.id) }
+    val currentPreview = preview == null || choicePreview != null
+    val choice = choicePreview?.selection ?: speech.selection
+    val selected = speech.computers.find { it.id == choice.host?.computerId }
+    val profiles = selected?.profiles.orEmpty()
+    val profile = profiles.find { it.id == choice.profileId }
+    LaunchedEffect(speech.ready, target, currentPreview) { if (speech.ready && currentPreview) speech.refreshProfiles(target) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Voice messages", style = MaterialTheme.typography.titleLarge)
+        if (!currentPreview) {
+            Text("This recording is no longer available.")
+            return@Column
+        }
         Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
         Box {
-            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
                 modifier = Modifier.fillMaxWidth()) {
-                Text(selected?.name ?: if (speech.selection.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(selected?.name ?: if (choice.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
                 speech.computers.forEach { machine ->
                     DropdownMenuItem(text = { Text(machine.name) }, onClick = {
                         hostsOpen = false
-                        model.selected?.target?.let { speech.chooseHost(MachineKey(it.connectionId, machine.id)) }
+                        target?.let { speech.chooseHost(MachineKey(it.connectionId, machine.id), it, choicePreview?.audio?.id) }
                     })
                 }
             }
         }
         Box {
-            OutlinedButton(onClick = { profilesOpen = true }, enabled = speech.profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+            OutlinedButton(onClick = { profilesOpen = true }, enabled = !speech.loading && profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
                 modifier = Modifier.fillMaxWidth()) {
-                Text(speech.profile?.name ?: speech.selection.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(profile?.name ?: choice.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
-                speech.profiles.forEach { profile -> DropdownMenuItem(text = { Column {
+                profiles.forEach { profile -> DropdownMenuItem(text = { Column {
                     Text(profile.name)
                     if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
                     if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
-                } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id) }) }
+                } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
             }
         }
         Text("Tap Send after recording. Zerus keeps the audio in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the audio.", style = MaterialTheme.typography.bodySmall)
         if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
         if (speech.statistics.isNotBlank()) Text(speech.statistics, style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { speech.refreshProfiles() }, enabled = !speech.loading && !speech.recording) { Text("Refresh voice profiles") }
-        SpeechComposerStatus(model)
+        TextButton(onClick = { speech.refreshProfiles(target) }, enabled = !speech.loading) { Text("Refresh voice profiles") }
+        if (showPreview) SpeechComposerStatus(model)
         speech.legacyResult?.let { legacy ->
             Text("An earlier dictation result remains saved on this phone. It has not been sent.", style = MaterialTheme.typography.bodySmall)
             if (legacy.text.isNotBlank()) {
@@ -128,6 +140,7 @@ import androidx.compose.ui.unit.dp
     val draft = speech.draft
     var confirmCold by remember { mutableStateOf<VoiceDraft?>(null) }
     var confirmDiscard by remember { mutableStateOf<VoiceDraft?>(null) }
+    var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
     if (!speech.recording && !speech.savingRecording && draft == null) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
@@ -145,7 +158,8 @@ import androidx.compose.ui.unit.dp
             draft != null -> {
                 Text("Voice message for ${draft.target.session}", style = MaterialTheme.typography.labelMedium)
                 val computer = speech.computers.find { it.id == draft.machineId }
-                Text("Transcription: ${computer?.name ?: draft.machineId} / ${computer?.profiles?.find { it.id == draft.profileId }?.name ?: draft.profileId}", style = MaterialTheme.typography.bodySmall)
+                Text(if (draft.machineId.isBlank() || draft.profileId.isBlank()) "Choose a transcription provider before sending."
+                    else "Transcription: ${computer?.name ?: draft.machineId} / ${computer?.profiles?.find { it.id == draft.profileId }?.name ?: draft.profileId}", style = MaterialTheme.typography.bodySmall)
                 VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs)
                 val reason = speech.sendReason()
                 Row {
@@ -154,6 +168,9 @@ import androidx.compose.ui.unit.dp
                         if (model.voiceColdCache()) confirmCold = draft else speech.submit()
                     }, enabled = reason.isBlank()) { Text("Send voice message") }
                     TextButton(onClick = { confirmDiscard = draft }) { Text("Discard") }
+                    IconButton(onClick = { providerSettings = draft }, enabled = !speech.savingRecording) {
+                        Icon(Icons.Default.Settings, "Transcription provider")
+                    }
                 }
                 if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
                 if (model.selected?.target != draft.target) model.sessions.find { it.target == draft.target }?.let { session ->
@@ -162,6 +179,15 @@ import androidx.compose.ui.unit.dp
             }
         }
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
+    }
+    providerSettings?.let { captured ->
+        ObscureConversation()
+        AlertDialog(onDismissRequest = { providerSettings = null }, title = { Text("Transcription provider") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Recording for ${captured.target.session}")
+                SpeechSettingsContent(model, captured.target, captured, showPreview = false)
+            } },
+            confirmButton = { TextButton(onClick = { providerSettings = null }) { Text("Done") } })
     }
     confirmCold?.let { captured ->
         AlertDialog(onDismissRequest = { confirmCold = null }, title = { Text("Send with full context?") },
