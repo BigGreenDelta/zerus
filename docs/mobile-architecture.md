@@ -763,8 +763,10 @@ treats a `null` page field as absent. When the escaped answer exceeds 1 MiB
 less 4 KiB, or its native output exceeds the connector's cap, the connector
 halves the window and reads again. If one journal entry or task still does
 not fit, the answer is the refusal `too_large` on that field. The phone
-continues a board with `after: next` until `next` is null, restarting
-when `cursor` changes between pages, then reconciles with `since`. It reads
+continues a board with `after: next` until `next` is null, then reconciles the
+walk with `since` set to its first page's `cursor`. The cursor is global and
+moves constantly, so a change between pages never restarts the walk. A cached
+board asks only for the changes `since` its cursor. The phone reads
 older journal entries with `journal_before: journal_from` until `journal_from`
 is 0, starting again from the newest page when `journal_total` changes.
 `projects` and `decisions` are not paged; `hgs` bounds them, with at most 50
@@ -802,16 +804,19 @@ list, and a failed refresh or `--help` probe keeps the previous digest.
 
 The relay derives `decision` events from the gateway's own snapshots, never
 from a peer heartbeat. Of the first 50 entries, those with a canonical UUID
-`task` and a 1–128 character `signature` count, first entry per task. A task
-that enters the list or changes its signature appends an ordinary `decision`
-event in the slot `overmind:<task>` and an alert candidate held under the
-presence rules below. While the digest is known, the candidate is resolved
-when the task leaves the list or its signature changes. A snapshot without the
-digest is unknown, not empty: it raises nothing and keeps held candidates,
-unless the gateway's valid capabilities no longer list `overmind_read`, which
-drops them. Tasks already waiting when the relay is upgraded raise nothing. A
-delivered candidate is an `alert` with `alert_kind: "decision"`; push payloads
-stay generic wakes without task text.
+`task` and a 1–128 character `signature` without control characters count,
+first entry per task. A task that enters the list or changes its signature
+appends an ordinary `decision` event in the slot `overmind:<task>` and an
+alert candidate held under the presence rules below. While the digest is
+known, the candidate is resolved when the task leaves the list or its
+signature changes. Only the gateway's own snapshot raises or resolves
+decisions: another gateway's peer heartbeat for the same computer never does,
+and a delivery checks them against the gateway's own snapshot. A snapshot
+without the digest is unknown, not empty: it raises nothing and keeps held
+candidates, unless the gateway's valid capabilities no longer list
+`overmind_read`, which drops them. Tasks already waiting when the relay is
+upgraded raise nothing. A delivered candidate is an `alert` with
+`alert_kind: "decision"`; push payloads stay generic wakes without task text.
 
 ### Android Tasks
 
@@ -1036,9 +1041,11 @@ session's input or error card, whichever the phone shows; a posted input or
 error card follows detail changes of the same run silently; and a need the
 relay announced without an alert waits for its alert.
 
-Roll out `hgs`, the desktop and the connector first, then Android, then the
-relay. The connector retries without `presence` when an older relay rejects it,
-and Android alert-only mode starts only when the relay advertises the feature.
+Deploy `hgs`, the desktop and the connector first, then Android, then the
+relay, replacing all PostgreSQL workers together; the desktop reports the
+presence that holds alerts. The connector retries without `presence` when an
+older relay rejects it, and Android alert-only mode starts only when the relay
+advertises the feature.
 Android builds released before this change keep only the newest event per
 session in a batch, so an alert following a completion can hide their opt-in
 completion card.

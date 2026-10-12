@@ -666,12 +666,14 @@ ABI: `overmind <command> --json (mobile ABI overmind-v1)`.
 The relay derives a new alert kind `decision` from `mobile_overmind.decisions`
 of the gateway's own snapshots, with the slot `overmind:<task uuid>`, under the
 existing presence rules. While the digest is known, it resolves when the task
-leaves the list or its signature changes. A snapshot without the digest is
-unknown, not resolved: the connector carries its latest digest in every gateway
-snapshot and omits it only while none is known, never sending an empty list in
-its place. A gateway whose capabilities stop listing `overmind_read` drops its
-decisions. Android gains a Decision card kind and a preference toggle; tapping
-opens the task. Older apps treat the unknown kind as a refresh.
+leaves the list or its signature changes. Only the gateway's own snapshot
+raises or resolves decisions; another gateway's peer heartbeat for the same
+computer never does. A snapshot without the digest is unknown, not resolved:
+the connector carries its latest digest in every gateway snapshot and omits it
+only while none is known, never sending an empty list in its place. A gateway
+whose capabilities stop listing `overmind_read` drops its decisions. Android
+gains a Decision card kind and a preference toggle; tapping opens the task.
+Older apps treat the unknown kind as a refresh.
 
 ### Android UI
 

@@ -1396,9 +1396,9 @@ Commands run by people (not `mcp`) take `--device <label>` to name the client
 they act from, such as a phone. The label is informational, not an identity:
 it is recorded as `device` on the actor of the events the command writes, for
 example in `created_by` and on journal entries. It has 1–64 characters, no
-control characters, does not start with `-` or `@` and is given once. Another
-label, or any label in a session environment (`HGS_SESSION` or `HGS_RUN_ID`
-set), is refused `invalid_request` with the field `device`. `hgs --help`
+control characters, does not start with `-` or `@` and is given once. A second
+`--device`, or any label in a session environment (`HGS_SESSION` or
+`HGS_RUN_ID` set), is refused `invalid_request` with the field `device`. `hgs --help`
 carries the line `hgs overmind <command> --json (mobile ABI overmind-v1)`,
 which the mobile connector probes before it serves the phone.
 
