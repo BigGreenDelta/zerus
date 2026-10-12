@@ -207,6 +207,8 @@ jobs:
     timeout-minutes: 45
     container:
       image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    env:
+      ZERUS_DEV_BUILD_NUMBER: ${{ github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEV_UPDATES_ENABLED == 'true' && github.run_number || '' }}
     steps:
       - name: Bootstrap Git before checkout
         run: pacman -Syu --noconfirm --needed git

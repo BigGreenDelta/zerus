@@ -12,8 +12,15 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val stableVersionName = "0.1.30"
 val devBuildNumber = providers.gradleProperty("zerusDevBuildNumber").orNull?.toInt()?.also { require(it > 0) }
 val updateVersionCode = providers.gradleProperty("zerusVersionCode").orNull?.toInt()?.also { require(it in 1..2_100_000_000) }
+val devBaseVersion = rootProject.file("DEV_VERSION").readText().trim().also {
+    require(it.matches(Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)")))
+    val firstChange = it.split('.').map(String::toInt).zip(stableVersionName.split('.').map(String::toInt)).firstOrNull { pair -> pair.first != pair.second }
+    require(firstChange != null && firstChange.first > firstChange.second) { "DEV_VERSION must be newer than stable." }
+}
+require(devBuildNumber == null || updateVersionCode != null) { "A Dev build needs an explicit increasing versionCode." }
 if (firebaseEnabled) {
     require(file("google-services.json").isFile) { "Optional Firebase builds require a private app/google-services.json." }
     apply(plugin = "com.google.gms.google-services")
@@ -27,7 +34,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = updateVersionCode ?: 31
-        versionName = "0.1.30" + (devBuildNumber?.let { "-dev.$it" } ?: "")
+        versionName = devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

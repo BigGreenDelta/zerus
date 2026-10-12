@@ -569,6 +569,13 @@ CLI is **1.51.0**. CI rejects a product/desktop version mismatch; packaging
 records both versions in `build-info.json`, with the source commit when built
 from Git. For source-archive builds, the release manifest and archive SHA-256
 provide the commit provenance.
+Stable fixes use patch releases (`0.42.1`, `0.42.2`); feature releases use a new
+minor version. `DEV_VERSION` names the next planned stable release and trusted
+main CI embeds its growing sequence (`0.42.1-dev.215`). Android follows the same
+rule with its independent `mobile/android/DEV_VERSION`. See the
+[version rule](public-distribution.md#version-rule) for identity and channel
+ordering. Bump both stable and next Dev bases when preparing a stable release;
+ordinary main commits advance only the Dev sequence, never stable release tags.
 Increase the product/desktop version for each new public bundle, including a
 CLI-only bundle change, so published archive URLs and hashes remain immutable.
 A recipe-only `pkgrel` bump can reuse immutable upstream assets. A newly compiled

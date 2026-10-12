@@ -31,6 +31,9 @@ class UpdateController : public QObject {
 public:
     explicit UpdateController(QObject *parent=nullptr,QString executable={},std::function<QNetworkReply *(const QNetworkRequest &)> fetch={});
     static UpdateController *instance();
+    // Embedded installed identity, independent of update channel/catalog selection.
+    static QJsonObject buildInfo();
+    static QString installedVersion();
     static DesktopUpdateFeed parseFeed(const QByteArray &data,const QString &channel);
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");

@@ -53,6 +53,8 @@ def validate(info, root, run):
     version = info.get('versionName')
     require(isinstance(version, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-dev\.[0-9]+)?', version),
             'Invalid dev version')
+    if '-dev.' in version:
+        require(version.rsplit('-dev.', 1)[1] == str(info['buildNumber']), 'Dev version/build sequence mismatch')
     artifacts = info.get('artifacts')
     require(isinstance(artifacts, list) and 1 <= len(artifacts) <= 16, 'Invalid dev artifacts')
     names = set()
@@ -105,12 +107,26 @@ def seal(root, output, platform, run_id, number, commit, published, apk_identity
     timestamp(published)
     require(not output.exists(), 'Candidate output already exists')
     artifacts = []
-    version = apk_identity['version_name'] if apk_identity else (root / 'VERSION').read_text().strip()
+    if apk_identity:
+        version = apk_identity['version_name']
+        require(version.endswith(f'-dev.{number}'), 'APK Dev version/build sequence mismatch')
+    else:
+        base = (root / 'DEV_VERSION').read_text().strip()
+        stable = (root / 'VERSION').read_text().strip()
+        require(re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', base)
+                and tuple(map(int, base.split('.'))) > tuple(map(int, stable.split('.'))), 'Dev base must follow the stable release')
+        version = f'{base}-dev.{number}'
+        package = json.loads((root / 'desktop-build-info.json').read_text())
+        embedded = package.get('desktop_build', {})
+        require(package.get('source_commit') == commit and package.get('version') == stable
+                and embedded.get('sourceCommit') == commit and embedded.get('sourceDirty') is False
+                and embedded.get('devBuildNumber') == number and embedded.get('versionName') == version
+                and embedded.get('version') == stable, 'Checked package Dev identity differs from the candidate')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.dev-candidate-', dir=output.parent) as temp:
         staging = Path(temp)
         for path in sorted(root.iterdir()):
-            if path.name == 'VERSION':
+            if path.name in {'VERSION', 'DEV_VERSION', 'desktop-build-info.json'}:
                 continue
             name = safe_name(path.name)
             require(path.is_file() and not path.is_symlink(), 'Nonregular candidate file')

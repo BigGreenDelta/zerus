@@ -50,8 +50,32 @@ DesktopUpdateFeed parseDev(const QByteArray &data){
         else return result;
     }
     if(sources!=1||packages!=1)return result;
-    result.valid=true;result.releaseId=id;result.buildNumber=raw["buildNumber"].toInteger();result.sourceCommit=commit;result.releaseUrl=raw["buildUrl"].toString();result.version=version+QString(" (dev %1)").arg(result.buildNumber);return result;
+    const auto number=raw["buildNumber"].toInteger();
+    const auto suffix=QRegularExpression("-dev\\.([0-9]+)\\z").match(version);
+    if(suffix.hasMatch()&&suffix.captured(1)!=QString::number(number))return result;
+    result.valid=true;result.releaseId=id;result.buildNumber=number;result.sourceCommit=commit;result.releaseUrl=raw["buildUrl"].toString();result.version=suffix.hasMatch()?version:version+QString("-dev.%1").arg(number);return result;
 }
+}
+
+QJsonObject UpdateController::buildInfo(){
+    QJsonObject info{{"version",QCoreApplication::applicationVersion()},
+                     {"versionName",QCoreApplication::applicationVersion()},
+                     {"devBuildNumber",0},{"sourceCommit",QString()},{"sourceDirty",QJsonValue()}};
+#ifdef ZERUS_BUILD_SOURCE_COMMIT
+    info["sourceCommit"]=QStringLiteral(ZERUS_BUILD_SOURCE_COMMIT);
+    info["sourceDirty"]=bool(ZERUS_BUILD_SOURCE_DIRTY);
+#endif
+#ifdef ZERUS_DEV_BUILD_NUMBER
+    info["devBuildNumber"]=qint64(ZERUS_DEV_BUILD_NUMBER);
+    info["versionName"]=QStringLiteral(ZERUS_DEV_BASE_VERSION)+QString("-dev.%1").arg(qint64(ZERUS_DEV_BUILD_NUMBER));
+#endif
+    return info;
+}
+QString UpdateController::installedVersion(){
+    const auto info=buildInfo();const auto version=info["versionName"].toString();
+    if(info["devBuildNumber"].toInteger()>0||info["sourceCommit"].toString().isEmpty())return version;
+    const auto source=info["sourceCommit"].toString().left(7);
+    return info["sourceDirty"].toBool()?tr("%1 (local changes %2)").arg(version,source):QString("%1 (%2)").arg(version,source);
 }
 
 DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QString &channel){
@@ -367,7 +391,7 @@ void UpdateController::compare(){
 #ifdef ZERUS_SOURCE_COMMIT
         installedCommit=QStringLiteral(ZERUS_SOURCE_COMMIT);
 #endif
-        completeComparison(m_installation.kind!="portable"&&devBuildIsNewer(m_feed,0,installedCommit),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
+        completeComparison(m_installation.kind!="portable"&&devBuildIsNewer(m_feed,buildInfo()["devBuildNumber"].toInteger(),installedCommit),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
     }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();

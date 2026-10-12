@@ -219,7 +219,8 @@ QString AppConfig::usage()
                "  --selftest            headless check: hgs is found and answers with valid\n"
                "                        JSON, then exit (no tray, no display)\n"
                "  -h, --help            this text\n"
-               "  --version             version and exit\n"
+               "  --version             installed release version and exit\n"
+               "  --build-info          embedded build/source identity as JSON and exit\n"
                "\n"
                "Values not given on the command line are read from\n"
                "~/.config/hgs/tray.conf (format \"key=value\": hgs, local-poll,\n"
@@ -462,6 +463,9 @@ bool AppConfig::load(const QStringList &args, AppConfig *out, QString *error)
             return false;
         } else if (a == QLatin1String("--version")) {
             *error = QStringLiteral("__version__");
+            return false;
+        } else if (a == QLatin1String("--build-info")) {
+            *error = QStringLiteral("__build_info__");
             return false;
         } else {
             *error = QStringLiteral("unknown option: %1").arg(a);
