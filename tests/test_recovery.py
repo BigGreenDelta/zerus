@@ -69,6 +69,55 @@ class Recovery(unittest.TestCase):
     def test_claude_delivery_acknowledgement_and_cancel(self):self.exercise('claude')
     def test_kimi_delivery_acknowledgement_and_cancel(self):self.exercise('kimi')
 
+    def capacity_sources(self, add_log=False):
+        from datetime import datetime, timezone
+        import sqlite3
+        if not add_log:
+            self.prepare()
+            self.capacity_at=int(time.time()*1000)/1000+.01
+            self.capacity_detail='Selected model is at capacity. Please try a different model.'
+            transcript=self.root/f'rollout-{self.conversation_id}.jsonl'
+            transcript.write_text('\n'.join(json.dumps(row) for row in [
+                dict(type='session_meta',payload=dict(id=self.conversation_id)),
+                dict(type='event_msg',timestamp=datetime.fromtimestamp(self.capacity_at,timezone.utc).isoformat(timespec='milliseconds'),
+                     payload=dict(type='task_complete',turn_id='fixture-failed-turn',
+                                  error=dict(message=self.capacity_detail,codex_error_info='ModelCapacity'))),
+            ])+'\n')
+            self.record['transcript']=str(transcript);self.write_record()
+        else:
+            home=self.root/'.codex';home.mkdir(exist_ok=True)
+            at=self.capacity_at+.000328
+            with sqlite3.connect(home/'logs_2.sqlite') as db:
+                db.execute('CREATE TABLE logs(id INTEGER, ts INTEGER, ts_nanos INTEGER, thread_id TEXT, target TEXT, feedback_log_body TEXT)')
+                db.execute('INSERT INTO logs VALUES(1,?,?,?,?,?)',(int(at),int((at%1)*1e9),self.conversation_id,
+                    'codex_core::session::turn','run_turn: Turn error: '+self.capacity_detail))
+
+    def test_capacity_source_change_keeps_waiting_and_delivers_once(self):
+        self.capacity_sources();self.tick();original=self.inspect()['recovery']
+        self.assertEqual(original['state'],'waiting')
+        self.capacity_sources(add_log=True);self.tick();current=self.inspect()['recovery']
+        for key in ('id','due_at','attempt','failure_id','delays'):self.assertEqual(current[key],original[key])
+        self.assertEqual(current['state'],'waiting');self.assertEqual(self.received(),b'')
+        self.command('recovery','action',payload=dict(name=self.name,id=current['id'],action='now'))
+        self.tick();self.wait_for(lambda:self.received().endswith(b'\r'))
+        self.assertEqual(self.inspect()['recovery']['state'],'retrying')
+        self.assertEqual(self.inspect()['recovery']['attempt'],1)
+        received=self.received();self.assertEqual(received.count(b'\r'),1)
+        self.tick();self.assertEqual(self.received(),received)
+
+    def test_legacy_zero_attempt_source_cancellation_is_repaired_without_new_episode(self):
+        self.capacity_sources();self.tick();original=self.inspect()['recovery']
+        path=next((self.state/'recovery/jobs').glob('*.json'))
+        legacy=json.loads(path.read_text());legacy.update(state='cancelled',reason='The failed turn is no longer current')
+        path.write_text(json.dumps(legacy))
+        self.capacity_sources(add_log=True);self.tick();repaired=self.inspect()['recovery']
+        self.assertEqual(repaired['state'],'waiting')
+        for key in ('id','due_at','attempt','failure_id','delays'):self.assertEqual(repaired[key],original[key])
+        self.assertEqual(self.received(),b'')
+        self.command('recovery','action',payload=dict(name=self.name,id=repaired['id'],action='cancel'))
+        self.tick();self.assertEqual(self.inspect()['recovery']['state'],'cancelled')
+        self.tick();self.assertEqual(self.inspect()['recovery']['state'],'cancelled');self.assertEqual(self.received(),b'')
+
     def test_draft_and_changed_identity_never_receive_recovery(self):
         self.prepare();self.tick();job=self.inspect()['recovery']
         self.screen('\x1b[2J\x1b[H› my unfinished draft',str(len('› my unfinished draft'))+':0')

@@ -1187,6 +1187,12 @@ Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
 and quoted error examples cannot change the session state. New native progress
 clears the failure; changing the account counter alone does not.
+Matching Codex log and completion records retain their exact failure references,
+so delayed duplicate evidence keeps the same recovery episode, deadline and
+attempt budget. Separate native turns remain separate even for identical errors.
+A previous cancellation caused by switching those sources can resume only with
+confirmed matching native evidence and zero delivery attempts; user cancellation,
+new input, interruption, changed identity and uncertain delivery still stop recovery.
 
 A chip in the toolbar above the message field shows the countdown; its popover
 shows the attempt number, **Attempts**, **Retry now** and **Cancel retry**. Retry now respects a known Retry-After and the reset deadline in reset mode. Policy edits apply to new
