@@ -93,13 +93,50 @@ private slots:
         auto *owner=new QObject;bool stale=false;int completed=0;
         AttachmentFiles::prepareAsync({{"owner.txt","text/plain","owner lifecycle fixture",{}}},owner,[&](const QJsonArray &,const QString &){stale=true;});
         QTRY_VERIFY(gate->entered.available()==1);delete owner;gate->entered.acquire();
-        for(int i=0;i<5;++i)AttachmentFiles::prepareAsync({{"owner.txt","text/plain","owner lifecycle fixture",{}}},this,[&](const QJsonArray &files,const QString &error){QVERIFY(error.isEmpty());QFile::remove(files.first().toObject().value("local_path").toString());++completed;});
+        QStringList paths;auto cleanup=qScopeGuard([&]{for(const auto &path:paths)QFile::remove(path);});
+        for(int i=0;i<5;++i)AttachmentFiles::prepareAsync({{"owner.txt","text/plain","owner lifecycle fixture",{}}},this,[&](const QJsonArray &files,const QString &error){QVERIFY(error.isEmpty());paths<<files.first().toObject().value("local_path").toString();++completed;});
         QTRY_VERIFY(gate->entered.available()==1);QCOMPARE(AttachmentFiles::pool().activeThreadCount(),2);
         int emptyCompleted=0;
         AttachmentFiles::prepareAsync({},this,[&](const QJsonArray &files,const QString &error){QVERIFY(files.isEmpty());QVERIFY(error.isEmpty());++emptyCompleted;});
         AttachmentFiles::readAsync({},this,[&](const QList<MessageAttachment> &files,const QString &error){QVERIFY(files.isEmpty());QVERIFY(error.isEmpty());++emptyCompleted;});
         bool heartbeat=false;QTimer::singleShot(0,this,[&]{heartbeat=true;});QTRY_VERIFY(heartbeat);QTRY_COMPARE(emptyCompleted,2);QCOMPARE(completed,0);
         gate->release.release(6);QTRY_COMPARE(completed,5);QVERIFY(!stale);
+    }
+    void identicalAttachmentKeepsAnOpenCachedCopy() {
+        // Windows cannot replace a file that a viewer or thumbnail reader has open.
+        const auto path=AttachmentFiles::store("shared.txt","shared fixture");QVERIFY(!path.isEmpty());
+        auto cleanup=qScopeGuard([&]{QFile::remove(path);});
+        {
+            QFile reader(path);QVERIFY(reader.open(QIODevice::ReadOnly));
+            QCOMPARE(AttachmentFiles::store("shared.txt","shared fixture"),path);
+        }
+        // A damaged copy of the same size is replaced rather than reused.
+        {QFile damaged(path);QVERIFY(damaged.open(QIODevice::WriteOnly|QIODevice::Truncate));QCOMPARE(damaged.write("shared FIXTURE"),qint64(14));}
+        QCOMPARE(AttachmentFiles::store("shared.txt","shared fixture"),path);
+        QFile restored(path);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),QByteArray("shared fixture"));
+    }
+    void cachedShortcutNeverWritesThroughToItsTarget() {
+        // QFile::link makes a .lnk shortcut on Windows; storing its bytes again must
+        // keep or replace the cached shortcut itself, never the user's target file.
+        QTemporaryDir folder;QVERIFY(folder.isValid());const auto target=folder.filePath("document.txt");
+        {QFile file(target);QVERIFY(file.open(QIODevice::WriteOnly));QVERIFY(file.write("user document")>0);}
+        const auto shortcut=folder.filePath("document.lnk");QVERIFY(QFile::link(target,shortcut));
+        QFile source(shortcut);QVERIFY(source.open(QIODevice::ReadOnly));const auto bytes=source.readAll();QVERIFY(!bytes.isEmpty());
+        const auto unchanged=[&]{QFile file(target);return file.open(QIODevice::ReadOnly) && file.readAll()=="user document";};
+        const auto path=AttachmentFiles::store("document.lnk",bytes);QVERIFY(!path.isEmpty());
+        auto cleanup=qScopeGuard([&]{QFile::remove(path);});
+        QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(unchanged());
+        {QFile damaged(path);QVERIFY(damaged.open(QIODevice::WriteOnly|QIODevice::Truncate));QCOMPARE(damaged.write(QByteArray(bytes.size(),'x')),qint64(bytes.size()));}
+        QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(unchanged());
+        QFile restored(path);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),bytes);
+#ifndef Q_OS_WIN
+        // A symbolic link planted in the cache is replaced as an entry, never followed.
+        const auto planted=AttachmentFiles::store("planted.txt","planted bytes");QVERIFY(!planted.isEmpty());
+        auto unplant=qScopeGuard([&]{QFile::remove(planted);});
+        QVERIFY(QFile::remove(planted));QVERIFY(QFile::link(target,planted));
+        QCOMPARE(AttachmentFiles::store("planted.txt","planted bytes"),planted);QVERIFY(unchanged());
+        QVERIFY(!QFileInfo(planted).isSymLink());
+#endif
     }
     void preparationCapturesCacheRootBeforeWorkerStarts() {
         struct Gate { QSemaphore entered,release; };auto gate=std::make_shared<Gate>();
