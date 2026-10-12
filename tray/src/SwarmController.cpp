@@ -4,6 +4,27 @@
 #include <QSettings>
 #include <QSet>
 
+namespace {
+QJsonObject sharedOrganization(QJsonObject local)
+{
+    // Keep fallback placement/order in the desktop cache, but never send it as
+    // membership. Older CLIs ignore the additive organization hint; the patch
+    // envelope and shared catalog operation schema stay intact.
+    QSet<QString> unassigned;
+    for (const auto &session : local.take("unassigned_sessions").toArray()) unassigned.insert(session.toString());
+    QJsonArray projects;
+    for (const auto &value : local.value("projects").toArray()) {
+        auto project = value.toObject(); QJsonArray sessions;
+        for (const auto &session : project.value("sessions").toArray())
+            if (!unassigned.contains(session.toString())) sessions.append(session);
+        project.insert("sessions", sessions); projects.append(project);
+    }
+    local.insert("projects", projects);
+    local.insert("session_assignments_explicit", true);
+    return local;
+}
+}
+
 SwarmController::SwarmController(HgsClient *client, QObject *parent) : QObject(parent), m_client(client)
 {
     m_poll.setInterval(5000);
@@ -51,8 +72,8 @@ void SwarmController::send(const QString &action)
     if(busy())return;
     m_action=action;m_sent=m_desired;
     QJsonObject input;
-    if(action=="initialize")input=m_desired;
-    if(action=="apply")input={{"base",m_base},{"desired",m_desired},{"versions",m_versions}};
+    if(action=="initialize")input=sharedOrganization(m_desired);
+    if(action=="apply")input={{"base",sharedOrganization(m_base)},{"desired",sharedOrganization(m_desired)},{"versions",m_versions}};
     m_request=m_client->requestSwarm({action},input);
 }
 void SwarmController::persist()
@@ -76,19 +97,33 @@ void SwarmController::persist()
 QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local)
 {
     QMap<QString,QJsonObject> remaining;
-    for(const auto &p:shared.value("projects").toArray())remaining.insert(p.toObject().value("id").toString(),p.toObject());
+    QSet<QString> assigned, unassigned, retained;
+    for(const auto &p:shared.value("projects").toArray()) {
+        remaining.insert(p.toObject().value("id").toString(),p.toObject());
+        for(const auto &session:p.toObject().value("sessions").toArray())assigned.insert(session.toString());
+    }
+    for(const auto &session:local.value("unassigned_sessions").toArray())unassigned.insert(session.toString());
     QJsonArray ordered;
     for(const auto &p:local.value("projects").toArray()){
         const auto old=p.toObject();const auto id=old.value("id").toString();
         if(!remaining.contains(id))continue;
         auto project=remaining.take(id);project.insert("collapsed",old.value("collapsed"));project.insert("vivid",old.value("vivid"));
-        // Session order is local too. Membership comes only from the catalog.
+        // Preserve local fallback rows only until the catalog assigns them.
         auto sessions=project.value("sessions").toArray();QJsonArray sorted;
+        for(const auto &session:old.value("sessions").toArray())
+            if(unassigned.contains(session.toString()) && !assigned.contains(session.toString())) {
+                sessions.append(session);retained.insert(session.toString());
+            }
+        // Session order is local too. Explicit membership comes from the catalog.
         for(const auto &s:old.value("sessions").toArray())if(sessions.contains(s)){sorted.append(s);for(qsizetype i=0;i<sessions.size();++i)if(sessions[i]==s){sessions.removeAt(i);break;}}
         for(const auto &s:sessions)sorted.append(s);project.insert("sessions",sorted);ordered.append(project);
     }
     for(const auto &project:remaining)ordered.append(project);
     auto result=shared;result.insert("projects",ordered);
+    if(local.contains("unassigned_sessions")) {
+        QStringList ids(retained.cbegin(),retained.cend());ids.sort();
+        result.insert("unassigned_sessions",QJsonArray::fromStringList(ids));
+    }
     for(const auto &key:{"default_project","runs","imported_machines"})if(local.contains(key))result.insert(key,local.value(key));
     return result;
 }

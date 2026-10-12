@@ -94,7 +94,7 @@ target_include_directories(test_processrunner PRIVATE ../src)
 target_link_libraries(test_processrunner PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME processrunner COMMAND test_processrunner)
 
-add_executable(test_swarmcontroller test_swarmcontroller.cpp ../src/SwarmController.cpp ../src/SwarmDialog.cpp ../src/SwarmConflictReview.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp ../src/FleetState.cpp)
+add_executable(test_swarmcontroller test_swarmcontroller.cpp ../src/SessionOrganization.cpp ../src/SwarmController.cpp ../src/SwarmDialog.cpp ../src/SwarmConflictReview.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp ../src/FleetState.cpp)
 target_include_directories(test_swarmcontroller PRIVATE ../src)
 target_link_libraries(test_swarmcontroller PRIVATE Qt6::Test Qt6::Widgets)
 add_test(NAME swarmcontroller COMMAND test_swarmcontroller)

@@ -20,6 +20,7 @@ class TestWorkspace : public QObject {
     Q_OBJECT
 private slots:
     void durableIdentityAndMissingSessions();
+    void observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership();
     void orderingAndRemoval();
     void invalidDataAndMoves();
     void nativeDropPlacement();
@@ -250,6 +251,35 @@ void TestWorkspace::durableIdentityAndMissingSessions()
     QVERIFY(archive != renamed); QCOMPARE(reloaded.groupFor(archive), QString("ungrouped"));
     QCOMPARE(reloaded.observe("arch", "codex/project/renamed-archive", "run-2", "archive-1"), archive);
     QCOMPARE(SessionOrganization(reloaded.toJson()).toJson(), reloaded.toJson());
+}
+
+void TestWorkspace::observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership()
+{
+    SessionOrganization model;
+    const auto one = model.observe("arch", "codex/example/one", "run-one");
+    const auto two = model.observe("arch", "codex/example/two", "run-two");
+    const auto archive = model.observe("arch", "codex/example/one", "run-one", "archive-one");
+    model = SessionOrganization(model.toJson());
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({one, two, archive}));
+    QCOMPARE(model.toJson()["unassigned_sessions"].toArray().size(), 3);
+    model.moveSession(one, "missing"); // Rejected moves do not create intent.
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(one));
+    model.moveSession(two, "ungrouped", one); // Explicit same-project ordering.
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({two, one, archive}));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(two));
+    const auto renamed = model.observe("arch", "codex/example/renamed", "run-one");
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(renamed));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(one));
+    // A catalog assignment may arrive for the new name before a fleet refresh.
+    const auto work = model.createGroup("Work");
+    model.moveSession("arch\ncodex/example/final", work);
+    const auto finalName = model.observe("arch", "codex/example/final", "run-one");
+    QCOMPARE(model.groupFor(finalName), work);
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(finalName));
+    QVERIFY(!model.group("ungrouped")->sessions.contains(renamed));
+    QCOMPARE(model.observe("arch", "codex/example/final", "run-one", "archive-one"), archive);
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(archive));
+    QCOMPARE(SessionOrganization(model.toJson()).toJson(), model.toJson());
 }
 
 void TestWorkspace::orderingAndRemoval()

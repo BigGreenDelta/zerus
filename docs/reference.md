@@ -722,6 +722,14 @@ agent processes. Drag headers, use the context menu or Alt-Up/Down to change loc
 order. Empty-project visibility, collapse state and default project are local.
 **All swarm projects** explicitly shows the full shared catalog.
 
+A newly discovered session appears in the local default project until a shared
+assignment arrives. Discovery alone does not publish that fallback as a project
+assignment, so another desktop can launch the session into its chosen project
+without racing an automatic Inbox assignment. Launching or explicitly moving a
+session publishes its project choice, including a deliberate move to Inbox.
+Update the desktops that observe sessions to receive this behavior; existing
+catalog assignments and unresolved conflicts remain available for review.
+
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
