@@ -585,6 +585,12 @@ pub fn fold(uuid: &str, events: &[&Event]) -> Option<Task> {
     let earlier: Vec<&Event> = sorted[..created_at].to_vec();
     let mut wf = project_workflow(&earlier, &project);
     let mut task = create(uuid, created, &wf)?;
+    // Events of this task never precede its creation, and the shared events
+    // that shape it must be readable, as after the creation.
+    let unreadable = |e: &Event| e.v > EVENT_VERSION && (e.kind == "session_renamed" || e.project == project);
+    if earlier.iter().any(|e| e.task == uuid || unreadable(e)) {
+        task.read_only = true;
+    }
     for event in &sorted[created_at + 1..] {
         if event.task.is_empty() && event.kind == "workflow_set" && event.project != project {
             continue;
@@ -801,6 +807,29 @@ mod tests {
         let mut events = events.to_vec();
         events.push(fixed);
         assert!(!run(&events).labels.contains("review-failed"));
+    }
+
+    #[test]
+    fn events_before_the_creation_make_the_task_read_only() {
+        let c = ev(A, 2, 5, human(), "task_created", "", json!({"title": "T", "prompt": "p", "stage": "Queue"}));
+        let early = ev(B, 1, 3, Actor::human(B), "journal", "", json!({"marker": "[comment]", "text": "x"}));
+        let task = run(&[c.clone(), early]);
+        assert!(task.read_only);
+        assert!(task.journal.iter().all(|j| j.marker != "[comment]"));
+        let mut newer = ev(B, 1, 3, Actor::human(B), "workflow_set", "", json!({}));
+        newer.task = String::new();
+        newer.v = EVENT_VERSION + 1;
+        assert!(run(&[c.clone(), newer.clone()]).read_only);
+        let mut renamed = newer.clone();
+        renamed.kind = "session_renamed".into();
+        renamed.project = String::new();
+        assert!(run(&[c.clone(), renamed]).read_only);
+        let mut elsewhere = newer.clone();
+        elsewhere.project = "other".into();
+        assert!(!run(&[c.clone(), elsewhere]).read_only);
+        let mut readable = newer;
+        readable.v = EVENT_VERSION;
+        assert!(!run(&[c, readable]).read_only);
     }
 
     #[test]

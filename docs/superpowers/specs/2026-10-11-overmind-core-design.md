@@ -177,7 +177,7 @@ external effect (a `[sent]` entry), the task gets the `conflict` flag and a
 `[conflict]` entry, and it appears in the human attention list. Nothing is
 resent or undone automatically: a prompt already delivered cannot be recalled.
 
-The fold itself enforces authority. It refuses human-only event kinds from non-humans (field, rank, label, relation, pin, reviewer, delete), flag changes except by people and the autopilot, workflow changes by non-humans, and agent journal or attachment events on Done or parked tasks. A task creation that is unreadable or newer than this build yields a read-only task instead of disappearing. A person can clear the conflict flag.
+The fold itself enforces authority. It refuses human-only event kinds from non-humans (field, rank, label, relation, pin, reviewer, delete), flag changes except by people and the autopilot, workflow changes by non-humans, and agent journal or attachment events on Done or parked tasks. A task creation that is unreadable or newer than this build yields a read-only task instead of disappearing. A task is also read-only when one of its events sorts before its creation, or when the log holds a shared event newer than this build that shapes it (its project's workflow, a session rename). A person can clear the conflict flag.
 
 ### Replication
 
