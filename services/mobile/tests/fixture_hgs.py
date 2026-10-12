@@ -231,6 +231,122 @@ def account_usage(identity, config):
                              "window_minutes": 10080, "resets_at": "2026-12-01T00:00:00Z"}]})}
 
 
+OVERMIND_MARKER = "hgs overmind <command> --json (mobile ABI overmind-v1)"
+OVERMIND_MACHINE = "11111111-1111-4111-8111-111111111111"
+OVERMIND_ROLES = {"Backlog": "backlog", "Queue": "ready", "Design": "active", "Build": "active",
+                  "Review": "review", "Your Call": "needs_human", "Done": "done"}
+
+
+def overmind_state(root):
+    path = root / "overmind.json"
+    return path, json.loads(path.read_text()) if path.exists() else {"cursor": 0, "tasks": {}, "receipts": {}}
+
+
+def overmind_step(state, task, marker, text, **fields):
+    """One synthetic event: a journal entry, a new head and the given field changes."""
+    state["cursor"] += 1
+    task.update(fields, head=f"{task['uuid']}-{state['cursor']}", updated_at=time.time())
+    task["journal"].append({"marker": marker, "text": text, "event": task["head"], "at": task["updated_at"]})
+
+
+def overmind_view(task, full):
+    keys = ("uuid", "ref", "project", "title", "stage", "assignee", "created_at", "updated_at", "head")
+    view = {key: task[key] for key in keys}
+    view["journal_count"] = len(task["journal"])
+    if full:
+        view.update(prompt=task["prompt"], journal=task["journal"], created_by=task["created_by"])
+    return view
+
+
+def overmind_call_human(root, uuid, question):
+    """The assignee asks a person, as `hgs overmind call-human` does inside its session."""
+    path, state = overmind_state(root)
+    task = state["tasks"][uuid]
+    assert task["stage"] in {"Design", "Build"} and task["assignee"]
+    overmind_step(state, task, "[needs-human]", question, stage="Your Call", resume_stage=task["stage"])
+    persist(path, state)
+
+
+def overmind(root, args, sessions, record, record_path):
+    """A synthetic `hgs overmind <command> --json [--device <label>]` gateway; returns (answer, exit)."""
+    assert args[2] == "--json" and (len(args) == 3 or (len(args) == 5 and args[3] == "--device")), args
+    command, device, request = args[1], args[4] if len(args) == 5 else "", json.load(sys.stdin)
+    path, state = overmind_state(root)
+    tasks = state["tasks"]
+
+    def refuse(code, message, field=""):
+        return {"ok": False, "error": {"code": code, "message": message, "field": field, "state": "invalid"}}, 1
+
+    if command == "projects":
+        counts = {}
+        for task in tasks.values():
+            row = counts.setdefault(task["project"], {"project": task["project"], "total": 0, "roles": dict.fromkeys(sorted(set(OVERMIND_ROLES.values())), 0)})
+            row["total"] += 1
+            row["roles"][OVERMIND_ROLES[task["stage"]]] += 1
+        return {"ok": True, "cursor": state["cursor"], "projects": list(counts.values())}, 0
+    if command == "decisions":
+        return {"ok": True, "cursor": state["cursor"], "decisions": [
+            {"task": task["uuid"], "ref": task["ref"], "project": task["project"], "title": task["title"], "stage": task["stage"],
+             "question": task["journal"][-1]["text"], "assignee": task["assignee"],
+             "signature": hashlib.sha256((task["uuid"] + task["head"]).encode()).hexdigest()}
+            for task in tasks.values() if task["stage"] == "Your Call"]}, 0
+    if command == "board":
+        rows = [overmind_view(task, False) for task in tasks.values() if task["project"] == request["project"]]
+        return {"ok": True, "project": request["project"], "cursor": state["cursor"],
+                "workflow": {"stages": [{"name": name, "role": role} for name, role in OVERMIND_ROLES.items()]},
+                "tasks": rows, **({"next": None} if "limit" in request else {})}, 0
+    if command == "show":
+        task = tasks.get(request["task"])
+        if task is None:
+            return refuse("unknown_task", "no such task", "task")
+        return {"ok": True, "task": {**overmind_view(task, True), "journal_total": len(task["journal"]), "journal_from": 0}}, 0
+    # Writes replay their receipt; the same request_id with another request is refused.
+    request_id = request["request_id"]
+    digest = hashlib.sha256(json.dumps([command, request], sort_keys=True).encode()).hexdigest()
+    stored = state["receipts"].get(request_id)
+    if stored is not None:
+        return (stored["result"], 0) if stored["digest"] == digest else refuse("request_reused", "this request_id was already used")
+    if command == "create":
+        uuid = request_id
+        title = request.get("title") or request["prompt"].splitlines()[0]
+        task = {"uuid": uuid, "ref": "om-" + hashlib.sha256(uuid.encode()).hexdigest()[:5], "project": request["project"],
+                "title": title, "prompt": request["prompt"], "assignee": None, "created_at": time.time(), "journal": [],
+                "created_by": {"kind": "human", "machine": OVERMIND_MACHINE, "device": device}}
+        tasks[uuid] = task
+        overmind_step(state, task, "[created]", "", stage=request.get("stage") or "Backlog")
+    elif command in {"send", "answer"}:
+        task = tasks.get(request["task"])
+        if task is None:
+            return refuse("unknown_task", "no such task", "task")
+        if command == "send":
+            target = request["session"]["name"]
+            if task["stage"] not in {"Backlog", "Queue"}:
+                return refuse("transition_not_allowed", "only a queued task is sent")
+            text = f"[Overmind {task['ref']}] {task['prompt']}"
+        else:
+            if task["stage"] != "Your Call":
+                return refuse("no_question", "the task is not waiting for a person")
+            target, text = task["assignee"]["name"], request["answer"]
+        session = next((row for row in sessions if row["name"] == target and row.get("runtime_state") == "live"), None)
+        if session is not record:  # Only the main fixture session is typed into.
+            return refuse("unknown_session", f"no live session {target}", "session")
+        record["events"].append({"seq": len(record["events"]) + 1, "type": "UserPromptSubmit", "agent_id": "", "at": time.time(), "detail": text})
+        persist(record_path, record)
+        with (root / "mutations.jsonl").open("a") as output:
+            output.write(json.dumps({"operation": "overmind-" + command, "request_id": request_id, "device": device}) + "\n")
+        if command == "send":
+            overmind_step(state, task, "[claim]", target, stage="Design", assignee={"machine": OVERMIND_MACHINE, "name": target})
+        else:
+            overmind_step(state, task, "[answer]", text, stage=task.pop("resume_stage"))
+        overmind_step(state, task, "[sent]", target)
+    else:
+        raise SystemExit("unsupported fixture Overmind command")
+    result = {"ok": True, "task": overmind_view(task, True), **({"delivery": "sent", "reason": ""} if command != "create" else {})}
+    state["receipts"][request_id] = {"digest": digest, "result": result}
+    persist(path, state)
+    return result, 0
+
+
 def main():
     root = Path(os.environ["ZERUS_MOBILE_FIXTURE_DIR"])
     args = sys.argv[1:]
@@ -251,6 +367,8 @@ def main():
     if args[:2] == ["__state", "worktrees"]: args=args[1:]
     if args == ["--help"]:
         print("hgs session-action <session> --json scoped native lifecycle action\nhgs --launch-id UUID\nhgs swarm assign-launch --json\nhgs terminal <session> --json\nhgs history <session> --json\nhgs recovery action --scoped-json\nMobile worktree ABI: worktrees-v1\nhgs [@host] read <session> --json mark the current reply/attention read\nhgs swarm preference set mobile_delivery VALUE --json\nhgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment")
+        if fixture_config.get("overmind") is True:
+            print(OVERMIND_MARKER)
         return
     if len(args) >= 8 and args[0] == "attachment" and "--stage" not in args:
         # Receipt-addressed read of the exact conversation's own staged file.
@@ -578,6 +696,11 @@ def main():
             # A broken native that prints a success receipt but fails.
             print(json.dumps(result))
             raise SystemExit(fixture_config["read_success_exit"])
+    elif args[:1] == ["overmind"] and fixture_config.get("overmind") is True:
+        result, code = overmind(root, args, [record, *states], record, path)
+        if code:
+            print(json.dumps(result))
+            raise SystemExit(code)
     else:
         raise SystemExit("unsupported fixture operation")
     if args and args[0] == "inspect":
