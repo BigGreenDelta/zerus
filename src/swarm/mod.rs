@@ -56,6 +56,11 @@ pub(crate) fn verified_bindings(
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or
 /// unreadable catalog reports the defaults.
+/// `{running, current}` for the background catalog worker.
+pub(crate) fn worker_status(config: &Config) -> Value {
+    service::status(config).json()
+}
+
 pub(crate) fn preferences(config: &Config) -> Value {
     std::fs::read(config.dir.join("swarm/catalog.json"))
         .ok()

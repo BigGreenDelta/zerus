@@ -16,6 +16,8 @@ belong to your terminal emulator; tmux provides the persistent session.
 hgs claude sample-project           # attach if present; otherwise start Claude
 hgs @mac claude sample-project      # the same operation over SSH
 hgs ls                             # local and peer sessions
+hgs status                         # version, sessions and services here and on peers
+hgs version                        # this hgs version (also hgs --version)
 hgs a claude/sample-project/review  # attach by full name
 hgs kill claude/sample-project      # remove the hgs binding; keep native history
 hgs pause --all                     # pause verified idle sessions
@@ -1346,6 +1348,16 @@ same explicit flag wins again.
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+
+`hgs status` only reads. For this computer and each peer it shows the hgs
+version, live sessions by what they need (working, needing attention, ready),
+stopped and archived sessions, and whether the desktop app, swarm worker,
+recovery worker and mobile connector are running. This computer also shows the
+running `hgs` executable. A peer whose hgs predates `status` still reports its
+version and sessions; update it to see its services. `--local` limits the report
+to this computer, `@host status` to one peer, and `--json` prints the same data
+for scripts. `hgs version` and `hgs @host version` print `hgs X.Y.Z`, like
+`--version`.
 Configurations are data assignments, not executable shell scripts:
 
 ```sh
