@@ -349,9 +349,9 @@ parent identity/model/history and the child's recorded result without a rollout.
 The Overmind MCP fixture launches a scripted Codex through `hgs`, then gives the
 real binary the same `-c mcp_servers.overmind.*` overrides with an empty
 `CODEX_HOME`: `codex mcp get overmind --json` must show the `hgs` executable,
-`overmind mcp` and the session variables, and a real `codex exec` must start the
-configured stdio server with those variables, because Codex otherwise clears the
-environment of MCP servers. Claude Code has no pinned version in CI; its inline
+`overmind mcp --session` and the session variables, and a real `codex exec`
+must start the configured stdio server with those variables, because Codex
+otherwise clears the environment of MCP servers. Claude Code has no pinned version in CI; its inline
 `--mcp-config` is covered only by the scripted launch tests.
 Every fixture owns a private home
 and tmux socket and uses only a localhost provider. No authenticated inference

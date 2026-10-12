@@ -241,7 +241,9 @@ its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Notifications open Activity for the exact requesting run and conversation,
-including remote or renamed sessions. Polling and restarts do not repeat the same
+including remote or renamed sessions. Overmind tasks waiting in Your Call
+notify as well and open their card ([Overmind on the
+desktop](#overmind-desktop)). Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
 the session is idle and has no reported active children; intermediate replies
 remain unread in Activity while work continues. Routine replies from a turn the
@@ -672,10 +674,12 @@ Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
 
-**Tasks & agents**, **Details** and **Worktrees** occupy the resizable inspector.
+**Plan & agents**, **Details** and **Worktrees** occupy the resizable inspector.
 Its width, tab and open state are local; toggling it preserves Activity, drafts and
-Terminal attachment. Successful native task/plan tools supply recorded pending,
-in-progress and completed items. Tool failures and Stop do not complete tasks.
+Terminal attachment. **Plan & agents** shows the agent's own plan, not Overmind
+tasks (see [the Tasks tab](#overmind-desktop)). Successful native task/plan
+tools supply recorded pending, in-progress and completed items. Tool failures
+and Stop do not complete tasks.
 There are up to 100 items per list and 65 lists, with truncation disclosed.
 Old data shows **Last recorded**; unavailable history is not reconstructed.
 
@@ -695,7 +699,7 @@ The expanded session tree hides children whose latest reported turn is finished
 by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Tasks & agents** inspector always shows the full
+active/total card counts. The **Plan & agents** inspector always shows the full
 reported roster and its active/total counts, including completed turns.
 Unknown states, errors, paused agents and input/approval requests remain visible.
 An open child's Activity and draft stay in place when its turn finishes. A child's
@@ -1308,6 +1312,7 @@ HGS_SELF="workstation"       # aliases that identify this host
 HGS_PEERS="macbook build-01"  # SSH aliases to poll and target
 HGS_TAB=1                    # enable terminal title updates
 HGS_TAB_COLORS="macbook=#80ff80"
+HGS_OVERMIND_MCP=1           # attach the Overmind MCP server at launch
 ```
 
 The CLI config is `~/.config/hgs/config`; `HGS_CONFIG_DIR` and `HGS_STATE_DIR` permit
@@ -1420,10 +1425,89 @@ Agents use `hgs overmind` on their own machine; `@host` is for people. The
 `hgs swarm overmind-*` requests that peers make over SSH refuse a caller with
 `HGS_SESSION` or `HGS_RUN_ID` set.
 
+**MCP.** `hgs overmind mcp` is a stdio MCP server named `overmind` (JSON-RPC
+2.0, one message per line) with the agent commands as tools: `my_tasks`,
+`get_task`, `comment`, `advance`, `call_human`, `return_task`, `decompose`,
+`file_task`, `attach_file` (a local png, jpg, gif or webp image of at most 10
+MiB), `review_task` and `download_attachment` (returns a local path). The
+caller is verified on every call, as for the CLI; a refusal is an `isError`
+result holding `{"ok": false, "error": …}`. When Zerus starts, resumes or forks
+Claude Code or Codex, it attaches the server as `hgs overmind mcp --session`:
+an inline `--mcp-config` for Claude Code and `-c mcp_servers.overmind.*`
+overrides for Codex, added to the started command only. The agent's own
+configuration is not edited and saved resume recipes never contain the server,
+so each launch follows the current setting. Zerus reserves the name
+`overmind`: a server of that name in the agent's own configuration is replaced
+in sessions Zerus launches. With `--session`, every tool call without a
+verified agent session is refused `session_mismatch`, so a server that lost the
+session's identity fails closed. Claude Code passes its environment to MCP
+servers; Codex starts them with an empty environment, so Zerus lists the
+variables Codex passes on (`env_vars`): `HOME`, `PATH`, `HGS_SESSION`,
+`HGS_RUN_ID`, `HGS_STATE_DIR`, `HGS_CONFIG_DIR`, `XDG_STATE_HOME`, `HGS_SELF`,
+`HGS_PEERS`, `HGS_SSH`, `SSH_AUTH_SOCK`, `TMUX` and `TMUX_TMPDIR`. Kimi and
+DeepSeek get no MCP server and use the CLI. The run record keeps
+`overmind_mcp: true|false`, and the `{tools}` text of the templates names the
+MCP tools or the CLI commands accordingly. A running session gains or loses the
+server only when it starts again.
+
+`HGS_OVERMIND_MCP` turns the attachment on (`1`, the default) or off (`0`).
+The configuration file `~/.config/hgs/config` is the durable switch. A value
+set in the environment of the `hgs` command that starts, resumes or forks a
+session wins over the file and reaches that launch, also through an already
+running tmux server, because Zerus passes it on with `-e`.
+
 Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
 blobs by SHA-256 and a `rev` file that changes with every write). The desktop
-and phone interfaces are described in
+is described [below](#overmind-desktop); the phone interface is planned in
 `docs/superpowers/specs/2026-10-11-overmind-core-design.md`.
+
+**Boards and decisions.** `rev --json` returns `{ok, cursor}`; it opens the
+store without the write lock, so polling it is cheap, and the cursor changes
+with every write. `board --json {project, since?}` returns `{ok, project,
+cursor, workflow, tasks}`. `workflow` is the project's workflow: `{version,
+stages: [{name, role}], rules: [{action, from, to, actors, requires, own}],
+evidence, session_wip}`, where a role is `backlog`, `ready`, `active`,
+`review`, `needs_human`, `done` or `parked`. Tasks come by stage, then by rank,
+each with `uuid`, `ref`, `project`, `title`, `stage`, `priority`, `rank`,
+`labels`, `flags`, `pinned`, `assignee` and `reviewer` (each `{machine, name}`
+or `null`), `parent`, `follows`, `created_at`, `updated_at`, `read_only`,
+`deleted` and `journal_count`, and three fields for boards:
+
+- `pinned_current`: only when the pin's session was renamed on this machine
+  (see above);
+- `queue_of`: the session whose queue holds the task, `{machine, name}` with
+  the pin's current name, only in a stage with role `ready`; `null` otherwise;
+- `markers`: in this order, any of `working` (a session holds the task in an
+  active stage), `reviewed` (label `reviewed`), `needs_work` (label
+  `review-failed`), `conflict`, `uncertain` (flag `delivery_uncertain`) and
+  `orphaned`.
+
+With `since`, only tasks changed after that cursor are listed (all of them
+after a change of the workflow), deleted ones included so that a reader can
+drop them. `decisions --json {}` lists the tasks waiting in a stage with role
+`needs_human`, in every project, oldest first and at most 50: `{ok, cursor,
+decisions: [{task, ref, project, title, stage, question, assignee,
+signature}]}`. `title` has at most 120 characters; `question` is the
+`[needs-human]` text of the task's last transition (at most 500 characters,
+empty when that transition wrote none); `assignee` is `{machine, name}` or
+`null`. `signature` (64 hexadecimal digits) changes with every transition of
+the task but not with comments, so a reader notifies once per signature.
+`projects --json {}` lists the projects that hold tasks, by name: `{ok,
+cursor, projects: [{project, total, roles: {backlog, ready, active, review,
+needs_human, done, parked}}]}`, every role present and deleted tasks not
+counted. Both refuse unknown request fields.
+
+**Creating and editing.** `create --json {project, prompt, title?, stage?,
+priority?, labels?, pinned?, attachments?, parent?, follows?}` adds a task;
+without `stage` it goes to the workflow's first backlog stage, and `pinned`
+takes `{machine?, name}` as `pin` does. Its images are `attachments: [{name,
+mime, data_base64}]`. `edit --json {task, title?, prompt?, priority?,
+attachments?}` changes a task; `attachments` is the task's whole new list of
+images, each either a new image `{name, mime, data_base64}` or `{sha256}`,
+which keeps an image the task already has without sending its bytes again. A
+`sha256` the task does not have is refused `invalid_field` with the field
+`attachments`. The limits apply to the list the task ends with: at most 8
+images, 10 MiB each and 20 MiB in total.
 
 **Sending.** `send --json {task, session: {machine?, name}, confirm?}` claims a
 task in Queue for a session and types the project's `dispatch` template into it
@@ -1542,6 +1626,70 @@ use the field `session` for `send` and `review-send`, and `task` for
 the session's machine as on the caller. `unknown_session` names the machine
 that does not know the session.
 
+<a id="overmind-desktop"></a>
+
+**On the desktop.** A session's **Tasks** tab, after Activity, Terminal and
+Processes, shows the board of one project, chosen in the tab's project
+selector. The choice is kept; on first use the tab opens the selected
+session's project. Switching sessions never changes the board, its scroll
+position, its filter or the open card. When the selected session belongs to
+the shown project, its tasks are highlighted and a strip reads "This session's
+queue: N · Send next"; **Send next** sends the first task of that queue, or else
+the first unpinned ready task that is not an epic. Columns follow the workflow.
+Stages with role `done` or `parked` (Done, Icebox) start collapsed; a click on
+a column header collapses or expands it. Tasks in Your Call are a warning
+strip above the board. Cards show the ref, P0 or P1, the title, a session tag,
+labels and the markers ▶ working, ✓ reviewed, ✗ needs work, ⚠ conflict or
+unconfirmed delivery, and ⊘ orphaned. The filter matches refs, titles, labels
+and sessions.
+
+A card can be dragged only to a stage a person may move it to by the
+workflow's rules, and reordered within its column. The CLI stays the
+authority: a refused move leaves the card where it was and shows the reason
+above the board. Moves that take a running task from its session, take a task
+out of Your Call or reopen a finished one ask first. The context-menu key or
+Shift+F10 on a card offers **Open** and **Move to…**. An open card shows its
+panel on the right: the editable title and prompt, images (add a file, paste,
+open or remove), priority, the pin, labels, relations and the journal as
+Markdown, with **Send to session ▾**, **Send for review ▾**, **Send rework**,
+**Done**, **Move to ▾**, the answer to a Your Call question and **Delete
+task…**, which asks first. A refusal that a person may overrule offers to send
+anyway, repeating the request with its `request_id`. An uncertain delivery
+warns and offers **Resolve delivery** instead of sending again. Unsaved prompt
+and answer edits stay with their task while the window is open.
+
+**Add as task**, beside Send in the composer, and Alt+Enter (Option+Return on
+macOS) turn the draft into a task of the session's project, in the workflow's
+first ready stage and pinned to the session: the session's queue. Its menu
+puts the draft into the project pool (the ready stage, unpinned) or into
+Backlog instead. A task keeps only images, so a draft with another attachment
+is refused before anything is sent. Success clears the composer; a refusal
+keeps the draft. A request that did not answer in time may still have added
+the task: adding the same draft again while Zerus stays open reuses its
+`request_id`, so the task is not added twice. The composer's **Tasks N** chip
+counts the session's queue in its own project and takes the danger color while
+one of the session's tasks waits in Your Call; with an empty queue and nothing
+waiting it is hidden. A click opens the Tasks tab on that project with the
+waiting task open. Session rows show the same count as a badge.
+
+Your Call raises the usual attention notification, once per decision: polls
+and restarts do not repeat it, a task parked again notifies again, and the
+notification is withdrawn when the task leaves Your Call. While Zerus has
+focus a new decision is not announced, as for sessions. A click opens the
+Tasks tab on the task's card and selects the asking session when Overmind can
+place its machine; a session is never chosen by its name alone. For a project
+this computer does not list, the click opens the session's Activity and says
+so.
+
+The desktop reads this computer's replica with `hgs overmind …`, without
+`@host`; every machine holds a full replica, and `send` reaches the session's
+machine by itself. It polls `rev` every 2 seconds while the Tasks tab is
+visible and every 10 seconds otherwise, also with the window closed, and reads
+a board or the decision list again only when the cursor changed. A Windows
+console has no replica: it reads the machine of the selected session with
+`@host` and keeps that machine while it is reachable, so its Tasks tab and Your
+Call notifications start once the window has selected a session.
+
 <a id="windows"></a>
 
 ## Windows control console
@@ -1624,8 +1772,9 @@ this computer as a control console without SSH settings. Settings → Mobile
 connection is hidden, automatic recovery settings are saved to the first
 reachable remote machine, no desktop presence is recorded, and this computer is
 listed at most once every 15 seconds. Attention notices are tray notifications
-with a taskbar badge. After a main-thread watchdog abort, Windows Error Reporting
-restarts the app with the same options.
+with a taskbar badge. The Overmind Tasks tab and Your Call notices read the
+machine of the selected session with `@host`. After a main-thread watchdog
+abort, Windows Error Reporting restarts the app with the same options.
 
 **Updates.** The portable zip has no installer or self-update, and only nightly
 releases carry it. Settings → Updates therefore uses the nightly channel by

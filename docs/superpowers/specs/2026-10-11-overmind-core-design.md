@@ -59,6 +59,8 @@ explicit report, not guessed from idleness.
 | Replication | Per-machine SQLite event log synchronized over the swarm channel. |
 | CLI | One namespace: `hgs overmind …`. |
 | Mobile | Full parity with the desktop in stage 1. |
+| Desktop reads | The local replica without `@host` (a Windows console: the selected session's machine); changes found by polling `rev`, 2 s with the Tasks tab visible, 10 s otherwise (Part 6). |
+| MCP attachment | Inline configuration on the spawned argv only, never in resume recipes; `overmind_mcp` in the run record; setting `HGS_OVERMIND_MCP` (default `1`); Kimi and DeepSeek use the CLI (Part 4). |
 
 ## Architecture overview
 
@@ -367,7 +369,9 @@ machine. Commands are flat. Commands accept CRLF text and store it with LF. Malf
 Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`, `review-send`,
 `rework-send`, `answer`, `resolve-delivery`, `done`, `reopen`, `delete`,
-`workflow get|set`, `templates get|set`, `status`, `attachment`, `rev`, `mcp`.
+`workflow get|set`, `templates get|set`, `status`, `attachment`, `rev`,
+`decisions` (Your Call tasks across projects, each with a `signature` that
+changes with every transition), `projects` (per-role counts), `mcp`.
 `send`, `review-send` and `pin` take `session: {machine?, name}`, and `create`
 takes `pinned` in the same form; `machine` defaults to the local computer.
 `pin` without `session` removes the pin, as `unpin` does. Peers advertise
@@ -396,15 +400,35 @@ better than rules loaded hours earlier.
 functions as the CLI: `my_tasks`, `get_task`, `comment`, `advance`,
 `call_human`, `return_task`, `decompose`, `file_task`, `attach_file`,
 `review_task`, `download_attachment` (returns a local path, not base64). It
-inherits the agent's environment, so identity works the same way.
+inherits the agent's environment, so identity works the same way, with one
+exception: Codex starts MCP servers with an empty environment and passes on
+only the variables its configuration names (`env_vars`). Zerus therefore names
+those the server needs: `HOME`, `PATH`, the session's identity (`HGS_SESSION`,
+`HGS_RUN_ID`), state and configuration (`HGS_STATE_DIR`, `HGS_CONFIG_DIR`,
+`XDG_STATE_HOME`), peers (`HGS_SELF`, `HGS_PEERS`, `HGS_SSH`, `SSH_AUTH_SOCK`)
+and the tmux server the session is checked against (`TMUX`, `TMUX_TMPDIR`).
+Without them a Codex agent would act through MCP as a person. Zerus starts the
+server as `hgs overmind mcp --session`, which refuses every tool call without a
+verified agent session (`session_mismatch`), so a server that lost the session's
+identity fails closed.
 
 The server is attached when Zerus launches an agent, without editing the user's
-global agent configuration: `--mcp-config` for Claude Code, `-c mcp_servers.*`
-overrides for Codex; Kimi and DeepSeek are verified during implementation and
-fall back to the CLI. A setting turns this off. Running sessions are never
-restarted to gain MCP; templates name the CLI commands for them. Launch argument
-changes need isolated real-agent contract coverage for the reviewed agent
-versions, as for any native lifecycle change.
+global agent configuration. The configuration is inline: Claude Code gets
+`--mcp-config '<json>'` and Codex gets `-c mcp_servers.overmind.command=…`,
+`-c mcp_servers.overmind.args=[…]` and `-c mcp_servers.overmind.env_vars=[…]`,
+appended to the spawned argv only, like the permission flags, and never to the
+saved resume recipe; resume and fork attach it again. The name `overmind` is
+reserved: a server of that name in the agent's own configuration is replaced in
+sessions Zerus launches. The run record keeps `overmind_mcp: true|false`, so
+templates name the MCP tools or the CLI commands for that session. Kimi and
+DeepSeek get no MCP injection in stage 1 and use the CLI. The setting is the
+machine-local configuration key `HGS_OVERMIND_MCP` (`1`, the default, or `0`)
+in `~/.config/hgs/config` and the environment, like `HGS_TAB`; the file is the
+durable switch, and a value in the environment of the launching `hgs` reaches
+starts, resumes and forks through `-e`. Running sessions are never restarted to
+gain MCP; templates name the CLI commands for them. Launch argument changes need
+isolated real-agent contract coverage for the reviewed agent versions, as for
+any native lifecycle change.
 
 ### Templates
 
@@ -544,17 +568,32 @@ Call), **Move to…**, **Done**, **Delete** (with confirmation).
   session, pinned to it. Arrow menu: project pool, Backlog. Success clears the
   composer and flashes the chip; failure keeps the draft.
 - A composer toolbar chip **Tasks N** (this session's queue; Danger when a Your
-  Call exists). Clicking it is the one action that switches the board: it opens
-  the Tasks tab on that session's project with its tasks highlighted.
+  Call exists). Clicking it switches the board, which only it and a Your Call
+  notification do: it opens the Tasks tab on that session's project with its
+  tasks highlighted.
 - Session rows show a queue badge.
-- Your Call raises the usual attention notification.
+- Your Call raises the usual attention notification, from the tray agent with or
+  without the window: one per `decisions` signature, never repeated by polls or
+  restarts, withdrawn when the task leaves the list, consumed silently while
+  Zerus has focus. A click opens the Tasks tab on the task's card with the
+  asking session selected when its machine is known.
 - The inspector tab "Tasks & agents" (provider todo lists) becomes
   "Plan & agents".
 
 ### Data flow
 
-The GUI reads the local replica with `hgs overmind board --json --project P
---since <cursor>` and watches the `rev` file, polling as a fallback. Writes run
+The GUI reads the local replica with `hgs overmind ...` (no `@host`): every
+machine holds a full replica, and `send` routes to the session's host by itself
+(Part 5). A Windows console, which has no local Overmind, uses `@host` of the
+machine of the selected session and keeps it while that machine is reachable.
+
+Change detection is a cheap poll of `hgs overmind rev`, which opens the store
+without the write lock: every 2 s while the Tasks tab is visible, every 10 s
+otherwise. A changed cursor reloads the affected boards (`board --json
+{project}`) and the decision list; an unchanged one reads nothing, so a board of
+hundreds of tasks costs one read per change. There is no file watcher: it could
+not watch other machines, and `rev` is cheap. One model in the tray agent serves
+the window's boards, the badges and the Your Call notifications. Writes run
 locally; `send` routes as in Part 5. A session host without Overmind support
 disables sending with "Update HGS on this machine".
 
