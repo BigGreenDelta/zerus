@@ -33,7 +33,9 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
     /** (connection, action, request, images, settled, unsettled): the request_id, or "" when nothing was saved. `unsettled` runs
      * when the write ended without a settlement to report (not saved, or its result could not be saved). */
     private val submit: (String, String, JSONObject, List<Attachment>, (OvermindWrite) -> Unit, (String) -> Unit) -> String,
-    private val retryWrite: (OvermindWrite, (OvermindWrite) -> Unit) -> Unit) {
+    private val retryWrite: (OvermindWrite, (OvermindWrite) -> Unit) -> Unit,
+    /** Gives up saved image copies that a change never saved; it keeps any that a draft or a write still names. */
+    private val release: (List<Attachment>) -> Unit = {}) {
     companion object {
         const val UNAVAILABLE = "Tasks are not available for this workspace."
         const val UNREACHABLE = "The gateway that serves Tasks was not confirmed by the last refresh. Refresh, then try again."
@@ -181,7 +183,17 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
     fun write(connectionId: String, action: String, request: JSONObject, context: OvermindWriteContext, attachments: List<Attachment> = emptyList(),
         report: ((OvermindOutcome?) -> Unit)? = null, after: (OvermindWrite) -> Unit = {}): String {
         if (report == null && (outcome?.resolve.isNullOrEmpty() || action in OvermindAccess.deliveringActions)) outcome = null
-        return submit(connectionId, action, request, attachments, { settled -> settle(connectionId, settled, context, report, after) }) {}
+        val answer = if (action == "answer") request.optString("answer") else null
+        val id = submit(connectionId, action, request, attachments, { settled -> recorded(connectionId, settled, answer); settle(connectionId, settled, context, report, after) }) {}
+        // A change that was never saved (no gateway, storage not ready, refused by the outbox) leaves its imported images to nobody.
+        if (id.isEmpty() && attachments.isNotEmpty()) release(attachments)
+        return id
+    }
+    /** An answer that the journal holds (or may hold) ends its draft, so it never pre-fills the box for a later question.
+     * A text typed since stays. */
+    private fun recorded(connectionId: String, settled: OvermindWrite, answer: String?) {
+        if (answer != null && OvermindOutcomes.recordsAnswer(settled))
+            editDrafts(connectionId, settled.task) { if (it.answer == answer) it.copy(answer = "") else it }
     }
     private fun settle(connectionId: String, settled: OvermindWrite, context: OvermindWriteContext, report: ((OvermindOutcome?) -> Unit)?, after: (OvermindWrite) -> Unit) {
         if (!connected(connectionId)) return
@@ -203,7 +215,8 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         write(connectionId, offer.action, offer.request, offer.context, report = report)
     /** Explicit only: the same request_id and payload, which the relay and hgs never apply twice. */
     fun retry(write: OvermindWrite, context: OvermindWriteContext, report: ((OvermindOutcome?) -> Unit)? = null, after: (OvermindWrite) -> Unit = {}) {
-        retryWrite(write) { settled -> settle(write.connectionId, settled, context, report, after) }
+        val answer = if (write.action == "answer") runCatching { JSONObject(write.request).optString("answer") }.getOrNull() else null
+        retryWrite(write) { settled -> recorded(write.connectionId, settled, answer); settle(write.connectionId, settled, context, report, after) }
     }
 
     /** Add as task: the workflow's first Ready stage comes from the board (cached or read now); the draft clears only once added.

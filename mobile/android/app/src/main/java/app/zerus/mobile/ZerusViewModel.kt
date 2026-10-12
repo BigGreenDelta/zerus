@@ -524,8 +524,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** The Tasks screens: boards, cards, images and messages, kept per workspace and dropped on disconnect. */
     val tasks = OvermindTasks(viewModelScope, overmind, ::overmindTarget, { id -> connections.any { it.id == id } },
-        { connection, action, request, files, settled, unsettled -> submitOvermindWrite(connection, action, request, files, settled, unsettled) }) { write, settled ->
-        retryOvermindWrite(write, settled) }
+        { connection, action, request, files, settled, unsettled -> submitOvermindWrite(connection, action, request, files, settled, unsettled) },
+        { write, settled -> retryOvermindWrite(write, settled) }, ::releaseOvermindFiles)
     fun tasksAvailable(connectionId: String) = overmindTarget(connectionId) != null
     /** An open Tasks window closes only when this is true; a failed refresh keeps it. */
     fun tasksWithdrawn(connectionId: String) = OvermindEntry.withdrawn(connections.any { it.id == connectionId }, relayOperations[connectionId],

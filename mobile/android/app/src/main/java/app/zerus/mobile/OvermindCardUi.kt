@@ -147,9 +147,7 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
         }
         if (role == OvermindRoles.YOUR_CALL && !gone) item(key = "answer") { AnswerBox(view, card, editable && !busy, drafts.answer, { text -> edit { it.copy(answer = text) } }) { answer ->
             write("answer", JSONObject().put("answer", answer), card.assignee?.name.orEmpty(),
-                "Sent your answer on ${card.ref} to ${card.assignee?.name ?: "its session"}.") { settled ->
-                if (settled.status == "completed") edit { if (it.answer == answer) it.copy(answer = "") else it }
-            }
+                "Sent your answer on ${card.ref} to ${card.assignee?.name ?: "its session"}.")   // the holder ends the draft once the answer is recorded
         } }
         if (!gone && board != null) item(key = "actions") { FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (OvermindWorkflow.claimable(board, card.stage)) OutlinedButton(onClick = { recipients = OvermindPurpose.Send }, enabled = editable && !epic && !busy) { Text("Send to session…") }

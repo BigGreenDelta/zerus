@@ -184,6 +184,13 @@ data class OvermindOutcome(val text: String, val tone: OvermindTone, val anyway:
 data class OvermindWriteContext(val ref: String, val session: String = "", val done: String = "")
 
 object OvermindOutcomes {
+    /** An answer write that recorded, or may have recorded, its answer in the journal: settled or unconfirmed, or refused as
+     * `not_delivered` (recorded, not typed). A refusal before that or a failure stored nothing. */
+    fun recordsAnswer(write: OvermindWrite) = write.action == "answer" && when (write.status) {
+        "completed", "uncertain" -> true
+        "refused" -> write.code == "not_delivered"
+        else -> false
+    }
     /** The session a delivery names in its request, for messages about a retried write. */
     fun recipient(write: OvermindWrite): String =
         runCatching { JSONObject(write.request).optJSONObject("session")?.optString("name") }.getOrNull().orEmpty()

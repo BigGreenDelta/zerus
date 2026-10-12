@@ -228,6 +228,18 @@ class OvermindScreensTest {
         assertFalse(SessionActionsMenu.items(facts.copy(tasks = "Overmind does not know this session's computer yet.")).flatten().single { it.id == "send_task" }.enabled)
     }
 
+    @Test fun onlyAnAnswerThatWasRecordedEndsItsDraft() {
+        val write = refused("answer", JSONObject().put("task", "t1").put("answer", "Yes"), "agent_busy")
+        assertFalse(OvermindOutcomes.recordsAnswer(write))
+        assertFalse(OvermindOutcomes.recordsAnswer(write.copy(status = "failed")))
+        assertFalse(OvermindOutcomes.recordsAnswer(write.copy(status = "sending")))
+        assertTrue(OvermindOutcomes.recordsAnswer(write.copy(code = "not_delivered")))
+        assertTrue(OvermindOutcomes.recordsAnswer(write.copy(status = "completed", code = "")))
+        assertTrue(OvermindOutcomes.recordsAnswer(write.copy(status = "uncertain", code = "delivery_unknown")))
+        assertTrue(OvermindOutcomes.recordsAnswer(write.copy(status = "uncertain", code = "")))
+        assertFalse(OvermindOutcomes.recordsAnswer(write.copy(action = "comment", status = "completed")))
+    }
+
     @Test fun anOpenWindowOutlivesAFailedRefresh() {
         val both = OvermindAccess.operations
         // A failed refresh leaves the gateway only last known: the window, its drafts and its messages stay.

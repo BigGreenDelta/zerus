@@ -25,9 +25,10 @@ class OvermindTasksTest {
     }
     private class Submitted(val action: String, val request: JSONObject, val id: String, val settle: (OvermindWrite) -> Unit, val unsettled: (String) -> Unit)
     private fun holder(scope: CoroutineScope, api: OvermindRepository, gateway: () -> OvermindGateway?, submitted: MutableList<Submitted> = mutableListOf(),
-        connected: () -> Boolean = { gateway() != null }) =
+        released: MutableList<Attachment> = mutableListOf(), saves: () -> Boolean = { true }, connected: () -> Boolean = { gateway() != null }) =
         OvermindTasks(scope, api, { gateway() }, { connected() }, { _, action, request, _, settle, unsettled ->
-            UUID.randomUUID().toString().also { submitted += Submitted(action, JSONObject(request.toString()), it, settle, unsettled) } }) { _, _ -> }
+            if (!saves()) "" else UUID.randomUUID().toString().also { submitted += Submitted(action, JSONObject(request.toString()), it, settle, unsettled) } },
+            { write, settle -> submitted += Submitted(write.action, JSONObject(write.request), write.requestId, settle) {} }) { released += it }
     private val synthetic = OvermindGateway(Connection("workspace", "Example", "https://relay.example", "token"), GATEWAY)
     private fun settled(write: Submitted, status: String = "completed") =
         OvermindWrites.create(write.id, MachineKey("workspace", GATEWAY), write.action, write.request, emptyList(), "", 1).copy(status = status)
@@ -137,7 +138,7 @@ class OvermindTasksTest {
             // Only the gateway's confirmation is lost (the workspace stays connected), as after one failed catalog refresh.
             var reachable = true
             val submitted = mutableListOf<Submitted>()
-            val tasks = holder(this, OvermindRepository(RelayApi()), { gateway.takeIf { reachable } }, submitted) { true }
+            val tasks = holder(this, OvermindRepository(RelayApi()), { gateway.takeIf { reachable } }, submitted, connected = { true })
             tasks.openTask("workspace", task, "example")
             tasks.editDrafts("workspace", task) { it.copy(answer = "REST") }
             var after = 0
@@ -222,5 +223,56 @@ class OvermindTasksTest {
         tasks.write("workspace", "label", JSONObject().put("task", task).put("label", "bug").put("present", true), OvermindWriteContext("om-1", done = "Labelled."))
         submitted.last().settle(settled(submitted.last()))
         assertNull(tasks.outcome)
+    }
+
+    private fun answered(write: Submitted, status: String, code: String = "") =
+        OvermindWrites.create(write.id, MachineKey("workspace", GATEWAY), "answer", write.request, emptyList(), "", 1).copy(status = status, code = code)
+
+    @Test fun theAnswerDraftClearsOnceTheAnswerIsRecorded() = runBlocking {
+        val submitted = mutableListOf<Submitted>()
+        val tasks = holder(this, OvermindRepository(RelayApi()), { synthetic }, submitted)
+        tasks.openTask("workspace", task, "example")
+        fun answer(text: String) {
+            tasks.editDrafts("workspace", task) { it.copy(answer = text) }
+            tasks.write("workspace", "answer", JSONObject().put("task", task).put("answer", text), OvermindWriteContext("om-1", worker.name))
+        }
+        // Refusals that stored nothing keep the text for another try.
+        answer("REST")
+        submitted.last().settle(answered(submitted.last(), "refused", "agent_busy").copy(field = "confirm"))
+        assertEquals("REST", tasks.drafts("workspace", task).answer)
+        answer("REST")
+        submitted.last().settle(answered(submitted.last(), "failed"))
+        assertEquals("REST", tasks.drafts("workspace", task).answer)
+        // Recorded but not typed: the answer is in the journal; "Send the answer again" repeats it.
+        answer("REST")
+        submitted.last().settle(answered(submitted.last(), "refused", "not_delivered").copy(error = "not delivered"))
+        assertEquals("", tasks.drafts("workspace", task).answer)
+        val again = checkNotNull(tasks.outcome?.anyway)
+        tasks.editDrafts("workspace", task) { it.copy(answer = "A new text for a later question") }
+        tasks.anyway("workspace", again)
+        submitted.last().settle(answered(submitted.last(), "completed"))
+        assertEquals("A new text for a later question", tasks.drafts("workspace", task).answer)
+        // An unconfirmed answer may be recorded, and its retry carries its own text.
+        answer("gRPC")
+        val lost = answered(submitted.last(), "uncertain").copy(error = OvermindWrites.UNCONFIRMED)
+        submitted.last().settle(lost)
+        assertEquals("", tasks.drafts("workspace", task).answer)
+        tasks.editDrafts("workspace", task) { it.copy(answer = "gRPC") }
+        tasks.retry(lost, OvermindWriteContext("om-1", worker.name))
+        submitted.last().settle(lost.copy(status = "completed"))
+        assertEquals("", tasks.drafts("workspace", task).answer)
+    }
+
+    @Test fun imagesOfAnEditThatWasNeverSavedAreReleased() = runBlocking {
+        val released = mutableListOf<Attachment>()
+        var saves = false
+        val tasks = holder(this, OvermindRepository(RelayApi()), { synthetic }, released = released, saves = { saves })
+        val image = Attachment("44444444-4444-4444-8444-444444444444", "screen.png", "image/png", 10, "a".repeat(64))
+        val edit = JSONObject().put("task", task).put("attachments", JSONArray())
+        assertEquals("", tasks.write("workspace", "edit", edit, OvermindWriteContext("om-1"), listOf(image)))
+        assertEquals(listOf(image), released)
+        saves = true
+        assertTrue(tasks.write("workspace", "edit", edit, OvermindWriteContext("om-1"), listOf(image)).isNotEmpty())
+        assertEquals(listOf(image), released)
     }
 }
