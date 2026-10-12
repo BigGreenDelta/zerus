@@ -232,23 +232,93 @@ fn footer(agent: &str, model: &str, screen: &str) -> Option<String> {
             if valid(value) {
                 return Some(value.into());
             }
-        } else if agent == "kimi" {
-            // The provider's status line, below its boxed composer.
-            if !["ask when needed", "never ask", "plan", "always ask"]
-                .iter()
-                .any(|prefix| line.starts_with(prefix))
-            {
-                continue;
-            }
-            if let Some((_, tail)) = line.split_once(" thinking: ") {
-                let value = tail.split_whitespace().next()?;
-                if valid(value) {
-                    return Some(value.into());
+        }
+    }
+    None
+}
+
+const KIMI_MODES: [&str; 4] = ["Ask When Needed", "Never Ask", "Plan", "Always Ask"];
+
+/// The effort Kimi's status line shows for a model displayed as one of `names`.
+/// The line joins slots (mode, goal, model, tasks, folder, git) with two spaces.
+/// Older releases print it in the last rows, starting with the permission mode;
+/// 2.1 prints it on the first row under the boxed composer. The model slot is
+/// `<name>`, `<name> thinking` or `<name> thinking: <level>`. A bare name means
+/// effort off on the built-in line, but a custom status line command need not
+/// show effort, so `custom` never reads a bare name as off.
+fn kimi_effort(screen: &str, names: &[&str], custom: bool) -> Option<String> {
+    let lines: Vec<_> = screen.lines().collect();
+    let below = lines
+        .iter()
+        .rposition(|line| {
+            let line = line.trim();
+            line.starts_with('╰') && line.ends_with('╯')
+        })
+        .and_then(|border| lines[border + 1..].iter().find(|line| !line.trim().is_empty()));
+    let legacy = lines.iter().rev().take(3).filter(|line| {
+        let first = line.trim().split("  ").next().unwrap_or_default();
+        KIMI_MODES.contains(&first)
+    });
+    for line in below.into_iter().chain(legacy) {
+        for slot in line.trim().split("  ").map(str::trim) {
+            for name in names.iter().filter(|name| !name.is_empty()) {
+                let Some(tail) = slot.strip_prefix(*name) else {
+                    continue;
+                };
+                let value = if tail.is_empty() && !custom {
+                    "off".to_owned()
+                } else if tail == " thinking" {
+                    "on".to_owned()
+                } else if let Some(level) = tail.strip_prefix(" thinking: ") {
+                    level.to_ascii_lowercase()
+                } else {
+                    continue;
+                };
+                if valid(&value) {
+                    return Some(value);
                 }
             }
         }
     }
     None
+}
+
+/// Whether tui.toml replaces Kimi's status line with a command's output.
+/// An unreadable configuration counts as custom.
+fn kimi_custom_status(record: &Value) -> bool {
+    let Ok(file) = File::open(agent_home(record).join("tui.toml")) else {
+        return false;
+    };
+    let mut text = String::new();
+    if file.take(256 * 1024).read_to_string(&mut text).is_err() {
+        return true;
+    }
+    text.parse::<toml_edit::DocumentMut>().map_or(true, |config| {
+        config
+            .get("status_line")
+            .and_then(|line| line.get("command"))
+            .is_some_and(|command| !command.as_str().is_some_and(|c| c.trim().is_empty()))
+    })
+}
+
+/// A Kimi model entry's value, as overridden by its `overrides` table.
+fn kimi_value<'a>(entry: &'a toml_edit::Item, key: &str) -> Option<&'a toml_edit::Item> {
+    entry
+        .get("overrides")
+        .and_then(|overrides| overrides.get(key))
+        .or_else(|| entry.get(key))
+}
+
+/// The displayed effort of the session's model (an ID or a display name).
+/// Kimi's status line names its model, so it must match that catalog entry.
+fn visible_effort(record: &Value, model: &str, screen: &str) -> Option<String> {
+    if string(record, "agent") != "kimi" {
+        return footer(string(record, "agent"), model, screen);
+    }
+    let option = catalog(record)
+        .into_iter()
+        .find(|option| option.id == model || option.label == model)?;
+    target_footer(record, &option, screen)
 }
 
 #[cfg(test)]
@@ -321,8 +391,7 @@ fn options(record: &Value, model: &str) -> Vec<String> {
             let Some(entry) = config.get("models").and_then(|models| models.get(model)) else {
                 return vec![];
             };
-            let mut levels: Vec<String> = entry
-                .get("support_efforts")
+            let mut levels: Vec<String> = kimi_value(entry, "support_efforts")
                 .and_then(|value| value.as_array())
                 .map(|values| {
                     values
@@ -333,17 +402,15 @@ fn options(record: &Value, model: &str) -> Vec<String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let always = entry
-                .get("capabilities")
+            let always = kimi_value(entry, "capabilities")
                 .and_then(|v| v.as_array())
                 .is_some_and(|v| v.iter().any(|v| v.as_str() == Some("always_thinking")));
             if levels.is_empty() {
                 let thinking = always
-                    || entry
-                        .get("capabilities")
+                    || kimi_value(entry, "capabilities")
                         .and_then(|v| v.as_array())
                         .is_some_and(|v| v.iter().any(|v| v.as_str() == Some("thinking")))
-                    || entry.get("adaptive_thinking").and_then(|v| v.as_bool()) == Some(true);
+                    || kimi_value(entry, "adaptive_thinking").and_then(|v| v.as_bool()) == Some(true);
                 if thinking {
                     levels.push("on".into());
                 }
@@ -430,15 +497,14 @@ fn catalog(record: &Value) -> Vec<ModelOption> {
                         if !safe_model(id) {
                             continue;
                         }
-                        let label = entry
-                            .get("display_name")
-                            .or_else(|| entry.get("model"))
+                        // Kimi shows the overridden alias on its status line.
+                        let label = kimi_value(entry, "display_name")
+                            .or_else(|| kimi_value(entry, "model"))
                             .and_then(|v| v.as_str())
                             .filter(|v| safe_model(v))
                             .unwrap_or(id);
                         let efforts = options(record, id);
-                        let default_effort = entry
-                            .get("default_effort")
+                        let default_effort = kimi_value(entry, "default_effort")
                             .and_then(|v| v.as_str())
                             .filter(|v| efforts.iter().any(|e| e == v))
                             .map(str::to_owned)
@@ -531,8 +597,11 @@ fn settings(record: &Value, live_pane: bool) -> Settings {
                     value.effort = effort.clone();
                 }
             }
-            if let Some(effort) = footer(string(record, "agent"), &value.model, &screen) {
-                value.effort = effort;
+            // Kimi's status line names its model; the catalog match above covers it.
+            if string(record, "agent") != "kimi" {
+                if let Some(effort) = footer(string(record, "agent"), &value.model, &screen) {
+                    value.effort = effort;
+                }
             }
         }
     }
@@ -728,7 +797,7 @@ fn kimi_command_ready(record: &Value) -> Result<bool> {
 
 fn kimi_change(name: &str, request: &Request, current: &Settings) -> Result<()> {
     let record = checked(name, request, true)?;
-    if footer("kimi", &current.model, &capture(&record)?).as_deref()
+    if visible_effort(&record, &current.model, &capture(&record)?).as_deref()
         != Some(current.effort.as_str())
     {
         return Err("the current Kimi effort is not visible; open Terminal".into());
@@ -776,7 +845,8 @@ fn kimi_change(name: &str, request: &Request, current: &Settings) -> Result<()> 
         let record = checked(name, request, false)?;
         let screen = capture(&record)?;
         Ok((kimi_picker(&screen).is_none()
-            && footer("kimi", &current.model, &screen).as_deref() == Some(request.effort.as_str()))
+            && visible_effort(&record, &current.model, &screen).as_deref()
+                == Some(request.effort.as_str()))
         .then_some(()))
     })?;
     input::checked_terminal(&record, true)
@@ -910,23 +980,7 @@ fn target_footer(record: &Value, model: &ModelOption, screen: &str) -> Option<St
     if string(record, "agent") == "codex" {
         footer("codex", &model.id, screen).or_else(|| footer("codex", &model.label, screen))
     } else {
-        let has_model = screen.lines().rev().take(3).any(|line| {
-            let line = line.trim();
-            ["Ask When Needed", "Never Ask", "Plan", "Always Ask"]
-                .iter()
-                .any(|mode| {
-                    line.strip_prefix(mode)
-                        .filter(|tail| tail.starts_with(' '))
-                        .and_then(|tail| tail.split_once(" thinking:"))
-                        .is_some_and(|(name, _)| {
-                            let name = name.trim();
-                            name == model.label || name == model.id
-                        })
-                })
-        });
-        has_model
-            .then(|| footer("kimi", &model.id, screen))
-            .flatten()
+        kimi_effort(screen, &[&model.label, &model.id], kimi_custom_status(record))
     }
 }
 
@@ -1041,11 +1095,29 @@ fn kimi_model_row(screen: &str) -> Option<String> {
     rows.next().is_none().then_some(row)
 }
 
+/// Whether the selected picker row is visibly the first and the last model row.
+/// Model names on unselected rows start where the selected row's name starts.
+fn kimi_model_edges(screen: &str) -> (bool, bool) {
+    let lines: Vec<_> = screen.lines().collect();
+    let Some(selected) = lines.iter().position(|l| l.trim_start().starts_with("❯ ")) else {
+        return (false, false);
+    };
+    let column = lines[selected].chars().position(|c| c == '❯').unwrap_or(0) + 2;
+    let row = |index: Option<usize>| {
+        index.and_then(|i| lines.get(i)).is_some_and(|line| {
+            let indent = line.chars().take_while(|c| *c == ' ').count();
+            indent == column && line.chars().count() > column
+        })
+    };
+    (!row(selected.checked_sub(1)), !row(Some(selected + 1)))
+}
+
 fn kimi_thinking(screen: &str) -> Option<String> {
     let lines: Vec<_> = screen.lines().collect();
+    // The picker is below the conversation, which can quote "Thinking set to …".
     let title = lines
         .iter()
-        .position(|l| l.trim().starts_with("Thinking"))?;
+        .rposition(|l| l.trim().starts_with("Thinking"))?;
     let row = lines.get(title + 1)?;
     let value = row
         .split_once("[ ")?
@@ -1064,6 +1136,10 @@ fn kimi_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> 
     })?;
     let mut visited = Vec::new();
     let mut tabs = Vec::new();
+    // Older pickers wrap around; Kimi 2.1 stops at either end, so a key that
+    // does not move the selection turns the walk around once per provider.
+    let mut down = true;
+    let mut turned = false;
     for _ in 0..256 {
         let record = checked(name, request, false)?;
         let screen = capture(&record)?;
@@ -1077,15 +1153,42 @@ fn kimi_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> 
             }
             tabs.push(row.clone());
             visited.clear();
+            (down, turned) = (true, false);
             send_key(&record, "Tab")?;
-        } else {
-            visited.push(row.clone());
-            send_key(&record, "Down")?;
+            wait_until(|| {
+                let r = checked(name, request, false)?;
+                Ok((kimi_model_row(&capture(&r)?).as_deref() != Some(row.as_str())).then_some(()))
+            })?;
+            continue;
         }
-        wait_until(|| {
+        send_key(&record, if down { "Down" } else { "Up" })?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let moved = loop {
             let r = checked(name, request, false)?;
-            Ok((kimi_model_row(&capture(&r)?).as_deref() != Some(row.as_str())).then_some(()))
-        })?;
+            if kimi_model_row(&capture(&r)?).as_deref() != Some(row.as_str()) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if moved {
+            visited.push(row);
+            continue;
+        }
+        // Turn only at a visible end of the list. A key that does not move the
+        // selection elsewhere may still be pending, so stop instead of guessing.
+        let (top, bottom) = kimi_model_edges(&capture(&checked(name, request, false)?)?);
+        if down && !turned && bottom {
+            // Walk up; rows passed on the way down are not a loop.
+            (down, turned) = (false, true);
+            visited.clear();
+        } else if !down && top {
+            visited.push(row);
+        } else {
+            return Err("model picker selection did not move; inspect Terminal".into());
+        }
     }
     for _ in 0..16 {
         let record = checked(name, request, false)?;
@@ -1167,7 +1270,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut record = checked(name, &request, true)?;
     let current = settings(&record, true);
-    if footer(string(&record, "agent"), &current.model, &capture(&record)?).as_deref()
+    if visible_effort(&record, &current.model, &capture(&record)?).as_deref()
         != Some(current.effort.as_str())
     {
         return Err("the current provider effort is not visible; open Terminal".into());
@@ -1820,21 +1923,87 @@ mod tests {
             ),
             Some("xhigh".into())
         );
+        let effort = |screen: &str, name: &str| kimi_effort(screen, &[name], false);
+        assert_eq!(effort(" Ask When Needed  K3 thinking: max  /work\n context: 22%", "K3").as_deref(), Some("max"));
+        assert!(effort("User said thinking: high", "K3").is_none());
+        // Kimi 2.1 status rows under its composer, captured from the native TUI or
+        // laid out by its footer slots (mode, goal, model, tasks, folder, git).
+        let composer = |status: &str| {
+            format!(" ● Fixture reply: hello thinking: max\n ╭────╮\n │ >  │\n ╰────╯\n {status}\n                    context: 1% (15/32k)")
+        };
+        for (status, name, expected) in [
+            ("kimi-levels thinking: high  ~/sample-project  main [±]          ctrl+c: cancel", "kimi-levels", "high"),
+            ("kimi-think thinking  ~/sample-project  main [±]", "kimi-think", "on"),
+            ("kimi-think  ~/sample-project  main [±]", "kimi-think", "off"),
+            ("Levels Pro thinking: max  /work", "Levels Pro", "max"),
+            ("Never Ask  kimi-think thinking  ~/work", "kimi-think", "on"),
+            ("plan  K3 thinking: max  ~/work", "K3", "max"),
+            ("Ask When Needed plan  K3 thinking: max  ~/work", "K3", "max"),
+            ("swarm  [goal ● paused · 7m · 3 turns]  K3 thinking: high  ~/work", "K3", "high"),
+            ("~/work  K3 thinking: low", "K3", "low"),
+        ] {
+            assert_eq!(effort(&composer(status), name).as_deref(), Some(expected), "{status}");
+        }
+        assert!(effort(&composer("K3 Pro thinking: max  ~/work"), "K3").is_none());
+        assert!(effort(&composer("plan  K3 thinking: unknown  ~/work"), "K3").is_none());
+        assert!(effort(&composer("ctrl+c again to exit"), "K3").is_none());
+        assert!(effort(" ● Fixture reply: K3  ~/work", "K3").is_none());
+        // A custom status line command need not show effort: never read "off".
+        assert!(kimi_effort(&composer("K3  ~/work  main"), &["K3"], true).is_none());
+        assert_eq!(kimi_effort(&composer("K3 thinking: max  ~/work"), &["K3"], true).as_deref(), Some("max"));
+        let model = |id: &str, label: &str, efforts: &[&str]| ModelOption {
+            id: id.into(),
+            label: label.into(),
+            efforts: efforts.iter().map(|v| v.to_string()).collect(),
+            default_effort: String::new(),
+        };
+        let home = tempfile::tempdir().unwrap();
+        let kimi = json!({"agent":"kimi","agent_home":home.path()});
+        let plain = composer("kimi-plain  ~/sample-project  main [±]");
         assert_eq!(
-            footer(
-                "kimi",
-                "kimi-code/k3",
-                " Ask When Needed  K3 thinking: max  /work\n context: 22%"
-            ),
-            Some("max".into())
+            target_footer(&kimi, &model("fixture-plain", "kimi-plain", &["off"]), &plain),
+            Some("off".into())
         );
-        assert!(footer("kimi", "kimi-code/k3", "User said thinking: high").is_none());
+        assert!(target_footer(&kimi, &model("fixture-think", "kimi-think", &["on", "off"]), &plain).is_none());
+        // A status line command replaces the built-in line: a bare name is not "off".
+        fs::write(home.path().join("tui.toml"), "[status_line]\ncommand = \"my-status\"\n").unwrap();
+        assert!(target_footer(&kimi, &model("fixture-plain", "kimi-plain", &["off"]), &plain).is_none());
+        fs::write(home.path().join("tui.toml"), "[status_line]\nitems = [\"cwd\", \"model\"]\n").unwrap();
+        assert_eq!(
+            target_footer(&kimi, &model("fixture-plain", "kimi-plain", &["off"]), &plain),
+            Some("off".into())
+        );
+        // The status line shows the alias as overridden, like Kimi's effective model.
+        fs::write(
+            home.path().join("config.toml"),
+            "[models.\"kimi-code/k3\"]\nmodel = \"k3\"\ndisplay_name = \"K3\"\nsupport_efforts = [\"low\", \"high\"]\n[models.\"kimi-code/k3\".overrides]\ndisplay_name = \"K3 Max\"\nsupport_efforts = [\"high\", \"max\"]\n",
+        )
+        .unwrap();
+        let k3 = catalog(&kimi).into_iter().find(|m| m.id == "kimi-code/k3").unwrap();
+        assert_eq!((k3.label.as_str(), k3.efforts.clone()), ("K3 Max", vec!["off".to_owned(), "high".into(), "max".into()]));
+        assert_eq!(
+            visible_effort(&kimi, "kimi-code/k3", &composer("K3 Max thinking: max  ~/work")).as_deref(),
+            Some("max")
+        );
         let panel = "────\n Select thinking effort\n ←→ switch · Enter select · Alt+S session-only · Esc cancel\n\n Low  [ High ]  Max\n────";
         assert_eq!(
             kimi_picker(panel),
             Some((vec!["low".into(), "high".into(), "max".into()], 1))
         );
         assert!(kimi_picker(&panel.replace("Alt+S session-only · ", "")).is_none());
+        // Kimi 2.1 model picker below a conversation that reported an earlier change.
+        let models = " Thinking set to max for this session only.\n ────\n  Select a model  (type to search)\n  Tab toggle provider · ↑↓ navigate · Enter select · Alt+S session-only · Es...\n   All   fixture\n     kimi-think   fixture\n   ❯ kimi-plain   fixture\n     kimi-levels  fixture ← current\n  Thinking\n     On (Unsupported)   [ Off ]\n ────";
+        assert_eq!(kimi_model_row(models).as_deref(), Some("kimi-plain   fixture"));
+        assert_eq!(kimi_thinking(models).as_deref(), Some("off"));
+        assert_eq!(
+            kimi_thinking(&models.replace("On (Unsupported)   [ Off ]", "[ On ]    Off")).as_deref(),
+            Some("on")
+        );
+        assert_eq!(kimi_model_edges(models), (false, false));
+        let top = models.replace("     kimi-think", "   ❯ kimi-think").replace("   ❯ kimi-plain", "     kimi-plain");
+        assert_eq!(kimi_model_edges(&top), (true, false));
+        let bottom = models.replace("   ❯ kimi-plain", "     kimi-plain").replace("     kimi-levels", "   ❯ kimi-levels");
+        assert_eq!(kimi_model_edges(&bottom), (false, true));
         assert!(kimi_picker(&panel.replace("[ High ]", "[ Low ]")).is_none());
     }
 }
