@@ -44,6 +44,13 @@ SSH = SSH.replace(
 assert 'no-deliver-' in SSH and 'bad-exchange-' in SSH
 
 
+def next_position(db, origin):
+    """The next seq of `origin`, which numbers only its own events, and the next lamport."""
+    seq = db.execute('SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE origin = ?', (origin,)).fetchone()[0]
+    lamport = db.execute('SELECT COALESCE(MAX(lamport), 0) + 1 FROM events').fetchone()[0]
+    return seq, lamport
+
+
 def append(state, kind, payload, actor=None, base=None, request_id=''):
     """Appends one event to the only task of a node's store; no command exists for some of them."""
     db = sqlite3.connect(Path(state) / 'overmind/overmind.sqlite3')
@@ -52,7 +59,7 @@ def append(state, kind, payload, actor=None, base=None, request_id=''):
         if base is None:
             rows = db.execute("SELECT raw FROM events WHERE kind = 'transition' ORDER BY seq").fetchall()
             base = json.loads(rows[-1][0])['id'] if rows else created['id']
-        seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+        seq, lamport = next_position(db, created['origin'])
         event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind=kind,
                      base=base, request_id=request_id, payload=payload)
         if actor is not None:

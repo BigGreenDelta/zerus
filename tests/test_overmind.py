@@ -21,13 +21,20 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 
 
+def next_position(db, origin):
+    """The next seq of `origin`, which numbers only its own events, and the next lamport."""
+    seq = db.execute('SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE origin = ?', (origin,)).fetchone()[0]
+    lamport = db.execute('SELECT COALESCE(MAX(lamport), 0) + 1 FROM events').fetchone()[0]
+    return seq, lamport
+
+
 def claim(state, task, name):
     """Claims a task still in Queue for a session of this machine, as its host does on send."""
     db = sqlite3.connect(Path(state) / 'overmind/overmind.sqlite3')
     with db:
         created = json.loads(db.execute("SELECT raw FROM events WHERE task = ? AND kind = 'task_created'",
                                         (task,)).fetchone()[0])
-        seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+        seq, lamport = next_position(db, created['origin'])
         event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind='transition',
                      base=created['id'], request_id='',
                      payload={'action': 'claim', 'to': 'Design', 'fields': {},
@@ -271,7 +278,7 @@ class AgentSession(unittest.TestCase):
             if base is None:
                 rows = db.execute("SELECT raw FROM events WHERE kind = 'transition' ORDER BY seq").fetchall()
                 base = json.loads(rows[-1][0])['id'] if rows else created['id']
-            seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+            seq, lamport = next_position(db, created['origin'])
             event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind=kind,
                          base=base, request_id=request_id, payload=payload)
             if actor is not None:
@@ -763,26 +770,36 @@ class UserExit(test_pause.Harness):
 
 class DeepSeekForget(unittest.TestCase):
     """Forgetting a native DeepSeek session through its resident adapter."""
-    setUp = test_dsh_session_actions.DeepSeekScopedActions.setUp
     tearDown = test_dsh_session_actions.DeepSeekScopedActions.tearDown
     serve = test_dsh_session_actions.DeepSeekScopedActions.serve
     run_action = test_dsh_session_actions.DeepSeekScopedActions.run_action
+
+    def setUp(self):
+        test_dsh_session_actions.DeepSeekScopedActions.setUp(self)
+        for key in ('TMUX', 'TMUX_PANE', 'HGS_SSH', 'HGS_SESSION', 'HGS_RUN_ID'):
+            self.env.pop(key, None)
+        # hgs puts $HOME/.local/bin first in PATH: this stub answers every tmux call and reaches no server.
+        tmux = self.root / '.local/bin/tmux'
+        tmux.parent.mkdir(parents=True)
+        tmux.write_text('#!/bin/sh\nif [ "$1" = -V ]; then echo "tmux 3.7"; fi\n')
+        tmux.chmod(0o755)
 
     def held_task(self):
         task = overmind(self.env, 'create', '--json', data={'project': 'example', 'prompt': 'x', 'stage': 'Queue'})['task']
         claim(self.root / 'state', task['uuid'], self.name)
         return task['ref']
 
+    def test_the_fixture_never_reaches_a_live_tmux_or_ssh(self):
+        for key in ('TMUX', 'TMUX_PANE', 'HGS_SSH', 'HGS_SESSION', 'HGS_RUN_ID'):
+            self.assertFalse(key in self.env, key)
+        self.assertTrue(os.access(self.root / '.local/bin/tmux', os.X_OK))
+
     def test_forgetting_a_session_orphans_its_tasks(self):
         scoped = self.held_task()
         self.assertEqual(self.run_action('forget')[1]['status'], 'completed')
         self.assertFalse(self.binding.exists())
         self.assertEqual(overmind(self.env, 'show', scoped)['task']['flags'], ['orphaned'])
-        # `hgs kill` forgets it too; this stub stands in for tmux and reaches no server.
-        tmux = self.root / '.local/bin/tmux'
-        tmux.parent.mkdir(parents=True)
-        tmux.write_text('#!/bin/sh\nif [ "$1" = -V ]; then echo "tmux 3.7"; fi\n')
-        tmux.chmod(0o755)
+        # `hgs kill` forgets it too; the tmux stub of setUp reaches no server.
         self.binding.write_text(json.dumps(self.record))
         killed = self.held_task()
         result = subprocess.run([str(HGS), 'kill', self.name], env=self.env, text=True, capture_output=True,
