@@ -114,28 +114,33 @@ pub fn current_pin(tx: &Tx, pinned: &SessionRef, machine: &str) -> Result<Sessio
         return Ok(pinned.clone());
     }
     let shared = tx.load(&Filter::Shared(String::new()))?;
-    let name = current_name(&shared, machine, &pinned.name, &crate::state::session_tracked);
+    let name = current_name(&renames_of(&shared, machine), &pinned.name, &crate::state::session_tracked);
     Ok(SessionRef { machine: pinned.machine.clone(), name })
 }
 
-/// `name` after the renames of `machine` in `events`, oldest first, stopping
-/// at a name that a tracked session uses.
-pub fn current_name(events: &[Event], machine: &str, name: &str, tracked: &dyn Fn(&str) -> bool) -> String {
+/// The renames of `machine`'s sessions as `(old, new)`, oldest first. Only the
+/// host renames its sessions, as in the fold.
+pub fn renames_of(events: &[Event], machine: &str) -> Vec<(String, String)> {
     let text = |event: &Event, key: &str| event.payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
     let mut renames: Vec<&Event> = events
         .iter()
         .filter(|e| e.task.is_empty() && e.kind == "session_renamed" && e.v <= EVENT_VERSION)
-        // Only the host renames its sessions, as in the fold.
         .filter(|e| e.actor.machine == machine && text(e, "machine") == machine)
         .collect();
     renames.sort_by(|a, b| a.order().cmp(&b.order()));
+    renames.into_iter().map(|e| (text(e, "old"), text(e, "new"))).collect()
+}
+
+/// `name` after `renames` (from `renames_of`), stopping at a name that a
+/// tracked session uses.
+pub fn current_name(renames: &[(String, String)], name: &str, tracked: &dyn Fn(&str) -> bool) -> String {
     let mut current = name.to_owned();
-    for rename in renames {
-        if text(rename, "old") == current {
+    for (old, new) in renames {
+        if *old == current {
             if tracked(&current) {
                 break;
             }
-            current = text(rename, "new");
+            current = new.clone();
         }
     }
     current
@@ -166,15 +171,16 @@ mod tests {
             renamed(4, THERE, THERE, "old", "theirs"),
         ];
         let nothing = |_: &str| false;
-        assert_eq!(current_name(&events, HERE, "old", &nothing), "new");
-        assert_eq!(current_name(&events, HERE, "mid", &nothing), "new");
-        assert_eq!(current_name(&events, HERE, "new", &nothing), "new", "only the host renames its sessions");
-        assert_eq!(current_name(&events, HERE, "other", &nothing), "other");
+        let names = |events: &[Event], name: &str, tracked: &dyn Fn(&str) -> bool| current_name(&renames_of(events, HERE), name, tracked);
+        assert_eq!(names(&events, "old", &nothing), "new");
+        assert_eq!(names(&events, "mid", &nothing), "new");
+        assert_eq!(names(&events, "new", &nothing), "new", "only the host renames its sessions");
+        assert_eq!(names(&events, "other", &nothing), "other");
         // A session that uses a name again stops the chain there.
-        assert_eq!(current_name(&events, HERE, "old", &|name: &str| name == "old"), "old");
-        assert_eq!(current_name(&events, HERE, "old", &|name: &str| name == "mid"), "mid");
+        assert_eq!(names(&events, "old", &|name: &str| name == "old"), "old");
+        assert_eq!(names(&events, "old", &|name: &str| name == "mid"), "mid");
         let mut newer = renamed(1, HERE, HERE, "old", "elsewhere");
         newer.v = EVENT_VERSION + 1;
-        assert_eq!(current_name(&[newer], HERE, "old", &nothing), "old");
+        assert_eq!(names(&[newer], "old", &nothing), "old");
     }
 }

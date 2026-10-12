@@ -1465,8 +1465,6 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-// Called under the existing input transaction lock; never a mutation from ls or
-// inspect. It deliberately does nothing while the agent is still working.
 /// Settings that `apply_pending` would apply now, after every check it makes.
 struct Pending {
     request: Request,
@@ -1524,6 +1522,8 @@ pub(super) fn check_pending(record: &Value) -> Result<()> {
     pending(record).map(|_| ())
 }
 
+// Called under the existing input transaction lock; never a mutation from ls or
+// inspect. It deliberately does nothing while the agent is still working.
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
     let Some(mut pending) = pending(&record)? else {
         return Ok(record);

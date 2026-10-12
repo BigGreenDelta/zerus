@@ -518,11 +518,12 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
             .then(a.uuid.cmp(&b.uuid))
     });
     let machine = ctx.store.machine();
+    let renames = super::sessions::renames_of(&events, machine);
     let views: Vec<Value> = tasks
         .iter()
         .map(|t| {
             let mut view = view(t, names.get(&t.uuid).map(String::as_str).unwrap_or_default(), false);
-            with_current_pin(&mut view, t, &events, machine);
+            with_current_pin(&mut view, t, &renames, machine);
             view
         })
         .collect();
@@ -532,9 +533,9 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
 /// Adds `pinned_current` to a task's view when the task is pinned to a session
 /// of this machine that has another name now: a pin written on another machine
 /// can miss a rename there. Other machines show the pin as written.
-fn with_current_pin(view: &mut Value, task: &Task, events: &[Event], machine: &str) {
+fn with_current_pin(view: &mut Value, task: &Task, renames: &[(String, String)], machine: &str) {
     if let Some(pinned) = task.pinned.as_ref().filter(|pinned| pinned.machine == machine) {
-        let name = super::sessions::current_name(events, machine, &pinned.name, &crate::state::session_tracked);
+        let name = super::sessions::current_name(renames, &pinned.name, &crate::state::session_tracked);
         if name != pinned.name {
             view["pinned_current"] = json!(name);
         }
@@ -556,7 +557,8 @@ pub fn show(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let uuid = resolve(tx, &req.task)?;
         let task = load(tx, &uuid)?;
         let mut view = view(&task, &reference(tx, &uuid)?, true);
-        with_current_pin(&mut view, &task, &tx.load(&Filter::Shared(String::new()))?, &machine);
+        let renames = super::sessions::renames_of(&tx.load(&Filter::Shared(String::new()))?, &machine);
+        with_current_pin(&mut view, &task, &renames, &machine);
         Ok(json!({"ok": true, "task": view}))
     })
 }

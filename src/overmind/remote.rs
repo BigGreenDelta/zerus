@@ -529,4 +529,23 @@ mod tests {
         assert!(accept_chunk(&mut bytes, &[1; 4], Some(10), 10).is_ok());
         assert_eq!(bytes.len(), 10);
     }
+
+    #[test]
+    fn decoding_accepts_exactly_the_limit_and_refuses_one_byte_more() {
+        let encode = |len: usize| base64::engine::general_purpose::STANDARD.encode(vec![7u8; len]);
+        assert_eq!(decode_at_most(&encode(RANGE), RANGE, "too long").unwrap().len(), RANGE);
+        assert!(decode_at_most(&encode(RANGE + 1), RANGE, "too long").is_err());
+    }
+
+    #[test]
+    fn a_full_range_chunk_is_fetched() {
+        let (_dir, store) = store();
+        let bytes = vec![9u8; RANGE];
+        let attachment = Attachment {
+            name: "full.png".into(), mime: "image/png".into(), bytes: RANGE as u64, sha256: format!("{:x}", Sha256::digest(&bytes)),
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        fetch(&store, &attachment, &mut |_| Ok(json!({"size": RANGE, "data_base64": encoded}))).unwrap();
+        assert!(present(&store, &attachment));
+    }
 }

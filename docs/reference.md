@@ -1393,7 +1393,11 @@ follow a session when it is renamed on its machine. A pin written on another
 machine before that machine learned of the rename keeps the old name; the
 session's machine resolves it, so `send` there accepts the session under its
 current name, and `show` and `board` there add the current name as
-`pinned_current`. Other machines show the pin as written.
+`pinned_current`. Other machines show the pin as written. `pinned_current` is a
+hint: a name reused by a session that has since ended can resolve a pin to the
+session that first held the name. `board --since` does not resend a task whose
+`pinned_current` changed only because a session appeared or disappeared on its
+machine.
 
 When a session stops taking input for good on its machine (it is archived, also
 after the user quits its agent; terminated; forgotten or killed), the tasks it
@@ -1463,7 +1467,9 @@ pin.
 
 `templates get --json {project}` shows the templates of a project and
 `templates set --json {project, templates: {dispatch|review|rework|answer:
-text|null}}` changes them; `null` restores the built-in text. A template can
+text|null}}` changes them; `null` restores the built-in text. Each template is
+stored by itself, so two people editing different templates of one project at
+the same time both keep their edit; for one template the later edit wins. A template can
 use `{task.ref}`, `{task.title}`, `{task.prompt}`, `{task.stage}`,
 `{task.journal_tail}`, `{review.report}`, `{answer.text}` and `{tools}`.
 Values are inserted as they are and never expanded again. The rendered text
@@ -1477,8 +1483,11 @@ data is refilled over several rounds; it ends when a round makes no progress or
 after 8 rounds, and the worker continues on its next pass. Each store writes
 its events under its own origin id, created with the store, so a store that was
 lost and created again never collides with events written earlier, even when
-it writes before it is refilled. Copying a store directory to a second machine,
-or restoring an old copy of one, is unsupported.
+it writes before it is refilled. A store restored from an old copy notices at
+its next exchange that a peer holds more events of its origin than it does. It
+then writes under a fresh origin and says so in `status`; tasks it changed
+before that exchange may differ from the other machines. Copying a store
+directory to a second machine is unsupported.
 `hgs overmind status` shows this store's origin id and each peer's last
 exchange and last error, including events the peer did not accept and events
 from the peer that this machine refused as damaged; a clean exchange clears
@@ -1493,11 +1502,17 @@ reviewer session of the task. A peer accepts at most 8 pushed images per call,
 A send to a session on another machine runs on that machine. The caller first
 exchanges events with the host, pushes the task's images, and runs the command
 there as a person, so the host writes the claim. The host checks the gates, not
-the caller; an offline host shows `host_unreachable`. The caller keeps the
-host's result as the result of the request, so a retry with the same
-`request_id` replays it without reaching the host. When the host's answer is
-lost after it may have acted, the refusal is `delivery_unknown`: check the task
-before sending it again.
+the caller. The caller keeps the host's result as the result of the request, so
+a retry with the same `request_id` replays it without reaching the host.
+
+Every failure of a forwarded command after the caller reached the host is a
+JSON refusal. Before the host is asked to act, the refusal says that nothing
+was attempted there: `host_unreachable` (no route, or the host is offline),
+`host_changed` (the machine behind the route is no longer the session's
+machine), `host_outdated` (the host runs a version without the request; update
+HGS there) and `host_sync_failed` (bringing the host up to date or giving it the
+task's images failed). When the host's answer is lost after it may have acted,
+the refusal is `delivery_unknown`: check the task before sending it again.
 
 <a id="windows"></a>
 

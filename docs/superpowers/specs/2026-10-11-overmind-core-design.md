@@ -157,9 +157,13 @@ security boundary: an agent that strips its environment is not stopped.
 its own origin id, created with the store, and numbers its events from `seq` 1.
 `actor.machine` names the machine. A store that was lost and created again
 therefore never collides with events written earlier, even when it writes
-before its peers refill it. Copying a whole store directory to a second
-machine, or restoring an old copy of one, is unsupported: the copy writes under
-the same origin, so its new events can collide with events written since.
+before its peers refill it. A store restored from an old copy writes under the
+same origin as the original, so its new events could collide with events written
+since. It detects this at its next exchange, when a peer holds more events of
+its own origin than it does: it then switches to a fresh origin for later events
+and records the fact in `status`. Events written before that exchange keep the
+old origin, and tasks changed then may differ from the other machines. Copying a
+whole store directory to a second machine is unsupported.
 
 `lamport` is the maximum seen plus one, so a causally later event always sorts
 later. Kinds: `task_created`, `field_set`, `transition`, `journal`, `rank_set`,
@@ -415,9 +419,13 @@ phone runs it through the connector on the gateway.
    dialogs, pending model settings that `hgs send` would refuse). A failure
    returns the reason; nothing is written. The gates and the preflight run
    before the host fetches images it lacks, so a refused request reaches no
-   other machine. A lost answer from the host, which may have acted already,
-   refuses with `delivery_unknown`, and the person checks the task before
-   sending it again.
+   other machine. Every failure after the caller reached the host is a JSON
+   refusal. Those before the host acted say that nothing was attempted there:
+   `host_unreachable`, `host_changed` (the route now leads to another machine),
+   `host_outdated` (the host lacks the request) and `host_sync_failed` (the
+   exchange or the image push failed). A lost answer from the host, which may
+   have acted already, refuses with `delivery_unknown`, and the person checks
+   the task before sending it again.
 4. Write `claim` with `base` and `request_id`.
 5. Deliver with `input::submit`, using the same receipt and identity rules as
    `hgs send`. `recovery::cancel_for_input` applies as for any user input.
@@ -575,9 +583,10 @@ payloads never contain task content.
 | Session stopped, paused or showing a dialog | `send` refuses with the reason; the task stays in Queue. |
 | Delivery failed without a receipt | `[unclaim]`, back to Queue, reason in the journal. |
 | Delivery uncertain | Stays in Design with `delivery_uncertain`; human resolves. |
+| Host unreachable, replaced, outdated or failing to sync before it acted | Refusal `host_unreachable`, `host_changed`, `host_outdated` or `host_sync_failed`; nothing was attempted on the host. |
 | Host's answer lost after it may have acted | `delivery_unknown`; the person checks the task before sending again. |
 | Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. The flag names the session and applies only while that session holds the task, so a session that lost a concurrent claim, or a task taken back meanwhile, is not flagged. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag, as does an accepted action of the assignee session itself (`advance`, `call_human`), which proves that it is alive, for example after its archive was restored. A task in Your Call keeps the flag through Icebox and back to Queue until it is sent again. |
-| Session renamed | `session_renamed` event inside the rename; pins, assignees and reviewers follow. The host writes assignees and reviewers with the current name, so only a pin written on another machine can miss a concurrent rename: the rename sorts before the pin, and the fold keeps the name as written. The host resolves such a pin through its own renames, oldest first, past every name that no session there uses: `send` compares the resolved name for `pinned_elsewhere`, and `show` and `board` add it as `pinned_current`. Other machines show the pin as written until the host resolves it. |
+| Session renamed | `session_renamed` event inside the rename; pins, assignees and reviewers follow. The host writes assignees and reviewers with the current name, so only a pin written on another machine can miss a concurrent rename: the rename sorts before the pin, and the fold keeps the name as written. The host resolves such a pin through its own renames, oldest first, past every name that no session there uses: `send` compares the resolved name for `pinned_elsewhere`, and `show` and `board` add it as `pinned_current`. Other machines show the pin as written until the host resolves it. A name reused by a session that has since ended can resolve a pin to the session that first held the name, so `pinned_current` is a hint; `board --since` does not resend a task whose `pinned_current` changed only because a session's binding appeared or disappeared. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |
 | Cache corrupted or schema changed | Rebuilt from `events`. |
 | Unknown event kind or version | Task read-only on that machine. |

@@ -143,14 +143,14 @@ fn active_tasks(tx: &Tx, session: &SessionRef) -> Result<usize> {
 
 /// The stage a send claims the task into, after the gates of Part 3. It runs on
 /// the session's host, which resolves a pin that missed one of its renames.
-fn send_gates(tx: &Tx, wf: &Workflow, task: &Task, session: &SessionRef, confirmed: &Confirmed) -> Result<String> {
+fn send_gates(tx: &Tx, machine: &str, wf: &Workflow, task: &Task, session: &SessionRef, confirmed: &Confirmed) -> Result<String> {
     if task.labels.contains("epic") {
         return refuse("epic", "an epic is a container and is never sent to a session");
     }
     let to = rule_target(wf, Action::Claim, &task.stage)
         .ok_or_else(|| Refusal::new("transition_not_allowed", format!("a task in {} cannot be sent", task.stage)))?;
     if let Some(pinned) = task.pinned.as_ref() {
-        let pinned = super::sessions::current_pin(tx, pinned, &session.machine)?;
+        let pinned = super::sessions::current_pin(tx, pinned, machine)?;
         if pinned != *session {
             confirmable("pinned_elsewhere", confirmed, format!("this task is reserved for {}", pinned.name))?;
         }
@@ -277,6 +277,7 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
     let dir = ctx.store.dir().to_owned();
+    let machine = ctx.store.machine().to_owned();
     // The gates and the session checks refuse before images this machine lacks
     // are fetched, so a refused request reaches no other machine. A claim this
     // request already wrote is resumed without fetching and without the session
@@ -285,7 +286,7 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
         let task = load_writable(tx, &resolve(tx, &req.task)?)?;
         let fresh = pending_claim(tx, &task, &request_id)?.is_none();
         if fresh {
-            send_gates(tx, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
+            send_gates(tx, &machine, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
         }
         Ok((fresh, task))
     })?;
@@ -299,7 +300,7 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
         let task = load_writable(tx, &uuid)?;
         let resumed = pending_claim(tx, &task, &request_id)?.is_some();
         if !resumed {
-            send_gates(tx, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
+            send_gates(tx, &machine, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
         }
         Ok((uuid, files(&dir, &task), resumed))
     })?;
@@ -312,7 +313,7 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
         let claim = match pending_claim(tx, &task, &request_id)? {
             Some(claim) => claim,
             None => {
-                let to = send_gates(tx, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
+                let to = send_gates(tx, &machine, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
                 transition(tx, &actor, &task, Action::Claim, &to, BTreeMap::new(), Some(session.clone()), vec![], &request_id)?
             }
         };
@@ -802,7 +803,7 @@ mod tests {
         let gates = |store: &mut Store, uuid: &str, confirmed: &Confirmed| {
             store.read(|tx| {
                 let task = load(tx, uuid)?;
-                send_gates(tx, &workflow(tx, "p")?, &task, &session("w1"), confirmed)
+                send_gates(tx, MACHINE, &workflow(tx, "p")?, &task, &session("w1"), confirmed)
             })
         };
         assert_eq!(gates(&mut store, &first, &none).unwrap(), "Design");
