@@ -13,9 +13,11 @@ pub const MAX_REQUEST: u64 = 29 * 1024 * 1024;
 
 const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSON request on stdin)
   board --json {project, since?}           tasks of a project (with its workflow, queue_of and markers), optionally changed since a cursor
+                                           pages: {stage?, limit? (1-1000), after?}; a page answers next (the after of the following page, or null)
   decisions --json {}                      tasks waiting in Your Call across projects, oldest first
   projects --json {}                       projects that have tasks, with counts per stage role
   show <ref> | show --json {task}          one task with its prompt and journal
+                                           journal pages: {journal_limit? (1-500), journal_before?}, newest first; the task gains journal_total and journal_from
   create --json {project, prompt, title?, stage?, priority?, labels?, pinned?, attachments?, parent?, follows?}
   edit --json {task, title?, prompt?, priority?, attachments?}   attachments: the whole new list of
                                            new images {name, mime, data_base64} and kept ones {sha256}

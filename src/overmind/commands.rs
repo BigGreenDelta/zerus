@@ -495,10 +495,46 @@ struct BoardRequest {
     project: String,
     #[serde(default)]
     since: Option<i64>,
+    /// Paging for readers with a size budget: one stage, at most `limit` tasks
+    /// after the `after` cursor of an earlier page.
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    after: Option<String>,
+}
+
+/// Most tasks one `board` page returns.
+pub const MAX_BOARD_PAGE: u64 = 1000;
+
+/// A board position as an opaque cursor: stage index, rank and UUID, so a page
+/// continues in board order even when the task it ended with has moved.
+type PageKey = (usize, String, String);
+fn page_cursor((position, rank, uuid): &PageKey) -> String {
+    format!("{position}.{rank}.{uuid}")
+}
+fn page_key(cursor: &str) -> Option<PageKey> {
+    let mut parts = cursor.splitn(3, '.');
+    let position = parts.next()?.parse().ok()?;
+    let ordinal = parts.next()?;
+    let uuid = parts.next().filter(|u| !u.is_empty())?;
+    (ordinal.is_empty() || rank::valid(ordinal)).then(|| (position, ordinal.to_owned(), uuid.to_owned()))
 }
 
 pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
     let req: BoardRequest = parse(&request)?;
+    if req.limit.is_some_and(|n| !(1..=MAX_BOARD_PAGE).contains(&n)) {
+        return refuse_field("limit", format!("limit is 1 to {MAX_BOARD_PAGE}"));
+    }
+    if req.stage.as_deref() == Some("") {
+        return Err(Refusal::field("invalid_field", "stage", "empty", "stage names one stage").into());
+    }
+    let after = match req.after.as_deref() {
+        Some(cursor) => Some(page_key(cursor).ok_or_else(|| Refusal::field("invalid_field", "after", "invalid", "after is the next cursor of an earlier page"))?),
+        None => None,
+    };
+    let paged = req.stage.is_some() || req.limit.is_some() || after.is_some();
     let cursor = ctx.store.cursor()?;
     let touched = match req.since {
         Some(since) => Some(ctx.store.touched_since(since)?),
@@ -514,14 +550,19 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
         .filter(|t| t.project == req.project)
         .filter(|t| shared_changed || touched.as_ref().map_or(true, |set| set.contains(&t.uuid)))
         .filter(|t| !t.deleted || touched.as_ref().is_some_and(|set| set.contains(&t.uuid)))
+        .filter(|t| req.stage.as_ref().is_none_or(|stage| &t.stage == stage))
         .collect();
     let position = |stage: &str| wf.stages.iter().position(|s| s.name == stage).unwrap_or(usize::MAX);
-    tasks.sort_by(|a, b| {
-        position(&a.stage)
-            .cmp(&position(&b.stage))
-            .then(a.rank.cmp(&b.rank))
-            .then(a.uuid.cmp(&b.uuid))
-    });
+    let key = |t: &Task| -> PageKey { (position(&t.stage), t.rank.clone(), t.uuid.clone()) };
+    tasks.sort_by_cached_key(key);
+    if let Some(after) = &after {
+        tasks.retain(|t| key(t) > *after);
+    }
+    let more = req.limit.is_some_and(|n| tasks.len() as u64 > n);
+    if let Some(limit) = req.limit {
+        tasks.truncate(limit as usize);
+    }
+    let next = if more { tasks.last().map(|t| page_cursor(&key(t))) } else { None };
     let machine = ctx.store.machine();
     let renames = super::sessions::renames_of(&events, machine);
     let views: Vec<Value> = tasks
@@ -541,7 +582,11 @@ pub fn board(ctx: &mut Ctx, request: Value) -> Result<Value> {
             view
         })
         .collect();
-    Ok(json!({"ok": true, "project": req.project, "cursor": cursor, "workflow": wf, "tasks": views}))
+    let mut result = json!({"ok": true, "project": req.project, "cursor": cursor, "workflow": wf, "tasks": views});
+    if paged {
+        result["next"] = json!(next);
+    }
+    Ok(result)
 }
 
 /// What a card shows besides its stage: `working` while a session holds the
@@ -673,8 +718,29 @@ struct TaskRequest {
     task: String,
 }
 
+/// Most journal entries one `show` page returns.
+pub const MAX_JOURNAL_PAGE: u64 = 500;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShowRequest {
+    #[allow(dead_code)] // Accepted as before; a read has no receipt.
+    #[serde(default)]
+    request_id: String,
+    task: String,
+    /// A journal window for readers with a size budget: at most `journal_limit`
+    /// entries ending before index `journal_before` (default: the newest).
+    #[serde(default)]
+    journal_limit: Option<u64>,
+    #[serde(default)]
+    journal_before: Option<u64>,
+}
+
 pub fn show(ctx: &mut Ctx, request: Value) -> Result<Value> {
-    let req: TaskRequest = parse(&request)?;
+    let req: ShowRequest = parse(&request)?;
+    if req.journal_limit.is_some_and(|n| !(1..=MAX_JOURNAL_PAGE).contains(&n)) {
+        return refuse_field("journal_limit", format!("journal_limit is 1 to {MAX_JOURNAL_PAGE}"));
+    }
     let machine = ctx.store.machine().to_owned();
     ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
@@ -682,8 +748,21 @@ pub fn show(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let mut view = view(&task, &reference(tx, &uuid)?, true);
         let renames = super::sessions::renames_of(&tx.load(&Filter::Shared(String::new()))?, &machine);
         with_current_pin(&mut view, &task, &renames, &machine);
+        if req.journal_limit.is_some() || req.journal_before.is_some() {
+            // Journal indexes count from the oldest entry; a page keeps that order.
+            let total = task.journal.len();
+            let before = req.journal_before.map_or(total, |n| usize::try_from(n).unwrap_or(usize::MAX).min(total));
+            let from = req.journal_limit.map_or(0, |n| before.saturating_sub(n as usize));
+            view["journal"] = json!(task.journal[from..before]);
+            view["journal_total"] = json!(total);
+            view["journal_from"] = json!(from);
+        }
         Ok(json!({"ok": true, "task": view}))
     })
+}
+
+fn refuse_field<T>(field: &str, message: String) -> Result<T> {
+    Err(Refusal::field("invalid_field", field, "invalid", message).into())
 }
 
 #[derive(Deserialize)]
@@ -1381,6 +1460,79 @@ mod tests {
         let delta = board(&mut human(&mut store), json!({"project": "p", "since": cursor})).unwrap();
         assert_eq!(delta["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(delta["tasks"][0]["labels"], json!(["ui"]));
+    }
+
+    fn uuids(page: &Value) -> Vec<String> {
+        page["tasks"].as_array().unwrap().iter().map(|t| t["uuid"].as_str().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    fn board_pages_by_stage_limit_and_cursor_in_board_order() {
+        let (_dir, mut store) = store();
+        let queued: Vec<String> = (0..5).map(|_| new_task(&mut store, "Queue")).collect();
+        new_task(&mut store, "Backlog");
+        new_task(&mut store, "Backlog");
+        let full = board(&mut human(&mut store), json!({"project": "p"})).unwrap();
+        assert!(full.get("next").is_none(), "an unpaged board answers as before");
+        let order = uuids(&full);
+        let (mut seen, mut after) = (Vec::new(), Value::Null);
+        loop {
+            let mut request = json!({"project": "p", "limit": 2});
+            if !after.is_null() {
+                request["after"] = after.clone();
+            }
+            let page = board(&mut human(&mut store), request).unwrap();
+            assert!(uuids(&page).len() <= 2 && page["workflow"].is_object());
+            seen.extend(uuids(&page));
+            after = page["next"].clone();
+            if after.is_null() {
+                break;
+            }
+        }
+        assert_eq!(seen, order);
+        let stage = board(&mut human(&mut store), json!({"project": "p", "stage": "Queue"})).unwrap();
+        let column: Vec<String> = order.iter().filter(|u| queued.contains(u)).cloned().collect();
+        assert_eq!((uuids(&stage), stage["next"].clone()), (column.clone(), Value::Null));
+        // A cursor keeps its board position when the task it ended with goes away.
+        let first = board(&mut human(&mut store), json!({"project": "p", "stage": "Queue", "limit": 2})).unwrap();
+        delete(&mut human(&mut store), json!({"task": column[1]})).unwrap();
+        let rest = board(&mut human(&mut store), json!({"project": "p", "stage": "Queue", "limit": 10, "after": first["next"]})).unwrap();
+        assert_eq!((uuids(&rest), rest["next"].clone()), (column[2..].to_vec(), Value::Null));
+        for (request, field) in [
+            (json!({"project": "p", "limit": 0}), "limit"),
+            (json!({"project": "p", "limit": 1001}), "limit"),
+            (json!({"project": "p", "after": "x"}), "after"),
+            (json!({"project": "p", "after": "1.!.u"}), "after"),
+            (json!({"project": "p", "stage": ""}), "stage"),
+        ] {
+            let refused = refusal(board(&mut human(&mut store), request).unwrap_err());
+            assert_eq!((refused.code.as_str(), refused.field.as_str()), ("invalid_field", field));
+        }
+    }
+
+    #[test]
+    fn show_pages_the_journal_newest_first() {
+        let (_dir, mut store) = store();
+        let task = new_task(&mut store, "Queue");
+        for n in 0..5 {
+            comment(&mut human(&mut store), json!({"task": task, "text": format!("note {n}")})).unwrap();
+        }
+        let full = show(&mut human(&mut store), json!({"task": task})).unwrap();
+        assert!(full["task"].get("journal_total").is_none() && full["task"].get("journal_from").is_none());
+        let journal = full["task"]["journal"].as_array().unwrap().clone();
+        let total = journal.len();
+        assert!(total >= 5);
+        let mut page = |request: Value| {
+            let shown = show(&mut human(&mut store), request).unwrap()["task"].clone();
+            (shown["journal"].clone(), shown["journal_total"].as_u64().unwrap() as usize, shown["journal_from"].as_u64().unwrap() as usize)
+        };
+        assert_eq!(page(json!({"task": task, "journal_limit": 2})), (json!(journal[total - 2..]), total, total - 2));
+        assert_eq!(page(json!({"task": task, "journal_limit": 2, "journal_before": total - 2})), (json!(journal[total - 4..total - 2]), total, total - 4));
+        assert_eq!(page(json!({"task": task, "journal_limit": 500, "journal_before": 1})), (json!(journal[..1]), total, 0));
+        assert_eq!(page(json!({"task": task, "journal_before": 1000})), (json!(journal), total, 0));
+        for (limit, code) in [(json!(0), "invalid_field"), (json!(501), "invalid_field"), (json!(-1), "invalid_request"), (json!("2"), "invalid_request")] {
+            assert_eq!(refusal(show(&mut human(&mut store), json!({"task": task, "journal_limit": limit})).unwrap_err()).code, code);
+        }
     }
 
     fn claim(store: &mut Store, task: &str, name: &str) {
