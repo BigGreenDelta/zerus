@@ -107,7 +107,10 @@ bool humanMove(const OvermindModel::Board &board, const QString &from, const QSt
     else if (fromRole == QLatin1String("done") && toRole == QLatin1String("ready")) action = QStringLiteral("reopen");
     else if (toRole == QLatin1String("active") && fromRole != QLatin1String("active")) return false;   // send it instead
     else if (fromRole == QLatin1String("needs_human") && toRole != QLatin1String("parked")) return false;   // answer it instead
-    for (const auto &value : board.workflow.value(QStringLiteral("rules")).toArray()) {
+    // A workflow without rules did not say: the drag is allowed and the CLI decides.
+    const auto rules = board.workflow.value(QStringLiteral("rules"));
+    if (!rules.isArray() || rules.toArray().isEmpty()) return true;
+    for (const auto &value : rules.toArray()) {
         const auto rule = value.toObject();
         if (rule.value(QStringLiteral("action")).toString() == action && rule.value(QStringLiteral("to")).toString() == to
             && rule.value(QStringLiteral("actors")).toArray().contains(QStringLiteral("human"))

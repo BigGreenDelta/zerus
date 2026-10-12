@@ -270,6 +270,7 @@ private slots:
     void highlightsTheSelectedSession();
     void refusedDropShowsTheReason();
     void forbiddenColumnsRejectTheDrag();
+    void workflowWithoutRulesLeavesDragsToTheCli();
     void filteredReorderSkipsHiddenCards();
     void sendNextWarnsWhenDeliveryIsUncertain();
     void sendAnywayStaysWithItsSession();
@@ -575,6 +576,37 @@ void TestTasksView::forbiddenColumnsRejectTheDrag()
     QTest::qWait(250);
     QVERIFY(f.calls("move").isEmpty());
     QVERIFY(!view.findChild<QLabel *>("tasksMessage")->isVisible());
+}
+
+// A workflow that names no rules (missing, not an array, or empty) does not
+// limit drags: the CLI decides. Its roles still do: an active stage takes a send.
+void TestTasksView::workflowWithoutRulesLeavesDragsToTheCli()
+{
+    for (const QJsonValue &rules : {QJsonValue(QJsonValue::Undefined), QJsonValue(QStringLiteral("none")), QJsonValue(QJsonArray())}) {
+        Fixture f; QVERIFY(f.setUp());
+        auto board = demoBoard();
+        auto flow = board["workflow"].toObject();
+        if (rules.isUndefined()) flow.remove("rules"); else flow["rules"] = rules;
+        board["workflow"] = flow;
+        QVERIFY(f.put("board-demo.json", compact(board)));
+        TasksView view(f.model.get()); view.resize(1600, 720);
+        view.setProjects(organization().groups());
+        view.setSession(selection("demo", "m1", "codex/demo/one"));
+        view.show();
+        QTRY_VERIFY(card(view, "t1"));
+        bool lit = false;
+        QVERIFY(takes(list(view, "Check")->viewport(), column(view, "Check"), "t1", &lit)); QVERIFY(lit);
+        QVERIFY(takes(column(view, "Later")->findChild<QWidget *>("taskColumnHeader"), column(view, "Later"), "t5", &lit)); QVERIFY(lit);
+        QVERIFY(!takes(list(view, "Doing")->viewport(), column(view, "Doing"), "t2"));
+        QVERIFY(f.put("refuse-move.json", R"({"ok":false,"error":{"code":"transition_not_allowed","message":"move from Inbox to Check is not allowed for human"}})"));
+        auto *check = list(view, "Check");
+        drop(check->viewport(), "t1", QPoint(20, check->viewport()->height() - 10));
+        QTRY_COMPARE(f.calls("move").size(), 1);
+        QCOMPARE(f.calls("move").first()["to"].toString(), QString("Check"));
+        auto *message = view.findChild<QLabel *>("tasksMessage");
+        QTRY_COMPARE(message->text(), QString("move from Inbox to Check is not allowed for human"));
+        QCOMPARE(cards(view, "Inbox"), QStringList{"t1"});
+    }
 }
 
 void TestTasksView::filteredReorderSkipsHiddenCards()
