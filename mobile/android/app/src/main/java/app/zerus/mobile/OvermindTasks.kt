@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class OvermindBoardKey(val connectionId: String, val project: String)
@@ -18,33 +19,43 @@ data class OvermindCardState(val view: OvermindTaskView? = null, val loading: Bo
 class OvermindImageState(val bytes: ByteArray? = null, val format: String? = null, val loading: Boolean = false, val error: String = "")
 /** The Tasks window: a project's board, and the card open on it ("" for none). A decision tap may open a card before its project is known. */
 data class OvermindScreen(val connectionId: String, val project: String, val task: String = "")
+/** Unsaved edits of one card. Like the desktop's, they live while the app runs: Back, another card or a decision tap keeps them;
+ * a save or a discard ends them, and a disconnect drops them. [prompt] is null while the prompt is not being edited. */
+data class OvermindCardDrafts(val title: String? = null, val prompt: String? = null, val promptBase: String = "", val answer: String = "",
+    val comment: String = "", val label: String = "", val link: String = "", val linkKind: String = "follows")
 
 /** Reads, writes and navigation of the Tasks screens. Reads refresh on demand or when the gateway digest moves past a board's
- * cursor; writes go through the outbox and are never repeated without a tap. Everything of a workspace is dropped on disconnect. */
+ * cursor; writes go through the outbox and are never repeated without a tap. State is kept while the workspace is connected,
+ * also through a failed refresh ([gateway] null), and everything of a workspace is dropped on disconnect. */
 class OvermindTasks(private val scope: CoroutineScope, private val repository: OvermindRepository,
     private val gateway: (String) -> OvermindGateway?,
-    private val submit: (String, String, JSONObject, List<Attachment>, (OvermindWrite) -> Unit) -> String,
+    private val connected: (String) -> Boolean,
+    /** (connection, action, request, images, settled, unsettled): the request_id, or "" when nothing was saved. `unsettled` runs
+     * when the write ended without a settlement to report (not saved, or its result could not be saved). */
+    private val submit: (String, String, JSONObject, List<Attachment>, (OvermindWrite) -> Unit, (String) -> Unit) -> String,
     private val retryWrite: (OvermindWrite, (OvermindWrite) -> Unit) -> Unit) {
     companion object {
         const val UNAVAILABLE = "Tasks are not available for this workspace."
+        const val UNREACHABLE = "The gateway that serves Tasks was not confirmed by the last refresh. Refresh, then try again."
         private const val IMAGE_BUDGET = 48L * 1024 * 1024
     }
     var boards by mutableStateOf<Map<OvermindBoardKey, OvermindBoardState>>(emptyMap()); private set
     var cards by mutableStateOf<Map<OvermindCardKey, OvermindCardState>>(emptyMap()); private set
     var images by mutableStateOf<Map<String, OvermindImageState>>(emptyMap()); private set
+    var drafts by mutableStateOf<Map<OvermindCardKey, OvermindCardDrafts>>(emptyMap()); private set
     var screen by mutableStateOf<OvermindScreen?>(null); private set
-    /** The Tasks window's message bar. */
+    /** The Tasks window's message bar; its next steps act on its own [OvermindOutcome.connectionId]. */
     var outcome by mutableStateOf<OvermindOutcome?>(null); private set
     /** Send a task here: the session chosen in its long-press sheet, and what the send said. */
     var sendTo by mutableStateOf<Session?>(null); private set
     var sendOutcome by mutableStateOf<OvermindOutcome?>(null); private set
-    /** Add as task, per composer target key. */
+    /** Add as task, per composer target key: its message, and the adds still reading the board or awaiting their settlement. */
     var notices by mutableStateOf<Map<String, OvermindOutcome>>(emptyMap()); private set
+    var adding by mutableStateOf<Set<String>>(emptySet()); private set
     private val reads = mutableMapOf<Any, Job>()
-    private val again = mutableSetOf<OvermindCardKey>()
+    private val again = mutableSetOf<Any>()
 
     private fun message(e: Exception) = e.message?.takeIf { it.isNotBlank() } ?: "The task board could not be read."
-    private fun connected(connectionId: String) = gateway(connectionId) != null
     private fun updateBoard(key: OvermindBoardKey, change: (OvermindBoardState) -> OvermindBoardState) {
         if (connected(key.connectionId)) boards = boards + (key to change(boards[key] ?: OvermindBoardState()))
     }
@@ -54,17 +65,24 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
 
     fun board(connectionId: String, project: String) = boards[OvermindBoardKey(connectionId, project)]
     fun card(connectionId: String, task: String) = cards[OvermindCardKey(connectionId, task)]
+    fun drafts(connectionId: String, task: String) = drafts[OvermindCardKey(connectionId, task)] ?: OvermindCardDrafts()
+    fun editDrafts(connectionId: String, task: String, change: (OvermindCardDrafts) -> OvermindCardDrafts) {
+        if (!connected(connectionId) || task.isEmpty()) return
+        val key = OvermindCardKey(connectionId, task)
+        val next = change(drafts[key] ?: OvermindCardDrafts())
+        drafts = if (next == OvermindCardDrafts()) drafts - key else drafts + (key to next)
+    }
 
     /** The cached board at once, then its changes from the gateway. Without [explicit], a fresh board is read again only once the
-     * gateway digest ([rev]) moved past its cursor. One read per board at a time. */
+     * gateway digest ([rev]) moved past its cursor. One read per board at a time; an explicit request meanwhile reads again after it. */
     fun load(connectionId: String, project: String, rev: Long? = null, explicit: Boolean = false) {
         if (project.isEmpty()) return
         val key = OvermindBoardKey(connectionId, project)
-        if (reads[key]?.isActive == true) return
+        if (reads[key]?.isActive == true) { if (explicit) again += key; return }
         val current = boards[key]
         val board = current?.board
         if (!explicit && current?.fresh == true && board != null && current.error.isEmpty() && (rev == null || (board.cursor ?: -1) >= rev)) return
-        val target = gateway(connectionId) ?: return
+        val target = gateway(connectionId) ?: run { updateBoard(key) { it.copy(loading = false, error = UNREACHABLE) }; return }
         updateBoard(key) { it.copy(loading = true) }
         reads[key] = scope.launch {
             try {
@@ -73,7 +91,7 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
                 updateBoard(key) { it.copy(board = read, loading = false, error = "", fresh = true) }
             } catch (e: CancellationException) { updateBoard(key) { it.copy(loading = false) }; throw e }
             catch (e: Exception) { updateBoard(key) { it.copy(loading = false, error = message(e)) } }
-            finally { reads.remove(key) }
+            finally { reads.remove(key); if (again.remove(key)) load(connectionId, project, explicit = true) }
         }
     }
 
@@ -82,7 +100,7 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         if (task.isEmpty()) return
         val key = OvermindCardKey(connectionId, task)
         if (reads[key]?.isActive == true) { again += key; return }
-        val target = gateway(connectionId) ?: return
+        val target = gateway(connectionId) ?: run { updateCard(key) { it.copy(loading = false, error = UNREACHABLE) }; return }
         updateCard(key) { it.copy(loading = true) }
         reads[key] = scope.launch {
             try {
@@ -101,23 +119,26 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         val key = OvermindCardKey(connectionId, task)
         val view = cards[key]?.view ?: return
         if (reads[key]?.isActive == true || view.journalFrom <= 0) return
-        val target = gateway(connectionId) ?: return
+        val target = gateway(connectionId) ?: run { updateCard(key) { it.copy(error = UNREACHABLE) }; return }
         updateCard(key) { it.copy(older = true) }
         reads[key] = scope.launch {
             try { val longer = repository.olderJournal(target, view); updateCard(key) { it.copy(view = longer, older = false, error = "") } }
             catch (e: CancellationException) { updateCard(key) { it.copy(older = false) }; throw e }
             catch (e: Exception) { updateCard(key) { it.copy(older = false, error = message(e)) } }
-            finally { reads.remove(key) }
+            finally { reads.remove(key); if (again.remove(key)) loadCard(connectionId, task) }
         }
     }
 
     fun imageKey(connectionId: String, task: String, sha256: String) = "$connectionId\n$task\n$sha256"
-    /** Reads an image in ranges and keeps it only when its bytes are a picture; an agent chose its name and type. Tapping a failed one reads it again. */
+    /** Reads an image in ranges and keeps it only when its bytes are a picture; an agent chose its name and type. Tapping a failed
+     * image, or one whose read is no longer running, reads it again. */
     fun image(connectionId: String, task: String, sha256: String, retry: Boolean = false) {
         val key = imageKey(connectionId, task, sha256)
         val current = images[key]
-        if (current != null && !(retry && current.error.isNotEmpty())) return
-        val target = gateway(connectionId) ?: return
+        if (reads[key]?.isActive == true) return
+        if (current != null && !(retry && (current.error.isNotEmpty() || current.loading))) return
+        if (!connected(connectionId)) return
+        val target = gateway(connectionId) ?: run { images = images + (key to OvermindImageState(error = UNREACHABLE)); return }
         images = images + (key to OvermindImageState(loading = true))
         reads[key] = scope.launch {
             val state = try {
@@ -137,9 +158,14 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         return kept
     }
 
-    fun openBoard(connectionId: String, project: String) { screen = OvermindScreen(connectionId, project); outcome = null }
+    /** Another workspace's message never stays on the window. */
+    private fun show(next: OvermindScreen) {
+        if (outcome?.connectionId != next.connectionId) outcome = null
+        screen = next
+    }
+    fun openBoard(connectionId: String, project: String) { show(OvermindScreen(connectionId, project)); outcome = null }
     fun openTask(connectionId: String, task: String, project: String = screen?.takeIf { it.connectionId == connectionId }?.project.orEmpty()) {
-        screen = OvermindScreen(connectionId, project, task)
+        show(OvermindScreen(connectionId, project, task))
     }
     fun closeTask() { screen = screen?.copy(task = "") }
     fun close() { screen = null; outcome = null }
@@ -155,14 +181,16 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
     fun write(connectionId: String, action: String, request: JSONObject, context: OvermindWriteContext, attachments: List<Attachment> = emptyList(),
         report: ((OvermindOutcome?) -> Unit)? = null, after: (OvermindWrite) -> Unit = {}): String {
         if (report == null && (outcome?.resolve.isNullOrEmpty() || action in OvermindAccess.deliveringActions)) outcome = null
-        return submit(connectionId, action, request, attachments) { settled -> settle(connectionId, settled, context, report, after) }
+        return submit(connectionId, action, request, attachments, { settled -> settle(connectionId, settled, context, report, after) }) {}
     }
     private fun settle(connectionId: String, settled: OvermindWrite, context: OvermindWriteContext, report: ((OvermindOutcome?) -> Unit)?, after: (OvermindWrite) -> Unit) {
         if (!connected(connectionId)) return
-        val said = OvermindOutcomes.of(settled, context)
-        // A delivery that may have arrived stays on show until another delivery, a problem or a dismissal.
+        val said = OvermindOutcomes.of(settled, context)?.copy(connectionId = connectionId)
+        // A delivery that may have arrived stays on show until another delivery, a problem or a dismissal; the window shows
+        // only messages of the workspace it shows.
         if (report != null) report(said)
-        else if (said != null && (outcome?.resolve.isNullOrEmpty() || settled.action in OvermindAccess.deliveringActions || said.tone != OvermindTone.Info)) outcome = said
+        else if (said != null && screen?.connectionId == connectionId &&
+            (outcome?.resolve.isNullOrEmpty() || settled.action in OvermindAccess.deliveringActions || said.tone != OvermindTone.Info)) outcome = said
         after(settled)
         // The board and the card are read again: the compact card in the receipt lacks the board's markers and queues.
         val project = runCatching { JSONObject(settled.result).optString("project") }.getOrNull().orEmpty()
@@ -170,7 +198,7 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         if (project.isNotEmpty() && boards.containsKey(OvermindBoardKey(connectionId, project))) load(connectionId, project, explicit = true)
         if (settled.task.isNotEmpty() && cards.containsKey(OvermindCardKey(connectionId, settled.task)) && settled.action != "delete") loadCard(connectionId, settled.task)
     }
-    /** "<action> anyway" is a new write: a new request_id with the refusal code confirmed. */
+    /** A follow-up ("<action> anyway", "Send the answer again") is a new write with a new request_id. */
     fun anyway(connectionId: String, offer: OvermindAnyway, report: ((OvermindOutcome?) -> Unit)? = null) =
         write(connectionId, offer.action, offer.request, offer.context, report = report)
     /** Explicit only: the same request_id and payload, which the relay and hgs never apply twice. */
@@ -178,47 +206,59 @@ class OvermindTasks(private val scope: CoroutineScope, private val repository: O
         retryWrite(write) { settled -> settle(write.connectionId, settled, context, report, after) }
     }
 
-    /** Add as task: the workflow's first Ready stage comes from the board (cached or read now); the draft clears only once added. */
+    /** Add as task: the workflow's first Ready stage comes from the board (cached or read now); the draft clears only once added.
+     * One add per composer at a time, from the tap until its settlement. */
     fun addAsTask(noticeKey: String, connectionId: String, project: String, prompt: String, attachments: List<Attachment>,
         destination: OvermindDestination, session: OvermindSession?, onAdded: (OvermindWrite) -> Unit) {
-        notices = notices + (noticeKey to OvermindOutcome("Adding the task…", OvermindTone.Info))
+        if (noticeKey in adding || !connected(connectionId)) return
+        adding = adding + noticeKey
+        notices = notices + (noticeKey to OvermindOutcome("Adding the task…", OvermindTone.Info, connectionId = connectionId))
+        fun done() { adding = adding - noticeKey }
         scope.launch {
             try {
-                val target = gateway(connectionId) ?: error(UNAVAILABLE)
+                val target = gateway(connectionId) ?: error(UNREACHABLE)
                 val stages = if (destination == OvermindDestination.Backlog) emptyList() else
                     (board(connectionId, project)?.board ?: repository.cachedBoard(target, project) ?: repository.board(target, project)).stages
                 val request = OvermindRequests.addAsTask(project, prompt, destination, session, stages)
-                val report: (OvermindOutcome?) -> Unit = { said -> notices = if (said == null) notices - noticeKey else notices + (noticeKey to said) }
-                val id = submit(connectionId, "create", request, attachments) { settled ->
+                // Disconnected while the board was read: nothing is sent.
+                if (!connected(connectionId)) { done(); return@launch }
+                val report: (OvermindOutcome?) -> Unit = { said -> notify(noticeKey, said) }
+                val id = submit(connectionId, "create", request, attachments, { settled ->
+                    done()
                     val card = runCatching { OvermindParser.card(JSONObject(settled.result)) }.getOrNull()
                     val ref = card?.ref?.ifBlank { null } ?: "the task"
-                    val done = when (destination) {
+                    val added = when (destination) {
                         OvermindDestination.Queue -> "Added $ref to this session's queue."
                         OvermindDestination.Pool -> "Added $ref to the project pool."
                         OvermindDestination.Backlog -> "Added $ref to ${card?.stage?.ifBlank { null } ?: "Backlog"}."
                     }
-                    settle(connectionId, settled, OvermindWriteContext(ref, done = done), report) { if (it.status == "completed") onAdded(it) }
-                }
-                if (id.isEmpty()) notices = notices - noticeKey
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { notices = notices + (noticeKey to OvermindOutcome("The task was not added: ${message(e)}", OvermindTone.Error)) }
+                    settle(connectionId, settled, OvermindWriteContext(ref, done = added), report) { if (it.status == "completed") onAdded(it) }
+                }) { _ -> done(); dismissNotice(noticeKey) }
+                if (id.isEmpty()) { done(); dismissNotice(noticeKey) }
+            } catch (e: CancellationException) { done(); throw e }
+            catch (e: Exception) { done(); notify(noticeKey, OvermindOutcome("The task was not added: ${message(e)}", OvermindTone.Error, connectionId = connectionId)) }
         }
     }
 
-    /** A disconnected workspace keeps nothing here: boards, cards, images, messages and the open window. */
+    /** A disconnected workspace keeps nothing here: boards, cards, images, drafts, messages and the open window. */
     fun purge(connectionId: String) {
-        reads.entries.filter { (key, _) -> when (key) {
+        fun mine(key: Any) = when (key) {
             is OvermindBoardKey -> key.connectionId == connectionId
             is OvermindCardKey -> key.connectionId == connectionId
             is String -> key.startsWith("$connectionId\n")
             else -> false
-        } }.forEach { it.value.cancel() }
+        }
+        reads.entries.filter { mine(it.key) }.forEach { it.value.cancel() }
         boards = boards.filterKeys { it.connectionId != connectionId }
         cards = cards.filterKeys { it.connectionId != connectionId }
         images = images.filterKeys { !it.startsWith("$connectionId\n") }
-        again.removeAll { it.connectionId == connectionId }
+        drafts = drafts.filterKeys { it.connectionId != connectionId }
+        again.removeAll(::mine)
         if (screen?.connectionId == connectionId) { screen = null; outcome = null }
+        if (outcome?.connectionId == connectionId) outcome = null
         if (sendTo?.target?.connectionId == connectionId) closeChooser()
-        notices = notices.filterKeys { key -> runCatching { org.json.JSONArray(key).optString(0) }.getOrNull() != connectionId }
+        val workspace = { key: String -> runCatching { JSONArray(key).optString(0) }.getOrNull() == connectionId }
+        notices = notices.filterKeys { !workspace(it) }
+        adding = adding.filterNot(workspace).toSet()
     }
 }

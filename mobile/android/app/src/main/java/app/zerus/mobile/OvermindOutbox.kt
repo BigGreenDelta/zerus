@@ -98,8 +98,9 @@ object OvermindWrites {
     /** Settles only a write that is still pending, so a reviewed or settled record is never overwritten. */
     fun result(state: MessageState, requestId: String, update: (OvermindWrite) -> OvermindWrite): MessageState =
         state.overmindWrites.find { it.requestId == requestId && it.pending }?.let { state.overmind(update(it)) } ?: state
+    /** A reviewed write is final and names no images any more, so their saved copies can be released. */
     fun review(state: MessageState, requestId: String): MessageState =
-        state.overmindWrites.find { it.requestId == requestId && it.status != "reviewed" }?.let { state.overmind(it.copy(status = "reviewed")) } ?: state
+        state.overmindWrites.find { it.requestId == requestId && it.status != "reviewed" }?.let { state.overmind(it.copy(status = "reviewed", attachments = emptyList())) } ?: state
     /** Pending writes stay; only the most recent settled ones are kept. */
     fun retain(writes: List<OvermindWrite>) = writes.filter { it.pending } + writes.filterNot { it.pending }.takeLast(KEEP)
 

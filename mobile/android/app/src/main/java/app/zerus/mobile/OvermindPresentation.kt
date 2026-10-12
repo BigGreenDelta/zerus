@@ -145,8 +145,14 @@ enum class OvermindDestination(val label: String) { Queue("To this session's que
 object OvermindRequests {
     const val UNKNOWN_MACHINE = "Overmind does not know this session's computer yet."
     private const val NO_PROMPT = "Write the task's prompt first."
-    /** Why a draft cannot become a task, or "": hgs needs a prompt and takes only images. */
-    fun addReason(prompt: String, attachments: List<Attachment>): String = when {
+    const val ADDING = "Adding this draft as a task…"
+    const val MAYBE_ADDED = "This draft may already be a task. Retry it or check the board before adding it again."
+    /** Why a draft cannot become a task, or "": hgs needs a prompt and takes only images. An add of this composer still running
+     * ([adding]) or a create of the same prompt that may have been recorded ([pending]) blocks another one, whose new
+     * request_id would add the task twice. */
+    fun addReason(prompt: String, attachments: List<Attachment>, adding: Boolean = false, pending: Boolean = false): String = when {
+        adding -> ADDING
+        pending -> MAYBE_ADDED
         prompt.isBlank() -> NO_PROMPT
         else -> attachments.firstOrNull { !it.mime.startsWith("image/") }?.let { "Only images can be added to a task. Remove ${it.name} first." }.orEmpty()
     }
@@ -166,12 +172,14 @@ object OvermindRequests {
 }
 
 enum class OvermindTone { Info, Warning, Error }
-/** "<action> anyway": the same request with the refusal code confirmed, sent as a new write with a new request_id.
- * [context] names the task and the receiving session for its own message. */
+/** An explicit follow-up write, always with a new request_id: "<action> anyway" (the same request with the refusal code
+ * confirmed) or "Send the answer again" (`repeat` names the request that recorded the answer). [context] names the task
+ * and the receiving session for its own message. */
 data class OvermindAnyway(val label: String, val action: String, val request: JSONObject, val context: OvermindWriteContext = OvermindWriteContext(""))
-/** What a settled write says, and what the person may do next: confirm anyway, resolve a delivery, retry, or check the task. */
+/** What a settled write says, and what the person may do next: confirm anyway, resolve a delivery, retry, or check the task.
+ * [connectionId] is the workspace it belongs to; its next steps act only there. */
 data class OvermindOutcome(val text: String, val tone: OvermindTone, val anyway: OvermindAnyway? = null, val resolve: String = "",
-    val retry: OvermindWrite? = null, val check: String = "")
+    val retry: OvermindWrite? = null, val check: String = "", val connectionId: String = "")
 /** Names for the message: the task's ref, the receiving session and the text shown on success ("" shows nothing). */
 data class OvermindWriteContext(val ref: String, val session: String = "", val done: String = "")
 
@@ -198,12 +206,20 @@ object OvermindOutcomes {
                 context.done.isNotBlank() -> OvermindOutcome(context.done, OvermindTone.Info)
                 else -> null
             }
-            write.status == "refused" && write.action == "answer" && write.code == "not_delivered" -> OvermindOutcome(
-                "${write.error} The answer is recorded but was not typed into the session; the phone cannot repeat it. Type it in the session, or repeat it from the desktop.",
-                OvermindTone.Error)
+            write.status == "refused" && write.action == "answer" && write.code == "not_delivered" ->
+                OvermindOutcome("Your answer on $ref is recorded, but it was not typed into $name: ${write.error}", OvermindTone.Error, anyway = again(write, ref, name))
             write.status == "refused" -> OvermindOutcome(write.error, OvermindTone.Error, anyway = anyway(write, ref, name))
             else -> OvermindOutcome(write.error.ifBlank { "The change was not made." }, OvermindTone.Error)
         }
+    }
+
+    /** The answer is recorded but surely not typed: a new request repeats the request that recorded it, which hgs types under
+     * that request's input id. A repeat that failed again names the same recording request. */
+    private fun again(write: OvermindWrite, ref: String, name: String): OvermindAnyway? {
+        val request = runCatching { JSONObject(write.request) }.getOrNull() ?: return null
+        request.remove("request_id")
+        request.put("repeat", request.optString("repeat").ifEmpty { write.requestId })
+        return OvermindAnyway("Send the answer again", "answer", request, OvermindWriteContext(ref, name, "Sent your answer on $ref to $name."))
     }
 
     /** Only a delivery's `confirm` refusal is confirmable, as on the desktop. The relay answers a changed body under the same
@@ -240,6 +256,11 @@ object OvermindRouting {
 
 /** Where Tasks appear: only while a gateway serves both operations, and only for a project of the swarm catalog. */
 object OvermindEntry {
+    /** An open Tasks window outlives a failed refresh (its gateway is only last known, and writes refuse with a message). It closes
+     * when the workspace is disconnected, when the relay no longer lists the operations, or when machines read in this refresh
+     * include no gateway that serves them. */
+    fun withdrawn(connected: Boolean, relay: Set<String>?, freshMachines: Boolean, gateway: Boolean) =
+        !connected || (relay != null && !OvermindAccess.supports(relay)) || (freshMachines && !gateway)
     fun project(available: Boolean, project: ProjectSummary?): String? =
         project?.takeIf { available && it.catalogued && it.key.id.isNotBlank() }?.key?.id
     fun project(available: Boolean, session: Session, projects: List<ProjectSummary>): String? =

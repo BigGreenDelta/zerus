@@ -484,18 +484,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Saves the change before sending it and returns its request_id (the new task's UUID for create), or "" when nothing was saved. */
     fun submitOvermindWrite(connectionId: String, action: String, request: JSONObject, attachments: List<Attachment> = emptyList(),
-        onSettled: (OvermindWrite) -> Unit = {}): String {
+        onSettled: (OvermindWrite) -> Unit = {}, onUnsettled: (String) -> Unit = {}): String {
         if (!storageReady || updateInstallPreparing) { error = "Private storage is not ready. The task was not changed."; return "" }
-        val gateway = overmindTarget(connectionId) ?: run { error = "Tasks are not available for this workspace."; return "" }
+        val gateway = overmindTarget(connectionId) ?: run { error = OvermindTasks.UNAVAILABLE + " " + OvermindTasks.UNREACHABLE; return "" }
         val write = try { OvermindWrites.create(UUID.randomUUID().toString(), gateway.key, action, request, attachments, overmindDevice, System.currentTimeMillis()) }
             catch (e: Exception) { error = e.message.orEmpty(); return "" }
+        // Images of writes that this one rotates out of the retained list, or that it completes, are released once it settles.
+        val earlier = messageState.overmindWrites.flatMap { it.attachments } + attachments
         overmindFlights += write.requestId
         viewModelScope.launch {
             try { onSettled(overmindOutbox.submit(gateway, write)) }
             catch (e: CancellationException) { throw e }
-            catch (e: OvermindUnsavedResult) { error = e.message.orEmpty() }
-            catch (e: Exception) { error = "Could not save the task change. It was not sent. ${e.message.orEmpty()}" }
-            finally { overmindFlights -= write.requestId }
+            catch (e: OvermindUnsavedResult) { error = e.message.orEmpty(); onUnsettled(error) }
+            catch (e: Exception) { error = "Could not save the task change. It was not sent. ${e.message.orEmpty()}"; onUnsettled(error) }
+            finally { overmindFlights -= write.requestId; releaseOvermindFiles(earlier) }
         }
         return write.requestId
     }
@@ -503,23 +505,31 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun retryOvermindWrite(write: OvermindWrite, onSettled: (OvermindWrite) -> Unit = {}) {
         if (write.requestId in overmindFlights || !write.retryable || updateInstallPreparing) return
         val connection = connections.find { it.id == write.connectionId } ?: return
+        val earlier = messageState.overmindWrites.flatMap { it.attachments } + write.attachments
         overmindFlights += write.requestId
         viewModelScope.launch {
             try { onSettled(overmindOutbox.retry(OvermindGateway(connection, write.computerId), write)) }
             catch (e: CancellationException) { throw e }
             catch (e: OvermindUnsavedResult) { error = e.message.orEmpty() }
             catch (e: Exception) { error = "The task change could not be retried. ${e.message.orEmpty()}" }
-            finally { overmindFlights -= write.requestId }
+            finally { overmindFlights -= write.requestId; releaseOvermindFiles(earlier) }
         }
     }
+    /** Dismisses a write; a reviewed write no longer names its images, so their saved copies are released. */
     fun reviewOvermindWrite(write: OvermindWrite) {
         if (write.requestId in overmindFlights) return
-        try { editState { OvermindWrites.review(it, write.requestId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
+        val earlier = messageState.overmindWrites.flatMap { it.attachments }
+        try { editState { OvermindWrites.review(it, write.requestId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty(); return }
+        releaseOvermindFiles(earlier)
     }
     /** The Tasks screens: boards, cards, images and messages, kept per workspace and dropped on disconnect. */
-    val tasks = OvermindTasks(viewModelScope, overmind, ::overmindTarget, { connection, action, request, files, settled ->
-        submitOvermindWrite(connection, action, request, files, settled) }) { write, settled -> retryOvermindWrite(write, settled) }
+    val tasks = OvermindTasks(viewModelScope, overmind, ::overmindTarget, { id -> connections.any { it.id == id } },
+        { connection, action, request, files, settled, unsettled -> submitOvermindWrite(connection, action, request, files, settled, unsettled) }) { write, settled ->
+        retryOvermindWrite(write, settled) }
     fun tasksAvailable(connectionId: String) = overmindTarget(connectionId) != null
+    /** An open Tasks window closes only when this is true; a failed refresh keeps it. */
+    fun tasksWithdrawn(connectionId: String) = OvermindEntry.withdrawn(connections.any { it.id == connectionId }, relayOperations[connectionId],
+        machines.any { it.connectionId == connectionId && !it.lastKnown }, overmindGateway(connectionId) != null)
     /** The Overmind project of a phone project, or null when Tasks are hidden for it. */
     fun overmindProject(project: ProjectSummary?): String? = OvermindEntry.project(project != null && tasksAvailable(project.key.connectionId), project)
     fun overmindProject(session: Session): String? = OvermindEntry.project(tasksAvailable(session.target.connectionId), session, projects)
@@ -534,7 +544,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val project = overmindProject(session) ?: run { error = OvermindTasks.UNAVAILABLE; return }
         val captured = draft(target)
         if (demo || !storageReady || updateInstallPreparing || captured.status != "editing") return
-        OvermindRequests.addReason(captured.text, captured.attachments).takeIf { it.isNotBlank() }?.let { error = it; return }
+        addTaskReason(target).takeIf { it.isNotBlank() }?.let { error = it; return }
         val ref = overmindSession(session)
         if (destination == OvermindDestination.Queue && ref == null) { error = OvermindRequests.UNKNOWN_MACHINE; return }
         tasks.addAsTask(target.key, target.connectionId, project, captured.text, captured.attachments, destination, ref) { clearAddedDraft(captured) }
@@ -547,6 +557,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         tasks.retry(write, OvermindWriteContext("the task", done = "Added the task."), { tasks.notify(target.key, it) }) {
             if (it.status == "completed" && captured.text == prompt) clearAddedDraft(captured)
         }
+    }
+    /** Why the composer's draft cannot be added as a task now, or "". */
+    fun addTaskReason(target: Target): String {
+        val draft = draft(target)
+        return OvermindRequests.addReason(draft.text, draft.attachments, target.key in tasks.adding, overmindWrites.any {
+            it.action == "create" && it.pending && runCatching { JSONObject(it.request).optString("prompt") }.getOrNull() == draft.text })
     }
     private fun clearAddedDraft(captured: Draft) {
         val current = drafts.find { it.key == captured.key } ?: return
@@ -564,6 +580,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     /** Saves picked images for a task edit. Only files whose bytes are a picture are kept: names and types are not trusted. */
     fun importOvermindImages(uris: List<Uri>, onImported: (List<Attachment>) -> Unit) {
         if (uris.isEmpty() || demo || !storageReady || attachmentImporting) return
+        attachmentImporting = true
         viewModelScope.launch {
             val added = mutableListOf<Attachment>()
             try {
@@ -572,11 +589,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     val file = attachmentStore.importDocument(uri, added).also { added += it }
                     val head = java.io.ByteArrayOutputStream()
                     attachmentStore.decrypt(file) { chunk -> if (head.size() < 64) head.write(chunk, 0, minOf(chunk.size, 64 - head.size())) }
-                    require(file.mime.startsWith("image/") && OvermindImages.format(head.toByteArray()) != null) { "${file.name} is not a picture." }
+                    require(file.mime.startsWith("image/") && OvermindImages.format(head.toByteArray()) != null) {
+                        "${file.name} is not a PNG, JPEG, GIF, WebP or BMP picture." }
                 }
+                attachmentImporting = false
                 onImported(added.toList())
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = "The images were not added. ${e.message.orEmpty()}"; releaseOvermindFiles(added) }
+            finally { attachmentImporting = false }
         }
     }
     private val frames = LinkedHashMap<String, Frame>(24, 0.75f, true)

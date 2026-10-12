@@ -119,6 +119,9 @@ class OvermindScreensTest {
         assertEquals("", OvermindRequests.addReason("Fix it", listOf(image)))
         assertEquals("Only images can be added to a task. Remove notes.txt first.", OvermindRequests.addReason("Fix it", listOf(image, notes)))
         assertEquals("Write the task's prompt first.", OvermindRequests.addReason("", listOf(image)))
+        // An add still running, or a create of this prompt that may have been recorded, blocks a second one.
+        assertEquals(OvermindRequests.ADDING, OvermindRequests.addReason("Fix it", listOf(image), adding = true))
+        assertEquals(OvermindRequests.MAYBE_ADDED, OvermindRequests.addReason("Fix it", listOf(image), pending = true))
         assertEquals(JSONObject().put("task", "t1").put("session", JSONObject().put("machine", machine).put("name", worker.name)).toString(),
             OvermindRequests.send("t1", worker).toString())
     }
@@ -171,8 +174,25 @@ class OvermindScreensTest {
         assertNull(OvermindOutcomes.of(base.copy(status = "completed"), context.copy(done = "")))
         assertNull(OvermindOutcomes.of(base, context))
         assertEquals(OvermindTone.Error, OvermindOutcomes.of(base.copy(status = "failed", error = "Nothing was changed."), context)!!.tone)
-        val notTyped = OvermindOutcomes.of(refused("answer", JSONObject().put("task", "t1").put("answer", "Yes"), "not_delivered", ""), context)!!
-        assertNull(notTyped.anyway); assertTrue(notTyped.text.contains("recorded"))
+    }
+
+    @Test fun anUndeliveredAnswerIsSentAgainByANewRequestThatRepeatsIt() {
+        val context = OvermindWriteContext("om-t1", worker.name)
+        val first = refused("answer", JSONObject().put("task", "t1").put("answer", "Yes").put("confirm", JSONArray(listOf("agent_busy"))), "not_delivered", "")
+        val outcome = checkNotNull(OvermindOutcomes.of(first, context))
+        assertTrue(outcome.text, outcome.text.contains("recorded"))
+        val again = checkNotNull(outcome.anyway)
+        assertEquals("Send the answer again" to "answer", again.label to again.action)
+        assertEquals(first.requestId, again.request.getString("repeat"))
+        assertEquals("Yes", again.request.getString("answer"))
+        assertEquals(JSONArray(listOf("agent_busy")).toString(), again.request.getJSONArray("confirm").toString())
+        assertFalse(again.request.has("request_id"))
+        assertEquals("Sent your answer on om-t1 to ${worker.name}.", again.context.done)
+        // Sent as a new write; when that one is not typed either, the next one still repeats the request that recorded the answer.
+        val second = OvermindWrites.create("99999999-9999-4999-8999-999999999999", first.gateway, again.action, again.request, emptyList(), "Pixel", 2)
+            .copy(status = "refused", code = "not_delivered", error = "not delivered")
+        assertNotEquals(first.requestId, second.requestId)
+        assertEquals(first.requestId, OvermindOutcomes.of(second, context)?.anyway?.request?.getString("repeat"))
     }
 
     @Test fun decisionTapsOpenTheTaskOnlyWhereTasksAreShown() {
@@ -206,6 +226,17 @@ class OvermindScreensTest {
         val offered = SessionActionsMenu.items(facts.copy(tasks = "")).flatten().single { it.id == "send_task" }
         assertEquals("Send a task here…", offered.label); assertTrue(offered.enabled)
         assertFalse(SessionActionsMenu.items(facts.copy(tasks = "Overmind does not know this session's computer yet.")).flatten().single { it.id == "send_task" }.enabled)
+    }
+
+    @Test fun anOpenWindowOutlivesAFailedRefresh() {
+        val both = OvermindAccess.operations
+        // A failed refresh leaves the gateway only last known: the window, its drafts and its messages stay.
+        assertFalse(OvermindEntry.withdrawn(true, both, freshMachines = false, gateway = false))
+        assertFalse(OvermindEntry.withdrawn(true, null, freshMachines = false, gateway = false))
+        assertFalse(OvermindEntry.withdrawn(true, both, freshMachines = true, gateway = true))
+        assertTrue(OvermindEntry.withdrawn(false, both, freshMachines = true, gateway = true))
+        assertTrue(OvermindEntry.withdrawn(true, setOf("send"), freshMachines = false, gateway = false))
+        assertTrue(OvermindEntry.withdrawn(true, both, freshMachines = true, gateway = false))
     }
 
     @Test fun sessionRefsUseTheOvermindMachineOfTheComputer() {

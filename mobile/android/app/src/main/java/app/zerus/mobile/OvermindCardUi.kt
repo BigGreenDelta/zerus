@@ -18,7 +18,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -89,6 +88,9 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
     val projectKey = model.projects.find { it.key.connectionId == connectionId && it.catalogued && it.key.id == card.project }?.key
     fun write(action: String, request: JSONObject, session: String = "", done: String = "", files: List<Attachment> = emptyList(), after: (OvermindWrite) -> Unit = {}) =
         tasks.write(connectionId, action, request.put("task", uuid), OvermindWriteContext(card.ref, session, done), files, after = after)
+    // Unsaved edits live in the holder, per workspace and task: Back, another card or a decision tap keeps them.
+    val drafts = tasks.drafts(connectionId, uuid)
+    fun edit(change: (OvermindCardDrafts) -> OvermindCardDrafts) = tasks.editDrafts(connectionId, uuid, change)
     var question by remember { mutableStateOf<Pair<OvermindQuestion, () -> Unit>?>(null) }
     fun ask(title: String, text: String, accept: String, run: () -> Unit) { question = OvermindQuestion(title, text, accept) to run }
     var recipients by remember { mutableStateOf<OvermindPurpose?>(null) }
@@ -114,7 +116,9 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
                 if (card.stage.isNotEmpty()) OvermindChip(card.stage)
                 if (state?.loading == true) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = P.Mint)
             }
-            TitleEditor(card, editable) { title -> write("edit", JSONObject().put("title", title)) }
+            TitleEditor(card, editable, drafts.title, { title -> edit { it.copy(title = title) } }) { title ->
+                write("edit", JSONObject().put("title", title)) { settled -> if (settled.status == "completed") edit { if (it.title?.trim() == title) it.copy(title = null) else it } }
+            }
             val meta = listOfNotNull(card.assignee?.let { "Assigned to ${it.name}" }, card.reviewer?.let { "Review by ${it.name}" },
                 (entry?.queueOf)?.let { "In the queue of ${it.name}" })
             if (meta.isNotEmpty()) Text(meta.joinToString(" · "), color = P.Muted, style = MaterialTheme.typography.bodySmall)
@@ -132,7 +136,7 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
                     color = P.Amber, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
                 fun resolve(delivered: Boolean) = write("resolve-delivery", JSONObject().put("delivered", delivered), done =
                     if (delivered) "Recorded that ${card.ref} was delivered." else "Recorded that ${card.ref} was not delivered.") { settled ->
-                    if (settled.status == "completed") unresolved.forEach(model::reviewOvermindWrite)
+                    if (settled.status == "completed" || settled.code == "not_uncertain") unresolved.forEach(model::reviewOvermindWrite)
                 }
                 Row {
                     TextButton(onClick = { resolve(true) }, enabled = editable && !busy) { Text("It was delivered") }
@@ -141,9 +145,11 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
                 }
             } }
         }
-        if (role == OvermindRoles.YOUR_CALL && !gone) item(key = "answer") { AnswerBox(view, card, editable && !busy) { answer, done ->
+        if (role == OvermindRoles.YOUR_CALL && !gone) item(key = "answer") { AnswerBox(view, card, editable && !busy, drafts.answer, { text -> edit { it.copy(answer = text) } }) { answer ->
             write("answer", JSONObject().put("answer", answer), card.assignee?.name.orEmpty(),
-                "Sent your answer on ${card.ref} to ${card.assignee?.name ?: "its session"}.") { if (it.status == "completed") done() }
+                "Sent your answer on ${card.ref} to ${card.assignee?.name ?: "its session"}.") { settled ->
+                if (settled.status == "completed") edit { if (it.answer == answer) it.copy(answer = "") else it }
+            }
         } }
         if (!gone && board != null) item(key = "actions") { FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (OvermindWorkflow.claimable(board, card.stage)) OutlinedButton(onClick = { recipients = OvermindPurpose.Send }, enabled = editable && !epic && !busy) { Text("Send to session…") }
@@ -168,7 +174,9 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
                 }
             }
         } }
-        item(key = "prompt") { PromptEditor(view, editable, card.ref, ::ask) { prompt, saved -> write("edit", JSONObject().put("prompt", prompt)) { if (it.status == "completed") saved() } } }
+        item(key = "prompt") { PromptEditor(view, editable, card.ref, drafts, ::edit, ::ask) { prompt ->
+            write("edit", JSONObject().put("prompt", prompt)) { settled -> if (settled.status == "completed") edit { if (it.prompt == prompt) it.copy(prompt = null, promptBase = "") else it } }
+        } }
         item(key = "images") { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Heading("Images", Modifier.weight(1f))
@@ -204,15 +212,21 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
                 if (pinned != null) TextButton(onClick = { write("unpin", JSONObject()) }, enabled = editable) { Text("Unpin") }
             }
         } }
-        item(key = "labels") { LabelEditor(card, editable, remove = { label -> write("label", JSONObject().put("label", label).put("present", false)) }) { label, done ->
-            write("label", JSONObject().put("label", label).put("present", true)) { if (it.status == "completed") done() }
+        item(key = "labels") { LabelEditor(card, editable, drafts.label, { text -> edit { it.copy(label = text) } },
+            remove = { label -> write("label", JSONObject().put("label", label).put("present", false)) }) { label ->
+            write("label", JSONObject().put("label", label).put("present", true)) { settled -> if (settled.status == "completed") edit { if (it.label.trim() == label) it.copy(label = "") else it } }
         } }
-        item(key = "relations") { RelationEditor(view, card, board, editable, open = { tasks.openTask(connectionId, it) },
-            remove = { relation, target -> write("link", JSONObject().put("relation", relation).put("target", target).put("present", false)) }) { relation, target, done ->
-            write("link", JSONObject().put("relation", relation).put("target", target).put("present", true)) { if (it.status == "completed") done() }
+        item(key = "relations") { RelationEditor(view, card, board, editable, drafts, ::edit, open = { tasks.openTask(connectionId, it) },
+            remove = { relation, target -> write("link", JSONObject().put("relation", relation).put("target", target).put("present", false)) }) { relation, target ->
+            write("link", JSONObject().put("relation", relation).put("target", target).put("present", true)) { settled ->
+                if (settled.status == "completed") edit { if (it.link == target) it.copy(link = "") else it }
+            }
         } }
-        item(key = "comment") { CommentBox(editable && view != null) { text, done -> write("comment", JSONObject().put("text", text), done = "Commented on ${card.ref}.") {
-            if (it.status == "completed") done() } } }
+        item(key = "comment") { CommentBox(editable && view != null, drafts.comment, { text -> edit { it.copy(comment = text) } }) { text ->
+            write("comment", JSONObject().put("text", text), done = "Commented on ${card.ref}.") { settled ->
+                if (settled.status == "completed") edit { if (it.comment == text) it.copy(comment = "") else it }
+            }
+        } }
         item(key = "journal") { Row(verticalAlignment = Alignment.CenterVertically) {
             Heading(if (view == null) "Journal" else "Journal (${view.journalTotal})", Modifier.weight(1f))
             if (view != null && view.journalFrom > 0) TextButton(onClick = { tasks.older(connectionId, uuid) }, enabled = state?.older != true && state?.loading != true) {
@@ -242,52 +256,49 @@ private fun decodeImage(bytes: ByteArray, maxSide: Int): Bitmap? {
 
 private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 -> "P2 · default"; 4 -> "P4 · lowest"; else -> "P$value" }
 
-@Composable private fun TitleEditor(card: OvermindCard, editable: Boolean, save: (String) -> Unit) {
-    var editing by rememberSaveable(card.uuid) { mutableStateOf<String?>(null) }
-    val draft = editing
+@Composable private fun TitleEditor(card: OvermindCard, editable: Boolean, draft: String?, change: (String?) -> Unit, save: (String) -> Unit) {
     if (draft == null) Row(verticalAlignment = Alignment.Top) {
         SelectionContainer(Modifier.weight(1f)) { Text(card.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold) }
-        if (editable) IconButton(onClick = { editing = card.title }) { Icon(Icons.Default.Edit, "Edit the title", tint = P.Muted) }
+        if (editable) IconButton(onClick = { change(card.title) }) { Icon(Icons.Default.Edit, "Edit the title", tint = P.Muted) }
     } else Column {
-        OutlinedTextField(draft, { editing = it.replace('\n', ' ').take(200) }, Modifier.fillMaxWidth(), label = { Text("Title") }, singleLine = true)
+        // A title not saved yet stays until it is, also after a refusal.
+        OutlinedTextField(draft, { change(it.replace('\n', ' ').take(200)) }, Modifier.fillMaxWidth(), label = { Text("Title") }, singleLine = true, enabled = editable)
         Row {
-            TextButton(onClick = { save(draft.trim()); editing = null }, enabled = draft.isNotBlank() && draft.trim() != card.title) { Text("Save") }
-            TextButton(onClick = { editing = null }) { Text("Cancel") }
+            TextButton(onClick = { save(draft.trim()) }, enabled = editable && draft.isNotBlank() && draft.trim() != card.title) { Text("Save") }
+            TextButton(onClick = { change(null) }) { Text("Cancel") }
         }
     }
 }
 
-@Composable private fun AnswerBox(view: OvermindTaskView?, card: OvermindCard, enabled: Boolean, send: (String, () -> Unit) -> Unit) {
-    var answer by rememberSaveable(card.uuid) { mutableStateOf("") }
+@Composable private fun AnswerBox(view: OvermindTaskView?, card: OvermindCard, enabled: Boolean, answer: String, change: (String) -> Unit, send: (String) -> Unit) {
     Surface(color = P.Amber.copy(alpha = .1f), shape = RoundedCornerShape(10.dp)) { Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Your Call: the agent asks", color = P.Amber, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
         val asked = view?.let(OvermindJournal::question).orEmpty()
         MarkdownText(asked.ifEmpty { if (view == null) "Loading the question…" else "The question is in the journal below." })
-        OutlinedTextField(answer, { answer = it }, Modifier.fillMaxWidth().heightIn(min = 88.dp), placeholder = { Text("Your answer") }, enabled = enabled)
+        OutlinedTextField(answer, change, Modifier.fillMaxWidth().heightIn(min = 88.dp), placeholder = { Text("Your answer") }, enabled = enabled)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Button(onClick = { val sent = answer; send(sent) { if (answer == sent) answer = "" } }, enabled = enabled && answer.isNotBlank()) { Text("Answer") }
+            Button(onClick = { send(answer) }, enabled = enabled && answer.isNotBlank()) { Text("Answer") }
         }
         Text("Records the answer and types it into ${card.assignee?.name ?: "the session that asked"}.", color = P.Muted, style = MaterialTheme.typography.labelSmall)
     } }
 }
 
-@Composable private fun PromptEditor(view: OvermindTaskView?, editable: Boolean, ref: String, ask: (String, String, String, () -> Unit) -> Unit,
-    save: (String, () -> Unit) -> Unit) {
-    val uuid = view?.card?.uuid.orEmpty()
-    var draft by rememberSaveable(uuid) { mutableStateOf<String?>(null) }
-    var base by rememberSaveable(uuid) { mutableStateOf("") }
-    var showCurrent by rememberSaveable(uuid) { mutableStateOf(false) }
+@Composable private fun PromptEditor(view: OvermindTaskView?, editable: Boolean, ref: String, drafts: OvermindCardDrafts,
+    edit: ((OvermindCardDrafts) -> OvermindCardDrafts) -> Unit, ask: (String, String, String, () -> Unit) -> Unit, save: (String) -> Unit) {
+    var showCurrent by remember(view?.card?.uuid) { mutableStateOf(false) }
     val saved = view?.prompt.orEmpty()
-    val text = draft
+    val text = drafts.prompt
+    val base = drafts.promptBase
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Heading("Prompt", Modifier.weight(1f))
-            if (text == null && editable && view != null) TextButton(onClick = { draft = saved; base = saved }) { Text("Edit") }
+            if (text == null && editable && view != null) TextButton(onClick = { edit { it.copy(prompt = saved, promptBase = saved) } }) { Text("Edit") }
             if (text != null) {
-                TextButton(onClick = { if (text == base) draft = null else ask("Discard changes", "Discard your changes to the prompt of $ref?", "Discard") { draft = null } }) { Text("Discard") }
+                val discard = { edit { it.copy(prompt = null, promptBase = "") } }
+                TextButton(onClick = { if (text == base) discard() else ask("Discard changes", "Discard your changes to the prompt of $ref?", "Discard") { discard() } }) { Text("Discard") }
                 val bytes = text.toByteArray(Charsets.UTF_8).size
                 TextButton(onClick = {
-                    val run = { save(text) { if (draft == text) draft = null }; Unit }
+                    val run = { save(text) }
                     if (base != saved) ask("Replace the prompt", "The prompt of $ref was changed elsewhere since you started editing. Save your version in its place?", "Replace", run)
                     else run()
                 }, enabled = editable && text.isNotBlank() && bytes <= MAX_PROMPT_BYTES && text != saved) { Text("Save") }
@@ -297,12 +308,12 @@ private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 ->
             if (view == null) Text("Loading the prompt…", color = P.Muted, style = MaterialTheme.typography.bodySmall)
             else SelectionContainer { Text(saved, style = MaterialTheme.typography.bodyMedium) }
         } else {
-            OutlinedTextField(text, { draft = it }, Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 360.dp), enabled = editable)
+            OutlinedTextField(text, { value -> edit { it.copy(prompt = value) } }, Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 360.dp), enabled = editable)
             val bytes = text.toByteArray(Charsets.UTF_8).size
             when {
                 bytes > MAX_PROMPT_BYTES -> Note("The prompt is longer than 64 KiB (${(bytes + 1023) / 1024} KiB): shorten it to save it.")
                 text.isBlank() -> Note("Write the task's prompt to save it.", P.Muted)
-                base != saved -> {
+                view != null && base != saved -> {
                     Note("The prompt was changed elsewhere since you started editing; saving replaces that version.")
                     TextButton(onClick = { showCurrent = !showCurrent }) { Text(if (showCurrent) "Hide the current version" else "Show the current version") }
                     if (showCurrent) SelectionContainer { Text(saved, Modifier.fillMaxWidth().background(P.Surface, RoundedCornerShape(8.dp)).padding(8.dp),
@@ -329,7 +340,7 @@ private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 ->
     Box(Modifier.size(width = 96.dp, height = 72.dp)) {
         Surface(onClick = {
             val bytes = state?.bytes
-            if (bytes != null && thumbnail != null) onOpen(bytes) else if (state == null || state.error.isNotEmpty()) tasks.image(connectionId, task, image.sha256, retry = true)
+            if (bytes != null && thumbnail != null) onOpen(bytes) else if (bytes == null) tasks.image(connectionId, task, image.sha256, retry = true)
         }, color = P.Surface, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxSize().semantics {
             contentDescription = when { failure != null -> "${image.name}: $failure"; thumbnail != null -> "Open ${image.name}"; state == null -> "Load ${image.name}"
                 else -> "${image.name}, loading" }
@@ -375,8 +386,7 @@ private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 ->
 }
 
 @OptIn(ExperimentalLayoutApi::class)
-@Composable private fun LabelEditor(card: OvermindCard, editable: Boolean, remove: (String) -> Unit, add: (String, () -> Unit) -> Unit) {
-    var label by rememberSaveable(card.uuid) { mutableStateOf("") }
+@Composable private fun LabelEditor(card: OvermindCard, editable: Boolean, label: String, change: (String) -> Unit, remove: (String) -> Unit, add: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Heading("Labels")
         if (card.labels.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -391,22 +401,21 @@ private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 ->
             }
         }
         if (editable) Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(label, { label = it.lowercase().filterNot(Char::isWhitespace).take(64) }, Modifier.weight(1f), singleLine = true,
+            OutlinedTextField(label, { change(it.lowercase().filterNot(Char::isWhitespace).take(64)) }, Modifier.weight(1f), singleLine = true,
                 placeholder = { Text("Add a label") })
-            TextButton(onClick = { val added = label.trim(); add(added) { if (label == added) label = "" } }, enabled = label.isNotBlank()) { Text("Add") }
+            TextButton(onClick = { add(label.trim()) }, enabled = label.isNotBlank()) { Text("Add") }
         }
     }
 }
 
-@Composable private fun RelationEditor(view: OvermindTaskView?, card: OvermindCard, board: OvermindBoard?, editable: Boolean, open: (String) -> Unit,
-    remove: (String, String) -> Unit, add: (String, String, () -> Unit) -> Unit) {
+@Composable private fun RelationEditor(view: OvermindTaskView?, card: OvermindCard, board: OvermindBoard?, editable: Boolean, drafts: OvermindCardDrafts,
+    edit: ((OvermindCardDrafts) -> OvermindCardDrafts) -> Unit, open: (String) -> Unit, remove: (String, String) -> Unit, add: (String, String) -> Unit) {
     val related = view?.raw?.let { raw -> runCatching { JSONObject(raw).optJSONArray("related") }.getOrNull() }
         ?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
     val groups = listOfNotNull(card.parent.takeIf { it.isNotEmpty() }?.let { "parent" to listOf(it) },
         card.follows.takeIf { it.isNotEmpty() }?.let { "follows" to it }, related.takeIf { it.isNotEmpty() }?.let { "related" to it })
     val names = mapOf("parent" to "Parent", "follows" to "Follows", "related" to "Related")
-    var kind by rememberSaveable(card.uuid) { mutableStateOf("follows") }
-    var target by rememberSaveable(card.uuid) { mutableStateOf("") }
+    val kind = drafts.linkKind.takeIf { it in names } ?: "follows"
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Heading("Relations")
         if (groups.isEmpty()) Text("No relations", color = P.Muted, style = MaterialTheme.typography.bodySmall)
@@ -425,21 +434,21 @@ private fun priorityName(value: Int) = when (value) { 0 -> "P0 · highest"; 2 ->
             var menu by remember { mutableStateOf(false) }
             Box {
                 TextButton(onClick = { menu = true }) { Text(names.getValue(kind)) }
-                DropdownMenu(menu, { menu = false }) { names.forEach { (id, name) -> DropdownMenuItem(text = { Text(name) }, onClick = { kind = id; menu = false }) } }
+                DropdownMenu(menu, { menu = false }) { names.forEach { (id, name) -> DropdownMenuItem(text = { Text(name) }, onClick = { edit { it.copy(linkKind = id) }; menu = false }) } }
             }
-            OutlinedTextField(target, { target = it.trim().take(64) }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Task ref, e.g. om-k3f9x") })
-            TextButton(onClick = { val linked = target; add(kind, linked) { if (target == linked) target = "" } }, enabled = target.isNotBlank()) { Text("Link") }
+            OutlinedTextField(drafts.link, { value -> edit { it.copy(link = value.trim().take(64)) } }, Modifier.weight(1f), singleLine = true,
+                placeholder = { Text("Task ref, e.g. om-k3f9x") })
+            TextButton(onClick = { add(kind, drafts.link) }, enabled = drafts.link.isNotBlank()) { Text("Link") }
         }
     }
 }
 
-@Composable private fun CommentBox(enabled: Boolean, send: (String, () -> Unit) -> Unit) {
-    var text by rememberSaveable { mutableStateOf("") }
+@Composable private fun CommentBox(enabled: Boolean, text: String, change: (String) -> Unit, send: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Heading("Comment")
-        OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), placeholder = { Text("Add a note to the journal") }, enabled = enabled, maxLines = 6)
+        OutlinedTextField(text, change, Modifier.fillMaxWidth(), placeholder = { Text("Add a note to the journal") }, enabled = enabled, maxLines = 6)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = { val sent = text; send(sent) { if (text == sent) text = "" } }, enabled = enabled && text.isNotBlank()) { Text("Comment") }
+            TextButton(onClick = { send(text) }, enabled = enabled && text.isNotBlank()) { Text("Comment") }
         }
     }
 }

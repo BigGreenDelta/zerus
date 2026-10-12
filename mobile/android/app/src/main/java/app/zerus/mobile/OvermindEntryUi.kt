@@ -52,15 +52,13 @@ private val E = OvermindPalette
     if (target.agentId.isNotBlank() || model.overmindProject(session) == null) return
     var menu by remember { mutableStateOf(false) }
     val draft = model.draft(target)
-    // A create that may have been recorded blocks a second one: another request_id would add the task twice.
-    val pending = model.overmindWrites.any { it.action == "create" && it.pending && runCatching { JSONObject(it.request).optString("prompt") }.getOrNull() == draft.text }
+    // An add still running, or a create of this prompt that may have been recorded, blocks another one (see addTaskReason).
     val reason = when {
         model.demo -> "Pair to add tasks."
         !model.storageReady || model.updateInstallPreparing -> "Private storage is not ready."
         draft.status != "editing" -> "Review the saved draft first."
         model.pickerDraft?.target == target -> "Wait for file selection to finish."
-        pending -> "This draft may already be a task. Retry it or check the board before adding it again."
-        else -> OvermindRequests.addReason(draft.text, draft.attachments)
+        else -> model.addTaskReason(target)
     }
     val known = model.overmindSession(session) != null
     Box {
@@ -115,7 +113,8 @@ private fun actionName(action: String) = when (action) {
                 if (write.error.isNotBlank()) Text(write.error, color = E.Amber, style = MaterialTheme.typography.bodySmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (write.retryable) TextButton(onClick = { model.retryOvermindWrite(write) }) { Text("Retry") }
-                    if (write.task.isNotBlank() && model.tasksAvailable(write.connectionId) && write.action != "delete")
+                    // A create that surely failed made no task to open.
+                    if (write.task.isNotBlank() && model.tasksAvailable(write.connectionId) && write.action != "delete" && !(write.action == "create" && !write.pending))
                         TextButton(onClick = { model.tasks.openTask(write.connectionId, write.task, project = "") }) {
                             Text(if (write.needsResolution) "Resolve delivery" else "Open task")
                         }

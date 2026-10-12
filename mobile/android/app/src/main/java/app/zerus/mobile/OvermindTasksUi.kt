@@ -105,9 +105,10 @@ internal object OvermindPalette {
             else -> Unit
         }
     }
+    // A failed refresh keeps the window and its drafts; a disconnect or a gateway that stopped serving Tasks closes it.
     tasks.screen?.let { screen ->
-        if (model.tasksAvailable(screen.connectionId)) OvermindTasksWindow(model, screen)
-        else LaunchedEffect(screen) { tasks.close() }   // the gateway stopped serving Tasks
+        if (!model.tasksWithdrawn(screen.connectionId)) OvermindTasksWindow(model, screen)
+        else LaunchedEffect(screen) { tasks.close() }
     }
     tasks.sendTo?.let { OvermindSendTaskDialog(model, it) }
 }
@@ -134,11 +135,13 @@ internal object OvermindPalette {
             }) { padding ->
                 Column(Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize().imePadding()) {
                     OvermindErrorStrip(model)
+                    // Its next steps act on the workspace the message belongs to, which is the one shown.
+                    val shown = tasks.outcome?.takeIf { it.connectionId == screen.connectionId }
                     Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                        OvermindOutcomeBar(tasks.outcome, onAnyway = { offer -> tasks.anyway(screen.connectionId, offer) },
-                            onResolve = { task -> tasks.dismissOutcome(); tasks.openTask(screen.connectionId, task) },
+                        OvermindOutcomeBar(shown, onAnyway = { offer -> shown?.let { tasks.anyway(it.connectionId, offer) } },
+                            onResolve = { task -> shown?.let { tasks.dismissOutcome(); tasks.openTask(it.connectionId, task) } },
                             onRetry = { write -> tasks.retry(write, context(model, screen, write.task, OvermindOutcomes.recipient(write))) }, onDismiss = tasks::dismissOutcome,
-                            retrying = model.overmindWrites.any { it.status == "sending" && it.requestId == tasks.outcome?.retry?.requestId })
+                            retrying = model.overmindWrites.any { it.status == "sending" && it.requestId == shown?.retry?.requestId })
                     }
                     if (screen.task.isNotEmpty()) OvermindTaskCard(model, screen) else OvermindBoardContent(model, screen)
                 }
