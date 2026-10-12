@@ -23,11 +23,14 @@ from .context import (
     ATTACHMENT_READ_GRACE,
     ATTACHMENT_RESULT_TTL,
     CAPABILITY_OPERATIONS,
+    GATEWAY_OPERATIONS,
     READ_OPERATIONS,
     READ_SQL,
+    SHORT_READS,
     inspect_features,
     supports,
 )
+from .overmind import decision_changes
 from .postgres_schema import SCHEMA
 from .projects import is_archived
 from .store import Store, canonical, digest, token
@@ -482,6 +485,9 @@ class PostgresStore(Notifications):
             byte_count += 144 if node['machine_id'] else 0
             snapshot = json.loads(node["snapshot"]) if node["snapshot"] else None
             op, payload = body["operation"], body["payload"]
+            # Available local routes sort first: a peer here means the computer has none.
+            if op in GATEWAY_OPERATIONS and not node["local"]:
+                return 409, {"error": "gateway operations run only on the gateway computer"}
             if op in CAPABILITY_OPERATIONS and not supports(snapshot, op):
                 return 409, {
                     "error": "computer does not advertise this operation; update its connector"
@@ -649,7 +655,7 @@ class PostgresStore(Notifications):
                         row = await conn.fetchrow(
                             f"SELECT {RECEIPT_COLUMNS} FROM requests WHERE id=$1", value
                         )
-                if row["operation"] in ("terminal_snapshot", "attachment_read") and row["state"] in TERMINAL:
+                if row["operation"] in ("terminal_snapshot", *SHORT_READS) and row["state"] in TERMINAL:
                     await conn.execute(
                         "UPDATE requests SET result_read=$2 WHERE id=$1",
                         value,
@@ -789,12 +795,13 @@ class PostgresStore(Notifications):
             ]
 
     @staticmethod
-    def _event_changes(previous, snapshot):
+    def _event_changes(previous, snapshot, gateway=False):
         if previous is None:
             return []
+        previous = json.loads(previous)
         old = {
             s["name"]: s
-            for s in json.loads(previous).get("sessions", [])
+            for s in previous.get("sessions", [])
             if isinstance(s, dict)
             and isinstance(s.get("name"), str)
             and not is_archived(s)
@@ -853,7 +860,8 @@ class PostgresStore(Notifications):
             else:
                 continue
             events.append((session["name"], kind))
-        return events
+        # Only the gateway's own snapshot carries the Overmind digest.
+        return events + (decision_changes(previous, snapshot) if gateway else [])
 
     async def _publish_peer_events(self,conn,node,changes,now):
         global_usage = await conn.fetchrow(
@@ -1075,7 +1083,7 @@ class PostgresStore(Notifications):
                 await self.pool.execute('UPDATE nodes SET last_seen=$2 WHERE id=$1 AND revoked=0',node['id'],now)
                 return
             changes = await self._cpu(
-                self._event_changes, previous["snapshot"], snapshot
+                self._event_changes, previous["snapshot"], snapshot, True
             )
             changes = [
                 (name, kind)
@@ -1624,7 +1632,7 @@ class PostgresStore(Notifications):
                 return
             # Independently indexed bounded retention classes.
             candidates = await conn.fetch(
-                f"(SELECT id,workspace_id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$1 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$2 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE body!='' AND state IN ('completed','failed','uncertain') AND updated<$3 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<$5 OR result_read<$6) ORDER BY updated LIMIT $4) LIMIT $4",
+                f"(SELECT id,workspace_id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$1 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<$2 ORDER BY updated LIMIT $4) UNION (SELECT id,workspace_id FROM requests WHERE body!='' AND state IN ('completed','failed','uncertain') AND updated<$3 ORDER BY updated LIMIT $4)" + "".join(f" UNION (SELECT id,workspace_id FROM requests WHERE operation='{operation}' AND state IN ('completed','failed','uncertain') AND (updated<$5 OR result_read<$6) ORDER BY updated LIMIT $4)" for operation in SHORT_READS) + " LIMIT $4",
                 now - 120,
                 now - min(retention, 3600),
                 now - retention,
@@ -1650,7 +1658,7 @@ class PostgresStore(Notifications):
                     row["operation"] == "terminal_snapshot"
                     and row["updated"] < now - 120
                 ) or (
-                    row["operation"] == "attachment_read"
+                    row["operation"] in SHORT_READS
                     and (row["updated"] < now - ATTACHMENT_RESULT_TTL
                          or (row["result_read"] is not None and row["result_read"] < now - ATTACHMENT_READ_GRACE))
                 ) or (

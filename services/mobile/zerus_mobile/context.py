@@ -9,16 +9,20 @@ LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktr
 COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
-OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+# Gateway-scoped: no session; served only by the gateway computer's own connector.
+GATEWAY_OPERATIONS = frozenset({"overmind_read", "overmind_write"})
+OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | GATEWAY_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read"})
+READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "overmind_read"})
 # Predicate of the persisted read_history_v3 index and the one-hour read class.
-# attachment_read is a read with its own short class, so this text stays fixed.
+# attachment_read and overmind_read are reads with their own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"
 # Every read operation, for counters and tombstone exclusion (never an index predicate).
 READ_CLASS_SQL = "(" + ",".join(f"'{operation}'" for operation in sorted(READ_OPERATIONS)) + ")"
-# Attachment bytes are carried, never kept: removed this long after completion,
-# or this long after the phone has read the terminal receipt.
+# Reads whose results are carried, never kept, each with its own partial index:
+# removed this long after completion, or this long after the phone has read
+# the terminal receipt.
+SHORT_READS = ("attachment_read", "overmind_read")
 ATTACHMENT_RESULT_TTL = 60
 ATTACHMENT_READ_GRACE = 5
 CAPABILITY_OPERATIONS = OPERATIONS - {"inspect", "send", "answer", "interrupt"}

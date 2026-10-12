@@ -103,6 +103,8 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
     headers = test_relay.RelayTests.headers
     call = test_relay.RelayTests.call
     command = test_relay.RelayTests.command
+    overmind = test_relay.RelayTests.overmind
+    advertise_overmind = test_relay.RelayTests.advertise_overmind
 
 
 # These are the existing assertions, not a second implementation of the API.
@@ -118,6 +120,7 @@ for name in (
     'heartbeat_events_baseline_transition_and_privacy', 'body_cap_nonfinite_and_poll_bounds',
     'async_question_fingerprints_add_change_remove', 'push_retired_unifiedpush_and_unavailable_fcm',
     'mark_read_is_exact_and_capability_gated', 'set_mobile_delivery_request_validation', 'mark_read_is_read_class_and_pruned_like_reads',
-    'attachment_read_is_exact_gated_and_short_lived',
+    'attachment_read_is_exact_gated_and_short_lived', 'overmind_envelopes_are_exact_and_gateway_gated',
+    'overmind_reads_are_short_lived_and_writes_keep_their_identity', 'overmind_decision_events_follow_the_gateway_digest',
 ):
     setattr(RustHttpContracts, 'test_' + name, getattr(test_relay.RelayTests, 'test_' + name))

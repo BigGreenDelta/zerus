@@ -384,6 +384,145 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                        {"payload": {"value": "away", "request_id": value["request_id"]}}):
             await self.call("POST", "/v1/requests", {**value, "request_id": str(uuid.uuid4()), **change}, expected=400)
 
+    def overmind(self, operation="overmind_read", action="projects", request=None, **extra):
+        request_id = str(uuid.uuid4())
+        payload = {"action": action, "request": {} if request is None else request, **extra}
+        if operation == "overmind_write":
+            payload["request_id"] = request_id
+        return {"request_id": request_id, "computer_id": self.node["node_id"], "operation": operation, "session": "", "payload": payload}
+
+    async def advertise_overmind(self, digest=None, operations=("overmind_read", "overmind_write")):
+        snapshot = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "operations": list(operations), "features": []}}
+        if digest is not None:
+            snapshot["mobile_overmind"] = digest
+        await self.call("POST", "/v1/node/heartbeat", {"snapshot": snapshot}, node=True)
+
+    async def test_overmind_envelopes_are_exact_and_gateway_gated(self):
+        self.assertTrue({"overmind_read", "overmind_write"} <= set((await self.call("GET", "/v1/capabilities"))["operations"]))
+        read = self.overmind()
+        write = self.overmind("overmind_write", "create", {"project": "example", "prompt": "Hello"}, device="Pixel 9 @home - work")
+        await self.call("POST", "/v1/requests", read, expected=409)
+        await self.advertise_overmind(operations=("overmind_read",))
+        await self.call("POST", "/v1/requests", write, expected=409)
+        await self.advertise_overmind()
+
+        def changed(base, drop=(), **change):
+            value = json.loads(json.dumps(base))
+            value["request_id"] = str(uuid.uuid4())
+            if "request_id" in value["payload"]:
+                value["payload"]["request_id"] = value["request_id"]
+            for key in drop:
+                value["payload"].pop(key)
+            for key, item in change.items():
+                (value if key == "session" else value["payload"])[key] = item
+            return value
+        attachment = self.overmind(action="attachment", request={"task": "om-12345", "sha256": "a" * 64, "offset": 0, "length": 524288})
+        invalid = [changed(read, session="codex/project/deep/tag"), changed(read, drop=("request",)), changed(read, drop=("action",)),
+                   changed(read, request_id=read["request_id"]), changed(read, extra=1), changed(write, request_id=str(uuid.uuid4())),
+                   changed(write, drop=("request_id",)), changed(write, request_id=7), changed(write, action="projects"),
+                   *(changed(read, action=action) for action in ("sessions", "show", "create", "advance", "call-human", "rev", "", 7, None)),
+                   *(changed(write, action=action) for action in ("advance", "call-human", "file", "mine", "Create", "task")),
+                   *(changed(read, request=request) for request in ([], "x", 1, None)), changed(write, request=[]),
+                   *(changed(read, device=device) for device in ("", "x" * 65, "phone\x7f", "phone\u0080", "phone\u009flabel",
+                                                                  "tab\there", "-phone", "--json", "@peer", 7, ["x"], None)),
+                   *(changed(attachment, request={**attachment["payload"]["request"], **range_}) for range_ in (
+                       {"length": 524289}, {"length": 0}, {"offset": 10 * 1024 * 1024}, {"offset": -1}, {"offset": 1.5},
+                       {"length": "1"}, {"offset": True}, {"offset": 10 * 1024 * 1024 - 10, "length": 11})),
+                   changed(attachment, request={"task": "om-12345", "sha256": "a" * 64, "offset": 0})]
+        for value in invalid:
+            with self.subTest(payload=str(value["payload"])[:200], session=value["session"]):
+                await self.call("POST", "/v1/requests", value, expected=400)
+        accepted = [read, write, attachment, changed(read, device="Ü" * 64), changed(read, device="x"),
+                    changed(attachment, request={"task": "om-12345", "sha256": "a" * 64, "offset": 10 * 1024 * 1024 - 1, "length": 1}),
+                    changed(read, action="board", request={"project": "example", "since": 3}), changed(read, action="task", request={"task": "om-12345"}),
+                    changed(write, action="review-send", request={"task": "om-12345", "session": {"name": "codex/example"}}),
+                    changed(write, request={"text": "x" * (2 * 1024 * 1024)})]
+        # A canonical read payload is bounded at 64 KiB; writes only by the request maximum.
+        prefix = len(json.dumps({"action": "projects", "request": {"text": ""}}, separators=(",", ":")))
+        largest = changed(read, request={"text": "x" * (65536 - prefix)})
+        accepted.append(largest)
+        for value in accepted:
+            with self.subTest(payload=str(value["payload"])[:200]):
+                self.assertEqual((await self.call("POST", "/v1/requests", value, expected=202))["state"], "queued")
+        await self.call("POST", "/v1/requests", changed(read, request={"text": "x" * (65537 - prefix)}), expected=413)
+        await self.call("POST", "/v1/requests", changed(write, request={"text": "x" * (29 * 1024 * 1024)}), expected=413)
+        delivered = {}
+        for _ in accepted:
+            for row in (await self.call("GET", "/v1/node/requests", node=True))["requests"]:
+                delivered[row["request_id"]] = row
+        self.assertEqual(set(delivered), {value["request_id"] for value in accepted})
+        for value in accepted:
+            row = delivered[value["request_id"]]
+            self.assertEqual((row["operation"], row["session"], row["payload"]), (value["operation"], "", value["payload"]))
+            self.assertNotIn("gateway_route", row)
+
+    async def test_overmind_reads_are_short_lived_and_writes_keep_their_identity(self):
+        await self.advertise_overmind()
+        read = self.overmind()
+        write = self.overmind("overmind_write", "comment", {"task": "om-12345", "text": "Hello"})
+        await self.call("POST", "/v1/requests", read, expected=202)
+        first = await self.call("POST", "/v1/requests", write, expected=202)
+        self.assertEqual(await self.call("POST", "/v1/requests", write, expected=202), first)
+        other = json.loads(json.dumps(write))
+        other["payload"]["request"]["text"] = "Other"
+        await self.call("POST", "/v1/requests", other, expected=409)
+        await self.call("POST", "/v1/requests", {**write, "payload": {**write["payload"], "device": "Pixel 9"}}, expected=409)
+        claimed = [(await self.call("GET", "/v1/node/requests", node=True))["requests"][0] for _ in range(2)]
+        self.assertEqual({row["request_id"] for row in claimed}, {read["request_id"], write["request_id"]})
+        self.assertEqual((await self.call("GET", "/v1/node/requests", node=True))["requests"], [])
+        answers = {read["request_id"]: {"ok": True, "cursor": 4, "projects": []},
+                   write["request_id"]: {"ok": True, "task": {"uuid": "00000000-0000-4000-8000-0000000000a1", "journal_count": 2}}}
+        for request_id, result in answers.items():
+            await self.call("POST", "/v1/node/requests/" + request_id + "/result", {"state": "completed", "result": result, "error": None}, node=True)
+        self.assertEqual((await self.call("GET", "/v1/requests/" + read["request_id"]))["result"], answers[read["request_id"]])
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='overmind_history'").fetchone()[0], 1)
+        self.store.maintain()
+        self.assertIsNotNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (read["request_id"],)).fetchone())
+        with self.store.db:
+            self.store.db.execute("UPDATE requests SET result_read=? WHERE id=? AND result_read IS NOT NULL", (time.time() - 6, read["request_id"]))
+            self.store.db.execute("UPDATE requests SET updated=? WHERE id=?", (time.time() - 3601, write["request_id"]))
+        self.store.maintain()
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (read["request_id"],)).fetchone())
+        # A write keeps its identity: a retry returns the first receipt and never runs again.
+        replay = await self.call("POST", "/v1/requests", write, expected=202)
+        self.assertEqual((replay["state"], replay["result"]), ("completed", answers[write["request_id"]]))
+        await self.call("POST", "/v1/requests", other, expected=409)
+        # A pruned read identity is new again.
+        self.assertEqual((await self.call("POST", "/v1/requests", read, expected=202))["state"], "queued")
+        self.assertEqual([row["request_id"] for row in (await self.call("GET", "/v1/node/requests", node=True))["requests"]], [read["request_id"]])
+
+    async def test_overmind_decision_events_follow_the_gateway_digest(self):
+        tasks = ["00000000-0000-4000-8000-0000000000a%d" % index for index in range(1, 6)]
+
+        def digest(*entries):
+            return {"schema": 1, "rev": 9, "projects": {"example": {"needs_human": len(entries)}},
+                    "decisions": [{"task": task, "project": "example", "title": "Synthetic decision", "signature": signature} for task, signature in entries]}
+        seen = []
+
+        async def changes(value):
+            await self.advertise_overmind(value)
+            events = [event for event in (await self.call("GET", "/v1/events"))["events"] if event["kind"] != "alert"]
+            fresh = [(event["session"], event["kind"]) for event in events[len(seen):]]
+            seen.extend(events[len(seen):])
+            self.assertTrue(all(event["computer_id"] == self.node["node_id"] for event in events))
+            return fresh
+        slot = lambda index: "overmind:" + tasks[index]
+        self.assertEqual(await changes(digest((tasks[0], "a" * 64))), [])  # The first snapshot is a baseline.
+        self.assertEqual(await changes(digest((tasks[0], "a" * 64), (tasks[1], "b" * 64))), [(slot(1), "decision")])
+        self.assertEqual(await changes(digest((tasks[1], "b" * 64), (tasks[0], "c" * 64))), [(slot(0), "decision")])
+        self.assertEqual(await changes(digest((tasks[1], "b" * 64))), [])  # Leaving Your Call raises nothing.
+        self.assertEqual(await changes(None), [])  # A missing digest is missing data, not a change.
+        self.assertEqual(await changes(digest((tasks[0], "d" * 64), (tasks[1], "b" * 64))), [])
+        malformed = [("not-a-uuid", "e" * 64), ("00000000-0000-4000-8000-0000000000AB", "e" * 64), (tasks[2], ""), (tasks[2], "x\x7fy"),
+                     (tasks[2], "x" * 129), (7, "e" * 64), (tasks[3], "first"), (tasks[3], "second"), (tasks[2], "e" * 128)]
+        self.assertEqual(await changes(digest((tasks[0], "d" * 64), (tasks[1], "f" * 64), *malformed)),
+                         [(slot(1), "decision"), (slot(3), "decision"), (slot(2), "decision")])
+        crowded = digest(*[(tasks[0], "d" * 64)] * 50, (tasks[4], "g" * 64))  # Entries after the first 50 are ignored.
+        self.assertEqual(await changes(crowded), [])
+        crowded["decisions"][0]["signature"] = "h" * 64
+        self.assertEqual(await changes(crowded), [(slot(0), "decision")])
+        self.assertEqual(await changes({"schema": 1, "decisions": {"task": tasks[4]}}), [])
+
 
 class FilesystemTests(unittest.TestCase):
     def test_private_database_and_no_parent_chmod(self):

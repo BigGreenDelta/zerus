@@ -19,6 +19,7 @@ CREATE INDEX IF NOT EXISTS request_claim_expiry ON requests(claimed,id) WHERE st
 CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at,id) WHERE state='queued' AND expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS terminal_history ON requests(updated,id) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain');
+CREATE INDEX IF NOT EXISTS overmind_history ON requests(updated,id) WHERE operation='overmind_read' AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS request_history ON requests(updated,id) WHERE body!='' AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS read_history_v3 ON requests(updated,id) WHERE operation IN ('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read') AND state IN ('completed','failed','uncertain');
 CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,state);

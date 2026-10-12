@@ -250,6 +250,24 @@ class SQLitePeerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status,413,await response.text())
         finally:await client.close()
 
+    async def test_gateway_operations_and_decisions_never_take_a_peer_route(self):
+        caps={'protocol_version':1,'operations':['inspect','send','overmind_read','overmind_write'],'features':['gateway_one_hop']}
+        def digest(signature):
+            return {'schema':1,'rev':1,'projects':{},'decisions':[{'task':'00000000-0000-4000-8000-0000000000a1','project':'example','title':'Synthetic','signature':signature}]}
+        await self.manifest(snap={**snapshot(),'mobile_capabilities':caps})
+        for signature in ('a'*64,'b'*64):
+            await self.call('peer_heartbeat',self.node,self.route,self.remote,{**snapshot(),'mobile_capabilities':caps,'mobile_overmind':digest(signature)})
+        read=lambda target:{'request_id':identity(),'computer_id':target,'operation':'overmind_read','session':'','payload':{'action':'projects','request':{}}}
+        # The peer advertises the operations, yet only its own connector may serve them.
+        self.assertEqual((await self.submit(read(self.target)))[0],409)
+        self.assertEqual(await self.call('claim',self.node,allow_gateway=True),[])
+        local=read(self.gateway['node_id'])
+        self.assertEqual((await self.submit(local))[0],202)
+        claimed=await self.call('claim',self.node,allow_gateway=True)
+        self.assertEqual((claimed[0]['request_id'],claimed[0]['gateway_route']['route_id']),(local['request_id'],None))
+        # A peer snapshot's digest never raises decision events.
+        self.assertNotIn('decision',[row['kind'] for row in await self.call('events',self.workspace,0)])
+
     async def test_registry_retention_ceiling_rolls_back_manifest(self):
         with patch('zerus_mobile.routes.MAX_COMPUTERS',2):
             with self.assertRaises(RouteError):

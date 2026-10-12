@@ -31,8 +31,9 @@ from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import attachment_reads
 from .recovery import validate_recovery
 from .history import validate_history
-from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
+from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, GATEWAY_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, SHORT_READS, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
 from .launch import catalog as project_catalog, validate as validate_launch
+from . import overmind
 from .launch import projects as launch_projects, project_choice
 from . import worktrees
 from .terminal import validate as validate_terminal
@@ -178,6 +179,7 @@ class Journal:
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running'")
+        self.db.execute("CREATE INDEX IF NOT EXISTS overmind_delivered_reads ON requests(delivered_at) WHERE operation='overmind_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS journal_operation ON requests(operation)")
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_reads ON requests(delivered_at) WHERE operation='inspect' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS mutation_retention ON requests(delivered_at) WHERE operation!='inspect' AND delivered=1 AND state!='running' AND response IS NOT NULL AND response_expired=0")
@@ -187,8 +189,9 @@ class Journal:
         now = time.time() if now is None else now
         with self.db:
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
-            # Delivered attachment chunks are never kept beyond the same short window.
-            self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            # Delivered attachment chunks and Overmind reads are never kept beyond the same short window.
+            for operation in SHORT_READS:
+                self.db.execute(f"DELETE FROM requests WHERE operation='{operation}' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
             rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
             for request_id, state in rows:
@@ -302,6 +305,9 @@ class Connector:
         self.preference_supported = False
         self.attachment_read_supported = False
         self.attachment_reads = attachment_reads.AttachmentReads()
+        self.overmind_supported = False
+        self.overmind_digest = None  # Latest known gateway digest; None until a first read succeeds.
+        self.overmind_next_poll = 0.0
         self.capabilities_next_poll = 0.0
         self.presence = None  # Latest listing desktop_presence; sent beside, never inside, the snapshot.
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
@@ -466,7 +472,9 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS)
+        gateway = getattr(self, "fleet", None) is not None
+        await self.enrich_overmind(snapshot)
+        operations = (OPERATIONS - (set() if self.overmind_supported and gateway else GATEWAY_OPERATIONS) - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and gateway else COMPUTER_OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -488,6 +496,7 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.overmind_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -503,6 +512,7 @@ class Connector:
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
+            self.overmind_supported = isinstance(help_text, str) and overmind.HELP_MARKER in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
                     marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -523,6 +533,27 @@ class Connector:
                 self.project_cache = {**(self.project_cache or unavailable_projects(self.project_fallback_id)), "stale": True}
         snapshot["mobile_projects"] = self.project_cache or unavailable_projects(self.project_fallback_id)
         apply_memberships(snapshot, snapshot["mobile_projects"])
+
+    async def enrich_overmind(self, snapshot: dict) -> None:
+        """The gateway's `mobile_overmind` digest, read at most every fifteen seconds.
+
+        Every gateway snapshot carries the latest known digest: a failed refresh
+        keeps it (never an empty list), and none is sent before a first success.
+        Peer machine contexts and an hgs without the mobile Overmind ABI send none.
+        """
+        if not self.overmind_supported or getattr(self, "fleet", None) is None:
+            self.overmind_digest, self.overmind_next_poll = None, 0.0
+            return
+        if time.monotonic() >= self.overmind_next_poll:
+            self.overmind_next_poll = time.monotonic() + overmind.DIGEST_SECONDS
+            try:
+                projects = await self.native(["overmind", "projects", "--json"], {}, timeout=5)
+                decisions = await self.native(["overmind", "decisions", "--json"], {}, timeout=5)
+                self.overmind_digest = overmind.digest(projects, decisions)
+            except (ConnectorError, ValueError):
+                LOG.debug("Overmind digest refresh failed; keeping the last known digest")
+        if self.overmind_digest is not None:
+            snapshot["mobile_overmind"] = self.overmind_digest
 
     async def enrich_attention(self, snapshot: dict) -> None:
         """Inspect two live Codex sessions per poll, without submitting input.
@@ -598,6 +629,17 @@ class Connector:
             try: validate_mobile_delivery(request.get("payload"))
             except ValueError as error: raise ConnectorError(str(error)) from None
             return operation, session, request["payload"]
+        if operation in GATEWAY_OPERATIONS:
+            if session != "": raise ConnectorError("Overmind requests use no session target")
+            payload = request.get("payload")
+            # The device label is informational: normalized for --device, never a refusal.
+            try: limit = overmind.validate(operation, payload, request["request_id"], check_device=False)
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            if operation == "overmind_write" and payload["request"].get("request_id", request["request_id"]) != request["request_id"]:
+                raise ConnectorError("the Overmind request_id is the request identity")
+            if len(json.dumps(payload, separators=(",", ":")).encode()) > limit:
+                raise ConnectorError("native request exceeds size limit")
+            return operation, session, payload
         if (not isinstance(session, str) or not session or len(session) > 512
                 or session.startswith(("-", "@")) or "@" in session
                 or any(ord(c) < 32 or ord(c) == 127 for c in session)):
@@ -744,6 +786,33 @@ class Connector:
         except attachment_reads.AttachmentReadError as error:
             raise ConnectorError(str(error)) from None
 
+    async def overmind_request(self, operation: str, payload: dict, request_id: str) -> dict:
+        """One phone request through `hgs overmind <command> --json [--device <label>]`.
+
+        A refusal (`ok: false`, exit 1) is the answer the phone shows, so it is a
+        completed result. A write carries the envelope identity as its Overmind
+        `request_id`, which also names a created task, so hgs replays a retry too.
+        """
+        action, request = payload["action"], payload["request"]
+        argv = ["overmind", overmind.COMMANDS[action], "--json"]
+        label = overmind.device_label(payload.get("device"))
+        if label is not None:
+            argv += ["--device", label]
+        if operation == "overmind_write":
+            request = {**request, "request_id": request_id}
+        elif action == "attachment":
+            # hgs names the local file; the connector serves one bounded range of it.
+            request = {key: request[key] for key in ("task", "sha256") if key in request}
+        result = await self.native(argv, request, failure_json=True)
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise ConnectorError("native Overmind answer is invalid")
+        if action == "attachment" and result["ok"]:
+            try:
+                result = await asyncio.to_thread(overmind.read_range, result, payload["request"])
+            except ValueError as error:
+                raise ConnectorError(str(error)) from None
+        return result
+
     async def child_send_preflight(self, session, payload):
         if not session.startswith("dsh/"):
             raise ConnectorError("this native provider has no child-send ABI")
@@ -771,6 +840,12 @@ class Connector:
             raise ConnectorError("invalid native request JSON") from None
         if not self.journal.claim(request_id, journal_operation, request_hash):
             return self.journal.replay(request_id)
+        route = request.get("gateway_route")
+        if journal_operation in GATEWAY_OPERATIONS and isinstance(route, dict) and route.get("route_id") is not None:
+            # Overmind runs on the gateway computer itself, never one hop away.
+            response = {"state": "failed", "result": None, "error": "Overmind requests run only on the gateway computer"}
+            self.journal.finish(request_id, response)
+            return response
         try:
             target, machine_id = await self.fleet.resolve(request.get("gateway_route"),
                                                        present="gateway_route" in request)
@@ -826,6 +901,8 @@ class Connector:
                 raise ConnectorError("native shared read ABI is unavailable")
             if operation == "attachment_read" and not self.attachment_read_supported:
                 raise ConnectorError("native attachment read ABI is unavailable")
+            if operation in GATEWAY_OPERATIONS and (not self.overmind_supported or getattr(self, "fleet", None) is None):
+                raise ConnectorError("Overmind is served by the gateway computer with a current hgs")
             if operation == "worktree_create":
                 from pathlib import PurePosixPath
                 destination = PurePosixPath(payload["destination"])
@@ -1057,6 +1134,8 @@ class Connector:
                     raise ConnectorError("native delivery setting acknowledgement did not match")
             elif operation == "attachment_read":
                 result = await self.read_attachment(session, payload, request_id)
+            elif operation in GATEWAY_OPERATIONS:
+                result = await self.overmind_request(operation, payload, request_id)
             elif operation == "mark_read":
                 result = await self.native(["read", session, "--json"], payload, failure_json=True)
                 if not mark_read_result(result, payload):

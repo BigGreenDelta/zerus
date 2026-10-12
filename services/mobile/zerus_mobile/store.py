@@ -14,7 +14,8 @@ import functools
 import uuid
 
 from .attachments import MAX_QUEUE_BYTES
-from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
+from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, GATEWAY_OPERATIONS, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, SHORT_READS, inspect_features, supports
+from .overmind import decision_changes
 from .projects import is_archived
 from .routes import Registry, RouteError, drive_sync, SCHEMA as ROUTE_SCHEMA, MAX_PEER_SNAPSHOT_BYTES
 
@@ -112,6 +113,7 @@ class Store:
         self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS overmind_history ON requests(updated,id) WHERE operation='overmind_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at) WHERE state='queued' AND expires_at IS NOT NULL")
         self.db.execute("CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,operation,state)")
         self.db.execute("CREATE INDEX IF NOT EXISTS event_expiry ON events(created)")
@@ -226,8 +228,10 @@ class Store:
         with self.db:
             self.db.execute(f"UPDATE requests SET state='failed',error='terminal input expired before delivery',result_bytes=length('terminal input expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND expires_at<=? ORDER BY expires_at LIMIT {batch_size})", (now,now))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
-            # Attachment bytes are carried, never kept beyond a short read window.
-            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
+            # Attachment bytes and Overmind reads are carried, never kept beyond a
+            # short read window. A literal operation lets each use its partial index.
+            for operation in SHORT_READS:
+                self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='{operation}' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"UPDATE requests SET state='failed',error='request expired before delivery',result_bytes=length('request expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND created<=? ORDER BY created LIMIT {batch_size})", (now, now - queue_ttl))
             if restart:
                 self.db.execute(f"UPDATE requests SET state='uncertain',error='relay restarted after claim',result_bytes=length('relay restarted after claim'),reserved_bytes=0,updated=? WHERE state='claimed'", (now,))
@@ -258,6 +262,9 @@ class Store:
                 exists = drive_sync(self.db, self.registry.resolve(device["workspace_id"], body["computer_id"]))
                 return (409 if exists else 404), {"error": "computer route is unavailable" if exists else "computer not found"}
             snapshot = json.loads(node["snapshot"]) if node["snapshot"] else None
+            # Available local routes sort first: a peer here means the computer has none.
+            if body["operation"] in GATEWAY_OPERATIONS and not node["local"]:
+                return 409, {"error": "gateway operations run only on the gateway computer"}
             if body["operation"] in CAPABILITY_OPERATIONS and not supports(snapshot, body["operation"]):
                 return 409, {"error": "computer does not advertise this operation; update its connector"}
             if body["operation"] == "inspect" and any(not supports(snapshot, feature, "features") for feature in inspect_features(body["payload"])):
@@ -372,7 +379,8 @@ class Store:
             event_node={'id':computer,'workspace_id':node['workspace_id']}
             previous = self.db.execute("SELECT snapshot FROM nodes WHERE id=?",(node["id"],)).fetchone()[0]
             if previous is not None:
-                old = {s["name"]: s for s in json.loads(previous).get("sessions", []) if isinstance(s, dict) and isinstance(s.get("name"), str) and not is_archived(s)}
+                previous = json.loads(previous)
+                old = {s["name"]: s for s in previous.get("sessions", []) if isinstance(s, dict) and isinstance(s.get("name"), str) and not is_archived(s)}
                 for session in snapshot.get("sessions", []):
                     if not isinstance(session, dict) or not isinstance(session.get("name"), str) or len(session["name"])>1024 or any(ord(c)<32 for c in session["name"]) or is_archived(session):
                         continue
@@ -390,6 +398,9 @@ class Store:
                         self.event(event_node, session["name"], "error")
                     elif session.get("activity") == "idle" and before.get("activity") == "busy" and identity(before) == identity(session):
                         self.event(event_node, session["name"], "completed")
+                # Only the gateway's own snapshot carries the Overmind digest.
+                for slot, kind in decision_changes(previous, snapshot):
+                    self.event(event_node, slot, kind)
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=?,snapshot_hash=? WHERE id=?", (now, encoded,snapshot_hash,node["id"]))
             # Bound event and push storage even for a noisy computer.
             excess=self.db.execute("SELECT max(0,event_count-100000) FROM relay_usage WHERE id=1").fetchone()[0]
@@ -519,7 +530,7 @@ class Store:
             elif row["state"] == "claimed" and row["claimed"] <= now-claim_ttl:
                 self.db.execute("UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id=?", (now,value))
             row = self.db.execute("SELECT id,operation,state,result,error FROM requests WHERE id=?", (value,)).fetchone()
-            if row["operation"] in ("terminal_snapshot", "attachment_read") and row["state"] not in ("queued","claimed"):
+            if row["operation"] in ("terminal_snapshot", *SHORT_READS) and row["state"] not in ("queued","claimed"):
                 self.db.execute("UPDATE requests SET result_read=? WHERE id=?", (now,value))
             return self.envelope(row)
 
