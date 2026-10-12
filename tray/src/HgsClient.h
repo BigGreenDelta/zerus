@@ -131,9 +131,11 @@ public:
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
     // `hgs [@host] overmind <arguments> --json` with the request as compact JSON on
     // stdin ({} when empty). A refusal is JSON on stdout with exit 1; it reaches
-    // overmindFailed as the parsed `error` object ({code, message, field?, state?}),
-    // other failures with an empty object and the CLI's own text.
-    quint64 requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input = {});
+    // overmindFailed as the parsed `error` object ({code, message, field?, state?}).
+    // A deadline (timeoutMs, 0: 10 s local, 30 s remote) gives {code: "timed_out",
+    // message, uncertain: true}: the command may have taken effect. Other failures
+    // give an empty object and the CLI's own text.
+    quint64 requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input = {}, int timeoutMs = 0);
     // `hgs presence set --json`. At most one write runs; while it does, only the
     // newest sample waits, so a slow CLI never builds a queue of stale samples.
     void setPresence(double idleSeconds, bool locked);

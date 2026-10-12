@@ -409,21 +409,25 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
-quint64 HgsClient::requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input)
+quint64 HgsClient::requestOvermind(const QString &host, const QStringList &arguments, const QJsonObject &input, int timeoutMs)
 {
     const quint64 request = ++m_overmindRequest;
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << QStringLiteral("overmind") << arguments << QStringLiteral("--json");
     auto process = processRequest(m_hgs, args);
-    process.timeoutMs = host.isEmpty() ? 10000 : 30000;
+    process.timeoutMs = timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 10000 : 30000;
     // Always written and closed: with --json every command, rev included, reads
     // its request to the end of stdin.
     process.input = QJsonDocument(input).toJson(QJsonDocument::Compact);
     // runHgs hands stdout only to a success; a refusal comes on stdout with exit 1.
     ProcessRunner::run(std::move(process), this, [this, request, host](const ProcessRunner::Result &result) {
         if (result.outcome == ProcessRunner::Result::TimedOut) {
-            emit overmindFailed(request, host, {}, tr("The task board did not answer in time."));
+            // Killed at the deadline, possibly after its change was stored or
+            // while it typed into a session: the outcome is unknown.
+            const auto message = tr("The task board did not answer in time.");
+            emit overmindFailed(request, host, {{QStringLiteral("code"), QStringLiteral("timed_out")},
+                {QStringLiteral("message"), message}, {QStringLiteral("uncertain"), true}}, message);
             return;
         }
         if (result.outcome == ProcessRunner::Result::FailedToStart) {
