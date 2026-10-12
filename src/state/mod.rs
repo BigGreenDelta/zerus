@@ -654,15 +654,20 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 println!("hgs: would forget {}", args[0]);
                 return Ok(0);
             }
-            let _guard = lock(None)?;
-            if record_path(&args[0]).exists() {
-                rename::remove_legacy(&read(&args[0])?)?;
+            {
+                let _guard = lock(None)?;
+                if record_path(&args[0]).exists() {
+                    rename::remove_legacy(&read(&args[0])?)?;
+                }
+                match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.to_string()),
+                }
             }
-            match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
-            }
+            // `hgs kill`: the session is gone. Hooks share the state lock, so
+            // Overmind hears of the end after it.
+            crate::overmind::session_ended(&args[0]);
         }
         _ => return Err(format!("unknown state operation: {command}")),
     }

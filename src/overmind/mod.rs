@@ -18,7 +18,7 @@ mod templates;
 mod workflow;
 
 pub use cli::dispatch;
-pub use sessions::session_renamed;
+pub use sessions::{session_ended, session_renamed};
 
 pub use sync::FEATURE;
 

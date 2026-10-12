@@ -8,13 +8,40 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 import uuid
 
+import test_dsh_session_actions
 import test_input as fixtures
+import test_pause
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
+
+
+def claim(state, task, name):
+    """Claims a task still in Queue for a session of this machine, as its host does on send."""
+    db = sqlite3.connect(Path(state) / 'overmind/overmind.sqlite3')
+    with db:
+        created = json.loads(db.execute("SELECT raw FROM events WHERE task = ? AND kind = 'task_created'",
+                                        (task,)).fetchone()[0])
+        seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
+        event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind='transition',
+                     base=created['id'], request_id='',
+                     payload={'action': 'claim', 'to': 'Design', 'fields': {},
+                              'session': {'machine': created['actor']['machine'], 'name': name}})
+        db.execute('INSERT INTO events(origin, seq, id, lamport, task, project, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                   (event['origin'], seq, event['id'], lamport, task, event['project'], 'transition', json.dumps(event)))
+    db.close()
+
+
+def overmind(env, *args, data=None):
+    """A person's `hgs overmind` request that succeeds."""
+    result = subprocess.run([str(HGS), 'overmind', *args], input=None if data is None else json.dumps(data),
+                            env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr + result.stdout
+    return json.loads(result.stdout)
 
 
 class Overmind(unittest.TestCase):
@@ -178,6 +205,20 @@ class Overmind(unittest.TestCase):
     def test_renames_create_no_store(self):
         self.rename('codex/demo/old', 'codex/demo/new')
         self.assertFalse((self.state / 'overmind').exists())
+
+    def test_a_session_archived_after_its_agent_quit_orphans_its_tasks(self):
+        task = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']
+        name, run, conversation = 'claude/demo/quit', str(uuid.uuid4()), str(uuid.uuid4())
+        claim(self.state, task['uuid'], name)
+        # Saved before the archive: the agent reported that the user quit, and its process is gone.
+        binding = {'version': 1, 'name': name, 'agent': 'claude', 'run_id': run, 'conversation_id': conversation,
+                   'conversation_state': 'ended',
+                   'session_end': {'run_id': run, 'conversation_id': conversation, 'reason': 'prompt_input_exit'}}
+        (self.state / f'{hashlib.sha256(name.encode()).hexdigest()}.json').write_text(json.dumps(binding))
+        exists = subprocess.run([str(HGS), '__state', 'exists', name], env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual((exists.returncode, exists.stderr), (1, ''))  # archived, so no binding is left
+        self.assertEqual(len(list((self.state / 'archives').glob('*.json'))), 1)
+        self.assertEqual(self.ok('show', task['ref'])['task']['flags'], ['orphaned'])
 
     def test_templates_round_trip(self):
         self.ok('templates', 'set', '--json', data={'project': 'demo', 'templates': {'review': 'Check {task.ref}'}})
@@ -480,6 +521,74 @@ class AgentSession(unittest.TestCase):
             'commit', '--allow-empty', '-qm', 'work')
         return git('rev-parse', 'HEAD')
 
+    def hgs(self, *args):
+        return subprocess.run([str(HGS), *args], env=self.env, text=True, capture_output=True, timeout=20,
+                              stdin=subprocess.DEVNULL)
+
+    def flags(self, ref):
+        return self.person('show', ref)['task']['flags']
+
+    def stop_agent(self):
+        """Ends the fixture's own session and waits until its agent has exited."""
+        self.tmux('kill-session', '-t', '=' + self.name)
+        self.wait_for(lambda: not subprocess.run(['ps', '-p', str(self.record['pid']), '-o', 'pid='],
+                                                 capture_output=True, text=True).stdout.strip())
+
+    def test_archiving_a_session_orphans_its_tasks(self):
+        elsewhere = self.task()
+        claim(self.state, self.person('show', elsewhere)['task']['uuid'], 'codex/other')
+        ref, waiting = self.task(), self.task()
+        self.assertEqual(self.send(ref)[1]['delivery'], 'sent')
+        self.stop_agent()
+        archived = self.hgs('archive', self.name)
+        self.assertEqual((archived.returncode, archived.stderr), (0, ''))
+        self.assertIn(f'archived {self.name}', archived.stdout)
+        self.assertEqual([self.flags(r) for r in (ref, elsewhere, waiting)], [['orphaned'], [], []])
+        task = self.person('show', ref)['task']
+        self.assertEqual((task['stage'], task['assignee']['name']), ('Design', self.name))
+        moved = self.person('move', '--json', data={'task': ref, 'to': 'Queue'})['task']
+        self.assertEqual((moved['stage'], moved['assignee'], moved['flags']), ('Queue', None, []))
+
+    def test_terminating_a_session_orphans_its_tasks(self):
+        ref = self.task()
+        self.send(ref)
+        result = self.hgs('terminate', self.name)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertIn('terminated and archived', result.stdout)
+        self.assertEqual(self.flags(ref), ['orphaned'])
+
+    def test_killing_a_session_orphans_its_tasks(self):
+        ref = self.task()
+        self.send(ref)
+        result = self.hgs('kill', self.name)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertFalse(self.record_path.exists())
+        self.assertEqual(self.flags(ref), ['orphaned'])
+
+    def test_a_busy_task_store_never_fails_the_archive(self):
+        ref = self.task()
+        self.send(ref)
+        store = sqlite3.connect(self.state / 'overmind/overmind.sqlite3', isolation_level=None)
+        store.execute('BEGIN IMMEDIATE')  # another Overmind writer holds the store
+        try:
+            started = time.monotonic()
+            result = self.hgs('terminate', self.name)
+            elapsed = time.monotonic() - started
+        finally:
+            store.execute('ROLLBACK')
+            store.close()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('terminated and archived', result.stdout)
+        self.assertIn('Overmind', result.stderr)
+        self.assertLess(elapsed, 5)
+        self.assertEqual(self.flags(ref), [])
+
+    def test_ending_a_session_creates_no_store(self):
+        self.assertEqual(self.hgs('swarm', 'hello').returncode, 0)  # the machine has its identity
+        result = self.hgs('terminate', self.name)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertFalse((self.state / 'overmind').exists())
+
     def test_a_live_session_acts_as_its_agent(self):
         self.assertIn('You can never move a task to Done', self.ok('--help'))
         self.assertEqual(self.ok('mine')['tasks'], [])
@@ -507,6 +616,49 @@ class AgentSession(unittest.TestCase):
         elsewhere = dict(self.env, GIT_DIR=str(other / '.git'))
         task = self.ok('advance', '--json', data={**review, 'evidence': sha}, env=elsewhere)['task']
         self.assertEqual(task['stage'], 'Review')
+
+
+class UserExit(test_pause.Harness):
+    """A session whose agent the user quits is archived by its supervisor."""
+
+    def test_quitting_the_agent_orphans_its_tasks(self):
+        name = self.start('claude')
+        task = overmind(self.env, 'create', '--json', data={'project': 'p', 'prompt': 'x', 'stage': 'Queue'})['task']
+        claim(self.root / 'state', task['uuid'], name)
+        self.t('send-keys', '-t', '=' + name + ':', '/exit', 'Enter')
+        self.wait(lambda: not self.binding(name))
+        self.wait(lambda: overmind(self.env, 'show', task['ref'])['task']['flags'] == ['orphaned'])
+
+
+class DeepSeekForget(unittest.TestCase):
+    """Forgetting a native DeepSeek session through its resident adapter."""
+    setUp = test_dsh_session_actions.DeepSeekScopedActions.setUp
+    tearDown = test_dsh_session_actions.DeepSeekScopedActions.tearDown
+    serve = test_dsh_session_actions.DeepSeekScopedActions.serve
+    run_action = test_dsh_session_actions.DeepSeekScopedActions.run_action
+
+    def held_task(self):
+        task = overmind(self.env, 'create', '--json', data={'project': 'example', 'prompt': 'x', 'stage': 'Queue'})['task']
+        claim(self.root / 'state', task['uuid'], self.name)
+        return task['ref']
+
+    def test_forgetting_a_session_orphans_its_tasks(self):
+        scoped = self.held_task()
+        self.assertEqual(self.run_action('forget')[1]['status'], 'completed')
+        self.assertFalse(self.binding.exists())
+        self.assertEqual(overmind(self.env, 'show', scoped)['task']['flags'], ['orphaned'])
+        # `hgs kill` forgets it too; this stub stands in for tmux and reaches no server.
+        tmux = self.root / '.local/bin/tmux'
+        tmux.parent.mkdir(parents=True)
+        tmux.write_text('#!/bin/sh\nif [ "$1" = -V ]; then echo "tmux 3.7"; fi\n')
+        tmux.chmod(0o755)
+        self.binding.write_text(json.dumps(self.record))
+        killed = self.held_task()
+        result = subprocess.run([str(HGS), 'kill', self.name], env=self.env, text=True, capture_output=True,
+                                timeout=20, stdin=subprocess.DEVNULL)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertFalse(self.binding.exists())
+        self.assertEqual(overmind(self.env, 'show', killed)['task']['flags'], ['orphaned'])
 
 
 if __name__ == '__main__':

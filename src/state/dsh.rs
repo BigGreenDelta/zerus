@@ -895,7 +895,7 @@ fn checked_request(record: &Value) -> Result<Value> {
 /// dispose, reload or replace a host to implement a mobile scoped action.
 pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, scope: &session_action::Scope) -> Result<()> {
     if !["pause","resume","rename","forget"].contains(&action) {return Err("This native DeepSeek adapter has no archive/fork lifecycle API".into());}
-    let _guard=lock(Some(&root().join("dsh/bindings.lock")))?;
+    let guard=lock(Some(&root().join("dsh/bindings.lock")))?;
     let mut record=binding(name)?;scope.check(&record)?;
     if let Some(new)=new_name {
         let old:Vec<_>=name.split('/').collect();let parts:Vec<_>=new.split('/').collect();
@@ -922,7 +922,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         "pause"=>record["paused"]=json!(true),
         "resume"=>{record["paused"]=json!(false);record["run_id"]=json!(uuid::Uuid::new_v4().to_string());record.as_object_mut().unwrap().remove("permissions_pending");},
         "rename"=>{record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
-        "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
+        "forget"=>{archive::remove_synced(&binding_path(name))?;drop(guard);crate::overmind::session_ended(name);return Ok(());},
         _=>unreachable!(),
     }
     save(&record)?;
@@ -932,7 +932,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
 
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose a DeepSeek session")?;
-    let _guard = if !["inspect", "exists"].contains(&command) {
+    let guard = if !["inspect", "exists"].contains(&command) {
         Some(lock(Some(&root().join("dsh/bindings.lock")))?)
     } else {
         None
@@ -1205,6 +1205,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 json!({"sessionId":record["conversation_id"]}),
             )?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            drop(guard);
+            crate::overmind::session_ended(name);
         }
         "exists" => return Ok(0),
         _ => {

@@ -228,11 +228,17 @@ a newer version keeps the event, shows the task read-only and refuses to write
 to it. The fold never treats an origin as a machine: a session rename applies
 only when its actor's machine is the renamed session's machine.
 
+Before the first release, how existing kinds fold may still change within
+version 1, since no released machine folds them yet: `claim`, `unclaim`,
+`return` and `decompose` now also clear `orphaned`. After the release such a
+change needs a new event version.
+
 ### Who writes what
 
 Any machine writes task edits, transitions allowed to its actor and journal
 entries. **Only the machine hosting a session writes the `claim` that hands a
-task to that session**, together with `[sent]`. Two machines can therefore
+task to that session**, together with `[sent]`, and flags the session's tasks
+`orphaned` when the session ends. Two machines can therefore
 collide only by claiming the same task at once. With manual sending that needs
 two people pressing Send within the sync delay; stage 2 adds a guard for pool
 claims by the autopilot.
@@ -441,8 +447,7 @@ receives it as a queued message. `review-send`, `rework-send` and `answer`
 follow the same path with their templates. `hgs send`'s request schema does not
 change.
 
-Deferred: the `orphaned` flag for tasks whose assignee session was terminated or
-archived (tracked in Beads), and the rename-ordering question `zerus-89h.2.4`.
+Deferred: the rename-ordering question `zerus-89h.2.4`.
 
 ## Part 6. Desktop GUI
 
@@ -564,7 +569,7 @@ payloads never contain task content.
 | Delivery failed without a receipt | `[unclaim]`, back to Queue, reason in the journal. |
 | Delivery uncertain | Stays in Design with `delivery_uncertain`; human resolves. |
 | Host's answer lost after it may have acted | `delivery_unknown`; the person checks the task before sending again. |
-| Assignee session terminated or archived | `orphaned` flag; human returns the task to Queue. |
+| Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag. |
 | Session renamed | `session_renamed` event inside the rename; pins and assignee follow. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |
 | Cache corrupted or schema changed | Rebuilt from `events`. |

@@ -1389,7 +1389,13 @@ read-only and refuses changes until hgs is updated.
 
 Tasks are referenced by `om-` plus at least five characters, or by UUID. A
 reference grows when needed to stay unambiguous. Pins, assignees and reviewers
-follow a session when it is renamed on its machine.
+follow a session when it is renamed on its machine. When a session stops taking
+input for good on its machine (it is archived, also after the user quits its
+agent; terminated; forgotten or killed), the tasks it holds in an active or
+needs-human stage get the flag `orphaned`. The session command never fails
+because of Overmind and waits for it at most about a second; pausing orphans
+nothing. Moving the task back to Queue clears the flag, as does any other change
+of assignee.
 
 Agents in Zerus sessions use their own commands (`mine`, `show`, `comment`,
 `advance`, `call-human`, `return`, `decompose`, `file`, `attach`, `review`).

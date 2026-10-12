@@ -361,6 +361,12 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
         }
         Action::Move => task.journal("[moved]", format!("{from} -> {to}"), event),
     }
+    // `orphaned` describes the assignee, so it goes when the assignee changes.
+    // Changed within version 1 before the first release; see the spec's
+    // Compatibility section.
+    if matches!(p.action, Action::Claim | Action::Unclaim | Action::Return | Action::Decompose) {
+        task.flags.remove("orphaned");
+    }
     if p.action != Action::Answer && wf.role(&from) == Some(Role::NeedsHuman) {
         task.resume_stage.clear();
     }
@@ -1033,6 +1039,28 @@ mod tests {
         let approve = transition(A, 6, 6, human(), &review.id, "approve", "Review", json!({"report": "r"}), Value::Null);
         let task = run(&[c, claim, spec, review, epic, approve.clone()]);
         assert_eq!(task.rejections[&approve.id].code, "epic");
+    }
+
+    #[test]
+    fn a_change_of_assignee_clears_the_orphaned_flag() {
+        let (c, claim) = claimed();
+        let orphan = |seq: u64| ev(A, seq, seq, human(), "flag_set", "", json!({"flag": "orphaned", "value": true}));
+        let flags = |events: &[Event]| run(events).flags.into_iter().collect::<Vec<_>>();
+        assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3)]), ["orphaned"]);
+        // Moves keep the assignee and the flag; so does a refused unclaim.
+        let park = transition(A, 4, 4, human(), &claim.id, "move", "Icebox", json!({}), Value::Null);
+        assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3), park]), ["orphaned"]);
+        let stale = transition(A, 4, 4, human(), &c.id, "unclaim", "Queue", json!({}), Value::Null);
+        assert_eq!(flags(&[c.clone(), claim.clone(), orphan(3), stale]), ["orphaned"]);
+        let unclaim = transition(A, 4, 4, human(), &claim.id, "unclaim", "Queue", json!({}), Value::Null);
+        let task = run(&[c.clone(), claim.clone(), orphan(3), unclaim.clone()]);
+        assert_eq!((task.stage.as_str(), task.assignee, task.flags.len()), ("Queue", None, 0));
+        // A flag that arrives after the unclaim is cleared by the next claim.
+        let again = transition(A, 6, 6, human(), &unclaim.id, "claim", "Design", json!({}), session("w2"));
+        let task = run(&[c.clone(), claim.clone(), unclaim.clone(), orphan(5), again]);
+        assert_eq!((task.assignee.unwrap().name.as_str(), task.flags.len()), ("w2", 0));
+        let back = transition(A, 4, 4, agent("w1"), &claim.id, "return", "Backlog", json!({"reason": "blocked"}), Value::Null);
+        assert_eq!(flags(&[c, claim, orphan(3), back]), Vec::<String>::new());
     }
 
     #[test]

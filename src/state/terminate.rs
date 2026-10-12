@@ -5,6 +5,15 @@ use std::time::{Duration, Instant};
 pub(super) fn dispatch(args: &[String], dry: bool) -> Result<i32> { dispatch_scoped(args,dry,None,false) }
 
 pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session_action::Scope>, forget: bool) -> Result<i32> {
+    let code = stop(args, dry, scope, forget)?;
+    // Hooks share the state lock, so Overmind hears of the end after it.
+    if !dry {
+        crate::overmind::session_ended(&args[0]);
+    }
+    Ok(code)
+}
+
+fn stop(args: &[String], dry: bool, scope: Option<&session_action::Scope>, forget: bool) -> Result<i32> {
     let (name, expected_run) = match args {
         [name] => (name.as_str(), None),
         [name, flag, run] if flag == "--expected-run-id" && !run.is_empty() => {

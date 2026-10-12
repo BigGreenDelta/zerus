@@ -118,9 +118,19 @@ pub(super) fn reconcile() -> Result<()> {
     if !root().exists() {
         return Ok(());
     }
+    // Hooks share the state lock, so Overmind hears of the ends after it.
+    for name in reconcile_locked()? {
+        crate::overmind::session_ended(&name);
+    }
+    Ok(())
+}
+
+/// The names of the sessions archived now.
+fn reconcile_locked() -> Result<Vec<String>> {
     let _guard = lock(None)?;
     let snapshot = live()?;
     let archived = records()?;
+    let mut ended = Vec::new();
     for record in super::storage::records()? {
         if snapshot.contains_key(string(&record, "name"))
             || process_alive(&record)
@@ -132,6 +142,7 @@ pub(super) fn reconcile() -> Result<()> {
         }
         if equivalent(&record, &archived) {
             save(&record)?;
+            ended.push(string(&record, "name").to_owned());
             continue;
         }
         let explicit_claude = string(&record, "agent") == "claude"
@@ -146,14 +157,24 @@ pub(super) fn reconcile() -> Result<()> {
             && known_exit(&record);
         if explicit_claude || confirmed_supervisor {
             save(&record)?;
+            ended.push(string(&record, "name").to_owned());
         }
     }
-    Ok(())
+    Ok(ended)
 }
 
 pub(super) fn manual(name: &str, dry: bool) -> Result<i32> { manual_scoped(name,dry,None) }
 
 pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
+    // Hooks share the state lock, so Overmind hears of the end after it.
+    if archive_stopped(name, dry, scope)? {
+        crate::overmind::session_ended(name);
+    }
+    Ok(0)
+}
+
+/// Whether the stopped session was archived.
+fn archive_stopped(name: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<bool> {
     let _guard = lock(None)?;
     if live()?.contains_key(name) {
         return Err(format!(
@@ -170,7 +191,7 @@ pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action
     }
     if dry {
         println!("hgs: would archive {name}");
-        return Ok(0);
+        return Ok(false);
     }
     record["completion_source"] = json!("manual_archive");
     record["completion_reason"] = json!("user_archived");
@@ -178,7 +199,7 @@ pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action
     let id = save(&record)?;
     if let Some(scope)=scope {scope.result(name,string(&record,"run_id"),string(&record,"conversation_id"),Some(&id));}
     else {println!("hgs: archived {name} ({id})");}
-    Ok(0)
+    Ok(true)
 }
 
 pub(super) fn forget(name: &str, id: &str, dry: bool) -> Result<()> { forget_scoped(name,id,dry,None) }

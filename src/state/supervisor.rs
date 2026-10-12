@@ -87,12 +87,23 @@ pub(super) fn wait(child: &mut Child) -> Result<ExitStatus> {
 }
 
 pub(super) fn finish(name: &str, run_id: &str, child_id: u32, status: ExitStatus) -> Result<()> {
+    // A clean exit is the user quitting the agent. Hooks share the state lock,
+    // so Overmind hears of the end after it.
+    if let Some(archived) = record_exit(name, run_id, child_id, status)? {
+        crate::overmind::session_ended(&archived);
+    }
+    Ok(())
+}
+
+/// The session's current name when the exit archived it; it may have been
+/// renamed since launch.
+fn record_exit(name: &str, run_id: &str, child_id: u32, status: ExitStatus) -> Result<Option<String>> {
     let _guard = lock(None)?;
     let Some(mut record) = read_run(name, run_id)? else {
-        return Ok(());
+        return Ok(None);
     };
     if record["pid"].as_u64() != Some(child_id.into()) {
-        return Ok(());
+        return Ok(None);
     }
     let signal = SHUTDOWN_SIGNAL.load(Ordering::SeqCst);
     record["exit_code"] = json!(status.code());
@@ -121,10 +132,11 @@ pub(super) fn finish(name: &str, run_id: &str, child_id: u32, status: ExitStatus
     });
     write(&mut record)?;
     if archive::failed_restore(&record)? {
-        return Ok(());
+        return Ok(None);
     }
-    if clean {
-        archive::save(&record)?;
+    if !clean {
+        return Ok(None);
     }
-    Ok(())
+    archive::save(&record)?;
+    Ok(Some(string(&record, "name").to_owned()))
 }
