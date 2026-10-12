@@ -128,10 +128,13 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   Missing or malformed information means away. `decision` candidates come from
   the gateway's own snapshot only, from `mobile_overmind.decisions` (Your
   Call): of its first 50 entries, those with a canonical UUID `task` and a
-  1–128 character `signature`, first entry per task. A new or re-signed entry
-  is an ordinary `decision` event and a candidate in the slot
-  `overmind:<task>`, which captures the signature; leaving the list or a
-  changed signature resolves it. A snapshot without the digest is missing
+  1–128 character `signature` without control characters, first entry per
+  task. A new or re-signed entry is an ordinary `decision` event and a
+  candidate in the slot `overmind:<task>`, which captures the signature;
+  leaving the list or a changed signature resolves it. Only the gateway's own
+  snapshot (its local route) raises or resolves decisions: another gateway's
+  peer heartbeat for the same computer never does, and delivery reads the
+  local route's snapshot for them. A snapshot without the digest is missing
   data: it raises nothing against a digest, and keeps held decisions, unless
   its valid capabilities (protocol version 1 with an `operations` array) no
   longer list `overmind_read`, which drops them. This relies on the connector

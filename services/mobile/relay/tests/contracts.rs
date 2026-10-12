@@ -2775,3 +2775,82 @@ async fn decision_candidates_drop_when_the_gateway_stops_serving_overmind() {
     assert_eq!(f.alert_count().await, 0);
     f.close().await;
 }
+
+#[tokio::test]
+async fn a_peer_heartbeat_never_resolves_a_gateway_s_own_decisions() {
+    let f = Fixture::new().await;
+    // The other computer is a gateway of its own, and the fixture gateway also
+    // reaches it as a peer (every enabled hgs peer is a mobile route).
+    let other = f
+        .store
+        .node(&f.node.workspace, "Other computer")
+        .await
+        .unwrap();
+    let other = f
+        .store
+        .authenticate(s(&other, "node_token"), Role::Node)
+        .await
+        .unwrap();
+    let (root, machine, route) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut serving = advertising(&["overmind_read", "overmind_write"]);
+    serving["mobile_capabilities"]["features"] = json!(["gateway_one_hop"]);
+    let task = Uuid::new_v4().to_string();
+    let slot = format!("overmind:{task}");
+    let waiting = json!([{"task":task,"project":"example","title":"Pick a database","signature":signature('1')}]);
+    for items in [json!([]), waiting] {
+        let mut own = serving.clone();
+        own["mobile_overmind"] = json!({"schema":1,"rev":"1","projects":{},"decisions":items});
+        let body =
+            json!({"snapshot":own,"machine_id":machine,"peers":[],"presence":presence(1.0, None)});
+        f.store
+            .heartbeat(&other, &body, &canonical(&own).unwrap())
+            .await
+            .unwrap();
+    }
+    let held = || f.count("alert_candidates WHERE kind='decision'");
+    assert_eq!((held().await, f.alert_count().await), (1, 0));
+    // The peer view of that computer has valid capabilities without the
+    // gateway operations, which only its own gateway serves.
+    let peers = json!([{"route_id":route,"machine_id":machine,"name":"Other","online":true}]);
+    gateway_beat(&f, &root, &peers, &serving).await;
+    peer_beat(&f, &route, &machine, &advertising(&["send"]), &Value::Null).await;
+    assert_eq!((held().await, f.alert_count().await), (1, 0));
+    // The owner left; delivery reads the computer's own snapshot, not the
+    // newer peer view, so the held decision is delivered.
+    let away = now() - 1000.0;
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET presence_at=?,presence_until=? WHERE id=?",
+            args![away, away, &other.id],
+        )
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec("UPDATE alert_candidates SET next_at=0", &[])
+        .await
+        .unwrap();
+    f.store.maintain(false).await.unwrap();
+    let alerts = f.events_of("alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        (
+            alerts[0]["alert_kind"].as_str(),
+            alerts[0]["session"].as_str(),
+            alerts[0]["computer_id"].as_str()
+        ),
+        (
+            Some("decision"),
+            Some(slot.as_str()),
+            Some(other.id.as_str())
+        )
+    );
+    assert_eq!(held().await, 0);
+    f.check_accounting().await;
+    f.close().await;
+}

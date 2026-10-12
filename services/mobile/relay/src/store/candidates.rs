@@ -29,6 +29,15 @@ impl AlertPlan {
 fn text(v: &Option<String>) -> Arg<'_> {
     v.as_deref().map_or(Arg::Null, Arg::Text)
 }
+/// A snapshot just committed for one computer. `peer`: another gateway's
+/// peer route carried it, so it is not the computer's own snapshot, which
+/// alone raises and resolves `decision` candidates.
+#[derive(Clone, Copy)]
+pub(super) struct Accepted<'a> {
+    pub computer: &'a str,
+    pub snapshot: &'a Value,
+    pub peer: bool,
+}
 impl Store {
     /// Records derived events of one computer. The caller holds event locks,
     /// which include this workspace, so the cap is transactional.
@@ -60,9 +69,16 @@ impl Store {
         }
         Ok(())
     }
-    /// `None` for a revoked or unknown computer; `Some(Null)` when no route
-    /// stores a readable snapshot, which is missing data.
-    async fn computer_snapshot(&self, t: &mut Tx, computer: &str) -> Result<Option<Value>> {
+    /// The most recently seen snapshot of a computer, over its routes or, with
+    /// `local`, only its own (`r.local=1`), which alone carries its decisions.
+    /// `None` for a revoked or unknown computer; `Some(Null)` when no such
+    /// route stores a readable snapshot, which is missing data.
+    async fn computer_snapshot(
+        &self,
+        t: &mut Tx,
+        computer: &str,
+        local: bool,
+    ) -> Result<Option<Value>> {
         if t.one(
             "SELECT id FROM computers WHERE id=? AND revoked=0",
             args![computer],
@@ -72,7 +88,8 @@ impl Store {
         {
             return Ok(None);
         }
-        let routes=t.all("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS seen FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.computer_id=? AND r.active=1 AND n.revoked=0",args![computer]).await?;
+        let own = if local { " AND r.local=1" } else { "" };
+        let routes=t.all(&format!("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS seen FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.computer_id=? AND r.active=1 AND n.revoked=0{own}"),args![computer]).await?;
         let latest = routes
             .iter()
             .filter(|r| r["snapshot"].is_string())
@@ -84,12 +101,13 @@ impl Store {
         ))
     }
     /// Plans one workspace. `accepted` is a snapshot just committed for one
-    /// computer; `due` limits maintenance to candidates whose recheck came.
+    /// computer, and whether a peer route carried it; `due` limits
+    /// maintenance to candidates whose recheck came.
     async fn alert_plan(
         &self,
         t: &mut Tx,
         w: &str,
-        accepted: Option<(&str, &Value)>,
+        accepted: Option<Accepted<'_>>,
         due: Option<f64>,
         at: f64,
     ) -> Result<AlertPlan> {
@@ -109,26 +127,34 @@ impl Store {
         let decision = alerts::decide(delivery, alerts::away_since(&machines), at);
         let mut resolved = vec![false; rows.len()];
         let mut checked = vec![false; rows.len()];
-        if let Some((id, snapshot)) = accepted {
+        if let Some(Accepted {
+            computer,
+            snapshot,
+            peer,
+        }) = accepted
+        {
             for (k, r) in rows.iter().enumerate() {
-                if s(r, "computer_id") == id {
+                // Another gateway's view of the computer never resolves its decisions.
+                if s(r, "computer_id") == computer && !(peer && s(r, "kind") == alerts::DECISION) {
                     checked[k] = true;
                     resolved[k] = Candidate::from_row(r).resolved_in(snapshot);
                 }
             }
         }
         if decision == Decision::Deliver {
-            // Other stored snapshots are parsed only before a delivery, one at a time.
-            let computers: BTreeSet<&str> = rows
+            // Other stored snapshots are parsed only before a delivery, one at a
+            // time; decisions are read from the computer's own route only.
+            let is_decision = |r: &Value| s(r, "kind") == alerts::DECISION;
+            let computers: BTreeSet<(&str, bool)> = rows
                 .iter()
                 .zip(&checked)
                 .filter(|(_, done)| !**done)
-                .map(|(r, _)| s(r, "computer_id"))
+                .map(|(r, _)| (s(r, "computer_id"), is_decision(r)))
                 .collect();
-            for computer in computers {
-                let snapshot = self.computer_snapshot(t, computer).await?;
+            for (computer, local) in computers {
+                let snapshot = self.computer_snapshot(t, computer, local).await?;
                 for (k, r) in rows.iter().enumerate() {
-                    if checked[k] || s(r, "computer_id") != computer {
+                    if checked[k] || s(r, "computer_id") != computer || is_decision(r) != local {
                         continue;
                     }
                     match &snapshot {
@@ -211,7 +237,7 @@ impl Store {
     pub(super) async fn evaluate_workspace(
         &self,
         w: &str,
-        accepted: Option<(&str, &Value)>,
+        accepted: Option<Accepted<'_>>,
     ) -> Result<()> {
         let at = now();
         let mut t = self.db.begin().await?;

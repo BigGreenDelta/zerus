@@ -1,4 +1,4 @@
-use super::*;
+use super::{candidates::Accepted, *};
 use crate::{
     alerts::{Candidate, Delivery, Presence},
     db::{Arg, Tx},
@@ -188,9 +188,14 @@ impl Store {
                 t.commit().await?;
             }
             // The snapshot is accepted; maintenance retries a failed evaluation.
+            let accepted = Accepted {
+                computer: &computer,
+                snapshot,
+                peer: peer.is_some(),
+            };
             if held
                 && self
-                    .evaluate_workspace(&c.workspace, Some((computer.as_str(), snapshot)))
+                    .evaluate_workspace(&c.workspace, Some(accepted))
                     .await
                     .is_err()
             {
