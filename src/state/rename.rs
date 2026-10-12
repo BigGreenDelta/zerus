@@ -94,7 +94,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     let old = &args[0];
     let new = &args[1];
     validate(old, new)?;
-    let _guard = lock(None)?;
+    let guard = lock(None)?;
     let snapshot = live()?;
     if archive_id.is_none()
         && old != new
@@ -178,6 +178,11 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         "hgs: {}renamed {old} to {new}",
         if dry { "would have " } else { "" }
     );}
+    // Hooks share the state lock, so Overmind records the rename after it.
+    drop(guard);
+    if old != new && !dry {
+        crate::overmind::session_renamed(old, new);
+    }
     Ok(0)
 }
 

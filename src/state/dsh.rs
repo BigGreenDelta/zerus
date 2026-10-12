@@ -926,7 +926,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         _=>unreachable!(),
     }
     save(&record)?;
-    if action=="rename" && new_name!=Some(name) {archive::remove_synced(&binding_path(name))?;}
+    if action=="rename" && new_name!=Some(name) {archive::remove_synced(&binding_path(name))?;crate::overmind::session_renamed(name,new_name.unwrap());}
     scope.result_record(&record);Ok(())
 }
 
@@ -1189,6 +1189,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             recovery::rename_job(name,new,string(&record,"run_id"))?;
             save(&record)?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            crate::overmind::session_renamed(name, new);
             println!(
                 "{}",
                 json!({"old_name":name,"name":new,"new_name":new,"run_id":record["run_id"],"conversation_id":record["conversation_id"]})

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Overmind tasks through the real CLI with isolated state."""
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
@@ -125,6 +127,24 @@ class Overmind(unittest.TestCase):
         created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})
         error = self.refused('advance', '--json', data={'task': created['task']['ref'], 'to': 'Build', 'spec': 's'})
         self.assertEqual(error['code'], 'agent_only')
+
+    def rename(self, old, new):
+        self.state.mkdir(mode=0o700, exist_ok=True)
+        binding = {'version': 1, 'name': old, 'agent': 'codex', 'run_id': str(uuid.uuid4())}
+        (self.state / f'{hashlib.sha256(old.encode()).hexdigest()}.json').write_text(json.dumps(binding))
+        result = subprocess.run([str(HGS), 'rename', old, new], env=self.env, text=True,
+                                capture_output=True, timeout=20)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+
+    def test_pins_follow_a_renamed_session(self):
+        pinned = {'machine': '', 'name': 'codex/demo/old'}
+        ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'pinned': pinned})['task']['ref']
+        self.rename('codex/demo/old', 'codex/demo/new')
+        self.assertEqual(self.ok('show', ref)['task']['pinned']['name'], 'codex/demo/new')
+
+    def test_renames_create_no_store(self):
+        self.rename('codex/demo/old', 'codex/demo/new')
+        self.assertFalse((self.state / 'overmind').exists())
 
 
 if __name__ == '__main__':

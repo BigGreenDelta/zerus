@@ -9,7 +9,9 @@ mod identity;
 mod model;
 mod rank;
 mod refs;
+mod sessions;
 mod store;
 mod workflow;
 
 pub use cli::dispatch;
+pub use sessions::session_renamed;

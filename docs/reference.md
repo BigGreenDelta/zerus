@@ -1388,7 +1388,8 @@ refused. A task that holds events from a newer version of hgs is shown
 read-only and refuses changes until hgs is updated.
 
 Tasks are referenced by `om-` plus at least five characters, or by UUID. A
-reference grows when needed to stay unambiguous.
+reference grows when needed to stay unambiguous. Pins, assignees and reviewers
+follow a session when it is renamed on its machine.
 
 Agents in Zerus sessions use their own commands (`mine`, `show`, `comment`,
 `advance`, `call-human`, `return`, `decompose`, `file`, `attach`, `review`).
