@@ -155,6 +155,14 @@ fn checked_record(name: &str, request: &Request) -> Result<Value> {
     Ok(record)
 }
 
+/// The checks `submit` makes before it writes anything, for callers that must
+/// refuse before recording their own intent. `submit` checks again.
+pub(super) fn preflight(name: &str, run_id: &str, conversation_id: &str) -> Result<()> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    compact_context::check_continuation(&record, "")?;
+    checked_terminal(&record, true)
+}
+
 pub(super) fn checked_ready(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
     checked_input(name, run_id, conversation_id, false)
 }

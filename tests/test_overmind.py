@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Overmind tasks through the real CLI with isolated state."""
+import base64
 import hashlib
 import json
 import os
@@ -173,6 +174,7 @@ class AgentSession(unittest.TestCase):
     tmux = fixtures.InputTransport.tmux
     wait_for = fixtures.InputTransport.wait_for
     write_record = fixtures.InputTransport.write_record
+    received = fixtures.InputTransport.received
 
     def overmind(self, *args, data=None, agent=True, env=None):
         env = dict(env or self.env)
@@ -187,20 +189,85 @@ class AgentSession(unittest.TestCase):
         self.assertEqual(code, 0, body)
         return body
 
-    def claim(self):
+    def claim(self, request_id=''):
         """Claims the only task for this session; plan 1a has no command for it."""
         db = sqlite3.connect(self.state / 'overmind/overmind.sqlite3')
         with db:
             created = json.loads(db.execute("SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])
             seq, lamport = db.execute('SELECT MAX(seq) + 1, MAX(lamport) + 1 FROM events').fetchone()
             event = dict(created, id=str(uuid.uuid4()), seq=seq, lamport=lamport, kind='transition',
-                         base=created['id'], request_id='',
+                         base=created['id'], request_id=request_id,
                          payload={'action': 'claim', 'to': 'Design', 'fields': {},
                                   'session': {'machine': created['origin'], 'name': self.name}})
             db.execute('INSERT INTO events(origin, seq, id, lamport, task, project, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                        (event['origin'], seq, event['id'], lamport, event['task'], event['project'], event['kind'],
                         json.dumps(event)))
         db.close()
+
+    def person(self, *args, data=None):
+        return self.ok(*args, data=data, agent=False)
+
+    def task(self, **fields):
+        return self.person('create', '--json', data={'project': 'demo', 'prompt': 'Fix the drafts', 'stage': 'Queue', **fields})['task']['ref']
+
+    def send(self, ref, **fields):
+        return self.overmind('send', '--json', data={'task': ref, 'session': {'name': self.name}, **fields}, agent=False)
+
+    def test_send_claims_and_types_the_dispatch_text(self):
+        image = base64.b64encode(b'\x89PNG fixture').decode()
+        ref = self.task(attachments=[{'name': 'shot.png', 'mime': 'image/png', 'data_base64': image}])
+        code, body = self.send(ref)
+        self.assertEqual((code, body['delivery']), (0, 'sent'), body)
+        self.assertEqual((body['task']['stage'], body['task']['assignee']['name']), ('Design', self.name))
+        self.assertEqual([j['marker'] for j in body['task']['journal']][-2:], ['[claim]', '[sent]'])
+        self.wait_for(lambda: b'\r' in self.received())
+        typed = self.received()
+        self.assertIn(f'[Overmind {ref}] Fix the drafts'.encode(), typed)
+        self.assertIn(b'Inspect the attached image', typed)
+
+    def test_send_retry_with_the_same_request_never_types_twice(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        first = self.send(ref, request_id=request_id)
+        self.wait_for(lambda: b'\r' in self.received())
+        self.assertEqual(self.send(ref, request_id=request_id), first)
+        self.assertEqual(self.received().count(b'[Overmind '), 1)
+
+    def test_an_interrupted_send_resumes_its_claim(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.claim(request_id=request_id)  # as if hgs stopped right after the claim
+        code, body = self.send(ref, request_id=request_id)
+        self.assertEqual((code, body['delivery']), (0, 'sent'), body)
+        markers = [j['marker'] for j in body['task']['journal']]
+        self.assertEqual((markers.count('[claim]'), markers.count('[sent]')), (1, 1))
+
+    def test_an_unready_session_writes_nothing(self):
+        ref = self.task()
+        self.record['expected_id'] = 'pending'
+        self.write_record()
+        code, body = self.send(ref)
+        self.assertEqual((code, body['error']['code']), (1, 'session_unavailable'))
+        task = self.person('show', ref)['task']
+        self.assertEqual((task['stage'], [j['marker'] for j in task['journal']]), ('Queue', ['[created]']))
+        self.assertEqual(self.received(), b'')
+
+    def test_a_busy_agent_and_a_second_task_need_confirmation(self):
+        first, second = self.task(), self.task()
+        self.record['activity'] = 'busy'
+        self.write_record()
+        code, body = self.send(first)
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'agent_busy', 'confirm'))
+        self.assertEqual(self.send(first, confirm=['agent_busy'])[1]['delivery'], 'sent')
+        code, body = self.send(second, confirm=['agent_busy'])
+        self.assertEqual(body['error']['code'], 'wip_exceeded')
+
+    def test_send_refuses_an_oversized_text_before_claiming(self):
+        self.person('templates', 'set', '--json', data={'project': 'demo', 'templates': {'dispatch': '{task.prompt}{task.prompt}'}})
+        ref = self.task(prompt='x' * (40 * 1024))
+        code, body = self.send(ref)
+        self.assertEqual((code, body['error']['code']), (1, 'invalid_template'))
+        self.assertEqual(self.person('show', ref)['task']['stage'], 'Queue')
 
     def commit(self, repo):
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}

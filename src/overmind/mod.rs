@@ -4,6 +4,7 @@ mod agent;
 mod blobs;
 mod cli;
 mod commands;
+mod deliver;
 mod fold;
 mod identity;
 mod model;
@@ -11,8 +12,6 @@ mod rank;
 mod refs;
 mod sessions;
 mod store;
-// Rendering is consumed by the sending code of the next tasks.
-#[allow(dead_code)]
 mod templates;
 mod workflow;
 

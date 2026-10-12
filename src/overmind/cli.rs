@@ -17,7 +17,9 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   create --json {project, prompt, title?, stage?, priority?, labels?, pinned?, attachments?, parent?, follows?}
   edit --json {task, title?, prompt?, priority?, attachments?}
   move --json {task, to}  |  done --json {task}  |  reopen --json {task}
-  reorder --json {task, before?}  |  pin --json {task, session?}
+  reorder --json {task, before?}  |  pin --json {task, session?}  |  unpin --json {task}
+  send --json {task, session: {machine?, name}, confirm?: [codes]}   claim and type the task into a session
+  resolve-delivery --json {task, delivered: true|false}
   label --json {task, label, present}  |  link --json {task, relation, target, present}
   comment --json {task, text}  |  delete --json {task}
   workflow get --json {project}  |  workflow set --json {project, workflow, moves?}
@@ -108,6 +110,9 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("reopen", []) => commands::reopen(&mut ctx, request)?,
         ("reorder", []) => commands::reorder(&mut ctx, request)?,
         ("pin", []) => commands::pin(&mut ctx, request)?,
+        ("unpin", []) => commands::unpin(&mut ctx, request)?,
+        ("send", []) => super::deliver::send(&mut ctx, request)?,
+        ("resolve-delivery", []) => super::deliver::resolve_delivery(&mut ctx, request)?,
         ("label", []) => commands::label(&mut ctx, request)?,
         ("link", []) => commands::link(&mut ctx, request)?,
         ("comment", []) => commands::comment(&mut ctx, request)?,

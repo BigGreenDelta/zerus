@@ -137,6 +137,40 @@ pub(crate) fn caller_session() -> Result<Option<CallerSession>> {
     Ok(Some(CallerSession { name: string(&record, "name").to_owned(), run_id, cwd: string(&record, "cwd").to_owned() }))
 }
 
+/// A session on this machine as Overmind needs it to deliver a task.
+pub(crate) struct DeliveryTarget {
+    pub run_id: String,
+    pub conversation_id: String,
+    /// The agent is working; the message waits in its own queue.
+    pub busy: bool,
+}
+
+/// The tracked session `name` on this machine, or None when there is none.
+pub(crate) fn delivery_target(name: &str) -> Result<Option<DeliveryTarget>> {
+    if dsh::exists(name) {
+        return Err("Overmind cannot type into DeepSeek sessions yet; open the session and send the prompt yourself".into());
+    }
+    if !record_path(name).exists() {
+        return Ok(None);
+    }
+    let record = read(name)?;
+    Ok(Some(DeliveryTarget {
+        run_id: string(&record, "run_id").to_owned(),
+        conversation_id: string(&record, "conversation_id").to_owned(),
+        busy: string(&record, "activity") == "busy",
+    }))
+}
+
+/// Refuses when `hgs send` would refuse now; writes nothing.
+pub(crate) fn delivery_preflight(name: &str, target: &DeliveryTarget) -> Result<()> {
+    input::preflight(name, &target.run_id, &target.conversation_id)
+}
+
+/// Types `request` (the `hgs send` JSON) into the session exactly like `hgs send`.
+pub(crate) fn deliver_input(name: &str, request: &Value) -> Result<Value> {
+    input::submit(name, request.to_string().as_bytes(), None)
+}
+
 pub(super) fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }

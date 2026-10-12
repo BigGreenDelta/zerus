@@ -110,6 +110,33 @@ fn request_digest(command: &str, request: &Value) -> String {
     format!("{:x}", Sha256::digest(keyed.to_string().as_bytes()))
 }
 
+/// The stored result of an earlier request with this `request_id`; a reused ID
+/// with another command or body is refused.
+pub fn replay(tx: &Tx, command: &str, request: &Value) -> Result<Option<Value>> {
+    let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default();
+    if request_id.is_empty() {
+        return Ok(None);
+    }
+    if uuid::Uuid::parse_str(request_id).is_err() {
+        return refuse("invalid_request", "request_id must be a UUID");
+    }
+    match tx.receipt(request_id)? {
+        Some((stored, _)) if stored != request_digest(command, request) => {
+            refuse("request_reused", "this request_id was already used for a different request")
+        }
+        Some((_, result)) => Ok(Some(result)),
+        None => Ok(None),
+    }
+}
+
+pub fn remember(tx: &mut Tx, command: &str, request: &Value, result: &Value) -> Result<()> {
+    let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default();
+    if !request_id.is_empty() {
+        tx.put_receipt(request_id, &request_digest(command, request), result)?;
+    }
+    Ok(())
+}
+
 /// Runs a write with receipt replay when the request carries a `request_id`.
 /// `command` is the CLI command name.
 pub fn write(
@@ -118,25 +145,13 @@ pub fn write(
     request: &Value,
     f: impl FnOnce(&mut Tx, &Actor) -> Result<Value>,
 ) -> Result<Value> {
-    let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
-    if !request_id.is_empty() && uuid::Uuid::parse_str(&request_id).is_err() {
-        return refuse("invalid_request", "request_id must be a UUID");
-    }
-    let digest = request_digest(command, request);
     let actor = ctx.actor.clone();
     ctx.store.write(|tx| {
-        if !request_id.is_empty() {
-            if let Some((stored, result)) = tx.receipt(&request_id)? {
-                if stored != digest {
-                    return refuse("request_reused", "this request_id was already used for a different request");
-                }
-                return Ok(result);
-            }
+        if let Some(result) = replay(tx, command, request)? {
+            return Ok(result);
         }
         let result = f(tx, &actor)?;
-        if !request_id.is_empty() {
-            tx.put_receipt(&request_id, &digest, &result)?;
-        }
+        remember(tx, command, request, &result)?;
         Ok(result)
     })
 }
@@ -237,7 +252,7 @@ pub fn transition(
     )
 }
 
-fn simple(tx: &mut Tx, actor: &Actor, task: &Task, kind: &str, payload: Value, request_id: &str) -> Result<Event> {
+pub fn simple(tx: &mut Tx, actor: &Actor, task: &Task, kind: &str, payload: Value, request_id: &str) -> Result<Event> {
     prove(
         tx,
         Draft {
@@ -272,7 +287,7 @@ pub fn view(task: &Task, reference: &str, full: bool) -> Value {
     out
 }
 
-fn task_result(tx: &Tx, uuid: &str) -> Result<Value> {
+pub fn task_result(tx: &Tx, uuid: &str) -> Result<Value> {
     let task = load(tx, uuid)?;
     Ok(json!({"ok": true, "task": view(&task, &reference(tx, uuid)?, true)}))
 }
@@ -419,7 +434,7 @@ fn task_uuid(request_id: &str) -> String {
 }
 
 /// Validates a session reference and fills in this machine when none is named.
-fn local_session(field: &str, session: Option<SessionRef>, machine: &str) -> Result<Option<SessionRef>, Refusal> {
+pub fn local_session(field: &str, session: Option<SessionRef>, machine: &str) -> Result<Option<SessionRef>, Refusal> {
     let Some(mut session) = session else {
         return Ok(None);
     };
@@ -759,6 +774,25 @@ pub fn pin(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
         simple(tx, actor, &task, "pin_set", json!({"session": session}), &req.request_id)?;
+        task_result(tx, &uuid)
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnpinRequest {
+    #[serde(default)]
+    request_id: String,
+    task: String,
+}
+
+pub fn unpin(ctx: &mut Ctx, request: Value) -> Result<Value> {
+    human_only(&ctx.actor)?;
+    let req: UnpinRequest = parse(&request)?;
+    write(ctx, "unpin", &request, |tx, actor| {
+        let uuid = resolve(tx, &req.task)?;
+        let task = load_writable(tx, &uuid)?;
+        simple(tx, actor, &task, "pin_set", json!({"session": null}), &req.request_id)?;
         task_result(tx, &uuid)
     })
 }
