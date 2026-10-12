@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <optional>
+#include <utility>
 
 #include "AttentionTracker.h"
 #include "FakeCli.h"
@@ -291,9 +293,22 @@ void TestOvermindModel::requestOvermindParsesRepliesAndRefusals()
 void TestOvermindModel::requestsNeverActAsTheTraysSession()
 {
     Fixture f; QVERIFY(f.setUp());
+    // Set for this test only; what the test process had is restored.
     struct Environment {
-        Environment() { qputenv("HGS_SESSION", "codex/demo"); qputenv("HGS_RUN_ID", "run-1"); qputenv("HGS_OVERMIND_PROBE", "kept"); }
-        ~Environment() { qunsetenv("HGS_SESSION"); qunsetenv("HGS_RUN_ID"); qunsetenv("HGS_OVERMIND_PROBE"); }
+        const QList<std::pair<const char *, QByteArray>> values{{"HGS_SESSION", "codex/demo"}, {"HGS_RUN_ID", "run-1"}, {"HGS_OVERMIND_PROBE", "kept"}};
+        QList<std::optional<QByteArray>> saved;
+        Environment()
+        {
+            for (const auto &[name, value] : values) {
+                saved.append(qEnvironmentVariableIsSet(name) ? std::optional<QByteArray>(qgetenv(name)) : std::nullopt);
+                qputenv(name, value);
+            }
+        }
+        ~Environment()
+        {
+            for (qsizetype i = 0; i < values.size(); ++i)
+                saved[i] ? void(qputenv(values[i].first, *saved[i])) : void(qunsetenv(values[i].first));
+        }
     } inherited;
     HgsClient client(FakeCli::program(f.script));
     QSignalSpy ready(&client, &HgsClient::overmindReady);
