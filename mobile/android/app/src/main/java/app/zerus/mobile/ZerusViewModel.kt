@@ -464,6 +464,56 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private data class Presentation(val messages: List<OutgoingMessage>, val events: List<Event>, val questions: List<Question>)
     private val pageCache=ConversationPageCache(application)
     private val historyCache = ConversationCache(application)
+    /** Overmind reads and their encrypted presentation cache; Tasks screens read through it with [overmindTarget]. */
+    val overmind = OvermindRepository(api, OvermindCache.create(application))
+    private val overmindOutbox = OvermindOutbox(overmind, { attachmentStore.payload(it) }) { reduce ->
+        durable(reduce) { current, _ -> runCatching { reduce(current) }.getOrDefault(current) } }
+    private val overmindDevice = OvermindDevice.label(android.os.Build.MODEL).ifEmpty { "Android" }
+    private var overmindFlights by mutableStateOf<Set<String>>(emptySet())
+    val overmindWrites get() = messageState.overmindWrites.map { if (it.requestId !in overmindFlights) it.recover() else it }
+    /** Each gateway's `mobile_overmind` digest, for project badges; a missing digest is unknown, not empty. */
+    var overmindDigests by mutableStateOf<Map<MachineKey, OvermindDigest>>(emptyMap()); private set
+    /** A decision card asked to open this task. The Tasks screen consumes it; without Tasks it is only a refresh. */
+    var overmindOpenRequest by mutableStateOf<OvermindTaskKey?>(null); private set
+    fun consumeOvermindOpen() { overmindOpenRequest = null }
+    fun overmindGateway(connectionId: String): Machine? = if (demo) null else
+        OvermindAccess.gateway(connectionId, machines, relayOperations[connectionId]) { machineOperations[it] }
+    fun overmindTarget(connectionId: String): OvermindGateway? {
+        val machine = overmindGateway(connectionId) ?: return null
+        return connections.find { it.id == connectionId }?.let { OvermindGateway(it, machine.id) }
+    }
+    /** Saves the change before sending it and returns its request_id (the new task's UUID for create), or "" when nothing was saved. */
+    fun submitOvermindWrite(connectionId: String, action: String, request: JSONObject, attachments: List<Attachment> = emptyList(),
+        onSettled: (OvermindWrite) -> Unit = {}): String {
+        if (!storageReady || updateInstallPreparing) { error = "Private storage is not ready. The task was not changed."; return "" }
+        val gateway = overmindTarget(connectionId) ?: run { error = "Tasks are not available for this workspace."; return "" }
+        val write = try { OvermindWrites.create(UUID.randomUUID().toString(), gateway.key, action, request, attachments, overmindDevice, System.currentTimeMillis()) }
+            catch (e: Exception) { error = e.message.orEmpty(); return "" }
+        overmindFlights += write.requestId
+        viewModelScope.launch {
+            try { onSettled(overmindOutbox.submit(gateway, write)) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = "Could not save the task change. It was not sent. ${e.message.orEmpty()}" }
+            finally { overmindFlights -= write.requestId }
+        }
+        return write.requestId
+    }
+    /** Explicit only. The same request_id and payload go to the write's own gateway, so the change is never applied twice. */
+    fun retryOvermindWrite(write: OvermindWrite, onSettled: (OvermindWrite) -> Unit = {}) {
+        if (write.requestId in overmindFlights || !write.retryable || updateInstallPreparing) return
+        val connection = connections.find { it.id == write.connectionId } ?: return
+        overmindFlights += write.requestId
+        viewModelScope.launch {
+            try { onSettled(overmindOutbox.retry(OvermindGateway(connection, write.computerId), write)) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = "The task change could not be retried. ${e.message.orEmpty()}" }
+            finally { overmindFlights -= write.requestId }
+        }
+    }
+    fun reviewOvermindWrite(write: OvermindWrite) {
+        if (write.requestId in overmindFlights) return
+        try { editState { OvermindWrites.review(it, write.requestId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
+    }
     private val frames = LinkedHashMap<String, Frame>(24, 0.75f, true)
     private val inspections = mutableMapOf<String, Pair<Target, Deferred<Frame>>>()
     private var presentationJob: Job? = null
@@ -609,7 +659,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var updateInstallPreparing by mutableStateOf(false); private set
     fun updateInstallReason(): String = UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),
-        deliveryFlights.isNotEmpty() || contextFlights.isNotEmpty() || actionFlights.isNotEmpty(),compactContinuationActive)
+        deliveryFlights.isNotEmpty() || contextFlights.isNotEmpty() || actionFlights.isNotEmpty() || overmindFlights.isNotEmpty(),compactContinuationActive)
     suspend fun prepareUpdateInstall() {
         check(!updateInstallPreparing && updateInstallReason().isBlank()) { updateInstallReason().ifBlank { "Update preparation is already running." } }
         updateInstallPreparing = true
@@ -1601,7 +1651,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             inspections.values.filter { it.first.connectionId == connection.id }.forEach { it.second.cancel() }
             inspections.entries.removeAll { it.value.first.connectionId == connection.id }
             frames.entries.removeAll { it.value.target.connectionId == connection.id }
-            editState { state -> state.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id }) }
+            editState { state -> state.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id },
+                overmindWrites=state.overmindWrites.filterNot { it.connectionId == connection.id }) }
             val removedReadKeys=readState.records.filter { it.target.connectionId==connection.id }.map { ConversationReadPolicies.key(it.target) }.toSet()
             readWriter?.let { readState=it.edit { state -> state.copy(records=state.records.filterNot { it.target.connectionId == connection.id }) } };flushDrafts()
             historyWindows.entries.removeAll { it.value.target.connectionId==connection.id }
@@ -1609,6 +1660,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
+            runCatching { overmind.purgeWorkspace(connection.id) }
+            overmindDigests = overmindDigests.filterKeys { it.connectionId != connection.id }
+            if (overmindOpenRequest?.connectionId == connection.id) overmindOpenRequest = null
             attachments.clear()
             sessions = sessions.filterNot { it.target.connectionId == connection.id }
             projects = projects.filterNot { it.key.connectionId == connection.id }
@@ -1639,6 +1693,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val newSessions = mutableListOf<Session>(); val newMachines = mutableListOf<Machine>(); val newAccounts=mutableListOf<AccountCatalog>()
         val successfulConnections=mutableSetOf<String>()
         val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
+        val newDigests = mutableMapOf<MachineKey, OvermindDigest>()
         try {
             for (connection in originalConnections) {
                 try {
@@ -1659,6 +1714,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         newOperations[MachineKey(connection.id, raw.getString("id"))] = if (capabilities?.optInt("protocol_version") == 1)
                             capabilities.optJSONArray("operations")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty() else emptySet()
                         machineFeatures=machineFeatures + (MachineKey(connection.id,raw.getString("id")) to capabilities?.optJSONArray("features")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
+                        OvermindDigests.parse(raw)?.let { newDigests[MachineKey(connection.id, raw.getString("id"))] = it }
                         newMachines += MachineCatalog.parse(connection.id, raw)
                         connectionSessions += NativeParser.sessions(connection, raw)
                     }
@@ -1678,6 +1734,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             newProjects += projects.filter { it.key.connectionId in unavailable }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
+            overmindDigests = newDigests + overmindDigests.filterKeys { it.connectionId in unavailable }
             refreshReadAttention();adoptSharedReads()
             val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }
@@ -1786,6 +1843,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun openFromNotification(connection: String, computer: String, session: String) {
+        // A decision card names a task, never a session. A stale or malformed one, or one without Tasks, only refreshes.
+        if (session.startsWith(OvermindDigests.SLOT)) {
+            overmindOpenRequest = OvermindDigests.task(session)?.let { OvermindTaskKey(connection, computer, it) }; refresh(); return
+        }
         pendingNotification = Triple(connection, computer, session); refresh()
     }
     private fun cancelDetail() {

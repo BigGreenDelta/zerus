@@ -32,7 +32,8 @@ object NotificationSettings {
         val next = old.copy(master = enabled, generation = generation,
             inputEnabledAt = if (enabled && old.input) generation else old.inputEnabledAt,
             errorsEnabledAt = if (enabled && old.errors) generation else old.errorsEnabledAt,
-            finishedEnabledAt = if (enabled && old.finished) generation else old.finishedEnabledAt)
+            finishedEnabledAt = if (enabled && old.finished) generation else old.finishedEnabledAt,
+            decisionsEnabledAt = if (enabled && old.decisions) generation else old.decisionsEnabledAt)
         store.saveNotificationPreferences(next)
         state.value = next
         SessionNotifications.cancelDisabled(context, next)
@@ -46,6 +47,7 @@ object NotificationSettings {
             SessionAlertKind.Input -> old.copy(input = enabled, inputEnabledAt = if (enabled && !old.input) generation else old.inputEnabledAt)
             SessionAlertKind.Error -> old.copy(errors = enabled, errorsEnabledAt = if (enabled && !old.errors) generation else old.errorsEnabledAt)
             SessionAlertKind.Finished -> old.copy(finished = enabled, finishedEnabledAt = if (enabled && !old.finished) generation else old.finishedEnabledAt)
+            SessionAlertKind.Decision -> old.copy(decisions = enabled, decisionsEnabledAt = if (enabled && !old.decisions) generation else old.decisionsEnabledAt)
         }.copy(generation = generation)
         store.saveNotificationPreferences(next)
         state.value = next
@@ -68,7 +70,8 @@ object NotificationSettings {
     }
     listOf(Triple(SessionAlertKind.Input, "Input and approvals", preferences.input),
         Triple(SessionAlertKind.Error, "Errors", preferences.errors),
-        Triple(SessionAlertKind.Finished, "Turn finished", preferences.finished)).forEach { (kind, caption, enabled) ->
+        Triple(SessionAlertKind.Finished, "Turn finished", preferences.finished),
+        Triple(SessionAlertKind.Decision, "Task decisions (Your Call)", preferences.decisions)).forEach { (kind, caption, enabled) ->
         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(caption, Modifier.weight(1f))
             Switch(enabled, onCheckedChange = { value ->

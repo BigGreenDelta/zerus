@@ -76,6 +76,14 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
             }
     }
+    /** Gateway-scoped operations have no session: the relay runs them only on the named gateway's own connector. */
+    suspend fun submitGateway(connection: Connection, computerId: String, operation: String, payload: JSONObject, id: String): JSONObject {
+        require(operation in OvermindAccess.operations && computerId.isNotBlank()) { "This operation is not served by the gateway." }
+        return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
+            .put("computer_id", computerId).put("session", "").put("operation", operation).put("payload", payload)).also {
+                check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
+            }
+    }
     suspend fun receipt(connection: Connection, id: String) = call(connection.url, connection.token, "/v1/requests/$id").also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }

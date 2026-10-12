@@ -99,9 +99,9 @@ object SessionNotifications {
         it.id == connection.id && it.url == connection.url && it.token == connection.token
     }
 
-    /** null keeps the last known mode when optional capability discovery fails. */
-    private suspend fun presenceAlerts(connection: Connection): Boolean? = try {
-        NotificationCatalogParser.presenceAlerts(api.capabilities(connection))
+    /** null keeps the last known modes when optional capability discovery fails. */
+    private suspend fun capabilities(connection: Connection): org.json.JSONObject? = try {
+        api.capabilities(connection)
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
     catch (e: RelayException) { if (e.status in listOf(401, 403)) throw e else null }
     catch (_: Exception) { null }
@@ -133,13 +133,14 @@ object SessionNotifications {
                     if (!capabilitiesChecked) {
                         capabilitiesChecked = true
                         operations++
-                        presenceAlerts(connection)?.let { state = state.copy(presenceAlerts = it) }
+                        capabilities(connection)?.let { relay -> state = state.copy(presenceAlerts = NotificationCatalogParser.presenceAlerts(relay),
+                            overmind = OvermindAccess.supports(relay.optJSONArray("operations")?.let { ops -> (0 until ops.length()).mapNotNull { ops.opt(it) as? String }.toSet() })) }
                     }
                     val raw = api.computers(connection).getJSONArray("computers").objects()
                     operations++
                     currentCoroutineContext().ensureActive()
                     if (!connected(store, connection)) return@withLock false
-                    val catalog = NotificationCatalogParser.parse(connection, raw, store.messageState().machineAliases)
+                    val catalog = NotificationCatalogParser.parse(connection, raw, store.messageState().machineAliases, state.overmind)
                     val active = synchronized(NotificationSettings.deliveryLock) {
                         cards(context).mapNotNull { it.notification.extras.getString("zerus_slot") }.toSet()
                     }

@@ -7,7 +7,7 @@ object UpdateInstallGuard {
         !storageReady -> "Private storage is not ready. Your drafts must be saved before installing."
         filesBusy || state.pickerDraft != null -> "Finish file selection before installing an update."
         preparing || flights || state.outgoing.any { it.status=="sending" } || state.drafts.any { it.status=="submitting" } ||
-            state.sessionActions.any { it.status=="sending" } || state.contextOperations.any { it.status=="sending" } ->
+            state.sessionActions.any { it.status=="sending" } || state.contextOperations.any { it.status=="sending" } || state.overmindWrites.any { it.status=="sending" } ->
             "Wait for the current message or session command to finish before installing."
         continuation -> "Cancel or finish compact-and-continue before installing."
         else -> ""

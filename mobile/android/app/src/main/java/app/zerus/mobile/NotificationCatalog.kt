@@ -9,7 +9,8 @@ data class NotificationCatalog(val sessions: List<NotificationCurrent>, val iden
 }
 
 object NotificationCatalogParser {
-    fun parse(connection: Connection, records: List<JSONObject>, aliases: List<MachineAlias>): NotificationCatalog {
+    /** [overmind]: the relay lists both Overmind operations. Decision cards then come from the gateway's digest. */
+    fun parse(connection: Connection, records: List<JSONObject>, aliases: List<MachineAlias>, overmind: Boolean = false): NotificationCatalog {
         val identities = mutableMapOf<String, String?>()
         val current = mutableListOf<NotificationCurrent>()
         val unique = records.groupBy { it.getString("id") }.filterValues { it.size == 1 }.values.map { it.single() }
@@ -44,6 +45,12 @@ object NotificationCatalogParser {
                     identity, value.string("activity") == "idle", machine.online,
                     SessionFilters.state(session) == "running" && value.string("process_state") != "exited")
             }
+            // A missing digest says nothing, and a gateway without both operations serves no Tasks: no decision cards.
+            if (overmind && OvermindAccess.supports(OvermindAccess.snapshotOperations(raw))) OvermindDigests.parse(raw)?.decisions?.forEach { decision ->
+                current += NotificationCurrent(NotificationSlot(connection.id, machine.id, OvermindDigests.slot(decision.task)),
+                    JSONArray(listOf("overmind", decision.task)).toString(), clean(decision.title, "Task"), clean(machine.name, "Computer"),
+                    SessionAlertKind.Decision, NotificationPolicy.fingerprint(JSONArray(listOf("decision", decision.signature)).toString()), false, machine.online)
+            }
         }
         return NotificationCatalog(current, identities)
     }
@@ -52,7 +59,7 @@ object NotificationCatalogParser {
         Character.isISOControl(it) || Character.getType(it) == Character.FORMAT.toInt()
     }.take(256).ifBlank { fallback }
 
-    private val alertKinds = setOf("attention", "error", "completed")
+    private val alertKinds = setOf("attention", "error", "completed", "decision")
     /** Relay capability that makes alert rows the only source of new cards. */
     fun presenceAlerts(capabilities: JSONObject) = capabilities.optJSONArray("features")?.let { features ->
         (0 until features.length()).any { features.optString(it) == "presence_alerts" } } == true

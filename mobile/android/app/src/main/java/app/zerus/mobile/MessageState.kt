@@ -18,7 +18,8 @@ fun Target.resolvesTo(current: Target): Boolean = agentId.isBlank() && current.a
     connectionId == current.connectionId && computerId == current.computerId && session == current.session && run == current.run
 
 /** The entire draft -> immutable outbox -> empty composer transition is one encrypted commit. */
-data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: List<OutgoingMessage> = emptyList(), val pickerDraft: Draft? = null, val pickerId: String = "", val contextOperations: List<ContextOperation> = emptyList(), val sessionActions: List<SessionAction> = emptyList(), val conversationIndex: List<IndexedConversation> = emptyList(), val terminalBuffers:List<TerminalBuffer> = emptyList(), val machineAliases:List<MachineAlias> = emptyList(), val machineColors:List<MachineColorOverride> = emptyList()) {
+data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: List<OutgoingMessage> = emptyList(), val pickerDraft: Draft? = null, val pickerId: String = "", val contextOperations: List<ContextOperation> = emptyList(), val sessionActions: List<SessionAction> = emptyList(), val conversationIndex: List<IndexedConversation> = emptyList(), val terminalBuffers:List<TerminalBuffer> = emptyList(), val machineAliases:List<MachineAlias> = emptyList(), val machineColors:List<MachineColorOverride> = emptyList(), val overmindWrites: List<OvermindWrite> = emptyList()) {
+    fun overmind(write: OvermindWrite): MessageState = copy(overmindWrites = OvermindWrites.retain(overmindWrites.filterNot { it.requestId == write.requestId } + write))
     fun action(action: SessionAction): MessageState {
         val next = sessionActions.filterNot { it.requestId == action.requestId } + action
         return copy(sessionActions = next.filter { it.blocksSending || it.status == "scheduled" || it.needsProjectReview } + next.filterNot { it.blocksSending || it.status == "scheduled" || it.needsProjectReview }.takeLast(100))
@@ -85,7 +86,8 @@ object MessageCodec {
     fun state(value: JSONObject) = MessageState(value.optJSONArray("drafts")?.objects().orEmpty().map(::draft),
         value.optJSONArray("outgoing")?.objects().orEmpty().map(::outgoing), value.optJSONObject("picker")?.let(::draft), value.string("picker_id"),
         value.optJSONArray("context_operations")?.objects().orEmpty().map { ContextOperation(it.getString("request"), target(it), it.getString("operation"), it.getString("status"), it.optLong("created"), it.string("error"), it.string("resolved_conversation")).recover() },
-        value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path")).recover() }, value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")))
+        value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path")).recover() }, value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")),
+        value.optJSONArray("overmind_writes")?.objects().orEmpty().map(OvermindWrites::decode))
     fun stateJson(state: MessageState) = JSONObject().put("drafts", JSONArray(state.drafts.map(::draftJson)))
         .put("outgoing", JSONArray(state.outgoing.map(::outgoingJson))).put("picker", state.pickerDraft?.let(::draftJson) ?: JSONObject.NULL).put("picker_id", state.pickerId).put("context_operations", JSONArray(state.contextOperations.map {
             targetJson(it.target).put("request", it.requestId).put("operation", it.operation).put("status", it.status).put("created", it.createdAt).put("error", it.error).put("resolved_conversation", it.resolvedConversation)
@@ -94,6 +96,7 @@ object MessageCodec {
                 .put("status", action.status).put("created", action.createdAt).put("error", action.error)
                 .put("result_target", action.resultTarget?.let(::targetJson) ?: JSONObject.NULL).put("pending_id", action.pendingId).put("apply_attempt_id",action.applyAttemptId).put("result_path",action.resultPath)
         })).put("conversation_index", JSONArray(state.conversationIndex.map(ConversationIndex::encode))).put("terminal_buffers",JSONArray(state.terminalBuffers.map(TerminalBuffers::encode))).put("machine_aliases",JSONArray(state.machineAliases.map(MachineNames::encode))).put("machine_colors",JSONArray(state.machineColors.map(MachineColors::encode)))
+        .put("overmind_writes", JSONArray(state.overmindWrites.map(OvermindWrites::encode)))
 }
 
 object ConversationMerge {
