@@ -329,6 +329,18 @@ width** in the same menu restores the default column. Narrower panes use their
 full width, and Terminal, Processes and Native UI are not affected. A reset icon
 appears beside an Appearance slider's value once it differs from the default and
 restores that default.
+**Settings → Appearance → Usage limit indicator** sets how the account usage in the
+status bar and on Overview account cards shows each limit window. The default, **Usage and elapsed time bars**, draws usage above a gray
+bar for the elapsed part of the window; a longer usage bar means a faster than
+even pace. **Pace marker** shows elapsed time as a mark on the usage bar, and
+usage beyond the mark takes the warning color. **Pace marker and reset
+countdown** adds an hourglass with the time until reset, such as `26h` or `6d`;
+compact Overview cards omit the countdown. Colors follow the average pace since
+the window started: green when the limit lasts until reset, orange when it would
+run out in the second half of the remaining time or 90% is used, and red when it
+would run out sooner or is exhausted. The first 8% of a window, and windows
+without a reported length or reset time, keep the fixed 70%/90% thresholds. The
+tooltip adds the time until reset and the pace forecast.
 **Settings → Appearance → Keep Zerus above other windows** keeps the Zerus window
 over other applications on X11, macOS and KDE Plasma 6 on Wayland. On KDE Wayland,
 Zerus uses temporary KWin scripts scoped to its own window and confirms the

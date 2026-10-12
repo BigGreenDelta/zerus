@@ -1180,7 +1180,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_settingsPage->appearanceChanged=[this]{
         m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
         m_sessionDock->setStripWidth(SessionStrip::width(m_sessions->property("compact").toBool()));
-        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());applyTheme();rebuild();
+        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
+        const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
+        applyTheme();rebuild();
     };
     m_settingsPage->contentScaleChanged=[this]{applyContentScale();};
     m_settingsPage->activityWidthChanged=[this]{applyActivityWidth();};

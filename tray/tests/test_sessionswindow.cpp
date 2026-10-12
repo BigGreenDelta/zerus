@@ -158,6 +158,7 @@ private slots:
     void workingCardsKeepTurnClockAcrossUpdates();
     void questionReplyPreviewUsesCompletePrompt();
     void accountUsageRejectsOtherSessionReplies();
+    void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
     void dashboardAndMultiMachineNavigation();
     void hiddenPagesRenderWhenShown();
@@ -1321,6 +1322,22 @@ void TestSessionsWindow::accountUsageRejectsOtherSessionReplies()
     client->accountsReady(2,"mac",second);QVERIFY(usage->toolTip().contains("second@example.test"));
     refresh->click();QVERIFY(refresh->isRefreshing());QVERIFY(!refresh->isEnabled());QVERIFY(usage->toolTip().contains("second@example.test"));
     client->accountsFailed(3,"mac","offline");QVERIFY(!refresh->isRefreshing());QVERIFY(refresh->isEnabled());QVERIFY(usage->toolTip().contains("second@example.test"));
+}
+
+void TestSessionsWindow::usageIndicatorSettingUpdatesFooter()
+{
+    QSettings().remove("workspace/usageIndicator");
+    SessionsWindow window(script()); window.setFleet(fleet());
+    auto *usage = static_cast<AccountUsage::Button *>(window.findChild<QPushButton *>("sessionAccountUsage"));
+    auto *option = window.findChild<QComboBox *>("workspaceUsageIndicator"); QVERIFY(option);
+    QCOMPARE(option->currentData().toString(), QString("rails")); QCOMPARE(usage->indicator(), AccountUsage::Indicator::Rails);
+    option->setCurrentIndex(option->findData("marker-countdown"));
+    QCOMPARE(QSettings().value("workspace/usageIndicator").toString(), QString("marker-countdown"));
+    QCOMPARE(usage->indicator(), AccountUsage::Indicator::MarkerCountdown);
+    SessionsWindow restored(script()); restored.setFleet(fleet());
+    QCOMPARE(restored.findChild<QComboBox *>("workspaceUsageIndicator")->currentData().toString(), QString("marker-countdown"));
+    QCOMPARE(static_cast<AccountUsage::Button *>(restored.findChild<QPushButton *>("sessionAccountUsage"))->indicator(), AccountUsage::Indicator::MarkerCountdown);
+    QSettings().remove("workspace/usageIndicator");
 }
 
 void TestSessionsWindow::separatesConversationProcessAndTerminal()
