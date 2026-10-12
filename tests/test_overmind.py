@@ -157,6 +157,13 @@ class Overmind(unittest.TestCase):
         self.rename('codex/demo/old', 'codex/demo/new')
         self.assertFalse((self.state / 'overmind').exists())
 
+    def test_templates_round_trip(self):
+        self.ok('templates', 'set', '--json', data={'project': 'demo', 'templates': {'review': 'Check {task.ref}'}})
+        listed = self.ok('templates', 'get', '--json', data={'project': 'demo'})['templates']
+        self.assertEqual(listed['review'], {'text': 'Check {task.ref}', 'custom': True})
+        self.assertTrue(listed['dispatch']['text'].startswith('[Overmind {task.ref}]'))
+        self.assertEqual(self.refused('templates', 'set', '--json', data={'project': 'demo', 'templates': {'review': '!rm'}})['code'], 'invalid_template')
+
 
 class AgentSession(unittest.TestCase):
     """`hgs overmind` inside a live session on an isolated tmux socket."""

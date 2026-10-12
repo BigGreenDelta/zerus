@@ -21,6 +21,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   label --json {task, label, present}  |  link --json {task, relation, target, present}
   comment --json {task, text}  |  delete --json {task}
   workflow get --json {project}  |  workflow set --json {project, workflow, moves?}
+  templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
   rev                                      change cursor for watchers
 Write requests may carry a request_id (UUID); repeating it replays the result.
 ";
@@ -113,6 +114,8 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("delete", []) => commands::delete(&mut ctx, request)?,
         ("workflow", ["get"]) => commands::workflow_get(&mut ctx, request)?,
         ("workflow", ["set"]) => commands::workflow_set(&mut ctx, request)?,
+        ("templates", ["get"]) => super::templates::get(&mut ctx, request)?,
+        ("templates", ["set"]) => super::templates::set(&mut ctx, request)?,
         ("mine", []) => agent::mine(&mut ctx)?,
         ("advance", []) => agent::advance(&mut ctx, request)?,
         ("call-human", []) => agent::call_human(&mut ctx, request)?,
