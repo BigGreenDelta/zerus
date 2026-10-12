@@ -247,24 +247,15 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
         // word, so only the request's exact text can match them.
         let mut seen: Vec<(Vec<&str>, Vec<&str>)> = Vec::new();
         let mut in_answer = false;
-        let gutter = rows[title + 1..end]
-            .iter()
-            .find(|row| !row.is_empty())
-            .is_some_and(|row| {
-                row.strip_prefix("│ ")
-                    .is_some_and(|text| text.trim_start().starts_with("● "))
-            });
+        let mut framed = false;
         for row in &rows[title + 1..end] {
-            // The same gutter appears on review question headings and their
-            // wrapped lines. Answer text is not decorated: a literal bar in a
-            // wrapped custom answer must survive the final exact comparison.
-            let unframed = row.strip_prefix("│ ").unwrap_or(row).trim_start();
-            let row = if gutter && (!in_answer || unframed.starts_with("● ")) {
-                unframed
-            } else {
-                row
-            };
-            if let Some(text) = row.strip_prefix("● ") {
+            // Claude frames each question separately: a gutter marks the
+            // heading and wrapped rows of a long one only. Answer text is not
+            // decorated: a literal bar in a wrapped custom answer must survive
+            // the final exact comparison.
+            let unframed = row.strip_prefix("│ ").map(str::trim_start);
+            if let Some(text) = unframed.unwrap_or(row).strip_prefix("● ") {
+                framed = unframed.is_some();
                 seen.push((vec![text], Vec::new()));
                 in_answer = false;
             } else if let Some(text) = row.strip_prefix("→ ") {
@@ -274,6 +265,10 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
                 let item = seen
                     .last_mut()
                     .ok_or("Not all Claude questions have answers")?;
+                let row = match unframed {
+                    Some(text) if framed && !in_answer => text,
+                    _ => row,
+                };
                 if in_answer { &mut item.1 } else { &mut item.0 }.push(row);
             }
         }
@@ -1042,6 +1037,30 @@ mod tests {
         }
     }
     #[test]
+    fn review_strips_the_gutter_only_from_framed_questions() {
+        // Claude 2.1.296 frames each review question separately: at 87
+        // columns only a long question may carry the gutter.
+        let card = card();
+        let plain = include_str!("../../tests/fixtures/claude-question-review.txt");
+        let expected = parse(plain, &card).unwrap();
+        for framed in [
+            plain.replace(" ● What else", " │ ● What else"),
+            plain.replace(
+                " ● What else should we know?",
+                " │ ● What else should\n │   we know?",
+            ),
+            plain.replace(" ● Which checks", " │ ● Which checks"),
+        ] {
+            assert_eq!(parse(&framed, &card).unwrap(), expected, "{framed}");
+        }
+        // An unframed question keeps a literal bar on its wrapped row.
+        let literal = plain.replace(
+            " ● What else should we know?",
+            " ● What else should\n │ we know?",
+        );
+        assert!(parse(&literal, &card).is_err());
+    }
+    #[test]
     fn recognizes_committed_single_choices_without_changing_labels() {
         let card = card();
         let screen = include_str!("../../tests/fixtures/claude-question-single.txt");
@@ -1153,6 +1172,9 @@ mod tests {
             include_str!("../../tests/fixtures/claude-question-other.txt"),
             include_str!("../../tests/fixtures/claude-question-other-filled.txt"),
             include_str!("../../tests/fixtures/claude-question-review.txt"),
+            // Only the long first review question carries Claude's gutter.
+            &include_str!("../../tests/fixtures/claude-question-review.txt")
+                .replace(" ● Which release", " │ ● Which release"),
         ] {
             let screen = widen(fixture);
             let expected = parse(&screen, &card).unwrap();
