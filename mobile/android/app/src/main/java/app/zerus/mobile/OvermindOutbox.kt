@@ -104,6 +104,14 @@ object OvermindWrites {
     /** A reviewed write is final and names no images any more, so their saved copies can be released. */
     fun review(state: MessageState, requestId: String): MessageState =
         state.overmindWrites.find { it.requestId == requestId && it.status != "reviewed" }?.let { state.overmind(it.copy(status = "reviewed", attachments = emptyList())) } ?: state
+    /** A disconnected workspace keeps no writes. Returns the state without them and the saved images that only they named,
+     * which can be released; a copy another workspace's draft or write still names is kept. */
+    fun disconnect(state: MessageState, connectionId: String): Pair<MessageState, List<Attachment>> {
+        val (dropped, kept) = state.overmindWrites.partition { it.connectionId == connectionId }
+        val next = state.copy(overmindWrites = kept)
+        val named = next.attachmentIds()
+        return next to dropped.flatMap { it.attachments }.filter { it.id !in named }.distinctBy { it.id }
+    }
     /** Pending writes stay; only the most recent settled ones are kept. */
     fun retain(writes: List<OvermindWrite>) = writes.filter { it.pending } + writes.filterNot { it.pending }.takeLast(KEEP)
 

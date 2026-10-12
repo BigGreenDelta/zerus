@@ -189,6 +189,23 @@ class OvermindOutboxTest {
         assertTrue(image.id in MessageState(drafts = listOf(Draft(Target("c", "s", "r", "v"), "", attachments = listOf(image)))).attachmentIds())
     }
 
+    @Test fun aDisconnectReleasesOnlyTheImagesNothingElseNames() {
+        val shared = image.copy(id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        val drafted = image.copy(id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        val mine = write(files = listOf(image, shared, drafted)).copy(status = "uncertain")
+        val again = write(id = "55555555-5555-4555-8555-555555555555", files = listOf(image)).copy(status = "refused")
+        val theirs = OvermindWrites.create(other, MachineKey("another", GATEWAY), "create", JSONObject().put("project", "example").put("prompt", "x"),
+            listOf(shared), "Pixel 9", 1_000)
+        val draft = Draft(Target("c", "s", "r", "v", connectionId = "another"), "", attachments = listOf(drafted))
+        val state = MessageState(drafts = listOf(draft), overmindWrites = listOf(mine, again, theirs))
+        val (next, released) = OvermindWrites.disconnect(state, "workspace")
+        assertEquals(listOf(theirs), next.overmindWrites)
+        assertEquals(listOf(draft), next.drafts)
+        // Another workspace's write and a draft still name theirs; one copy is released once.
+        assertEquals(listOf(image), released)
+        assertEquals(state to emptyList<Attachment>(), OvermindWrites.disconnect(state, "unknown"))
+    }
+
     @Test fun aRetryThatMayNotHaveReachedTheRelayStaysUnconfirmed() = runBlocking<Unit> {
         var status = 401
         val relay = object : Dispatcher() {

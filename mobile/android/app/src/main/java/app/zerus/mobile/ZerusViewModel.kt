@@ -572,10 +572,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) { error = e.message.orEmpty(); return }
         releaseOvermindFiles(captured.attachments)
     }
-    /** Removes saved image copies that no draft, outbox entry or Overmind write names any more. */
+    /** Removes saved image copies that no draft, outbox entry or Overmind write names any more. The edit that stopped naming
+     * them is written first: until then the durable state still protects them. */
     fun releaseOvermindFiles(files: List<Attachment>) {
         if (files.isEmpty()) return
-        viewModelScope.launch { val protected = protectedAttachmentIds(); files.forEach { if (it.id !in protected) runCatching { attachmentStore.remove(it.id, protected) } } }
+        viewModelScope.launch {
+            try { persistence?.flush() } catch (e: CancellationException) { throw e } catch (_: Exception) { return@launch }
+            val protected = protectedAttachmentIds(); files.forEach { if (it.id !in protected) runCatching { attachmentStore.remove(it.id, protected) } }
+        }
     }
     /** Saves picked images for a task edit. Only files whose bytes are a picture are kept: names and types are not trusted. */
     fun importOvermindImages(uris: List<Uri>, onImported: (List<Attachment>) -> Unit) {
@@ -1737,8 +1741,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             inspections.values.filter { it.first.connectionId == connection.id }.forEach { it.second.cancel() }
             inspections.entries.removeAll { it.value.first.connectionId == connection.id }
             frames.entries.removeAll { it.value.target.connectionId == connection.id }
-            editState { state -> state.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id },
-                overmindWrites=state.overmindWrites.filterNot { it.connectionId == connection.id }) }
+            val writeFiles = OvermindWrites.disconnect(messageState, connection.id).second
+            editState { state -> OvermindWrites.disconnect(state, connection.id).first.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id }) }
             val removedReadKeys=readState.records.filter { it.target.connectionId==connection.id }.map { ConversationReadPolicies.key(it.target) }.toSet()
             readWriter?.let { readState=it.edit { state -> state.copy(records=state.records.filterNot { it.target.connectionId == connection.id }) } };flushDrafts()
             historyWindows.entries.removeAll { it.value.target.connectionId==connection.id }
@@ -1747,6 +1751,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
             runCatching { overmind.purgeWorkspace(connection.id) }
+            // The saved images of the dropped writes, unless a draft or another workspace's write still names them.
+            releaseOvermindFiles(writeFiles)
             tasks.purge(connection.id)
             overmindDigests = overmindDigests.filterKeys { it.connectionId != connection.id }
             if (overmindOpenRequest?.connectionId == connection.id) overmindOpenRequest = null
