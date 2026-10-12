@@ -1,6 +1,8 @@
 //! Append-only Overmind event log in SQLite. Each write runs in one IMMEDIATE
 //! transaction, so a command's checks and appends never interleave with
-//! another writer's. Every store holds a contiguous prefix of each machine's
+//! another writer's. Events are numbered per origin: the store that wrote
+//! them, not the machine, so a store that was lost and created again never
+//! reuses a position. Every store holds a contiguous prefix of each origin's
 //! events, so a version vector describes it exactly.
 use super::model::{now, Draft, Event, EVENT_VERSION};
 use anyhow::{ensure, Context, Result};
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS receipts(
 CREATE TABLE IF NOT EXISTS peers(
   machine TEXT PRIMARY KEY, alias TEXT NOT NULL, vector TEXT,
   last_ok INTEGER NOT NULL, last_error TEXT NOT NULL, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
 /// Which events to load. Shared events have no task: workflows, settings, renames.
@@ -44,13 +47,16 @@ pub struct Store {
     conn: Connection,
     dir: PathBuf,
     machine: String,
+    /// The origin of the events this store writes, created with the store.
+    origin: String,
 }
 
 /// What `insert_raw` did with a batch from another machine.
 #[derive(Debug, Default, PartialEq)]
 pub struct Received {
     pub inserted: usize,
-    /// Damaged events, out-of-range positions and ids stored at another position.
+    /// Damaged events, out-of-range positions, ids stored at another position
+    /// and other events at a position already stored.
     pub refused: usize,
 }
 
@@ -69,7 +75,7 @@ fn storable(event: &Event) -> bool {
 
 pub struct Tx<'a> {
     tx: rusqlite::Transaction<'a>,
-    machine: String,
+    origin: String,
 }
 
 fn query(conn: &Connection, filter: &Filter) -> Result<Vec<Event>> {
@@ -148,11 +154,24 @@ impl Store {
             .context("the Overmind database is damaged")?;
         conn.execute_batch("PRAGMA synchronous=FULL;")?;
         conn.execute_batch(SCHEMA).context("the Overmind database is damaged")?;
-        Ok(Self { conn, dir: dir.to_owned(), machine: machine.to_owned() })
+        // Concurrent first opens agree: the first insert wins and all read it back.
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('origin', ?1)",
+            params![uuid::Uuid::new_v4().to_string()],
+        )?;
+        let origin: String = conn.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0))?;
+        ensure!(uuid::Uuid::parse_str(&origin).is_ok(), "the Overmind database is damaged: invalid origin");
+        Ok(Self { conn, dir: dir.to_owned(), machine: machine.to_owned(), origin })
     }
 
+    /// This machine's identity, which peers know it by.
     pub fn machine(&self) -> &str {
         &self.machine
+    }
+
+    /// The origin of the events this store writes.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// How long a write waits for other writers (10 seconds after `open`).
@@ -254,6 +273,18 @@ impl Store {
                 params![event.origin],
                 |row| row.get(0),
             )?;
+            if event.seq <= max as u64 {
+                // Known positions are skipped; another event there is a damaged or forged copy.
+                let stored: String = tx.query_row(
+                    "SELECT id FROM events WHERE origin = ?1 AND seq = ?2",
+                    params![event.origin, event.seq as i64],
+                    |row| row.get(0),
+                )?;
+                if stored != event.id {
+                    received.refused += 1;
+                }
+                continue;
+            }
             if event.seq != max as u64 + 1 {
                 continue;
             }
@@ -277,7 +308,7 @@ impl Store {
     /// Runs `f` against a consistent snapshot; nothing is written.
     pub fn read<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let wrapped = Tx { tx, machine: self.machine.clone() };
+        let wrapped = Tx { tx, origin: self.origin.clone() };
         let value = f(&wrapped);
         drop(wrapped);
         value
@@ -285,10 +316,10 @@ impl Store {
 
     /// Runs `f` in one IMMEDIATE transaction; an error rolls everything back.
     pub fn write<T>(&mut self, f: impl FnOnce(&mut Tx<'_>) -> Result<T>) -> Result<T> {
-        let machine = self.machine.clone();
+        let origin = self.origin.clone();
         let value = {
             let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let mut wrapped = Tx { tx, machine };
+            let mut wrapped = Tx { tx, origin };
             let value = f(&mut wrapped)?;
             wrapped.tx.commit()?;
             value
@@ -335,7 +366,7 @@ impl Tx<'_> {
     pub fn preview(&self, draft: &Draft) -> Result<Event> {
         let seq: i64 = self.tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE origin = ?1",
-            params![self.machine],
+            params![self.origin],
             |row| row.get(0),
         )?;
         let lamport: i64 =
@@ -346,7 +377,7 @@ impl Tx<'_> {
         );
         Ok(Event {
             id: uuid::Uuid::new_v4().to_string(),
-            origin: self.machine.clone(),
+            origin: self.origin.clone(),
             seq: seq as u64,
             lamport: lamport as u64,
             at: now(),
@@ -485,7 +516,7 @@ mod tests {
         assert_eq!((a.seq, b.seq), (1, 2));
         assert!(b.lamport > a.lamport);
         assert_eq!(store.load(&Filter::Task("t".into())).unwrap(), vec![a, b]);
-        assert_eq!(store.version_vector().unwrap().get(MACHINE), Some(&2));
+        assert_eq!(store.version_vector().unwrap().get(store.origin()), Some(&2));
     }
 
     #[test]
@@ -542,21 +573,24 @@ mod tests {
         for _ in 0..3 {
             store.write(|tx| tx.append(&draft("t"))).unwrap();
         }
-        store.insert_raw(&remote(2)).unwrap();
+        let theirs = remote(2);
+        store.insert_raw(&theirs).unwrap();
+        let mine = store.origin().to_owned();
+        let other = theirs[0]["origin"].as_str().unwrap().to_owned();
         let positions = |peer: BTreeMap<String, u64>| -> Vec<(String, u64)> {
             let (events, more) = store.missing(&peer, usize::MAX).unwrap();
             assert!(!more);
             events.iter().map(|e| (e["origin"].as_str().unwrap().to_owned(), e["seq"].as_u64().unwrap())).collect()
         };
-        let peer = BTreeMap::from([(MACHINE.to_owned(), 2), (OTHER.to_owned(), 2)]);
-        assert_eq!(positions(peer), vec![(MACHINE.to_owned(), 3)]);
-        let beyond = BTreeMap::from([(MACHINE.to_owned(), u64::MAX)]);
-        assert_eq!(positions(beyond), vec![(OTHER.to_owned(), 1), (OTHER.to_owned(), 2)]);
-        // Origins take turns, so a long backlog of one never crowds out the others.
-        let (machine, other) = (MACHINE.to_owned(), OTHER.to_owned());
+        let peer = BTreeMap::from([(mine.clone(), 2), (other.clone(), 2)]);
+        assert_eq!(positions(peer), vec![(mine.clone(), 3)]);
+        let beyond = BTreeMap::from([(mine.clone(), u64::MAX)]);
+        assert_eq!(positions(beyond), vec![(other.clone(), 1), (other.clone(), 2)]);
+        // Origins take turns in origin order, so a long backlog of one never crowds out the others.
+        let (first, second) = if mine < other { (mine.clone(), other.clone()) } else { (other.clone(), mine.clone()) };
         assert_eq!(
             positions(BTreeMap::new()),
-            vec![(machine.clone(), 1), (other.clone(), 1), (machine.clone(), 2), (other, 2), (machine, 3)]
+            vec![(first.clone(), 1), (second.clone(), 1), (first, 2), (second, 2), (mine, 3)]
         );
     }
 
@@ -585,13 +619,50 @@ mod tests {
         batch.extend(theirs.iter().cloned());
         assert_eq!(store.insert_raw(&batch).unwrap(), received(2, 4));
         let vector = store.version_vector().unwrap();
-        assert_eq!(vector, BTreeMap::from([(MACHINE.to_owned(), 1), (OTHER.to_owned(), 2)]));
+        let other = theirs[0]["origin"].as_str().unwrap().to_owned();
+        assert_eq!(vector, BTreeMap::from([(store.origin().to_owned(), 1), (other, 2)]));
         // A clock pushed to the limit fails local writes with a clear error, never an overflow.
         let edge = copy(&origins[0], 1, MAX_POSITION - 1, &fresh());
         assert_eq!(store.insert_raw(&[edge]).unwrap(), received(1, 0));
         assert_eq!(store.write(|tx| tx.append(&draft("t"))).unwrap().lamport, MAX_POSITION);
         let error = store.write(|tx| tx.append(&draft("t"))).unwrap_err();
         assert!(format!("{error:#}").contains("exhausted"), "{error:#}");
+    }
+
+    #[test]
+    fn another_event_at_a_known_position_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let theirs = remote(2);
+        assert_eq!(store.insert_raw(&theirs).unwrap(), received(2, 0));
+        let mut forged = theirs[0].clone();
+        forged["id"] = json!(uuid::Uuid::new_v4().to_string());
+        // The identical copy is skipped silently; the different one is counted.
+        assert_eq!(store.insert_raw(&[forged, theirs[1].clone()]).unwrap(), received(0, 1));
+        assert_eq!(store.load(&Filter::All).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn each_store_writes_under_its_own_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        let origin = |path: &Path| {
+            let mut store = Store::open(path, MACHINE).unwrap();
+            let event = store.write(|tx| tx.append(&draft("t"))).unwrap();
+            assert!(uuid::Uuid::parse_str(&event.origin).is_ok());
+            assert_eq!(event.actor.machine, MACHINE);
+            (event.origin, event.seq)
+        };
+        let (one, seq) = origin(&first);
+        assert_ne!(one, MACHINE, "the origin is the store's, not the machine's");
+        assert_eq!(origin(&first), (one.clone(), seq + 1), "reopening keeps the origin");
+        assert_ne!(origin(&second).0, one, "another store of the same machine has its own");
+        // A store from before origins existed gets one when it is opened.
+        Store::open(&first, MACHINE).unwrap().conn.execute_batch("DELETE FROM meta").unwrap();
+        let (fresh, seq) = origin(&first);
+        assert_ne!(fresh, one);
+        assert_eq!(seq, 1);
+        assert_eq!(Store::open(&first, MACHINE).unwrap().load(&Filter::All).unwrap().len(), 3);
     }
 
     #[test]

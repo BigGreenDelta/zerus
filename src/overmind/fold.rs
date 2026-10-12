@@ -432,7 +432,8 @@ fn apply(task: &mut Task, event: &Event, wf: &mut Workflow) {
                     *wf = set.workflow;
                 }
             }
-            "session_renamed" if p.get("machine").and_then(Value::as_str) == Some(event.origin.as_str()) => {
+            // Only the session's host renames it; the actor names the machine that wrote the event.
+            "session_renamed" if p.get("machine").and_then(Value::as_str) == Some(event.actor.machine.as_str()) => {
                 let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
                 let (machine, old, new) = (s("machine"), s("old"), s("new"));
                 rename(&mut task.pinned, &machine, &old, &new);
@@ -863,6 +864,23 @@ mod tests {
     }
 
     #[test]
+    fn renames_apply_only_when_written_by_the_sessions_host() {
+        let c = created("Queue");
+        let pin = ev(A, 2, 2, human(), "pin_set", "", json!({"session": session("old")}));
+        // Origins are stores, not machines: the actor names the machine that wrote it.
+        let store = "44444444-4444-4444-8444-444444444444";
+        let rename = |origin: &str, actor: Actor| {
+            let mut event = ev(origin, 1, 3, actor, "session_renamed", "", json!({"machine": A, "old": "old", "new": "new"}));
+            event.task = String::new();
+            event.project = String::new();
+            event
+        };
+        assert_eq!(run(&[c.clone(), pin.clone(), rename(store, human())]).pinned.unwrap().name, "new");
+        assert_eq!(run(&[c.clone(), pin.clone(), rename(A, Actor::human(B))]).pinned.unwrap().name, "old");
+        assert_eq!(run(&[c, pin, rename(store, Actor::human(B))]).pinned.unwrap().name, "old");
+    }
+
+    #[test]
     fn fold_many_finds_every_task() {
         let c = created("Queue");
         let mut other = created("Backlog");
@@ -1005,6 +1023,7 @@ mod tests {
         assert_eq!(run(&[c.clone(), pin.clone(), junk]).pinned.unwrap().name, "p1");
         let clear = ev(A, 5, 5, human(), "pin_set", "", json!({"session": null}));
         assert!(run(&[c.clone(), pin.clone(), clear]).pinned.is_none());
+        // Written on machine B for a session of machine A.
         let mut foreign = ev(B, 1, 6, Actor::human(B), "session_renamed", "", json!({"machine": A, "old": "p1", "new": "q"}));
         foreign.task = String::new();
         assert_eq!(run(&[c.clone(), pin, foreign]).pinned.unwrap().name, "p1");

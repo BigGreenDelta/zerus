@@ -72,6 +72,9 @@ class Overmind(unittest.TestCase):
         self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})
         status = self.ok('status')
         self.assertEqual((status['peers'], list(status['vector'].values())), ([], [1]))
+        # Events are numbered under the store's own origin, not the machine identity.
+        self.assertEqual(list(status['vector']), [status['origin']])
+        self.assertNotEqual(status['origin'], status['machine'])
 
     def test_receipts_replay(self):
         request = {'request_id': '0b9c5c1e-34c4-4d5e-9a64-1d2a3b4c5d6e', 'project': 'demo', 'prompt': 'x'}
@@ -215,7 +218,7 @@ class AgentSession(unittest.TestCase):
     def claim(self, request_id='', name=None):
         """Claims the only task for a session (this one by default)."""
         machine = json.loads(sqlite3.connect(self.state / 'overmind/overmind.sqlite3').execute(
-            "SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])['origin']
+            "SELECT raw FROM events WHERE kind = 'task_created'").fetchone()[0])['actor']['machine']
         self.append('transition', {'action': 'claim', 'to': 'Design', 'fields': {},
                                    'session': {'machine': machine, 'name': name or self.name}}, request_id=request_id)
 

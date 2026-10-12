@@ -248,6 +248,29 @@ mod tests {
     }
 
     #[test]
+    fn a_wiped_store_that_writes_before_it_is_refilled_keeps_every_event() {
+        let (dir, mut a, mut b) = stores();
+        comment(&mut b, "t", 10);
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        let old = b.load(&Filter::All).unwrap()[0].id.clone();
+        drop(b);
+        // The same machine starts over with an empty store and writes at once.
+        let mut fresh = Store::open(&dir.path().join("fresh"), B).unwrap();
+        comment(&mut fresh, "u", 10);
+        let new = fresh.load(&Filter::All).unwrap()[0].id.clone();
+        exchange(&mut a, B, "b", &mut |request| serve(&mut fresh, request.clone())).unwrap();
+        exchange(&mut fresh, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+        let ids = |s: &Store| s.load(&Filter::All).unwrap().into_iter().map(|e| e.id).collect::<std::collections::BTreeSet<_>>();
+        for store in [&a, &fresh] {
+            assert!(ids(store).contains(&old) && ids(store).contains(&new), "{:?}", ids(store));
+        }
+        assert_eq!(ids(&a), ids(&fresh));
+        assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
+        assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
+        assert_eq!(fresh.peer(A).unwrap().unwrap().last_error, "");
+    }
+
+    #[test]
     fn a_peer_that_refuses_events_stops_the_exchange_and_is_reported() {
         let (_dir, mut a, mut b) = stores();
         for _ in 0..3 { comment(&mut a, "t", 10); }
@@ -258,7 +281,7 @@ mod tests {
         comment(&mut c, "v", 10);
         a.insert_raw(&c.missing(&BTreeMap::new(), BATCH).unwrap().0).unwrap();
         // B already holds A's first event id at another position, so it refuses A's events.
-        let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == A && e["seq"] == 1).unwrap();
+        let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == a.origin() && e["seq"] == 1).unwrap();
         let mut forged = first.clone();
         forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
         b.insert_raw(&[forged]).unwrap();
@@ -267,7 +290,7 @@ mod tests {
         assert!(summary.not_accepted > 0, "{summary:?}");
         let peer = a.peer(B).unwrap().unwrap();
         assert!(peer.last_error.contains("did not accept"), "{peer:?}");
-        assert!(a.version_vector().unwrap().get(B).copied().unwrap_or(0) >= 1, "B's own origin reached A");
-        assert_eq!(b.version_vector().unwrap().get(C).copied(), Some(1), "a pushed origin B accepted reached B");
+        assert!(a.version_vector().unwrap().get(b.origin()).copied().unwrap_or(0) >= 1, "B's own origin reached A");
+        assert_eq!(b.version_vector().unwrap().get(c.origin()).copied(), Some(1), "a pushed origin B accepted reached B");
     }
 }

@@ -1447,9 +1447,13 @@ peer whose version runs Overmind, and does so within seconds of a local write.
 One call pushes and pulls, so it works when SSH goes in one direction only. An
 exchange continues while the peer still lacks events, so a peer that lost its
 data is refilled over several rounds; it ends when a round makes no progress or
-after 8 rounds, and the worker continues on its next pass.
-`hgs overmind status` shows each peer's last exchange and last error, including
-events the peer did not accept. An unreachable peer appears in the swarm sync
+after 8 rounds, and the worker continues on its next pass. Each store writes
+its events under its own origin id, created with the store, so a store that was
+lost and created again never collides with events written earlier, even when
+it writes before it is refilled. Copying a store directory to a second machine,
+or restoring an old copy of one, is unsupported.
+`hgs overmind status` shows this store's origin id and each peer's last
+exchange and last error, including events the peer did not accept. An unreachable peer appears in the swarm sync
 result, and its Overmind status keeps the last good state. Images are not part
 of the exchange. `attachment --json {task, sha256}` returns the local path of a
 task image and fetches it from another machine when needed, in ranges of at

@@ -464,7 +464,8 @@ pub fn status(ctx: &mut Ctx) -> Result<Value> {
                    "last_error": peer.last_error, "updated": peer.updated, "behind": behind})
         })
         .collect();
-    Ok(json!({"ok": true, "machine": ctx.store.machine(), "cursor": ctx.store.cursor()?, "vector": vector, "peers": peers}))
+    Ok(json!({"ok": true, "machine": ctx.store.machine(), "origin": ctx.store.origin(), "cursor": ctx.store.cursor()?,
+              "vector": vector, "peers": peers}))
 }
 
 #[derive(Deserialize)]
