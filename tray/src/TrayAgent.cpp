@@ -129,6 +129,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_cfg(cfg)
     , m_client(cfg.hgsPath)
     , m_readSync(&m_client)
+    , m_overmind(&m_client)
     , m_terminal(makeTerminal(cfg))
     // Набор режимов для подменю «Open in» спрашивается У AppConfig, а не строится
     // внутри меню: второго списка режимов в проекте нет и заводиться не должно (см.
@@ -143,7 +144,8 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_notifier(makeAttentionNotifier())
 #endif
     , m_badge(makeApplicationBadge())
-    , m_attention(QJsonDocument::fromJson(QSettings().value("attention/observed").toByteArray()).object())
+    , m_attention(QJsonDocument::fromJson(QSettings().value("attention/observed").toByteArray()).object(),
+                  QJsonDocument::fromJson(QSettings().value("attention/decisions").toByteArray()).object())
     , m_localTimer(this)
     , m_peerTimer(this)
 {
@@ -160,6 +162,17 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
             if(!activationToken.isEmpty())KWindowSystem::setCurrentXdgActivationToken(activationToken);
             KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
 #endif
+            return;
+        }
+        // Your Call: the Tasks tab on the task's card, the asking session selected.
+        if (const auto decision = AttentionTracker::decision(token); !decision.isEmpty()) {
+            showSessions();
+#ifdef Q_OS_LINUX
+            if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
+            KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
+#endif
+            m_sessionsWindow->showDecision(decision.value("project").toString(), decision.value("task").toString(),
+                                           decision.value("machine").toString(), decision.value("name").toString());
             return;
         }
         const auto target = AttentionTracker::target(token);
@@ -183,8 +196,12 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         if(UpdateController::isUpdateToken(token))return;
         m_attention.deliveryFailed(token);
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
+        QSettings().setValue("attention/decisions", QJsonDocument(m_attention.decisionState()).toJson(QJsonDocument::Compact));
         if (m_sessionsWindow) m_sessionsWindow->showNotificationNotice(tr("System notification was not delivered: %1").arg(detail));
     });
+    // Your Call follows the board model, which reads the decisions again after
+    // each `rev` change; the local tick below retries a failed delivery.
+    connect(&m_overmind, &OvermindModel::decisionsChanged, this, &TrayAgent::observeDecisions);
 
     // Кому после этого принадлежит меню -- зависит от иконки (на маке по-прежнему
     // TrayMenu, на Linux -- самой иконке), см. TrayIcon::setContextMenu и ~TrayMenu.
@@ -373,6 +390,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
     const int localPoll = box.localSessions ? m_cfg.localPollMs : std::max(m_cfg.localPollMs, kControlOnlyPollMs);
     if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
     observeAttention({}, m_state.local());
+    observeDecisions();
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_pollingHosts); }
     refreshIcon();
     // Тик раз в 2с не должен перестраивать меню, пока оно открыто под курсором --
@@ -461,6 +479,18 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
         const auto target = AttentionTracker::target(m_pendingAttention);
         resolveAttentionClick(box.ok && target.value("host").toString() == host);
     }
+}
+
+void TrayAgent::observeDecisions()
+{
+    const auto before = m_attention.decisionState();
+    // Not loaded yet, a failed read or a reset after a host change: no resolution.
+    const bool read = m_overmind.decisionsLoaded() && m_overmind.decisionsError().isEmpty();
+    const auto changes = m_attention.observeDecisions(read, m_overmind.decisions());
+    if (m_attention.decisionState() != before)
+        QSettings().setValue("attention/decisions", QJsonDocument(m_attention.decisionState()).toJson(QJsonDocument::Compact));
+    for (const auto &token : changes.cleared) m_notifier->withdraw(token);
+    for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body);
 }
 
 void TrayAgent::migrateReadMarks(const QString &host)
@@ -589,7 +619,7 @@ void TrayAgent::launchSession(const QString &host, const QString &cmd, const QSt
 void TrayAgent::showSessions()
 {
     if (!m_sessionsWindow) {
-        m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
+        m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath, nullptr, &m_overmind);
         const auto publishReadState = [this]() {
             QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
             publishReadMarks();

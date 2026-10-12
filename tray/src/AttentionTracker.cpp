@@ -110,6 +110,13 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
 
 void AttentionTracker::deliveryFailed(const QString &token, qint64 now)
 {
+    for (auto entry = m_decisions.begin(); entry != m_decisions.end(); ++entry) {
+        auto value = entry.value().toObject();
+        if (value.value("token") != token) continue;
+        value["retry_at"] = now + 60;
+        m_decisions[entry.key()] = value;
+        return;
+    }
     for (auto host = m_hosts.begin(); host != m_hosts.end(); ++host) {
         auto entries = host.value().toObject();
         for (auto entry = entries.begin(); entry != entries.end(); ++entry) {
@@ -130,6 +137,59 @@ QJsonObject AttentionTracker::target(const QString &token)
     if (!result.value("host").isString() || result.value("name").toString().isEmpty()
         || result.value("notice").toString().isEmpty()) return {};
     return result;
+}
+
+AttentionChanges AttentionTracker::observeDecisions(bool read, const QList<OvermindModel::Decision> &decisions, qint64 now)
+{
+    const auto *application = qobject_cast<QGuiApplication *>(QCoreApplication::instance());
+    return observeDecisions(read, decisions, now, application && application->applicationState() == Qt::ApplicationActive);
+}
+
+AttentionChanges AttentionTracker::observeDecisions(bool read, const QList<OvermindModel::Decision> &decisions, qint64 now,
+                                                    bool applicationFocused)
+{
+    AttentionChanges changes;
+    if (!read) return changes;
+    QJsonObject current;
+    for (const auto &d : decisions) {
+        if (d.task.isEmpty() || current.contains(d.task)) continue;
+        const auto old = m_decisions.value(d.task).toObject();
+        const auto retry = old.value("retry_at").toInteger();
+        if (old.value("signature").toString() == d.signature && (!retry || retry > now)) {
+            current[d.task] = old;
+            continue;
+        }
+        const QJsonObject target{{"decision", d.task}, {"project", d.project}, {"machine", d.assignee.machine},
+            {"name", d.assignee.name}, {"notice", QUuid::createUuid().toString(QUuid::WithoutBraces)}};
+        const QString token = QString::fromLatin1(QJsonDocument(target).toJson(QJsonDocument::Compact)
+            .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+        current[d.task] = QJsonObject{{"signature", d.signature}, {"token", token}};
+        // As for sessions: a decision that arrives while Zerus has focus is
+        // consumed, never shown later; the Tasks tab and the badges show it.
+        if (applicationFocused) continue;
+        QString where = concise(d.project, 60);
+        if (!d.assignee.name.isEmpty()) where += " / " + concise(d.assignee.name, 120);
+        const QString body = concise(d.ref + ": " + d.title, 160) + '\n'
+            + (d.question.isEmpty() ? QObject::tr("A task waits for your call.") : concise(d.question, 240)) + '\n' + where;
+        changes.raised.append({token, QObject::tr("Zerus — Your Call"), body});
+    }
+    for (auto it = m_decisions.begin(); it != m_decisions.end(); ++it) {
+        const QString token = it.value().toObject().value("token").toString();
+        if (!token.isEmpty() && current.value(it.key()).toObject().value("token").toString() != token)
+            changes.cleared << token;
+    }
+    m_decisions = current;
+    return changes;
+}
+
+QJsonObject AttentionTracker::decision(const QString &token)
+{
+    if (token.size() > 8192) return {};
+    const auto result = QJsonDocument::fromJson(QByteArray::fromBase64(token.toLatin1(), QByteArray::Base64UrlEncoding)).object();
+    if (result.value("decision").toString().isEmpty() || !result.value("project").isString()
+        || result.value("notice").toString().isEmpty()) return {};
+    return QJsonObject{{"task", result.value("decision")}, {"project", result.value("project")},
+        {"machine", result.value("machine").toString()}, {"name", result.value("name").toString()}};
 }
 
 bool AttentionTracker::matches(const QJsonObject &target, const SessionInfo &s)

@@ -56,12 +56,19 @@ class QToolBar;
 class SessionsWindow : public QWidget {
     Q_OBJECT
 public:
-    explicit SessionsWindow(const QString &hgsPath, QWidget *parent = nullptr);
+    // `overmind`: the board model to read with, owned by the caller and outliving
+    // the window (the tray's, which also raises Your Call notifications); the
+    // window creates its own without one.
+    explicit SessionsWindow(const QString &hgsPath, QWidget *parent = nullptr, OvermindModel *overmind = nullptr);
     void setFleet(const FleetState &fleet);
     void showSessionList();
     void showUpdates();
     void showSession(const QString &host, const QString &name);
     void showAttentionSession(const QString &host, const QString &name);
+    // A Your Call notification: selects the session that asked (machine is its
+    // Overmind node ID; never matched by name alone) and opens the Tasks tab on
+    // the task's card in its project.
+    void showDecision(const QString &project, const QString &task, const QString &machine, const QString &session);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
     void showProjects(const QString &host = {});
     void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});

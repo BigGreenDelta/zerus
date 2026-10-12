@@ -201,6 +201,7 @@ private slots:
     void inspectorPreservesWorkspaceAndReportsTasks();
     void tasksTabKeepsItsProjectAcrossSessions();
     void composerAddsTasksAndShowsQueues();
+    void decisionNotificationOpensItsCard();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -3992,6 +3993,91 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-narrow.png"));
     }
     QSettings().remove("workspace/theme");
+}
+
+// A Your Call notification opens the Tasks tab on its card with the session
+// that asked selected. The window reads boards with the tray's model, so one
+// poller serves the notifications, the board and the badges.
+void TestSessionsWindow::decisionNotificationOpensItsCard()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto hgs = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, "#!/usr/bin/env python3\nimport json,runpy,sys\na=sys.argv[1:]\n"
+        "if a[:1]==['overmind']:\n data=sys.stdin.read();c=' '.join(a[1:-1]);f=__file__\n"
+        " def load(name,default=None):\n  try:return json.load(open(f+name))\n  except FileNotFoundError:return default\n"
+        " if c=='rev':print('{\"ok\":true,\"cursor\":1}')\n"
+        " elif c=='status':print('{\"ok\":true,\"machine\":\"node-arch\",\"cursor\":1}')\n"
+        " elif c=='decisions':print('{\"ok\":true,\"cursor\":1,\"decisions\":[]}')\n"
+        " elif c=='board':\n  p=json.loads(data)['project']\n"
+        "  b=load('.board-'+p,{'tasks':[]});b.update(ok=True,cursor=1,project=p,workflow=load('.workflow'));print(json.dumps(b))\n"
+        " elif c=='show':\n  t=json.loads(data)['task'];d=[x for p in ('alpha','beta') for x in load('.board-'+p,{'tasks':[]})['tasks'] if x['uuid']==t][0]\n"
+        "  print(json.dumps({'ok':True,'task':dict(d,prompt='Decide.',attachments=[],journal=[],related=[],resume_stage='Design')}))\n"
+        " else:print('{\"ok\":false,\"error\":{\"code\":\"refused\",\"message\":\"Not in this test\"}}');sys.exit(1)\n"
+        "else:\n sys.argv[0]=" + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n"));
+    const auto put = [&](const QString &name, const QJsonObject &value) { return FakeCli::replace(hgs + name, QJsonDocument(value).toJson(QJsonDocument::Compact)); };
+    const QStringList names{"Backlog", "Queue", "Design", "Build", "Review", "Your Call", "Done", "Icebox"};
+    const QStringList roles{"backlog", "ready", "active", "active", "review", "needs_human", "done", "parked"};
+    QJsonArray stages; for (int i = 0; i < names.size(); ++i) stages.append(QJsonObject{{"name", names[i]}, {"role", roles[i]}});
+    QVERIFY(put(".workflow", QJsonObject{{"version", 1}, {"stages", stages}, {"rules", QJsonArray()}, {"evidence", "git_sha_or_text"}, {"session_wip", 1}}));
+    const auto person = [](const QString &machine, const QString &name) { return QJsonObject{{"machine", machine}, {"name", name}}; };
+    const auto task = [](const QString &id, const QString &project, const QString &title, const QString &stage, const QJsonValue &assignee) {
+        return QJsonObject{{"uuid", id}, {"ref", "om-" + id}, {"project", project}, {"title", title}, {"stage", stage}, {"rank", id},
+            {"priority", 2}, {"labels", QJsonArray()}, {"flags", QJsonArray()}, {"markers", QJsonArray()}, {"pinned", QJsonValue::Null},
+            {"assignee", assignee}, {"reviewer", QJsonValue::Null}, {"queue_of", QJsonValue::Null}};
+    };
+    QVERIFY(put(".board-alpha", QJsonObject{{"tasks", QJsonArray{
+        task("p7c1d", "alpha", "Pick a store for drafts", "Your Call", person("node-arch", "codex/hgs/dashboard")),
+        task("k3f9x", "alpha", "Stream logs", "Queue", QJsonValue::Null)}}}));
+    QVERIFY(put(".board-beta", QJsonObject{{"tasks", QJsonArray{
+        task("b8n7m", "beta", "Name the beta menus", "Your Call", person("node-mac", "claude/infra/review"))}}}));
+    QSettings().setValue("workspace/organization", QByteArray(R"({"projects":[
+        {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
+        {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research","mac\nclaude/infra/review"]}],"default_project":"alpha"})"));
+
+    HgsClient client(FakeCli::program(hgs)); OvermindModel model(&client);
+    SessionsWindow window(FakeCli::program(hgs), nullptr, &model); window.resize(1240, 760); window.setFleet(fleet()); window.show();
+    // The window uses the model it was given and creates none of its own.
+    QVERIFY(!window.findChild<OvermindModel *>());
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(tabs && view && list);
+    const auto current = [&] { return list->currentItem() ? list->currentItem()->data(SessionRoles::Key).toString() : QString(); };
+    window.showSession({}, "kimi/docs/research");
+    QTRY_VERIFY(model.watchedProjects().contains("beta"));
+    QTRY_COMPARE(model.machine(), QString("node-arch"));
+    tabs->setCurrentIndex(0);
+
+    // The session that asked is selected, and the card opens in its project.
+    window.showDecision("alpha", "p7c1d", "node-arch", "codex/hgs/dashboard");
+    QCOMPARE(current(), QString("\ncodex/hgs/dashboard"));
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->project(), QString("alpha"));
+    QCOMPARE(view->openedTask(), QString("p7c1d"));
+    auto *panel = view->findChild<QWidget *>("taskPanel"); QVERIFY(panel);
+    QTRY_VERIFY(panel->property("task").toString() == "p7c1d" && panel->property("loaded").toBool());
+
+    // A session is never guessed by its name alone: a same-named session on
+    // another machine, or one whose machine Overmind cannot place, keeps the
+    // current selection, and the card still opens.
+    window.showSession({}, "kimi/docs/research"); tabs->setCurrentIndex(0);
+    window.showDecision("alpha", "p7c1d", "node-mac", "codex/hgs/dashboard");
+    QCOMPARE(current(), QString("\nkimi/docs/research"));
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->openedTask(), QString("p7c1d"));
+    tabs->setCurrentIndex(0);
+    window.showDecision("beta", "b8n7m", "node-mac", "claude/infra/review");
+    QCOMPARE(current(), QString("\nkimi/docs/research"));
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->project(), QString("beta"));
+    QCOMPARE(view->openedTask(), QString("b8n7m"));
+
+    // A project this computer does not list says so and shows the session's
+    // Activity instead; the board stays as it was.
+    window.showDecision("gamma", "g1h2j", "node-arch", "codex/hgs/dashboard");
+    QCOMPARE(current(), QString("\ncodex/hgs/dashboard"));
+    QCOMPARE(tabs->currentIndex(), 0);
+    QCOMPARE(view->project(), QString("beta")); QCOMPARE(view->openedTask(), QString("b8n7m"));
+    auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
+    QVERIFY2(notice->isVisible() && notice->text().contains("gamma"), qPrintable(notice->text()));
 }
 
 // Add as task, the Tasks chip and the session rows' queue badges. The window

@@ -13,6 +13,7 @@
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "IconFactory.h"
+#include "OvermindModel.h"
 #include "ReadMarkSync.h"
 #include "TerminalBackend.h"
 #include "TrayIcon.h"
@@ -49,6 +50,9 @@ private slots:
 private:
     void refreshIcon();
     void observeAttention(const QString &host, const BoxState &box);
+    // Your Call: a notification per decision the board model read (see
+    // AttentionTracker::observeDecisions), persisted like attention/observed.
+    void observeDecisions();
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
     void resolveAttentionClick(bool final = false);
@@ -84,6 +88,10 @@ private:
     HgsClient m_client;
     FleetState m_state;
     ReadMarkSync m_readSync;
+    // Overmind boards and Your Call decisions. It polls `rev` from the start,
+    // window or not, and the window reads its boards with it (one poller).
+    // Declared after m_client, which it uses, and destroyed after the window.
+    OvermindModel m_overmind;
     IconFactory m_icons;
     // Терминал прячется за интерфейсом целиком: в TrayAgent нет ни строчки D-Bus, и
     // замена Konsole на что угодно другое не трогает меню.

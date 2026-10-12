@@ -281,7 +281,7 @@ QString SessionsWindow::status(const SessionInfo &s, bool reachable)
     return SessionPresentation::status(s, reachable);
 }
 
-SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
+SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, OvermindModel *overmind)
     : QWidget(parent), m_client(hgsPath, this)
 {
     WorkspaceFocus::install();
@@ -951,7 +951,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
     // Tasks come last: Native UI keeps its index (2) and the Processes tab its place.
-    m_overmind = new OvermindModel(&m_client, this);
+    m_overmind = overmind ? overmind : new OvermindModel(&m_client, this);
     m_tasks = new TasksView(m_overmind); tabs->addTab(m_tasks, tr("Tasks"));
     connect(m_tasks, &TasksView::showRequested, this, [this] { if (selected()) m_detailTabs->setCurrentWidget(m_tasks); });
     connect(m_overmind, &OvermindModel::machineChanged, this, &SessionsWindow::updateTasksView);
@@ -1927,6 +1927,36 @@ void SessionsWindow::showAttentionSession(const QString &host, const QString &na
     m_detailTabs->setCurrentIndex(0);
     showSession(host, name);
     inspect();
+}
+
+void SessionsWindow::showDecision(const QString &project, const QString &task, const QString &machine, const QString &session)
+{
+    // The session that asked, placed by its Overmind machine: a same-named
+    // session elsewhere is another one. Without it the selection stays.
+    QString host, name; bool found = false, live = false;
+    if (!machine.isEmpty() && !session.isEmpty())
+        for (const auto &entry : std::as_const(m_entries)) {
+            QString id;
+            if (entry.session.name != session || !overmindKnown(entry, &id)) continue;
+            if ((id.isEmpty() ? m_overmind->machine() : id) != machine || (found && live)) continue;
+            host = entry.host; name = entry.session.name; found = true; live = entry.session.state != "archived";
+        }
+    bool listed = false;
+    for (const auto &group : m_organization.groups()) listed |= group.accessible && group.id == project;
+    if (!listed) {
+        // No board to open here: the session's Activity shows the question.
+        if (found) showAttentionSession(host, name); else showSessionList();
+        showNotice(tr("The project %1 of this task is not listed on this computer.").arg(project), false);
+        return;
+    }
+    if (found) showSession(host, name); else showSessionList();
+    if (!selected()) {
+        showNotice(tr("Select a session to open the Tasks tab."), false);
+        return;
+    }
+    updateTasksView();
+    m_tasks->showProject(project, m_selectedKey);
+    if (m_tasks->project() == project) m_tasks->openTask(task);
 }
 
 void SessionsWindow::populateBatchActions(QMenu *menu)
