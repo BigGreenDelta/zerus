@@ -339,7 +339,7 @@ thread_local! { static TRANSCRIPT_SCANS: std::cell::Cell<usize> = const { std::c
 fn codex_transcript_cached(record: &Value) -> Result<(Vec<Value>, f64)> {
     let path = PathBuf::from(string(record, "transcript"));
     let mut failure = None;
-    let value = scan_cache::cached("codex-provider-errors", &path, string(record, "conversation_id"), || {
+    let value = scan_cache::cached("codex-provider-errors-v2", &path, string(record, "conversation_id"), || {
         codex_transcript(record)
             .map(|(errors, progress)| json!({"errors": errors, "progress": progress}))
             .map_err(|error| failure = Some(error))
@@ -444,6 +444,20 @@ pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upgraded_scan_does_not_reuse_cached_failures_without_native_turn_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("rollout-{conversation}.jsonl"));
+        let header = json!({"type":"session_meta","payload":{"id":conversation}});
+        let failure = json!({"type":"event_msg","timestamp":"2026-10-12T12:00:00.000Z",
+            "payload":{"type":"task_complete","turn_id":"current-turn","error":{"message":"Selected model is at capacity"}}});
+        std::fs::write(&path, format!("{header}\n{failure}\n")).unwrap();
+        let legacy = json!({"errors":[event("legacy-entry", 100.0, "Selected model is at capacity", "codex_native_transcript")],"progress":0.0});
+        assert!(scan_cache::cached("codex-provider-errors", &path, &conversation, ||Some(legacy)).is_some());
+        let (errors, _) = codex_transcript_cached(&json!({"transcript":path,"conversation_id":conversation})).unwrap();
+        assert_eq!(errors[0]["turn_id"], "current-turn");
+    }
     #[test]
     fn codex_log_and_completion_keep_both_exact_failure_references() {
         let mut completion = event("completed-turn", 100.0, "Selected model is at capacity", "codex_native_transcript");
