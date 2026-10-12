@@ -124,8 +124,6 @@ class OvermindOutboxTest {
         val sent = OvermindWrites.settle(send, receipt("completed", ok().put("delivery", "sent").put("reason", "").put("task", card(other, "Doing", "a"))))
         assertEquals("completed" to "sent", sent.status to sent.delivery)
         assertFalse(sent.needsResolution)
-        val notSent = OvermindWrites.settle(send, receipt("completed", ok().put("delivery", "not_sent").put("reason", "the session is busy")))
-        assertEquals("completed" to "the session is busy", notSent.status to notSent.error)
         val uncertain = OvermindWrites.settle(send, receipt("completed", ok().put("delivery", "uncertain").put("reason", "lost").put("task", card(other, "Doing", "a"))))
         assertEquals("uncertain", uncertain.status)
         assertTrue(uncertain.needsResolution)

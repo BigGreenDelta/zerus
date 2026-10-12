@@ -55,11 +55,12 @@ object OvermindWrites {
             "completed" -> when (result?.opt("ok")) {
                 true -> {
                     val card = result.optJSONObject("task")?.takeIf { it.toString().length <= MAX_CARD }
+                    // `sent` or `uncertain`: hgs never answers ok with `not_sent`; an undelivered send is refused
+                    // `not_delivered` instead (src/overmind/deliver.rs).
                     val delivery = result.opt("delivery") as? String ?: ""
-                    val reason = result.opt("reason") as? String ?: ""
                     val uncertain = delivering && delivery == "uncertain"
                     write.copy(status = if (uncertain) "uncertain" else "completed", delivery = delivery, code = "", field = "",
-                        error = when { uncertain -> RESOLVE; delivery == "not_sent" -> reason.ifBlank { "Saved, but not sent to the session." }; else -> "" },
+                        error = if (uncertain) RESOLVE else "",
                         task = card?.string("uuid")?.ifBlank { null } ?: (result.opt("deleted") as? String)?.ifBlank { null } ?: write.task,
                         result = card?.toString().orEmpty(), request = if (uncertain) write.request else "", attachments = if (uncertain) write.attachments else emptyList())
                 }

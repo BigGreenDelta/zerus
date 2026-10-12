@@ -208,11 +208,7 @@ object OvermindOutcomes {
             } + " Check the session, then resolve the delivery. It is never sent again on its own.", OvermindTone.Warning, resolve = write.task)
             write.needsCheck -> OvermindOutcome(write.error.ifBlank { OvermindWrites.CHECK_TASK }, OvermindTone.Warning, check = write.task)
             write.retryable -> OvermindOutcome(write.error.ifBlank { OvermindWrites.UNCONFIRMED }, OvermindTone.Warning, retry = write)
-            write.status == "completed" -> when {
-                write.delivery == "not_sent" -> OvermindOutcome(write.error.ifBlank { "Saved, but not sent to the session." }, OvermindTone.Warning)
-                context.done.isNotBlank() -> OvermindOutcome(context.done, OvermindTone.Info)
-                else -> null
-            }
+            write.status == "completed" -> if (context.done.isNotBlank()) OvermindOutcome(context.done, OvermindTone.Info) else null
             write.status == "refused" && write.action == "answer" && write.code == "not_delivered" ->
                 OvermindOutcome("Your answer on $ref is recorded, but it was not typed into $name: ${write.error}", OvermindTone.Error, anyway = again(write, ref, name))
             write.status == "refused" -> OvermindOutcome(write.error, OvermindTone.Error, anyway = anyway(write, ref, name))
