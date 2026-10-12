@@ -24,14 +24,16 @@ class Overmind(unittest.TestCase):
         self.root = Path(temp.name)
         (self.root / 'bin').mkdir()
         (self.root / 'config').mkdir()
-        tmux = self.root / 'bin/tmux'
+        # hgs puts $HOME/.local/bin first in PATH: this stub answers every tmux call and reaches no server.
+        tmux = self.root / '.local/bin/tmux'
+        tmux.parent.mkdir(parents=True)
         tmux.write_text('#!/bin/sh\nif [ "$1" = -V ]; then echo "tmux 3.7"; fi\n')
         tmux.chmod(0o755)
         self.state = self.root / 'state'
         self.env = dict(os.environ, HOME=str(self.root), HGS_CONFIG_DIR=str(self.root / 'config'),
                         HGS_STATE_DIR=str(self.state), HGS_TAB='0',
                         PATH=str(self.root / 'bin') + ':' + os.environ['PATH'])
-        for key in ('HGS_PEERS', 'HGS_SELF', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION', 'HGS_EXECUTABLE'):
+        for key in ('HGS_PEERS', 'HGS_SELF', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION', 'HGS_EXECUTABLE', 'HGS_SSH'):
             self.env.pop(key, None)
 
     def run_hgs(self, *args, data=None, env=None):
@@ -176,8 +178,12 @@ class Overmind(unittest.TestCase):
 
 class AgentSession(unittest.TestCase):
     """`hgs overmind` inside a live session on an isolated tmux socket."""
-    setUp = fixtures.InputTransport.setUp
     tearDown = fixtures.InputTransport.tearDown
+
+    def setUp(self):
+        # The input fixture's shim in $HOME/.local/bin reaches only its socket; no SSH leaves the test.
+        fixtures.InputTransport.setUp(self)
+        self.env.pop('HGS_SSH', None)
     script = fixtures.InputTransport.script
     tmux = fixtures.InputTransport.tmux
     wait_for = fixtures.InputTransport.wait_for

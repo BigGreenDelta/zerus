@@ -25,6 +25,18 @@ SSH = swarm.SSH.replace(
 assert 'no-overmind-' in SSH
 
 
+def tmux_shim(home, socket, tmux=fixtures.TMUX):
+    """hgs puts $HOME/.local/bin first in PATH, so every tmux call reaches only this shim:
+    the fixture's socket when tmux exists, a failure when it does not."""
+    shim = Path(home) / '.local/bin/tmux'
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    if tmux:
+        shim.write_text('#!/bin/sh\nexec ' + tmux + ' -S "' + str(socket) + '" -f /dev/null "$@"\n')
+    else:
+        shim.write_text('#!/bin/sh\necho "tmux is not available in this test" >&2\nexit 1\n')
+    shim.chmod(0o755)
+
+
 class Nodes(unittest.TestCase):
     """Two swarm nodes `a` and `b` on this machine, joined through the fake SSH."""
     def setUp(self):
@@ -33,16 +45,12 @@ class Nodes(unittest.TestCase):
         self.root = Path(temp.name)
         (self.root / 'bin').mkdir()
         ssh = self.root / 'bin/ssh'; ssh.write_text(SSH); ssh.chmod(0o755)
-        # Every tmux call of both nodes, also through the fake SSH, reaches only this socket:
-        # hgs puts $HOME/.local/bin first in PATH, and HOME is this directory.
-        if fixtures.TMUX:
-            tmux = self.root / '.local/bin/tmux'
-            tmux.parent.mkdir(parents=True)
-            tmux.write_text('#!/bin/sh\nexec ' + fixtures.TMUX + ' -S "' + str(self.root / 'socket') + '" -f /dev/null "$@"\n')
-            tmux.chmod(0o755)
+        # Every tmux call of both nodes, also through the fake SSH, reaches only this socket,
+        # and every SSH call only the fake SSH: HOME is this directory.
+        tmux_shim(self.root, self.root / 'socket')
         self.env = dict(os.environ, SWARM_TEST_ROOT=str(self.root), SWARM_TEST_HGS=str(swarm.HGS),
                         HOME=str(self.root), PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
-        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION']:
+        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'HGS_SSH', 'TMUX', 'TMUX_PANE', 'HGS_RUN_ID', 'HGS_SESSION']:
             self.env.pop(key, None)
         for node, peer in [('a', 'b'), ('b', 'a')]:
             (self.root / node).mkdir()
@@ -81,6 +89,17 @@ class Nodes(unittest.TestCase):
 
 
 class Replication(Nodes):
+    def test_the_fixture_never_reaches_a_live_tmux_or_ssh(self):
+        shim = self.root / '.local/bin/tmux'
+        self.assertTrue(os.access(shim, os.X_OK))
+        if fixtures.TMUX:
+            self.assertIn('-S "' + str(self.root / 'socket') + '"', shim.read_text())
+        self.assertNotIn('HGS_SSH', self.node_env('a'))
+        # Without tmux the shim fails instead of letting hgs find a tmux elsewhere on its PATH.
+        home = self.root / 'without-tmux'
+        tmux_shim(home, self.root / 'socket', None)
+        self.assertNotEqual(subprocess.run([str(home / '.local/bin/tmux'), 'list-sessions'], capture_output=True).returncode, 0)
+
     def test_images_are_fetched_in_ranges_when_needed(self):
         attachment, data = self.image(700 * 1024)
         task = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment]})['task']
