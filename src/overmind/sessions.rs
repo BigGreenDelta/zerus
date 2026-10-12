@@ -4,10 +4,11 @@ use super::store::Store;
 use anyhow::Result;
 use serde_json::json;
 use std::path::Path;
+use std::time::Duration;
 
 /// Records that a session on this machine was renamed, so pins, assignees and
-/// reviewers follow it. A rename never fails because of Overmind, and a
-/// machine that never used Overmind gets no store.
+/// reviewers follow it. A rename never fails or waits long because of
+/// Overmind, and a machine that never used Overmind gets no store.
 pub fn session_renamed(old: &str, new: &str) {
     if old == new {
         return;
@@ -16,10 +17,11 @@ pub fn session_renamed(old: &str, new: &str) {
         .map_err(|e| anyhow::anyhow!(e.message))
         .and_then(|config| {
             let dir = config.state.join("overmind");
-            if !dir.join("overmind.sqlite3").exists() {
-                return Ok(());
+            // The store is opened only after the machine identity was saved.
+            match crate::swarm::saved_node_id(&config) {
+                Some(machine) if dir.join("overmind.sqlite3").exists() => record_rename(&dir, &machine, old, new),
+                _ => Ok(()),
             }
-            record_rename(&dir, &crate::swarm::local_node_id(&config)?, old, new)
         });
     if let Err(error) = recorded {
         eprintln!("hgs: Overmind tasks still name {old}: {error:#}");
@@ -28,6 +30,7 @@ pub fn session_renamed(old: &str, new: &str) {
 
 fn record_rename(dir: &Path, machine: &str, old: &str, new: &str) -> Result<()> {
     let mut store = Store::open(dir, machine)?;
+    store.wait_for_writers(Duration::from_secs(1))?;
     store.write(|tx| {
         tx.append(&Draft {
             actor: Actor::human(machine),

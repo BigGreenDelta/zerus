@@ -53,6 +53,21 @@ pub(crate) fn verified_bindings(
         .unwrap_or_default()
 }
 
+/// The machine identity `local_node_id` saved, or None before it ran or when
+/// the catalog is unreadable. Lock-free: the store is replaced atomically.
+#[cfg(unix)]
+pub(crate) fn saved_node_id(config: &Config) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Local {
+        node_id: String,
+    }
+    std::fs::read(config.dir.join("swarm/catalog.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Local>(&bytes).ok())
+        .map(|store| store.node_id)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == *id))
+}
+
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or
 /// unreadable catalog reports the defaults.

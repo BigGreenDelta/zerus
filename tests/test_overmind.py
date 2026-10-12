@@ -131,17 +131,25 @@ class Overmind(unittest.TestCase):
         error = self.refused('advance', '--json', data={'task': created['task']['ref'], 'to': 'Build', 'spec': 's'})
         self.assertEqual(error['code'], 'agent_only')
 
-    def rename(self, old, new):
+    def rename(self, old, new, archive=False):
         self.state.mkdir(mode=0o700, exist_ok=True)
         binding = {'version': 1, 'name': old, 'agent': 'codex', 'run_id': str(uuid.uuid4())}
-        (self.state / f'{hashlib.sha256(old.encode()).hexdigest()}.json').write_text(json.dumps(binding))
-        result = subprocess.run([str(HGS), 'rename', old, new], env=self.env, text=True,
-                                capture_output=True, timeout=20)
+        if archive:
+            binding['archive_id'] = str(uuid.uuid4())
+            (self.state / 'archives').mkdir(mode=0o700, exist_ok=True)
+            (self.state / 'archives' / f"{binding['archive_id']}.json").write_text(json.dumps(binding))
+        else:
+            (self.state / f'{hashlib.sha256(old.encode()).hexdigest()}.json').write_text(json.dumps(binding))
+        command = [str(HGS), 'rename', old, new, *(['--archive', binding['archive_id']] if archive else [])]
+        result = subprocess.run(command, env=self.env, text=True, capture_output=True, timeout=20)
         self.assertEqual((result.returncode, result.stderr), (0, ''))
 
     def test_pins_follow_a_renamed_session(self):
         pinned = {'machine': '', 'name': 'codex/demo/old'}
         ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'pinned': pinned})['task']['ref']
+        # An archived conversation may share the name of a live session; its rename moves nothing.
+        self.rename('codex/demo/old', 'codex/demo/archived', archive=True)
+        self.assertEqual(self.ok('show', ref)['task']['pinned']['name'], 'codex/demo/old')
         self.rename('codex/demo/old', 'codex/demo/new')
         self.assertEqual(self.ok('show', ref)['task']['pinned']['name'], 'codex/demo/new')
 
@@ -188,10 +196,14 @@ class AgentSession(unittest.TestCase):
         db.close()
 
     def commit(self, repo):
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
-                        'commit', '--allow-empty', '-qm', 'work'], check=True)
-        return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        git = lambda *args: subprocess.check_output(['git', '-C', str(repo), *args], env=env, text=True).strip()
+        repo.mkdir()
+        git('init', '-q')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false',
+            'commit', '--allow-empty', '-qm', 'work')
+        return git('rev-parse', 'HEAD')
 
     def test_a_live_session_acts_as_its_agent(self):
         self.assertIn('You can never move a task to Done', self.ok('--help'))

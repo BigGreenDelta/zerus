@@ -172,18 +172,22 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             remove(&path)?;
         }
     }
-    if let Some(scope)=scope {
-        if archive_id.is_none() {scope.result_record(&read(new)?);}
-    } else {println!(
-        "hgs: {}renamed {old} to {new}",
-        if dry { "would have " } else { "" }
-    );}
-    // Hooks share the state lock, so Overmind records the rename after it.
+    let reported = match scope {
+        Some(scope) if archive_id.is_none() => read(new).map(|record| scope.result_record(&record)),
+        Some(_) => Ok(()),
+        None => {
+            println!("hgs: {}renamed {old} to {new}", if dry { "would have " } else { "" });
+            Ok(())
+        }
+    };
+    // Hooks share the state lock, so Overmind records the rename after it. An
+    // archived conversation can share its name with a live session, whose
+    // tasks must stay where they are.
     drop(guard);
-    if old != new && !dry {
+    if archive_id.is_none() && old != new && !dry {
         crate::overmind::session_renamed(old, new);
     }
-    Ok(0)
+    reported.map(|()| 0)
 }
 
 fn anchor(record: &mut Value) {
@@ -293,6 +297,8 @@ pub(super) fn recover_locked() -> Result<()> {
         }
         commit(&transaction)?;
         remove(&path)?;
+        // Rare, and Overmind waits at most a second, so this may run under the lock.
+        crate::overmind::session_renamed(old, new);
     }
     Ok(())
 }
