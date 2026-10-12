@@ -393,7 +393,9 @@ phone runs it through the connector on the gateway.
    the blobs of the task's attachments and runs the command there over the swarm
    SSH route. The cost is at most the 4 MiB batches the worker would send anyway.
    The forwarded command runs as a person on the host (`Actor::human(host)`), so
-   the host writes the claim, as Part 2 requires.
+   the host writes the claim, as Part 2 requires. The caller stores the host's
+   result as its own receipt for the request, so a retry replays it without SSH
+   and the same `request_id` with another request is refused on the caller.
 3. On the session's host: gate check against the merged state, then the existing
    `checked_input` preflight (run and conversation identity, pause, blocking
    dialogs). A failure returns the reason; nothing is written.

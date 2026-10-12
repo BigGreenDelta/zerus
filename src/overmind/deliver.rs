@@ -229,7 +229,9 @@ struct SendRequest {
 
 /// Runs a sending command on the host of a session on another machine, before
 /// anything is written here. On a host (`local_only`) it refuses instead: a
-/// forwarded command is never forwarded again.
+/// forwarded command is never forwarded again. The host's result is also this
+/// request's receipt here, so a retry replays it without reaching the host and
+/// the same `request_id` with another request is refused here.
 fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &SessionRef, local_only: bool) -> Result<Value> {
     if local_only {
         return Err(Refusal::field("remote_session", "session", "invalid", "this session is not on this machine").into());
@@ -238,7 +240,15 @@ fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &Se
     let uuid = ctx.store.read(|tx| resolve(tx, task))?;
     let mut forwarded = request.clone();
     forwarded["task"] = json!(uuid);
-    super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine)
+    let result = super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine)?;
+    ctx.store.write(|tx| {
+        // Two retries of one request: the first to finish wins.
+        if let Some(stored) = commands::replay(tx, command, request)? {
+            return Ok(stored);
+        }
+        commands::remember(tx, command, request, &result)?;
+        Ok(result)
+    })
 }
 
 /// The session that receives a rework or an answer: the task's assignee.

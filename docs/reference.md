@@ -1469,7 +1469,9 @@ reviewer session of the task. A peer accepts at most 8 pushed images per call,
 A send to a session on another machine runs on that machine. The caller first
 exchanges events with the host, pushes the task's images, and runs the command
 there as a person, so the host writes the claim. The host checks the gates, not
-the caller; an offline host shows `host_unreachable`.
+the caller; an offline host shows `host_unreachable`. The caller keeps the
+host's result as the result of the request, so a retry with the same
+`request_id` replays it without reaching the host.
 
 <a id="windows"></a>
 

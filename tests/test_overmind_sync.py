@@ -240,6 +240,21 @@ class RemoteDelivery(Nodes):
         claim = next(j for j in on_a['journal'] if j['marker'] == '[claim]')
         self.assertEqual(claim['actor']['machine'], b)  # the host wrote the claim
 
+    def test_a_forwarded_result_is_remembered_on_the_caller(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        request = {'request_id': str(uuid.uuid4()), 'task': ref, 'session': {'machine': b, 'name': self.name}}
+        first = self.overmind('a', 'send', '--json', data=request)
+        self.assertEqual(first['delivery'], 'sent', first)
+        (self.root / 'calls').write_text('')
+        # An identical retry replays here; the same request_id with another request is refused here.
+        self.assertEqual(self.overmind('a', 'send', '--json', data=request), first)
+        other = dict(request, session={'machine': b, 'name': 'codex/other'})
+        refused = self.overmind_raw('a', 'send', '--json', data=other)
+        self.assertEqual((refused.returncode, json.loads(refused.stdout)['error']['code']), (1, 'request_reused'))
+        self.assertEqual((self.root / 'calls').read_text(), '')  # the host was never contacted
+        self.assertEqual(self.received().count(b'[Overmind '), 1)
+
     def test_a_remote_send_brings_the_task_images_along(self):
         attachment, _ = self.image(1024)
         ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'Look', 'stage': 'Queue', 'attachments': [attachment]})['task']['ref']
