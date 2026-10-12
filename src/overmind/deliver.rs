@@ -236,6 +236,14 @@ pub fn send(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
     let dir = ctx.store.dir().to_owned();
+    // Images this machine lacks are fetched first; a resumed claim keeps today's behaviour.
+    let (first, fetched) = ctx.store.read(|tx| {
+        let task = load_writable(tx, &resolve(tx, &req.task)?)?;
+        Ok((pending_claim(tx, &task, &request_id)?.is_none(), task))
+    })?;
+    if first {
+        super::remote::ensure_blobs(ctx.store, &fetched)?;
+    }
     // Everything that can refuse runs before the claim is written. A claim this
     // request already wrote is resumed without the session checks: its text may
     // be typed already, and `submit` decides from its receipt.
@@ -479,6 +487,10 @@ pub fn review_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
+    if !resumed {
+        let task = ctx.store.read(|tx| load_writable(tx, &resolve(tx, &req.task)?))?;
+        super::remote::ensure_blobs(ctx.store, &task)?;
+    }
     let (uuid, attachments) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
@@ -523,6 +535,10 @@ pub fn rework_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
     }
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
+    if !resumed {
+        let task = ctx.store.read(|tx| load_writable(tx, &resolve(tx, &req.task)?))?;
+        super::remote::ensure_blobs(ctx.store, &task)?;
+    }
     let (uuid, session, text, attachments) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;

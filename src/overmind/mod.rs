@@ -10,6 +10,7 @@ mod identity;
 mod model;
 mod rank;
 mod refs;
+mod remote;
 mod sessions;
 mod store;
 mod sync;
@@ -29,6 +30,8 @@ fn open(config: &crate::config::Config) -> anyhow::Result<store::Store> {
 pub fn serve(config: &crate::config::Config, action: &str, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     match action {
         "overmind-exchange" => sync::serve(&mut open(config)?, request),
+        "overmind-blob" => remote::serve_blob(&open(config)?, &request),
+        "overmind-blobs" => remote::serve_blobs(&open(config)?, &request),
         _ => anyhow::bail!("this machine does not know the Overmind request {action}; update HGS on it"),
     }
 }

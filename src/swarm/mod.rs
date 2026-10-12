@@ -53,6 +53,16 @@ pub(crate) fn verified_bindings(
         .unwrap_or_default()
 }
 
+/// The configured peer alias whose verified binding is `machine`.
+#[cfg(unix)]
+pub(crate) fn alias_for(config: &Config, machine: &str) -> Option<String> {
+    let local = saved_node_id(config)?;
+    verified_bindings(config, &local)
+        .into_iter()
+        .find(|(alias, id)| id == machine && config.peers.contains(alias))
+        .map(|(alias, _)| alias)
+}
+
 /// The machine identity `local_node_id` saved, or None before it ran or when
 /// the catalog is unreadable. Lock-free: the store is replaced atomically.
 #[cfg(unix)]
@@ -142,9 +152,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
 }
 
 /// One swarm transport call for other modules (Overmind replication and delivery).
-// Overmind delivery (Task 6) is its first caller.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub(crate) fn call(config: &Config, alias: &str, action: &str, request: Option<&Value>) -> Result<Value> {
     transport::remote(config, alias, action, request)
 }

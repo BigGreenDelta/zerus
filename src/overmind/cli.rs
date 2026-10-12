@@ -20,6 +20,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   reorder --json {task, before?}  |  pin --json {task, session?}  |  unpin --json {task}
   send --json {task, session: {machine?, name}, confirm?: [codes]}   claim and type the task into a session
   review-send --json {task, session, confirm?}  |  rework-send --json {task, confirm?}  |  answer --json {task, answer, confirm?}
+  attachment --json {task, sha256}         local path of a task image, fetched from another machine when needed
   resolve-delivery --json {task, delivered: true|false}
   label --json {task, label, present}  |  link --json {task, relation, target, present}
   comment --json {task, text}  |  delete --json {task}
@@ -41,6 +42,7 @@ const AGENT_USAGE: &str = "usage: hgs overmind <command> --json   (JSON request 
   decompose --json {task, subtasks: [{title?, prompt}], ordered?}
   file --json {prompt, breaks, title?, related?, project?}   record an out-of-scope finding in Backlog
   attach --json {task, name, mime, data_base64, note?}
+  attachment --json {task, sha256}         local path of a task image, fetched from another machine when needed
   review --json {task, verdict: approve|needs_work, report}
 You can never move a task to Done: a person signs it off.
 ";
@@ -133,6 +135,7 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
         ("return", []) => agent::return_task(&mut ctx, request)?,
         ("decompose", []) => agent::decompose(&mut ctx, request)?,
         ("file", []) => agent::file(&mut ctx, request)?,
+        ("attachment", []) => super::remote::attachment(&mut ctx, request)?,
         ("attach", []) => agent::attach(&mut ctx, request)?,
         ("review", []) => agent::review(&mut ctx, request)?,
         _ => return Err(Refusal::new("unknown_command", "unknown overmind command; see hgs overmind --help").into()),

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Overmind replication through the swarm worker, with isolated nodes and fake SSH."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -56,8 +57,34 @@ class Replication(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return json.loads(result.stdout)
 
+    def overmind_raw(self, node, *args, data=None):
+        return subprocess.run([str(swarm.HGS), 'overmind', *args], input=None if data is None else json.dumps(data),
+                              env=self.node_env(node), text=True, capture_output=True, timeout=40)
+
     def refs(self, node):
         return sorted(t['ref'] for t in self.overmind(node, 'board', '--json', data={'project': 'demo'})['tasks'])
+
+    def image(self, size):
+        data = bytes(range(256)) * (size // 256)
+        return {'name': 'shot.png', 'mime': 'image/png', 'data_base64': base64.b64encode(data).decode()}, data
+
+    def test_images_are_fetched_in_ranges_when_needed(self):
+        attachment, data = self.image(700 * 1024)
+        task = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment]})['task']
+        self.call('a', 'sync')
+        sha = task['attachments'][0]['sha256']
+        got = self.overmind('b', 'attachment', '--json', data={'task': task['ref'], 'sha256': sha})
+        self.assertEqual(Path(got['path']).read_bytes(), data)
+        calls = (self.root / 'calls').read_text()
+        self.assertEqual(calls.count('overmind-blob\n'), 2)
+
+    def test_missing_blob_refuses_before_claiming(self):
+        attachment, _ = self.image(1024)
+        task = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment], 'stage': 'Queue'})['task']
+        self.call('a', 'sync')
+        (self.root / 'offline-a').write_text('')
+        result = self.overmind_raw('b', 'attachment', '--json', data={'task': task['ref'], 'sha256': task['attachments'][0]['sha256']})
+        self.assertEqual(json.loads(result.stdout)['error']['code'], 'attachment_unavailable')
 
     def test_sync_replicates_both_ways_over_one_direction(self):
         made_on_a = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'from a'})['task']['ref']
