@@ -159,11 +159,15 @@ its own origin id, created with the store, and numbers its events from `seq` 1.
 therefore never collides with events written earlier, even when it writes
 before its peers refill it. A store restored from an old copy writes under the
 same origin as the original, so its new events could collide with events written
-since. It detects this at its next exchange, when a peer holds more events of
-its own origin than it does: it then switches to a fresh origin for later events
-and records the fact in `status`. Events written before that exchange keep the
-old origin, and tasks changed then may differ from the other machines. Copying a
-whole store directory to a second machine is unsupported.
+since. Exchanges carry tips (Replication below), so the collision is found at
+the next exchange with a peer that holds those positions, however many events
+the copy wrote; a copy that only lost events finds it when a peer holds more
+events of its origin than it does. The store then switches to a fresh origin
+for later events and records the fact in its origin history, which `status`
+shows. Events written before that exchange keep the old origin, are no longer
+exchanged with the peers that hold other events there, and tasks changed then
+may differ from the other machines. Copying a whole store directory to a
+second machine is unsupported.
 
 `lamport` is the maximum seen plus one, so a causally later event always sorts
 later. Kinds: `task_created`, `field_set`, `transition`, `journal`, `rank_set`,
@@ -198,8 +202,26 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   holds a contiguous `seq` prefix of each origin. Events of every origin are
   replicated alike, including older origins of this machine. An event at a
   position a store already holds is skipped when it is the same event and
-  refused when it is another one; the machine that runs an exchange reports
-  the events it refused in `status`.
+  refused when it is another one, and then no later event of that origin from
+  the same batch is stored; the machine that runs an exchange reports the
+  events it refused in `status`.
+- Collisions. The request and the answer of an exchange carry `tips`: for
+  every origin of the sender's version vector, the id of the sender's event at
+  that position. A side that holds the position with another event has found
+  a collision of that origin: the two logs differ there or earlier. The
+  shorter log's tip always lies inside the longer one, so one side always finds
+  it, and it tells the other in `collisions`, which both messages carry. A
+  store whose own current origin collides replaces it before anything is
+  written there again, as a store does when a peer holds more events of its
+  origin than it does. Both sides record each collision once, with the peer,
+  the origin and the time, and from then on neither sends events of that
+  origin to the other nor stores the other's, so no log mixes the two
+  histories. Both fields are optional, so a machine without them still
+  exchanges.
+- `status` shows `origin_history`, newest first and at most 20: each change of
+  this store's origin (`restored`) and each collision (`collision`), with `at`,
+  `origin`, `peer` and, when the store replaced the origin, `replaced_by`. A
+  peer's last error is cleared by the next clean exchange; this history is not.
 - The existing swarm worker (`hgs-swarm.service`) runs an Overmind exchange
   with each peer in its loop, through a new internal command over the same SSH
   route. One call pushes and pulls, so it works when SSH goes in one direction
@@ -334,7 +356,9 @@ Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `rework-send`, `answer`, `resolve-delivery`, `done`, `reopen`, `delete`,
 `workflow get|set`, `templates get|set`, `status`, `attachment`, `rev`, `mcp`.
 `send`, `review-send` and `pin` take `session: {machine?, name}`, and `create`
-takes `pinned` in the same form; `machine` defaults to the local computer. Peers advertise `overmind:1` in the `features` of swarm `hello`.
+takes `pinned` in the same form; `machine` defaults to the local computer.
+`pin` without `session` removes the pin, as `unpin` does. Peers advertise
+`overmind:1` in the `features` of swarm `hello`.
 
 Agent commands: `mine`, `show`, `comment`, `advance`, `call-human`, `return`,
 `decompose`, `file`, `attach`, `attachment`, `review`. `attachment` is open to
@@ -376,9 +400,10 @@ Four templates render the text sent to a session: `dispatch`, `review`,
 profiles and sessions in stage 2). A project stores each replacement as its own
 setting, one `settings_set` event per template name (`null` restores the
 built-in text), so two machines editing different templates both keep their
-edit; for one name the latest event in the total order wins. Variables: `{task.ref}`, `{task.title}`,
-`{task.prompt}`, `{task.stage}`, `{task.journal_tail}`, `{review.report}`,
-`{answer.text}`, `{tools}` (MCP or CLI hint). Default `dispatch`:
+edit; for one name the latest event in the total order wins. Variables:
+`{task.ref}`, `{task.title}`, `{task.prompt}`, `{task.stage}`,
+`{task.journal_tail}`, `{review.report}`, `{answer.text}`, `{tools}` (MCP or
+CLI hint). Default `dispatch`:
 
 ```
 [Overmind om-k3f9x] <title>
@@ -419,13 +444,22 @@ phone runs it through the connector on the gateway.
    dialogs, pending model settings that `hgs send` would refuse). A failure
    returns the reason; nothing is written. The gates and the preflight run
    before the host fetches images it lacks, so a refused request reaches no
-   other machine. Every failure after the caller reached the host is a JSON
-   refusal. Those before the host acted say that nothing was attempted there:
-   `host_unreachable`, `host_changed` (the route now leads to another machine),
-   `host_outdated` (the host lacks the request) and `host_sync_failed` (the
-   exchange or the image push failed). A lost answer from the host, which may
-   have acted already, refuses with `delivery_unknown`, and the person checks
-   the task before sending it again.
+   other machine. Every failure of a forwarded command is a JSON refusal.
+   `host_unreachable` comes before the caller reaches the host (no verified
+   route, or the host does not answer `hello`). After the host answered and
+   before it is asked to act: `host_changed` (the route now leads to another
+   machine), `host_outdated` (the host lacks the request) and
+   `host_sync_failed` (the exchange or the image push failed). None of them
+   reached the host's tasks; the messages of `host_changed` and
+   `host_sync_failed` say that nothing was attempted there. A lost answer from
+   the host, which may have acted already, or an answer that is neither a
+   result nor a refusal, refuses with `delivery_unknown`, and the person checks
+   the task before sending it again. The host runs a forwarded command as its
+   own and never forwards it again: a session that is not on it is refused
+   `remote_session`, naming the host's machine. Refusals about the receiving
+   session use the request's field for it: `session` for `send` and
+   `review-send`, `task` for `rework-send` and `answer`, on the host as on the
+   caller. `unknown_session` names the machine that does not know the session.
 4. Write `claim` with `base` and `request_id`.
 5. Deliver with `input::submit`, using the same receipt and identity rules as
    `hgs send`. `recovery::cancel_for_input` applies as for any user input.
@@ -588,6 +622,7 @@ payloads never contain task content.
 | Assignee session terminated or archived | When a session stops taking input for good (archived, also after the user quits its agent; terminated; forgotten or killed), its machine flags the tasks it holds in active or needs-human stages `orphaned`, best effort: the session command never fails because of Overmind and waits for it at most a second. Pausing is not an end. The flag names the session and applies only while that session holds the task, so a session that lost a concurrent claim, or a task taken back meanwhile, is not flagged. A person returns the task to Queue; any change of assignee (`claim`, `unclaim`, `return`, `decompose`) clears the flag, as does an accepted action of the assignee session itself (`advance`, `call_human`), which proves that it is alive, for example after its archive was restored. A task in Your Call keeps the flag through Icebox and back to Queue until it is sent again. |
 | Session renamed | `session_renamed` event inside the rename; pins, assignees and reviewers follow. The host writes assignees and reviewers with the current name, so only a pin written on another machine can miss a concurrent rename: the rename sorts before the pin, and the fold keeps the name as written. The host resolves such a pin through its own renames, oldest first, past every name that no session there uses: `send` compares the resolved name for `pinned_elsewhere`, and `show` and `board` add it as `pinned_current`. Other machines show the pin as written until the host resolves it. A name reused by a session that has since ended can resolve a pin to the session that first held the name, so `pinned_current` is a hint; `board --since` does not resend a task whose `pinned_current` changed only because a session's binding appeared or disappeared. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |
+| Store restored from an old copy, or two logs of one origin | Found at the next exchange with a peer that holds more events of the store's origin, or another event at a position (tips). A store whose own origin it is writes later events under a fresh origin (`restored` or `collision` in `origin_history`); on a collision both stores note it and stop exchanging that origin with each other. |
 | Cache corrupted or schema changed | Rebuilt from `events`. |
 | Unknown event kind or version | Task read-only on that machine. |
 | Concurrent conflicting transitions | `[rejected]` for the loser; `conflict` if an external effect is overturned. |

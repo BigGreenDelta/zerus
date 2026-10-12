@@ -1461,16 +1461,16 @@ the answer to a question in Your Call and sends the `answer` template. The
 answer is recorded before it is typed; if it was not delivered, repeat the
 request with the same `request_id`, which the refusal names; the same
 `request_id` with another answer is refused `request_reused`. `pin --json
-{task, session: {machine?, name}}` reserves a task for a session, with `machine`
-defaulting to this computer as for `send`, and `unpin --json {task}` removes the
-pin.
+{task, session?: {machine?, name}}` reserves a task for a session, with
+`machine` defaulting to this computer as for `send`; without `session` it
+removes the pin, as `unpin --json {task}` does.
 
 `templates get --json {project}` shows the templates of a project and
 `templates set --json {project, templates: {dispatch|review|rework|answer:
 text|null}}` changes them; `null` restores the built-in text. Each template is
 stored by itself, so two people editing different templates of one project at
-the same time both keep their edit; for one template the later edit wins. A template can
-use `{task.ref}`, `{task.title}`, `{task.prompt}`, `{task.stage}`,
+the same time both keep their edit; for one template the later edit wins. A
+template can use `{task.ref}`, `{task.title}`, `{task.prompt}`, `{task.stage}`,
 `{task.journal_tail}`, `{review.report}`, `{answer.text}` and `{tools}`.
 Values are inserted as they are and never expanded again. The rendered text
 follows the `hgs send` rules: at most 64 KiB, not starting with `/` or `!`.
@@ -1483,21 +1483,34 @@ data is refilled over several rounds; it ends when a round makes no progress or
 after 8 rounds, and the worker continues on its next pass. Each store writes
 its events under its own origin id, created with the store, so a store that was
 lost and created again never collides with events written earlier, even when
-it writes before it is refilled. A store restored from an old copy notices at
-its next exchange that a peer holds more events of its origin than it does. It
-then writes under a fresh origin and says so in `status`; tasks it changed
-before that exchange may differ from the other machines. Copying a store
-directory to a second machine is unsupported.
+it writes before it is refilled.
+
+A store restored from an old copy writes under its old origin, so its new
+events can collide with events its peers already hold at the same positions.
+Each exchange therefore also carries tips: for every origin, the id of the
+sender's last event of it. A side that holds that position with another event
+has found a collision of that origin, and it tells the other side. The shorter
+log's tip always lies inside the longer one, so one of the two always finds it.
+A store whose own origin collides, or whose peer holds more events of its
+origin than it does, writes later events under a fresh origin. Events of a
+colliding origin are no longer exchanged between the two stores, so neither
+mixes the two logs; tasks changed before the exchange may differ between them.
+Copying a store directory to a second machine is unsupported.
+
 `hgs overmind status` shows this store's origin id and each peer's last
 exchange and last error, including events the peer did not accept and events
 from the peer that this machine refused as damaged; a clean exchange clears
-the error. An unreachable peer appears in the swarm sync
-result, and its Overmind status keeps the last good state. Images are not part
-of the exchange. `attachment --json {task, sha256}` returns the local path of a
-task image and fetches it from another machine when needed, in ranges of at
-most 512 KiB verified by SHA-256. People may use it, and so may the assignee or
-reviewer session of the task. A peer accepts at most 8 pushed images per call,
-10 MiB each and 20 MiB in total.
+the error. `origin_history` keeps the changes of origin and the collisions,
+newest first and at most 20, each with `at`, `kind` (`restored` or
+`collision`), `origin`, `peer` and, when this store replaced the origin,
+`replaced_by`; exchanges never clear it. An unreachable peer appears in the
+swarm sync result, and its Overmind status keeps the last good state.
+
+Images are not part of the exchange. `attachment --json {task, sha256}` returns
+the local path of a task image and fetches it from another machine when needed,
+in ranges of at most 512 KiB verified by SHA-256. People may use it, and so may
+the assignee or reviewer session of the task. A peer accepts at most 8 pushed
+images per call, 10 MiB each and 20 MiB in total.
 
 A send to a session on another machine runs on that machine. The caller first
 exchanges events with the host, pushes the task's images, and runs the command
@@ -1505,14 +1518,23 @@ there as a person, so the host writes the claim. The host checks the gates, not
 the caller. The caller keeps the host's result as the result of the request, so
 a retry with the same `request_id` replays it without reaching the host.
 
-Every failure of a forwarded command after the caller reached the host is a
-JSON refusal. Before the host is asked to act, the refusal says that nothing
-was attempted there: `host_unreachable` (no route, or the host is offline),
-`host_changed` (the machine behind the route is no longer the session's
-machine), `host_outdated` (the host runs a version without the request; update
-HGS there) and `host_sync_failed` (bringing the host up to date or giving it the
-task's images failed). When the host's answer is lost after it may have acted,
-the refusal is `delivery_unknown`: check the task before sending it again.
+Every failure of a forwarded command is a JSON refusal. `host_unreachable`
+comes before the caller reaches the host: this computer has no verified route
+to the session's machine, or the machine does not answer. After the host
+answered, and before it is asked to act: `host_changed` (the machine behind
+the route is no longer the session's machine), `host_outdated` (the host runs
+a version without the request; update HGS there) and `host_sync_failed`
+(bringing the host up to date or giving it the task's images failed). None of
+these reached the host's tasks; the messages of `host_changed` and
+`host_sync_failed` say that nothing was attempted there. When the host's answer
+is lost after it may have acted, or is neither a result nor a refusal, the
+refusal is `delivery_unknown`: check the task before sending it again. A host
+never forwards a command again: for a session that is not on it, it refuses
+`remote_session`, naming its own machine. Refusals about the receiving session
+use the field `session` for `send` and `review-send`, and `task` for
+`rework-send` and `answer`, which name the session only through the task, on
+the session's machine as on the caller. `unknown_session` names the machine
+that does not know the session.
 
 <a id="windows"></a>
 
