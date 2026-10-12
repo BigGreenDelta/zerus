@@ -317,6 +317,14 @@ class RemoteDelivery(Nodes):
         self.assertEqual(sent['actor']['machine'], b)
         self.assertEqual(result['task']['ref'], ref)
 
+    def test_a_device_label_travels_to_the_host_that_writes_the_claim(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'Fix the drafts', 'stage': 'Queue'})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        self.overmind('a', 'send', '--json', '--device', 'Pixel 9', data={'task': ref, 'session': {'machine': b, 'name': self.name}})
+        journal = self.overmind('a', 'show', ref)['task']['journal']
+        claim = next(j for j in journal if j['marker'] == '[claim]')
+        self.assertEqual((claim['actor']['machine'], claim['actor'].get('device')), (b, 'Pixel 9'))
+
     def made_on_b(self):
         """A task created on b, where `append` sets it up; returns its uuid."""
         return self.overmind('b', 'create', '--json', data={'project': 'demo', 'prompt': 'Fix the drafts', 'stage': 'Queue'})['task']['uuid']

@@ -196,7 +196,7 @@ pub fn push_blobs(config: &Config, alias: &str, store: &Store, task: &Task) -> R
 /// Runs a sending command on the host of a session on another machine (spec
 /// Part 5): brings the host up to date, gives it the task's images, runs the
 /// command there as a person and pulls the claim and its outcome back.
-pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, machine: &str) -> Result<Value> {
+pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, machine: &str, device: &str) -> Result<Value> {
     let config = Config::load().map_err(|e| anyhow!(e.message))?;
     // The request names the receiving session itself, or (rework, answer) only the task.
     let field = if request.get("session").is_some() { "session" } else { "task" };
@@ -229,7 +229,11 @@ pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, ma
     let loaded = store.read(|tx| commands::load(tx, task))?;
     push_blobs(&config, &alias, store, &loaded).map_err(|error| not_attempted("giving the task's images to", error))?;
     // The host may have acted before the call failed, so the outcome is unknown.
-    let answer = crate::swarm::call(&config, &alias, "overmind-deliver", Some(&json!({"command": command, "request": request})))
+    let mut deliver_body = json!({"command": command, "request": request});
+    if !device.is_empty() {
+        deliver_body["device"] = json!(device);
+    }
+    let answer = crate::swarm::call(&config, &alias, "overmind-deliver", Some(&deliver_body))
         .map_err(|error| -> anyhow::Error {
             let text = format!("{error:#}");
             // An old host rejected the call before running anything.
@@ -287,7 +291,17 @@ fn host_answer(answer: Value, field: &str, alias: &str) -> Result<Value> {
 pub fn serve_deliver(store: &mut Store, request: &Value) -> Result<Value> {
     let machine = store.machine().to_owned();
     let inner = request["request"].clone();
-    let mut ctx = Ctx { store, actor: Actor::human(&machine), cwd: None };
+    // Additive: an older caller sends no label.
+    let mut actor = Actor::human(&machine);
+    match request.get("device") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(label)) if super::cli::valid_device(label) => actor.device = label.clone(),
+        Some(_) => {
+            let refusal = Refusal::field("invalid_request", "device", "invalid", "the device label is not valid");
+            return Ok(json!({"ok": false, "error": refusal}));
+        }
+    }
+    let mut ctx = Ctx { store, actor, cwd: None };
     let result = match request["command"].as_str().unwrap_or_default() {
         "send" => deliver::send_on(&mut ctx, inner, true),
         "review-send" => deliver::review_send_on(&mut ctx, inner, true),
@@ -523,6 +537,10 @@ mod tests {
         ] {
             let answer = serve_deliver(&mut store, &json!({"command": command, "request": request})).unwrap();
             assert_eq!((answer["ok"].clone(), answer["error"]["code"].clone()), (json!(false), json!("remote_session")), "{command}");
+        }
+        for device in [json!(""), json!("-x"), json!("@x"), json!(7), json!("a".repeat(65))] {
+            let answer = serve_deliver(&mut store, &json!({"command": "send", "request": {}, "device": device})).unwrap();
+            assert_eq!((answer["error"]["code"].clone(), answer["error"]["field"].clone()), (json!("invalid_request"), json!("device")));
         }
         assert!(serve_deliver(&mut store, &json!({"command": "edit", "request": {}})).is_err());
         assert_eq!(store.cursor().unwrap(), before, "nothing was written");

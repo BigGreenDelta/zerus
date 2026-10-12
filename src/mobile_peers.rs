@@ -241,6 +241,15 @@ fn read_mark(payload: &Option<Value>) -> Result<()> {
     Ok(())
 }
 
+/// Overmind is a gateway operation: it never runs on another machine's connector.
+fn peer_forwardable(argv: &[String]) -> Result<()> {
+    ensure!(
+        argv.first().is_none_or(|v| v != "overmind"),
+        "overmind requests are served by the gateway"
+    );
+    Ok(())
+}
+
 /// Validate complete argv shapes before calling the CLI's permissive legacy dispatcher.
 /// Session operations retain their native scoped-payload validation and receipts.
 fn validate(request: &LocalRequest) -> Result<()> {
@@ -523,10 +532,14 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 rest.first().is_some_and(|command| OVERMIND_COMMANDS.contains(&command.as_str())),
                 "overmind command is not allowed"
             );
-            let flags = options(&rest[1..], &["--json"], &["--device"])?;
-            ensure!(flags.contains_key("--json"), "overmind requests are JSON");
+            // Exactly `--json` or `--json --device <label>`.
             ensure!(
-                flags.get("--device").is_none_or(|v| v.chars().count() <= 64 && !v.chars().any(char::is_control)),
+                rest.len() == 2 || (rest.len() == 4 && rest[2] == "--device"),
+                "overmind shape is not allowed"
+            );
+            ensure!(rest[1] == "--json", "overmind requests are JSON");
+            ensure!(
+                rest.get(3).is_none_or(|v| (1..=64).contains(&v.chars().count()) && !v.chars().any(char::is_control) && !v.starts_with(['-', '@'])),
                 "invalid overmind device label"
             );
             ensure!(
@@ -1074,6 +1087,7 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 argv: request.argv,
                 payload: request.payload,
             };
+            peer_forwardable(&local.argv)?;
             validate(&local)?;
             let deadline = Instant::now() + Duration::from_secs(30);
             supported(&request.via, deadline)?;
@@ -1381,6 +1395,8 @@ mod tests {
             vec!["overmind", "board", "--json", "--device", "--json"],
             vec!["overmind", "board", "--json", "--device", "@peer"],
             vec!["overmind", "board", "--json", "--device", ""],
+            vec!["overmind", "board", "--device", "a", "--json"],
+            vec!["overmind", "board", "--json", "--device", &"x".repeat(65)],
             vec!["overmind", "board", "--json", "--device", "a", "--device", "b"],
             vec!["overmind", "board", "--json", "extra"],
             vec!["overmind", "board", "--json", "--device", "a", "extra"],
@@ -1405,6 +1421,12 @@ mod tests {
         ] {
             assert!(validate(&request(&argv, body())).is_err(), "{argv:?}");
         }
+    }
+
+    #[test]
+    fn overmind_is_never_forwarded_to_a_peer() {
+        assert!(peer_forwardable(&["overmind".into(), "board".into(), "--json".into()]).is_err());
+        assert!(peer_forwardable(&["ls".into(), "--json".into(), "--local".into()]).is_ok());
     }
 
     #[test]

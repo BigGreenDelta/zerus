@@ -29,7 +29,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   comment --json {task, text}  |  delete --json {task}
   workflow get --json {project}  |  workflow set --json {project, workflow, moves?}
   templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
-  Any command takes --device <label> (1-64 characters) to record the client a person acts from.
+  Commands run by people take --device <label> (1-64 characters; not mcp) to record the client they act from.
   rev                                      change cursor for watchers
   status                                   replication state with every peer
   mcp [--session]                          serve the agent commands as an MCP server on stdio (--session: only for a verified agent session)
@@ -91,6 +91,11 @@ fn read_stdin() -> Result<Value> {
         .map_err(|e| Refusal::new("invalid_request", format!("the request is not valid JSON: {e}")).into())
 }
 
+/// The one label rule: CLI, forwarded deliveries and the mobile peer allowlist.
+pub fn valid_device(label: &str) -> bool {
+    (1..=64).contains(&label.chars().count()) && !label.chars().any(char::is_control) && !label.starts_with(['-', '@'])
+}
+
 /// `--device <label>` names the phone or other client a person acts from. It is
 /// informational and refused inside a session environment, which is an agent.
 fn split_device(args: &[String]) -> Result<(Vec<&str>, Option<&str>)> {
@@ -106,9 +111,8 @@ fn split_device(args: &[String]) -> Result<(Vec<&str>, Option<&str>)> {
                     return Err(invalid("--device may be given once").into());
                 }
                 let label = args.get(index + 1).map(String::as_str).unwrap_or("");
-                let chars = label.chars().count();
-                if !(1..=64).contains(&chars) || label.chars().any(char::is_control) {
-                    return Err(invalid("--device takes a label of 1 to 64 printable characters").into());
+                if !valid_device(label) {
+                    return Err(invalid("--device takes a label of 1 to 64 printable characters, not starting with - or @").into());
                 }
                 device = Some(label);
                 index += 1;

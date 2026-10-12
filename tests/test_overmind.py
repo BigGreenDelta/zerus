@@ -219,7 +219,7 @@ class Overmind(unittest.TestCase):
         self.assertEqual(self.ok('show', ref, '--device', 'x')['task']['ref'], ref)
 
     def test_device_label_is_validated_and_refused_for_sessions(self):
-        for label in ('', 'x' * 65, 'tab\there', 'new\nline'):
+        for label in ('', 'x' * 65, 'tab\there', 'new\nline', '-x', '--json', '@peer'):
             error = self.refused('board', '--json', '--device', label, data={'project': 'demo'})
             self.assertEqual((error['code'], error.get('field')), ('invalid_request', 'device'), label)
         error = self.refused('board', '--json', '--device', data={'project': 'demo'})

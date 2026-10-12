@@ -235,7 +235,7 @@ fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &Se
     let uuid = ctx.store.read(|tx| resolve(tx, task))?;
     let mut forwarded = request.clone();
     forwarded["task"] = json!(uuid);
-    let result = super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine)?;
+    let result = super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine, &ctx.actor.device)?;
     record_forwarded(ctx.store, command, request, result)
 }
 
