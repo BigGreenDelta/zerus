@@ -96,6 +96,8 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
             None => (Vec::new(), true),
         };
         let pushed = events.len();
+        let pushed_origins: std::collections::BTreeSet<String> =
+            events.iter().filter_map(|e| e["origin"].as_str().map(str::to_owned)).collect();
         summary.sent += pushed;
         let request = ExchangeRequest { v: 1, from: store.machine().into(), vector: store.version_vector()?, events };
         let response: ExchangeResponse = serde_json::from_value(call(&serde_json::to_value(&request)?)?)
@@ -113,11 +115,24 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         // What the peer still lacks according to its fresh answer: a peer that
         // lost its data is refilled from here on.
         let (lacking, _) = store.missing(&response.vector, BATCH)?;
-        if pushed > 0 && !push_more && !lacking.is_empty() {
-            summary.not_accepted = lacking.len();
-            break;
+        // A peer below the vector this round assumed lost data: push from its
+        // fresh vector next round. Otherwise events of an origin we pushed to
+        // that did not move the peer's seq were refused.
+        let lost_data = known
+            .as_ref()
+            .map_or(false, |k| k.iter().any(|(origin, seq)| response.vector.get(origin).copied().unwrap_or(0) < *seq));
+        if pushed > 0 && !push_more && !lost_data {
+            let unmoved = |origin: &str| {
+                let before = known.as_ref().and_then(|k| k.get(origin)).copied().unwrap_or(0);
+                response.vector.get(origin).copied().unwrap_or(0) == before
+            };
+            let refused = lacking.iter().filter(|e| e["origin"].as_str().map_or(false, |o| pushed_origins.contains(o) && unmoved(o))).count();
+            if refused > 0 {
+                summary.not_accepted = refused;
+                break;
+            }
         }
-        if !progress || !(push_more || response.more || (pushed == 0 && !lacking.is_empty())) {
+        if !progress || !(push_more || response.more || lost_data || (pushed == 0 && !lacking.is_empty())) {
             break;
         }
     }
@@ -134,6 +149,7 @@ mod tests {
 
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
 
     fn comment(store: &mut Store, task: &str, size: usize) {
         let machine = store.machine().to_owned();
@@ -220,20 +236,39 @@ mod tests {
     }
 
     #[test]
+    fn a_wiped_peer_is_refilled_even_when_this_machine_has_newer_events() {
+        let (dir, mut a, mut b) = stores();
+        for _ in 0..3 { comment(&mut a, "t", 10); }
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        for _ in 0..2 { comment(&mut a, "t", 10); }
+        drop(b);
+        let mut fresh = Store::open(&dir.path().join("fresh"), B).unwrap();
+        exchange(&mut a, B, "b", &mut |request| serve(&mut fresh, request.clone())).unwrap();
+        assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
+        assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
+    }
+
+    #[test]
     fn a_peer_that_refuses_events_stops_the_exchange_and_is_reported() {
         let (_dir, mut a, mut b) = stores();
         for _ in 0..3 { comment(&mut a, "t", 10); }
         comment(&mut b, "u", 10);
+        // A also holds events of a third origin, which B accepts.
+        let dir_c = tempfile::tempdir().unwrap();
+        let mut c = Store::open(dir_c.path(), C).unwrap();
+        comment(&mut c, "v", 10);
+        a.insert_raw(&c.missing(&BTreeMap::new(), BATCH).unwrap().0).unwrap();
         // B already holds A's first event id at another position, so it refuses A's events.
         let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["origin"] == A && e["seq"] == 1).unwrap();
         let mut forged = first.clone();
-        forged["origin"] = json!("33333333-3333-4333-8333-333333333333");
+        forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
         b.insert_raw(&[forged]).unwrap();
         let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
         assert!(summary.rounds <= 2, "{summary:?}");
         assert!(summary.not_accepted > 0, "{summary:?}");
         let peer = a.peer(B).unwrap().unwrap();
         assert!(peer.last_error.contains("did not accept"), "{peer:?}");
-        assert!(a.version_vector().unwrap().get(B).copied().unwrap_or(0) >= 1, "other origins still arrived");
+        assert!(a.version_vector().unwrap().get(B).copied().unwrap_or(0) >= 1, "B's own origin reached A");
+        assert_eq!(b.version_vector().unwrap().get(C).copied(), Some(1), "a pushed origin B accepted reached B");
     }
 }
