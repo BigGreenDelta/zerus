@@ -295,7 +295,7 @@ void TestMessageComposer::storageFailureKeepsDraftAndBlocksDispatch()
     QVERIFY(!setSendingReady(composer, "one")); QVERIFY(!composer.editor()->isReadOnly());
     QCOMPARE(composer.editor()->toPlainText(), "Still editable");
     QVERIFY(blocker.remove()); composer.editor()->insertPlainText("X");
-    QTRY_VERIFY(status(composer)->text().contains("saved locally"));
+    QTRY_VERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
     MessageComposer restored; setSessionReady(restored, "one"); QCOMPARE(restored.editor()->toPlainText(), composer.editor()->toPlainText());
 }
 
@@ -368,6 +368,8 @@ void TestMessageComposer::typingDoesNotRewriteAttachmentSnapshots()
 void TestMessageComposer::slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestState()
 {
     MessageComposer composer; setSessionReady(composer, "slow\nexact"); composer.setAvailability(true);
+    composer.resize(440, 220); composer.show(); QTest::qWait(20);
+    QVERIFY(status(composer)->isHidden()); const auto quietSize = composer.sizeHint();
     QSemaphore entered, release;
     std::atomic<int> writes = 0;
     QThread *writer = nullptr;
@@ -389,15 +391,20 @@ void TestMessageComposer::slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestSta
     bool heartbeat = false;
     QTimer::singleShot(0, &composer, [&] { heartbeat = true; });
     QTRY_VERIFY(heartbeat);
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
+    QCOMPARE(composer.sizeHint(), quietSize);
     release.release(); ComposerDraftStore::flushWrites();
     QCOMPARE(ComposerDraftStore().load("slow\nexact").text, latest);
     QVERIFY(writes <= 2); // At most the in-flight and coalesced latest edit.
     QVERIFY(setSendingReady(composer, "slow\nexact"));
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
     QVERIFY(ComposerDraftStore().load("slow\nexact").uncertain);
     composer.deliveryFinished("slow\nexact", true, {});
     QCoreApplication::processEvents(); // Obsolete async acknowledgements cannot restore the text.
     QVERIFY(ComposerDraftStore().load("slow\nexact").text.isEmpty());
     QVERIFY(composer.editor()->toPlainText().isEmpty());
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
+    QCOMPARE(composer.sizeHint(), quietSize);
 }
 
 void TestMessageComposer::sendPreparationWaitsForDurableLatestSnapshot()
@@ -789,8 +796,9 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     const auto *send = composer.findChild<QPushButton *>("sendMessage");
     QCOMPARE(composer.width(), 280); QVERIFY(attach->geometry().right() < button->geometry().left());
     QVERIFY(button->geometry().right() < send->geometry().left()); QVERIFY(send->geometry().right() < composer.width());
-    QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
+    QVERIFY(status(composer)->isHidden());
     composer.deliveryFinished("arch/session", false, "Check terminal before retrying", true); QTest::qWait(20);
+    QVERIFY(status(composer)->isVisible()); QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
     const auto *retry = composer.findChild<QPushButton *>("allowMessageRetry"); QVERIFY(retry->isVisible());
     QCOMPARE(composer.width(), 280); QVERIFY(retry->geometry().top() > button->geometry().bottom());
     QVERIFY(retry->geometry().right() < composer.width()); QVERIFY(send->geometry().right() < composer.width());

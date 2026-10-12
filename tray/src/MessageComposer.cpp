@@ -316,7 +316,7 @@ void MessageComposer::resizeEvent(QResizeEvent *event)
         m_actions->removeWidget(m_retry);
         m_feedback->addWidget(m_status, 1); m_feedback->addWidget(m_retry);
     } else {
-        m_actions->setStretch(1, 0);
+        m_actions->setStretch(1, m_status->isHidden() ? 1 : 0);
         m_feedback->removeWidget(m_status); m_feedback->removeWidget(m_retry);
         m_actions->insertWidget(2, m_status, 1);
         m_actions->insertWidget(3, m_retry);
@@ -778,12 +778,14 @@ void MessageComposer::updateControls()
     m_retry->setVisible(draft.uncertain && !locked);
     m_settings->setEnabled(!m_key.isEmpty() && !locked);
     if (m_settingsPopup->isVisible()) updateSettingsApply();
-    QString status = m_loadingKeys.contains(m_key) ? tr("Loading draft…") : !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
-    // An available composer may still explain what Send will do first.
-    if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_available || !m_unavailableReason.isEmpty() ? m_unavailableReason
-        : hasContent ? (m_savingKeys.contains(m_key) ? tr("Saving draft… Enter to send; Shift+Enter for a new line")
-                       : tr("Draft saved locally. Enter to send; Shift+Enter for a new line")) : tr("Enter to send; Shift+Enter for a new line");
+    // Routine loading, saving and delivery feedback belongs to the controls.
+    // Reserve this space for errors and cautions about blocked/deferred sends.
+    QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key)
+        : draft.error || draft.uncertain ? draft.notice : QString();
+    if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : m_unavailableReason;
     m_status->setText(status); m_status->setToolTip(status);
+    m_status->setVisible(!status.isEmpty());
+    m_actions->setStretch(1, m_narrow || status.isEmpty() ? 1 : 0);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
 }
 
