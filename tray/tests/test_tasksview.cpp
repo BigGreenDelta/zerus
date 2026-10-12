@@ -27,6 +27,10 @@
 #include <algorithm>
 #include <memory>
 
+#ifdef Q_OS_UNIX
+#include <sys/stat.h>
+#endif
+
 #include "FakeCli.h"
 #include "HgsClient.h"
 #include "MarkdownText.h"
@@ -1588,10 +1592,12 @@ void TestTasksView::imagesOpenOnlyAsPictures()
     const auto attachment = [](const QString &name, const QString &sha) {
         return QJsonObject{{"name", name}, {"mime", "image/png"}, {"bytes", 20}, {"sha256", sha}};
     };
+    QVERIFY(image.save(b.f.dir.filePath("image-eeee.png"), "PNG"));
+    const QString longName = QString(176, 'A') + ".jarX.command";
     QVERIFY(b.f.put("show-t5.json", compact({{"attachments", QJsonArray{attachment("notes.command", "bbbb"), attachment("evil.command", "cccc"),
-                                                                        attachment("missing.png", "dddd")}}})));
+                                                                        attachment("missing.png", "dddd"), attachment(longName, "eeee")}}})));
     QVERIFY(b.show("t5"));
-    QTRY_COMPARE(b.f.calls("attachment").size(), 3);
+    QTRY_COMPARE(b.f.calls("attachment").size(), 4);
     QList<QUrl> opened;
     bool opens = true;
     qobject_cast<TaskPanel *>(b.panel())->openUrl = [&](const QUrl &url) { opened << url; return opens; };
@@ -1610,6 +1616,12 @@ void TestTasksView::imagesOpenOnlyAsPictures()
     QCOMPARE(opened.size(), 1);
     QVERIFY2(opened.first().toLocalFile().endsWith("/evil.png"), qPrintable(opened.first().toLocalFile()));
     QFile::remove(opened.first().toLocalFile());
+    // However long the name an agent chose, the copy ends with the picture's extension.
+    thumb("eeee")->click();
+    QCOMPARE(opened.size(), 2);
+    const QFileInfo copy(opened.last().toLocalFile());
+    QVERIFY2(copy.fileName().endsWith(".png") && copy.fileName().size() <= 180, qPrintable(copy.fileName()));
+    QFile::remove(copy.filePath());
     // A missing image and a desktop that cannot open it say so.
     thumb("dddd")->click();
     QCOMPARE(b.message()->text(), QString("Cannot open missing.png: the image is not on this machine"));
@@ -1652,6 +1664,21 @@ void TestTasksView::imagesAddPasteAndRemove()
     picked = {b.f.dir.filePath("notes.png")};
     b.find<QPushButton>("taskImageAdd")->click();
     QCOMPARE(b.message()->text(), QString("notes.png is not a picture."));
+    // Only regular files are read, and at most 10 MiB of them.
+    QFile big(b.f.dir.filePath("big.png"));
+    QVERIFY(big.open(QIODevice::WriteOnly) && big.resize(10 * 1024 * 1024 + 1));
+    big.close();
+    picked = {big.fileName()};
+    b.find<QPushButton>("taskImageAdd")->click();
+    QCOMPARE(b.message()->text(), QString("Cannot add big.png: it is larger than 10 MiB."));
+#ifdef Q_OS_UNIX
+    const QString fifo = b.f.dir.filePath("pipe.png");
+    QCOMPARE(::mkfifo(QFile::encodeName(fifo).constData(), 0600), 0);
+    picked = {fifo};
+    b.find<QPushButton>("taskImageAdd")->click();   // returns: a FIFO is never opened
+    QCOMPARE(b.message()->text(), QString("Cannot add pipe.png: it is not a regular file."));
+#endif
+    QCOMPARE(b.f.calls("edit").size(), 1);
     // The clipboard's image, as PNG.
     QImage pasted(16, 12, QImage::Format_RGB32); pasted.fill(Qt::yellow);
     QGuiApplication::clipboard()->setImage(pasted);

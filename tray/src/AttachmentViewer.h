@@ -17,6 +17,17 @@
 
 namespace AttachmentFiles {
 inline QString root() {return QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/attachments";}
+// At most 180 characters. A longer name keeps its last extension, by which a
+// viewer chooses the application: cutting the end could expose an inner one
+// (A….jarX.command must not become A….jar). Without a short last extension
+// the shortened name keeps no dot at all.
+inline QString fitName(const QString &base) {
+    constexpr int limit=180;
+    if(base.size()<=limit)return base;
+    const auto dot=base.lastIndexOf('.');
+    if(dot>0 && base.size()-dot<=32)return base.left(limit-(base.size()-dot))+base.mid(dot);
+    auto cut=base.left(limit);cut.replace('.','_');return cut;
+}
 inline QString store(const QString &name,const QByteArray &bytes) {
     if(bytes.isEmpty() || bytes.size()>HgsClient::MaximumAttachmentBytes)return {};
     const auto folder=root()+"/"+QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());
@@ -25,7 +36,7 @@ inline QString store(const QString &name,const QByteArray &bytes) {
     QFile::setPermissions(folder,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     auto base=QFileInfo(name).fileName();base.replace(QRegularExpression("[^\\p{L}\\p{N}._ -]"),"_");
     if(base.isEmpty() || base=="." || base=="..")base="attachment";
-    const auto path=folder+"/"+base.left(180);QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
+    const auto path=folder+"/"+fitName(base);QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
     file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
     if(file.write(bytes)!=bytes.size() || !file.commit())return {};return path;
 }

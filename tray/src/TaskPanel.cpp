@@ -133,6 +133,27 @@ QString extension(const QByteArray &format)
     return format == "jpeg" ? QStringLiteral("jpg") : QString::fromLatin1(format);
 }
 
+// At most `limit` bytes of a regular file. A device or FIFO named by a path
+// (one pasted from the clipboard, say) is refused: it is never read without end.
+bool readFile(const QString &path, qsizetype limit, QByteArray *bytes, QString *error)
+{
+    if (!QFileInfo(path).isFile()) {
+        *error = TaskPanel::tr("it is not a regular file");
+        return false;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *error = file.errorString();
+        return false;
+    }
+    *bytes = file.read(limit + 1);
+    if (bytes->size() > limit) {
+        *error = TaskPanel::tr("it is larger than 10 MiB");
+        return false;
+    }
+    return true;
+}
+
 // Labels the workflow sets; a person does not remove them.
 const QStringList ReservedLabels{QStringLiteral("reviewed"), QStringLiteral("review-failed"), QStringLiteral("epic"), QStringLiteral("epic-ready")};
 
@@ -951,22 +972,19 @@ void TaskPanel::openImage(const QString &sha256, const QString &name)
         m_view->notify(error.isEmpty() ? tr("%1 is still loading.").arg(name) : tr("Cannot open %1: %2").arg(name, error));
         return;
     }
-    QFile file(path);
-    if (file.size() > MaxImageBytes) {
-        m_view->notify(tr("Cannot open %1: it is larger than 10 MiB.").arg(name));
+    QByteArray bytes;
+    QString error;
+    if (!readFile(path, MaxImageBytes, &bytes, &error)) {
+        m_view->notify(tr("Cannot open %1: %2").arg(name, error));
         return;
     }
-    if (!file.open(QIODevice::ReadOnly)) {
-        m_view->notify(tr("Cannot open %1: %2").arg(name, file.errorString()));
-        return;
-    }
-    const QByteArray bytes = file.readAll();
     const QByteArray format = imageFormat(bytes);
     if (format.isEmpty()) {
         m_view->notify(tr("%1 is not a picture this computer can show, so it is not opened.").arg(name));
         return;
     }
-    QString base = QFileInfo(name).completeBaseName();
+    // A short base: the copy's name always ends with the detected extension.
+    QString base = QFileInfo(name).completeBaseName().left(120);
     if (base.isEmpty()) base = QStringLiteral("image");
     const QString copy = AttachmentFiles::store(base + QLatin1Char('.') + extension(format), bytes);
     if (copy.isEmpty()) {
@@ -980,17 +998,13 @@ void TaskPanel::addImageFiles(const QStringList &paths)
 {
     QList<Image> added;
     for (const auto &path : paths) {
-        const QFileInfo info(path);
-        if (info.size() > MaxImageBytes) {
-            m_view->notify(tr("%1 is larger than 10 MiB.").arg(info.fileName()));
+        const QString fileName = QFileInfo(path).fileName();
+        Image image{fileName, {}, {}};
+        QString error;
+        if (!readFile(path, MaxImageBytes, &image.bytes, &error)) {
+            m_view->notify(tr("Cannot add %1: %2.").arg(fileName, error));
             return;
         }
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) {
-            m_view->notify(tr("Cannot read %1: %2").arg(info.fileName(), file.errorString()));
-            return;
-        }
-        Image image{info.fileName(), {}, file.readAll()};
         if (imageFormat(image.bytes).isEmpty()) {
             m_view->notify(tr("%1 is not a picture.").arg(image.name));
             return;

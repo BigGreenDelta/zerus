@@ -25,6 +25,20 @@ private slots:
         const auto html=AttachmentFiles::store("notes.html","<script>never execute</script>");
         QVERIFY(AttachmentLoader::thumbnail(html).isNull());QFile::remove(path);QFile::remove(html);
     }
+    void longNamesKeepTheirLastExtension() {
+        const QByteArray bytes("fixture bytes");
+        // Cutting the end would expose an inner extension: the last one is kept.
+        const QFileInfo command(AttachmentFiles::store(QString(176,'A')+".jarX.command",bytes));
+        QVERIFY2(command.fileName().endsWith(".command") && command.fileName().size()==180,qPrintable(command.fileName()));
+        const QFileInfo png(AttachmentFiles::store(QString(300,'B')+".png",bytes));
+        QVERIFY(png.fileName().endsWith(".png"));QCOMPARE(png.fileName().size(),180);
+        // Without a short last extension, the shortened name has no dot.
+        const QFileInfo none(AttachmentFiles::store(QString(172,'C')+".command"+QString(50,'D'),bytes));
+        QVERIFY2(!none.fileName().contains('.') && none.fileName().size()==180,qPrintable(none.fileName()));
+        QCOMPARE(QFileInfo(AttachmentFiles::store("short.png",bytes)).fileName(),QString("short.png"));
+        for(const auto &info:{command,png,none})QFile::remove(info.filePath());
+        QFile::remove(QFileInfo(command.dir(),"short.png").filePath());
+    }
     void missingFileAndUnrelatedResponseDoNotOpenAnotherAttachment() {
         HgsClient client("/nonexistent/hgs");AttachmentLoader loader(&client);bool done=false;
         loader.open("mac","session","conversation",{}, {},{{"name","missing.png"},{"request_id","request-one"},{"index",0}},

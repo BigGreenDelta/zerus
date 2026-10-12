@@ -1734,7 +1734,8 @@ mod tests {
         let other = edit(&mut human(&mut store), json!({"task": second, "attachments": [image(b"\x89PNG c", "c.png")]})).unwrap();
         let elsewhere = other["task"]["attachments"][0]["sha256"].clone();
         for wrong in [json!({"sha256": "0".repeat(64)}), json!({"sha256": elsewhere}), json!({"sha256": "xyz"}), json!({"sha256": sha.to_uppercase()}),
-                      json!({"sha256": sha, "name": "a.png"}), json!({"name": "a.png"})] {
+                      json!({"sha256": sha, "name": "a.png"}), json!({"name": "a.png"}),
+                      json!({"name": "b.png", "mime": "image/png", "data_base64": "AA==", "note": "x"})] {
             let refused = refusal(edit(&mut human(&mut store), json!({"task": uuid, "attachments": [{"sha256": sha}, wrong.clone()]})).unwrap_err());
             assert_eq!((refused.code.as_str(), refused.field.as_str()), ("invalid_field", "attachments"), "{wrong}");
         }
