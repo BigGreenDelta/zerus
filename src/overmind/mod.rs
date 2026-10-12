@@ -12,6 +12,7 @@ mod rank;
 mod refs;
 mod sessions;
 mod store;
+mod sync;
 mod templates;
 mod workflow;
 

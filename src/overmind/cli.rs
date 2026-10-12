@@ -26,6 +26,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   workflow get --json {project}  |  workflow set --json {project, workflow, moves?}
   templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
   rev                                      change cursor for watchers
+  status                                   replication state with every peer
 Write requests may carry a request_id (UUID); repeating it replays the result.
 ";
 
@@ -101,6 +102,7 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     let mut ctx = Ctx { store: &mut store, actor, cwd };
     let value = match (command, positional.as_slice()) {
         ("rev", []) => commands::rev(&mut ctx)?,
+        ("status", []) => commands::status(&mut ctx)?,
         ("board", []) => commands::board(&mut ctx, request)?,
         ("show", [reference]) => commands::show(&mut ctx, json!({"task": reference}))?,
         ("show", []) => commands::show(&mut ctx, request)?,

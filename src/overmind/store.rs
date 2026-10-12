@@ -24,6 +24,9 @@ CREATE INDEX IF NOT EXISTS events_project ON events(project);
 CREATE INDEX IF NOT EXISTS events_lamport ON events(lamport);
 CREATE TABLE IF NOT EXISTS receipts(
   request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS peers(
+  machine TEXT PRIMARY KEY, alias TEXT NOT NULL, vector TEXT,
+  last_ok INTEGER NOT NULL, last_error TEXT NOT NULL, updated INTEGER NOT NULL);
 ";
 
 /// Which events to load. Shared events have no task: workflows, settings, renames.
@@ -44,7 +47,6 @@ pub struct Store {
 }
 
 /// What `insert_raw` did with a batch from another machine.
-#[allow(dead_code)] // Used by replication (plan 1b).
 #[derive(Debug, Default, PartialEq)]
 pub struct Received {
     pub inserted: usize,
@@ -185,7 +187,6 @@ impl Store {
         Ok(tasks)
     }
 
-    #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn version_vector(&self) -> Result<BTreeMap<String, u64>> {
         let mut statement = self.conn.prepare("SELECT origin, MAX(seq) FROM events GROUP BY origin")?;
         let vector = statement
@@ -197,7 +198,6 @@ impl Store {
     /// Raw events the peer lacks, up to about `max_bytes`, taking one event of
     /// each origin in turn (each origin in `seq` order), so an origin the peer
     /// cannot accept never holds back the others. The flag says whether more remain.
-    #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn missing(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
         let mut pending: Vec<(String, i64)> = self
             .conn
@@ -233,7 +233,6 @@ impl Store {
         Ok((out, false))
     }
 
-    #[allow(dead_code)] // Used by replication (plan 1b).
     /// Inserts events from another machine. Known events are skipped, and an
     /// origin's events after a gap are left for a later exchange. A refused
     /// event is never stored, so its origin stops there; the rest of the batch
@@ -639,5 +638,53 @@ mod tests {
         fs::create_dir(dir.path().join("rev")).unwrap();
         store.write(|tx| tx.append(&draft("t"))).unwrap();
         assert_eq!(store.load(&Filter::All).unwrap().len(), 1);
+    }
+}
+
+/// What this machine learned about a peer in exchanges. Local only.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeerState {
+    pub machine: String,
+    pub alias: String,
+    /// The peer's version vector after the last exchange; None before the first.
+    pub vector: Option<BTreeMap<String, u64>>,
+    pub last_ok: u64,
+    pub last_error: String,
+    pub updated: u64,
+}
+
+fn peer_row(row: &rusqlite::Row) -> rusqlite::Result<PeerState> {
+    let vector: Option<String> = row.get(2)?;
+    Ok(PeerState {
+        machine: row.get(0)?,
+        alias: row.get(1)?,
+        vector: vector.and_then(|v| serde_json::from_str(&v).ok()),
+        last_ok: row.get::<_, i64>(3)? as u64,
+        last_error: row.get(4)?,
+        updated: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+impl Store {
+    pub fn peer(&self, machine: &str) -> Result<Option<PeerState>> {
+        Ok(self
+            .conn
+            .query_row("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers WHERE machine = ?1", params![machine], peer_row)
+            .optional()?)
+    }
+
+    pub fn peers(&self) -> Result<Vec<PeerState>> {
+        let mut statement = self.conn.prepare("SELECT machine, alias, vector, last_ok, last_error, updated FROM peers ORDER BY machine")?;
+        let peers = statement.query_map([], peer_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(peers)
+    }
+
+    pub fn put_peer(&self, peer: &PeerState) -> Result<()> {
+        let vector = peer.vector.as_ref().map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO peers(machine, alias, vector, last_ok, last_error, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![peer.machine, peer.alias, vector, peer.last_ok as i64, peer.last_error, peer.updated as i64],
+        )?;
+        Ok(())
     }
 }

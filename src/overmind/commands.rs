@@ -450,6 +450,23 @@ pub fn rev(ctx: &mut Ctx) -> Result<Value> {
     Ok(json!({"ok": true, "cursor": ctx.store.cursor()?}))
 }
 
+pub fn status(ctx: &mut Ctx) -> Result<Value> {
+    let vector = ctx.store.version_vector()?;
+    let peers: Vec<Value> = ctx
+        .store
+        .peers()?
+        .into_iter()
+        .map(|peer| {
+            let behind = peer.vector.as_ref().map(|theirs| {
+                vector.iter().map(|(origin, seq)| seq.saturating_sub(theirs.get(origin).copied().unwrap_or(0))).sum::<u64>()
+            });
+            json!({"machine": peer.machine, "alias": peer.alias, "last_ok": peer.last_ok,
+                   "last_error": peer.last_error, "updated": peer.updated, "behind": behind})
+        })
+        .collect();
+    Ok(json!({"ok": true, "machine": ctx.store.machine(), "cursor": ctx.store.cursor()?, "vector": vector, "peers": peers}))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BoardRequest {

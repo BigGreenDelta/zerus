@@ -68,6 +68,11 @@ class Overmind(unittest.TestCase):
         self.assertEqual((directory / 'overmind.sqlite3').stat().st_mode & 0o777, 0o600)
         self.assertEqual(int((directory / 'rev').read_text()), self.ok('rev')['cursor'])
 
+    def test_status_on_a_lone_machine(self):
+        self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})
+        status = self.ok('status')
+        self.assertEqual((status['peers'], list(status['vector'].values())), ([], [1]))
+
     def test_receipts_replay(self):
         request = {'request_id': '0b9c5c1e-34c4-4d5e-9a64-1d2a3b4c5d6e', 'project': 'demo', 'prompt': 'x'}
         first = self.ok('create', '--json', data=request)
