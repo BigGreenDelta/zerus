@@ -159,7 +159,7 @@ its own origin id, created with the store, and numbers its events from `seq` 1.
 therefore never collides with events written earlier, even when it writes
 before its peers refill it. Copying a whole store directory to a second
 machine, or restoring an old copy of one, is unsupported: the copy writes under
-the same origin, and its peers refuse the colliding events and report them.
+the same origin, so its new events can collide with events written since.
 
 `lamport` is the maximum seen plus one, so a causally later event always sorts
 later. Kinds: `task_created`, `field_set`, `transition`, `journal`, `rank_set`,
@@ -194,7 +194,8 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   holds a contiguous `seq` prefix of each origin. Events of every origin are
   replicated alike, including older origins of this machine. An event at a
   position a store already holds is skipped when it is the same event and
-  refused when it is another one; refused events are reported in `status`.
+  refused when it is another one; the machine that runs an exchange reports
+  the events it refused in `status`.
 - The existing swarm worker (`hgs-swarm.service`) runs an Overmind exchange
   with each peer in its loop, through a new internal command over the same SSH
   route. One call pushes and pulls, so it works when SSH goes in one direction
