@@ -19,6 +19,11 @@ pub const READS: &[&str] = &[
     "worktrees",
     "mark_read",
     "attachment_read",
+    "speech_profiles",
+    "speech_stats",
+    "speech_status",
+    "voice_profiles",
+    "voice_status",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
 /// retention class. `attachment_read` is a read with its own shorter class
@@ -27,6 +32,16 @@ pub const READ_SQL: &str =
     "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
 pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
 /// Computer-scoped: no session, delivered to the gateway computer itself.
+pub const SPEECH: &[&str] = &[
+    "speech_profiles",
+    "speech_stats",
+    "speech_submit",
+    "speech_status",
+    "speech_cancel",
+];
+pub const SPEECH_READ_SQL: &str =
+    "('speech_profiles','speech_stats','speech_status','voice_profiles','voice_status')";
+pub const SPEECH_AUDIO_MAX: usize = 16000 * 2 * 120;
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
 pub const MOBILE_DELIVERY: &[&str] = &[
     "immediate",
@@ -37,6 +52,10 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "voice_profiles",
+    "voice_submit",
+    "voice_status",
+    "voice_cancel",
     "answer",
     "archive",
     "attachment_read",
@@ -61,6 +80,11 @@ pub const OPERATIONS: &[&str] = &[
     "send",
     "send_now",
     "set_mobile_delivery",
+    "speech_profiles",
+    "speech_stats",
+    "speech_submit",
+    "speech_status",
+    "speech_cancel",
     "settings",
     "terminal_input",
     "terminal_snapshot",
@@ -153,6 +177,61 @@ pub fn supports(s: &Value, op: &str, field: &str) -> bool {
             .as_array()
             .is_some_and(|a| a.iter().any(|v| v == op))
 }
+fn speech(op: &str, p: &Value, id: &str) -> Result<()> {
+    match op {
+        "speech_profiles" | "speech_stats" => fields(p, &[], &[]),
+        "speech_status" | "speech_cancel" => {
+            fields(p, &["job_id"], &[])?;
+            uuid(&p["job_id"], true)?;
+            Ok(())
+        }
+        "speech_submit" => {
+            fields(p, &["request_id", "profile_id", "audio"], &[])?;
+            if p["request_id"] != id {
+                return Err(Error::BAD);
+            }
+            uuid(&p["request_id"], true)?;
+            let profile = text(&p["profile_id"], 64, false)?;
+            if !profile
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            {
+                return Err(Error::BAD);
+            }
+            let a = &p["audio"];
+            fields(
+                a,
+                &["format", "sample_rate", "channels", "data_base64"],
+                &[],
+            )?;
+            if a["format"] != "pcm_s16le"
+                || a["sample_rate"].as_u64() != Some(16000)
+                || a["channels"].as_u64() != Some(1)
+            {
+                return Err(Error::BAD);
+            }
+            let encoded = a["data_base64"].as_str().ok_or(Error::BAD)?;
+            if encoded.len() < 4 || encoded.len() > SPEECH_AUDIO_MAX.div_ceil(3) * 4 {
+                return Err(Error::BAD);
+            }
+            let mut buffer = [0u8; 49152];
+            let mut size = 0;
+            for (index, part) in encoded.as_bytes().chunks(65536).enumerate() {
+                if part.contains(&b'=') && (index + 1) * 65536 < encoded.len() {
+                    return Err(Error::BAD);
+                }
+                size += STANDARD
+                    .decode_slice(part, &mut buffer)
+                    .map_err(|_| Error::BAD)?;
+            }
+            if !(2..=SPEECH_AUDIO_MAX).contains(&size) || size % 2 != 0 {
+                return Err(Error::BAD);
+            }
+            Ok(())
+        }
+        _ => Err(Error::BAD),
+    }
+}
 pub fn request(v: &Value) -> Result<()> {
     fields(
         v,
@@ -178,13 +257,18 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        LAUNCH.contains(&op) || COMPUTER.contains(&op),
+        LAUNCH.contains(&op) || COMPUTER.contains(&op) || SPEECH.contains(&op),
     )?;
     if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
         launch(op, p, id)?;
+    } else if SPEECH.contains(&op) {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        speech(op, p, id)?;
     } else if COMPUTER.contains(&op) {
         fields(p, &["value"], &[])?;
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
@@ -251,6 +335,8 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
+            "voice_submit" => &["speech", "audio"],
+            "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
             "interrupt" => &["expected_turn_started"],
             "send_now" => &["queue_id"],
@@ -293,10 +379,26 @@ pub fn request(v: &Value) -> Result<()> {
                 "recovery_action",
                 "send_now",
                 "attachment_read",
+                "voice_submit",
+                "voice_status",
+                "voice_cancel",
             ]
             .contains(&op),
         )?;
         match op {
+            "voice_submit" => {
+                fields(&p["speech"], &["machine_id", "profile_id"], &[])?;
+                uuid(&p["speech"]["machine_id"], true)?;
+                speech(
+                    "speech_submit",
+                    &json!({"request_id":id,
+                    "profile_id":p["speech"]["profile_id"],"audio":p["audio"]}),
+                    id,
+                )?;
+            }
+            "voice_status" | "voice_cancel" => {
+                uuid(&p["message_id"], true)?;
+            }
             "send" => send(p)?,
             "answer" => {
                 for k in ["question_id", "expected_question_hash", "answers"] {
@@ -368,7 +470,9 @@ pub fn request(v: &Value) -> Result<()> {
             uuid(&p["archive_id"], op != "process_output")?;
         }
     }
-    if op != "send" {
+    if ["speech_submit", "voice_submit"].contains(&op) {
+        json::size(v, 6 * MIB)?;
+    } else if op != "send" {
         json::size(v, MIB)?;
     }
     Ok(())

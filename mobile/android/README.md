@@ -252,6 +252,76 @@ worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
+## Voice input
+
+Settings includes **Voice messages**, with an independently selected transcription
+computer and host-configured profile. Open a conversation to discover the computers
+reachable from its owner. An unavailable saved selection never silently switches
+providers. Both the relay and conversation computer must advertise `voice_profiles`,
+`voice_submit`, `voice_status` and `voice_cancel`. When supported, `speech_stats`
+displays the selected processing computer's aggregate local counts. Audio and
+transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
+and [analytics](../../docs/analytics.md).
+
+Tap the composer microphone, speak, then **Stop recording**. Local capture starts
+without waiting for provider discovery; discovery refreshes in the background.
+Capture lasts at most two minutes. Stopping, leaving the foreground and returning from system settings
+never send a message. The preview is an encrypted durable WAV file on this phone;
+it offers **Play**, **Discard** and **Send voice message**. A process killed before
+capture finishes can lose the unfinished recording. Completed previews survive
+restart and remain accessible in Drafts. Capture and bounded 48 kHz fallback
+conversion run off the main thread.
+
+A preview recorded before choosing a provider remains saved without a fabricated
+selection. Use **Transcription provider** on that preview to choose its computer
+and profile. This dialog always addresses the recording's original conversation.
+Send requires fresh confirmation of that exact available provider; discovery
+failure or an unavailable selection keeps the audio and never chooses a fallback
+or sends automatically. The conversation must have a confirmed run and conversation
+identity before recording.
+The composer preview scrolls within a bounded area while the software keyboard is
+open, keeping the typed draft visible and editable after capture stops.
+
+While recording, the typed draft stays visible and read-only, and ordinary message
+sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
+into the saved preview; holding or releasing that key never sends, discards or
+starts playback. Editing resumes when capture ends, subject to existing send locks.
+
+Denied microphone access opens a focused explanation with **Open app settings**.
+This opens Zerus's Android settings; choose **Permissions → Microphone** and allow
+access while using the app. Return and tap the microphone again to record.
+Returning from system settings never starts recording automatically. If the
+settings page is unavailable, the explanation retains the manual navigation path.
+
+**Send voice message** saves an immutable audio reference and request UUID before
+uploading mono 16 kHz signed little-endian PCM to the conversation computer through
+the trusted relay. That explicit action authorizes transcription and delivery of
+the recognized text to the agent. The phone never sends a second native message
+after recognition. Existing typed text and attachments remain unchanged. Cold-cache
+sending requires the normal full-context warning; voice does not implicitly clear,
+compact or resume a session. Child and archived conversations cannot send voice;
+archived voice messages remain playable.
+
+A single history card shows the original audio, processing or delivery status,
+errors, and expandable recognized text. Another device can open the same card and
+fetch audio using authenticated `attachment_read` ranges, verifying identity,
+length and SHA-256 before playback. Status updates use monotonic revisions; exact
+native bindings suppress duplicate user rows without matching on transcript text.
+The circular play/pause control sits beside the recording's measured waveform.
+Tap or drag the waveform to seek; Android accessibility controls expose the same
+position and elapsed/total duration. Seeking a paused recording keeps it paused.
+Older messages show a plain seek track until their computer supplies waveform
+metadata; the phone never invents amplitude bars or downloads audio just to draw them.
+The phone retains encrypted voice receipts and local audio copies in Drafts; removing
+a local copy does not remove the computer's history or cancel delivery. New capture
+is bounded by a 100 MiB local audio budget and the outbox holds at most 100 receipts.
+
+Interrupted uploads retain their original UUID and recover with status reads only;
+recordings are never automatically uploaded again. The computer owns the durable
+transcription/delivery pipeline even if the phone disconnects. Failed or uncertain
+results remain visible. Playback stops when the app leaves the foreground. The
+relay can read relayed audio; this transport has no end-to-end encryption.
+
 ## Build and install
 
 Install JDK 17 or 21 and Android SDK platform 36 / build tools 35.0.0. Set
@@ -262,6 +332,35 @@ cd mobile/android
 ./gradlew assembleDebug testDebugUnitTest lintDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The isolated microphone smoke uses a synthetic in-process relay while exercising
+real AudioRecord and encrypted Android storage. On a disposable emulator only:
+
+```sh
+./gradlew -PzerusInstrumentationRunner=app.zerus.mobile.SpeechSmokeInstrumentation assembleDebug assembleDebugAndroidTest
+adb -s emulator-5580 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5580 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s emulator-5580 shell pm clear app.zerus.mobile
+adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.SpeechSmokeInstrumentation
+```
+
+The clear command removes app data on that emulator. The smoke checks durable
+preview without implicit upload, real PCM capture during delayed, failed and
+unavailable provider discovery, explicit preview-scoped provider selection without
+fallback, explicit Send, local and authenticated remote
+playback, processing/history cards, recognized text, concurrent typed-draft
+preservation, lost-submit status-only recovery, cancellation and background capture
+stop. Hardware Space/Escape coverage verifies the read-only draft, blocked ordinary
+send, held-key/release consumption, retained preview and restored editing. It also
+denies microphone access twice, opens Android's app permission
+settings, grants access there and verifies recording requires a new explicit tap
+after returning.
+It does not measure recognition accuracy or replace a physical microphone test.
+
+Private previews may override only their build identity using
+`-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater
+than the installed build; the next regular update must exceed the preview code.
+These properties do not change the signing key or checked-in release version.
 
 The checked-in Gradle wrapper uses Gradle 8.13 with an official distribution
 checksum. Dependencies come from Google Maven and Maven Central. The debug APK

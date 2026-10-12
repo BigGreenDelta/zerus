@@ -24,7 +24,7 @@ function(zerus_test_support target)
         # Programs with Qt GUI get the Windows UI font (TestFonts.cpp).
         get_target_property(libraries ${target} LINK_LIBRARIES)
         foreach(library IN LISTS libraries)
-            if(library MATCHES "^(Qt6::(Gui|Widgets|WebEngineWidgets)|hgs-(markdown|terminal|window-layer|updates))$")
+            if(library MATCHES "^(Qt6::(Gui|Widgets|WebEngineWidgets)|hgs-(markdown|terminal|window-layer|updates|speech))$")
                 target_sources(${target} PRIVATE "${ZERUS_TEST_SUPPORT}/TestFonts.cpp")
                 break()
             endif()
@@ -47,6 +47,29 @@ function(zerus_test_environment)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>" "QT_QPA_FONTDIR=set:${fonts}")
     endforeach()
 endfunction()
+
+add_executable(test_speech test_speech.cpp ../src/ProcessRunner.cpp ../src/MessageComposer.cpp
+    ../src/ComposerDraftStore.cpp ../src/ComposerToolbar.cpp)
+target_include_directories(test_speech PRIVATE ../src)
+target_link_libraries(test_speech PRIVATE Qt6::Test hgs-speech)
+add_test(NAME speech COMMAND test_speech)
+set_tests_properties(speech PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+if(APPLE)
+    # No consent requests or audio capture: compare Qt's read-only status with
+    # AVFoundation and verify the production binary imports the static backend.
+    qt_add_executable(test_macos_microphone_permissions MANUAL_FINALIZATION
+        test_macos_microphone_permissions.mm ../src/speech/SpeechRecorder.cpp)
+    set_target_properties(test_macos_microphone_permissions PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/microphone-permissions.plist")
+    target_include_directories(test_macos_microphone_permissions PRIVATE ../src)
+    target_link_libraries(test_macos_microphone_permissions PRIVATE Qt6::Test Qt6::Multimedia "-framework AVFoundation")
+    target_compile_definitions(test_macos_microphone_permissions PRIVATE ZERUS_TRAY_BINARY="$<TARGET_FILE:hgs-tray>")
+    add_dependencies(test_macos_microphone_permissions hgs-tray)
+    qt_finalize_executable(test_macos_microphone_permissions)
+    add_test(NAME macos_microphone_permissions COMMAND test_macos_microphone_permissions)
+endif()
 
 add_executable(test_attention test_attention.cpp ../src/AttentionTracker.cpp ../src/FleetState.cpp)
 target_include_directories(test_attention PRIVATE ../src)
@@ -257,7 +280,7 @@ add_executable(test_sessionswindow test_sessionswindow.cpp ../src/SessionsWindow
                ../src/NewSessionDialog.cpp ../src/ProjectsDialog.cpp ../resources.qrc)
 target_include_directories(test_sessionswindow PRIVATE ../src)
 target_compile_definitions(test_sessionswindow PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
-target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer)
+target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech)
 # The longest suite runs as parallel shards of its test functions.
 foreach(shard RANGE 9)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
@@ -277,7 +300,7 @@ endif()
 
 add_executable(test_activityview test_activityview.cpp ../src/ActivityView.cpp)
 target_include_directories(test_activityview PRIVATE ../src)
-target_link_libraries(test_activityview PRIVATE Qt6::Test Qt6::Widgets hgs-markdown)
+target_link_libraries(test_activityview PRIVATE Qt6::Test Qt6::Widgets Qt6::Multimedia hgs-markdown)
 add_test(NAME activityview COMMAND test_activityview)
 set_tests_properties(activityview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

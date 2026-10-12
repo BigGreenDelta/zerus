@@ -28,7 +28,7 @@ if(MSVC)
     add_compile_definitions(NOMINMAX)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets Multimedia)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -54,6 +54,11 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+
+add_library(hgs-speech STATIC src/speech/SpeechClient.cpp src/speech/SpeechRecorder.cpp
+    src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
+target_include_directories(hgs-speech PUBLIC src)
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -76,7 +81,9 @@ if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUA
 endif()
 include(cmake/BuildVersion.cmake)
 
-add_executable(hgs-tray
+# Qt finalization imports macOS permission plugins selected by our Info.plist.
+# A plain add_executable silently leaves QMicrophonePermission without a backend.
+qt_add_executable(hgs-tray MANUAL_FINALIZATION
     resources.qrc
     src/main.cpp
     src/AppConfig.cpp
@@ -190,7 +197,8 @@ if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
-target_link_libraries(hgs-tray PRIVATE hgs-updates)
+target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech)
+qt_finalize_executable(hgs-tray)
 
 include(CTest)
 if(BUILD_TESTING)

@@ -280,6 +280,52 @@ online machines, CPU, memory and load, plus account limits. Counts open the matc
 filter, sessions open Activity, and machine settings lead to Machines. Native
 account quotas are grouped by verified identity instead of adding machine usage.
 
+**About** is the final Settings section, after **Voice input**.
+
+**Settings → Voice input** selects the speech computer, its recognition profile
+and the local microphone. The speech computer is independent of the agent's
+computer: a laptop can record locally and use a configured GPU peer over SSH.
+Configure providers and their credentials only on that processing computer; see
+[the optional speech host](../services/speech/README.md). The first built-in
+adapter is GigaAM with a Russian `v3_e2e_rnnt` profile. Selecting a profile does
+not install or download a model and never falls back to another provider.
+
+Use **Voice** in the message toolbar, allow microphone access, then stop recording
+to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+are limited to two minutes and remain separate from the typed draft. Capture
+opens the local microphone without waiting for speech computers or providers.
+Provider discovery runs in the background. If it fails, the recording remains
+available for playback; refresh providers in the preview before sending.
+An unavailable selected provider stays selected until you explicitly change it.
+During capture, the typed draft stays visible and read-only, and ordinary message
+submission and attachment changes are blocked. History remains readable.
+**Space** or **Escape** stops recording into the retained preview; neither sends
+nor discards it. Recording takes priority over Escape's agent-interruption
+action. Holding either key stops capture only once, and editing resumes after
+capture ends unless another delivery lock applies. Android supports the same
+controls with a hardware keyboard; its touch Stop control remains available.
+The preview lists speech profiles reachable from the conversation computer. Explicit Send
+stores the original there, starts recognition and delivers recognized text to
+the pinned agent conversation. One history card retains the playable original,
+expandable transcript and processing or delivery errors across devices. Its
+circular play/pause control sits beside the recording's amplitude waveform;
+the played portion is highlighted, and selecting a point on the waveform seeks
+within the recording and keeps paused audio paused. The time display follows
+playback. Older recordings gain their waveform in the background without
+recognition or delivery being repeated.
+Clients recover interrupted requests by the original message UUID without blindly
+uploading or sending again. Hiding the composer stops unsubmitted capture.
+See [persistent voice messages](voice-messages.md) for storage and delivery details.
+Voice settings also show the selected computer's
+90-day counters; [analytics](analytics.md) documents their meaning and the planned
+cross-computer agent statistics.
+
+If microphone access is denied, Voice shows a permission explanation with
+**Open microphone settings** on macOS and Windows. On macOS this opens
+**System Settings → Privacy & Security → Microphone**. Allow Zerus, return to
+the conversation and press **Voice** again; opening settings does not start a
+recording. If settings cannot open, the dialog keeps the manual navigation path.
+
 Session rows show provider, machine, current action, model, effort and Git context.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
@@ -507,8 +553,9 @@ unless its native UI offers the supported promotion operation.
 **Stop** interrupts the current turn and cancels recovery without terminating the
 session; Escape anywhere in the workspace except Terminal does the same while
 the selected session's turn is working, after first clearing a search being
-typed. Once the turn is interrupted, its prompt returns to an empty message field
-for editing; a started draft is kept. Claude, Codex and Kimi use verified native
+typed. While recording voice, Escape stops the recording instead and preserves
+its preview. Once the turn is interrupted, its prompt returns to an empty message
+field for editing; a started draft is kept. Claude, Codex and Kimi use verified native
 Escape; Claude sends no event for it, so HGS records the interruption once
 Claude shows it. Stopped before its first reply, Claude rewinds the turn and
 puts the prompt back into its own input instead; HGS then moves exactly that

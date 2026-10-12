@@ -11,6 +11,7 @@ mod native_ui;
 mod session_reference;
 mod platform;
 mod presence;
+mod speech;
 mod status;
 // The local session host (tmux, hooks, agent state) runs on Unix. Windows builds
 // are control consoles for remote machines and link the stubs in state_windows.rs.

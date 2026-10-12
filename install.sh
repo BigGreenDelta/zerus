@@ -60,3 +60,8 @@ if [ -z "${HGS_INSTALL_PREFIX:-}" ] && [ -z "${HGS_STATE_DIR:-}" ] && [ -z "${HG
     if [ "$changed" -eq 1 ]; then swarm_args+=(--restart); fi
     python3 "$here/scripts/install-swarm-service.py" "$prefix/bin/hgs" "${swarm_args[@]}"
 fi
+if [ -z "${HGS_INSTALL_PREFIX:-}" ] && [ -z "${HGS_STATE_DIR:-}" ] && [ -z "${HGS_CONFIG_DIR:-}" ] && [ "${HGS_VOICE_SERVICE:-1}" != "0" ]; then
+    voice_args=()
+    if [ "$changed" -eq 1 ]; then voice_args+=(--restart); fi
+    python3 "$here/scripts/install-voice-service.py" "$prefix/bin/hgs" "${voice_args[@]}"
+fi

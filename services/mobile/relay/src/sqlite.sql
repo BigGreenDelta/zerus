@@ -58,3 +58,6 @@ UPDATE nodes SET computer_id=id WHERE computer_id IS NULL;
 CREATE TABLE IF NOT EXISTS alert_candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL REFERENCES workspaces(id),computer_id TEXT NOT NULL,session TEXT NOT NULL,kind TEXT NOT NULL,run_id TEXT,conversation_id TEXT,attention_signature TEXT,reply_id TEXT,created DOUBLE PRECISION NOT NULL,next_at DOUBLE PRECISION NOT NULL,UNIQUE(workspace_id,computer_id,session,kind));
 CREATE INDEX IF NOT EXISTS alert_candidate_due ON alert_candidates(next_at,id);
 CREATE INDEX IF NOT EXISTS alert_candidate_expiry ON alert_candidates(created,id);
+
+CREATE INDEX IF NOT EXISTS speech_reads_history ON requests(updated,id) WHERE operation IN ('speech_profiles','speech_stats','speech_status') AND state IN ('completed','failed','uncertain');
+CREATE INDEX IF NOT EXISTS speech_audio_cleanup ON requests(updated,id) WHERE operation='speech_submit' AND body!='' AND state IN ('completed','failed','uncertain');

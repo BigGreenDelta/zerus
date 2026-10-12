@@ -25,7 +25,8 @@ CLI_VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["versi
 QT_VERSION = "6.10.3"
 # What the fake windeployqt deploys next to hgs-tray.exe.
 QT_RUNTIME = [name for name in portable.REQUIRED if name.startswith(("Qt", "platforms/", "imageformats/",
-                                                                   "iconengines/", "resources/"))]
+                                                                   "iconengines/", "resources/", "multimedia/",
+                                                                   "avcodec-", "avformat-", "avutil-", "swresample-", "swscale-"))]
 
 
 def manifest(**updates):
@@ -182,7 +183,7 @@ class PackageTests(unittest.TestCase):
         version_file.parent.mkdir(parents=True)
         version_file.write_text(f'set(PACKAGE_VERSION "{QT_VERSION}")\n')
         (self.qt / "sbom").mkdir()
-        for name in ("qtbase", "qtwebengine", "qtwebengine-chromium-webengine", "qtsvg"):
+        for name in ("qtbase", "qtwebengine", "qtwebengine-chromium-webengine", "qtsvg", "qtmultimedia"):
             (self.qt / "sbom" / f"{name}-{QT_VERSION}.spdx").write_text(f"SPDXVersion: SPDX-2.3\nName: {name}\n")
         (self.qt / "sbom" / f"qtbase-{QT_VERSION}.spdx").write_text("\n".join([
             "SPDXVersion: SPDX-2.3", "PackageName: BundledLibjpeg", "PackageLicenseConcluded: IJG AND BSD-3-Clause",
@@ -190,6 +191,11 @@ class PackageTests(unittest.TestCase):
             "PackageLicenseConcluded: LicenseRef-Qt-Commercial", "LicenseID: LicenseRef-Qt-Commercial",
             "ExtractedText: <text>Licensees holding valid commercial Qt licenses",
             "may use this file in accordance with the commercial license agreement.</text>", ""]))
+        (self.qt / "sbom" / f"qtmultimedia-{QT_VERSION}.spdx").write_text("\n".join([
+            "SPDXVersion: SPDX-2.3", "PackageName: QtMultimedia",
+            "PackageLicenseConcluded: Unlicense OR MIT-0",
+            "PackageName: FFmpeg",
+            "PackageLicenseConcluded: LGPL-2.1-or-later AND BSD-Source-Code AND ISC", ""]))
         (self.qt / "sbom" / f"qtbase-{QT_VERSION}.source.spdx").write_text("source\n")
         self.windeployqt = base / "windeployqt"
         self.windeployqt.write_text(f"#!{sys.executable}\n" + "\n".join([
@@ -232,6 +238,14 @@ class PackageTests(unittest.TestCase):
     def check(self, path, *arguments):
         return subprocess.run([sys.executable, str(ROOT / "scripts/check-windows-portable.py"), str(path), *arguments],
                               capture_output=True, text=True)
+
+    def test_multimedia_notices_are_required(self):
+        (self.qt / "sbom" / f"qtmultimedia-{QT_VERSION}.spdx").unlink()
+        output = self.directory / "missing-multimedia.zip"
+        result = self.package(output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks its SBOM notices", result.stderr)
+        self.assertFalse(output.exists())
 
     def test_bundle_holds_tested_binaries_runtime_notices_and_provenance(self):
         output = self.directory / "out" / "zerus-windows-x86_64.zip"

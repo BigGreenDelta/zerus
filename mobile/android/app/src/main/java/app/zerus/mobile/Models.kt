@@ -14,7 +14,8 @@ data class Connection(val id: String, val label: String, val url: String, val to
 data class Machine(val connectionId: String, val id: String, val name: String, val online: Boolean,
     val nativeName: String = name, val serverAliases: Set<String> = emptySet(),
     val route: MachineRoute = MachineRoute.Unknown, val lastKnown: Boolean = false,
-    val hgsVersion: String = "", val mobileDelivery: String = "", val lastSeenAt: Double? = null)
+    val hgsVersion: String = "", val mobileDelivery: String = "", val lastSeenAt: Double? = null,
+    val machineId: String = "")
 data class Target(val computerId: String, val session: String, val run: String, val conversation: String, val connectionId: String = "demo", val archiveId: String = "", val agentId: String = "", val parentConversation: String = "") {
     val key: String get() = JSONArray(listOf(connectionId, computerId, session, run, conversation) + (if (archiveId.isBlank()) emptyList() else listOf(archiveId)) + (if(agentId.isBlank()) emptyList() else listOf("agent",agentId,parentConversation))).toString()
     fun json(): JSONObject {
@@ -36,7 +37,8 @@ data class Event(val id: String, val role: String, val text: String, val time: S
     val requestId: String = "", val attachments: List<DisplayedAttachment> = emptyList(), val source: String = "",
     val delivery: String = "", val outgoingId: String = "", val nativeType: String = "", val submittedText: String = "",
     val originalId: String = "", val historyId: String = "", val historyCursor: String = "",
-    val historyEpoch: String = "", val incomingSeq: Long? = null, val originalIds: List<String> = emptyList(), val detailTruncated: Boolean = false)
+    val historyEpoch: String = "", val incomingSeq: Long? = null, val originalIds: List<String> = emptyList(), val detailTruncated: Boolean = false,
+    val voice: VoiceMessage? = null)
 /** Display metadata plus the identities that can open the exact bytes: a native
  * receipt position (`messageId`, `index`) and/or this phone's private copy. */
 data class DisplayedAttachment(val name: String, val mime: String, val bytes: Long, val reference: String = "",

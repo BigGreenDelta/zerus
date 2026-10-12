@@ -49,6 +49,11 @@ class PrivateStore(context: Context) {
     else MessageState(read("drafts").objects().map(MessageCodec::draft))
     // Legacy encrypted drafts are retained; only a successful combined commit becomes authoritative.
     fun saveMessageState(state: MessageState) = write("message_state", JSONArray().put(MessageCodec.stateJson(state)))
+    internal fun speechState() = SpeechProtocol.decode(read("speech_v1").optJSONObject(0) ?: JSONObject())
+    internal fun saveSpeechState(state: SpeechState) = write("speech_v1", JSONArray().put(SpeechProtocol.encode(state)))
+    internal fun voiceState(): VoiceState = read("voice_messages_v1").optJSONObject(0)?.let(VoiceCodec::decode)
+        ?: VoiceState(selection = speechState().selection)
+    internal fun saveVoiceState(state: VoiceState) = write("voice_messages_v1", JSONArray().put(VoiceCodec.encode(state)))
     fun accounts()=AccountSnapshots.decode(read("account_catalog_v1"))
     fun saveAccounts(state:List<AccountCatalog>)=write("account_catalog_v1",AccountSnapshots.encode(state))
     fun readState()=ConversationReadPolicies.decode(read("conversation_read_v1"))

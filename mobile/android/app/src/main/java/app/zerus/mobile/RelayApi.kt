@@ -76,6 +76,28 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
             }
     }
+    internal suspend fun speech(connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
+        id: String = UUID.randomUUID().toString()): JSONObject {
+        require(host.connectionId == connection.id && operation in SpeechProtocol.operations + "speech_stats")
+        val initial = call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
+            .put("computer_id", host.computerId).put("session", "").put("operation", operation).put("payload", payload))
+        check(initial.string("request_id") == id) { "Gateway returned a different voice receipt." }
+        val receipt = await(connection, initial)
+        check(receipt.string("state") == "completed") {
+            receipt.string("error").ifBlank { "The computer has not confirmed this voice request. Check its status." }
+        }
+        return receipt.getJSONObject("result")
+    }
+    internal suspend fun voice(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
+        require(connection.id == target.connectionId && operation in VoiceProtocol.operations && target.session.isNotBlank())
+        require(payload.string("request_id") == id && payload.string("expected_run_id") == target.run &&
+            payload.string("expected_conversation_id") == target.conversation)
+        val receipt = await(connection, submit(connection, target, operation, payload, id))
+        check(receipt.string("request_id") == id && receipt.string("state") == "completed") {
+            receipt.string("error").ifBlank { "The computer has not confirmed this voice request. Check its status." }
+        }
+        return receipt.getJSONObject("result")
+    }
     suspend fun receipt(connection: Connection, id: String) = call(connection.url, connection.token, "/v1/requests/$id").also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }
@@ -151,7 +173,7 @@ object NativeParser {
         }
         val occurrences = mutableMapOf<String, Int>()
         fun parse(value: JSONObject, streamArgument: String): Event? {
-            val stream = value.string("history_stream").takeIf { it in listOf("journal", "provider", "attachment") } ?: streamArgument
+            val stream = value.string("history_stream").takeIf { it in listOf("journal", "provider", "attachment", "voice") } ?: streamArgument
             val type = value.string("type")
             if (type !in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered", "AgentMessage", "Stop") ||
                 !inScope(value)) return null
@@ -161,13 +183,16 @@ object NativeParser {
                 else -> "AgentMessage"
             }
             val source = value.string("source").ifBlank { stream }
+            val voice = if (source == "hgs_voice") value.optJSONObject("voice")?.let {
+                runCatching { VoiceProtocol.message(it) }.getOrNull()
+            } else null
             val files = value.optJSONArray("attachments")?.objects().orEmpty().map {
                 DisplayedAttachment(it.string("name"), it.string("mime"), it.optLong("bytes"), it.string("reference"),
                     it.string("request_id"), (it.opt("index") as? Int) ?: -1)
             }
             val text = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
                 else value.string("detail", "text", "message", "prompt", "submitted_text")
-            if (text.isBlank() && files.isEmpty()) return null
+            if (text.isBlank() && files.isEmpty() && voice == null) return null
             val at = value.optDouble("at", 0.0).takeIf { it.isFinite() } ?: 0.0
             val nativeId = value.string("message_id", "seq", "source_offset")
             // Count only indistinguishable rows, rather than the whole array.
@@ -185,11 +210,11 @@ object NativeParser {
             val originalId = value.string("original_id").ifBlank { "$stream:$source:$role:$fallback" }
             val historyId = value.string("history_id")
             return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
-                text, value.string("at", "timestamp"), at, if (source == "hgs_delivery" && role == "You") value.string("message_id") else "", files, source,
+                text, value.string("at", "timestamp"), at, if (source in setOf("hgs_delivery", "hgs_voice") && role == "You") value.string("message_id") else "", files, source,
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
-                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"))
+                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice)
         }
         val rows = (journal.mapNotNull { item ->
             fun replaces(provider: JSONObject, hook: JSONObject) = provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) &&
@@ -207,6 +232,26 @@ object NativeParser {
                 kotlin.math.abs(rows[it].at - metadata.at) <= 10 }.singleOrNull()
             if (exact != null) { used += exact; rows[exact] = metadata.copy(at = rows[exact].at) }
             else if (rows.none { it.role == "You" && it.requestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
+        }
+        raw.optJSONArray("voice_messages")?.objects().orEmpty().forEach { item ->
+            val metadata = parse(item, "voice") ?: return@forEach
+            val voice = metadata.voice ?: return@forEach
+            if (metadata.requestId != voice.id) return@forEach
+            // A persisted native binding is authoritative; equal text alone never removes a row.
+            val binding = item.optJSONObject("voice")?.optJSONObject("native_binding")
+            val bound = if (binding == null) emptyList() else (journal.map { it to "journal" } + providers.map { it to "provider" }).filter { (native, stream) ->
+                val seq = binding.opt("journal_seq") as? Number
+                val providerId = binding.string("provider_message_id")
+                inScope(native) && native.string("type") in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
+                    if (stream == "journal") seq != null && (native.opt("seq") as? Number)?.toLong() == seq.toLong()
+                    else providerId.isNotBlank() && native.string("message_id") == providerId &&
+                        (binding.string("provider_source").isBlank() || native.string("source") == binding.string("provider_source")) &&
+                        (!binding.has("provider_source_offset") || native.opt("source_offset")?.toString() == binding.opt("provider_source_offset")?.toString())
+            }.mapNotNull { (native, stream) -> parse(native, stream)?.id }.distinct()
+            if (bound.size == 1) rows.removeAll { it.id == bound.single() && it.role == "You" && it.voice == null }
+            val old = rows.indexOfFirst { it.voice?.id == voice.id }
+            val next = metadata.copy(originalIds = (metadata.originalIds + bound).distinct().take(8))
+            if (old < 0) rows += next else if (rows[old].voice!!.revision < voice.revision) rows[old] = next
         }
         return if (raw.string("history_epoch").isNotBlank()) rows.toList() else rows.sortedBy { it.at }
     }

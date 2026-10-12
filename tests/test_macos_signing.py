@@ -63,7 +63,7 @@ class Signing(unittest.TestCase):
         web = plistlib.loads(Path(entitlements[next(key for key in entitlements if "QtWebEngineProcess" in key)]).read_bytes())
         self.assertEqual(web, {"com.apple.security.cs.allow-jit": True})
         application = plistlib.loads(Path(entitlements["Zerus.app"]).read_bytes())
-        self.assertEqual(application, {"com.apple.security.automation.apple-events": True})
+        self.assertEqual(application, {"com.apple.security.automation.apple-events": True, "com.apple.security.device.audio-input": True})
 
     def test_codesign_command_uses_hardened_runtime_and_timestamps(self):
         command = sign.codesign_command(self.app, "Developer ID Application: Example (ABCDE12345)", None)

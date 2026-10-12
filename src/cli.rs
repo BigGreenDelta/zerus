@@ -41,6 +41,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin)
+       hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
        hgs [@host] ls                 sessions here and on peers
@@ -284,6 +286,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     let args = &args[index + 1..];
     match command.as_str() {
         "-h" | "--help" | "help" => {
+            // Capability probes for a selected computer must inspect that
+            // computer's installed CLI, including retained older versions.
+            if !target.is_empty() && !config.is_self(&target) {
+                return remote(&config, &target, "--help", args, dry);
+            }
             print!("{USAGE}");
             return Ok(0);
         }
@@ -344,10 +351,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech") {
         local_sessions()?;
     }
     match command.as_str() {
+        "speech" => crate::speech::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
             let url = state::dsh::native_ui_url(require(args, 0, "Choose a native session")?)
                 .map_err(|e| Error::new(1, e))?;
@@ -370,11 +378,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "recovery" => {
+        | "attachment" | "recovery" | "voice" => {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -607,7 +615,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),

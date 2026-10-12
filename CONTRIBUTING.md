@@ -87,7 +87,7 @@ without the local session host and `hgs-tray.exe` for remote machines. You need:
 - Python 3.9 or later for the Qt test fixtures, 3.11 or later for the packaging
   scripts, and 3.13 for the hash-locked Qt installer;
 - Git for Windows with Git Bash;
-- Qt 6.10.3 `msvc2022_64` with Qt WebEngine, Qt WebChannel and Qt Positioning.
+- Qt 6.10.3 `msvc2022_64` with Qt WebEngine, Qt WebChannel, Qt Positioning and Qt Multimedia.
   CI installs it with `scripts/ci/aqt-requirements.txt` (aqtinstall 3.3.0 cannot
   install Qt 6.11 or later for Windows yet); the same works locally:
 
@@ -96,7 +96,7 @@ python -m venv ~/aqt
 ~/aqt/Scripts/python -m pip install --require-hashes --only-binary :all: \
     -r scripts/ci/aqt-requirements.txt
 ~/aqt/Scripts/python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
-    -m qtwebengine qtwebchannel qtpositioning --outputdir ~/Qt
+    -m qtwebengine qtwebchannel qtpositioning qtmultimedia --outputdir ~/Qt
 ```
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and

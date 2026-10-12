@@ -117,6 +117,7 @@ class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void crashRestoresLastEditAndAttachmentBytes();
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
@@ -1351,4 +1352,26 @@ int main(int argc, char **argv)
     }
     TestMessageComposer test; return QTest::qExec(&test, argc, argv);
 }
+void TestMessageComposer::voiceInsertionRequiresUnchangedDraftAndNavigation()
+{
+    MessageComposer composer; setSessionReady(composer, "fixture\nvoice"); composer.setAvailability(true);
+    composer.editor()->setPlainText("First"); composer.editor()->moveCursor(QTextCursor::End);
+    QSignalSpy sent(&composer, &MessageComposer::sendRequested);
+    const auto original = composer.voiceTarget();
+    composer.editor()->insertPlainText(" edit"); composer.editor()->undo();
+    QVERIFY(!composer.insertVoiceText(original, "stale words", [](bool) {}));
+    const auto beforeNavigation = composer.voiceTarget();
+    setSessionReady(composer, "fixture\nother"); setSessionReady(composer, "fixture\nvoice");
+    QVERIFY(!composer.insertVoiceText(beforeNavigation, "wrong destination", [](bool) {}));
+    const auto beforeLock = composer.voiceTarget();
+    QVERIFY(composer.setWaitingToSend(composer.sessionKey(), "Waiting"));
+    QVERIFY(!composer.insertVoiceText(beforeLock, "locked words", [](bool) {}));
+    QVERIFY(composer.setWaitingToSend(composer.sessionKey(), {}));
+    composer.editor()->moveCursor(QTextCursor::End); bool finished = false, durable = false;
+    QVERIFY(composer.insertVoiceText(composer.voiceTarget(), "spoken words", [&](bool saved) { finished = true; durable = saved; }));
+    QTRY_VERIFY(finished); QVERIFY(durable); QCOMPARE(sent.count(), 0);
+    QCOMPARE(composer.editor()->toPlainText(), "First spoken words");
+    QCOMPARE(ComposerDraftStore().load(composer.sessionKey()).text, "First spoken words");
+}
+
 #include "test_messagecomposer.moc"

@@ -234,9 +234,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                       '--only-binary :all: \\\n            -r scripts/ci/aqt-requirements.txt </dev/null', windows)
         self.assertIn('python -m venv "$RUNNER_TEMP/aqt"', windows)
         self.assertIn('"$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \\\n'
-                      '            -m qtwebengine qtwebchannel qtpositioning --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
+                      '            -m qtwebengine qtwebchannel qtpositioning qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
         self.assertIn("if: steps.qt-cache.outputs.cache-hit != 'true'", windows)
-        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-"
+        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-"
                       "${{ hashFiles('scripts/ci/aqt-requirements.txt') }}", windows)
         # A new stable Rust release must not fail an unchanged commit.
         self.assertIn("cargo +1.85.0 clippy --locked --all-targets -- -D warnings", windows)

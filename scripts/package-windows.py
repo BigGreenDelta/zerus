@@ -176,6 +176,7 @@ def main():
         sboms = sorted(path for path in (qt_root / "sbom").glob("*.spdx") if not path.name.endswith(".source.spdx"))
         names = {path.name for path in sboms}
         require(f"qtbase-{manifest['qt_version']}.spdx" in names and
+                f"qtmultimedia-{manifest['qt_version']}.spdx" in names and
                 f"qtwebengine-{manifest['qt_version']}.spdx" in names and
                 any(name.startswith("qtwebengine-chromium-") for name in names),
                 "The Qt installation lacks its SBOM notices; review Qt licensing before distribution.")

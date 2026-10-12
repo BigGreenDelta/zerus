@@ -6,8 +6,11 @@
 #include "ProcessSettings.h"
 #include "QuestionReply.h"
 #include "SessionFileReference.h"
+#include "speech/VoicePlayerImage.h"
 
 #include <QDateTime>
+#include <QAudioOutput>
+#include <QMediaPlayer>
 #include <QAbstractTextDocumentLayout>
 #include <QAction>
 #include <QClipboard>
@@ -356,6 +359,7 @@ QString questionReplyBody(const QJsonArray &replies, const QString &muted, const
 
 QString eventKey(const QJsonObject &event)
 {
+    if(event.value("source")=="hgs_voice")return "voice-"+event.value("voice").toObject().value("id").toString(event.value("message_id").toString());
     if (!event.value("activity_key").toString().isEmpty()) return event.value("activity_key").toString();
     if(event.value("type")=="LocalMessage")return "local-"+event.value("id").toString();
     if(event.value("source")=="hgs_delivery")return "receipt-"+event.value("message_id").toString();
@@ -401,6 +405,7 @@ QString timeText(const QJsonObject &event)
 
 QString messageRole(const QJsonObject &event)
 {
+    if (event.value("source") == "hgs_voice" && event.value("voice").isObject()) return "user";
     if (!event.value("agent_id").toString().isEmpty() || (event.value("detail").toString().isEmpty() && event.value("attachments").toArray().isEmpty())) return {};
     // Claude starts a turn for finished background work; nobody wrote it.
     const auto origin = event.value("origin").toString();
@@ -478,7 +483,9 @@ struct ActivityRenderResult {
     QJsonArray m_events, m_localMessages;
     QHash<QString, bool> m_expanded;
     QHash<QString, QString> m_fileLinks, m_deliveryKeys, m_copyTexts;
-    QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles;
+    QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles, m_voiceLinks;
+    QHash<QString,int> m_voicePositions;
+    QString m_voiceError;
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QImage> m_previews;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
@@ -503,6 +510,12 @@ struct ActivityRenderResult {
     if (clear.value("type") == "SessionCleared" && !std::any_of(m_events.cbegin(), m_events.cend(), [&clear](const QJsonValue &value) {
             return sameSessionClear(value.toObject(), clear);
         })) m_events.append(clear);
+    for(const auto &value:details.value("voice_messages").toArray()) {
+        const auto voice=value.toObject();const auto id=voice.value("message_id").toString();
+        if(id.isEmpty())continue;
+        for(qsizetype i=m_events.size();i-->0;)if(m_events[i].toObject().value("source")=="hgs_voice" && m_events[i].toObject().value("message_id")==id)m_events.removeAt(i);
+        m_events.append(voice);
+    }
     for(const auto &value:details.value("attachment_messages").toArray()) {
         const auto receipt=value.toObject();if(receipt.value("source")!="hgs_delivery" || receipt.value("attachments").toArray().isEmpty())continue;
         const auto submitted=receipt.value("submitted_text").toString().trimmed();int match=-1;double nearest=10.;
@@ -510,7 +523,7 @@ struct ActivityRenderResult {
             const auto event=m_events[i].toObject();const auto body=event.value("detail").toString().trimmed();
             const double distance=qAbs(event.value("at").toDouble()-receipt.value("at").toDouble());
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
-            if(event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
+            if(event.value("source")!="hgs_voice" && event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
         }
         if(match<0){auto message=receipt;message["attachment_submitted_text"]=receipt.value("submitted_text");m_events.append(message);}
         else {auto event=m_events[match].toObject();event["detail"]=receipt.value("detail");event["attachments"]=receipt.value("attachments");event["attachment_request_id"]=receipt.value("message_id");event["attachment_submitted_text"]=receipt.value("submitted_text");m_events[match]=event;}
@@ -555,6 +568,11 @@ struct ActivityRenderResult {
     }
     for(const auto &value:localMessages) {
         auto message=value.toObject();message["type"]="LocalMessage";message["detail"]=message.value("text");message["at"]=message.value("submitted_at");
+        if(message.value("source")=="hgs_voice") {
+            bool saved=false;for(const auto &event:sourceEvents)if(event.toObject().value("source")=="hgs_voice" && event.toObject().value("message_id")==message.value("message_id")){saved=true;break;}
+            if(!saved)sourceEvents.append(message);
+            continue;
+        }
         // The native hook can arrive before the durable delivery metadata.
         // Keep the cached file attached to that event, not as a second message.
         int match=-1;double nearest=10.;
@@ -564,7 +582,7 @@ struct ActivityRenderResult {
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
             const auto body=event.value("detail").toString().trimmed();
             const double distance=qAbs(event.value("at").toDouble()-message.value("at").toDouble());
-            if(event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
+            if(event.value("source")!="hgs_voice" && event.value("attachments").toArray().isEmpty() && distance<=nearest && !submitted.isEmpty() && !body.isEmpty() && (body.startsWith(submitted.left(1000)) || submitted.startsWith(body.left(1000)))){match=i;nearest=distance;}
         }
         if(match>=0){auto event=sourceEvents[match].toObject();event["activity_key"]=eventKey(message);event["detail"]=message.value("detail");event["attachments"]=message.value("attachments");event["attachment_submitted_text"]=message.value("submitted_text");sourceEvents[match]=event;continue;}
         sourceEvents.append(message);
@@ -660,9 +678,31 @@ struct ActivityRenderResult {
 
     QList<QJsonObject> events;
     QSet<QString> seen;
+    bool voiceBoundPrompt = false;
+    QList<QJsonObject> voiceBindings;
+    for(const auto &value:sourceEvents) {
+        const auto event=value.toObject();
+        if(event.value("source")=="hgs_voice")voiceBindings.append(event.value("voice").toObject().value("native_binding").toObject());
+    }
     for (const auto &value : sourceEvents) {
         if (!value.isObject()) continue;
         const auto event = value.toObject(); const auto key = eventKey(event);
+        if(event.value("source")!="hgs_voice") {
+            bool bound=false;
+            for(const auto &binding:voiceBindings) {
+                const auto seq=binding.value("journal_seq").toInteger();
+                const auto id=binding.value("provider_message_id").toString();
+                const auto source=binding.value("provider_source").toString();
+                if((seq>0 && event.value("seq").toInteger()==seq)
+                    || (!id.isEmpty() && !source.isEmpty()
+                        && event.value("provider_message_id").toString(event.value("message_id").toString())==id
+                        && event.value("provider_source").toString(event.value("source").toString())==source)) {bound=true;break;}
+            }
+            if(bound) {
+                if(!event.value("detail").toString().isEmpty() && event.value("detail")==details.value("prompt"))voiceBoundPrompt=true;
+                continue;
+            }
+        }
         // Kimi emits this lifecycle hook without text before TurnStarted.
         // It still drives session state, but adds no content to the transcript.
         if (event.value("type") == "UserPromptSubmit" && event.value("agent_id").toString().isEmpty()
@@ -695,7 +735,8 @@ struct ActivityRenderResult {
         const auto previousType = previous.value("type").toString();
         const auto previousText=previous.value("attachment_submitted_text").toString(previous.value("detail").toString()).trimmed();
         const auto currentText=current.value("attachment_submitted_text").toString(current.value("detail").toString()).trimmed();
-        if ((previousType == "UserPromptSubmit" || previousType == "UserPromptQueued")
+        if (previous.value("source") != "hgs_voice" && current.value("source") != "hgs_voice"
+            && (previousType == "UserPromptSubmit" || previousType == "UserPromptQueued")
             && current.value("type") == "TurnStarted"
             && messageRole(previous) == "user" && messageRole(current) == "user"
             && (isExcerptOf(previousText, currentText)
@@ -710,10 +751,11 @@ struct ActivityRenderResult {
         } else ++i;
     }
     QString prompt = details.value("prompt").toString(fallbackPrompt);
+    if(voiceBoundPrompt)prompt.clear();
     QString answer = details.value("last_message").toString();
     for (int i = events.size() - 1; i >= 0; --i) {
         const auto role = messageRole(events[i]);
-        if (role == "user" && events[i].value("type") != "QuestionAnswered"
+        if (role == "user" && events[i].value("source") != "hgs_voice" && events[i].value("type") != "QuestionAnswered"
             && !prompt.isEmpty() && isExcerptOf(events[i].value("attachment_submitted_text").toString(events[i].value("detail").toString()).trimmed(), prompt.trimmed())) {
             if(events[i].value("attachments").toArray().isEmpty()) events[i]["detail"] = prompt;
             prompt.clear();
@@ -782,6 +824,33 @@ struct ActivityRenderResult {
         if (!role.isEmpty()) {
             const auto text = event.value("detail").toString();
             const auto replies = role == "user" ? QuestionReply::parse(text) : QJsonArray();
+            if(event.value("source")=="hgs_voice") {
+                const auto voice=event.value("voice").toObject();const auto audio=voice.value("audio").toObject();
+                const auto id=voice.value("id").toString(event.value("message_id").toString());
+                const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+"\n"+id).toUtf8(),QCryptographicHash::Sha256).toHex());
+                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,audio);
+                const auto state=voice.value("state").toString();
+                const QHash<QString,QString> labels{{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
+                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent")},{"failed",tr("Voice message failed")},
+                    {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
+                const int playerWidth=qBound(140,int(qMin(width,widthWithScrollBar)/m_scale)-72,420);
+                const QUrl playerUrl("hgs-voice-player:"+key);
+                document->addResource(QTextDocument::ImageResource,playerUrl,
+                    VoicePlayerImage::draw(qRound(playerWidth*m_scale),m_scale,document->pixelRatio,m_dark,audio,0,false,false));
+                const auto label=tr("Play or pause voice message (%1)").arg(VoicePlayerImage::time(audio.value("duration_ms").toInteger()));
+                QString body=QString("<p style='margin:8px 0 4px;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='%4' height='52' alt='%2'></a></p>")
+                    .arg(key,escaped(label),playerUrl.toString(),QString::number(playerWidth));
+                const auto transcript=voice.value("transcript").toString();
+                if(!transcript.isEmpty()) {
+                    const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
+                    body+=QString("<p><a href='hgs-activity:%1' style='color:%2;'>%3</a></p>").arg(toggle,accent,escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript")));
+                    if(m_expanded.value(toggle))body+=userMessage(transcript);
+                }
+                if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
+                if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
+                html+=card(eventKey(event),tr("You (voice)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
+                ++i;continue;
+            }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
@@ -883,6 +952,10 @@ struct ActivityRenderResult {
     document->setHtml(m_html);
     MarkdownObjects::convertChips(document.get(), agentTheme);
     edit.endEditBlock();
+    for(auto block=document->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto fragment=it.fragment();const QUrl image(fragment.charFormat().toImageFormat().name());
+        if(image.scheme()=="hgs-voice-player")m_voicePositions.insert(image.path(),fragment.position());
+    }
     document->setTextWidth(width);
     size = document->documentLayout()->documentSize();
     if (size.height() > viewportHeight && widthWithScrollBar != width) {
@@ -1032,6 +1105,9 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 void ActivityView::setSessionKey(const QString &key)
 {
     if (key == m_sessionKey) return;
+    if(m_voicePlayer)m_voicePlayer->stop();
+    m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceError.clear();m_voiceLinks.clear();m_voicePositions.clear();
+    m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
     m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
     m_attachmentLinks.clear();m_fileLinks.clear();
     m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
@@ -1068,6 +1144,9 @@ void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &eve
     const auto conversation = details.value("conversation_id").toString();
     if (!m_conversation.isEmpty() && !conversation.isEmpty() && conversation != m_conversation
         && !details.value("cleared_conversations").toArray().contains(m_conversation)) {
+        if(m_voicePlayer)m_voicePlayer->stop();
+        m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceLinks.clear();m_voicePositions.clear();
+        m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
         m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
         m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
         m_fileLinks.clear(); m_attachmentLinks.clear(); m_messageActions.clear(); m_copyTexts.clear();
@@ -1323,20 +1402,40 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
         const auto *mouse = dynamic_cast<QMouseEvent *>(event);
         if (event->type() == QEvent::ToolTip) {
             const auto *help = static_cast<QHelpEvent *>(event);
+            const auto voice=voiceKeyAt(help->pos());
+            if(!voice.isEmpty()){
+                const auto local=help->pos()-voiceRect(voice).topLeft();
+                const auto caption=m_voiceLoading==voice?tr("Loading voice message…")
+                    :local.x()>=56*voiceRect(voice).height()/52.?tr("Seek in voice message")
+                    :m_voicePlaying==voice?tr("Pause voice message"):tr("Play voice message");
+                QToolTip::showText(help->globalPos(),caption,viewport);return true;
+            }
             if (!copyKeyAt(help->pos()).isEmpty()) {
                 QToolTip::showText(help->globalPos(), tr("Copy as Markdown"), viewport);
                 return true;
             }
         } else if (event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) {
-            const bool over = mouse && !copyKeyAt(mouse->position().toPoint()).isEmpty();
+            const bool over = mouse && (!copyKeyAt(mouse->position().toPoint()).isEmpty() || !voiceKeyAt(mouse->position().toPoint()).isEmpty());
             if (over && !m_copyHover) { m_copyCursor = viewport->cursor(); viewport->setCursor(Qt::PointingHandCursor); }
             else if (!over && m_copyHover) viewport->setCursor(m_copyCursor);
             m_copyHover = over;
         } else if (mouse && mouse->button() == Qt::LeftButton
                    && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
             // A press on the button keeps the reader's selection and position.
+            m_voicePressed=voiceKeyAt(mouse->position().toPoint());
+            if(!m_voicePressed.isEmpty())return true;
             m_copyPressed = copyKeyAt(mouse->position().toPoint());
             if (!m_copyPressed.isEmpty()) return true;
+        } else if(mouse && mouse->button()==Qt::LeftButton && event->type()==QEvent::MouseButtonRelease && !m_voicePressed.isEmpty()){
+            const auto key=std::exchange(m_voicePressed,QString());
+            if(voiceKeyAt(mouse->position().toPoint())==key){
+                const auto rect=voiceRect(key);const auto local=mouse->position()-rect.topLeft();
+                const qreal scale=rect.height()/52.;
+                const auto waveform=VoicePlayerImage::waveformRect(rect.width(),scale);
+                if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
+                else if(local.x()<48*scale)activateVoice(key);
+            }
+            return true;
         } else if (mouse && mouse->button() == Qt::LeftButton && event->type() == QEvent::MouseButtonRelease && !m_copyPressed.isEmpty()) {
             const auto pressed = std::exchange(m_copyPressed, QString());
             if (copyKeyAt(mouse->position().toPoint()) == pressed) copyMarkdown(pressed);
@@ -1364,6 +1463,8 @@ void ActivityView::activateLink(const QUrl &url)
         emit fileReferenceActivated(m_fileLinks.value(url.path()));
     } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
         emit attachmentActivated(m_attachmentLinks.value(url.path()));
+    } else if(url.scheme()=="hgs-voice" && m_voiceLinks.contains(url.path())) {
+        activateVoice(url.path());
     } else if(url.scheme()=="hgs-message" && m_messageActions.contains(url.path())) {
         const auto action=m_messageActions.value(url.path());emit messageActionRequested(action.first,action.second);
     } else if(url.scheme()=="hgs-process" && m_processLinks.contains(url.path())) emit processRequested(url.path());
@@ -1382,6 +1483,68 @@ QString ActivityView::copyKeyAt(const QPoint &position) const
     if (image.scheme() != QLatin1String("hgs-ui") || !image.path().startsWith(QLatin1String("copy/"))) return {};
     const auto key = QUrlQuery(image).queryItemValue("card");
     return m_copyTexts.contains(key) ? key : QString();
+}
+
+QString ActivityView::voiceKeyAt(const QPoint &position) const
+{
+    const QPointF content=position+QPoint(m_browser->horizontalScrollBar()->value(),m_browser->verticalScrollBar()->value());
+    const QUrl image(m_browser->document()->documentLayout()->imageAt(content));
+    return image.scheme()=="hgs-voice-player" && m_voiceLinks.contains(image.path())?image.path():QString();
+}
+
+QRect ActivityView::voiceRect(const QString &key) const
+{
+    if(!m_voicePositions.contains(key))return {};
+    QTextCursor cursor(m_browser->document());cursor.setPosition(m_voicePositions.value(key));
+    const auto at=m_browser->cursorRect(cursor);
+    auto *document=paintDocument(m_browser->document());
+    const auto image=document->resource(QTextDocument::ImageResource,QUrl("hgs-voice-player:"+key)).value<QImage>();
+    const auto size=image.deviceIndependentSize()*document->metrics.logicalDpiY()/document->defaultDpi;
+    return QRect(at.topLeft(),size.toSize());
+}
+
+void ActivityView::updateVoiceImage(const QString &key)
+{
+    if(key.isEmpty() || !m_voiceLinks.contains(key) || !m_voicePositions.contains(key))return;
+    auto *document=paintDocument(m_browser->document());const QUrl url("hgs-voice-player:"+key);
+    const auto previous=document->resource(QTextDocument::ImageResource,url).value<QImage>();
+    if(previous.isNull())return;
+    document->addResource(QTextDocument::ImageResource,url,VoicePlayerImage::draw(previous.deviceIndependentSize().width(),previous.deviceIndependentSize().height()/52.,
+        document->pixelRatio,m_dark,m_voiceLinks.value(key),m_voiceKey==key?m_voicePosition:0,m_voicePlaying==key,
+        m_voiceLoading==key || (m_voiceKey==key && m_voicePendingSeek>=0 && m_voiceStartAfterLoad)));
+    m_browser->viewport()->update(voiceRect(key).adjusted(-2,-2,2,2));
+}
+
+void ActivityView::activateVoice(const QString &key,std::optional<qreal> fraction)
+{
+    if(!m_voiceLinks.contains(key))return;
+    const qint64 duration=m_voiceLinks.value(key).value("duration_ms").toInteger();
+    const qint64 position=fraction?qRound64(qBound<qreal>(0,*fraction,1)*duration):0;
+    if(m_voiceLoading==key){
+        if(fraction){m_voicePosition=position;m_voicePendingSeek=position;updateVoiceImage(key);}
+        return;
+    }
+    if(m_voicePlayer && m_voiceKey==key && !m_voicePlayer->source().isEmpty() && m_voicePlayer->error()==QMediaPlayer::NoError){
+        if(fraction){
+            m_voicePosition=position;
+            if(m_voicePendingSeek>=0)m_voicePendingSeek=position;
+            m_voicePlayer->setPosition(position);updateVoiceImage(key);
+        }else if(m_voicePlayer->playbackState()==QMediaPlayer::PlayingState || m_voiceStartAfterLoad){
+            m_voiceStartAfterLoad=false;m_voicePlayer->pause();
+        }else{
+            if(m_voicePosition>=duration){m_voicePosition=0;m_voicePlayer->setPosition(0);if(m_voicePendingSeek>=0)m_voicePendingSeek=0;}
+            if(m_voicePendingSeek>=0)m_voiceStartAfterLoad=true;else m_voicePlayer->play();
+        }
+        updateVoiceImage(key);return;
+    }
+    const auto previous=m_voiceKey;
+    if(m_voicePlayer){m_voicePlayer->stop();m_voicePlayer->setSource({});}
+    m_voiceKey=key;m_voicePosition=position;m_voicePendingSeek=position;m_voiceStartAfterLoad=!fraction.has_value();
+    const bool hadError=!m_voiceError.isEmpty();
+    m_voiceLoading=key;m_voiceError.clear();m_voicePlaying.clear();
+    updateVoiceImage(previous);updateVoiceImage(key);
+    if(hadError)render(false);
+    emit voicePlaybackRequested(key,m_voiceLinks.value(key));
 }
 
 void ActivityView::copyMarkdown(const QString &key)
@@ -1458,6 +1621,7 @@ void ActivityView::startRender()
     result->m_fallbackPrompt = m_fallbackPrompt;
     result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys;
     result->m_previews = m_previews;
+    result->m_voiceError=m_voiceError;
     result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale;
     result->processesEnabled = ProcessSettings::enabled();
     result->width = m_browser->viewport()->width();
@@ -1581,7 +1745,8 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
         && previous->metrics.dotsPerMeterY() == next->metrics.dotsPerMeterY()) {
         // Attachment location metadata can change without changing its identity
         // or markup. Keep the committed action maps current even in that case.
-        m_attachmentLinks = result->m_attachmentLinks;
+        m_attachmentLinks = result->m_attachmentLinks;m_voiceLinks=result->m_voiceLinks;m_voicePositions=result->m_voicePositions;
+        for(const auto &key:m_voiceLinks.keys())updateVoiceImage(key);
         m_messageActions = result->m_messageActions;
         m_pendingContentUpdate = result->contentRevision != m_contentRevision;
         return;
@@ -1594,7 +1759,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     }
     m_pendingContentUpdate = result->contentRevision != m_contentRevision;
     m_knownEvents = result->m_knownEvents; m_html = result->m_html;
-    m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;
+    m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;m_voiceLinks=result->m_voiceLinks;m_voicePositions=result->m_voicePositions;
     m_messageActions = result->m_messageActions; m_copyTexts = result->m_copyTexts;
     m_expanded = result->m_expanded; m_deliveryKeys = result->m_deliveryKeys;
     m_toggleKeys = result->m_toggleKeys; m_processLinks = result->m_processLinks;
@@ -1623,6 +1788,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
         paintDocument(document)->addResource(QTextDocument::ImageResource, QUrl("hgs-thumbnail:" + it.key()), it.value());
     document->setParent(m_browser);
     m_browser->setDocument(document);
+    for(const auto &key:m_voiceLinks.keys())updateVoiceImage(key);
     oldDocument->deleteLater();
     emit document->documentLayout()->documentSizeChanged(result->size);
     const auto &updatedAnchors = result->anchors;
@@ -1677,3 +1843,29 @@ void ActivityView::clearDocument()
 }
 
 #include "ActivityView.moc"
+
+void ActivityView::playVoice(const QString &key,const QString &path,const QString &error)
+{
+    if(m_voiceLoading!=key || !m_voiceLinks.contains(key) || !isVisible())return;
+    m_voiceLoading.clear();
+    if(!error.isEmpty() || path.isEmpty()){m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voiceError=key+"\n"+(error.isEmpty()?tr("Recording is unavailable."):error);render(false);return;}
+    if(!m_voicePlayer){
+        m_voicePlayer=new QMediaPlayer(this);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
+        connect(m_voicePlayer,&QMediaPlayer::playbackStateChanged,this,[this](QMediaPlayer::PlaybackState state){m_voicePlaying=state==QMediaPlayer::PlayingState?m_voiceKey:QString();updateVoiceImage(m_voiceKey);});
+        connect(m_voicePlayer,&QMediaPlayer::positionChanged,this,[this](qint64 position){m_voicePosition=position;updateVoiceImage(m_voiceKey);});
+        connect(m_voicePlayer,&QMediaPlayer::mediaStatusChanged,this,[this](QMediaPlayer::MediaStatus status){
+            if((status!=QMediaPlayer::LoadedMedia && status!=QMediaPlayer::BufferedMedia) || m_voicePendingSeek<0 || !isVisible())return;
+            const auto seek=std::exchange(m_voicePendingSeek,qint64(-1));m_voicePlayer->setPosition(seek);
+            if(std::exchange(m_voiceStartAfterLoad,false))m_voicePlayer->play();
+        });
+        connect(m_voicePlayer,&QMediaPlayer::errorOccurred,this,[this](QMediaPlayer::Error,const QString &detail){m_voiceError=m_voiceKey+"\n"+tr("Could not play recording: %1").arg(detail);render(false);});
+    }
+    m_voiceKey=key;m_voicePlayer->setSource(QUrl::fromLocalFile(path));
+    updateVoiceImage(key);
+}
+void ActivityView::hideEvent(QHideEvent *event)
+{
+    m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voicePressed.clear();
+    if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();updateVoiceImage(m_voiceKey);
+    QWidget::hideEvent(event);
+}

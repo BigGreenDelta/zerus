@@ -261,6 +261,15 @@ fn validate(request: &LocalRequest) -> Result<()> {
         Ok(())
     };
     match op {
+        "voice" => {
+            ensure!(rest.len() == 2 && session(&rest[0]) && rest[1] == "--json", "voice requires a session and its fixed JSON ABI");
+            crate::state::voice::validate_request(request.payload.as_ref().context("voice payload is required")?)
+                .map_err(anyhow::Error::msg)?;
+        }
+        "speech" => {
+            ensure!(rest == ["--json"], "speech requires its fixed JSON ABI");
+            crate::speech::validate_request(request.payload.as_ref().context("speech payload is required")?)?;
+        }
         "--help" => {
             ensure!(rest.is_empty(), "invalid help request");
             no_payload()?;
@@ -1216,6 +1225,19 @@ mod tests {
         ))
         .is_ok());
         assert!(validate(&request(&["swarm", "assign-launch", "--json"], None)).is_err());
+    }
+
+    #[test]
+    fn voice_peer_calls_cannot_start_workers_or_use_client_routes() {
+        let mut value=scope();value["action"]=json!("profiles");
+        assert!(validate(&request(&["voice","codex/project","--json"],Some(value.clone()))).is_ok());
+        assert!(validate(&request(&["voice","worker"],Some(value.clone()))).is_err());
+        value["action"]=json!("submit");
+        value["speech"]=json!({"machine_id":"client-alias","profile_id":"fixture"});
+        value["audio"]=json!({"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":"AAAAAA=="});
+        assert!(validate(&request(&["voice","codex/project","--json"],Some(value.clone()))).is_err());
+        value["speech"]["machine_id"]=json!(ID);
+        assert!(validate(&request(&["voice","codex/project","--json"],Some(value))).is_ok());
     }
 
     #[test]

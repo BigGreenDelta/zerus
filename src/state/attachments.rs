@@ -335,6 +335,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if flag("--conversation") != string(&record, "conversation_id") {
         return Err("The session conversation changed; refresh Activity".into());
     }
+    if let Some(output) = voice::read_attachment(&record, Some(flag("--agent")), &id.to_string(), index)? {
+        println!("{output}");
+        return Ok(0);
+    }
     let receipt = receipt(&directory(&record).join(format!("{id}.json")))?;
     if !belongs(&receipt, &record, flag("--agent")) {
         return Err("This attachment belongs to another conversation".into());

@@ -21,7 +21,7 @@ ALLOWED_RPATHS = ("@executable_path/", "@loader_path/")
 REFERENCES = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB"}
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
-QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtwebengine",
+QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtmultimedia", "qtwebengine",
               "qtwebengine-chromium-webengine")
 EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", "Contents/Resources/bin/zerus-setup"]
 REQUIRED_FILES = [

@@ -11,12 +11,25 @@ object RollingConversationHistory {
         require(maxEvents >= 0 && maxBytes >= 2)
         val rows = linkedMapOf<String, Event>()
         if (target == previousTarget) previous.forEach { rows[it.id] = it.copy(attachments = it.attachments.toList()) }
-        incoming.forEach { rows[it.id] = it.copy(attachments = it.attachments.toList()) }
+        incoming.forEach { incomingRow ->
+            val previousRow = rows[incomingRow.id]
+            val voice = incomingRow.voice?.let { VoiceProtocol.newer(previousRow?.voice, it) }
+            rows[incomingRow.id] = if (voice == null) incomingRow.copy(attachments = incomingRow.attachments.toList())
+                else incomingRow.copy(voice = voice, text = voice.transcript, attachments = listOf(voice.audio))
+        }
         val canonicalAliases = mutableMapOf<String, String>()
         incoming.filter { it.historyId.isNotBlank() }.forEach { canonical ->
             (canonical.originalIds + canonical.originalId).filter(String::isNotBlank).distinct().forEach { original ->
                 val legacy = rows.values.filter { it.id == original && it.id != canonical.id }.singleOrNull()
                 if (legacy != null) { rows.remove(legacy.id); canonicalAliases[legacy.id] = canonical.id }
+            }
+        }
+        incoming.filter { it.voice != null }.forEach { voice ->
+            voice.originalIds.forEach { original ->
+                val legacy = rows[original]
+                if (legacy != null && legacy.voice == null && legacy.role == "You" && original != voice.id) {
+                    rows.remove(original); canonicalAliases[original] = voice.id
+                }
             }
         }
         val reconciled = rows.values.toMutableList()
@@ -77,6 +90,7 @@ object EventHistoryCodec {
         .put("original_id", event.originalId).put("history_id", event.historyId).put("history_cursor", event.historyCursor)
         .put("history_epoch", event.historyEpoch).put("incoming_seq", event.incomingSeq ?: JSONObject.NULL)
         .put("original_ids", JSONArray(event.originalIds)).put("detail_truncated",event.detailTruncated)
+        .put("voice", event.voice?.takeIf { it.state in VoiceProtocol.states }?.let(VoiceProtocol::json))
         .put("outgoing_id", event.outgoingId).put("attachments", JSONArray(event.attachments.map { file ->
             JSONObject().put("name", file.name).put("mime", file.mime).put("bytes", file.bytes).put("reference", file.reference).also {
                 if (file.messageId.isNotBlank() && file.index >= 0) it.put("message_id", file.messageId).put("index", file.index)
@@ -98,7 +112,8 @@ object EventHistoryCodec {
                 }, value.getString("source"), value.getString("delivery"), value.getString("outgoing_id"), value.optString("native_type"), value.optString("submitted_text"), value.optString("original_id"),
                 value.optString("history_id"), value.optString("history_cursor"), value.optString("history_epoch"),
                 (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
-                value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), value.optBoolean("detail_truncated"))
+                value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), value.optBoolean("detail_truncated"),
+                value.optJSONObject("voice")?.let(VoiceProtocol::message))
         }
     }
 }

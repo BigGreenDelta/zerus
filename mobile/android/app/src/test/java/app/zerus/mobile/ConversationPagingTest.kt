@@ -9,6 +9,19 @@ class ConversationPagingTest {
     private val target=Target("computer","codex/project/chat","run","conversation","workspace")
     private fun event(i:Int)=Event("history:$i","AgentMessage","reply $i","",i.toDouble(),nativeType="AgentMessage",historyId="$i",historyCursor="opaque:$i",historyEpoch="epoch",incomingSeq=i.toLong())
     private fun page(start:Int,end:Int,before:Boolean=true,after:Boolean=false)=HistoryPage(target,"epoch",(start..end).map(::event),"opaque:$start","opaque:$end",before,after,1000,1000,true,false,false,JSONObject())
+    @Test fun emptyCanonicalHeadStillFetchesFirstPendingVoiceWithoutMovingAnOlderWindow() {
+        val empty=HistoryWindow.from(page(1,0,before=false).copy(before=null,after=null))
+        val pending=event(1).copy(id="voice:fixture",role="You",nativeType="UserMessage",source="hgs_voice",
+            historyId="",historyCursor="",historyEpoch="",incomingSeq=null)
+        // Inspection cannot invent canonical order for a voice row before native submission.
+        val inspected=empty.inspection(listOf(pending))
+        assertTrue(inspected.events.isEmpty())
+        assertEquals("" to "",HistoryRequests.refreshAtHead(inspected))
+        val canonical=HistoryWindow.from(page(1,1,before=false).copy(events=listOf(pending.copy(historyId="1",historyCursor="opaque:1",historyEpoch="epoch"))))
+        assertEquals("after" to "opaque:1",HistoryRequests.refreshAtHead(canonical))
+        assertEquals("after" to "opaque:1",HistoryRequests.refreshAtHead(canonical.copy(events=canonical.events+pending.copy(id="voice:next"))))
+        assertNull(HistoryRequests.refreshAtHead(canonical.copy(atHead=false,hasAfter=true)))
+    }
     @Test fun prependKeepsOlderPageAndAnchorInsteadOfEvictingIt() {
         val current=HistoryWindow.from(page(501,1000))
         val older=current.merge(page(401,500,after=true),"before")

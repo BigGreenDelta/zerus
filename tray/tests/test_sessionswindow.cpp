@@ -128,6 +128,7 @@ class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void nativeSettingsNavigationOnExplicitSpeechHost();
     void copySessionReferencePreservesSelectionAndDraft();
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
@@ -313,6 +314,34 @@ private:
     // RunQtShard.cmake does) exits without destroying the test object.
     std::unique_ptr<QTemporaryDir> m_dir;
 };
+
+void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
+{
+    const auto executable=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HGS");
+    const auto host=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HOST");
+    const auto expected=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_PROFILE");
+    if(executable.isEmpty() || expected.isEmpty()) QSKIP("Requires an explicit installed CLI and speech profile; settings requests are read-only.");
+    QSettings().setValue("speech/host",host); QSettings().setValue("speech/profile",expected);
+    SettingsPage page(executable); page.setPeers({host}); page.show();
+    auto *sections=page.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->item(sections->count()-1)->text(),"About");
+    QCOMPARE(sections->item(sections->count()-2)->text(),"Voice input");
+    sections->setCurrentRow(sections->count()-1);
+    auto *version=page.findChild<QLabel *>("aboutHgsVersion"); QVERIFY(version);
+    QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
+    auto *provider=page.findChild<QComboBox *>("speechProfile"); QVERIFY(provider);
+    auto *refresh=page.findChild<QPushButton *>("speechRefresh"); QVERIFY(refresh);
+    auto *status=page.findChild<QLabel *>("speechSettingsStatus"); QVERIFY(status);
+    sections->setCurrentRow(sections->count()-2);
+    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
+    QVERIFY2(provider->isEnabled(),qPrintable(status->text())); QCOMPARE(provider->currentData().toString(),expected);
+    page.hide(); page.show(); page.refresh();
+    QVERIFY(!refresh->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
+    QVERIFY2(provider->isEnabled(),qPrintable(status->text())); QCOMPARE(provider->currentData().toString(),expected);
+    sections->setCurrentRow(sections->count()-1);
+    QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
+}
 
 void TestSessionsWindow::initTestCase()
 {
@@ -4485,6 +4514,8 @@ void TestSessionsWindow::childTreeKeepsRoutineResultsQuiet()
     QSettings().setValue("workspace/showCompletedSubagents", true);
     FleetState state; auto box = fleet().local(); auto session = box.sessions[0];
     session.conversationId = "tree-conversation"; session.runId = "tree-run";
+    session.activity = "idle"; session.phase = "idle"; session.currentTool.clear();
+    session.subagentCountsComplete = true; session.subagentTotalCount = 2; session.subagentActiveCount = 1;
     session.subagents = {{"agent-a", QJsonObject{{"name","Review"},{"state","working"},{"detail","Checking changes"}}},
         {"agent-b", QJsonObject{{"name","Tests"},{"state","finished"},{"detail","All tests pass"},{"reply_id","first-result"}}}};
     box.sessions = {session};
@@ -4541,18 +4572,28 @@ void TestSessionsWindow::childTreeKeepsRoutineResultsQuiet()
     QVERIFY(filter); filter->click(); QCOMPARE(list->count(), 0);
     // An explicit child approval still reaches the attention filter and rail.
     box.sessions[0].subagents["agent-b"] = QJsonObject{{"name","Tests"},{"state","working"},{"display_state","approval"}};
+    box.sessions[0].subagentActiveCount = 2;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
     QCOMPARE(brand->property("attentionCount").toInt(), 1); QVERIFY(badge->isVisible()); QVERIFY(!readAll->isEnabled());
     box.sessions[0].subagents["agent-b"] = QJsonObject{{"name","Tests"},{"state","finished"}};
+    box.sessions[0].subagentActiveCount = 1;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
-    // An intermediate parent reply waits for the turn to finish without being marked read.
+    // An intermediate parent reply remains unread while work continues.
+    box.sessions[0].activity = "busy"; box.sessions[0].phase = "tool";
     box.sessions[0].replyId = "12:120";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    QCOMPARE(list->count(), 0); QVERIFY(state.local().sessions[0].unreadReply);
-    // Finished parent replies still need to be read and participate in Mark all as read.
+    QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
+    QVERIFY(state.local().sessions[0].unreadReply);
+    QVERIFY(readAll->isEnabled()); // The exact unread reply is retained for explicit reading.
+    // Finishing the parent turn still waits for its active child.
     box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(list->count(), 0); QCOMPARE(brand->property("attentionCount").toInt(), 0);
+    // Finishing that child reveals the same unread reply without a new reply ID.
+    box.sessions[0].subagents["agent-a"] = QJsonObject{{"name","Review"},{"state","finished"}};
+    box.sessions[0].subagentActiveCount = 0;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
     QVERIFY(readAll->isEnabled()); QSignalSpy read(&window, &SessionsWindow::repliesMarkedRead);

@@ -8,6 +8,7 @@ mod claude_permission;
 mod claude_resume;
 mod claude_question;
 mod attachments;
+pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod compact_context;
@@ -473,6 +474,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "hook" {
         return hooks::hook();
     }
+    if command == "voice" { return voice::dispatch(args); }
     if command == "attachment" {
         return attachments::dispatch(args);
     }

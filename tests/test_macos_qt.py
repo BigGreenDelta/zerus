@@ -33,7 +33,7 @@ class PinnedQt(unittest.TestCase):
         qt.validate_pin(self.pin)
         self.assertEqual(self.pin["qt_version"], "6.11.2")
         names = " ".join(archive["path"] for archive in self.pin["archives"])
-        for module in ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtwebengine"):
+        for module in ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtmultimedia", "qtwebengine"):
             self.assertIn(module + "-", names)
 
     def test_pin_rejects_foreign_sources_and_malformed_entries(self):
