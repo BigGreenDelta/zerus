@@ -154,12 +154,22 @@ impl Store {
             .context("the Overmind database is damaged")?;
         conn.execute_batch("PRAGMA synchronous=FULL;")?;
         conn.execute_batch(SCHEMA).context("the Overmind database is damaged")?;
-        // Concurrent first opens agree: the first insert wins and all read it back.
-        conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('origin', ?1)",
-            params![uuid::Uuid::new_v4().to_string()],
-        )?;
-        let origin: String = conn.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0))?;
+        // Reading never takes the write lock, so a store with an origin opens
+        // while another process writes. Concurrent first opens agree: the first
+        // insert wins and all read it back.
+        let stored = |conn: &Connection| -> Result<Option<String>> {
+            Ok(conn.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0)).optional()?)
+        };
+        let origin = match stored(&conn)? {
+            Some(origin) => origin,
+            None => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES ('origin', ?1)",
+                    params![uuid::Uuid::new_v4().to_string()],
+                )?;
+                stored(&conn)?.context("the Overmind database is damaged: no origin")?
+            }
+        };
         ensure!(uuid::Uuid::parse_str(&origin).is_ok(), "the Overmind database is damaged: invalid origin");
         Ok(Self { conn, dir: dir.to_owned(), machine: machine.to_owned(), origin })
     }
@@ -172,6 +182,16 @@ impl Store {
     /// The origin of the events this store writes.
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// Replaces the origin with a fresh one: local events written afterwards
+    /// use it. For a store that peers have outgrown, whose old origin would
+    /// collide with events they hold.
+    pub fn rotate_origin(&mut self) -> Result<String> {
+        let fresh = uuid::Uuid::new_v4().to_string();
+        self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('origin', ?1)", params![fresh])?;
+        self.origin = fresh.clone();
+        Ok(fresh)
     }
 
     /// How long a write waits for other writers (10 seconds after `open`).
@@ -316,9 +336,11 @@ impl Store {
 
     /// Runs `f` in one IMMEDIATE transaction; an error rolls everything back.
     pub fn write<T>(&mut self, f: impl FnOnce(&mut Tx<'_>) -> Result<T>) -> Result<T> {
-        let origin = self.origin.clone();
         let value = {
             let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Another process may have rotated the origin since this store opened.
+            let origin: String = tx.query_row("SELECT value FROM meta WHERE key = 'origin'", [], |row| row.get(0))?;
+            self.origin = origin.clone();
             let mut wrapped = Tx { tx, origin };
             let value = f(&mut wrapped)?;
             wrapped.tx.commit()?;
@@ -493,6 +515,35 @@ mod tests {
             request_id: String::new(),
             payload: json!({"marker": "[comment]", "text": "x"}),
         }
+    }
+
+    #[test]
+    fn opening_a_store_never_takes_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Store::open(dir.path(), MACHINE).unwrap());
+        let other = Connection::open(dir.path().join("overmind.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let store = Store::open(dir.path(), MACHINE).unwrap();
+        store.wait_for_writers(Duration::from_millis(50)).unwrap();
+        assert!(store.load(&Filter::All).unwrap().is_empty());
+        assert!(store.version_vector().unwrap().is_empty());
+        assert!(started.elapsed() < Duration::from_secs(3), "opening waited for the writer");
+        other.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn rotating_the_origin_changes_what_later_events_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let first = store.write(|tx| tx.append(&draft("t"))).unwrap();
+        let old = store.origin().to_owned();
+        let fresh = store.rotate_origin().unwrap();
+        assert_ne!(fresh, old);
+        assert_eq!(store.origin(), fresh);
+        let second = store.write(|tx| tx.append(&draft("t"))).unwrap();
+        assert_eq!((first.origin, second.origin.clone(), second.seq), (old, fresh.clone(), 1));
+        assert_eq!(Store::open(dir.path(), MACHINE).unwrap().origin(), fresh, "reopening keeps the new origin");
     }
 
     #[test]

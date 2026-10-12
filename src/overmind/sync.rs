@@ -31,6 +31,9 @@ struct ExchangeResponse {
     events: Vec<Value>,
     #[serde(default)]
     more: bool,
+    /// How many events of the request this side refused.
+    #[serde(default)]
+    refused: usize,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -43,12 +46,25 @@ pub struct Summary {
     pub refused: usize,
     /// Events pushed that the peer still lacks after its answer.
     pub not_accepted: usize,
+    /// Events this store pushed that the peer reported refusing.
+    pub peer_refused: usize,
+    /// This store was older than the peer's copy and now writes under a fresh origin.
+    pub rotated: bool,
 }
 
 impl Summary {
     /// What `status` shows for this exchange; empty when it was clean.
-    fn problems(&self) -> String {
+    fn problems(&self, peer: &str) -> String {
         let mut problems = Vec::new();
+        if self.rotated {
+            problems.push(restored_note(peer));
+        }
+        if self.peer_refused > 0 {
+            problems.push(format!(
+                "the peer refused {} events from this machine: damaged, or other events at positions it already holds",
+                self.peer_refused
+            ));
+        }
         if self.not_accepted > 0 {
             problems.push(format!("the peer did not accept {} events; it may run an older or damaged store", self.not_accepted));
         }
@@ -62,6 +78,20 @@ impl Summary {
     }
 }
 
+fn restored_note(peer: &str) -> String {
+    format!(
+        "this store is older than its copy on {peer}; new events use a fresh origin; \
+         tasks changed here before the exchange may differ from the other machines"
+    )
+}
+
+/// The other side holds more events of this store's own origin than this store
+/// does: this is an older copy (restored from a backup) that peers have outgrown,
+/// and writing on under the same origin would collide with what they hold.
+fn outgrown(own: &BTreeMap<String, u64>, theirs: &BTreeMap<String, u64>, origin: &str) -> bool {
+    theirs.get(origin).copied().unwrap_or(0) > own.get(origin).copied().unwrap_or(0)
+}
+
 /// The peer's side of one call: store what arrived, answer with what the caller lacks.
 pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
     let request: ExchangeRequest =
@@ -71,9 +101,26 @@ pub fn serve(store: &mut Store, request: Value) -> Result<Value> {
         uuid::Uuid::parse_str(&request.from).is_ok() && request.from != store.machine(),
         "invalid Overmind exchange request"
     );
-    store.insert_raw(&request.events)?;
+    if outgrown(&store.version_vector()?, &request.vector, store.origin()) {
+        store.rotate_origin()?;
+        let mut state = store
+            .peer(&request.from)?
+            .unwrap_or_else(|| PeerState { machine: request.from.clone(), ..PeerState::default() });
+        let name = if state.alias.is_empty() { request.from.clone() } else { state.alias.clone() };
+        state.last_error = restored_note(&name);
+        state.updated = now();
+        store.put_peer(&state)?;
+    }
+    let received = store.insert_raw(&request.events)?;
     let (events, more) = store.missing(&request.vector, BATCH)?;
-    let response = ExchangeResponse { v: 1, machine: store.machine().into(), vector: store.version_vector()?, events, more };
+    let response = ExchangeResponse {
+        v: 1,
+        machine: store.machine().into(),
+        vector: store.version_vector()?,
+        events,
+        more,
+        refused: received.refused,
+    };
     Ok(serde_json::to_value(response)?)
 }
 
@@ -88,7 +135,7 @@ pub fn exchange(store: &mut Store, peer: &str, alias: &str, call: &mut dyn FnMut
         match &result {
             Ok(summary) => {
                 state.last_ok = state.updated;
-                state.last_error = summary.problems();
+                state.last_error = summary.problems(if alias.is_empty() { peer } else { alias });
             }
             Err(error) => state.last_error = format!("{error:#}"),
         }
@@ -113,11 +160,19 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         let pushed_origins: std::collections::BTreeSet<String> =
             events.iter().filter_map(|e| e["origin"].as_str().map(str::to_owned)).collect();
         summary.sent += pushed;
-        let request = ExchangeRequest { v: 1, from: store.machine().into(), vector: store.version_vector()?, events };
+        let own = store.version_vector()?;
+        let request = ExchangeRequest { v: 1, from: store.machine().into(), vector: own.clone(), events };
         let response: ExchangeResponse = serde_json::from_value(call(&serde_json::to_value(&request)?)?)
             .map_err(|e| anyhow!("the peer's Overmind answer is not valid: {e}"))?;
         ensure!(response.v == 1, "this peer speaks another Overmind exchange version; update HGS on the older machine");
         ensure!(response.machine == peer, "the machine behind this peer changed identity");
+        summary.peer_refused += response.refused;
+        // Before anything is written here again: peers hold more of this
+        // store's origin than this store does.
+        if outgrown(&own, &response.vector, store.origin()) {
+            store.rotate_origin()?;
+            summary.rotated = true;
+        }
         let received = store.insert_raw(&response.events)?;
         summary.inserted += received.inserted;
         summary.refused += received.refused;
@@ -317,6 +372,77 @@ mod tests {
         assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
         assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
         assert_eq!(fresh.peer(A).unwrap().unwrap().last_error, "");
+    }
+
+    /// B holds one event, exchanges with A, is copied aside, writes and exchanges
+    /// again, then is replaced by the old copy. Returns the restored B and its old origin.
+    fn restored_b(dir: &tempfile::TempDir, a: &mut Store) -> (Store, String) {
+        let path = dir.path().join("b");
+        let mut b = Store::open(&path, B).unwrap();
+        comment(&mut b, "t", 10);
+        exchange(a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        let old = b.origin().to_owned();
+        drop(b);
+        let aside = dir.path().join("aside.sqlite3");
+        std::fs::copy(path.join("overmind.sqlite3"), &aside).unwrap();
+        let mut b = Store::open(&path, B).unwrap();
+        comment(&mut b, "t", 10);
+        comment(&mut b, "t", 10);
+        exchange(a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        drop(b);
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(path.join(format!("overmind.sqlite3{suffix}")));
+        }
+        std::fs::copy(&aside, path.join("overmind.sqlite3")).unwrap();
+        (Store::open(&path, B).unwrap(), old)
+    }
+
+    #[test]
+    fn a_restored_store_rotates_its_origin() {
+        // The restored store answers the exchange.
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+        let (mut b, old) = restored_b(&dir, &mut a);
+        assert_eq!(b.origin(), old);
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert_ne!(b.origin(), old, "the served store rotated");
+        let note = b.peer(A).unwrap().unwrap().last_error;
+        assert!(note.contains("older than its copy on") && note.contains("fresh origin"), "{note}");
+        comment(&mut b, "t", 10);
+        let latest = b.load(&Filter::All).unwrap().into_iter().max_by_key(|e| e.lamport).unwrap();
+        assert_eq!(latest.origin, b.origin());
+        assert_eq!(a.version_vector().unwrap().get(&old), Some(&3));
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap());
+
+        // The restored store makes the call.
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = Store::open(&dir.path().join("a"), A).unwrap();
+        let (mut b, old) = restored_b(&dir, &mut a);
+        exchange(&mut b, A, "a", &mut |request| serve(&mut a, request.clone())).unwrap();
+        assert_ne!(b.origin(), old, "the calling store rotated");
+        let note = b.peer(A).unwrap().unwrap().last_error;
+        assert!(note.contains("older than its copy on a"), "{note}");
+        comment(&mut b, "t", 10);
+        assert!(b.version_vector().unwrap().contains_key(b.origin()));
+        assert_eq!(b.version_vector().unwrap().get(&old), Some(&3), "the events the old origin lost came back");
+    }
+
+    #[test]
+    fn serve_reports_refused_events() {
+        let (_dir, mut a, mut b) = stores();
+        comment(&mut a, "t", 10);
+        let sent = a.missing(&BTreeMap::new(), BATCH).unwrap().0;
+        // B holds A's event id at another position, so it refuses A's event.
+        let mut forged = sent[0].clone();
+        forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
+        b.insert_raw(&[forged]).unwrap();
+        let request = json!({"v": 1, "from": A, "vector": a.version_vector().unwrap(), "events": sent});
+        assert_eq!(serve(&mut b, request).unwrap()["refused"], 1);
+        let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert!(summary.peer_refused > 0, "{summary:?}");
+        let note = a.peer(B).unwrap().unwrap().last_error;
+        assert!(note.contains("peer refused"), "{note}");
     }
 
     #[test]

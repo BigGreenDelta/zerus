@@ -241,14 +241,28 @@ fn route(ctx: &mut Ctx, command: &str, request: &Value, task: &str, session: &Se
     let mut forwarded = request.clone();
     forwarded["task"] = json!(uuid);
     let result = super::remote::forward(ctx.store, command, &forwarded, &uuid, &session.machine)?;
-    ctx.store.write(|tx| {
+    record_forwarded(ctx.store, command, request, result)
+}
+
+/// Keeps the host's result as this request's receipt, but only for a request
+/// that carries a `request_id`. The host has acted already, so a failure to
+/// write the receipt is a warning and the host's result is still returned.
+fn record_forwarded(store: &mut Store, command: &str, request: &Value, result: Value) -> Result<Value> {
+    let recorded = store.write(|tx| {
         // Two retries of one request: the first to finish wins.
         if let Some(stored) = commands::replay(tx, command, request)? {
             return Ok(stored);
         }
         commands::remember(tx, command, request, &result)?;
-        Ok(result)
-    })
+        Ok(result.clone())
+    });
+    match recorded {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            eprintln!("hgs overmind: could not record the forwarded result: {error:#}");
+            Ok(result)
+        }
+    }
 }
 
 /// The session that receives a rework or an answer: the task's assignee.
@@ -753,6 +767,33 @@ mod tests {
     }
     fn code(result: Result<impl std::fmt::Debug>) -> String {
         result.unwrap_err().downcast::<Refusal>().unwrap().code
+    }
+
+    #[test]
+    fn a_forwarded_result_is_recorded_only_for_a_request_id_and_never_fails_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let receipts = || -> i64 {
+            let conn = rusqlite::Connection::open(dir.path().join("overmind.sqlite3")).unwrap();
+            conn.query_row("SELECT COUNT(*) FROM receipts", [], |row| row.get(0)).unwrap()
+        };
+        let result = json!({"ok": true, "status": "submitted"});
+        let anonymous = json!({"task": "t", "session": {"machine": MACHINE, "name": "w1"}});
+        assert_eq!(record_forwarded(&mut store, "send", &anonymous, result.clone()).unwrap(), result);
+        assert_eq!(receipts(), 0, "no request_id, no receipt");
+
+        let identified = json!({"task": "t", "request_id": "33333333-3333-4333-8333-333333333333"});
+        assert_eq!(record_forwarded(&mut store, "send", &identified, result.clone()).unwrap(), result);
+        assert_eq!(receipts(), 1);
+
+        // Another process holds the write lock: the receipt cannot be written.
+        let other = rusqlite::Connection::open(dir.path().join("overmind.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.wait_for_writers(std::time::Duration::from_millis(20)).unwrap();
+        let again = json!({"task": "t", "request_id": "44444444-4444-4444-8444-444444444444"});
+        assert_eq!(record_forwarded(&mut store, "send", &again, result.clone()).unwrap(), result);
+        other.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(receipts(), 1, "the failed receipt was not written");
     }
 
     #[test]
