@@ -65,10 +65,34 @@ private slots:
     void terminationPinsRun();
     void nativeLaunchReportsProcessResult();
     void attachmentsUseCapturedIdentityAndValidateResponses();
+    void downloadsRequireExactSavedFileReceipts();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
 };
+
+void TestHgsClient::downloadsRequireExactSavedFileReceipts()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs"), destination = fixture.filePath("saved copy.txt");
+    QFile saved(destination); QVERIFY(saved.open(QIODevice::WriteOnly)); saved.write("sample"); saved.close();
+    QVERIFY(FakeCli::install(program, "#!/usr/bin/env python3\nimport sys\nprint(open(__file__+'.receipt').read())\n"));
+    HgsClient client(FakeCli::program(program));
+    QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed);
+    const QJsonObject exact{{"host", "remote"}, {"path", "/remote/file.txt"}, {"local_path", destination}, {"bytes", 6}};
+    QList<QJsonObject> invalid{{}, exact, exact, exact, exact};
+    invalid[1]["host"] = "other"; invalid[2]["path"] = "/other.txt";
+    invalid[3]["local_path"] = fixture.filePath("other.txt"); invalid[4]["bytes"] = 0;
+    auto reply = [&](const QJsonObject &value) { QFile response(program + ".receipt"); QVERIFY(response.open(QIODevice::WriteOnly)); response.write(QJsonDocument(value).toJson()); };
+    for (const auto &value : invalid) {
+        reply(value); const auto request = client.downloadFile("remote", "/remote/file.txt", destination);
+        QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed.takeFirst()[0].toULongLong(), request); QVERIFY(ready.isEmpty());
+    }
+    reply(exact); const auto request = client.downloadFile("remote", "/remote/file.txt", destination);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready.first()[0].toULongLong(), request); QCOMPARE(ready.first()[1].toString(), destination);
+    saved.remove(); ready.clear();
+    client.downloadFile("remote", "/remote/file.txt", destination); QTRY_COMPARE(failed.size(), 1); QVERIFY(ready.isEmpty());
+}
 
 void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()
 {

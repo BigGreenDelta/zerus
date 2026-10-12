@@ -60,6 +60,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] clear-context <session> --json   clear the idle agent context using its native command
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
+       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
@@ -328,6 +329,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     if command == "a" && args.first().is_some_and(|v| v.starts_with("dsh/")) {
         return crate::native_ui::open(&config, &target, &args[0], dry);
+    }
+    if command == "download" {
+        return crate::download::dispatch(&config, &target, args, dry);
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);

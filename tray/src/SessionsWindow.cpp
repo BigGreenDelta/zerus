@@ -53,6 +53,9 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QProgressBar>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QComboBox>
@@ -569,11 +572,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
         const QString host = entry->host, machine = entry->machine;
-        const bool local = host.isEmpty();
+        const bool local = host.isEmpty(), online = entry->online;
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
         QUrl desktopTarget;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
-        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(560, 210);
+        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(local ? 560 : 650, 230);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
         auto *source = new QLabel(local ? tr("File on this machine") : tr("File on %1").arg(machine));
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
@@ -590,9 +593,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("This path belongs to %1. Copy it and open the machine's SSH terminal to access the file.").arg(machine));
+            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+        hint->setObjectName("sessionFileHint");
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
         auto *buttons = new QDialogButtonBox; layout->addWidget(buttons);
+        QString savedPath;
+        quint64 pending = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
             connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget] {
@@ -608,8 +615,70 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 dialog.accept();
             });
         } else if (!local) {
+            auto *progress = new QProgressBar; progress->setObjectName("sessionFileProgress");
+            progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
+            progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
+            auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
+            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
+            const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
+            const bool downloadable = online && !remotePath.isEmpty();
+            download->setEnabled(downloadable); open->setEnabled(downloadable);
+            if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
+            else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
+            auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
+                if (pending) return;
+                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                const auto destination = save.selectedFiles().first();
+                download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
+                progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
+                openAfterDownload = opening;
+                pending = m_client.downloadFile(host, remotePath, destination);
+                auto *completion = new QObject(this);
+                const QPointer<QDialog> shownDialog(&dialog);
+                const auto request = pending;
+                connect(&m_client, &HgsClient::fileDownloaded, completion, [this, completion, shownDialog, request, opening](quint64 id, const QString &localPath) {
+                    if (id != request) return;
+                    if (!shownDialog) {
+                        if (opening) QTimer::singleShot(0, this, [this, localPath] {
+                            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)))
+                                showNotice(tr("Saved to %1, but no application could open the file.").arg(localPath), true);
+                        });
+                        else showNotice(tr("Downloaded to %1").arg(localPath));
+                    }
+                    completion->deleteLater();
+                });
+                connect(&m_client, &HgsClient::fileDownloadFailed, completion, [this, completion, shownDialog, request](quint64 id, const QString &error) {
+                    if (id != request) return;
+                    if (!shownDialog) showNotice(tr("Download failed: %1").arg(error), true);
+                    completion->deleteLater();
+                });
+            };
+            connect(download, &QPushButton::clicked, &dialog, [startDownload] { startDownload(false); });
+            connect(open, &QPushButton::clicked, &dialog, [startDownload] { startDownload(true); });
+            connect(&m_client, &HgsClient::fileDownloadFailed, &dialog, [&, progress, download, open, downloadable](quint64 request, const QString &error) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Download failed: %1").arg(error));
+            });
+            connect(&m_client, &HgsClient::fileDownloaded, &dialog, [&, progress, download, open, savedOpen, downloadable](quint64 request, const QString &destination) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); savedPath = destination;
+                download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Saved on this computer: %1").arg(destination)); open->hide(); savedOpen->show();
+                if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); dialog.accept(); }
+            });
+            connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
+                if (!QFileInfo(savedPath).isFile()) { hint->setText(tr("The local copy is no longer available.")); return; }
+                desktopTarget = QUrl::fromLocalFile(savedPath); dialog.accept();
+            });
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");
             connect(ssh, &QPushButton::clicked, &dialog, [this, host, &dialog] { emit machineSshRequested(host); dialog.accept(); });
+            auto *close = buttons->addButton(QDialogButtonBox::Close);
+            close->setAutoDefault(false);
         }
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         dialog.exec();

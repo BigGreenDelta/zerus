@@ -507,8 +507,18 @@ nor shown in Activity.
 
 File links retain their visible path and source position. Relative references
 resolve against that session's folder. Local references can open the file or its
-parent folder; remote references identify the host and offer an SSH terminal
-instead of treating the remote path as local. Display alone downloads or launches
+parent folder; remote references identify the host and offer **Download…** and
+**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
+use that machine's configured SSH profile and SFTP, stream directly to disk and
+replace the chosen destination only after a successful transfer. Errors remain
+in the dialog; a saved copy can be opened with **Open local copy**. Offline or
+unresolved relative references explain why downloading is unavailable. The
+download continues if its dialog is closed, with a completion or error notice;
+an explicitly requested open still happens after successful saving. The
+120-second transfer deadline leaves an existing destination unchanged on failure.
+`hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
+transfer from the CLI, including empty files and paths starting with `~/`.
+Display alone downloads or launches
 nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is
 destroyed so Wayland activation does not depend on a disappearing window.

@@ -1,6 +1,7 @@
 mod accounts;
 mod cli;
 mod config;
+mod download;
 mod machines;
 mod macos_session;
 mod metrics;
