@@ -26,10 +26,12 @@ class SpeechRecorderWorker;
 class SpeechRecorder : public QObject {
     Q_OBJECT
 public:
-    enum class Failure { Recording, PermissionDenied };
+    enum class Failure { Recording, PermissionDenied, Setup };
     Q_ENUM(Failure)
     explicit SpeechRecorder(QObject *parent = nullptr);
     ~SpeechRecorder() override;
+    // Read-only: never checks consent, requests permission or opens a device.
+    static bool microphonePermissionBackendAvailable();
     virtual void start(const QByteArray &deviceId);
     virtual void stop();
     virtual void cancel();

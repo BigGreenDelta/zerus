@@ -27,6 +27,7 @@
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
 #include "MessageBoxIcons.h"
+#include "speech/SpeechRecorder.h"
 #endif
 
 #include <cstdio>
@@ -170,6 +171,14 @@ int main(int argc, char *argv[])
 
     if (cfg.selfTest) {
         QCoreApplication app(argc, argv);
+#ifdef Q_OS_MACOS
+        // Package validation checks registration only: never prompt for consent
+        // or open audio hardware from a self-test/startup diagnostic.
+        if (!SpeechRecorder::microphonePermissionBackendAvailable()) {
+            errOut << "hgs-tray: microphone permission backend is missing; update or reinstall Zerus.\n";
+            return 1;
+        }
+#endif
 #ifdef Q_OS_WIN
         cfg.hgsPath = AppConfig::resolveHgsPath(cfg.hgsPath, QCoreApplication::applicationDirPath());
 #endif

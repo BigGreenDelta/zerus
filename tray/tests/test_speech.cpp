@@ -116,6 +116,21 @@ private slots:
         for (int second = 0; second < 125; ++second) converter.append(silence);
         QVERIFY(converter.full()); QCOMPARE(converter.finish().size(), SpeechPcmConverter::MaximumBytes);
     }
+    void missingMacPermissionBackendFailsBeforeRequest() {
+#ifdef Q_OS_MACOS
+        // This fixture intentionally has no permission-plugin import or usage
+        // description. The guard must fail before Qt can request consent/audio.
+        QVERIFY(!SpeechRecorder::microphonePermissionBackendAvailable());
+        SpeechRecorder recorder; QSignalSpy failed(&recorder, &SpeechRecorder::failed);
+        QSignalSpy started(&recorder, &SpeechRecorder::started);
+        recorder.start({});
+        QCOMPARE(failed.count(), 1); QCOMPARE(started.count(), 0);
+        QCOMPARE(qvariant_cast<SpeechRecorder::Failure>(failed[0][0]), SpeechRecorder::Failure::Setup);
+        QVERIFY(failed[0][1].toString().contains("Update or reinstall Zerus"));
+#else
+        QVERIFY(SpeechRecorder::microphonePermissionBackendAvailable());
+#endif
+    }
     void oldHostNeverReceivesSpeechCommand() {
         QTemporaryDir dir; SpeechClient client(fixture(dir.path())); bool finished = false; QString error;
         client.request("legacy", {{"action","providers"}}, [&](const QJsonObject &, const QString &failure) { error = failure; finished = true; });

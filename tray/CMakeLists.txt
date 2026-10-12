@@ -81,7 +81,9 @@ if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUA
 endif()
 include(cmake/BuildVersion.cmake)
 
-add_executable(hgs-tray
+# Qt finalization imports macOS permission plugins selected by our Info.plist.
+# A plain add_executable silently leaves QMicrophonePermission without a backend.
+qt_add_executable(hgs-tray MANUAL_FINALIZATION
     resources.qrc
     src/main.cpp
     src/AppConfig.cpp
@@ -196,6 +198,7 @@ if(LINUX)
 endif()
 
 target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech)
+qt_finalize_executable(hgs-tray)
 
 include(CTest)
 if(BUILD_TESTING)

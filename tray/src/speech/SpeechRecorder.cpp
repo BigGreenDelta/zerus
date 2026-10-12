@@ -3,6 +3,10 @@
 #include <QAudioSource>
 #include <QCoreApplication>
 #include <QMediaDevices>
+#ifdef Q_OS_MACOS
+#include <QJsonObject>
+#include <QPluginLoader>
+#endif
 #if QT_CONFIG(permissions)
 #include <QPermissions>
 #endif
@@ -142,9 +146,26 @@ SpeechRecorder::~SpeechRecorder()
     QMetaObject::invokeMethod(m_worker, [this] { m_worker->cancel(); }, Qt::BlockingQueuedConnection);
     m_thread.quit(); m_thread.wait();
 }
+bool SpeechRecorder::microphonePermissionBackendAvailable()
+{
+#ifdef Q_OS_MACOS
+    // Darwin permission backends are static plugins even with shared Qt. Without
+    // this import Qt reports Denied without ever consulting the system's consent.
+    for (const auto &plugin : QPluginLoader::staticPlugins()) {
+        if (plugin.metaData().value("className").toString() == QStringLiteral("QDarwinMicrophonePermissionPlugin")) return true;
+    }
+    return false;
+#else
+    return true;
+#endif
+}
 void SpeechRecorder::start(const QByteArray &deviceId)
 {
     const auto generation = ++m_generation;
+    if (!microphonePermissionBackendAvailable()) {
+        emit failed(Failure::Setup, tr("This Zerus installation cannot request microphone access. Update or reinstall Zerus, then press Voice again."));
+        return;
+    }
 #if QT_CONFIG(permissions)
     QMicrophonePermission permission;
     const auto status = qApp->checkPermission(permission);
