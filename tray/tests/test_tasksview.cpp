@@ -201,6 +201,7 @@ struct Fixture {
         if (!FakeCli::install(script, kFixture) || !put("rev", "1") || !put("board-demo.json", compact(demoBoard()))) return false;
         client = std::make_unique<HgsClient>(FakeCli::program(script));
         model = std::make_unique<OvermindModel>(client.get());
+        model->setEnabled(true);   // Windows starts disabled
         model->setIntervals(40, 40);
         return true;
     }

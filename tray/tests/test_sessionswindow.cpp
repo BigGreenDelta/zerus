@@ -3872,6 +3872,7 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
         {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research"]}],"default_project":"alpha"})";
     const auto open = [&](SessionsWindow &window) {
+        window.findChild<OvermindModel *>()->setEnabled(true);   // Windows starts disabled
         window.resize(1240, 760); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
         auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
         if (tabs && view) tabs->setCurrentWidget(view);
@@ -4035,6 +4036,7 @@ void TestSessionsWindow::decisionNotificationOpensItsCard()
         {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research","mac\nclaude/infra/review"]}],"default_project":"alpha"})"));
 
     HgsClient client(FakeCli::program(hgs)); OvermindModel model(&client);
+    model.setEnabled(true);   // Windows starts disabled
     SessionsWindow window(FakeCli::program(hgs), nullptr, &model); window.resize(1240, 760); window.setFleet(fleet()); window.show();
     // The window uses the model it was given and creates none of its own.
     QVERIFY(!window.findChild<OvermindModel *>());
@@ -4178,7 +4180,9 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     QImage image(48, 32, QImage::Format_RGB32); image.fill(QColor("#3b82f6"));
     QByteArray png; { QBuffer buffer(&png); buffer.open(QIODevice::WriteOnly); QVERIFY(image.save(&buffer, "PNG")); }
 
-    SessionsWindow window(FakeCli::program(hgs)); window.resize(1240, 760); window.setFleet(fleet()); window.show();
+    SessionsWindow window(FakeCli::program(hgs));
+    window.findChild<OvermindModel *>()->setEnabled(true);   // Windows starts disabled
+    window.resize(1240, 760); window.setFleet(fleet()); window.show();
     window.showSession({}, "codex/hgs/dashboard");
     auto *model = window.findChild<OvermindModel *>(); auto *chip = window.findChild<ToolbarChip *>("tasksChip");
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
@@ -4318,7 +4322,8 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     QDir().mkpath(directory);
     for (const QString theme : {"dark", "light"}) {
         QSettings().setValue("workspace/theme", theme);
-        SessionsWindow shown(FakeCli::program(hgs)); shown.resize(1240, 760); shown.setFleet(fleet()); shown.show();
+        SessionsWindow shown(FakeCli::program(hgs)); shown.findChild<OvermindModel *>()->setEnabled(true);
+        shown.resize(1240, 760); shown.setFleet(fleet()); shown.show();
         shown.showSession({}, "codex/hgs/dashboard");
         auto *shownChip = shown.findChild<ToolbarChip *>("tasksChip");
         QTRY_COMPARE(shownChip->fullLabel(), QString("Tasks 1"));

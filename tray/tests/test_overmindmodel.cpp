@@ -288,6 +288,7 @@ void TestOvermindModel::reloadsOnlyWhenRevChanges()
     Fixture f; QVERIFY(f.setUp());
     HgsClient client(FakeCli::program(f.script));
     OvermindModel model(&client);
+    model.setEnabled(true);   // Windows starts disabled
     model.setIntervals(50, 50);
     QSignalSpy changed(&model, &OvermindModel::boardChanged), decided(&model, &OvermindModel::decisionsChanged);
     model.watchProject("demo");
@@ -790,6 +791,7 @@ void TestOvermindModel::yourCallNoticesSurviveResetsAndFailedReads()
     Fixture f; QVERIFY(f.setUp());
     HgsClient client(FakeCli::program(f.script));
     OvermindModel model(&client); model.setIntervals(50, 50);
+    model.setEnabled(true);   // Windows starts disabled
     AttentionTracker tracker;
     const AttentionTracker::ProjectNames names{{"demo", "Demo"}};
     QVERIFY(!model.decisionsLoaded());
