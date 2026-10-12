@@ -38,9 +38,28 @@ pub struct Summary {
     pub rounds: usize,
     pub sent: usize,
     pub inserted: usize,
+    /// Events the peer sent that this store refused: damaged, or another event
+    /// at a position it already holds.
     pub refused: usize,
     /// Events pushed that the peer still lacks after its answer.
     pub not_accepted: usize,
+}
+
+impl Summary {
+    /// What `status` shows for this exchange; empty when it was clean.
+    fn problems(&self) -> String {
+        let mut problems = Vec::new();
+        if self.not_accepted > 0 {
+            problems.push(format!("the peer did not accept {} events; it may run an older or damaged store", self.not_accepted));
+        }
+        if self.refused > 0 {
+            problems.push(format!(
+                "this machine refused {} events from the peer: damaged, or other events at positions it already holds",
+                self.refused
+            ));
+        }
+        problems.join("; ")
+    }
 }
 
 /// The peer's side of one call: store what arrived, answer with what the caller lacks.
@@ -69,11 +88,7 @@ pub fn exchange(store: &mut Store, peer: &str, alias: &str, call: &mut dyn FnMut
         match &result {
             Ok(summary) => {
                 state.last_ok = state.updated;
-                state.last_error = if summary.not_accepted > 0 {
-                    format!("the peer did not accept {} events; it may run an older or damaged store", summary.not_accepted)
-                } else {
-                    String::new()
-                };
+                state.last_error = summary.problems();
             }
             Err(error) => state.last_error = format!("{error:#}"),
         }
@@ -116,11 +131,12 @@ fn rounds(store: &mut Store, peer: &str, call: &mut dyn FnMut(&Value) -> Result<
         let (lacking, _) = store.missing(&response.vector, BATCH)?;
         // A peer below the vector this round assumed lost data: push from its
         // fresh vector next round. Otherwise events of an origin we pushed to
-        // that did not move the peer's seq were refused.
+        // that did not move the peer's seq were refused, whether or not more
+        // batches remain: each pushed origin starts right after the peer's seq.
         let lost_data = known
             .as_ref()
             .map_or(false, |k| k.iter().any(|(origin, seq)| response.vector.get(origin).copied().unwrap_or(0) < *seq));
-        if pushed > 0 && !push_more && !lost_data {
+        if pushed > 0 && !lost_data {
             let unmoved = |origin: &str| {
                 let before = known.as_ref().and_then(|k| k.get(origin)).copied().unwrap_or(0);
                 response.vector.get(origin).copied().unwrap_or(0) == before
@@ -245,6 +261,39 @@ mod tests {
         exchange(&mut a, B, "b", &mut |request| serve(&mut fresh, request.clone())).unwrap();
         assert_eq!(a.version_vector().unwrap(), fresh.version_vector().unwrap());
         assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
+    }
+
+    #[test]
+    fn damaged_events_from_the_peer_are_reported_until_a_clean_exchange() {
+        let (_dir, mut a, mut b) = stores();
+        comment(&mut b, "t", 10);
+        let summary = exchange(&mut a, B, "b", &mut |request| {
+            let mut answer = serve(&mut b, request.clone())?;
+            answer["events"].as_array_mut().unwrap().push(json!({"id": "damaged"}));
+            Ok(answer)
+        })
+        .unwrap();
+        assert!(summary.refused > 0, "{summary:?}");
+        assert_eq!(a.version_vector().unwrap(), b.version_vector().unwrap(), "the good events still arrived");
+        let peer = a.peer(B).unwrap().unwrap();
+        assert!(peer.last_error.contains("damaged"), "{peer:?}");
+        exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert_eq!(a.peer(B).unwrap().unwrap().last_error, "");
+    }
+
+    #[test]
+    fn refused_pushes_are_reported_when_the_backlog_spans_several_batches() {
+        let (_dir, mut a, mut b) = stores();
+        for _ in 0..80 { comment(&mut a, "t", 60 * 1024); }
+        // B already holds A's first event id at another position, so it refuses A's events.
+        let first = a.missing(&BTreeMap::new(), BATCH).unwrap().0.into_iter().find(|e| e["seq"] == 1).unwrap();
+        let mut forged = first.clone();
+        forged["origin"] = json!("44444444-4444-4444-8444-444444444444");
+        b.insert_raw(&[forged]).unwrap();
+        let summary = exchange(&mut a, B, "b", &mut |request| serve(&mut b, request.clone())).unwrap();
+        assert!(summary.not_accepted > 0, "{summary:?}");
+        let peer = a.peer(B).unwrap().unwrap();
+        assert!(peer.last_error.contains("did not accept"), "{peer:?}");
     }
 
     #[test]

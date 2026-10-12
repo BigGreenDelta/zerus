@@ -1460,7 +1460,9 @@ lost and created again never collides with events written earlier, even when
 it writes before it is refilled. Copying a store directory to a second machine,
 or restoring an old copy of one, is unsupported.
 `hgs overmind status` shows this store's origin id and each peer's last
-exchange and last error, including events the peer did not accept. An unreachable peer appears in the swarm sync
+exchange and last error, including events the peer did not accept and events
+from the peer that this machine refused as damaged; a clean exchange clears
+the error. An unreachable peer appears in the swarm sync
 result, and its Overmind status keeps the last good state. Images are not part
 of the exchange. `attachment --json {task, sha256}` returns the local path of a
 task image and fetches it from another machine when needed, in ranges of at
