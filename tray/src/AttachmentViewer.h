@@ -37,7 +37,18 @@ inline QString storeAt(const QString &cacheRoot, const QString &name, const QByt
     QFile::setPermissions(folder,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     auto base=QFileInfo(name).fileName();base.replace(QRegularExpression("[^\\p{L}\\p{N}._ -]"),"_");
     if(base.isEmpty() || base=="." || base=="..")base="attachment";
-    const auto path=folder+"/"+base.left(180);QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
+    // Identical attachments share this content-addressed path. Writers take turns
+    // and keep an intact copy: Windows cannot replace a file that another worker,
+    // a thumbnail reader or an opened viewer has open.
+    static QBasicMutex writers;const QMutexLocker lock(&writers);
+    const auto path=folder+"/"+base.left(180);const QFileInfo entry(path);
+    // QFile reads a Windows .lnk shortcut itself; only real links lead elsewhere.
+    const bool redirected=entry.isSymbolicLink() || entry.isJunction();
+    if(QFile existing(path);!redirected && (entry.isFile() || entry.isShortcut()) && existing.open(QIODevice::ReadOnly)
+        && existing.size()==bytes.size() && existing.read(bytes.size()+1)==bytes)return path;
+    // QSaveFile writes through links, shortcuts and aliases, so remove the entry itself.
+    if(entry.isSymLink() && !QFile::remove(path))return {};
+    QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
     file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
     if(file.write(bytes)!=bytes.size() || !file.commit())return {};return path;
 }
