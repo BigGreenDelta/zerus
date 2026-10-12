@@ -107,6 +107,7 @@ class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void nativeSettingsNavigationOnExplicitSpeechHost();
     void copySessionReferencePreservesSelectionAndDraft();
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
@@ -277,6 +278,34 @@ private:
     QString script() const { return m_dir.filePath("hgs"); }
     QTemporaryDir m_dir;
 };
+
+void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
+{
+    const auto executable=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HGS");
+    const auto host=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_HOST");
+    const auto expected=qEnvironmentVariable("ZERUS_SPEECH_SETTINGS_PROFILE");
+    if(executable.isEmpty() || expected.isEmpty()) QSKIP("Requires an explicit installed CLI and speech profile; settings requests are read-only.");
+    QSettings().setValue("speech/host",host); QSettings().setValue("speech/profile",expected);
+    SettingsPage page(executable); page.setPeers({host}); page.show();
+    auto *sections=page.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->item(sections->count()-1)->text(),"About");
+    QCOMPARE(sections->item(sections->count()-2)->text(),"Voice input");
+    sections->setCurrentRow(sections->count()-1);
+    auto *version=page.findChild<QLabel *>("aboutHgsVersion"); QVERIFY(version);
+    QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
+    auto *provider=page.findChild<QComboBox *>("speechProfile"); QVERIFY(provider);
+    auto *refresh=page.findChild<QPushButton *>("speechRefresh"); QVERIFY(refresh);
+    auto *status=page.findChild<QLabel *>("speechSettingsStatus"); QVERIFY(status);
+    sections->setCurrentRow(sections->count()-2);
+    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
+    QVERIFY2(provider->isEnabled(),qPrintable(status->text())); QCOMPARE(provider->currentData().toString(),expected);
+    page.hide(); page.show(); page.refresh();
+    QVERIFY(!refresh->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(),65000);
+    QVERIFY2(provider->isEnabled(),qPrintable(status->text())); QCOMPARE(provider->currentData().toString(),expected);
+    sections->setCurrentRow(sections->count()-1);
+    QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
+}
 
 void TestSessionsWindow::initTestCase()
 {

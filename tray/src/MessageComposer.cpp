@@ -326,6 +326,7 @@ void MessageComposer::resizeEvent(QResizeEvent *event)
 void MessageComposer::setSessionKey(const QString &key)
 {
     if (key == m_key) return;
+    ++m_navigationRevision;
     m_settingsPopup->hide();
     m_toolbar->closePopovers(); m_preview->hide();
     if (!key.isEmpty() && !m_drafts.contains(key)) {
@@ -343,6 +344,23 @@ void MessageComposer::setSessionKey(const QString &key)
     m_key = key; m_loading = true;
     restoreDraft();
     m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
+}
+
+bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
+{
+    if (target.key.isEmpty() || target.key != m_key || target.revision != m_saveRevision.value(m_key)
+        || target.navigation != m_navigationRevision || !canAttachFiles() || isPreparingSending(m_key)
+        || !isInputVisible() || m_editor->isReadOnly() || text.isEmpty()) return false;
+    // Dictation appends at the captured caret without replacing a selection.
+    auto cursor = m_editor->textCursor(); cursor.clearSelection();
+    QString insertion = text;
+    const QString existing = m_editor->toPlainText();
+    if (cursor.position() > 0 && !existing[cursor.position()-1].isSpace()) insertion.prepend(' ');
+    if (cursor.position() < existing.size() && !existing[cursor.position()].isSpace()) insertion.append(' ');
+    cursor.insertText(insertion); m_editor->setTextCursor(cursor);
+    m_draftStore.saveDurableAsync(m_key, m_drafts.value(m_key), this,
+        [saved](bool ok, const ComposerDraft &) { saved(ok); });
+    return true;
 }
 
 void MessageComposer::restoreDraft()
@@ -785,6 +803,7 @@ void MessageComposer::updateControls()
                        : tr("Draft saved locally. Enter to send; Shift+Enter for a new line")) : tr("Enter to send; Shift+Enter for a new line");
     m_status->setText(status); m_status->setToolTip(status);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
+    emit controlsChanged();
 }
 
 void MessageComposer::showSavedDrafts()

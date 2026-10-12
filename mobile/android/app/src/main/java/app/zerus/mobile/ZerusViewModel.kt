@@ -28,6 +28,45 @@ import org.json.JSONObject
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
+    internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
+    internal val speechNavigation get() = navigationId
+    internal fun speechHostReason(host: MachineKey): String = when {
+        demo -> "Connect a computer to use voice input."
+        connections.none { it.id == host.connectionId } -> "The voice workspace is disconnected."
+        machines.none { it.connectionId == host.connectionId && it.id == host.computerId && it.online && !it.lastKnown } -> "The selected voice computer is offline."
+        !relayOperations[host.connectionId].orEmpty().containsAll(SpeechProtocol.operations) -> "This gateway does not support voice input yet."
+        !machineOperations[host].orEmpty().containsAll(SpeechProtocol.operations) -> "This computer does not support voice input yet."
+        else -> ""
+    }
+    internal fun supportsSpeechStats(host: MachineKey) = "speech_stats" in relayOperations[host.connectionId].orEmpty() &&
+        "speech_stats" in machineOperations[host].orEmpty()
+    internal var speechComposer: SpeechComposerBridge? = null; private set
+    internal fun bindSpeechComposer(bridge: SpeechComposerBridge) { speechComposer = bridge }
+    internal fun unbindSpeechComposer(bridge: SpeechComposerBridge) {
+        if (speechComposer === bridge) speechComposer = null
+    }
+    internal suspend fun insertSpeech(attempt: SpeechAttempt, explicit: Boolean) {
+        check(storageReady && !updateInstallPreparing) { "Private storage is not ready." }
+        if (attempt.id in messageState.speechAppliedIds) { persistence!!.flush(); return }
+        check(selected?.target == attempt.origin.target) { "Open the original conversation to insert this transcription, or copy it." }
+        val bridge = speechComposer
+        check(bridge != null && bridge.isCurrent(draft(attempt.origin.target))) {
+            "Wait for the original draft to open, then insert the transcription."
+        }
+        // The actual editor can be ahead of its snapshotFlow mirror. Reconcile without yielding
+        // before checking the captured revision, including when insertion was explicitly reviewed.
+        val editorText = bridge.editor.text.toString()
+        if (draft(attempt.origin.target).text != editorText) edit(attempt.origin.target, editorText)
+        val current = draft(attempt.origin.target)
+        check(current.text == editorText) { "Could not save the latest draft. Copy the transcription instead." }
+        check(explicit || SpeechDrafts.unchanged(attempt, current)) { "The draft changed. Review the transcription before inserting it." }
+        if (continuation?.draft?.target == current.target) cancelCompactContinuation("Draft changed. Your message will not be sent automatically.")
+        editState { SpeechDrafts.insert(it, attempt, current) }
+        // Advance the real editor and its reconciliation generation in this same main-loop turn.
+        // An IME edit during the persistence barrier must not be replaced by a later UI effect.
+        bridge.apply(draft(current.target))
+        persistence!!.flush()
+    }
     var connections by mutableStateOf<List<Connection>>(emptyList()); private set
     var machines by mutableStateOf<List<Machine>>(emptyList()); private set
     var sessions by mutableStateOf<List<Session>>(emptyList()); private set
@@ -602,7 +641,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync() }
     var updateInstallPreparing by mutableStateOf(false); private set
-    fun updateInstallReason(): String = UpdateInstallGuard.reason(messageState,storageReady,
+    fun updateInstallReason(): String = if (speech.busy) "Finish voice recording or recognition before installing." else UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),
         deliveryFlights.isNotEmpty() || contextFlights.isNotEmpty() || actionFlights.isNotEmpty(),compactContinuationActive)
     suspend fun prepareUpdateInstall() {

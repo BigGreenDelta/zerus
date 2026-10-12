@@ -252,6 +252,40 @@ worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
+## Voice input
+
+Settings includes **Voice input**, with an independently selected computer and
+host-configured recognition profile. Both the gateway and selected computer must
+advertise `speech_profiles`, `speech_submit`, `speech_status` and `speech_cancel`;
+older installations remain usable and show why voice is unavailable. Profile
+discovery never loads a model. When supported, `speech_stats` displays the selected
+computer's aggregate local voice counts; audio and transcription are excluded from
+Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
+for the transport contract and [analytics](../../docs/analytics.md) for counter
+definitions and the broader local/fleet design.
+
+The composer microphone requests Android microphone permission and records at most
+two minutes. Stop sends 16 kHz mono signed little-endian PCM through the gateway to
+the chosen computer. Capture and bounded 48 kHz fallback conversion run off the
+main thread. Leaving the app stops capture and retains it in memory for explicit
+Transcribe or Discard. Audio is not saved on the phone; process death during capture
+loses that recording. The gateway can read relayed audio; this transport has no E2EE.
+
+Denied microphone access opens a focused explanation with **Open app settings**.
+This opens Zerus's Android settings; choose **Permissions → Microphone** and allow
+access while using the app. Return and tap the microphone again to record.
+Returning from system settings never starts recording automatically. If the
+settings page is unavailable, the explanation retains the manual navigation path.
+
+Before upload, the phone saves the exact request UUID, speech host/profile and
+original draft identity in encrypted storage. Interrupted submissions use status
+queries for that original job and never upload again automatically. Completed text
+is encrypted before insertion. An unchanged draft on the same navigation receives
+the text as an editable append; changes, navigation and app restarts require review
+with **Insert into draft** or **Copy**. Insertion retains attachments and saves its
+deduplication identity atomically with the draft. Recognition never sends a message.
+Settings retains recovery controls even when the original conversation disappears.
+
 ## Build and install
 
 Install JDK 17 or 21 and Android SDK platform 36 / build tools 35.0.0. Set
@@ -262,6 +296,30 @@ cd mobile/android
 ./gradlew assembleDebug testDebugUnitTest lintDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The isolated microphone smoke uses a synthetic in-process relay while exercising
+real AudioRecord and encrypted Android storage. On a disposable emulator only:
+
+```sh
+./gradlew -PzerusInstrumentationRunner=app.zerus.mobile.SpeechSmokeInstrumentation assembleDebug assembleDebugAndroidTest
+adb -s emulator-5580 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5580 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s emulator-5580 shell pm clear app.zerus.mobile
+adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.SpeechSmokeInstrumentation
+```
+
+The clear command removes app data on that emulator. The smoke covers a completed
+submit acknowledgement without text, delayed recognition while editing, unmirrored
+IME edits at insertion and during persistence, explicit recovery insertion,
+background capture stop, cancellation and encrypted draft persistence. It also
+denies microphone access twice, opens Android's app permission settings, grants
+access there and verifies recording requires a new explicit tap after returning.
+It does not measure recognition accuracy or replace a physical microphone test.
+
+Private previews may override only their build identity using
+`-PzerusVersionName=0.1.31-voice.236 -PzerusVersionCode=10236`. Choose a code greater
+than the installed build; the next regular update must exceed the preview code.
+These properties do not change the signing key or checked-in release version.
 
 The checked-in Gradle wrapper uses Gradle 8.13 with an official distribution
 checksum. Dependencies come from Google Maven and Maven Central. The debug APK

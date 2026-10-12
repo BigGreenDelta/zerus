@@ -23,6 +23,7 @@
 #include "AttachmentViewer.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
+#include "speech/SpeechComposer.h"
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
 #include "SettingsPage.h"
@@ -565,6 +566,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *activityPage = new QWidget; auto *activityLayout = new QVBoxLayout(activityPage);
     activityLayout->setContentsMargins(0, 0, 0, 0); activityLayout->setSpacing(0);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
+    new SpeechComposer(hgsPath, m_composer, [this] {
+        const auto *entry = selected();
+        if (!entry || m_details.isEmpty()) return QString();
+        return QString::fromUtf8(QJsonDocument(QJsonArray{entry->key, entry->machine,
+            m_details.value("run_id"), m_details.value("conversation_id")}).toJson(QJsonDocument::Compact));
+    });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
@@ -758,6 +765,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     subagentTop->addWidget(m_subagentHint);
     m_subagentView = new ActivityView; m_subagentView->setObjectName("subagentActivity"); m_subagentView->browser()->setObjectName("subagentJournal"); subagentLayout->addWidget(m_subagentView, 1);
     m_subagentComposer = new MessageComposer; m_subagentComposer->setObjectName("subagentComposer"); m_subagentComposer->setInputVisible(false);
+    new SpeechComposer(hgsPath, m_subagentComposer, [this] {
+        const auto *entry = selected();
+        if (!entry || m_subagentId.isEmpty() || m_subagentDetails.isEmpty()) return QString();
+        return QString::fromUtf8(QJsonDocument(QJsonArray{entry->key, entry->machine, m_subagentId,
+            m_details.value("run_id"), m_details.value("conversation_id"), m_subagentDetails.value("conversation_id")}).toJson(QJsonDocument::Compact));
+    });
     m_subagentContextUsage=new SessionUsage::ContextButton;m_subagentContextUsage->setObjectName("subagentContext");
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);

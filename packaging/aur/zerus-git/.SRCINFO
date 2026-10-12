@@ -11,6 +11,7 @@ pkgbase = zerus-git
 	makedepends = ninja
 	depends = qt6-base
 	depends = qt6-webengine
+	depends = qt6-multimedia
 	depends = qt6-svg
 	depends = kstatusnotifieritem
 	depends = kwindowsystem

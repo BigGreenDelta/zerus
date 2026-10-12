@@ -1,5 +1,12 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+add_executable(test_speech test_speech.cpp ../src/ProcessRunner.cpp ../src/MessageComposer.cpp
+    ../src/ComposerDraftStore.cpp ../src/ComposerToolbar.cpp)
+target_include_directories(test_speech PRIVATE ../src)
+target_link_libraries(test_speech PRIVATE Qt6::Test hgs-speech)
+add_test(NAME speech COMMAND test_speech)
+set_tests_properties(speech PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_attention test_attention.cpp ../src/AttentionTracker.cpp ../src/FleetState.cpp)
 target_include_directories(test_attention PRIVATE ../src)
 target_link_libraries(test_attention PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
@@ -201,7 +208,7 @@ add_executable(test_sessionswindow test_sessionswindow.cpp ../src/SessionsWindow
                ../src/NewSessionDialog.cpp ../src/ProjectsDialog.cpp ../resources.qrc)
 target_include_directories(test_sessionswindow PRIVATE ../src)
 target_compile_definitions(test_sessionswindow PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
-target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer)
+target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech)
 # The longest suite runs as parallel shards of its test functions.
 foreach(shard RANGE 9)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>

@@ -117,6 +117,7 @@ class MainActivity : ComponentActivity() {
             model.finishAttachmentPick(uris, selectionId)
         }
     }
+    override fun onStop() { model.speech.background(); super.onStop() }
     override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
@@ -1028,6 +1029,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val lane = ComposerIdentity.lane(target)
     val editor = remember(lane) { TextFieldState(initialText = draft.text, initialSelection = TextRange(draft.text.length)) }
     var sync by remember(editor) { mutableStateOf(ComposerSync(draft.generation)) }
+    val speechBridge = remember(editor, target) {
+        SpeechComposerBridge(target, editor, { sync.generation }) { sync = ComposerSync(it) }
+    }
+    DisposableEffect(speechBridge) {
+        model.bindSpeechComposer(speechBridge)
+        onDispose { model.unbindSpeechComposer(speechBridge) }
+    }
     val currentTarget by rememberUpdatedState(target)
     var expanded by remember(lane) { mutableStateOf(false) }
     var visualLines by remember(lane) { mutableIntStateOf(1) }
@@ -1040,6 +1048,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     if(coldDraft != null || coldClearTarget != null || blockedSendReason != null) ObscureConversation()
     val focusRequester = remember(lane) { FocusRequester() }
     LaunchedEffect(editor, draft.generation) {
+        if (model.draft(currentTarget).generation != draft.generation) return@LaunchedEffect
         val update = ComposerReconciler.external(sync, draft.generation, draft.text)
         sync = update.sync
         update.replacement?.let { text -> editor.edit {
@@ -1082,6 +1091,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SpeechComposerStatus(model)
         ContextFooter(model, session) {
             model.edit(target, editor.text.toString())
             model.draft(target)
@@ -1113,6 +1123,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
                     enabled = !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
+                }
+                SpeechComposerButton(model, target) {
+                    if (model.draft(target).text != editor.text.toString()) model.edit(target, editor.text.toString())
                 }
                 BasicTextField(state = editor, modifier = Modifier.weight(1f).padding(horizontal = 3.dp, vertical = 10.dp)
                     .heightIn(max = if (expanded) 280.dp else 168.dp).focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },

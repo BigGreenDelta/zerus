@@ -20,7 +20,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets Multimedia)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -46,6 +46,11 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+
+add_library(hgs-speech STATIC src/speech/SpeechClient.cpp src/speech/SpeechRecorder.cpp
+    src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
+target_include_directories(hgs-speech PUBLIC src)
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -158,7 +163,7 @@ if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
-target_link_libraries(hgs-tray PRIVATE hgs-updates)
+target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech)
 
 include(CTest)
 if(BUILD_TESTING)

@@ -11,7 +11,7 @@ const RECEIPT: &str = "id,workspace_id,device_id,node_id,operation,body_hash,sta
 CASE WHEN BYTES(result AS_BYTES)<=1048576 THEN result END AS result,
 CASE WHEN BYTES(error AS_BYTES)<=1048576 THEN error END AS error,
 CASE WHEN COALESCE(BYTES(result AS_BYTES),0)+COALESCE(BYTES(error AS_BYTES),0)>1048576 THEN 1 ELSE 0 END AS oversized,
-created,claimed,updated,expires_at,result_bytes,reserved_bytes";
+created,claimed,updated,expires_at,body_bytes,result_bytes,reserved_bytes";
 /// A claim leaves storage only after COMMIT. Decoding/HTTP failures cannot requeue it.
 pub struct Claim {
     pub body: String,
@@ -45,6 +45,7 @@ pub struct Submission {
     after: bool,
     agent: bool,
     attachments: bool,
+    speech_job: Option<String>,
 }
 impl Submission {
     pub fn new(body: Value) -> Result<Self> {
@@ -60,6 +61,11 @@ impl Submission {
             attachments: body["payload"]["attachments"]
                 .as_array()
                 .is_some_and(|v| !v.is_empty()),
+            speech_job: if ["speech_status", "speech_cancel"].contains(&s(&body, "operation")) {
+                body["payload"]["job_id"].as_str().map(str::to_owned)
+            } else {
+                None
+            },
             encoded,
             hash,
         })
@@ -110,6 +116,17 @@ impl Store {
             None => Value::Null,
         };
         let op = b.operation.as_str();
+        if let Some(job) = &b.speech_job {
+            let owner = t.one("SELECT workspace_id,device_id,operation,target_computer_id,target_machine_id FROM requests WHERE id=?", args![job]).await?.ok_or(Error::NOT_FOUND)?;
+            if owner["workspace_id"] != c.workspace
+                || owner["device_id"] != c.id
+                || owner["operation"] != "speech_submit"
+                || owner["target_computer_id"] != node["id"]
+                || owner["target_machine_id"] != node["machine_id"]
+            {
+                return Err(Error::NOT_FOUND);
+            }
+        }
         if !["inspect", "send", "answer", "interrupt"].contains(&op)
             && !protocol::supports(&snapshot, op, "operations")
         {
@@ -349,7 +366,12 @@ impl Store {
             }
             return Err(Error::CONFLICT);
         }
-        let delta = size as i64 - i(&row, "reserved_bytes") - i(&row, "result_bytes");
+        let audio_bytes = if row["operation"] == "speech_submit" {
+            i(&row, "body_bytes")
+        } else {
+            0
+        };
+        let delta = size as i64 - i(&row, "reserved_bytes") - i(&row, "result_bytes") - audio_bytes;
         if delta > 0 {
             if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![delta,self.db.shard(&c.workspace),delta,self.db.cfg.global_max_bytes/self.db.cfg.quota_shards]).await?==0{return Err(Error::BUSY);}
         } else {
@@ -360,6 +382,13 @@ impl Store {
             .await?;
         }
         t.exec("UPDATE requests SET state=?,result=?,error=?,updated=?,result_bytes=?,reserved_bytes=0 WHERE id=?",args![&b["state"],&result,&b["error"],now(),size,id]).await?;
+        if audio_bytes > 0 {
+            t.exec(
+                "UPDATE requests SET body='',body_bytes=0 WHERE id=?",
+                args![id],
+            )
+            .await?;
+        }
         t.exec("UPDATE workspace_usage SET active=active-1,payload_bytes=payload_bytes+? WHERE workspace_id=?",args![delta,&c.workspace]).await?;
         t.commit().await
     }

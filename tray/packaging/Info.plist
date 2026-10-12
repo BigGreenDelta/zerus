@@ -19,5 +19,6 @@
     <!-- Start in the menu bar. MacAppVisibility enables Dock / Cmd-Tab while
          an application window is open, including minimized windows. -->
     <key>LSUIElement</key>               <true/>
+    <key>NSMicrophoneUsageDescription</key><string>Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.</string>
 </dict>
 </plist>

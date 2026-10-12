@@ -9,6 +9,7 @@ mod native_ui;
 mod session_reference;
 mod platform;
 mod presence;
+mod speech;
 mod state;
 mod swarm;
 

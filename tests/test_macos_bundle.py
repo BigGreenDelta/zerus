@@ -43,6 +43,7 @@ class MacosBundleName(unittest.TestCase):
         self.assertEqual(info["CFBundleExecutable"], "${MACOSX_BUNDLE_EXECUTABLE_NAME}")
         self.assertEqual(info["CFBundleIdentifier"], "com.hgdev.hgs-tray")
         self.assertEqual(info["LSMinimumSystemVersion"], "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        self.assertIn("voice", info["NSMicrophoneUsageDescription"])
 
     @unittest.skipUnless(os.environ.get("ZERUS_MACOS_BUNDLE"), "needs a built macOS bundle")
     def test_built_bundle_carries_the_localized_name(self):

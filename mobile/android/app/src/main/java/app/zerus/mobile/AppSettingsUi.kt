@@ -46,6 +46,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
                 val body = Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize().padding(horizontal = 16.dp)
                 if (notices) ThirdPartyContent(noticesScroll, body.padding(vertical = 16.dp))
                 else Column(body.verticalScroll(settingsScroll).padding(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    SpeechSettingsContent(model)
+                    HorizontalDivider()
                     Text("Privacy", style = MaterialTheme.typography.titleLarge)
                     if (BuildConfig.FIREBASE_ENABLED) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -65,6 +67,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
                         }
                     } else Text("This build does not include Firebase analytics or crash reporting.")
                     if (preferences.error) Text("Could not fully apply this setting. Check the switch and try again.", color = MaterialTheme.colorScheme.error)
+                    HorizontalDivider()
+                    Text("Updates", style = MaterialTheme.typography.titleLarge)
+                    UpdatesContent(model, updater, interactionBlocked = { preferences.saving })
                     HorizontalDivider()
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -97,12 +102,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
                             Text("ufna/zerus")
                         }
                         if (linkError) Text("No browser could open GitHub. Try again after installing a browser.", color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = { notices = true }, enabled = !preferences.saving) { Text("Third-party notices") }
                     }
-                    HorizontalDivider()
-                    Text("Updates", style = MaterialTheme.typography.titleLarge)
-                    UpdatesContent(model, updater, interactionBlocked = { preferences.saving })
-                    HorizontalDivider()
-                    TextButton(onClick = { notices = true }, enabled = !preferences.saving) { Text("Third-party notices") }
                 }
             }
         }

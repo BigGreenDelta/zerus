@@ -274,6 +274,31 @@ online machines, CPU, memory and load, plus account limits. Counts open the matc
 filter, sessions open Activity, and machine settings lead to Machines. Native
 account quotas are grouped by verified identity instead of adding machine usage.
 
+**About** is the final Settings section, after **Voice input**.
+
+**Settings → Voice input** selects the speech computer, its recognition profile
+and the local microphone. The speech computer is independent of the agent's
+computer: a laptop can record locally and use a configured GPU peer over SSH.
+Configure providers and their credentials only on that processing computer; see
+[the optional speech host](../services/speech/README.md). The first built-in
+adapter is GigaAM with a Russian `v3_e2e_rnnt` profile. Selecting a profile does
+not install or download a model and never falls back to another provider.
+
+Use **Voice** in the message toolbar, allow microphone access, then stop recording
+to transcribe. Recordings are limited to two minutes. Recognized text becomes a
+private draft; it never sends a message automatically. A changed draft or
+conversation requires explicit review before insertion. Interrupted jobs retain
+their identity for status recovery without re-uploading audio. Hiding the composer
+stops unsubmitted capture. Voice settings also show the selected computer's
+90-day counters; [analytics](analytics.md) documents their meaning and the planned
+cross-computer agent statistics.
+
+If microphone access is denied, Voice shows a permission explanation with
+**Open microphone settings** on macOS and Windows. On macOS this opens
+**System Settings → Privacy & Security → Microphone**. Allow Zerus, return to
+the conversation and press **Voice** again; opening settings does not start a
+recording. If settings cannot open, the dialog keeps the manual navigation path.
+
 Session rows show provider, machine, current action, model, effort and Git context.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,

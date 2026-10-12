@@ -232,6 +232,38 @@ released HTTP/connector compatibility, PostgreSQL recovery and repeated 256 MiB
 container workloads. An unchanged GUI clear-context fixture passed on rerun;
 its timing instability is tracked separately in `zerus-wvl`.
 
+## Speech transport
+
+The optional speech host adds capability-gated `speech_profiles`, `speech_stats`,
+`speech_submit`, `speech_status` and `speech_cancel`, all scoped to a computer
+with an empty session. Both the relay and the selected computer must advertise
+the operation. The connector returns a job receipt promptly; inference runs in
+the separate host service and never occupies its native command queue.
+
+Submit accepts at most 120 seconds of mono 16 kHz PCM16LE, inside a bounded
+6 MiB JSON envelope. Its request UUID also identifies the host job. Status and
+cancel require the original submit receipt, bound to the same device, workspace,
+computer and native machine identity. A guessed job ID or a different phone
+cannot retrieve its text. Submit and cancel receipts omit transcripts; only
+status returns text. Uncertain jobs are recovered by status, never by uploading
+audio again.
+
+The relay removes submitted audio on the connector result acknowledgement and
+scrubs terminal expired/revoked submissions during maintenance. It preserves
+the fingerprint and mutation identity. Speech reads expire after 120 seconds,
+independently of the existing persisted read-history predicate. Two additive
+partial indexes support bounded cleanup; schema version remains 1. Replace
+both PostgreSQL workers together so either accepts the new operations. Existing
+phones and connectors remain compatible, and discovery does not load models.
+The first index creation scans request metadata; use the normal backup, drain
+and code-only update procedure above.
+
+Host installation and adapters are documented in
+[services/speech](../../speech/README.md). Local content-free counters and the
+planned fleet analytics architecture are described in
+[analytics](../../../docs/analytics.md). API v1 remains trusted TLS transport;
+the relay can see audio and status responses in transit.
+
 ## Capacity evidence
 
 Run `tests/load.py` through the repository's Python test environment after building

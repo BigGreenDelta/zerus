@@ -17,6 +17,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
+from . import speech
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
@@ -279,13 +280,17 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise web.HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
     if op in LAUNCH_OPERATIONS:
         if value["session"] != "": raise ValueError("catalog/launch use no existing session target")
         validate_launch(op,payload,request_id)
+        return
+    if op in speech.OPERATIONS:
+        if value["session"] != "": raise ValueError("speech uses no session target")
+        speech.validate(op, payload, request_id)
         return
     if op in COMPUTER_OPERATIONS:
         if value["session"] != "": raise ValueError("the delivery setting uses no session target")
@@ -342,6 +347,9 @@ async def submit(request):
     await blocking(validate_request, value)
     if value["operation"] == "send":
         await blocking(validate_send, value["payload"])
+    elif value["operation"] == "speech_submit":
+        if await blocking(encoded_size, value, 6 * 1024 * 1024) > 6 * 1024 * 1024:
+            raise web.HTTPRequestEntityTooLarge(max_size=6 * 1024 * 1024, actual_size=6 * 1024 * 1024 + 1)
     elif await blocking(encoded_size, value, 1024 * 1024) > 1024 * 1024:
         raise web.HTTPRequestEntityTooLarge(max_size=1024 * 1024, actual_size=1024 * 1024 + 1)
     await still_authorized(request, device, "devices")

@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from zerus_mobile.connector import Connector, ConnectorError
 from zerus_mobile.context import OPERATIONS
+from zerus_mobile.speech import OPERATIONS as SPEECH_OPERATIONS
 from zerus_mobile.server import Config, create_app
 from zerus_mobile.store import Store
 
@@ -271,7 +272,8 @@ class ContextFixtureTests(unittest.IsolatedAsyncioTestCase):
         hint = {"status": "cold", "source": "native_footer", "tokens": 60000}
         self.config(all_states=True, session_usage=usage, cache_hint=hint)
         snapshot = await self.connector.snapshot()
-        self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]), OPERATIONS)
+        # This retained fixture deliberately has no speech ABI in its CLI help.
+        self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]), OPERATIONS - SPEECH_OPERATIONS)
         self.assertEqual(len(snapshot["sessions"]), 7)
         inspect = await self.connector.native(["inspect", NAME])
         self.assertEqual(inspect["session_usage"], usage)

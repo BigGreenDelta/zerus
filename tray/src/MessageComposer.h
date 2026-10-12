@@ -72,6 +72,11 @@ public:
     // A required question replaces the field and its actions; the toolbar stays.
     void setInputVisible(bool visible);
     bool isInputVisible() const;
+    struct VoiceTarget { QString key; quint64 revision = 0, navigation = 0; };
+    VoiceTarget voiceTarget() const { return {m_key, m_saveRevision.value(m_key), m_navigationRevision}; }
+    // Append only to an unchanged, still selected editable draft. A successful
+    // callback means the inserted text is durable; it never submits a message.
+    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
 
@@ -82,6 +87,7 @@ signals:
     void sendRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
+    void controlsChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -121,6 +127,7 @@ private:
     QSet<QString> m_storedDrafts;
     ComposerDraftStore m_draftStore;
     QHash<QString, quint64> m_saveRevision;
+    quint64 m_navigationRevision = 0;
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;

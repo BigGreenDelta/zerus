@@ -42,6 +42,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
        hgs [@host] ls                 sessions here and on peers
@@ -253,6 +254,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     let args = &args[index + 1..];
     match command.as_str() {
         "-h" | "--help" | "help" => {
+            // Capability probes for a selected computer must inspect that
+            // computer's installed CLI, including retained older versions.
+            if !target.is_empty() && !config.is_self(&target) {
+                return remote(&config, &target, "--help", args, dry);
+            }
             print!("{USAGE}");
             return Ok(0);
         }
@@ -309,6 +315,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return remote(&config, &target, command, args, dry);
     }
     match command.as_str() {
+        "speech" => crate::speech::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
             let url = state::dsh::native_ui_url(require(args, 0, "Choose a native session")?)
                 .map_err(|e| Error::new(1, e))?;
@@ -562,7 +569,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),

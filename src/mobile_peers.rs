@@ -261,6 +261,10 @@ fn validate(request: &LocalRequest) -> Result<()> {
         Ok(())
     };
     match op {
+        "speech" => {
+            ensure!(rest == ["--json"], "speech requires its fixed JSON ABI");
+            crate::speech::validate_request(request.payload.as_ref().context("speech payload is required")?)?;
+        }
         "--help" => {
             ensure!(rest.is_empty(), "invalid help request");
             no_payload()?;

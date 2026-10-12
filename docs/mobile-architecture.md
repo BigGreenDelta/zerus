@@ -693,6 +693,52 @@ no app can open the type. Rows show progress and errors; a failed read is never
 retried automatically. Without the operation on the relay and the computer, the
 row says "Update Zerus on this computer to open attachments."
 
+### Voice input
+
+In Android Settings, choose a **Voice input** computer and one of its configured
+recognition profiles. The processing computer is independent of the computer
+running the current session. Choices use the existing authorized connected
+computers and direct peers; an unavailable selection never switches to another
+provider automatically. Both the relay and selected computer must advertise
+the speech operations before the phone sends them.
+
+Tap the composer microphone, allow Android microphone access, then speak. Tap
+**Stop and transcribe** to submit the recording; **Cancel** discards a recording
+before upload. Capture lasts at most two minutes and produces at most 3,840,000
+bytes of mono 16 kHz signed little-endian PCM. Recording and the 48 kHz fallback
+conversion run off the main thread. Leaving the foreground stops capture and
+retains the audio in memory for explicit **Transcribe** or **Discard**. Audio is
+not persisted on the phone, so process death during capture loses that recording.
+
+The phone stores the request UUID, processing host/profile and exact original
+draft identity in encrypted storage before its single upload attempt. An
+interrupted submission exposes **Check status** for the same job and never
+automatically uploads again. Submit and cancel acknowledgements contain no
+transcript; completed text is fetched through status and encrypted locally
+before insertion. An unchanged draft on the same navigation receives an append.
+If the draft or navigation changed, or the app restarted, the result stays
+available for explicit **Insert into draft** in the original conversation or
+**Copy**. Insertion checks the actual editor before its asynchronous draft mirror
+and advances the editor generation before waiting for storage, preserving IME
+edits arriving at either boundary. Attachments and existing edits are retained.
+A durable insertion ID prevents the same result from being appended again after interruption. Voice
+recognition never sends a message to the agent.
+
+Voice jobs use the ordinary authenticated request envelope with the processing
+`computer_id` and an empty `session`. Operations are `speech_profiles`,
+`speech_submit`, `speech_status` and `speech_cancel`. Audio travels through the
+trusted relay, which can read it; this is not end-to-end encrypted. Models,
+provider credentials and inference remain on the selected computer. See the
+[speech service](../services/speech/README.md) for host setup and limits.
+
+When `speech_stats` is advertised, Settings also shows that computer's retained
+aggregate counts for completed and failed recognition and accepted audio
+minutes. These counters belong to the processing host; the phone does not count
+the same recording again or send audio/text to Firebase analytics. Broader local
+and fleet measurements are described in [analytics](analytics.md). The
+[Android README](../mobile/android/README.md#voice-input) covers client behavior
+and the isolated microphone smoke test.
+
 ## Protocol version 1
 
 Authenticated requests use `Authorization: Bearer <credential>`. Bodies and
@@ -925,7 +971,8 @@ sends requests to client-supplied URLs. Restore it from Git history if needed.
 
 The main Android toolbar orders New session, Refresh and Settings. Settings is
 a full-window screen with its own Back action; it retains the underlying tab,
-project, filters, scroll position and drafts. It contains telemetry controls,
+project, filters, scroll position and drafts. It contains voice host/profile
+selection and local speech counters, telemetry controls,
 the application version, a direct GitHub repository link, update controls and
 an offline third-party notices page. Back from notices returns to Settings;
 Back from Settings returns to the previous workspace view.

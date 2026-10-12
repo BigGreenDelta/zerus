@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerus-speech"
+version = "0.1.0"
+description = "Optional private speech recognition service for Zerus"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+gigaam = ["gigaam @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5"]
+
+[project.scripts]
+zerus-speech = "zerus_speech.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["zerus_speech*"]

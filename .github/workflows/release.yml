@@ -69,7 +69,7 @@ jobs:
           path: artifacts/arch
       - name: Arch release dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python namcap desktop-file-utils
           useradd -m user
           chown -R user:user "$GITHUB_WORKSPACE"
       - name: Assemble exact verified candidate

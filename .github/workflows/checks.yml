@@ -113,6 +113,7 @@ jobs:
         run: cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
       - name: Released HTTP and outbound connector compatibility
         run: |
+          cargo +1.85.0 build --locked --bin hgs
           python3 -m venv "$RUNNER_TEMP/relay-venv"
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile
           export ZERUS_RELAY_BINARY="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-relay"
@@ -120,6 +121,8 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_rust_relay.py -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test*end_to_end.py' -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_peer_migration.py -v
+          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
+          env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
       - name: Build the deployment image
         run: docker build --tag zerus-relay-contract services/mobile
       - name: Enforce the 256 MiB runtime envelope
@@ -207,7 +210,7 @@ jobs:
           fetch-depth: 0
       - name: Arch dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus namcap desktop-file-utils
           useradd -m user
           chown -R user:user "$GITHUB_WORKSPACE"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -248,7 +251,7 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: brew install cmake qt qtwebengine ccache
+      - run: brew install cmake qt qtwebengine qtmultimedia ccache
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/ccache

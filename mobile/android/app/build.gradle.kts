@@ -12,6 +12,9 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
+    require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
+}
 val devBuildNumber = providers.gradleProperty("zerusDevBuildNumber").orNull?.toInt()?.also { require(it > 0) }
 val updateVersionCode = providers.gradleProperty("zerusVersionCode").orNull?.toInt()?.also { require(it in 1..2_100_000_000) }
 if (firebaseEnabled) {
@@ -27,9 +30,9 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = updateVersionCode ?: 31
-        versionName = "0.1.30" + (devBuildNumber?.let { "-dev.$it" } ?: "")
+        versionName = previewVersionName ?: ("0.1.30" + (devBuildNumber?.let { "-dev.$it" } ?: ""))
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
     }
     if(privateSigningFile.isFile) signingConfigs.create("development") {
         val keyFile = File(checkNotNull(privateSigning.getProperty("storeFile")))
