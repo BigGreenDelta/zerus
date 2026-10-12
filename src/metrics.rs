@@ -55,6 +55,14 @@ fn sampled_cpu(root: &Path, mut current: CpuSample) -> std::io::Result<(Option<f
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        // Windows may release a closed handle's lock only later; unlock explicitly.
+        struct Unlock<'a>(&'a fs::File);
+        impl Drop for Unlock<'_> {
+            fn drop(&mut self) {
+                let _ = FileExt::unlock(self.0);
+            }
+        }
+        let _unlock = Unlock(&lock);
         let path = directory.join("cpu.json");
         let previous: Option<CpuSample> = fs::metadata(&path)
             .ok()
@@ -364,7 +372,8 @@ mod tests {
         holder.lock_exclusive().unwrap();
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(60));
-            drop(holder);
+            // Like a listing: closing alone may release the lock late on Windows.
+            FileExt::unlock(&holder).unwrap();
         });
         assert_eq!(
             sampled_cpu(root.path(), cpu(200, 90, 102.)).unwrap(),
