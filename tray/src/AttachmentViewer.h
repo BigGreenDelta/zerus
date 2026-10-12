@@ -20,12 +20,14 @@ inline QString root() {return QStandardPaths::writableLocation(QStandardPaths::C
 // At most 180 characters. A longer name keeps its last extension, by which a
 // viewer chooses the application: cutting the end could expose an inner one
 // (A….jarX.command must not become A….jar). Without a short last extension
-// the shortened name keeps no dot at all.
+// the shortened name keeps no dot at all. A trailing dot or space is no
+// extension: Windows drops both, so A….jar. would open as A….jar.
 inline QString fitName(const QString &base) {
     constexpr int limit=180;
     if(base.size()<=limit)return base;
     const auto dot=base.lastIndexOf('.');
-    if(dot>0 && base.size()-dot<=32)return base.left(limit-(base.size()-dot))+base.mid(dot);
+    const auto extension=dot>0?base.mid(dot+1):QString();
+    if(!extension.isEmpty() && extension.size()<32 && !extension.contains(' '))return base.left(limit-(base.size()-dot))+base.mid(dot);
     auto cut=base.left(limit);cut.replace('.','_');return cut;
 }
 inline QString store(const QString &name,const QByteArray &bytes) {
@@ -39,6 +41,26 @@ inline QString store(const QString &name,const QByteArray &bytes) {
     const auto path=folder+"/"+fitName(base);QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
     file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
     if(file.write(bytes)!=bytes.size() || !file.commit())return {};return path;
+}
+// The format of bytes Qt decodes as a picture, empty for anything else. SVG
+// is a document with scripts and links, not a picture: it is refused.
+inline QByteArray imageFormat(const QByteArray &bytes) {
+    QBuffer buffer;buffer.setData(bytes);
+    if(!buffer.open(QIODevice::ReadOnly))return {};
+    QImageReader reader(&buffer);
+    const auto format=reader.format().toLower();
+    if(format.isEmpty() || format.startsWith("svg") || !reader.canRead())return {};
+    return format;
+}
+inline QString imageExtension(const QByteArray &format) {return format=="jpeg"?QStringLiteral("jpg"):QString::fromLatin1(format);}
+// A picture whose name someone else chose (an agent names the images it
+// attaches): a copy named <base>.<detected extension>, so a name such as
+// x.bat or notes.command never picks the application that opens it. Empty
+// when the bytes are no picture (see imageFormat) or the copy failed.
+inline QString storeImage(const QString &name,const QByteArray &bytes) {
+    const auto format=imageFormat(bytes);if(format.isEmpty())return {};
+    auto base=QFileInfo(name).completeBaseName().left(120);if(base.isEmpty())base=QStringLiteral("image");
+    return store(base+'.'+imageExtension(format),bytes);
 }
 inline QString cached(const QJsonObject &file) {
     const QFileInfo info(file.value("local_path").toString());const auto path=info.canonicalFilePath();
@@ -77,12 +99,27 @@ public:
         m_jobs.insert(key,{host,session,conversation,archive,agent,file,{std::move(done)}});
         if(priority)m_queue.prepend(key);else m_queue.append(key);pump();
     }
+    // An image opens only when its bytes are a picture, from a copy named for
+    // their format (AttachmentFiles::storeImage): an agent can attach anything
+    // as image/png under any name, and a review passes it on to Activity.
     void open(const QString &host,const QString &session,const QString &conversation,const QString &archive,
               const QString &agent,const QJsonObject &file,Callback done) {
-        fetch(host,session,conversation,archive,agent,file,[done](const QString &path,const QString &error) {
+        const bool image=file.value("mime").toString().startsWith("image/",Qt::CaseInsensitive);
+        const auto name=file.value("name").toString();
+        fetch(host,session,conversation,archive,agent,file,[done,image,name](const QString &path,const QString &error) {
             if(!error.isEmpty()){done({},error);return;}
-            if(!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {done({},tr("No application could open this file."));return;}
-            done(path,{});
+            auto target=path;
+            if(image) {
+                QFile source(path);QByteArray bytes;
+                if(source.open(QIODevice::ReadOnly))bytes=source.read(HgsClient::MaximumAttachmentBytes+1);
+                if(AttachmentFiles::imageFormat(bytes).isEmpty()) {
+                    done({},tr("This attachment is not a picture this computer can show, so it is not opened."));return;
+                }
+                target=AttachmentFiles::storeImage(name.isEmpty()?QFileInfo(path).fileName():name,bytes);
+                if(target.isEmpty()){done({},tr("Could not save the attachment."));return;}
+            }
+            if(!QDesktopServices::openUrl(QUrl::fromLocalFile(target))) {done({},tr("No application could open this file."));return;}
+            done(target,{});
         },true);
     }
     static QImage thumbnail(const QString &path) {

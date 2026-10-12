@@ -17,7 +17,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
-#include <QImageReader>
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QFrame>
@@ -114,24 +113,6 @@ constexpr qsizetype MaxPromptBytes = HgsClient::MaximumMessageBytes;
 // The CLI's image limits (MAX_ATTACHMENTS, MAX_ATTACHMENT, MAX_ATTACHMENTS_TOTAL).
 constexpr int MaxImages = HgsClient::MaximumAttachments;
 constexpr qsizetype MaxImageBytes = HgsClient::MaximumAttachmentBytes, MaxImagesBytes = HgsClient::MaximumAttachmentsBytes;
-
-// The format of bytes Qt decodes as a picture, empty for anything else. SVG
-// is a document with scripts and links, not a picture: it is refused.
-QByteArray imageFormat(const QByteArray &bytes)
-{
-    QBuffer buffer;
-    buffer.setData(bytes);
-    if (!buffer.open(QIODevice::ReadOnly)) return {};
-    QImageReader reader(&buffer);
-    const QByteArray format = reader.format().toLower();
-    if (format.isEmpty() || format.startsWith("svg") || !reader.canRead()) return {};
-    return format;
-}
-
-QString extension(const QByteArray &format)
-{
-    return format == "jpeg" ? QStringLiteral("jpg") : QString::fromLatin1(format);
-}
 
 // At most `limit` bytes of a regular file. A device or FIFO named by a path
 // (one pasted from the clipboard, say) is refused: it is never read without end.
@@ -978,15 +959,11 @@ void TaskPanel::openImage(const QString &sha256, const QString &name)
         m_view->notify(tr("Cannot open %1: %2").arg(name, error));
         return;
     }
-    const QByteArray format = imageFormat(bytes);
-    if (format.isEmpty()) {
+    if (AttachmentFiles::imageFormat(bytes).isEmpty()) {
         m_view->notify(tr("%1 is not a picture this computer can show, so it is not opened.").arg(name));
         return;
     }
-    // A short base: the copy's name always ends with the detected extension.
-    QString base = QFileInfo(name).completeBaseName().left(120);
-    if (base.isEmpty()) base = QStringLiteral("image");
-    const QString copy = AttachmentFiles::store(base + QLatin1Char('.') + extension(format), bytes);
+    const QString copy = AttachmentFiles::storeImage(name, bytes);
     if (copy.isEmpty()) {
         m_view->notify(tr("Cannot open %1: its copy could not be saved.").arg(name));
         return;
@@ -1005,7 +982,7 @@ void TaskPanel::addImageFiles(const QStringList &paths)
             m_view->notify(tr("Cannot add %1: %2.").arg(fileName, error));
             return;
         }
-        if (imageFormat(image.bytes).isEmpty()) {
+        if (AttachmentFiles::imageFormat(image.bytes).isEmpty()) {
             m_view->notify(tr("%1 is not a picture.").arg(image.name));
             return;
         }
@@ -1063,7 +1040,7 @@ void TaskPanel::changeImages(const QList<Image> &added, const QString &removed, 
     }
     for (const auto &image : added) {
         QString mime = QMimeDatabase().mimeTypeForData(image.bytes).name();
-        if (!mime.startsWith(QLatin1String("image/"))) mime = QStringLiteral("image/") + QString::fromLatin1(imageFormat(image.bytes));
+        if (!mime.startsWith(QLatin1String("image/"))) mime = QStringLiteral("image/") + QString::fromLatin1(AttachmentFiles::imageFormat(image.bytes));
         total += image.bytes.size();
         list.append(QJsonObject{{QStringLiteral("name"), image.name}, {QStringLiteral("mime"), mime},
                                 {QStringLiteral("data_base64"), QString::fromLatin1(image.bytes.toBase64())}});
