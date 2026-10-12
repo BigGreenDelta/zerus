@@ -465,10 +465,10 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
-For Claude messages ending in a literal backslash, the paste includes a final
-newline so the single Enter submits the unchanged message instead of activating
-Claude's backslash-Enter line continuation. This is verified against native
-history; no second Enter is sent as an automatic retry.
+For Claude and Kimi messages ending in a literal backslash, the paste includes a
+final newline so the single Enter submits the unchanged message instead of
+activating the agent's backslash-Enter line continuation. This is verified
+against native history; no second Enter is sent as an automatic retry.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue
@@ -872,10 +872,13 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Worktrees and ordinary folders
 
-Session cards show only the Git branch, or **detached HEAD**, in their checkout
-line, preceded by a small Git branch icon. The opened session's header and
-**Details** retain the worktree name and folder path. Ordinary folders without
-Git metadata have no branch label.
+Session cards show a checkout line of the form `folder / branch`, such as
+`zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
+replaces a missing branch. A linked worktree names its main checkout folder
+rather than its own generated folder. Ordinary folders without Git metadata
+show only their name, preceded by a folder icon. The opened session's header and
+**Details** show the same line, marked `· worktree` for a linked worktree; the
+full folder path stays in the header tooltip and **Details**.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.

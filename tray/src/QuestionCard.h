@@ -34,6 +34,10 @@ public:
     // Enlarges question text and answers; actions keep the workspace size.
     void setContentScale(double scale);
     void setNativeUi(bool native);
+    // Only a successful callback permits transport; receipts can supersede pending work.
+    void prepareSendingAsync(const QString &sessionKey, const QString &questionId, std::function<void(bool)> done);
+    bool isDraftLoading() const { return m_loadingKeys.contains(m_key); }
+    // UI convenience: acceptance is asynchronous. Transport owners use prepareSendingAsync.
     bool setSending(const QString &sessionKey, const QString &questionId, bool sending = true);
     void setError(const QString &sessionKey, const QString &questionId, const QString &detail, bool uncertain = false);
     void setAnswered(const QString &sessionKey, const QString &questionId);
@@ -44,6 +48,7 @@ public:
 
 signals:
     void answerRequested(const QString &sessionKey, const QString &questionId, const QJsonArray &answers);
+    void draftRestored();
     void openTerminalRequested();
     void queueNavigationRequested(int direction);
     // Links in the question's Markdown, after an explicit click.
@@ -72,8 +77,8 @@ private:
     };
     void rebuild();
     void capture();
-    bool saveDraft(const QString &key, bool asynchronous = false);
-    Draft loadDraft(const QString &key) const;
+    bool saveDraft(const QString &key, bool asynchronous = true, std::function<void(bool)> done = {});
+    Draft restoredDraft(const ComposerDraft &saved) const;
     void ensureDraft(const QString &key, const QString &sessionKey);
     void updateControls();
     void scheduleSizing();
@@ -95,6 +100,7 @@ private:
     ComposerDraftStore m_draftStore;
     QHash<QString, quint64> m_saveRevision;
     QSet<QString> m_failedSaves;
+    QSet<QString> m_loadingKeys;
     QHash<QString, QString> m_latestKeys, m_sendingKeys;
     QHash<QString, QString> m_fileLinks;   // hgs-file: key -> the agent's reference
     QString m_session, m_id, m_key, m_unavailableReason;

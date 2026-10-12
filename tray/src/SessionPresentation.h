@@ -4,6 +4,7 @@
 #include "QuestionReply.h"
 #include <QObject>
 #include <QDateTime>
+#include <QRegularExpression>
 
 namespace SessionPresentation {
 inline QString childState(const QJsonObject &child) {
@@ -148,13 +149,51 @@ inline QString branchContext(const SessionInfo &s)
     return s.gitDetached ? QObject::tr("detached HEAD") : QString();
 }
 
+// Path components of a local or remote path, whichever separator its machine uses.
+inline QStringList pathParts(const QString &path)
+{
+    static const QRegularExpression separators(QStringLiteral("[/\\\\]+"));
+    return path.split(separators, Qt::SkipEmptyParts);
+}
+
+// The folder people know a checkout by. A linked worktree names its main
+// checkout (`zerus` rather than `zerus-work-1a2b`); a bare `repo.git` names itself.
+inline QString checkoutFolder(const SessionInfo &s)
+{
+    if (s.gitWorktree && !s.gitCommonDir.isEmpty()) {
+        auto parts = pathParts(s.gitCommonDir);
+        if (parts.size() > 1 && parts.last().startsWith('.')) parts.removeLast();
+        QString name = parts.isEmpty() ? QString() : parts.last();
+        if (name.size() > 4 && name.endsWith(QStringLiteral(".git"))) name.chop(4);
+        if (!name.isEmpty()) return name;
+    }
+    const auto parts = pathParts(!s.gitRoot.isEmpty() ? s.gitRoot : !s.cwd.isEmpty() ? s.cwd : s.canonicalCwd);
+    return parts.isEmpty() ? QString() : parts.last();
+}
+
+// The card's checkout line: folder / branch (or detached HEAD); an ordinary folder shows its name.
+inline QString checkoutLine(const SessionInfo &s)
+{
+    const QString folder = checkoutFolder(s), branch = branchContext(s);
+    if (folder.isEmpty() || branch.isEmpty()) return folder.isEmpty() ? branch : folder;
+    return folder + QStringLiteral(" / ") + branch;
+}
+
+// The workspace icon beside checkoutLine.
+inline QString checkoutIcon(const SessionInfo &s)
+{
+    if (!branchContext(s).isEmpty()) return QStringLiteral("git-branch");
+    return checkoutFolder(s).isEmpty() ? QString() : QStringLiteral("folder");
+}
+
+// The opened header and Details: the card line plus a linked-worktree mark.
+// The worktree folder itself stays in the path shown beside it.
 inline QString projectContext(const SessionInfo &s)
 {
-    QStringList parts{s.project.isEmpty() ? s.name.section('/', 1, 1) : s.project};
-    const QString branch = branchContext(s);
-    if (!branch.isEmpty()) parts << branch;
-    if (s.gitWorktree) parts << (s.gitWorktreeName.isEmpty() ? QObject::tr("worktree") : QObject::tr("worktree: %1").arg(s.gitWorktreeName));
-    return parts.join(QStringLiteral(" / "));
+    QString context = checkoutLine(s);
+    if (context.isEmpty()) context = s.project.isEmpty() ? s.name.section('/', 1, 1) : s.project;
+    if (s.gitWorktree) context += QObject::tr(" · worktree");
+    return context;
 }
 
 inline bool currentActivity(const SessionInfo &s, bool online = true)
