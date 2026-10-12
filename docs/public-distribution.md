@@ -90,6 +90,15 @@ channel with an older version leaves the current app/data installed until a newe
 compatible APK is published. Do not reset the version-code sequence when changing
 workflow names or channels.
 
+Preview APKs share this same version-code sequence. Before distributing one,
+compare its code with the live Dev catalog and the next main CI sequence; avoid
+reserving codes ahead of normal publication. Returning from a preview to Dev
+requires a verified main candidate whose code is strictly greater than every
+distributed preview. An equal code is not an update, even when its display name
+or source differs. Keep the preview immutable, publish a newer main candidate,
+and verify an in-place upgrade with the original signer and retained local data.
+Rerunning an existing CI run does not increase its sequence or version code.
+
 Automatic dev discovery is throttled to fifteen minutes. Android WorkManager
 checks remain subject to system scheduling and battery restrictions; checks do not
 require a paired workspace. Its settings badge and one silent replaceable system

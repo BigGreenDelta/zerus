@@ -11,6 +11,7 @@
 <p align="center">
   <a href="docs/installation.md">Install</a> &nbsp; | &nbsp;
   <a href="#features">Features</a> &nbsp; | &nbsp;
+  <a href="#voice-control-across-agents-and-devices">Voice control</a> &nbsp; | &nbsp;
   <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
   <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows (TBD) &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
@@ -30,6 +31,10 @@ settings sync directly between machines, with no permanent main machine.
 Work from your laptop or workstation using the SSH access configured there.
 Bring your own agents and subscriptions.
 
+**Give your agents tasks by voice, from your computer or phone.** The same voice
+workflow works across supported agent types and connected machines, with your
+choice of local or remote speech recognition.
+
 **Claude Code, Codex, Kimi Code and DeepSeek Harness** run in their own native
 runtimes. Zerus brings their Activity, messages, questions, approvals and session
 controls together, while their original tools, hooks, permissions and history
@@ -48,6 +53,26 @@ Missing your agent or a feature?
 </p>
 
 ## Features
+
+### Voice control across agents and devices
+
+Available in [current Dev builds](docs/public-distribution.md#verified-main-dev-channel).
+
+Speak a task to **Claude Code, Codex, Kimi Code or DeepSeek Harness** from the
+desktop or Android app. Record, review and send: Zerus transcribes the recording
+and delivers the text to the selected agent's native conversation, including on
+another connected computer. Your message stays in Activity as a **playable voice
+message with a waveform and expandable transcript**, so you can compare what you
+said with what the agent received.
+
+Choose the processing computer and manage its recognition profiles in
+**Settings → Voice input**. Use **local GigaAM v3 for Russian**, including GPU
+inference, or an **OpenAI-compatible transcription server** at your own URL.
+Your phone reaches the processing computer through the relay; it does not need
+to run the model. Agent choice and speech provider choice are independent.
+
+[Set up a speech provider](docs/speech-setup.md) |
+[Voice messages and delivery](docs/voice-messages.md)
 
 <table>
   <tr>
@@ -100,6 +125,9 @@ The **Android app** brings your projects and agents to your phone:
 
 - **Conversations and tasks.** Read replies, follow goals, task lists and subagents,
   answer questions and approvals, and send messages with files and images.
+- **Voice control.** Send recorded tasks to any supported agent, play your voice
+  messages back and view their transcripts. Choose recognition profiles on a
+  connected computer, including local models and remote transcription servers.
 - **Remote controls.** Create sessions with the computer's native agent and account;
   change models, clear or compact context, inspect processes and open the native
   terminal where supported.

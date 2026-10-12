@@ -411,9 +411,11 @@ before pairing. About shows the installed version and build beside its heading,
 wrapping onto the next line when needed, and a GitHub-marked `ufna/zerus` link.
 Offline bundled Third-party notices include selectable license text.
 Back returns to the same app content; notification and push controls stay in Machines.
-Anonymous checks use `https://zerus.dev/updates/v1/android/dev.json` at startup
-and through WorkManager every six hours when a network is available. Android
-may defer background work. An available update or pending installation badges
+Anonymous checks follow the selected channel: Dev uses
+`https://zerus.dev/updates/v2/android/dev.json` with a fifteen-minute interval;
+Stable uses `https://zerus.dev/updates/v1/android/stable.json` with a six-hour
+interval. Checks run at startup and through WorkManager when a network is
+available; Android may defer background work. An available update or pending installation badges
 the Settings button. The indicator remains available without notification
 permission. Check, Download and Install are separate actions; no update silently
 repoints or removes a paired workspace. The suggested relay for new pairing is
