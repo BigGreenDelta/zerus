@@ -52,13 +52,17 @@ pub struct Received {
     pub refused: usize,
 }
 
-/// Identities are UUIDs, and positions stay below `i64::MAX` so that the next
-/// `seq` and `lamport` still fit in SQLite.
+/// The largest `seq` and `lamport`: exact in every JSON reader, including the
+/// desktop and the phone. Real logs never come near it.
+pub const MAX_POSITION: u64 = (1 << 53) - 1;
+
+/// Identities are UUIDs, and positions are at most `MAX_POSITION` on every
+/// machine alike.
 fn storable(event: &Event) -> bool {
     uuid::Uuid::parse_str(&event.id).is_ok()
         && uuid::Uuid::parse_str(&event.origin).is_ok()
-        && (1..i64::MAX as u64).contains(&event.seq)
-        && event.lamport < i64::MAX as u64
+        && (1..=MAX_POSITION).contains(&event.seq)
+        && event.lamport <= MAX_POSITION
 }
 
 pub struct Tx<'a> {
@@ -149,6 +153,12 @@ impl Store {
         &self.machine
     }
 
+    /// How long a write waits for other writers (10 seconds after `open`).
+    pub fn wait_for_writers(&self, timeout: Duration) -> Result<()> {
+        self.conn.busy_timeout(timeout)?;
+        Ok(())
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -184,29 +194,41 @@ impl Store {
         Ok(vector)
     }
 
-    /// Raw events the peer lacks, per origin in `seq` order, up to about
-    /// `max_bytes`. The flag says whether more remain.
+    /// Raw events the peer lacks, up to about `max_bytes`, taking one event of
+    /// each origin in turn (each origin in `seq` order), so an origin the peer
+    /// cannot accept never holds back the others. The flag says whether more remain.
     #[allow(dead_code)] // Used by replication (plan 1b).
     pub fn missing(&self, peer: &BTreeMap<String, u64>, max_bytes: usize) -> Result<(Vec<Value>, bool)> {
-        let origins = self
+        let mut pending: Vec<(String, i64)> = self
             .conn
             .prepare("SELECT DISTINCT origin FROM events ORDER BY origin")?
             .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut statement = self.conn.prepare("SELECT raw FROM events WHERE origin = ?1 AND seq > ?2 ORDER BY seq")?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|origin| {
+                let known = peer.get(&origin).map_or(0, |seq| i64::try_from(*seq).unwrap_or(i64::MAX));
+                (origin, known)
+            })
+            .collect();
+        let mut statement =
+            self.conn.prepare("SELECT seq, raw FROM events WHERE origin = ?1 AND seq > ?2 ORDER BY seq LIMIT 1")?;
         let mut out = Vec::new();
         let mut bytes = 0;
-        for origin in origins {
-            let known = peer.get(&origin).map_or(0, |seq| i64::try_from(*seq).unwrap_or(i64::MAX));
-            let mut rows = statement.query(params![origin, known])?;
-            while let Some(row) = rows.next()? {
-                let raw: String = row.get(0)?;
+        while !pending.is_empty() {
+            let mut next = Vec::new();
+            for (origin, after) in pending {
+                let row = statement
+                    .query_row(params![origin, after], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                    .optional()?;
+                let Some((seq, raw)) = row else { continue };
                 if !out.is_empty() && bytes + raw.len() > max_bytes {
                     return Ok((out, true));
                 }
                 bytes += raw.len();
                 out.push(serde_json::from_str(&raw)?);
+                next.push((origin, seq));
             }
+            pending = next;
         }
         Ok((out, false))
     }
@@ -319,6 +341,10 @@ impl Tx<'_> {
         )?;
         let lamport: i64 =
             self.tx.query_row("SELECT COALESCE(MAX(lamport), 0) + 1 FROM events", [], |row| row.get(0))?;
+        ensure!(
+            seq as u64 <= MAX_POSITION && lamport as u64 <= MAX_POSITION,
+            "the Overmind event clock is exhausted: an event from another machine set it to its limit"
+        );
         Ok(Event {
             id: uuid::Uuid::new_v4().to_string(),
             origin: self.machine.clone(),
@@ -479,6 +505,12 @@ mod tests {
         assert_eq!(positions(peer), vec![(MACHINE.to_owned(), 3)]);
         let beyond = BTreeMap::from([(MACHINE.to_owned(), u64::MAX)]);
         assert_eq!(positions(beyond), vec![(OTHER.to_owned(), 1), (OTHER.to_owned(), 2)]);
+        // Origins take turns, so a long backlog of one never crowds out the others.
+        let (machine, other) = (MACHINE.to_owned(), OTHER.to_owned());
+        assert_eq!(
+            positions(BTreeMap::new()),
+            vec![(machine.clone(), 1), (other.clone(), 1), (machine.clone(), 2), (other, 2), (machine, 3)]
+        );
     }
 
     #[test]
@@ -499,18 +531,20 @@ mod tests {
         let origins: Vec<String> = (0..3).map(|_| fresh()).collect();
         let mut batch = vec![
             copy(&origins[0], 1, 1, &local.id),
-            copy(&origins[1], i64::MAX as u64, 1, &fresh()),
-            copy(&origins[2], 1, i64::MAX as u64, &fresh()),
+            copy(&origins[1], MAX_POSITION + 1, 1, &fresh()),
+            copy(&origins[2], 1, MAX_POSITION + 1, &fresh()),
             json!({"id": "damaged"}),
         ];
         batch.extend(theirs.iter().cloned());
         assert_eq!(store.insert_raw(&batch).unwrap(), received(2, 4));
         let vector = store.version_vector().unwrap();
         assert_eq!(vector, BTreeMap::from([(MACHINE.to_owned(), 1), (OTHER.to_owned(), 2)]));
-        // The largest storable positions are stored and can still be extended once.
-        let edge = copy(&origins[0], 1, i64::MAX as u64 - 1, &fresh());
+        // A clock pushed to the limit fails local writes with a clear error, never an overflow.
+        let edge = copy(&origins[0], 1, MAX_POSITION - 1, &fresh());
         assert_eq!(store.insert_raw(&[edge]).unwrap(), received(1, 0));
-        assert_eq!(store.write(|tx| tx.append(&draft("t"))).unwrap().lamport, i64::MAX as u64);
+        assert_eq!(store.write(|tx| tx.append(&draft("t"))).unwrap().lamport, MAX_POSITION);
+        let error = store.write(|tx| tx.append(&draft("t"))).unwrap_err();
+        assert!(format!("{error:#}").contains("exhausted"), "{error:#}");
     }
 
     #[test]
