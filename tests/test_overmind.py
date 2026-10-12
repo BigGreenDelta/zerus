@@ -99,6 +99,24 @@ class Overmind(unittest.TestCase):
         self.assertEqual(self.ok('move', '--json', data={'task': ref, 'to': 'Backlog'})['task']['stage'], 'Backlog')
         self.assertEqual(self.refused('done', '--json', data={'task': ref})['code'], 'transition_not_allowed')
 
+    def test_mcp_server_answers_and_refuses_tool_calls_outside_a_session(self):
+        lines = [
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}},
+            {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
+            {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
+            {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'my_tasks', 'arguments': {}}},
+        ]
+        result = subprocess.run([str(HGS), 'overmind', 'mcp'], input='\n'.join(json.dumps(l) for l in lines) + '\n',
+                                env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([r['id'] for r in replies], [1, 2, 3])
+        self.assertEqual(replies[0]['result']['serverInfo']['name'], 'overmind')
+        self.assertEqual(len(replies[1]['result']['tools']), 11)
+        self.assertTrue(replies[2]['result']['isError'])
+        body = json.loads(replies[2]['result']['content'][0]['text'])
+        self.assertEqual(body['error']['code'], 'agent_only')
+
     def test_store_is_private(self):
         self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x'})
         directory = self.state / 'overmind'

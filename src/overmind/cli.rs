@@ -28,6 +28,7 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   templates get --json {project}  |  templates set --json {project, templates: {dispatch|review|rework|answer: text|null}}
   rev                                      change cursor for watchers
   status                                   replication state with every peer
+  mcp                                      serve the agent commands as an MCP server on stdio
 Write requests may carry a request_id (UUID); repeating it replays the result.
 ";
 
@@ -44,6 +45,7 @@ const AGENT_USAGE: &str = "usage: hgs overmind <command> --json   (JSON request 
   attach --json {task, name, mime, data_base64, note?}
   attachment --json {task, sha256}         local path of a task image, fetched from another machine when needed
   review --json {task, verdict: approve|needs_work, report}
+  mcp                                      the same commands as an MCP server on stdio (agents get it at launch)
 You can never move a task to Done: a person signs it off.
 ";
 
@@ -92,6 +94,12 @@ fn run(config: &Config, args: &[String]) -> Result<Option<Value>> {
     let command = words.first().copied().unwrap_or("--help");
     if matches!(command, "-h" | "--help" | "help") {
         print!("{}", usage());
+        return Ok(None);
+    }
+    // The MCP server reads protocol messages, not one request, and checks the
+    // caller on every tool call instead of once.
+    if command == "mcp" && words.len() == 1 {
+        super::mcp::serve(config, std::io::stdin().lock(), std::io::stdout().lock())?;
         return Ok(None);
     }
     let machine = super::machine(config)?;

@@ -7,6 +7,7 @@ mod commands;
 mod deliver;
 mod fold;
 mod identity;
+mod mcp;
 mod model;
 mod rank;
 mod refs;
