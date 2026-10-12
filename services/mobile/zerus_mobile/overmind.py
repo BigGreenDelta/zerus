@@ -34,6 +34,7 @@ ENTRY_BOUNDS = {"task": 64, "project": 384, "signature": 128}
 TITLE_CHARS, TITLE_BYTES = 120, 600
 # Reads the connector pages into one relay result: the window field and its first size.
 PAGES = {"task": ("journal_limit", 100), "board": ("limit", 200)}
+PAGE_FIELDS = frozenset({"journal_limit", "journal_before", "limit", "after", "stage"})
 # An applied write's task as a compact card: the board fields of hgs `view(full=false)`
 # plus the transition head and a renamed pin, so its answer always fits one result.
 CARD_KEYS = frozenset({"uuid", "ref", "project", "title", "stage", "priority", "rank", "labels", "pinned", "assignee",

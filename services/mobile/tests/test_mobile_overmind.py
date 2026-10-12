@@ -500,6 +500,59 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
                 await self.connector.heartbeats(None)
             self.assertEqual("mobile_overmind" in sent[-1]["snapshot"], kept)
 
+    async def test_paged_reads_shrink_when_the_native_answer_exceeds_the_output_cap(self):
+        self.connector.journal.close()
+        self.connector = Connector(self.config, max_bytes=2 * 1024 * 1024)  # Native output cap of 2 MiB.
+        await self.connector.snapshot()
+        journal = [{"marker": "[comment]", "text": "ж" * 5000 + str(index)} for index in range(150)]  # About 30 KB escaped each.
+        self.configure(pages={"journal": journal})
+        response = await self.connector.execute(request("overmind_read", "task", {"task": "om-abcde"}))
+        self.assertEqual(response["state"], "completed")
+        self.assertEqual((response["result"]["task"]["journal"], response["result"]["task"]["journal_from"]), (journal[125:], 125))
+        # 100 entries exceed the output cap, 50 the result bound; 25 fit.
+        self.assertEqual([call["payload"]["journal_limit"] for call in self.calls("show")], [100, 50, 25])
+        self.configure(pages={"tasks": [{"uuid": str(uuid.UUID(int=index)), "title": "ж" * 5000} for index in range(300)]})
+        response = await self.connector.execute(request("overmind_read", "board", {"project": "example"}))
+        self.assertEqual((response["state"], len(response["result"]["tasks"])), ("completed", 25))
+        self.assertEqual([call["payload"]["limit"] for call in self.calls("board")], [200, 100, 50, 25])
+
+    async def test_a_write_over_the_native_output_cap_still_answers_with_a_card(self):
+        await self.connector.snapshot()
+        full = {"uuid": TASK, "ref": "om-abcde", "title": "Synthetic", "journal_count": 1, "head": "event-1",
+                "journal": [{"marker": "[comment]", "text": "ж" * 1500000}]}  # About 9 MB of native output.
+        self.configure(comment={"output": {"ok": True, "task": full}})
+        write = request("overmind_write", "comment", {"task": "om-abcde", "text": "Hello"})
+        expected = {"state": "completed", "error": None,
+                    "result": {"ok": True, "task": {"uuid": TASK, "ref": "om-abcde", "title": "Synthetic", "journal_count": 1, "head": "event-1"}}}
+        self.assertEqual(await self.connector.execute(write), expected)
+        self.assertEqual(await self.connector.execute(write), expected)
+        self.assertEqual(len(self.calls("comment")), 1)
+
+    async def test_null_windows_are_absent_and_a_phone_window_never_exceeds_the_default(self):
+        await self.connector.snapshot()
+        self.configure(pages={"journal": [{"marker": "[comment]", "text": "note"}], "tasks": [{"uuid": TASK}]})
+        cases = [("task", {"task": "om-abcde", "journal_limit": None, "journal_before": None}, {"task": "om-abcde", "journal_limit": 100}),
+                 ("task", {"task": "om-abcde", "journal_limit": 400, "journal_before": 3}, {"task": "om-abcde", "journal_limit": 100, "journal_before": 3}),
+                 ("task", {"task": "om-abcde", "journal_limit": 20}, {"task": "om-abcde", "journal_limit": 20}),
+                 ("board", {"project": "example", "limit": None, "after": None, "stage": None}, {"project": "example", "limit": 200}),
+                 ("board", {"project": "example", "limit": 1000, "stage": "Queue"}, {"project": "example", "limit": 200, "stage": "Queue"})]
+        for action, body, forwarded in cases:
+            with self.subTest(action=action, body=body):
+                self.assertEqual((await self.connector.execute(request("overmind_read", action, body)))["state"], "completed")
+                self.assertEqual(self.calls("show" if action == "task" else "board")[-1]["payload"], forwarded)
+
+    async def test_fifty_maximal_decisions_fit_one_result(self):
+        # hgs clips titles to 120 and questions to 500 characters; stage names have at most 40,
+        # session names 256 and project ids 128 UTF-8 bytes. Astral characters escape to 12 bytes.
+        await self.connector.snapshot()
+        astral = "\U0001F600"
+        entry = {"task": TASK, "ref": "om-" + "a" * 32, "project": astral * 32, "title": astral * 120, "stage": astral * 40,
+                 "question": astral * 500, "assignee": {"machine": MACHINE, "name": astral * 256}, "signature": "a" * 64}
+        self.configure(decisions={"output": {"ok": True, "cursor": 2 ** 62, "decisions": [entry] * 50}})
+        response = await self.connector.execute(request("overmind_read", "decisions"))
+        self.assertEqual((response["state"], len(response["result"]["decisions"])), ("completed", 50))
+        self.assertLessEqual(len(json.dumps(response).encode()), 1024 * 1024 - 4096)
+
 
 if __name__ == "__main__":
     unittest.main()

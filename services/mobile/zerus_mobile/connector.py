@@ -54,6 +54,9 @@ MAX_PAYLOAD = MAX_REQUEST_BYTES
 MAX_RESULT = 1024 * 1024
 # One Overmind page leaves room for the receipt envelope below the result bound.
 PAGE_BUDGET = MAX_RESULT - 4096
+# An applied Overmind write's native answer is projected to a card before any size
+# check, so it may be larger than ordinary native output.
+WRITE_OUTPUT = 32 * 1024 * 1024
 # The relay's heartbeat body limit; the Overmind digest is left out rather than exceed it.
 MAX_HEARTBEAT = 1024 * 1024
 ARCHIVE_SNAPSHOT_TTL = 45
@@ -62,6 +65,11 @@ LOCAL_MACHINE_GUARD = contextvars.ContextVar("mobile_local_machine_guard", defau
 
 class ConnectorError(Exception):
     """A deliberately sanitized error, suitable for transmission and logs."""
+
+
+class NativeOutputTooLarge(ConnectorError):
+    def __init__(self):
+        super().__init__("native output exceeds size limit")
 
 
 class RelayError(ConnectorError):
@@ -356,7 +364,7 @@ class Connector:
             while chunk := await stream.read(65536):
                 size += len(chunk)
                 if size > (self.max_bytes if max_output_bytes is None else max_output_bytes):
-                    if not mobile_create: raise ConnectorError("native output exceeds size limit")
+                    if not mobile_create: raise NativeOutputTooLarge()
                     oversized = True
                     continue  # Keep draining the owned supervisor without retaining excess.
                 chunks.append(chunk)
@@ -396,7 +404,7 @@ class Connector:
             joined = asyncio.gather(*tasks)
             if cancelled_during_spawn: raise asyncio.CancelledError()
             stdout, _, _, code = await asyncio.wait_for(asyncio.shield(joined) if mobile_create else joined, self.timeout if timeout is None else timeout)
-            if oversized: raise ConnectorError("native output exceeds size limit")
+            if oversized: raise NativeOutputTooLarge()
             # `hgs read` answers an unknown session with JSON and exit status 1.
             if code != 0 and not (failure_json and stdout.strip()):
                 raise ConnectorError("native command failed")
@@ -814,13 +822,24 @@ class Connector:
             request = {key: request[key] for key in ("task", "sha256") if key in request}
         field, window = overmind.PAGES.get(action, (None, None))
         if field is not None:
-            window = request.get(field, window)  # The phone's own window is where shrinking starts.
+            # A null window, cursor or stage is absent; the phone may ask for a smaller
+            # window than the default, never a larger one. Invalid values reach hgs.
+            request = {key: value for key, value in request.items() if value is not None or key not in overmind.PAGE_FIELDS}
+            given = request.get(field)
+            window = window if given is None else min(given, window) if type(given) is int else given
         while True:
-            result = await self.native(argv, request if field is None else {**request, field: window}, failure_json=True)
-            if not isinstance(result, dict) or type(result.get("ok")) is not bool:
-                raise ConnectorError("native Overmind answer is invalid")
-            if field is None or not result["ok"] or len(json.dumps(result).encode()) <= PAGE_BUDGET:
-                break
+            try:
+                result = await self.native(argv, request if field is None else {**request, field: window}, failure_json=True,
+                                           max_output_bytes=WRITE_OUTPUT if operation == "overmind_write" else None)
+            except NativeOutputTooLarge:
+                if field is None:
+                    raise
+            else:
+                if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                    raise ConnectorError("native Overmind answer is invalid")
+                if field is None or not result["ok"] or len(json.dumps(result).encode()) <= PAGE_BUDGET:
+                    break
+            # Too large to read or to answer: a smaller window, down to a single item.
             if type(window) is not int or window <= 1:
                 return overmind.too_large(field)
             window //= 2
