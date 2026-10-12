@@ -200,6 +200,7 @@ private slots:
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
     void tasksTabKeepsItsProjectAcrossSessions();
+    void composerAddsTasksAndShowsQueues();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -3989,6 +3990,214 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-wide.png"));
         window.resize(820, 640); QTest::qWait(150);
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-narrow.png"));
+    }
+    QSettings().remove("workspace/theme");
+}
+
+// Add as task, the Tasks chip and the session rows' queue badges. The window
+// reads boards only for the projects of listed sessions and the Tasks tab.
+// HGS_COMPOSER_TASKS_PREVIEW=<directory> saves the window in both themes.
+void TestSessionsWindow::composerAddsTasksAndShowsQueues()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto hgs = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, "#!/usr/bin/env python3\nimport json,runpy,sys,time\na=sys.argv[1:]\n"
+        "if a[:1]==['overmind']:\n data=sys.stdin.read();c=' '.join(a[1:-1]);f=__file__\n"
+        " def load(name,default=None):\n  try:return json.load(open(f+name))\n  except FileNotFoundError:return default\n"
+        " if c=='rev':print('{\"ok\":true,\"cursor\":1}')\n"
+        " elif c=='status':print('{\"ok\":true,\"machine\":\"node-arch\",\"cursor\":1}')\n"
+        " elif c=='decisions':print(json.dumps({'ok':True,'cursor':1,'decisions':load('.decisions',[])}))\n"
+        " elif c=='board':\n  p=json.loads(data)['project']\n"
+        "  b=load('.board-'+p,{'tasks':[]});b.update(ok=True,cursor=1,project=p,workflow=load('.workflow'));print(json.dumps(b))\n"
+        " elif c=='workflow get':print(json.dumps({'ok':True,'project':json.loads(data)['project'],'workflow':load('.workflow')}))\n"
+        " elif c=='create':\n  open(f+'.creates','a').write(data+'\\n')\n"
+        "  if load('.slow'):time.sleep(3)\n"
+        "  r=load('.refuse')\n"
+        "  if r:print(json.dumps(r));sys.exit(1)\n"
+        "  q=json.loads(data);n=len(open(f+'.creates').read().splitlines())\n"
+        "  print(json.dumps({'ok':True,'task':{'uuid':'n%d'%n,'ref':'om-n%d'%n,'project':q['project'],'stage':q.get('stage') or 'Backlog'}}))\n"
+        " else:print('{\"ok\":false,\"error\":{\"code\":\"refused\",\"message\":\"Not in this test\"}}');sys.exit(1)\n"
+        "else:\n sys.argv[0]=" + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n"));
+    const auto put = [&](const QString &name, const QByteArray &bytes) { return FakeCli::replace(hgs + name, bytes); };
+    const auto json = [](const QJsonValue &value) {
+        return value.isArray() ? QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact) : QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact);
+    };
+    const auto creates = [&] {
+        QList<QJsonObject> out; QFile file(hgs + ".creates");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) out << QJsonDocument::fromJson(line).object();
+        return out;
+    };
+    const QStringList names{"Backlog", "Queue", "Design", "Build", "Review", "Your Call", "Done", "Icebox"};
+    const QStringList roles{"backlog", "ready", "active", "active", "review", "needs_human", "done", "parked"};
+    QJsonArray stages; for (int i = 0; i < names.size(); ++i) stages.append(QJsonObject{{"name", names[i]}, {"role", roles[i]}});
+    QVERIFY(put(".workflow", json(QJsonObject{{"version", 1}, {"stages", stages}, {"rules", QJsonArray()}, {"evidence", "git_sha_or_text"}, {"session_wip", 1}})));
+    const auto person = [](const QString &machine, const QString &name) { return QJsonObject{{"machine", machine}, {"name", name}}; };
+    const auto dashboard = person("node-arch", "codex/hgs/dashboard"), research = person("node-arch", "kimi/docs/research");
+    const auto task = [](const QString &id, const QString &project, const QString &title, const QString &stage, const QJsonObject &extra) {
+        QJsonObject out{{"uuid", id}, {"ref", "om-" + id}, {"project", project}, {"title", title}, {"stage", stage}, {"rank", id},
+            {"priority", 2}, {"labels", QJsonArray()}, {"flags", QJsonArray()}, {"markers", QJsonArray()}, {"pinned", QJsonValue::Null},
+            {"assignee", QJsonValue::Null}, {"reviewer", QJsonValue::Null}, {"queue_of", QJsonValue::Null}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) out[it.key()] = it.value();
+        return out;
+    };
+    QVERIFY(put(".board-alpha", json(QJsonObject{{"tasks", QJsonArray{
+        task("k3f9x", "alpha", "Stream logs to the Activity tab", "Queue", {{"pinned", dashboard}, {"queue_of", dashboard}}),
+        task("m2q8a", "alpha", "Measure inspection latency", "Queue", {}),
+        task("p7c1d", "alpha", "Pick a store for drafts", "Your Call", {{"assignee", dashboard}})}}})));
+    QVERIFY(put(".board-beta", json(QJsonObject{{"tasks", QJsonArray{
+        task("b1q2w", "beta", "Compare lifecycles", "Queue", {{"pinned", research}, {"queue_of", research}}),
+        task("b3e4r", "beta", "Summarize resume rules", "Queue", {{"pinned", research}, {"queue_of", research}})}}})));
+    QVERIFY(put(".decisions", json(QJsonArray{QJsonObject{{"task", "p7c1d"}, {"ref", "om-p7c1d"}, {"project", "alpha"},
+        {"title", "Pick a store for drafts"}, {"stage", "Your Call"}, {"question", "SQLite or plain files?"}, {"assignee", dashboard}, {"signature", "s1"}}})));
+    QSettings().setValue("workspace/organization", QByteArray(R"({"projects":[
+        {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
+        {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research"]}],"default_project":"alpha"})"));
+    QImage image(48, 32, QImage::Format_RGB32); image.fill(QColor("#3b82f6"));
+    QByteArray png; { QBuffer buffer(&png); buffer.open(QIODevice::WriteOnly); QVERIFY(image.save(&buffer, "PNG")); }
+
+    SessionsWindow window(FakeCli::program(hgs)); window.resize(1240, 760); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *model = window.findChild<OvermindModel *>(); auto *chip = window.findChild<ToolbarChip *>("tasksChip");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
+    auto *list = window.findChild<QListWidget *>("sessionList");
+    QVERIFY(model && chip && composer && tabs && view && list);
+    auto *editor = composer->editor(); auto *status = composer->findChild<QLabel *>("messageStatus");
+    auto *add = composer->findChild<QPushButton *>("addAsTask"); auto *more = composer->findChild<QPushButton *>("addAsTaskMenu");
+    QVERIFY(add && more && more->menu());
+    const auto row = [&](const QString &key) -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(SessionRoles::Key).toString() == key && list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) return list->item(i);
+        return nullptr;
+    };
+    const auto watched = [&] { auto out = model->watchedProjects(); std::sort(out.begin(), out.end()); return out; };
+    const auto highlighted = [&] {
+        QStringList out;
+        for (auto *cards : view->findChildren<QListWidget *>("taskList"))
+            for (int i = 0; i < cards->count(); ++i)
+                if (cards->item(i)->data(TaskRoles::Highlighted).toBool()) out << cards->item(i)->data(TaskRoles::Uuid).toString();
+        std::sort(out.begin(), out.end()); return out;
+    };
+    // The inspector's provider plans are "Plan & agents": Tasks is Overmind's board.
+    QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
+
+    // The chip counts this session's queue and turns Danger while one of its tasks waits in Your Call.
+    QTRY_VERIFY(chip->isVisible());
+    QTRY_COMPARE(chip->fullLabel(), QString("Tasks 1"));
+    QTRY_COMPARE(chip->tone(), ChipTone::Danger);
+    QVERIFY2(chip->toolTip().contains("om-p7c1d") && chip->toolTip().contains("Pick a store for drafts"), qPrintable(chip->toolTip()));
+    // Rows show their queues; boards are read for the projects of the listed sessions.
+    QTRY_COMPARE(watched(), (QStringList{"alpha", "beta"}));
+    QTRY_COMPARE(row("\ncodex/hgs/dashboard")->data(SessionRoles::Queue).toInt(), 1);
+    QVERIFY(row("\ncodex/hgs/dashboard")->data(SessionRoles::YourCall).toBool());
+    QVERIFY2(row("\ncodex/hgs/dashboard")->data(Qt::AccessibleTextRole).toString().contains("Tasks in its queue: 1"),
+             qPrintable(row("\ncodex/hgs/dashboard")->data(Qt::AccessibleTextRole).toString()));
+    QTRY_COMPARE(row("\nkimi/docs/research")->data(SessionRoles::Queue).toInt(), 2);
+    QVERIFY(!row("\nkimi/docs/research")->data(SessionRoles::YourCall).toBool());
+    QCOMPARE(row("\ncodex/website/navigation")->data(SessionRoles::Queue).toInt(), 0);
+
+    // Alt+Enter: this session's Queue, pinned to it, with the draft's images.
+    editor->setFocus(); editor->setPlainText("Polish the empty state");
+    QVERIFY(composer->addAttachment("shot.png", "image/png", png));
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
+    QTRY_COMPARE(creates().size(), 1);
+    auto request = creates()[0];
+    QVERIFY(!QUuid(request.take("request_id").toString()).isNull());
+    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "[Image #1] Polish the empty state"}, {"stage", "Queue"}, {"pinned", dashboard},
+        {"attachments", QJsonArray{QJsonObject{{"name", "shot.png"}, {"mime", "image/png"}, {"data_base64", QString::fromLatin1(png.toBase64())}}}}}));
+    QTRY_VERIFY(editor->toPlainText().isEmpty());
+    QVERIFY(!composer->hasDraft("\ncodex/hgs/dashboard"));
+    QCOMPARE(status->text(), QString("Added om-n1 to this session's queue."));
+    QVERIFY(chip->property("flashing").toBool());
+
+    // A refusal keeps the draft and shows the reason.
+    QVERIFY(put(".refuse", R"({"ok":false,"error":{"code":"invalid_field","field":"attachments","state":"invalid","message":"images are limited to 10 MiB each and 20 MiB in total"}})"));
+    editor->setPlainText("Keep me"); add->click();
+    QTRY_COMPARE(status->text(), QString("The task was not added: images are limited to 10 MiB each and 20 MiB in total"));
+    QCOMPARE(creates().size(), 2);
+    QCOMPARE(editor->toPlainText(), QString("Keep me")); QVERIFY(composer->hasDraft("\ncodex/hgs/dashboard"));
+    QVERIFY(QFile::remove(hgs + ".refuse"));
+    // A create without an answer in time may have happened: the same draft is
+    // added again with the same request_id, which replays instead of adding twice.
+    OvermindModel::Timeouts quick; quick.local = quick.remote = quick.deliveryLocal = quick.deliveryRemote = 500;
+    model->setTimeouts(quick); QVERIFY(put(".slow", "1"));
+    add->click();
+    QTRY_VERIFY2(status->text().contains("may have been added"), qPrintable(status->text()));
+    QCOMPARE(editor->toPlainText(), QString("Keep me"));
+    QVERIFY(QFile::remove(hgs + ".slow")); model->setTimeouts({});
+    add->click();
+    QTRY_VERIFY(editor->toPlainText().isEmpty());
+    auto all = creates(); QCOMPARE(all.size(), 4);
+    QCOMPARE(all[3]["request_id"], all[2]["request_id"]); QVERIFY(all[2]["request_id"] != all[1]["request_id"]);
+    QCOMPARE(status->text(), QString("Added om-n4 to this session's queue."));
+
+    // The arrow: the project pool (Queue, not pinned) and Backlog (the workflow's first backlog stage).
+    editor->setPlainText("Pool idea"); more->menu()->actions().at(0)->trigger();
+    QTRY_VERIFY(editor->toPlainText().isEmpty());
+    request = creates().last(); request.remove("request_id");
+    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "Pool idea"}, {"stage", "Queue"}}));
+    QCOMPARE(status->text(), QString("Added om-n5 to the Alpha pool."));
+    editor->setPlainText("Later idea"); more->menu()->actions().at(1)->trigger();
+    QTRY_VERIFY(editor->toPlainText().isEmpty());
+    request = creates().last(); request.remove("request_id");
+    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "Later idea"}}));
+    QCOMPARE(status->text(), QString("Added om-n6 to Backlog."));
+
+    // A session whose computer Overmind does not know offers only the pool and
+    // Backlog, and shows no queue: its count would be a guess.
+    window.showSession("mac", "claude/infra/review");
+    editor->setPlainText("Remote idea");
+    QTRY_VERIFY(!add->isEnabled());
+    QCOMPARE(add->toolTip(), QString("Overmind does not know this session's computer yet."));
+    QVERIFY(more->isEnabled()); QVERIFY(!chip->isVisible());
+    editor->clear();
+
+    // The chip is the one action that switches the board: the Tasks tab opens on
+    // the session's project with its tasks highlighted and its decision open.
+    window.showSession({}, "codex/hgs/dashboard"); QTRY_VERIFY(chip->isVisible());
+    auto *projects = view->findChild<QComboBox *>("tasksProject");
+    projects->setCurrentIndex(projects->findData("beta")); QCOMPARE(view->project(), QString("beta"));
+    tabs->setCurrentIndex(0);
+    QTest::mouseClick(chip, Qt::LeftButton);
+    QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+    QCOMPARE(view->project(), QString("alpha"));
+    QTRY_COMPARE(highlighted(), QStringList{"k3f9x"});
+    QCOMPARE(view->openedTask(), QString("p7c1d"));
+
+    // A project no listed session uses is read only while the Tasks tab shows it.
+    projects->setCurrentIndex(projects->findData("beta"));
+    auto state = fleet(); auto local = state.local(); local.sessions.removeAt(1); state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state);
+    QTRY_VERIFY(!row("\nkimi/docs/research"));
+    QTRY_COMPARE(watched(), (QStringList{"alpha", "beta"}));
+    projects->setCurrentIndex(projects->findData("alpha"));
+    QTRY_COMPARE(watched(), QStringList{"alpha"});
+
+    const auto directory = qEnvironmentVariable("HGS_COMPOSER_TASKS_PREVIEW");
+    if (directory.isEmpty()) return;
+    QDir().mkpath(directory);
+    for (const QString theme : {"dark", "light"}) {
+        QSettings().setValue("workspace/theme", theme);
+        SessionsWindow shown(FakeCli::program(hgs)); shown.resize(1240, 760); shown.setFleet(fleet()); shown.show();
+        shown.showSession({}, "codex/hgs/dashboard");
+        auto *shownChip = shown.findChild<ToolbarChip *>("tasksChip");
+        QTRY_COMPARE(shownChip->fullLabel(), QString("Tasks 1"));
+        shown.findChild<MessageComposer *>("messageComposer")->editor()->setPlainText("Polish the empty state of the Tasks tab");
+        QTest::qWait(200);
+        QVERIFY(shown.grab().save(directory + "/composer-tasks-" + theme + ".png"));
+        const auto region = [&](const char *name) {
+            auto *widget = shown.findChild<QWidget *>(name);
+            return shown.grab(QRect(widget->mapTo(&shown, QPoint()), widget->size()));
+        };
+        QVERIFY(region("sessionListPanel").save(directory + "/session-queue-" + theme + ".png"));
+        QVERIFY(region("messageComposer").save(directory + "/composer-chip-" + theme + ".png"));
+        // Another session's queue without a decision; then a narrow column.
+        shown.showSession({}, "kimi/docs/research");
+        QTRY_COMPARE(shownChip->fullLabel(), QString("Tasks 2"));
+        QTest::qWait(150);
+        QVERIFY(region("messageComposer").save(directory + "/composer-chip-queue-" + theme + ".png"));
+        shown.resize(900, 760); QTest::qWait(200);
+        QVERIFY(region("messageComposer").save(directory + "/composer-narrow-" + theme + ".png"));
     }
     QSettings().remove("workspace/theme");
 }

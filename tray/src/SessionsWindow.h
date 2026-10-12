@@ -15,6 +15,7 @@ class SwarmController;
 #include <QWidget>
 #include "FleetState.h"
 #include "HgsClient.h"
+#include "MessageComposer.h"
 #include "SessionOrganization.h"
 
 class QAction;
@@ -123,6 +124,21 @@ private:
     void updateTasksView();
     // The Overmind node ID of an entry's machine; empty while unknown.
     QString overmindMachine(const Entry &entry) const;
+    // Whether Overmind can name the entry's session: its machine is known, or
+    // it is the machine of the replica read (machine then stays empty, which
+    // the model and the CLI read as that machine).
+    bool overmindKnown(const Entry &entry, QString *machine) const;
+    // Overmind in the composer and the session list: the Tasks chip, what Add
+    // as task may do for the selected session, and the rows' queue badges.
+    void updateComposerTasks();
+    void refreshOvermind();
+    // Reads the boards the badges and the chip need: the projects of the
+    // listed sessions and of the selected one, and the one the Tasks tab
+    // shows. A project none of them needs is no longer read.
+    void syncOvermindWatches();
+    void addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments,
+                 MessageComposer::TaskDestination destination);
+    void openSessionTasks();
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);
@@ -345,6 +361,13 @@ private:
     class ProcessView *m_processes = nullptr;
     OvermindModel *m_overmind = nullptr;
     TasksView *m_tasks = nullptr;
+    ToolbarChip *m_tasksChip = nullptr;
+    QStringList m_listedProjects;   // projects of the sessions in the list
+    bool m_overmindRefreshPending = false;
+    // An Add as task that timed out, per session: the same request again
+    // reuses its request_id, so the board replays it instead of adding twice.
+    struct UncertainTask { QByteArray fingerprint; QString requestId; };
+    QHash<QString, UncertainTask> m_uncertainTasks;
     QWidget *m_nativeSignIn = nullptr;
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;

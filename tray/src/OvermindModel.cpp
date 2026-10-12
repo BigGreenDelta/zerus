@@ -237,6 +237,16 @@ int OvermindModel::queueCount(const QString &machine, const QString &session) co
     return count;
 }
 
+QList<OvermindModel::Decision> OvermindModel::decisionsFor(const QString &machine, const QString &session) const
+{
+    const QString &owner = machine.isEmpty() ? m_machine : machine;
+    QList<Decision> out;
+    if (owner.isEmpty() || session.isEmpty()) return out;
+    for (const auto &decision : m_decisions)
+        if (decision.assignee.name == session && decision.assignee.machine == owner) out.append(decision);
+    return out;
+}
+
 quint64 OvermindModel::write(const QString &command, QJsonObject request, Callback callback, QObject *context)
 {
     // A repeated request_id replays the stored result instead of writing twice.

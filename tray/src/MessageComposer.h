@@ -21,9 +21,16 @@ class QFrame;
 
 // Drafts belong to a selected session, never to the visible row position.
 // A failed or uncertain delivery keeps text and attachments for recovery.
+// Add as task (Alt+Enter) hands the draft to the owner instead of sending it;
+// only a task that was added clears the draft.
 class MessageComposer : public QWidget {
     Q_OBJECT
 public:
+    // Where Add as task puts the draft: this session's queue (Queue, pinned to
+    // the session), the project pool (Queue, not pinned) or Backlog.
+    enum class TaskDestination { Queue, Pool, Backlog };
+    Q_ENUM(TaskDestination)
+
     explicit MessageComposer(QWidget *parent = nullptr);
     ~MessageComposer() override;
     void setSessionKey(const QString &key);
@@ -57,7 +64,7 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key) && !isWaitingToSend(m_key) && !isAddingTask(m_key); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -69,7 +76,21 @@ public:
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
 
+    // Add as task and its menu; a subagent's composer shows none.
+    void setTaskActionsVisible(bool visible);
+    // Whether a task can be added at all (a task board is reachable)...
+    void setTaskAvailability(bool available, const QString &reason = {});
+    // ...and to this session's queue (Overmind knows the session's computer).
+    void setTaskQueueAvailability(bool available, const QString &reason = {});
+    bool isAddingTask(const QString &key) const { return m_addingTasks.contains(key); }
+    // The owner's answer to addTaskRequested, shown under the field: a task
+    // that was added clears the draft, anything else keeps it.
+    void taskAdded(const QString &key, bool ok, const QString &detail);
+
 signals:
+    // Add as task: the draft stays, locked, until taskAdded answers.
+    void addTaskRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments,
+                          MessageComposer::TaskDestination destination);
     void interruptRequested(const QString &sessionKey);
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
@@ -85,6 +106,9 @@ private:
     using Draft = ComposerDraft;
     bool saveDraft(const QString &key, bool asynchronous = false);
     void send();
+    void addTask(TaskDestination destination);
+    // A button's reason to stay disabled, under the field where Enter would act.
+    void explainDisabled(const QString &reason);
     void restoreDraft();
     void notifyDraft(const QString &key);
     void updatePlaceholder();
@@ -131,6 +155,12 @@ private:
     bool m_settingsEnabled = false;
     QPushButton *m_attach, *m_send, *m_retry;
     QPushButton *m_stop;
+    QWidget *m_addTaskGroup;
+    QPushButton *m_addTask, *m_addTaskMenu;
+    QSet<QString> m_addingTasks;   // keys whose draft is being added as a task
+    QHash<QString, QString> m_renamedTasks;   // a renamed session's old key -> new key, until its answer
+    bool m_taskActions = true, m_taskAvailable = true, m_taskQueueAvailable = true;
+    QString m_taskReason, m_taskQueueReason;
     ComposerToolbar *m_toolbar;
     ToolbarChip *m_attachmentsChip;
     QWidget *m_attachmentList, *m_input;

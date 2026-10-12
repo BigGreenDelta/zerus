@@ -128,6 +128,9 @@ public:
     // Tasks queued for the session in the watched boards. An empty machine
     // means machine(); 0 while it is unknown.
     int queueCount(const QString &machine, const QString &session) const;
+    // The session's tasks waiting in Your Call, from decisions(); the machine
+    // as in queueCount.
+    QList<Decision> decisionsFor(const QString &machine, const QString &session) const;
     qint64 cursor() const { return m_cursor; }   // -1 before the first answer
     QString error() const { return m_error; }    // the last poll failed
 

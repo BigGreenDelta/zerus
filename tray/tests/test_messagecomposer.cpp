@@ -23,6 +23,7 @@
 #include <QLabel>
 #include <QJsonDocument>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QLineEdit>
 #include <QMimeData>
@@ -60,6 +61,23 @@ void observe(MessageComposer &composer, QList<Submission> &submissions)
 }
 
 QPushButton *sendButton(MessageComposer &composer) { return composer.findChild<QPushButton *>("sendMessage"); }
+
+struct TaskRequest {
+    QString key, text;
+    QList<MessageAttachment> attachments;
+    MessageComposer::TaskDestination destination;
+};
+
+void observeTasks(MessageComposer &composer, QList<TaskRequest> &requests)
+{
+    QObject::connect(&composer, &MessageComposer::addTaskRequested, &composer,
+        [&requests](const QString &key, const QString &text, const QList<MessageAttachment> &attachments, MessageComposer::TaskDestination destination) {
+            requests.append({key, text, attachments, destination});
+        });
+}
+
+QPushButton *addTaskButton(MessageComposer &composer) { return composer.findChild<QPushButton *>("addAsTask"); }
+QPushButton *addTaskMenu(MessageComposer &composer) { return composer.findChild<QPushButton *>("addAsTaskMenu"); }
 
 QByteArray pngBytes()
 {
@@ -145,6 +163,8 @@ private slots:
     void hiddenInputKeepsToolbar();
     void attachmentsPopoverShrinksAndTakesPreviewAlong();
     void keyboardRemovalKeepsFocusInTheList();
+    void addAsTaskKeepsTheDraftOnFailure();
+    void addAsTaskOffersPoolBacklogAndAltEnter();
     void toolbarPreview();
 private:
     QTemporaryDir m_settings;
@@ -632,6 +652,17 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     QCOMPARE(composer.width(), 280); QVERIFY(attach->geometry().right() < button->geometry().left());
     QVERIFY(button->geometry().right() < send->geometry().left()); QVERIFY(send->geometry().right() < composer.width());
     QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
+    // Add as task keeps its place between the settings and Send, as an icon.
+    const auto *add = addTaskButton(composer), *more = addTaskMenu(composer);
+    QVERIFY(add->isVisible() && more->isVisible());
+    QVERIFY(add->text().isEmpty()); QCOMPARE(add->accessibleName(), QString("Add as task"));
+    const auto inRow = [&](const QWidget *widget) { return QRect(widget->mapTo(&composer, QPoint()), widget->size()); };
+    QVERIFY(inRow(button).right() < inRow(add).left()); QVERIFY(inRow(add).right() < inRow(more).left() + 1);
+    QVERIFY(inRow(more).right() < inRow(send).left());
+    composer.resize(720, 220); QTest::qWait(20);
+    QCOMPARE(add->text(), QString("Add as task"));
+    QVERIFY(inRow(button).right() < inRow(add).left()); QVERIFY(inRow(more).right() < inRow(send).left());
+    composer.resize(280, 220); QTest::qWait(20);
     composer.deliveryFinished("arch/session", false, "Check terminal before retrying", true); QTest::qWait(20);
     const auto *retry = composer.findChild<QPushButton *>("allowMessageRetry"); QVERIFY(retry->isVisible());
     QCOMPARE(composer.width(), 280); QVERIFY(retry->geometry().top() > button->geometry().bottom());
@@ -1109,6 +1140,131 @@ void TestMessageComposer::hiddenInputKeepsToolbar()
     QVERIFY(window.composer->editor()->isVisible()); QVERIFY(sendButton(*window.composer)->isVisible());
 }
 
+// Add as task: the owner answers with taskAdded. A refusal keeps the text and
+// the images; only a task that was added clears the draft.
+void TestMessageComposer::addAsTaskKeepsTheDraftOnFailure()
+{
+    MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+    QList<TaskRequest> tasks; observeTasks(composer, tasks);
+    composer.setSessionKey("arch/one"); composer.setAvailability(true); composer.resize(720, 260); composer.show();
+    auto *editor = composer.editor(); auto *add = addTaskButton(composer);
+    QVERIFY(add); QVERIFY(!add->isEnabled());   // nothing to add yet
+    editor->setPlainText("Fix the header"); QVERIFY(composer.addAttachment("shot.png", "image/png", pngBytes()));
+    QVERIFY(add->isEnabled());
+    add->click();
+    QCOMPARE(tasks.size(), 1); QCOMPARE(submissions.size(), 0);
+    QCOMPARE(tasks[0].key, QString("arch/one")); QCOMPARE(tasks[0].text, QString("[Image #1] Fix the header"));
+    QCOMPARE(tasks[0].attachments.size(), 1); QCOMPARE(tasks[0].attachments[0].data, pngBytes());
+    QCOMPARE(tasks[0].attachments[0].name, QString("shot.png")); QCOMPARE(tasks[0].attachments[0].mime, QString("image/png"));
+    QCOMPARE(tasks[0].destination, MessageComposer::TaskDestination::Queue);
+    // While it is added the draft stays in view, locked.
+    QVERIFY(composer.isAddingTask("arch/one"));
+    QCOMPARE(editor->toPlainText(), QString("[Image #1] Fix the header")); QVERIFY(editor->isReadOnly());
+    QVERIFY(!add->isEnabled()); QVERIFY(!sendButton(composer)->isEnabled());
+    QVERIFY(!composer.findChild<QPushButton *>("removeAttachment")->isEnabled());
+    QCOMPARE(status(composer)->text(), QString("Adding the task…"));
+    add->click(); QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier); QCOMPARE(tasks.size(), 1);
+    // A refusal keeps text and images and says why.
+    composer.taskAdded("arch/one", false, "The task was not added: choose a project or pin the task to a session");
+    QVERIFY(!composer.isAddingTask("arch/one"));
+    QCOMPARE(editor->toPlainText(), QString("[Image #1] Fix the header")); QVERIFY(!editor->isReadOnly());
+    QCOMPARE(composer.findChildren<QPushButton *>("removeAttachment").size(), 1);
+    QCOMPARE(status(composer)->text(), QString("The task was not added: choose a project or pin the task to a session"));
+    QVERIFY(composer.hasDraft("arch/one")); QVERIFY(add->isEnabled()); QVERIFY(sendButton(composer)->isEnabled());
+    {
+        MessageComposer restarted; restarted.setSessionKey("arch/one");
+        QCOMPARE(restarted.editor()->toPlainText(), QString("[Image #1] Fix the header"));
+    }
+    // Alt+Enter adds it again; success clears the draft and says where it went.
+    editor->setFocus();
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
+    QCOMPARE(tasks.size(), 2); QCOMPARE(submissions.size(), 0);
+    QCOMPARE(tasks[1].destination, MessageComposer::TaskDestination::Queue); QCOMPARE(tasks[1].attachments.size(), 1);
+    composer.taskAdded("arch/one", true, "Added om-k3f9x to this session's queue.");
+    QVERIFY(editor->toPlainText().isEmpty()); QVERIFY(!editor->isReadOnly());
+    QCOMPARE(composer.findChildren<QPushButton *>("removeAttachment").size(), 0);
+    QVERIFY(!composer.hasDraft("arch/one"));
+    QCOMPARE(status(composer)->text(), QString("Added om-k3f9x to this session's queue."));
+    {
+        MessageComposer restarted; restarted.setSessionKey("arch/one");
+        QVERIFY(restarted.editor()->toPlainText().isEmpty());
+    }
+    // A task keeps only images: a file stays in the draft and nothing is asked.
+    editor->setPlainText("Read the notes"); QVERIFY(composer.addAttachment("notes.md", "text/markdown", "# notes"));
+    add->click(); QCOMPARE(tasks.size(), 2);
+    QCOMPARE(status(composer)->text(), QString("A task keeps only images. Remove notes.md first, or send it as a message."));
+    QCOMPARE(editor->toPlainText(), QString("[File #1] Read the notes"));
+    // A task added for a session that is not shown clears only that session's draft.
+    composer.setSessionKey("mac/two"); editor->setPlainText("Second idea"); add->click();
+    QCOMPARE(tasks.size(), 3); QCOMPARE(tasks[2].key, QString("mac/two"));
+    composer.setSessionKey("arch/one");
+    QVERIFY(!composer.isAddingTask("arch/one")); QVERIFY(add->isEnabled());
+    composer.taskAdded("mac/two", true, "Added om-2 to Backlog.");
+    QCOMPARE(editor->toPlainText(), QString("[File #1] Read the notes"));
+    QCOMPARE(composer.findChildren<QPushButton *>("removeAttachment").size(), 1);
+    composer.setSessionKey("mac/two"); QVERIFY(editor->toPlainText().isEmpty()); QVERIFY(!composer.hasDraft("mac/two"));
+}
+
+void TestMessageComposer::addAsTaskOffersPoolBacklogAndAltEnter()
+{
+    MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+    QList<TaskRequest> tasks; observeTasks(composer, tasks);
+    composer.setSessionKey("arch/one"); composer.setAvailability(true); composer.resize(720, 260); composer.show();
+    auto *editor = composer.editor(); auto *add = addTaskButton(composer); auto *more = addTaskMenu(composer);
+    QVERIFY(add && more && more->menu());
+    QCOMPARE(add->text(), QString("Add as task"));
+    const QString shortcut = QKeySequence(Qt::ALT | Qt::Key_Return).toString(QKeySequence::NativeText);
+    QVERIFY2(add->toolTip().contains(shortcut), qPrintable(add->toolTip()));
+    QVERIFY(!more->isEnabled());
+    editor->setPlainText("Idea"); editor->moveCursor(QTextCursor::End);
+    QVERIFY(more->isEnabled());
+    // The arrow offers the project pool (Queue, not pinned) and Backlog.
+    const auto actions = more->menu()->actions();
+    QCOMPARE(actions.size(), 2);
+    QCOMPARE(actions[0]->text(), QString("To the project pool")); QCOMPARE(actions[1]->text(), QString("To Backlog"));
+    actions[0]->trigger();
+    QCOMPARE(tasks.size(), 1); QCOMPARE(tasks[0].destination, MessageComposer::TaskDestination::Pool); QCOMPARE(tasks[0].text, QString("Idea"));
+    QVERIFY(!more->isEnabled());
+    composer.taskAdded("arch/one", false, "No");
+    actions[1]->trigger();
+    QCOMPARE(tasks.size(), 2); QCOMPARE(tasks[1].destination, MessageComposer::TaskDestination::Backlog);
+    composer.taskAdded("arch/one", false, "No");
+    // Alt+Enter (also the keypad's Enter) adds to the session's queue and never
+    // sends; Enter still sends and Shift+Enter still starts a line.
+    editor->setFocus();
+    QTest::keyClick(editor, Qt::Key_Return, Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QString("Idea\n")); QCOMPARE(tasks.size(), 2);
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
+    QCOMPARE(tasks.size(), 3); QCOMPARE(tasks[2].destination, MessageComposer::TaskDestination::Queue);
+    QCOMPARE(submissions.size(), 0); QCOMPARE(editor->toPlainText(), QString("Idea\n"));
+    composer.taskAdded("arch/one", false, "No");
+    QTest::keyClick(editor, Qt::Key_Enter, Qt::AltModifier | Qt::KeypadModifier);
+    QCOMPARE(tasks.size(), 4); QCOMPARE(submissions.size(), 0);
+    composer.taskAdded("arch/one", false, "No");
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(submissions.size(), 1); QCOMPARE(tasks.size(), 4);
+    // Without the session's queue (its computer is not known) the arrow still adds.
+    composer.setTaskQueueAvailability(false, "Overmind does not know this session's computer yet.");
+    QVERIFY(!add->isEnabled()); QCOMPARE(add->toolTip(), QString("Overmind does not know this session's computer yet."));
+    QVERIFY(more->isEnabled());
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier); QCOMPARE(tasks.size(), 4); QCOMPARE(submissions.size(), 1);
+    actions[0]->trigger(); QCOMPARE(tasks.size(), 5);
+    composer.taskAdded("arch/one", false, "No");
+    composer.setTaskQueueAvailability(true);
+    QVERIFY(add->isEnabled()); QVERIFY2(add->toolTip().contains(shortcut), qPrintable(add->toolTip()));
+    // Without a task board nothing is offered.
+    composer.setTaskAvailability(false, "This computer has no task board.");
+    QVERIFY(!add->isEnabled()); QVERIFY(!more->isEnabled()); QCOMPARE(add->toolTip(), QString("This computer has no task board."));
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier); QCOMPARE(tasks.size(), 5);
+    composer.setTaskAvailability(true);
+    QVERIFY(add->isEnabled());
+    // A composer without task actions (a subagent's) shows none and Alt+Enter does nothing.
+    composer.setTaskActionsVisible(false);
+    QVERIFY(!add->isVisible()); QVERIFY(!more->isVisible());
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
+    QCOMPARE(tasks.size(), 5); QCOMPARE(submissions.size(), 1);
+}
+
 void TestMessageComposer::toolbarPreview()
 {
     const auto directory = qEnvironmentVariable("HGS_COMPOSER_PREVIEW");
@@ -1128,6 +1284,7 @@ void TestMessageComposer::toolbarPreview()
         auto *recovery = chip(ComposerToolbar::Slot::Recovery, "recovery", "Retry in 42 s", "42 s", "refresh", ChipTone::Warning);
         auto *cache = chip(ComposerToolbar::Slot::Cache, "cache", "Cache ~4m", "~4m", {}, ChipTone::Success);
         auto *limit = chip(ComposerToolbar::Slot::UsageLimit, "limit", "Limit reached · 2h 14m", "Limit", "attention", ChipTone::Danger);
+        chip(ComposerToolbar::Slot::Tasks, "tasks", "Tasks 3", "3", "tasks", ChipTone::Neutral)->setActive(true);
         auto *context = new QPushButton("70,1k"); context->setFlat(true); context->setFixedHeight(24); composer->toolbar()->add(ComposerToolbar::Slot::Context, context);
         // Stand-ins for the window's compaction indicator and Cancel send link.
         auto *compaction = new QLabel("Compacting context…"); compaction->hide(); composer->toolbar()->add(ComposerToolbar::Slot::Compaction, compaction);

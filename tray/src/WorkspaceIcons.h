@@ -169,6 +169,12 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.setPen(QPen(color, 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             if (name == "send") { p.drawLine(12, 19, 12, 5); p.drawLine(6, 11, 12, 5); p.drawLine(18, 11, 12, 5); }
             else { p.drawLine(6, 9, 12, 15); p.drawLine(12, 15, 18, 9); }
+        } else if (name == "tasks") {
+            // A short checklist: one item done, one still open.
+            p.drawLine(QPointF(4, 8), QPointF(6.2, 10.2)); p.drawLine(QPointF(6.2, 10.2), QPointF(10, 5.5));
+            p.drawLine(13, 8, 20, 8);
+            p.drawRoundedRect(QRectF(4.5, 14, 5, 5), 1, 1);
+            p.drawLine(QPointF(13, 16.5), QPointF(20, 16.5));
         } else if (name == "more") { p.drawPoint(5, 12); p.drawPoint(12, 12); p.drawPoint(19, 12); }
         p.end(); icon.addPixmap(pm);
     }

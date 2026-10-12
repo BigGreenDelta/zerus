@@ -611,6 +611,13 @@ void TestOvermindModel::boardsDecisionsQueuesAndHost()
     QCOMPARE(decision.assignee.machine, QString("m1")); QCOMPARE(decision.assignee.name, QString("codex/demo"));
     QCOMPARE(decision.signature, QString("5f1e"));
     QVERIFY(model.decisionsError().isEmpty());
+    // A session's decisions: an empty machine means this one.
+    QCOMPARE(model.decisionsFor("m1", "codex/demo").size(), 1);
+    QCOMPARE(model.decisionsFor("m1", "codex/demo").first().task, QString("t3"));
+    QCOMPARE(model.decisionsFor({}, "codex/demo").size(), 1);   // this machine: m1
+    QVERIFY(model.decisionsFor("m2", "codex/demo").isEmpty());
+    QVERIFY(model.decisionsFor("m1", "claude/demo").isEmpty());
+    QVERIFY(model.decisionsFor("m1", {}).isEmpty());
 
     // Another host clears what came from the previous one and asks it with @host.
     model.setIntervals(60000, 60000);
@@ -625,6 +632,8 @@ void TestOvermindModel::boardsDecisionsQueuesAndHost()
     QTRY_VERIFY(model.board("demo").loaded); QTRY_VERIFY(model.decisionsLoaded());
     QTRY_COMPARE(model.machine(), QString("m2"));
     QCOMPARE(model.queueCount({}, "codex/demo"), 30);   // this machine is now m2
+    QVERIFY(model.decisionsFor({}, "codex/demo").isEmpty());
+    QCOMPARE(model.decisionsFor("m1", "codex/demo").size(), 1);
     const auto calls = f.calls();
     QVERIFY(calls.size() > before);
     for (qsizetype i = before; i < calls.size(); ++i) QCOMPARE(calls[i]["argv"].toArray().first().toString(), QString("@mac"));

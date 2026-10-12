@@ -265,8 +265,26 @@ private:
         const QString children = SessionList::childrenLabel(index);
         const QRect childrenControl = SessionList::childrenControlRect(option.rect, index, option.font);
         const int childWidth = expandable ? childrenControl.width() : children.isEmpty() ? 0 : CachedText::width(font, children) + 32;
+        const QRect counter = expandable ? childrenControl : QRect(right - childWidth, modelY, childWidth, 20);
+        // Overmind: the session's queue, in the danger tone while one of its
+        // tasks waits in Your Call (then without a number when the queue is empty).
+        const int queue = index.data(SessionRoles::Queue).toInt();
+        const bool yourCall = index.data(SessionRoles::YourCall).toBool();
+        int queueWidth = 0;
+        if (queue > 0 || yourCall) {
+            const QString count = queue > 0 ? QString::number(queue) : QString();
+            queueWidth = 26 + (count.isEmpty() ? 0 : CachedText::width(font, count) + 4);
+            const int queueRight = children.isEmpty() ? right + 1 : counter.left() - 6;
+            const QRect badge(queueRight - queueWidth, modelY + 1, queueWidth, 18);
+            const QColor ink = yourCall ? QColor(dark ? "#ff9ca8" : "#b52d48") : muted;
+            p->setPen(QPen(yourCall ? QColor(dark ? "#5a3540" : "#efc2ca") : QColor(dark ? "#3d4855" : "#dce2e8"), 1));
+            p->setBrush(yourCall ? QColor(dark ? "#2a1e24" : "#fdeef0") : QColor(dark ? "#222a33" : "#f1f4f7"));
+            p->drawRoundedRect(QRectF(badge).adjusted(.5, .5, -.5, -.5), 5, 5);
+            workspaceIcon("tasks", ink).paint(p, QRect(badge.x() + 6, badge.y() + 2, 14, 14));
+            if (!count.isEmpty()) { p->setPen(ink); CachedText::draw(p, badge.adjusted(22, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft, count); }
+            p->setPen(muted);
+        }
         if (!children.isEmpty()) {
-            const QRect counter = expandable ? childrenControl : QRect(right - childWidth, modelY, childWidth, 20);
             const bool hovered = expandable && option.widget && option.widget->property("hoveredChildren").toString() == index.data(SessionRoles::Key).toString();
             if (expandable) {
                 p->setPen(Qt::NoPen); p->setBrush(QColor(dark ? (hovered ? "#344650" : "#28323c") : (hovered ? "#d4e4e9" : "#e7edf2")));
@@ -290,7 +308,7 @@ private:
         const QString effort = index.data(SessionRoles::Effort).toString();
         const bool hasEffort = !effort.isEmpty() && effort != "—";
         const int effortWidth = hasEffort ? CachedText::width(font, effort) + 10 : 0;
-        const int modelWidth = qMax(0, width - (childWidth ? childWidth + 10 : 0) - (hasEffort ? effortWidth + 7 : 0));
+        const int modelWidth = qMax(0, width - (childWidth ? childWidth + 10 : 0) - (queueWidth ? queueWidth + 10 : 0) - (hasEffort ? effortWidth + 7 : 0));
         const QString model = CachedText::elided(font, index.data(SessionRoles::Model).toString(), Qt::ElideMiddle, modelWidth);
         p->setPen(muted); CachedText::draw(p, QRect(textX, modelY, modelWidth, 20), Qt::AlignVCenter, model);
         if (hasEffort) {

@@ -246,6 +246,7 @@ int ComposerToolbar::priority(Slot slot)
     switch (slot) {
     case Slot::MarkRead: return 10;
     case Slot::Attachments: return 20;
+    case Slot::Tasks: return 25;
     case Slot::Cache: return 30;
     case Slot::Recovery: return 40;
     case Slot::UsageLimit: return 50;

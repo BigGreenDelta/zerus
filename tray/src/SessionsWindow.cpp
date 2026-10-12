@@ -58,6 +58,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QCheckBox>
 #include <QInputDialog>
 #include <QWidgetAction>
@@ -692,6 +693,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_markRead=new ToolbarChip;m_markRead->setObjectName("activityMarkRead");
     m_markRead->setLabels(tr("Mark as read"));m_markRead->setIconName("read-all");m_markRead->setTone(ChipTone::Accent);
     toolbar->add(ComposerToolbar::Slot::MarkRead,m_markRead);
+    // This session's Overmind queue; clicking it is the one action that switches the Tasks board.
+    m_tasksChip=new ToolbarChip;m_tasksChip->setObjectName("tasksChip");m_tasksChip->setIconName("tasks");m_tasksChip->setTone(ChipTone::Quiet);
+    toolbar->add(ComposerToolbar::Slot::Tasks,m_tasksChip);
+    connect(m_tasksChip,&QPushButton::clicked,this,&SessionsWindow::openSessionTasks);
+    connect(m_composer,&MessageComposer::addTaskRequested,this,&SessionsWindow::addTask);
     auto *compaction=m_activityView->compactionIndicator();compaction->layout()->setContentsMargins(0,0,0,0);
     toolbar->add(ComposerToolbar::Slot::Compaction,compaction);toolbar->add(ComposerToolbar::Slot::CompactionCancel,m_compactCancel);
     m_cacheStatus=new CacheStatus::Chip;
@@ -742,6 +748,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     subagentTop->addWidget(m_subagentHint);
     m_subagentView = new ActivityView; m_subagentView->setObjectName("subagentActivity"); m_subagentView->browser()->setObjectName("subagentJournal"); subagentLayout->addWidget(m_subagentView, 1);
     m_subagentComposer = new MessageComposer; m_subagentComposer->setObjectName("subagentComposer"); m_subagentComposer->setInputVisible(false);
+    m_subagentComposer->setTaskActionsVisible(false);   // tasks belong to sessions, not to their subagents
     m_subagentContextUsage=new SessionUsage::ContextButton;m_subagentContextUsage->setObjectName("subagentContext");
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);
@@ -922,6 +929,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_tasks = new TasksView(m_overmind); tabs->addTab(m_tasks, tr("Tasks"));
     connect(m_tasks, &TasksView::showRequested, this, [this] { if (selected()) m_detailTabs->setCurrentWidget(m_tasks); });
     connect(m_overmind, &OvermindModel::machineChanged, this, &SessionsWindow::updateTasksView);
+    // Queues and decisions feed the Tasks chip and the session rows' badges.
+    for (const auto signal : {&OvermindModel::machineChanged, &OvermindModel::decisionsChanged})
+        connect(m_overmind, signal, this, &SessionsWindow::refreshOvermind);
+    connect(m_overmind, &OvermindModel::boardChanged, this, &SessionsWindow::refreshOvermind);
+    connect(m_tasks, &TasksView::projectChanged, this, &SessionsWindow::syncOvermindWatches);
     for(auto *view:{m_activityView,m_subagentView})connect(view,&ActivityView::processRequested,this,[this](const QString &id){if(!ProcessSettings::enabled())return;m_detailTabs->setCurrentWidget(m_processes);m_processes->selectProcess(id);});
     connect(m_nativeUi, &NativeUiView::responseRequested, this, [this] { closeSubagent(); m_detailTabs->setCurrentWidget(m_activityStack); });
     m_workSplitter = new QSplitter(Qt::Horizontal); m_workSplitter->setObjectName("sessionWorkSplitter");
@@ -967,7 +979,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
-    m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
+    // The agents' own plans; Tasks is Overmind's board.
+    m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
@@ -2278,6 +2291,11 @@ void SessionsWindow::rebuild()
         }
         for (const auto &id : launches) rows.append({group.id, -1, hasGroups && group.collapsed, {}, id});
     }
+    // Queue badges need the boards of the listed sessions' projects.
+    QStringList listed;
+    for (const auto &row : std::as_const(rows))
+        if (row.entry >= 0 && row.child.isEmpty() && visible[row.entry].session.state != "archived" && !listed.contains(row.group)) listed << row.group;
+    m_listedProjects = listed; syncOvermindWatches();
     const auto rowKey = [&](const Row &row) { return !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
     bool sameRows = m_sessions->count() == rows.size();
     for (int i = 0; sameRows && i < rows.size(); ++i) sameRows = m_sessions->item(i)->data(KeyRole).toString() == rowKey(rows[i]);
@@ -2296,6 +2314,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::LaunchId, row.launch);
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
+        item->setData(SessionRoles::Queue, 0); item->setData(SessionRoles::YourCall, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
         item->setData(SessionRoles::BranchIcon, false);
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
@@ -2389,6 +2408,11 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Working, !isTerminating(e) && currentActivity(s, e.online) && s.activity == "busy" && !s.needsAction());
         item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
+        // Overmind: a session whose computer is not known shows no queue rather than a guess.
+        QString overmind; const bool known = m_overmind && s.state != "archived" && overmindKnown(e, &overmind);
+        const int queue = known ? m_overmind->queueCount(overmind, s.name) : 0;
+        const bool yourCall = known && !m_overmind->decisionsFor(overmind, s.name).isEmpty();
+        item->setData(SessionRoles::Queue, queue); item->setData(SessionRoles::YourCall, yourCall);
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
@@ -2399,6 +2423,8 @@ void SessionsWindow::rebuild()
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
         if (s.unreadReply) accessibleFields << tr("New reply (not viewed yet)");
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
+        if (queue > 0) accessibleFields << tr("Tasks in its queue: %1").arg(queue);
+        if (yourCall) accessibleFields << tr("A task waits for your call");
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
         if (!currentActivity(s, e.online) && !s.currentTool.isEmpty()) accessibleFields << tr("Last recorded: %1").arg(s.currentTool + " / " + s.toolDetail);
@@ -2684,6 +2710,166 @@ void SessionsWindow::updateTasksView()
         recipients.append(recipient);
     }
     m_tasks->setRecipients(recipients);
+    syncOvermindWatches();
+    updateComposerTasks();
+}
+
+bool SessionsWindow::overmindKnown(const Entry &entry, QString *machine) const
+{
+    const QString id = overmindMachine(entry);
+    if (machine) *machine = id;
+    return !id.isEmpty() || entry.host == m_overmind->host();
+}
+
+void SessionsWindow::syncOvermindWatches()
+{
+    if (!m_overmind || !m_tasks) return;
+    QStringList wanted = m_listedProjects;
+    if (const auto *entry = selected(); entry && entry->session.state != "archived") wanted << m_organization.groupFor(entry->identity);
+    // The tab watches the project it shows; it is kept while shown.
+    wanted << m_tasks->project();
+    for (const auto &project : m_overmind->watchedProjects())
+        if (!wanted.contains(project)) m_overmind->unwatchProject(project);
+    const auto watched = m_overmind->watchedProjects();
+    for (const auto &project : std::as_const(wanted))
+        if (!project.isEmpty() && !watched.contains(project)) m_overmind->watchProject(project);
+}
+
+// Boards and decisions arrive outside the fleet polls: the chip follows at once,
+// the rows with the next list pass.
+void SessionsWindow::refreshOvermind()
+{
+    updateComposerTasks();
+    if (m_overmindRefreshPending) return;
+    m_overmindRefreshPending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_overmindRefreshPending = false;
+        if (isVisible()) rebuild();
+    });
+}
+
+void SessionsWindow::updateComposerTasks()
+{
+    if (!m_tasksChip || !m_overmind || !m_composer) return;
+    const auto *entry = selected();
+    const bool live = entry && entry->session.state != "archived";
+    QString machine;
+    const bool known = live && overmindKnown(*entry, &machine);
+    // Add as task needs a task board; the session's queue also needs its computer.
+    if (!m_overmind->isEnabled()) m_composer->setTaskAvailability(false, tr("This computer has no task board. Select a session on a machine with Overmind."));
+    else m_composer->setTaskAvailability(true);
+    if (entry && !live) m_composer->setTaskQueueAvailability(false, tr("This session is archived: add the task to the project pool or to Backlog."));
+    else if (entry && !known) m_composer->setTaskQueueAvailability(false, tr("Overmind does not know this session's computer yet."));
+    else m_composer->setTaskQueueAvailability(true);
+    // The chip shows a count only once it is real: the board read and the
+    // machine known. A failed poll keeps the last count (the tab says why).
+    const QString project = entry ? m_organization.groupFor(entry->identity) : QString();
+    const bool ready = known && m_overmind->isEnabled() && m_overmind->board(project).loaded
+        && !(machine.isEmpty() && m_overmind->machine().isEmpty());
+    if (!ready) { m_tasksChip->setActive(false); return; }
+    const int queue = m_overmind->queueCount(machine, entry->session.name);
+    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name);
+    m_tasksChip->setLabels(tr("Tasks %1").arg(queue), QString::number(queue));
+    m_tasksChip->setTone(!decisions.isEmpty() ? ChipTone::Danger : queue > 0 ? ChipTone::Neutral : ChipTone::Quiet);
+    QStringList detail{queue == 0 ? tr("No tasks in this session's queue.")
+                       : queue == 1 ? tr("1 task in this session's queue.") : tr("%1 tasks in this session's queue.").arg(queue)};
+    for (const auto &decision : decisions) detail << tr("%1 waits for your call: %2").arg(decision.ref, decision.title);
+    detail << tr("Click to open the tasks of its project.");
+    m_tasksChip->setDetail(detail.join('\n'));
+    m_tasksChip->setActive(true);
+}
+
+void SessionsWindow::openSessionTasks()
+{
+    const auto *entry = selected();
+    if (!entry || !m_tasks) return;
+    const QString project = m_organization.groupFor(entry->identity), key = entry->key;
+    QString machine; overmindKnown(*entry, &machine);
+    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name);
+    m_tasks->showProject(project, key);
+    // A decision waiting on this session is what its Danger tone asks for.
+    for (const auto &decision : decisions)
+        if (decision.project == project && m_tasks->project() == project) { m_tasks->openTask(decision.task); break; }
+}
+
+void SessionsWindow::addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments,
+                             MessageComposer::TaskDestination destination)
+{
+    const Entry *entry = nullptr;
+    for (const auto &candidate : std::as_const(m_entries)) if (candidate.key == key) { entry = &candidate; break; }
+    if (!entry) { m_composer->taskAdded(key, false, tr("The task was not added: the session is no longer listed.")); return; }
+    const QString project = m_organization.groupFor(entry->identity);
+    const auto *group = m_organization.group(project);
+    const QString projectName = group ? group->name : project;
+    QJsonObject request{{"project", project}, {"prompt", text}};
+    if (!attachments.isEmpty()) {
+        // Like hgs send, without the inline reference: the prompt carries it.
+        QJsonArray images;
+        for (const auto &attachment : attachments)
+            images.append(QJsonObject{{"name", attachment.name}, {"mime", attachment.mime}, {"data_base64", QString::fromLatin1(attachment.data.toBase64())}});
+        request.insert("attachments", images);
+    }
+    if (destination == MessageComposer::TaskDestination::Queue) {
+        QString machine;
+        if (entry->session.state == "archived") {
+            m_composer->taskAdded(key, false, tr("This session is archived: add the task to the project pool or to Backlog."));
+            return;
+        }
+        if (!overmindKnown(*entry, &machine)) {
+            m_composer->taskAdded(key, false, tr("Overmind does not know this session's computer yet."));
+            return;
+        }
+        QJsonObject pinned{{"name", entry->session.name}};
+        if (!machine.isEmpty()) pinned.insert("machine", machine);
+        request.insert("pinned", pinned);
+    }
+    const auto create = [this, key, destination, projectName](QJsonObject request) {
+        // A create that may have happened goes again with its request_id: the
+        // board then replays it instead of adding the task twice.
+        const QByteArray fingerprint = QCryptographicHash::hash(QJsonDocument(request).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256);
+        const auto previous = m_uncertainTasks.value(key);
+        if (!previous.requestId.isEmpty() && previous.fingerprint == fingerprint) request.insert("request_id", previous.requestId);
+        m_overmind->write("create", request, [this, key, destination, projectName, fingerprint](const OvermindModel::Result &result) {
+            if (result.ok) {
+                m_uncertainTasks.remove(key);
+                const auto task = result.reply.value("task").toObject();
+                const QString ref = task.value("ref").toString().isEmpty() ? tr("the task") : task.value("ref").toString();
+                const QString message = destination == MessageComposer::TaskDestination::Queue ? tr("Added %1 to this session's queue.").arg(ref)
+                    : destination == MessageComposer::TaskDestination::Pool ? tr("Added %1 to the %2 pool.").arg(ref, projectName)
+                    : tr("Added %1 to %2.").arg(ref, task.value("stage").toString());
+                if (key == m_selectedKey) m_tasksChip->flash();
+                m_composer->taskAdded(key, true, message);
+                return;
+            }
+            if (result.uncertain()) m_uncertainTasks.insert(key, {fingerprint, result.requestId});
+            else m_uncertainTasks.remove(key);
+            m_composer->taskAdded(key, false, result.uncertain()
+                ? tr("The task board did not answer in time, so the task may have been added. Adding the same draft again does not add it twice.")
+                : tr("The task was not added: %1").arg(result.refusal.value("message").toString()));
+        }, this);
+    };
+    if (destination == MessageComposer::TaskDestination::Backlog) { create(request); return; }   // the CLI picks the first backlog stage
+    // The session's queue and the pool are the workflow's first ready stage,
+    // from the board when it was read, else from the workflow itself.
+    const auto queueInto = [this, key, create](QJsonObject request, const QString &stage) {
+        if (stage.isEmpty()) { m_composer->taskAdded(key, false, tr("The task was not added: the project's workflow has no Ready stage.")); return; }
+        request.insert("stage", stage);
+        create(request);
+    };
+    const auto &board = m_overmind->board(project);
+    if (board.loaded) {
+        QString stage;
+        for (const auto &candidate : board.stages) if (candidate.role == "ready") { stage = candidate.name; break; }
+        queueInto(request, stage);
+        return;
+    }
+    m_overmind->read("workflow get", {{"project", project}}, [this, key, request, queueInto](const OvermindModel::Result &result) {
+        if (!result.ok) { m_composer->taskAdded(key, false, tr("The task was not added: %1").arg(result.refusal.value("message").toString())); return; }
+        QString stage;
+        for (const auto &value : result.reply.value("workflow").toObject().value("stages").toArray())
+            if (value.toObject().value("role").toString() == "ready") { stage = value.toObject().value("name").toString(); break; }
+        queueInto(request, stage);
+    }, this);
 }
 
 void SessionsWindow::renderDetails()
@@ -2940,8 +3126,8 @@ void SessionsWindow::renderDetails()
         children += QString("<h3>%1</h3><p style='color:%2'>%3</p>").arg(tr("Goal"), m_muted, tr("Goal data is unavailable for this conversation or agent version."));
     }
     const auto taskLists = m_details.value("task_lists").toObject();
-    children += QString("<h3>%1</h3>").arg(tr("Tasks"));
-    if (taskLists.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No task list reported yet. Tasks appear when the agent updates its plan."));
+    children += QString("<h3>%1</h3>").arg(tr("Plan"));
+    if (taskLists.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No plan reported yet. It appears when the agent updates its plan."));
     QStringList taskOwners = taskLists.keys(); taskOwners.removeAll("main");
     if (taskLists.contains("main")) taskOwners.prepend("main");
     for (const auto &owner : taskOwners) {
@@ -3013,9 +3199,9 @@ void SessionsWindow::renderDetails()
         const auto child = childRoster(*entry).value(m_subagentId).toObject();
         children = QString("<h3>%1</h3><p>%2</p><p>%3</p><h3>%4</h3>")
             .arg(htmlText(childName(child, m_subagentId)), htmlText(childStatus(child)),
-                htmlText(child.value("task").toString(child.value("detail").toString())), tr("Tasks"));
+                htmlText(child.value("task").toString(child.value("detail").toString())), tr("Plan"));
         const auto tasks = taskLists.value("agent:" + m_subagentId).toObject().value("items").toArray();
-        if (tasks.isEmpty()) children += "<p>" + tr("No task list reported by this agent.") + "</p>";
+        if (tasks.isEmpty()) children += "<p>" + tr("No plan reported by this agent.") + "</p>";
         for (const auto &item : tasks) {
             const auto task = item.toObject();
             children += QString("<p>%1 %2</p>").arg(task.value("status") == "completed" ? "✓" : "○", htmlText(task.value("title").toString()));

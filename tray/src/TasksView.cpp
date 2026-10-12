@@ -879,6 +879,7 @@ void TasksView::setProject(const QString &project, bool persist)
     if (m_model && !project.isEmpty()) m_model->watchProject(project);
     showPanel(m_openTask);
     render();
+    emit projectChanged(project);
 }
 
 void TasksView::showProject(const QString &project, const QString &sessionKey)

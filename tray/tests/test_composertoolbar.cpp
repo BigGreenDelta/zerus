@@ -78,6 +78,7 @@ private slots:
     void roomyRowsShowWholeLabels();
     void chipStyleStaysOutOfPopover();
     void popoverFitsItsContent();
+    void tasksChipLeadsTheTrailingZone();
     void hiddenChipHandsFocusToTheField();
     void openPopoverFollowsItsContent();
     void exactWidthNeedsNoShortening();
@@ -256,6 +257,38 @@ void TestComposerToolbar::exactWidthNeedsNoShortening()
     row.window.resize(needed, 90); QTRY_COMPARE(row.toolbar->width(), needed); QCoreApplication::processEvents();
     for (auto *chip : {row.attachments, row.read, row.recovery, row.cache}) QVERIFY2(!chip->isCompact(), qPrintable(chip->objectName()));
     verifyFits(row);
+}
+
+// The session's Tasks chip opens the trailing zone, before the usage, recovery
+// and cache notices; a narrow row shortens it after Attachments, before Cache.
+void TestComposerToolbar::tasksChipLeadsTheTrailingZone()
+{
+    Row row;
+    auto *tasks = makeChip("tasks", "Tasks 12", "12", "tasks", ChipTone::Neutral);
+    auto *limit = makeChip("limit", "Limit reached · 2h 14m", "Limit", "attention", ChipTone::Danger);
+    row.toolbar->add(ComposerToolbar::Slot::UsageLimit, limit);
+    row.toolbar->add(ComposerToolbar::Slot::Tasks, tasks);
+    row.show(1100); QVERIFY(QTest::qWaitForWindowExposed(&row.window)); QTRY_VERIFY(tasks->isVisible());
+    QCoreApplication::processEvents();
+    QVERIFY(!tasks->isCompact());
+    int right = -1;
+    for (QWidget *item : QList<QWidget *>{row.attachments, row.read, tasks, limit, row.recovery, row.cache, row.context}) {
+        const QRect rect = bounds(item, row.toolbar);
+        QVERIFY2(rect.left() > right, qPrintable(item->objectName()));
+        right = rect.right();
+    }
+    // Tasks belongs to the trailing zone: it stays right of the gap.
+    QVERIFY(bounds(tasks, row.toolbar).left() - bounds(row.read, row.toolbar).right() > 20);
+    bool compacted = false;
+    for (int width = 1100; width >= 360; width -= 20) {
+        row.window.resize(width, 90); QTRY_COMPARE(row.toolbar->width(), width); QCoreApplication::processEvents(); row.toolbar->fit();
+        QVERIFY2(tasks->isVisible(), qPrintable(QString::number(width)));
+        if (tasks->isCompact()) QVERIFY2(row.attachments->isCompact(), qPrintable(QString::number(width)));
+        if (row.cache->isCompact()) QVERIFY2(tasks->isCompact(), qPrintable(QString::number(width)));
+        compacted = compacted || tasks->isCompact();
+    }
+    QVERIFY(compacted);
+    QCOMPARE(tasks->accessibleName(), QString("Tasks 12"));
 }
 
 void TestComposerToolbar::accentChipIsAGreenPill()

@@ -24,6 +24,7 @@
 #include <QToolTip>
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMimeDatabase>
@@ -94,10 +95,20 @@ protected:
     }
 };
 
+// The arrow of Add as task: its width while there is room, none in the
+// composer's minimum, so a narrow column never has to widen for it.
+class SplitArrow : public QPushButton {
+public:
+    using QPushButton::QPushButton;
+    QSize sizeHint() const override { return {24, 34}; }
+    QSize minimumSizeHint() const override { return {0, 34}; }
+};
+
 class ComposeEdit : public QPlainTextEdit {
 public:
     explicit ComposeEdit(QWidget *parent) : QPlainTextEdit(parent) {}
     std::function<void()> submit;
+    std::function<void()> addTask;
     std::function<bool()> escape;
     std::function<QString()> suggestion;
     std::function<void(const QString &)> attachFile;
@@ -122,8 +133,17 @@ protected:
         }
         if (source->hasText()) insertPlainText(source->text());
     }
+    // Alt+Enter (Option+Return on macOS), also with the keypad's Enter: Add as task.
+    static bool addsTask(const QKeyEvent *event) {
+        return (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && event->modifiers().testFlag(Qt::AltModifier)
+            && !event->modifiers().testFlag(Qt::ShiftModifier) && !event->modifiers().testFlag(Qt::ControlModifier);
+    }
     bool event(QEvent *event) override {
         if (event->type() == QEvent::ShortcutOverride && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+            event->accept(); return true;
+        }
+        // No window shortcut takes Alt+Enter from the field.
+        if (event->type() == QEvent::ShortcutOverride && addsTask(static_cast<QKeyEvent *>(event))) {
             event->accept(); return true;
         }
         // Tab takes the suggested next message into an empty field, as in Claude's
@@ -139,6 +159,10 @@ protected:
         if (!m_composing && event->key() == Qt::Key_Escape) {
             // Like Escape in Terminal: stop a working turn, otherwise leave the field.
             if (!(escape && escape())) clearFocus();
+            event->accept(); return;
+        }
+        if (!m_composing && addsTask(event)) {
+            if (addTask) addTask();
             event->accept(); return;
         }
         if (!m_composing && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
@@ -210,6 +234,30 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_send->setToolTip(tr("Send: Enter; new line: Shift+Enter"));
     m_stop = new QPushButton(tr("Stop")); m_stop->setObjectName("interruptAgent"); m_stop->hide();
     connect(m_stop,&QPushButton::clicked,this,[this]{emit interruptRequested(m_key);});
+    // Add as task: a split button, the default (this session's queue) and an
+    // arrow for the project pool and Backlog.
+    m_addTaskGroup = new QWidget; m_addTaskGroup->setObjectName("addAsTaskGroup");
+    auto *addTaskLayout = new QHBoxLayout(m_addTaskGroup); addTaskLayout->setContentsMargins(0, 0, 0, 0); addTaskLayout->setSpacing(0);
+    m_addTask = new QPushButton(tr("Add as task")); m_addTask->setObjectName("addAsTask"); m_addTask->setAccessibleName(tr("Add as task"));
+    m_addTask->setFixedHeight(34); m_addTask->setIconSize(QSize(15, 15)); m_addTask->setAutoDefault(false);
+    // Never widens the composer: a narrow one shows only the icon (resizeEvent).
+    m_addTask->setMinimumWidth(34);
+    m_addTaskMenu = new SplitArrow; m_addTaskMenu->setObjectName("addAsTaskMenu");
+    m_addTaskMenu->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed); m_addTaskMenu->setFixedHeight(34); m_addTaskMenu->setMaximumWidth(24);
+    m_addTaskMenu->setIconSize(QSize(12, 12)); m_addTaskMenu->setAutoDefault(false);
+    m_addTaskMenu->setAccessibleName(tr("More ways to add as a task"));
+    auto *destinations = new QMenu(m_addTaskMenu); destinations->setObjectName("addAsTaskDestinations");
+    auto *pool = destinations->addAction(tr("To the project pool"));
+    pool->setToolTip(tr("Queue, not pinned: any session of the project can take it"));
+    auto *backlog = destinations->addAction(tr("To Backlog"));
+    destinations->setToolTipsVisible(true);
+    m_addTaskMenu->setMenu(destinations);
+    // A click leaves the caret in the field; Tab still reaches both parts.
+    m_addTask->setFocusPolicy(Qt::TabFocus); m_addTaskMenu->setFocusPolicy(Qt::TabFocus);
+    addTaskLayout->addWidget(m_addTask); addTaskLayout->addWidget(m_addTaskMenu);
+    connect(m_addTask, &QPushButton::clicked, this, [this] { addTask(TaskDestination::Queue); });
+    connect(pool, &QAction::triggered, this, [this] { addTask(TaskDestination::Pool); });
+    connect(backlog, &QAction::triggered, this, [this] { addTask(TaskDestination::Backlog); });
     m_settings = new SettingsButton(this); m_settings->setObjectName("sessionModelSettings"); m_settings->setFixedHeight(34);
     m_settings->setAccessibleName(tr("Model and reasoning effort for this session"));
     m_settingsPopup = new ChipPopover(this); m_settingsPopup->setObjectName("sessionSettingsPopup");
@@ -243,7 +291,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_retry); actions->addWidget(m_settings);
+    actions->addWidget(m_addTaskGroup); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     m_feedback = new QHBoxLayout; m_feedback->setContentsMargins(0, 0, 0, 0); m_feedback->setSpacing(8); inputLayout->addLayout(m_feedback);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
@@ -264,6 +313,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     connect(edit, &QPlainTextEdit::cursorPositionChanged, this, rememberCursor);
     connect(edit, &QPlainTextEdit::selectionChanged, this, rememberCursor);
     edit->submit = [this]() { send(); };
+    edit->addTask = [this]() { addTask(TaskDestination::Queue); };
     edit->escape = [this]() { return requestInterrupt(); };
     edit->suggestion = [this]() { return suggestion(); };
     edit->attachFile = [this](const QString &path) { attachFile(path); };
@@ -298,6 +348,10 @@ void MessageComposer::resizeEvent(QResizeEvent *event)
     const bool narrow = width() < 640;
     if (narrow == m_narrow) return;
     m_narrow = narrow;
+    // A narrow row keeps Add as task as its icon; the name stays its accessible name.
+    m_addTask->setText(narrow ? QString() : tr("Add as task"));
+    if (narrow) m_addTask->setFixedWidth(34);
+    else { m_addTask->setMinimumWidth(34); m_addTask->setMaximumWidth(QWIDGETSIZE_MAX); }
     if (narrow) {
         m_actions->setStretch(1, 1);
         m_actions->removeWidget(m_status);
@@ -363,7 +417,7 @@ bool MessageComposer::requestInterrupt()
 
 bool MessageComposer::offerDraft(const QString &key, const QString &text)
 {
-    if (key.isEmpty() || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if (key.isEmpty() || text.trimmed().isEmpty() || isWaitingToSend(key) || isAddingTask(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
@@ -508,6 +562,8 @@ void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
     m_storedDrafts.remove(oldKey);
     m_drafts.insert(newKey, m_drafts.take(oldKey));
     if(m_preservedDrafts.contains(oldKey))m_preservedDrafts.insert(newKey,m_preservedDrafts.take(oldKey));
+    // A task being added answers under the old key.
+    if (m_addingTasks.remove(oldKey)) { m_addingTasks.insert(newKey); m_renamedTasks.insert(oldKey, newKey); }
     notifyDraft(oldKey); notifyDraft(newKey);
     if (m_key == oldKey) { m_key.clear(); setSessionKey(newKey); }
 }
@@ -529,6 +585,76 @@ void MessageComposer::send()
         m_dismissedSuggestions.insert(m_key, m_suggestions.take(m_key).at); updatePlaceholder();
     }
     emit sendRequested(m_key, draft.text, draft.attachments);
+}
+
+void MessageComposer::explainDisabled(const QString &reason)
+{
+    if (reason.isEmpty()) return;
+    QToolTip::showText(m_editor->mapToGlobal(QPoint(10, m_editor->height())), reason.toHtmlEscaped(), m_editor, {}, 5000);
+}
+
+void MessageComposer::addTask(TaskDestination destination)
+{
+    if (m_key.isEmpty() || !m_taskActions) return;
+    auto *button = destination == TaskDestination::Queue ? m_addTask : m_addTaskMenu;
+    const auto draft = m_drafts.value(m_key);
+    if (!button->isEnabled()) {
+        // Like Send: a draft that cannot go says why, an empty field stays quiet.
+        const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
+        const QString why = !m_taskAvailable ? m_taskReason
+            : destination == TaskDestination::Queue && !m_taskQueueAvailable ? m_taskQueueReason : m_status->text();
+        if (hasContent && !draft.sending && !isAddingTask(m_key) && !isWaitingToSend(m_key)) explainDisabled(why);
+        return;
+    }
+    // Overmind keeps images with a task, nothing else: the file stays in the draft.
+    for (const auto &attachment : draft.attachments)
+        if (!attachment.mime.startsWith(QLatin1String("image/"))) {
+            showError(tr("A task keeps only images. Remove %1 first, or send it as a message.").arg(attachment.name));
+            return;
+        }
+    QToolTip::hideText();
+    if (!saveDraft(m_key)) { updateControls(); return; }
+    m_addingTasks.insert(m_key);
+    auto &current = m_drafts[m_key];
+    if (!current.uncertain) { current.notice.clear(); current.error = false; }
+    if (m_addTaskMenu->hasFocus() || m_addTask->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
+    updateControls();
+    emit addTaskRequested(m_key, draft.text, draft.attachments, destination);
+}
+
+void MessageComposer::taskAdded(const QString &key, bool ok, const QString &detail)
+{
+    QString target = key;
+    while (m_renamedTasks.contains(target)) target = m_renamedTasks.take(target);
+    if (!m_addingTasks.remove(target)) return;
+    auto &draft = m_drafts[target];
+    draft.notice = detail; draft.error = !ok;
+    if (ok) {
+        draft.text.clear(); draft.attachments.clear(); draft.attachmentHashes.clear(); draft.nextAttachmentNumber = 1;
+        draft.position = draft.anchor = 0; draft.uncertain = false;
+    }
+    saveDraft(target);
+    notifyDraft(target);
+    if (target != m_key) return;
+    if (ok) { m_loading = true; restoreDraft(); m_loading = false; }
+    rebuildAttachments(); updateControls();
+}
+
+void MessageComposer::setTaskActionsVisible(bool visible)
+{
+    m_taskActions = visible; m_addTaskGroup->setVisible(visible); updateControls();
+}
+
+void MessageComposer::setTaskAvailability(bool available, const QString &reason)
+{
+    if (available == m_taskAvailable && reason == m_taskReason) return;
+    m_taskAvailable = available; m_taskReason = reason; updateControls();
+}
+
+void MessageComposer::setTaskQueueAvailability(bool available, const QString &reason)
+{
+    if (available == m_taskQueueAvailable && reason == m_taskQueueReason) return;
+    m_taskQueueAvailable = available; m_taskQueueReason = reason; updateControls();
 }
 
 void MessageComposer::attachFiles()
@@ -626,7 +752,8 @@ void MessageComposer::rebuildAttachments()
 
 void MessageComposer::removeAttachment(int index)
 {
-    auto &current = m_drafts[m_key]; if (current.sending || isWaitingToSend(m_key) || index < 0 || index >= current.attachments.size()) return;
+    auto &current = m_drafts[m_key];
+    if (current.sending || isWaitingToSend(m_key) || isAddingTask(m_key) || index < 0 || index >= current.attachments.size()) return;
     QWidget *focus = QApplication::focusWidget();
     const bool keepFocus = focus && focus->objectName() == "removeAttachment" && m_attachmentList->isAncestorOf(focus);
     const auto reference = current.attachments.takeAt(index).reference;
@@ -712,7 +839,8 @@ void MessageComposer::updateControls()
     const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
     const bool tooLong = draft.text.toUtf8().size() > MaxTextBytes;
     const bool waiting = isWaitingToSend(m_key);
-    const bool locked = draft.sending || waiting;
+    const bool adding = isAddingTask(m_key);
+    const bool locked = draft.sending || waiting || adding;
     // Disabling a focused editor makes Qt focus another action (often Stop).
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
@@ -727,13 +855,23 @@ void MessageComposer::updateControls()
     m_retry->setVisible(draft.uncertain && !locked);
     m_settings->setEnabled(!m_key.isEmpty() && !locked);
     if (m_settingsPopup->isVisible()) updateSettingsApply();
-    QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key) : draft.notice;
+    // Add as task needs no running agent: only a draft and a task board.
+    const bool canAddTask = m_taskActions && m_taskAvailable && !m_key.isEmpty() && hasContent && !tooLong && !locked;
+    m_addTask->setEnabled(canAddTask && m_taskQueueAvailable);
+    m_addTaskMenu->setEnabled(canAddTask);
+    const QString shortcut = QKeySequence(Qt::ALT | Qt::Key_Return).toString(QKeySequence::NativeText);
+    m_addTask->setToolTip(!m_taskAvailable && !m_taskReason.isEmpty() ? m_taskReason
+        : !m_taskQueueAvailable && !m_taskQueueReason.isEmpty() ? m_taskQueueReason
+        : tr("Add this draft as a task to this session's queue: %1").arg(shortcut));
+    m_addTaskMenu->setToolTip(!m_taskAvailable && !m_taskReason.isEmpty() ? m_taskReason : tr("Add to the project pool or to Backlog"));
+    QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key)
+        : adding ? tr("Adding the task…") : draft.notice;
     // An available composer may still explain what Send will do first.
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_available || !m_unavailableReason.isEmpty() ? m_unavailableReason
         : hasContent ? (m_savingKeys.contains(m_key) ? tr("Saving draft… Enter to send; Shift+Enter for a new line")
                        : tr("Draft saved locally. Enter to send; Shift+Enter for a new line")) : tr("Enter to send; Shift+Enter for a new line");
     m_status->setText(status); m_status->setToolTip(status);
-    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
+    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && !adding && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
 }
 
 void MessageComposer::showSavedDrafts()
@@ -906,6 +1044,9 @@ void MessageComposer::setTheme(bool dark)
     m_send->setIcon(composerIcon("send", QColor(dark ? "#10231b" : "#ffffff"), QColor(dark ? "#85909e" : "#6d7784")));
     const QColor chevron(dark ? "#a2adbc" : "#627082");
     m_settings->setProperty("chevron", QVariant::fromValue(composerIcon("chevron-down", chevron, chevron))); m_settings->update();
+    const QColor taskInk(dark ? "#e8edf4" : "#1a2733"), taskDisabled(dark ? "#85909e" : "#6d7784");
+    m_addTask->setIcon(composerIcon("tasks", taskInk, taskDisabled));
+    m_addTaskMenu->setIcon(composerIcon("chevron-down", chevron, taskDisabled));
     setStyleSheet(QString(R"(
         QPlainTextEdit#messageInput { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
         QPlainTextEdit#messageInput:focus { border-color:%5; }
@@ -937,6 +1078,14 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#attachMessageFile:hover { background:%1; border-color:%5; }
         QPushButton#attachMessageFile:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
+        QPushButton#addAsTask { padding:0 10px; min-height:0; font-weight:600; color:%2; background:transparent; border:1px solid %3; border-right:0;
+            border-top-left-radius:7px; border-bottom-left-radius:7px; border-top-right-radius:0; border-bottom-right-radius:0; }
+        QPushButton#addAsTaskMenu { padding:0; min-height:0; background:transparent; border:1px solid %3;
+            border-top-right-radius:7px; border-bottom-right-radius:7px; border-top-left-radius:0; border-bottom-left-radius:0; }
+        QPushButton#addAsTaskMenu::menu-indicator { image:none; width:0; }
+        QPushButton#addAsTask:hover, QPushButton#addAsTaskMenu:hover { background:%1; }
+        QPushButton#addAsTask:disabled { color:%7; }
+        QPushButton#addAsTask:focus[keyboardFocus="true"], QPushButton#addAsTaskMenu:focus[keyboardFocus="true"] { border-color:%5; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")
         .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark));

@@ -141,6 +141,9 @@ signals:
     void taskOpened(const QString &uuid);
     // showProject asks the window to show this tab.
     void showRequested();
+    // The project shown changed (its board is watched; the previous one is
+    // left to the window, which knows whether other views still need it).
+    void projectChanged(const QString &project);
 
 protected:
     void showEvent(QShowEvent *event) override;
