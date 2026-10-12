@@ -24,7 +24,8 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   move --json {task, to}  |  done --json {task}  |  reopen --json {task}
   reorder --json {task, before?}  |  pin --json {task, session?: {machine?, name}}  |  unpin --json {task}
   send --json {task, session: {machine?, name}, confirm?: [codes]}   claim and type the task into a session
-  review-send --json {task, session, confirm?}  |  rework-send --json {task, confirm?}  |  answer --json {task, answer, confirm?}
+  review-send --json {task, session, confirm?}  |  rework-send --json {task, confirm?}
+  answer --json {task, answer, confirm?, repeat?}   repeat: the request_id that recorded an undelivered answer
   attachment --json {task, sha256}         local path of a task image, fetched from another machine when needed
   resolve-delivery --json {task, delivered: true|false}
   label --json {task, label, present}  |  link --json {task, relation, target, present}

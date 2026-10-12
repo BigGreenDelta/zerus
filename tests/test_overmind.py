@@ -770,6 +770,85 @@ class AgentSession(unittest.TestCase):
         self.assertEqual(self.received().count(b'[Overmind '), 1)
         self.assertEqual(self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)[1], body)
 
+    def test_an_undelivered_answer_is_typed_again_by_a_new_request_that_repeats_it(self):
+        ref = self.task()
+        self.asks_a_question(ref)
+        shim = (self.bin / 'tmux').read_text()
+        self.script('tmux', '#!/bin/sh\nif [ "$1" = load-buffer ]; then exit 1; fi\n' + shim.split('\n', 1)[1])
+        recording = str(uuid.uuid4())
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': recording}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'not_delivered'), body)
+        self.assertIn(f'repeat {recording}', body['error']['message'])
+        # A second failed repeat stores nothing, and a later repeat of the same recording still works.
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': str(uuid.uuid4()), 'repeat': recording}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'not_delivered'), body)
+        self.script('tmux', shim)
+        again = {'task': ref, 'answer': 'REST', 'request_id': str(uuid.uuid4()), 'repeat': recording}
+        code, body = self.overmind('answer', '--json', data=again, agent=False)
+        self.assertEqual((code, body['delivery'], body['task']['stage']), (0, 'sent', 'Build'), body)
+        self.wait_for(lambda: b'REST' in self.received())
+        markers = [j['marker'] for j in body['task']['journal']]
+        self.assertEqual((markers.count('[answer]'), markers.count('[sent]')), (1, 1), markers)
+        self.assertEqual(self.received().count(b'[Overmind '), 1)
+        # Typed under the recording request's input id, never the new one.
+        receipts = self.state / 'input_receipts'
+        self.assertTrue((receipts / f'{recording}.json').exists())
+        self.assertFalse((receipts / f"{again['request_id']}.json").exists())
+        # A retry of the new request replays its receipt; another repeat finds nothing unsent.
+        typed = self.received()
+        self.assertEqual(self.overmind('answer', '--json', data=again, agent=False), (0, body))
+        code, refused = self.overmind('answer', '--json', data=dict(again, request_id=str(uuid.uuid4())), agent=False)
+        self.assertEqual((code, refused['error']['code']), (1, 'nothing_to_repeat'), refused)
+        self.assertEqual(self.received(), typed)
+
+    def test_a_repeat_needs_a_recorded_answer_that_is_still_unsent(self):
+        ref = self.task()
+        self.asks_a_question(ref)
+        def repeat(recording, answer='REST'):
+            return self.overmind('answer', '--json', agent=False,
+                                 data={'task': ref, 'answer': answer, 'request_id': str(uuid.uuid4()), 'repeat': recording})
+        code, body = repeat('not-a-uuid')
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'invalid_field', 'repeat'), body)
+        code, body = repeat(str(uuid.uuid4()))
+        self.assertEqual((code, body['error']['code']), (1, 'nothing_to_repeat'), body)
+        recording = str(uuid.uuid4())
+        self.append('transition', {'action': 'answer', 'to': '@resume', 'fields': {'answer': 'REST'}, 'session': None,
+                                   'children': []}, request_id=recording)  # recorded, then hgs stopped
+        code, body = repeat(recording, 'gRPC')
+        self.assertEqual((code, body['error']['code'], body['error']['field']), (1, 'answer_changed', 'answer'), body)
+        # An uncertain delivery recorded its outcome: nothing is left to repeat.
+        self.type_directly(recording)
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': recording}, agent=False)
+        self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
+        before = self.received()
+        code, body = repeat(recording)
+        self.assertEqual((code, body['error']['code']), (1, 'nothing_to_repeat'), body)
+        self.assertEqual(self.received(), before)
+
+    def test_a_repeat_after_a_sent_answer_or_a_moved_task_refuses(self):
+        ref = self.task()
+        self.asks_a_question(ref)
+        sent = str(uuid.uuid4())
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': sent}, agent=False)
+        self.assertEqual((code, body['delivery']), (0, 'sent'), body)
+        self.wait_for(lambda: b'REST' in self.received())
+        code, body = self.overmind('answer', '--json', agent=False,
+                                   data={'task': ref, 'answer': 'REST', 'request_id': str(uuid.uuid4()), 'repeat': sent})
+        self.assertEqual((code, body['error']['code']), (1, 'nothing_to_repeat'), body)
+        # A recorded but unsent answer whose task moved on since is not typed into the session.
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.ok('call-human', '--json', data={'task': ref, 'question': 'And the version?'})
+        moved = str(uuid.uuid4())
+        self.append('transition', {'action': 'answer', 'to': '@resume', 'fields': {'answer': 'v2'}, 'session': None,
+                                   'children': []}, request_id=moved)
+        self.append('transition', {'action': 'advance', 'to': 'Review', 'fields': {'worklog': 'w', 'evidence': 'e'}},
+                    actor={'kind': 'agent', 'machine': machine, 'session': self.name})
+        before = self.received()
+        code, body = self.overmind('answer', '--json', agent=False,
+                                   data={'task': ref, 'answer': 'v2', 'request_id': str(uuid.uuid4()), 'repeat': moved})
+        self.assertEqual((code, body['error']['code']), (1, 'nothing_to_repeat'), body)
+        self.assertEqual(self.received(), before)
+
     def test_a_recorded_answer_is_never_replaced_by_another_text(self):
         request_id = str(uuid.uuid4())
         ref = self.task()

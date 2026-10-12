@@ -705,6 +705,11 @@ struct AnswerRequest {
     request_id: String,
     task: String,
     answer: String,
+    /// The request_id that recorded this answer, when typing it surely failed:
+    /// a new request types the recorded answer again under that request's input
+    /// id, so a client that cannot reuse a request_id still never types it twice.
+    #[serde(default)]
+    repeat: String,
     #[serde(default)]
     confirm: Confirmed,
 }
@@ -717,21 +722,34 @@ pub fn answer(ctx: &mut Ctx, request: Value) -> Result<Value> {
 pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: AnswerRequest = parse(&request)?;
+    let repeat = !req.repeat.is_empty();
+    if repeat && uuid::Uuid::parse_str(&req.repeat).is_err() {
+        return Err(Refusal::field("invalid_field", "repeat", "invalid", "repeat names the request_id that recorded the answer").into());
+    }
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "answer", &request))? {
         return Ok(result);
     }
     if let Some(session) = assignee_on_another_machine(ctx, &req.task)? {
         return route(ctx, "answer", &request, &req.task, &session, local_only);
     }
-    let input = input_id(&req.request_id);
-    let resumed = typed_before(&req.request_id);
+    // The request that recorded the answer: this one, or the one it repeats.
+    let recording = if repeat { req.repeat.as_str() } else { req.request_id.as_str() };
+    let input = input_id(recording);
+    let resumed = typed_before(recording);
+    let unsent = || -> Result<()> { refuse("nothing_to_repeat", "that request recorded no answer that is still unsent; check the task") };
     // An answer this request recorded but did not settle is sent again.
     let (uuid, session, pending) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
-        let pending = pending_transition(tx, &task, &req.request_id, "answer")?;
+        let pending = pending_transition(tx, &task, recording, "answer")?;
+        if repeat && pending.is_none() {
+            unsent()?;
+        }
         // Repeating the request sends the recorded answer; another text is another request.
         if pending.as_ref().is_some_and(|event| event.payload["fields"]["answer"] != commands::normalize(&req.answer).as_str()) {
+            if repeat {
+                return Err(Refusal::field("answer_changed", "answer", "invalid", "repeat sends the recorded answer unchanged").into());
+            }
             return refuse("request_reused", "this request_id was already used for a different request");
         }
         let session = if resumed || pending.is_some() { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
@@ -742,6 +760,10 @@ pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Valu
     let recorded = pending.as_ref().map(|e| e.payload["fields"]["answer"].as_str().unwrap_or_default().to_owned());
     let (typed, settles) = ctx.store.write(|tx| {
         let task = load_writable(tx, &uuid)?;
+        // Another repeat settled it meanwhile.
+        if repeat && pending_transition(tx, &task, recording, "answer")?.is_none() {
+            unsent()?;
+        }
         let (text, settles) = match (&pending, &recorded) {
             (Some(event), Some(text)) => (text.clone(), event.id.clone()),
             _ if resumed => (commands::normalize(&req.answer), String::new()),
@@ -755,8 +777,8 @@ pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Valu
         Ok((lenient(render(tx, &load(tx, &uuid)?, "answer", &text, &session), resumed)?, settles))
     })?;
     let outcome = deliver_resumed(&session, target, Ok(Vec::new()), typed, &input);
-    // The answer stays recorded; the person can repeat the request to send it again.
-    let hint = format!("; the answer is recorded, repeat this answer with request_id {input} to send it again");
+    // The answer stays recorded; the person can repeat the request, or send a new one with `repeat`, to type it again.
+    let hint = format!("; the answer is recorded: repeat this answer with request_id {input}, or send it in a new request with repeat {input}, to type it again");
     settle(ctx, "answer", &request, &uuid, "answer", &session, outcome, &settles, &hint, |tx, actor, task| {
         journal(tx, actor, task, "[comment]", &format!("the answer was not delivered to {}", session.name), "")
     })
