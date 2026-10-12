@@ -34,6 +34,9 @@ struct SessionInfo {
     bool replyScheduled = false;
     int scheduledJobs = -1, recurringSchedules = -1;
     double nextScheduledAt = 0;
+    int backgroundProcesses = -1;
+    double backgroundStarted = 0, backgroundObservedAt = 0;
+    QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.

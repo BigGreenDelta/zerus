@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 mod control;
 mod history;
 mod native;
+pub(super) use control::WorkSample;
 #[cfg(test)]
 mod tests;
 
@@ -402,6 +403,18 @@ pub(super) fn dsh_snapshot(record: &Value, inspected: &Value) -> Value {
         },
         false,
     )
+}
+pub(super) fn dsh_work(record: &Value, inspected: &Value, live: bool) -> Value {
+    if !live || (!inspected["jobs"].is_array() && !inspected["shellCalls"].is_array()) {
+        return json!({"count":null,"started_at":null,"command":"","sampled_at":now()});
+    }
+    let jobs = native::dsh(record, inspected);
+    let current: Vec<_> = jobs.values().filter(|j| j["observed"] == true
+        && matches!(string(j, "source"), "dsh_jobs" | "dsh_calls")
+        && matches!(string(j, "status"), "starting" | "running" | "stopping")).collect();
+    let first = current.iter().min_by(|a,b| a["started_at"].as_f64().unwrap_or(0.).total_cmp(&b["started_at"].as_f64().unwrap_or(0.)));
+    json!({"count":current.len(),"started_at":first.map(|j|j["started_at"].clone()),
+        "command":first.map(|j|journal::clipped(&j["command"],240)).unwrap_or_default(),"sampled_at":now()})
 }
 fn read_tail(path: &Path) -> Result<(String, bool)> {
     let mut f = open_regular(path)?;

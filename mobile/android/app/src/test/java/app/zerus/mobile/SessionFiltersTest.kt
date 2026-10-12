@@ -6,6 +6,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionFiltersTest {
+    @Test fun liveShellWorkIsActiveAndOutranksScheduleWhileNativeInputStaysIdle() {
+        val item = session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"schedules":{"count":1}}""")
+        assertEquals("Background work",SessionFilters.status(item,true))
+        assertTrue(SessionFilters.working(item,true))
+        assertTrue(SessionFilters.active(item,true))
+        assertFalse(SessionFilters.scheduled(item,true))
+        assertFalse(SessionFilters.needsAction(item))
+        assertFalse(SessionFilters.working(item,false))
+        val finished=item.copy(raw=JSONObject(item.raw.toString()).put("process_work",JSONObject().put("count",0)).put("schedules",JSONObject().put("count",0)))
+        assertEquals("Ready",SessionFilters.status(finished,true))
+        assertFalse(SessionFilters.active(finished,true))
+    }
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
     private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =
         Session(Target("same", name, "run", "conversation", connection, archive), "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, JSONObject(raw))

@@ -50,6 +50,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
 #include "QuestionCard.h"
@@ -169,6 +170,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
+    void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
@@ -2300,6 +2302,45 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
 }
 
+void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
+{
+    QSettings().setValue("processes/enabled", true);
+    auto state = fleet(); auto box = state.local(); auto &s = box.sessions[1];
+    s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1;
+    s.backgroundStarted = QDateTime::currentSecsSinceEpoch() - 90;
+    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList");
+    QListWidgetItem *row = nullptr;
+    for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) row=list->item(i);
+    QVERIFY(row);
+    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background work"));
+    QVERIFY(row->data(SessionRoles::Working).toBool());
+    QVERIFY(!row->data(SessionRoles::Scheduled).toBool());
+    QCOMPARE(row->data(SessionRoles::WorkingSince).toDouble(),s.backgroundStarted);
+    QVERIFY(row->data(SessionRoles::Detail).toString().contains("build --wait"));
+    list->setCurrentItem(row);
+    QSignalSpy terminated(&window,&SessionsWindow::sessionActivated);
+    QContextMenuEvent event(QContextMenuEvent::Mouse,list->visualItemRect(row).center(),list->viewport()->mapToGlobal(list->visualItemRect(row).center()));
+    QApplication::sendEvent(list->viewport(),&event);
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    auto *action=menu->findChild<QAction *>("contextOpenProcesses"); QVERIFY(action); QVERIFY(action->isEnabled());
+    action->trigger(); menu->hide();
+    QCOMPARE(window.findChild<QTabWidget *>("sessionDetailTabs")->currentWidget(),window.findChild<ProcessView *>());
+    QCOMPARE(terminated.size(),0);
+    auto *badge=window.findChild<QLabel *>("badge"); QVERIFY(badge);
+    QVERIFY(badge->width() >= badge->fontMetrics().horizontalAdvance(badge->text()) + 16);
+    const QString preview=qEnvironmentVariable("ZERUS_BACKGROUND_PREVIEW");
+    if(!preview.isEmpty())QVERIFY(window.grab().save(preview));
+    box.sessions[1].backgroundProcesses=0; box.sessions[1].scheduledJobs=0;
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) {
+        QCOMPARE(list->item(i)->data(SessionRoles::Status).toString(),QString("Ready"));
+        QVERIFY(!list->item(i)->data(SessionRoles::Working).toBool());
+    }
+}
+
 void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery()
 {
     auto state = fleet(); auto box = state.local();
@@ -2477,18 +2518,15 @@ void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts()
     QFETCH(bool, busy);
     QFETCH(bool, providerFailure);
     const QString capture = m_dir->filePath("message-capture.json");
-    const QString snapshot = m_dir->filePath(QString("message-inspect-%1.json").arg(QTest::currentDataTag()));
-    QFile::remove(snapshot);
     const QString program = m_dir->filePath("message-hgs");
+    QFile::remove(program + ".details"); // Each data row starts with fresh native state.
     QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
     const QByteArray captureLiteral = QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact);
-    QByteArray body = "#!/usr/bin/env python3\nimport sys,json,time\nfrom pathlib import Path\nargs=sys.argv[1:]\nif args[0].startswith('@'): args=args[1:]\n";
+    QByteArray body = "#!/usr/bin/env python3\nimport sys,json,time,pathlib\nargs=sys.argv[1:]\nif args[0].startswith('@'): args=args[1:]\n";
     body += "capture=" + captureLiteral + "[0]\n";
-    body += "snapshot=Path(" + FakeCli::pythonString(snapshot) + ")\n";
-    body += R"PY(if args[0]=='inspect' and snapshot.exists():
- print(snapshot.read_text())
-elif args[0]=='inspect':
- print(json.dumps({'tracked':True,'run_id':'run-ready','conversation_id':'conversation-ready','runtime_state':'live','process_state':'running','activity':'idle','phase':'idle','last_event_at':2000000000,'events':[],'cursor':0}))
+    body += R"PY(if args[0]=='inspect':
+ snapshot=pathlib.Path(__file__+'.details')
+ print(snapshot.read_text() if snapshot.exists() else json.dumps({'tracked':True,'run_id':'run-ready','conversation_id':'conversation-ready','runtime_state':'live','process_state':'running','activity':'idle','phase':'idle','last_event_at':2000000000,'events':[],'cursor':0}))
 elif args[0]=='send':
  payload=json.load(sys.stdin)
  with open(capture,'w') as f: json.dump({'args':args,'payload':payload},f)
@@ -2503,6 +2541,17 @@ elif args[0]=='send':
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
     auto *send = window.findChild<MessageComposer *>("messageComposer")->findChild<QPushButton *>("sendMessage"); QVERIFY(send);
     auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
+    const auto applyDetails = [&](const QJsonObject &details) {
+        QVERIFY(FakeCli::replace(program + ".details", QJsonDocument(details).toJson()));
+        // Drain old replies, then start an inspection reading the new atomic
+        // snapshot. All later automatic polls now agree with the test state.
+        QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+        QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, "codex/hgs/dashboard") && (issued = replies.size(), true)));
+        QTRY_VERIFY(std::any_of(replies.cbegin() + issued, replies.cend(), [](const QList<QVariant> &reply) {
+            return reply[0].toString().isEmpty() && reply[1].toString() == "codex/hgs/dashboard" && reply[3].toString().isEmpty();
+        }));
+        client->inspectionReady({}, "codex/hgs/dashboard", details);
+    };
     QSignalSpy delivered(client, &HgsClient::messageSent);
     const QString message = QString::fromUtf8("Review this screenshot.\nКавычки: '$HOME' `whoami`");
     setComposerText(composer, message);
@@ -2537,8 +2586,7 @@ elif args[0]=='send':
         {"runtime_state", "live"}, {"process_state", "running"}, {"activity", "idle"}, {"phase", "idle"}, {"last_event_at", 2000000000},
         {"cursor", 1}, {"events", QJsonArray{QJsonObject{{"seq", 1}, {"at", QDateTime::currentMSecsSinceEpoch() / 1000.0},
         {"type", promptEvent}, {"detail", payload.value("text")}}}}};
-    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
-    client->inspectionReady({}, "codex/hgs/dashboard", details);
+    applyDetails(details);
     auto *activity = window.findChild<QTextBrowser *>("activity"); QVERIFY(activity);
     QTRY_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
     QTRY_COMPARE(activity->toPlainText().count("Review this screenshot."), 1);
@@ -2551,9 +2599,8 @@ elif args[0]=='send':
         {"message_id",payload["request_id"]},{"at",details["events"].toArray().first().toObject()["at"]},
         {"detail",payload["text"]},{"submitted_text",payload["text"]},{"attachments",QJsonArray{attachment}}}};
     details["events"] = QJsonArray{};
-    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
     QSignalSpy documentChanges(activity, &QTextBrowser::textChanged);
-    client->inspectionReady({}, "codex/hgs/dashboard", details);
+    applyDetails(details);
     QTRY_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
     QCOMPARE(documentChanges.size(), 0);
     QTRY_COMPARE(activity->toPlainText().count("Review this screenshot."), 1);
@@ -3411,7 +3458,8 @@ void TestSessionsWindow::activityEscapingAndActions()
         {"cwd", "/workspace/zerus"}, {"prompt", "<b>literal request</b>"}, {"cursor", 5},
         {"events", QJsonArray{QJsonObject{{"seq", 4}, {"at", 1790928000}, {"type", "PostToolUse"}, {"tool", "Bash"}, {"detail", "<img src='file:///not-loaded'>"}},
             QJsonObject{{"seq", 5}, {"at", 1790928001}, {"type", "Stop"}, {"detail", QString("A response paragraph.\n\n").repeated(60)}}}}};
-    SessionsWindow window(programInspecting("activity-escaping-hgs", data)); window.setFleet(fleet()); window.setClipboardMode(true); window.show();
+    const auto fixture = programInspecting("activity-actions-hgs", data); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(fixture); window.setFleet(fleet()); window.setClipboardMode(true); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList"); list->setCurrentRow(0);
     auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     client->inspectionReady({}, "codex/hgs/dashboard", data);

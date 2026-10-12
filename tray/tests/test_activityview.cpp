@@ -55,12 +55,9 @@ qint64 threadCpuMs()
 {
 #ifdef Q_OS_WIN
     FILETIME created{}, exited{}, kernel{}, user{};
-    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
-        qFatal("Cannot read this test thread's CPU time");
-    const auto ticks = [](FILETIME value) {
-        return (quint64(value.dwHighDateTime) << 32) | value.dwLowDateTime;
-    };
-    return qint64((ticks(kernel) + ticks(user)) / 10000);
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) qFatal("Cannot read thread CPU time");
+    const auto ticks = [](const FILETIME &time) { return (quint64(time.dwHighDateTime) << 32) | time.dwLowDateTime; };
+    return qint64((ticks(kernel) + ticks(user)) / 10000); // 100 ns units.
 #else
     timespec now{}; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;

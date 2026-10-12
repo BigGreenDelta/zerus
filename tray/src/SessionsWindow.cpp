@@ -145,7 +145,7 @@ QColor tone(const QString &status, bool dark)
 {
     if (status == "Needs approval" || status == "Needs input" || status == "Sign in") return QColor(dark ? "#f0c77b" : "#885400");
     if (status == "Error") return QColor(dark ? "#ff9298" : "#b52b3d");
-    if (status == "Working" || status == "Using a tool" || status == "Compacting") return QColor(dark ? "#55e39a" : "#12834e");
+    if (status == "Working" || status == "Using a tool" || status == "Compacting" || status == "Background work") return QColor(dark ? "#55e39a" : "#12834e");
     if (status == "Ready") return QColor(dark ? "#78dabb" : "#11775d");
     if (status == "Paused") return QColor(dark ? "#b9a5ed" : "#7051a4");
     return QColor(dark ? "#9aa4b2" : "#646f7e");
@@ -2353,7 +2353,7 @@ void SessionsWindow::rebuild()
             for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == row.group) {
                 if (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e)))) ++alerts;
                 if (e.session.unreadReply) ++unread;
-                if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++busy;
+                if (SessionPresentation::working(e.session, e.online)) ++busy;
             }
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled | Qt::ItemIsDragEnabled);
             item->setData(TitleRole, group->name);
@@ -2415,15 +2415,15 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Failure, s.phase=="error");
         item->setData(SessionRoles::Draft, m_composer->hasDraft(e.key));
         item->setData(SessionRoles::Unread, !terminating && s.unreadReply);
-        item->setData(SessionRoles::Working, !isTerminating(e) && currentActivity(s, e.online) && s.activity == "busy" && !s.needsAction());
-        item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+        item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
+        item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
-            accessibleFields << tr("%1 since %2").arg(s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
+            accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background work") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
         if (s.unreadReply) accessibleFields << tr("New reply (not viewed yet)");
@@ -2455,7 +2455,7 @@ void SessionsWindow::rebuild()
     int visibleWorking = 0, visibleAttention = 0;
     for (const auto &e : visible) {
         if (entryNeedsAttention(e)) ++visibleAttention;
-        if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++visibleWorking;
+        if (SessionPresentation::working(e.session, e.online)) ++visibleWorking;
     }
     m_count->setText(visible.isEmpty() ? tr("No matching sessions") : tr("%1 shown, %2 working, %3 attention").arg(visible.size()).arg(visibleWorking).arg(visibleAttention));
     const int starting = std::count_if(rows.cbegin(), rows.cend(), [](const Row &row) { return !row.launch.isEmpty(); });
@@ -2783,6 +2783,7 @@ void SessionsWindow::renderDetails()
     m_badge->setText(state); const auto color = tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
+    m_badge->setMinimumWidth(state == "Background work" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
     s.model = m_details.value("model").toString(s.model); s.effort = m_details.value("effort").toString(s.effort);
     const QString modelText = s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort);
     // Details render on every poll; elide again only when the text or font changes.
@@ -2833,6 +2834,10 @@ void SessionsWindow::renderDetails()
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
+    else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
+        ? tr("The agent has replied, but a command is still running.") : tr("The agent has replied, but %1 commands are still running.").arg(s.backgroundProcesses))
+        + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."))
+        + QStringLiteral(" ") + tr("You can send another message.");
     else if (s.activity != "idle") hint = tr("Waiting for the agent to confirm its state. Open its terminal if it needs attention.");
     else hint = tr("Ready for your next message. Finishing a response does not mark the task complete.");
     m_hint->setText(hint);
@@ -3939,6 +3944,9 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
     if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available);
+    if (!archived && SessionPresentation::backgroundIdle(original.session))
+        add(tr("Show running commands"), "contextOpenProcesses", SessionMenuAction::OpenProcesses, original.online && ProcessSettings::enabled(),
+            ProcessSettings::enabled() ? tr("Follow this session's background work in Processes") : tr("Enable Settings > Processes to inspect running commands"));
     const bool localFolder = original.host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -4053,6 +4061,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
     }
     switch (action) {
+    case SessionMenuAction::OpenProcesses:
+        if (entry->online && ProcessSettings::enabled()) m_detailTabs->setCurrentWidget(m_processes);
+        return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
         if (entry->online && m_open->isEnabled() && entry->session.state != "archived")
