@@ -400,7 +400,11 @@ phone runs it through the connector on the gateway.
    and the same `request_id` with another request is refused on the caller.
 3. On the session's host: gate check against the merged state, then the existing
    `checked_input` preflight (run and conversation identity, pause, blocking
-   dialogs). A failure returns the reason; nothing is written.
+   dialogs). A failure returns the reason; nothing is written. The gates run
+   before the host fetches images it lacks, so a refused request reaches no
+   other machine. A lost answer from the host, which may have acted already,
+   refuses with `delivery_unknown`, and the person checks the task before
+   sending it again.
 4. Write `claim` with `base` and `request_id`.
 5. Deliver with `input::submit`, using the same receipt and identity rules as
    `hgs send`. `recovery::cancel_for_input` applies as for any user input.
@@ -428,7 +432,8 @@ claim resumes that claim without new gates or session checks. `review-send`,
 receipt already exists. A failed delivery is "not sent" only when no input
 receipt exists; anything else is uncertain. An answer is recorded before it is
 typed; one that was not delivered is sent again by repeating the request with
-the same `request_id`, which the refusal names.
+the same `request_id`, which the refusal names. The same `request_id` with
+another answer is refused `request_reused`.
 
 Sending while the agent works is allowed after confirmation; the native agent
 receives it as a queued message. `review-send`, `rework-send` and `answer`
@@ -557,6 +562,7 @@ payloads never contain task content.
 | Session stopped, paused or showing a dialog | `send` refuses with the reason; the task stays in Queue. |
 | Delivery failed without a receipt | `[unclaim]`, back to Queue, reason in the journal. |
 | Delivery uncertain | Stays in Design with `delivery_uncertain`; human resolves. |
+| Host's answer lost after it may have acted | `delivery_unknown`; the person checks the task before sending again. |
 | Assignee session terminated or archived | `orphaned` flag; human returns the task to Queue. |
 | Session renamed | `session_renamed` event inside the rename; pins and assignee follow. |
 | Peer unreachable | Everything works locally; the GUI shows sync state per machine. |

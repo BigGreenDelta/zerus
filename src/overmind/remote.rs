@@ -6,7 +6,7 @@ use super::fold::{Attachment, Task};
 use super::model::{Actor, ActorKind, Refusal};
 use super::store::Store;
 use crate::config::Config;
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -195,18 +195,24 @@ pub fn forward(store: &mut Store, command: &str, request: &Value, task: &str, ma
     super::sync::exchange(store, machine, &alias, &mut exchange)?;
     let loaded = store.read(|tx| commands::load(tx, task))?;
     push_blobs(&config, &alias, store, &loaded)?;
+    // The host may have acted before the call failed, so the outcome is unknown.
     let answer = crate::swarm::call(&config, &alias, "overmind-deliver", Some(&json!({"command": command, "request": request})))
-        .with_context(|| format!("the session's machine {alias} did not report the delivery; check the task before sending it again"))?;
+        .map_err(|error| -> anyhow::Error {
+            let message = format!("the session's machine {alias} did not report the delivery ({error:#}); check the task before sending it again");
+            Refusal::new("delivery_unknown", message).into()
+        })?;
     // A failure here only delays the board: the worker exchanges again soon.
     let _ = super::sync::exchange(store, machine, &alias, &mut exchange);
     host_answer(answer)
 }
 
-/// The host's result, or its refusal as the same refusal here.
+/// The host's result, or its refusal as the same refusal here. Only an
+/// explicit `ok: true` is a result.
 fn host_answer(answer: Value) -> Result<Value> {
-    if answer["ok"] != false {
+    if answer["ok"] == true {
         return Ok(answer);
     }
+    ensure!(answer["ok"] == false, "the session's machine sent an invalid answer");
     let refusal: Refusal = serde_json::from_value(answer["error"].clone())
         .map_err(|error| anyhow!("the session's machine sent an invalid refusal: {error}"))?;
     Err(refusal.into())
@@ -354,6 +360,10 @@ mod tests {
         let refusal = host_answer(refused).unwrap_err().downcast::<Refusal>().unwrap();
         assert_eq!(refusal, Refusal::field("agent_busy", "confirm", "missing", "busy"));
         assert!(host_answer(json!({"ok": false, "error": "garbage"})).unwrap_err().downcast::<Refusal>().is_err());
+        // Only an explicit success is one.
+        for answer in [json!({"delivery": "sent"}), json!({"ok": "yes"}), json!(null)] {
+            assert!(host_answer(answer.clone()).unwrap_err().downcast::<Refusal>().is_err(), "{answer}");
+        }
     }
 
     #[test]

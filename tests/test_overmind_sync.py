@@ -23,6 +23,14 @@ SSH = swarm.SSH.replace(
     "    print(json.dumps(output)); sys.exit(0)\n"
     "if not (root / ('old-' + alias)).exists():", 1)
 assert 'no-overmind-' in SSH
+# A marker that loses the answer of a delivery after the host ran it.
+SSH = SSH.replace(
+    "if not (root / ('old-' + alias)).exists():",
+    "if args[1:] == ['overmind-deliver'] and (root / ('lost-deliver-' + alias)).exists():\n"
+    "    subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)\n"
+    "    print('fixture connection lost', file=sys.stderr); sys.exit(255)\n"
+    "if not (root / ('old-' + alias)).exists():", 1)
+assert 'lost-deliver-' in SSH
 
 
 def tmux_shim(home, socket, tmux=fixtures.TMUX):
@@ -117,6 +125,30 @@ class Replication(Nodes):
         (self.root / 'offline-a').write_text('')
         result = self.overmind_raw('b', 'attachment', '--json', data={'task': task['ref'], 'sha256': task['attachments'][0]['sha256']})
         self.assertEqual(json.loads(result.stdout)['error']['code'], 'attachment_unavailable')
+
+    def test_refused_sends_fetch_no_images(self):
+        attachment, _ = self.image(1024)
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'attachments': [attachment]})['task']['ref']
+        self.call('a', 'sync')
+        (self.root / 'calls').write_text('')
+        # The task is in Backlog: every gate refuses before b looks for the image.
+        for command, request in [('send', {'task': ref, 'session': {'name': 'codex/nobody'}}),
+                                 ('review-send', {'task': ref, 'session': {'name': 'codex/nobody'}}),
+                                 ('rework-send', {'task': ref})]:
+            result = self.overmind_raw('b', command, '--json', data=request)
+            self.assertEqual(json.loads(result.stdout)['error']['code'], 'transition_not_allowed', command)
+        self.assertNotIn('overmind-blob', (self.root / 'calls').read_text())
+
+    def test_a_lost_delivery_answer_asks_to_check_the_task(self):
+        ref = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
+        b = self.overmind('b', 'status')['machine']
+        (self.root / 'lost-deliver-b').write_text('')
+        result = self.overmind_raw('a', 'send', '--json', data={'task': ref, 'session': {'machine': b, 'name': 'codex/nobody'}})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        error = json.loads(result.stdout)['error']
+        self.assertEqual(error['code'], 'delivery_unknown')
+        self.assertNotIn('field', error)
+        self.assertIn('check the task', error['message'])
 
     def test_sync_replicates_both_ways_over_one_direction(self):
         made_on_a = self.overmind('a', 'create', '--json', data={'project': 'demo', 'prompt': 'from a'})['task']['ref']

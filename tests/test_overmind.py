@@ -459,6 +459,17 @@ class AgentSession(unittest.TestCase):
         self.assertEqual(self.received().count(b'[Overmind '), 1)
         self.assertEqual(self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)[1], body)
 
+    def test_a_recorded_answer_is_never_replaced_by_another_text(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.asks_a_question(ref)
+        self.append('transition', {'action': 'answer', 'to': '@resume', 'fields': {'answer': 'REST'}, 'session': None,
+                                   'children': []}, request_id=request_id)  # recorded, then hgs stopped
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'gRPC', 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body['error']['code']), (1, 'request_reused'), body)
+        self.assertEqual(self.received(), b'')
+        self.assertNotIn('[sent]', [j['marker'] for j in self.person('show', ref)['task']['journal']])
+
     def commit(self, repo):
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
         env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')

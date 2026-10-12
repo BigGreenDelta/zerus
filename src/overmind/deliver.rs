@@ -274,10 +274,15 @@ pub fn send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Value>
     }
     let request_id = if req.request_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { req.request_id.clone() };
     let dir = ctx.store.dir().to_owned();
-    // Images this machine lacks are fetched first; a resumed claim keeps today's behaviour.
+    // The gates refuse before images this machine lacks are fetched, so a
+    // refused request reaches no other machine; a resumed claim fetches nothing.
     let (fresh, loaded) = ctx.store.read(|tx| {
         let task = load_writable(tx, &resolve(tx, &req.task)?)?;
-        Ok((pending_claim(tx, &task, &request_id)?.is_none(), task))
+        let fresh = pending_claim(tx, &task, &request_id)?.is_none();
+        if fresh {
+            send_gates(tx, &workflow(tx, &task.project)?, &task, &session, &req.confirm)?;
+        }
+        Ok((fresh, task))
     })?;
     if fresh {
         super::remote::ensure_blobs(ctx.store, &loaded)?;
@@ -577,7 +582,12 @@ pub fn review_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
     if !resumed {
-        let task = ctx.store.read(|tx| load_writable(tx, &resolve(tx, &req.task)?))?;
+        // The gates refuse before images are fetched.
+        let task = ctx.store.read(|tx| {
+            let task = load_writable(tx, &resolve(tx, &req.task)?)?;
+            review_gates(tx, &task, &session)?;
+            Ok(task)
+        })?;
         super::remote::ensure_blobs(ctx.store, &task)?;
     }
     let (uuid, attachments) = ctx.store.read(|tx| {
@@ -633,7 +643,12 @@ pub fn rework_send_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result
     let resumed = typed_before(&req.request_id);
     let dir = ctx.store.dir().to_owned();
     if !resumed {
-        let task = ctx.store.read(|tx| load_writable(tx, &resolve(tx, &req.task)?))?;
+        // The gates refuse before images are fetched.
+        let task = ctx.store.read(|tx| {
+            let task = load_writable(tx, &resolve(tx, &req.task)?)?;
+            assignee_for(&task, "rework")?;
+            Ok(task)
+        })?;
         super::remote::ensure_blobs(ctx.store, &task)?;
     }
     let (uuid, session, text, attachments) = ctx.store.read(|tx| {
@@ -680,6 +695,10 @@ pub fn answer_on(ctx: &mut Ctx, request: Value, local_only: bool) -> Result<Valu
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
         let pending = pending_transition(tx, &task, &req.request_id, "answer")?;
+        // Repeating the request sends the recorded answer; another text is another request.
+        if pending.as_ref().is_some_and(|event| event.payload["fields"]["answer"] != commands::normalize(&req.answer).as_str()) {
+            return refuse("request_reused", "this request_id was already used for a different request");
+        }
         let session = if resumed || pending.is_some() { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
         Ok((uuid, session, pending))
     })?;

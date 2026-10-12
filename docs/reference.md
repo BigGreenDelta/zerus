@@ -1417,7 +1417,8 @@ confirmable codes are `agent_busy`, `wip_exceeded`, `predecessors_open` and
 is stopped, paused, blocked by a dialog or a DeepSeek native session, which is
 not supported yet) and `attachment_unavailable` (no reachable machine holds an
 image of the task), are never confirmable, and nothing is written when one
-occurs. A successful result has `delivery` set to `sent` (the text was submitted) or
+occurs. The gates refuse before any image is fetched from another machine. A
+successful result has `delivery` set to `sent` (the text was submitted) or
 `uncertain`, which sets the flag `delivery_uncertain`; a person settles it with
 `resolve-delivery --json {task, delivered: true|false}`. `delivered: true`
 records the delivery. `delivered: false` undoes what the uncertain delivery
@@ -1438,7 +1439,8 @@ reviewer session, `rework-send --json {task, confirm?}` sends the `rework`
 template to the assignee, and `answer --json {task, answer, confirm?}` records
 the answer to a question in Your Call and sends the `answer` template. The
 answer is recorded before it is typed; if it was not delivered, repeat the
-request with the same `request_id`, which the refusal names. `unpin --json
+request with the same `request_id`, which the refusal names; the same
+`request_id` with another answer is refused `request_reused`. `unpin --json
 {task}` removes a pin.
 
 `templates get --json {project}` shows the templates of a project and
@@ -1475,7 +1477,9 @@ exchanges events with the host, pushes the task's images, and runs the command
 there as a person, so the host writes the claim. The host checks the gates, not
 the caller; an offline host shows `host_unreachable`. The caller keeps the
 host's result as the result of the request, so a retry with the same
-`request_id` replays it without reaching the host.
+`request_id` replays it without reaching the host. When the host's answer is
+lost after it may have acted, the refusal is `delivery_unknown`: check the task
+before sending it again.
 
 <a id="windows"></a>
 
