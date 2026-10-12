@@ -44,14 +44,24 @@
 #include <ctime>
 #include <limits>
 #include <QKeySequence>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace {
 // Existing presentation contracts assert the committed document. Keep their
 // setup explicit while the responsiveness tests below use the asynchronous API.
 qint64 threadCpuMs()
 {
+#ifdef Q_OS_WIN
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) qFatal("Cannot read thread CPU time");
+    const auto ticks = [](const FILETIME &time) { return (quint64(time.dwHighDateTime) << 32) | time.dwLowDateTime; };
+    return qint64((ticks(kernel) + ticks(user)) / 10000); // 100 ns units.
+#else
     timespec now{}; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+#endif
 }
 void standardKey(QWidget *widget, QKeySequence::StandardKey key)
 {
@@ -451,6 +461,7 @@ void TestActivityView::renderedModelMatchesLaidOutSource()
         for (int i = 0; i < expected->lineCount(); ++i) {
             const auto a = actual->lineAt(i), e = expected->lineAt(i);
             QCOMPARE(a.textStart(), e.textStart()); QCOMPARE(a.textLength(), e.textLength());
+            QCOMPARE(a.leadingIncluded(), e.leadingIncluded());
             for (int offset = e.textStart(); offset <= e.textStart() + e.textLength(); ++offset)
                 QVERIFY2(qAbs(a.cursorToX(offset) - e.cursorToX(offset)) < .1,
                     qPrintable(QString("block %1 line %2 offset %3: %4 vs %5").arg(block.text()).arg(i).arg(offset).arg(a.cursorToX(offset)).arg(e.cursorToX(offset))));

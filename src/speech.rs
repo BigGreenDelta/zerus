@@ -7,12 +7,14 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
-    time::Duration,
 };
+#[cfg(unix)]
+use std::{io::Write, time::Duration};
 
 pub const MAX_REQUEST_BYTES: usize = 5_130_000;
+#[cfg(unix)]
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {

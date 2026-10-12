@@ -28,6 +28,16 @@ public:
     // платформах: SniTrayIcon переводит его в имена тем (dialog-warning и т.п.).
     virtual void showMessage(const QString &title, const QString &body,
                              QSystemTrayIcon::MessageIcon icon, int msecs) = 0;
+    // As showMessage(); clicked runs when the user clicks this message. A tray icon
+    // shows one message at a time and QSystemTrayIcon reports a click without
+    // saying on which message, so a later message replaces the callback. Icons
+    // without click support only show the message.
+    virtual void showClickableMessage(const QString &title, const QString &body,
+                                      QSystemTrayIcon::MessageIcon icon, int msecs,
+                                      std::function<void()> clicked) {
+        (void)clicked;
+        showMessage(title, body, icon, msecs);
+    }
     // Показать иконку. Звать после setIcon(): у QSystemTrayIcon пустая иконка видна как
     // дырка в панели. У SniTrayIcon это no-op -- StatusNotifierItem регистрируется у
     // панели уже в конструкторе.

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
+
+#include "SessionCommands.h"
 
 // Терминал — сменная деталь. open() обязателен, raise() — нет: у Konsole есть D-Bus и
 // вкладку можно адресовать, у Terminal.app на маке нет ни того ни другого (AppleScript
@@ -11,6 +14,13 @@ public:
     virtual ~TerminalBackend() = default;
     // Запустить команду в новой вкладке или окне. false — не получилось.
     virtual bool open(const QString &command, QString *error) = 0;
+    // The same for one program and its arguments. Backends that start a shell
+    // command line take the displayed command (SessionCommands::command); Windows
+    // Terminal starts the program itself, without a shell parsing the arguments.
+    virtual bool openProgram(const QString &program, const QStringList &arguments, QString *error)
+    {
+        return open(SessionCommands::command(program, arguments), error);
+    }
     virtual bool canRaise() const { return false; }
     // Поднять и сфокусировать окно, в котором открыт этот tty. false — не нашли.
     virtual bool raiseTty(const QString &tty, QString *error) { Q_UNUSED(tty); Q_UNUSED(error); return false; }

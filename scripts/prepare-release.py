@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 
+from macos_release import add_macos
 from release_common import binary_dependencies
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ def main():
     parser.add_argument("--package", type=Path, required=True, help="verified Arch CI package")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--macos", type=Path, help="signed and notarized macOS artifact from the macos-signing job")
     args = parser.parse_args()
     version = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version) or args.version != version:
@@ -75,10 +77,13 @@ def main():
             text = text.replace(key, value)
         (directory / "PKGBUILD").write_text(text)
     (args.output / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in (source, binary)))
-    (args.output / "release-info.json").write_text(json.dumps({"version": version, "source_commit": revision,
-        "architecture": "x86_64", "distribution": "Arch Linux", "publication": "candidate",
-        "binary_dependencies": libraries, "native_agents_bundled": False}, indent=2) + "\n")
-    print("Created source and Arch binary archives, SHA256SUMS and release AUR recipes. Nothing was published.")
+    info = {"version": version, "source_commit": revision, "architecture": "x86_64", "distribution": "Arch Linux",
+            "publication": "candidate", "binary_dependencies": libraries, "native_agents_bundled": False}
+    if args.macos:
+        add_macos(args.output, args.macos, version, info)
+    (args.output / "release-info.json").write_text(json.dumps(info, indent=2) + "\n")
+    print("Created source and Arch binary archives, SHA256SUMS and release AUR recipes"
+          + (" plus the notarized macOS bundle and its cask" if args.macos else "") + ". Nothing was published.")
 
 
 if __name__ == "__main__":

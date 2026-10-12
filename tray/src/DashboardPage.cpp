@@ -159,8 +159,8 @@ public:
         auto *item = m_model.item(0); bool changed = false;
         const auto set = [&](int role, const QVariant &value) { if (item->data(role) != value) { item->setData(value, role); changed = true; } };
         set(SessionRoles::Title, sessionLabel(session));
-        set(SessionRoles::Meta, branchContext(session));
-        set(SessionRoles::BranchIcon, !branchContext(session).isEmpty());
+        set(SessionRoles::Meta, checkoutLine(session));
+        set(SessionRoles::MetaIcon, checkoutIcon(session));
         set(SessionRoles::GitStatus, session.gitStatus);
         set(SessionRoles::Status, status(session, online));
         set(SessionRoles::Failure, session.phase=="error");
@@ -173,10 +173,10 @@ public:
         set(SessionRoles::Effort, session.effort);
         set(SessionRoles::Attention, session.reviewLater || (online && !session.attentionAcknowledged && session.needsAction()));
         set(SessionRoles::ReviewLater, session.reviewLater);
-        set(SessionRoles::Unread, session.unreadReply);
+        set(SessionRoles::Unread, session.visibleUnreadReply(online));
         set(SessionRoles::Working, working(session, online));
         set(SessionRoles::Draft, draft);
-        set(SessionRoles::WorkingSince, session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
+        set(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(session) ? session.backgroundStarted : session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
         set(SessionRoles::Scheduled, scheduled(session, online));
         set(SessionRoles::Children, childCount(session, false, online, includeCompleted));
         // Overview cards navigate to a session; the roster opens in its list.
@@ -224,6 +224,7 @@ public:
         usage=new AccountUsage::Button;usage->setObjectName("dashboardAccountUsage");usage->setShowProvider(false);usage->setCompact(true);bottom->addWidget(usage);layout->addLayout(bottom);
         for(auto *child:findChildren<QWidget *>()){child->setAttribute(Qt::WA_TransparentForMouseEvents);child->setFocusPolicy(Qt::NoFocus);}
     }
+    void setUsageIndicator(AccountUsage::Indicator indicator){usage->setIndicator(indicator);}
     void setTheme(bool dark){if(m_themed&&m_dark==dark)return;m_themed=true;m_dark=dark;provider->setTheme(dark);host->setTheme(dark);for(auto *badge:extraHosts)badge->setTheme(dark);usage->setTheme(dark);QPushButton::update();}
     void update(const QJsonObject &profile) {
         // Polls repeat profiles. Refresh time-based text; repaint only on a visible change.
@@ -249,7 +250,7 @@ protected:
     }
 private:
     // Usage windows expire with time, so the stripe and tooltip can change without new data.
-    QColor stripe() const {const double used=AccountUsage::highest(data["usage"].toObject());return used>=0?AccountUsage::color(used,m_dark):QColor(m_dark?"#9aaaba":"#64788a");}
+    QColor stripe() const {const auto tone=AccountUsage::severest(data["usage"].toObject());return tone?AccountUsage::toneColor(*tone,m_dark):QColor(m_dark?"#9aaaba":"#64788a");}
     void describe(){const auto tip=AccountUsage::tooltip(m_usage);if(tip==toolTip()&&!accessibleName().isEmpty())return;setToolTip(tip);setAccessibleName(data["label"].toString()+" / "+data["machine"].toString()+"\n"+tip);}
     void elide(){int extra=0;for(auto *badge:extraHosts)extra+=badge->sizeHint().width()+6;title->setText(title->fontMetrics().elidedText(data["label"].toString(),Qt::ElideRight,qMax(20,width()-provider->sizeHint().width()-host->sizeHint().width()-extra-52)));identity->setText(identity->fontMetrics().elidedText(identityText,Qt::ElideRight,qMax(0,width()-usage->width()-32)));}
     QJsonObject data,m_usage;QString identityText;QLabel *title,*identity;IdentityBadge *provider,*host;AccountUsage::Button *usage;
@@ -306,6 +307,11 @@ bool DashboardPage::eventFilter(QObject *watched, QEvent *event)
     if (event->type() == QEvent::Resize && watched == m_sessionGrid->parentWidget()) {arrangeSessions();arrangeAccounts();}
     return QWidget::eventFilter(watched, event);
 }
+void DashboardPage::setUsageIndicator(AccountUsage::Indicator indicator)
+{
+    m_usageIndicator = indicator;
+    for (auto *card : m_accountCards) card->setUsageIndicator(indicator);
+}
 void DashboardPage::setAccounts(const QJsonArray &profiles)
 {
     QStringList keys;
@@ -325,7 +331,7 @@ void DashboardPage::setAccounts(const QJsonArray &profiles)
         auto *card=m_accountCards.value(key);
         if(!card){card=new DashboardAccountCard(this);m_accountCards[key]=card;connect(card,&QPushButton::clicked,this,[this,card]{emit accountRequested(card->property("host").toString(),card->property("profile").toString());});}
         card->setProperty("host", p["host"].toString()); card->setProperty("profile", p["id"].toString());
-        card->setTheme(m_dark);card->update(p);
+        card->setTheme(m_dark);card->setUsageIndicator(m_usageIndicator);card->update(p);
     }
     for(auto it=m_accountCards.begin();it!=m_accountCards.end();)if(!keys.contains(it.key())){delete it.value();it=m_accountCards.erase(it);}else ++it;
     if(keys!=m_accountOrder){m_accountOrder=keys;m_accountColumns=0;}
@@ -373,7 +379,9 @@ void DashboardPage::render()
     struct Machine { QString key, alias, host; BoxState box; bool fresh; };
     QList<Machine> machines;
     const auto local = m_fleet.local();
-    machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
+    // A control-only computer runs no agents; the overview covers remote machines.
+    if (local.localSessions)
+        machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
     for (const auto &host : m_fleet.peerNames()) {
         const auto *box = m_fleet.peer(host); if (!box) continue;
         machines.append({host, host, host, *box, box->ok && now - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs});

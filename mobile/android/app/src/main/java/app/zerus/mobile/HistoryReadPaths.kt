@@ -15,6 +15,18 @@ object HistoryReadPaths {
         } catch(error:CancellationException) { throw error }
         catch(error:Exception) { return null }
     }
+    data class Reopened(val result:Result,val head:Boolean)
+    /** A reset index rejects every cursor of its previous epoch, the connector reports that only as a failed
+     *  command, and the page cache replays the old epoch. Reopen the verified head once it reports another epoch. */
+    suspend fun reopening(epoch:String?,read:suspend ()->Result,head:suspend ()->HistoryPage):Reopened {
+        var failure:Exception?=null
+        val first=try { read() } catch(error:CancellationException) { throw error } catch(error:Exception) { failure=error;null }
+        if(!epoch.isNullOrBlank() && first?.verified!=true) {
+            val latest=try { head() } catch(error:CancellationException) { throw error } catch(_:Exception) { null }
+            if(latest!=null && latest.epoch.isNotBlank() && latest.epoch!=epoch) return Reopened(Result(latest,true),true)
+        }
+        return Reopened(first ?: throw failure!!,false)
+    }
     suspend fun read(target:Target,network:suspend ()->HistoryPage,cached:suspend ()->JSONObject?):Result {
         try { return Result(network(),true) } catch(error:CancellationException) { throw error }
         catch(error:Exception) {

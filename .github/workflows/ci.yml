@@ -24,6 +24,10 @@ on:
         description: Run macOS CLI and desktop builds/tests
         type: boolean
         default: true
+      run_windows:
+        description: Run Windows client and desktop tests and build the portable zip
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       ref:
@@ -37,6 +41,9 @@ on:
         type: boolean
         default: false
       run_macos:
+        type: boolean
+        default: false
+      run_windows:
         type: boolean
         default: false
 
@@ -64,6 +71,7 @@ jobs:
       run_linux: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
+      run_windows: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
   review:
     name: PR and manual checks
     if: >-
@@ -75,6 +83,7 @@ jobs:
       run_linux: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
+      run_windows: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
   gate:
     name: CI gate
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')

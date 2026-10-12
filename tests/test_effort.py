@@ -154,7 +154,7 @@ class EffortTransport(unittest.TestCase):
         self.record['agent']='kimi';self.record['model']='kimi-code/k3';self.write_record()
         (self.root/'.kimi-code').mkdir()
         config=(self.root/'.kimi-code/config.toml')
-        config.write_text('[models."kimi-code/k3"]\ncapabilities=["thinking", "always_thinking"]\nsupport_efforts=["low","high","max"]\n')
+        config.write_text('[models."kimi-code/k3"]\nmodel="k3"\ndisplay_name="K3"\ncapabilities=["thinking", "always_thinking"]\nsupport_efforts=["low","high","max"]\n')
         before=config.read_bytes();(self.root/'set-kimi').touch();os.kill(self.record['pid'],signal.SIGUSR1)
         self.wait_for(lambda:'thinking: high' in self.tmux('capture-pane','-p','-t',self.pane))
         self.change(self.payload('max'))

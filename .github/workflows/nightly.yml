@@ -23,8 +23,21 @@ jobs:
       run_linux: true
       run_arch: true
       run_macos: true
-  assemble:
+      run_windows: true
+  macos:
+    # The zerus@nightly cask starts once the macos-signing environment is
+    # provisioned; see docs/macos-distribution.md. A failed cask fails the nightly.
+    if: vars.MACOS_CASKS_ENABLED == 'true'
     needs: verify
+    uses: ./.github/workflows/macos-cask.yml
+    with:
+      channel: nightly
+  assemble:
+    needs: [verify, macos]
+    # A skipped cask is acceptable only while macOS casks are disabled.
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && vars.MACOS_CASKS_ENABLED != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     container:
@@ -40,6 +53,15 @@ jobs:
         with:
           name: arch-x86_64-${{ github.sha }}
           path: artifacts/arch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-x86_64-${{ github.sha }}
+          path: artifacts/windows
+      - if: needs.macos.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
       - name: Arch packaging dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git python qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh curl procps-ng hicolor-icon-theme namcap desktop-file-utils
@@ -49,13 +71,19 @@ jobs:
         env:
           NIGHTLY_RUN_ID: ${{ github.run_id }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+          MACOS_CASK: ${{ needs.macos.result == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           packages=(artifacts/arch/*.pkg.tar.zst)
+          portables=(artifacts/windows/*.zip)
           test "${#packages[@]}" = 1
+          test "${#portables[@]}" = 1
+          macos=()
+          if [ "$MACOS_CASK" = true ]; then macos=(--macos artifacts/macos-signed); fi
           runuser -u user -- python3 scripts/prepare-nightly.py --package "${packages[0]}" \
-            --run-id "$NIGHTLY_RUN_ID" --run-number "$NIGHTLY_RUN_NUMBER" --output dist
+            --windows-zip "${portables[0]}" \
+            --run-id "$NIGHTLY_RUN_ID" --run-number "$NIGHTLY_RUN_NUMBER" --output dist "${macos[@]}"
           runuser -u user -- bash scripts/check-nightly-package.sh dist
           pacman -U --noconfirm dist/*.pkg.tar.zst
           runuser -u user -- python3 scripts/check-installed-package.py

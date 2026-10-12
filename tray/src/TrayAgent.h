@@ -22,6 +22,7 @@
 #include "ApplicationBadge.h"
 
 class SessionsWindow;
+class SwarmWorkerSupervisor;
 
 // Склейка: таймеры -> HgsClient -> FleetState -> иконка и меню.
 // Ничего не вычисляет сам; вся логика состояния в FleetState, весь ввод-вывод в
@@ -112,4 +113,8 @@ private:
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;
     QString m_presenceError;
+#ifdef Q_OS_WIN
+    // The tray runs `hgs swarm worker` itself on Windows (SwarmWorkerSupervisor.h).
+    std::unique_ptr<SwarmWorkerSupervisor> m_swarmWorker;
+#endif
 };

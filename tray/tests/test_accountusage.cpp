@@ -3,9 +3,117 @@
 #include "AccountUsage.h"
 #include "CacheStatus.h"
 
+static QJsonObject limitWindow(int minutes,double used,qint64 resetIn,const QDateTime &now) {
+    return {{"window_minutes",minutes},{"used_percent",used},{"resets_at",double(now.toSecsSinceEpoch()+resetIn)}};
+}
+
 class TestAccountUsage : public QObject {
     Q_OBJECT
 private slots:
+    void initTestCase() {
+        QVERIFY(m_settings.isValid());
+        QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("account-usage");
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
+    }
+    void paceSeparatesEqualUsageByTimeUntilReset() {
+        const auto now=QDateTime::currentDateTime();
+        const auto tomorrow=AccountUsage::pace(limitWindow(10080,48,26*3600,now),now);
+        QVERIFY(tomorrow.known);QCOMPARE(tomorrow.tone,AccountUsage::Tone::Normal);
+        QVERIFY(qAbs(tomorrow.elapsed-142./168)<0.001);QCOMPARE(tomorrow.runsOutIn,qint64(-1));QCOMPARE(qRound(tomorrow.projected),57);
+        const auto later=AccountUsage::pace(limitWindow(10080,48,145*3600,now),now);
+        QVERIFY(later.known);QCOMPARE(later.tone,AccountUsage::Tone::Critical);
+        // 48% in the first 23 hours leaves 52%, enough for about 24h 55m at that pace.
+        QCOMPARE(later.runsOutIn/60,qint64(1495));
+        QVERIFY(AccountUsage::paceColor(later,true)!=AccountUsage::paceColor(tomorrow,true));
+    }
+    void paceToneFollowsForecastWithThresholdFallbacks() {
+        using AccountUsage::Tone;
+        const auto now=QDateTime::currentDateTime();
+        auto tone=[&](int minutes,double used,qint64 resetIn){return AccountUsage::pace(limitWindow(minutes,used,resetIn,now),now).tone;};
+        QCOMPARE(tone(10080,92,3*3600),Tone::Warning);
+        QCOMPARE(tone(10080,61,76*3600),Tone::Warning);
+        QCOMPARE(tone(300,35,120*60),Tone::Normal);
+        QCOMPARE(tone(300,100,47*60),Tone::Critical);
+        // The first 8% of a window is too short to extrapolate; the fixed thresholds apply.
+        const auto early=AccountUsage::pace(limitWindow(10080,6,165*3600,now),now);
+        QVERIFY(early.early);QCOMPARE(early.tone,Tone::Normal);QCOMPARE(early.runsOutIn,qint64(-1));
+        QCOMPARE(tone(10080,75,165*3600),Tone::Warning);
+        QCOMPARE(tone(10080,95,165*3600),Tone::Critical);
+        QJsonObject unknown{{"used_percent",78},{"window_minutes",300}};
+        const auto withoutReset=AccountUsage::pace(unknown,now);QVERIFY(!withoutReset.known);QCOMPARE(withoutReset.tone,Tone::Warning);
+        unknown.remove("window_minutes");unknown["resets_at"]=double(now.toSecsSinceEpoch()+3600);
+        QVERIFY(!AccountUsage::pace(unknown,now).known);
+    }
+    void severestToneFollowsPaceAcrossWindows() {
+        using AccountUsage::Tone;
+        const auto now=QDateTime::currentDateTime();
+        // 80% with half an hour left lasts until reset; 48% a day into the week does not.
+        QJsonObject data{{"windows",QJsonArray{limitWindow(300,80,30*60,now)}}};
+        QCOMPARE(AccountUsage::severest(data),std::optional(Tone::Normal));
+        data["windows"]=QJsonArray{limitWindow(300,80,30*60,now),limitWindow(10080,48,145*3600,now)};
+        QCOMPARE(AccountUsage::severest(data),std::optional(Tone::Critical));
+        data["windows"]=QJsonArray{QJsonObject{{"used_percent",100},{"window_minutes",300},{"resets_at",double(now.toSecsSinceEpoch()-60)}}};
+        QVERIFY(!AccountUsage::severest(data));
+    }
+    void countdownUsesTheLargestWholeUnit() {
+        QCOMPARE(AccountUsage::countdown(30),QString("1m"));
+        QCOMPARE(AccountUsage::countdown(47*60),QString("47m"));
+        QCOMPARE(AccountUsage::countdown(3*3600+20*60),QString("3h"));
+        QCOMPARE(AccountUsage::countdown(26*3600),QString("26h"));
+        QCOMPARE(AccountUsage::countdown(145*3600),QString("6d"));
+    }
+    void tooltipForecastsPaceUntilReset() {
+        const auto now=QDateTime::currentDateTime();
+        QJsonObject data{{"provider","claude"},{"status","ok"},{"windows",QJsonArray{limitWindow(10080,48,145*3600+30,now)}}};
+        QVERIFY(AccountUsage::tooltip(data).contains("(in 6d 1h)"));
+        QVERIFY(AccountUsage::tooltip(data).contains("At the current pace, the limit runs out in about 1d"));
+        data["windows"]=QJsonArray{limitWindow(10080,48,26*3600,now)};
+        QVERIFY(AccountUsage::tooltip(data).contains("At the current pace, about 57% by reset"));
+        data["windows"]=QJsonArray{limitWindow(10080,6,165*3600,now)};
+        QVERIFY(!AccountUsage::tooltip(data).contains("current pace"));
+    }
+    void indicatorPreferenceDefaultsToRails() {
+        using AccountUsage::Indicator;
+        QSettings().remove("workspace/usageIndicator");QCOMPARE(AccountUsage::indicator(),Indicator::Rails);
+        QSettings().setValue("workspace/usageIndicator","marker");QCOMPARE(AccountUsage::indicator(),Indicator::Marker);
+        QSettings().setValue("workspace/usageIndicator","marker-countdown");QCOMPARE(AccountUsage::indicator(),Indicator::MarkerCountdown);
+        AccountUsage::Button saved;QCOMPARE(saved.indicator(),Indicator::MarkerCountdown);
+        QSettings().setValue("workspace/usageIndicator","unknown");QCOMPARE(AccountUsage::indicator(),Indicator::Rails);
+        QSettings().remove("workspace/usageIndicator");
+        AccountUsage::Button button;QCOMPARE(button.indicator(),Indicator::Rails);
+    }
+    void footerIndicatorsShareLayoutExceptTheCountdown() {
+        using AccountUsage::Indicator;
+        const auto now=QDateTime::currentDateTime();
+        AccountUsage::Button button;button.show();
+        const QJsonObject data{{"provider","claude"},{"status","ok"},{"windows",QJsonArray{limitWindow(300,10,200*60,now),limitWindow(10080,48,145*3600,now)}}};
+        button.setData(data);
+        button.setIndicator(Indicator::Rails);const auto rails=button.size();const auto railsImage=button.grab().toImage();
+        button.setIndicator(Indicator::Marker);QCOMPARE(button.size(),rails);
+        const auto markerImage=button.grab().toImage();QVERIFY(markerImage!=railsImage);
+        button.setIndicator(Indicator::MarkerCountdown);QVERIFY(button.width()>rails.width());
+        QCOMPARE(button.height(),22);QCOMPARE(button.sizeHint(),button.size());
+        QVERIFY(button.accessibleName().contains("At the current pace"));
+        // The compact dashboard footer has no room for the countdown; the marker remains.
+        button.setCompact(true);const auto compactCountdown=button.size();
+        button.setIndicator(Indicator::Marker);QCOMPARE(button.size(),compactCountdown);
+        button.setCompact(false);
+        const auto directory=qEnvironmentVariable("HGS_DASHBOARD_PREVIEW");
+        if(!directory.isEmpty()) {
+            QDir().mkpath(directory);
+            for(const auto &[indicator,name]:{std::pair{Indicator::Rails,"rails"},std::pair{Indicator::Marker,"marker"},std::pair{Indicator::MarkerCountdown,"marker-countdown"}})
+                for(const bool dark:{false,true}) {
+                    button.setIndicator(indicator);button.setTheme(dark);
+                    QVERIFY(button.grab().save(directory+"/pace-"+name+(dark?"-dark":"-light")+".png"));
+                }
+            button.setTheme(true);
+        }
+        // Without a reset time there is no pace, so every indicator draws the plain bar.
+        button.setData({{"status","ok"},{"windows",QJsonArray{QJsonObject{{"used_percent",48},{"window_minutes",10080}}}}});
+        button.setIndicator(Indicator::Rails);const auto plain=button.grab().toImage();
+        button.setIndicator(Indicator::Marker);QCOMPARE(button.grab().toImage(),plain);
+        button.setIndicator(Indicator::MarkerCountdown);QCOMPARE(button.grab().toImage(),plain);
+    }
     void savedCredentialsAreDistinctFromSignedOut() {
         for(const auto &status:{"credentials_locked","desktop_session_unavailable","credentials_unavailable"}) {
             const auto text=AccountUsage::state({{"status",status},{"provider","claude"}});
@@ -153,6 +261,8 @@ private slots:
         font.setFamily("DejaVu Sans Mono");button.setFont(font);QCOMPARE(button.size(),button.sizeHint());
         QVERIFY(button.toolTip().contains("DeepSeek"));QVERIFY(button.accessibleName().contains("DeepSeek"));
     }
+private:
+    QTemporaryDir m_settings;
 };
 QTEST_MAIN(TestAccountUsage)
 #include "test_accountusage.moc"

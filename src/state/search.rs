@@ -513,7 +513,7 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
             }
             (
                 role,
-                text_parts(&message["content"], &["text"]),
+                journal::pasted_text(&text_parts(&message["content"], &["text"])).into_owned(),
                 string(event, "uuid"),
                 timestamp(&event["timestamp"]),
                 "claude_transcript",
@@ -781,6 +781,9 @@ mod tests {
         );
         claude["isSidechain"] = json!(true);
         assert!(provider_event("claude", &claude).is_none());
+        let pasted = json!({"type":"user","uuid":"pasted","timestamp":"2026-01-01T01:00:00Z","message":{"role":"user",
+            "content":"<pasted_content id=\"1b93\">\nFrom the phone\n</pasted_content id=\"1b93\">"}});
+        assert_eq!(provider_event("claude", &pasted).unwrap().0["detail"], "From the phone");
         let notice = "<task-notification>\n<status>completed</status>\n<summary>Background command \"Run checks\" completed</summary>\n</task-notification>";
         let mut task = json!({"type":"user","uuid":"task","timestamp":"2026-01-01T01:00:00Z","promptSource":"system",
             "origin":{"kind":"task-notification"},"message":{"role":"user","content":notice}});

@@ -14,6 +14,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import macos_release
+from homebrew_tap_fixture import make_tap_remote, remote_file
 import release_common as common
 
 
@@ -41,9 +43,17 @@ class PublicationTests(unittest.TestCase):
                      "aur_packages": list(common.PACKAGES),
                      "binary_dependencies": {name: "1.2.3" for name in common.BINARY_LIBRARIES}}
 
-    def candidate(self):
+    def candidate(self, macos=False):
         directory = self.directory / "candidate"
         directory.mkdir()
+        if macos:
+            archive = directory / macos_release.macos_asset(VERSION)
+            archive.write_bytes(b"notarized application")
+            self.info.update(macos={"asset": archive.name, "qt_version": "6.11.3", "team_id": "ABCDE12345",
+                                    "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
+                                    "minimum_system_version": "14.0"})
+            (directory / "homebrew").mkdir()
+            (directory / "homebrew/zerus.rb").write_text(macos_release.render_cask(VERSION, common.sha256(archive)))
         for suffix in ("source", "arch-x86_64"):
             (directory / f"zerus-{VERSION}-{suffix}.tar.gz").write_bytes(suffix.encode())
         for package in ("zerus", "zerus-ade-bin"):
@@ -76,6 +86,102 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another commit"):
             common.validate_candidate(directory, VERSION, "b" * 40)
 
+    def test_cask_template_renders_only_version_and_digest(self):
+        text = macos_release.render_cask(VERSION, "c" * 64)
+        self.assertIn(f'version "{VERSION}"', text)
+        self.assertIn('sha256 "' + "c" * 64 + '"', text)
+        self.assertIn("releases/download/v#{version}/zerus-#{version}-macos-arm64.zip", text)
+        self.assertIn('conflicts_with cask: "zerus@nightly"', text)
+        self.assertEqual(macos_release.cask_fields(text), {"version": VERSION, "sha256": "c" * 64})
+        self.assertNotIn("@", text.replace("#{", "").replace("zerus@nightly", ""), "template markers must all be replaced")
+        for stanza in ("preflight", "postflight", "uninstall", "uninstall_preflight", "auto_updates"):
+            self.assertNotRegex(text, rf"(?m)^  {stanza}\b", "upgrades must not quit the GUI or unload agents")
+        with self.assertRaisesRegex(ValueError, "template"):
+            macos_release.require_template_cask(text + "  postflight do\n", VERSION, "c" * 64)
+        with self.assertRaisesRegex(ValueError, "version"):
+            macos_release.render_cask("0.37", "c" * 64)
+        with self.assertRaisesRegex(ValueError, "digest"):
+            macos_release.render_cask(VERSION, "C" * 64)
+
+    def test_cask_versions_compare_numerically(self):
+        self.assertLess(macos_release.cask_version_key("0.9.9"), macos_release.cask_version_key("0.10.0"))
+        with self.assertRaisesRegex(ValueError, "version"):
+            macos_release.cask_version_key("0.10.0-rc1")
+
+    def test_schema_two_candidate_seals_macos_asset_and_cask(self):
+        directory = self.candidate(macos=True)
+        info, hashes = common.validate_candidate(directory, VERSION, COMMIT)
+        self.assertEqual(info["schema"], 2)
+        self.assertEqual(info["homebrew_casks"], ["zerus"])
+        self.assertEqual(info["architecture"], "x86_64", "Arch fields stay unchanged for the mirror")
+        self.assertIn(macos_release.macos_asset(VERSION), hashes)
+        self.assertEqual(len(hashes), 7)
+
+    def test_schema_two_rejects_changed_zip_or_cask(self):
+        directory = self.candidate(macos=True)
+        (directory / "homebrew/zerus.rb").write_text((directory / "homebrew/zerus.rb").read_text() + "# edited\n")
+        with self.assertRaisesRegex(ValueError, "template"):
+            common.validate_candidate(directory, VERSION)
+        (directory / "homebrew/zerus.rb").write_text(macos_release.render_cask(VERSION, "d" * 64))
+        with self.assertRaisesRegex(ValueError, "template"):
+            common.validate_candidate(directory, VERSION)
+
+    def test_schema_two_requires_verified_macos_provenance(self):
+        self.info["team_id"] = "unused"
+        directory = self.candidate(macos=True)
+        info = json.loads((directory / "release-info.json").read_text())
+        info["macos"]["team_id"] = "not a team"
+        (directory / "release-info.json").write_text(json.dumps(info))
+        common.finish_candidate(directory)
+        with self.assertRaisesRegex(ValueError, "macOS provenance"):
+            common.validate_candidate(directory, VERSION)
+
+    def signed_macos(self, **changes):
+        directory = self.directory / "macos-signed"
+        directory.mkdir()
+        (directory / macos_release.macos_asset(VERSION)).write_bytes(b"notarized application")
+        metadata = {"asset": macos_release.macos_asset(VERSION), "qt_version": "6.11.2", "team_id": "ABCDE12345",
+                    "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef", "minimum_system_version": "14.0"}
+        metadata.update(changes)
+        (directory / "macos-info.json").write_text(json.dumps(metadata))
+        return directory
+
+    def test_signed_macos_artifact_enters_the_candidate_with_its_cask(self):
+        output = self.directory / "dist"
+        output.mkdir()
+        info = {"version": VERSION}
+        macos_release.add_macos(output, self.signed_macos(), VERSION, info)
+        archive = output / macos_release.macos_asset(VERSION)
+        self.assertEqual(archive.read_bytes(), b"notarized application")
+        self.assertEqual(info["macos"]["notarization_id"], "0123abcd-4567-89ef-0123-456789abcdef")
+        macos_release.require_template_cask((output / "homebrew/zerus.rb").read_text(), VERSION, common.sha256(archive))
+
+    def test_signed_macos_artifact_must_be_exact(self):
+        for changes in ({"asset": "zerus-0.37.0-macos-x86_64.zip"}, {"team_id": "bad"}, {"notarization_id": None}):
+            with self.subTest(changes=changes):
+                output = self.directory / "dist"
+                output.mkdir()
+                with self.assertRaises(ValueError):
+                    macos_release.add_macos(output, self.signed_macos(**changes), VERSION, {"version": VERSION})
+                self.assertFalse((output / "homebrew").exists())
+                for path in (output, self.directory / "macos-signed"):
+                    for child in sorted(path.rglob("*"), reverse=True):
+                        child.unlink() if child.is_file() else child.rmdir()
+                    path.rmdir()
+        output = self.directory / "dist"
+        output.mkdir()
+        source = self.signed_macos()
+        (source / "unreviewed.dylib").write_bytes(b"extra")
+        with self.assertRaisesRegex(ValueError, "Unexpected signed macOS artifact"):
+            macos_release.add_macos(output, source, VERSION, {"version": VERSION})
+
+    def test_schema_one_candidate_cannot_carry_a_cask(self):
+        directory = self.candidate()
+        (directory / "homebrew").mkdir()
+        (directory / "homebrew/zerus.rb").write_text(macos_release.render_cask(VERSION, "c" * 64))
+        with self.assertRaisesRegex(ValueError, "Unsealed"):
+            common.validate_candidate(directory, VERSION)
+
     def test_changed_binary_fails_before_publication(self):
         directory = self.candidate()
         (directory / f"zerus-{VERSION}-arch-x86_64.tar.gz").write_bytes(b"changed")
@@ -97,6 +203,16 @@ class PublicationTests(unittest.TestCase):
         with (directory / "SHA256SUMS").open("a") as output:
             output.write("0" * 64 + "  ../outside\n")
         with self.assertRaisesRegex(ValueError, "Invalid checksum"):
+            common.validate_candidate(directory, VERSION)
+
+    def test_stable_candidate_has_no_windows_zip_even_when_sealed(self):
+        # finish_candidate seals nightly zips; a stable release keeps its Arch-only family.
+        directory = self.candidate()
+        self.assertEqual(len(common.validate_candidate(directory, VERSION)[1]), 6)
+        (directory / f"zerus-{VERSION}-windows-x86_64.zip").write_bytes(b"portable")
+        common.finish_candidate(directory)
+        self.assertIn(f"zerus-{VERSION}-windows-x86_64.zip", (directory / "SHA256SUMS").read_text())
+        with self.assertRaisesRegex(ValueError, "Unexpected/missing release assets"):
             common.validate_candidate(directory, VERSION)
 
     def test_wrong_package_architecture_fails(self):
@@ -373,6 +489,97 @@ class PublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "moving branch"):
                 publish.publish_github(directory, info, sums)
             mutations.assert_not_called()
+
+    def tap_remote(self, files=None):
+        return make_tap_remote(self.directory, files)
+
+    def remote_cask(self, remote):
+        return remote_file(remote, "Casks/zerus.rb")
+
+    def test_tap_update_is_prepared_without_changing_the_remote(self):
+        candidate = self.candidate(macos=True)
+        remote = self.tap_remote()
+        workspace = self.directory / "work"
+        workspace.mkdir()
+        directory = publish.prepare_tap(candidate, workspace, None, VERSION, remote=str(remote))
+        self.assertEqual((directory / "Casks/zerus.rb").read_text(), (candidate / "homebrew/zerus.rb").read_text())
+        self.assertIsNone(self.remote_cask(remote), "only a dry-run push happens before GitHub publication")
+        publish.git(directory, "push", "origin", "HEAD:main")
+        self.assertEqual(self.remote_cask(remote), (candidate / "homebrew/zerus.rb").read_text())
+
+    def test_tap_retry_with_identical_cask_is_a_no_op(self):
+        candidate = self.candidate(macos=True)
+        remote = self.tap_remote({"Casks/zerus.rb": (candidate / "homebrew/zerus.rb").read_text()})
+        workspace = self.directory / "work"
+        workspace.mkdir()
+        self.assertIsNone(publish.prepare_tap(candidate, workspace, None, VERSION, remote=str(remote)))
+
+    def test_tap_refuses_downgrades_and_changed_same_version_casks(self):
+        candidate = self.candidate(macos=True)
+        for existing in (macos_release.render_cask("0.38.0", "e" * 64), macos_release.render_cask(VERSION, "e" * 64)):
+            with self.subTest(existing=existing.splitlines()[1]):
+                remote_root = self.directory / "remote"
+                remote_root.mkdir()
+                self.directory, original = remote_root, self.directory
+                try:
+                    remote = self.tap_remote({"Casks/zerus.rb": existing})
+                    workspace = remote_root / "work"
+                    workspace.mkdir()
+                    with self.assertRaisesRegex(ValueError, "downgrade"):
+                        publish.prepare_tap(candidate, workspace, None, VERSION, remote=str(remote))
+                    self.assertEqual(self.remote_cask(remote), existing)
+                finally:
+                    self.directory = original
+                    subprocess.run(["rm", "-rf", str(remote_root)], check=True)
+
+    def test_tap_with_unexpected_casks_is_left_for_manual_review(self):
+        candidate = self.candidate(macos=True)
+        remote = self.tap_remote({"Casks/other.rb": "cask \"other\" do\nend\n"})
+        workspace = self.directory / "work"
+        workspace.mkdir()
+        with self.assertRaisesRegex(ValueError, "Unexpected tap"):
+            publish.prepare_tap(candidate, workspace, None, VERSION, remote=str(remote))
+
+    def test_macos_candidate_needs_the_tap_key_before_any_publication(self):
+        directory = self.candidate(macos=True)
+        arguments = ["publish-release.py", "--candidate", str(directory), "--version", VERSION, "--ssh-key", "/unused/key"]
+        with patch.object(sys, "argv", arguments), \
+                patch.object(publish, "ssh_environment", return_value=([], {})), \
+                patch.object(publish, "prepare_aur") as aur, patch.object(publish, "publish_github") as github:
+            with self.assertRaisesRegex(ValueError, "tap deploy key"):
+                publish.main()
+            aur.assert_not_called()
+            github.assert_not_called()
+
+    def test_arch_only_candidate_never_touches_the_tap(self):
+        directory = self.candidate()
+        arguments = ["publish-release.py", "--candidate", str(directory), "--version", VERSION, "--ssh-key", "/unused/key"]
+        with patch.object(sys, "argv", arguments), \
+                patch.object(publish, "ssh_environment", return_value=([], {})), \
+                patch.object(publish, "prepare_aur", return_value=[]), \
+                patch.object(publish, "publish_github"), patch.object(publish, "prepare_tap") as tap:
+            publish.main()
+            tap.assert_not_called()
+
+    def test_tap_push_follows_github_and_aur_and_failure_is_retryable(self):
+        directory = self.candidate(macos=True)
+        arguments = ["publish-release.py", "--candidate", str(directory), "--version", VERSION,
+                     "--ssh-key", "/unused/key", "--tap-ssh-key", "/unused/tap-key"]
+        events = []
+        def push(repo, *args, **kwargs):
+            events.append(repo.name)
+            if repo.name == "homebrew-zerus": raise subprocess.CalledProcessError(1, "git push")
+        plans = [(name, self.directory / name) for name in common.PACKAGES]
+        with patch.object(sys, "argv", arguments), \
+                patch.object(publish, "ssh_environment", return_value=([], {})) as ssh, \
+                patch.object(publish, "prepare_aur", return_value=plans), \
+                patch.object(publish, "prepare_tap", return_value=self.directory / "homebrew-zerus"), \
+                patch.object(publish, "publish_github", side_effect=lambda *args: events.append("GitHub")), \
+                patch.object(publish, "git", side_effect=push):
+            with self.assertRaisesRegex(SystemExit, "same candidate"):
+                publish.main()
+        self.assertEqual(events, ["GitHub", *common.PACKAGES, "homebrew-zerus"])
+        self.assertEqual(ssh.call_args_list[1].args[2], publish.GITHUB_FINGERPRINT)
 
     def test_aur_failure_precedes_github_and_partial_push_is_retryable(self):
         directory = self.candidate()

@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QClipboard>
+#include <QTimeZone>
 #include <QCryptographicHash>
 #include <QBuffer>
 #include <QEnterEvent>
@@ -188,8 +189,11 @@ void TestMessageComposer::crashRestoresLastEditAndAttachmentBytes()
     QProcess child; child.setProcessChannelMode(QProcess::SeparateChannels);
     child.start(QCoreApplication::applicationFilePath(), {"--draft-crash-child", m_settings.path()});
     QVERIFY(child.waitForStarted());
-    QVERIFY2(child.waitForReadyRead(10000), qPrintable(QString::fromUtf8(child.readAllStandardError())));
-    QCOMPARE(child.readAllStandardOutput().trimmed(), QByteArray("saved"));
+    // Diagnostics on stderr can arrive first; wait for the child's own report.
+    QByteArray saved;
+    QTRY_VERIFY2_WITH_TIMEOUT((saved += child.readAllStandardOutput()).contains('\n'),
+                              qPrintable(QString::fromUtf8(child.readAllStandardError())), 10000);
+    QCOMPARE(saved.trimmed(), QByteArray("saved"));
     child.kill(); QVERIFY(child.waitForFinished()); QCOMPARE(child.exitStatus(), QProcess::CrashExit);
     MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
     setSessionReady(composer, "arch\nended/session"); composer.setAvailability(true);
@@ -197,6 +201,9 @@ void TestMessageComposer::crashRestoresLastEditAndAttachmentBytes()
     QCOMPARE(composer.editor()->textCursor().position(), 8); QCOMPARE(composer.editor()->textCursor().anchor(), 3);
     sendButton(composer)->click(); QCOMPARE(submissions.size(), 1);
     QCOMPARE(submissions[0].attachments.size(), 1); QCOMPARE(submissions[0].attachments[0].data, QByteArray("exact\0bytes", 11));
+#ifdef Q_OS_UNIX
+    // Windows keeps drafts private through the profile directory's ACL; Qt
+    // reports no owner-only modes there.
     const auto root = ComposerDraftStore::directory();
     for (const auto &folder : QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const auto permissions = QFileInfo(root + '/' + folder).permissions();
@@ -204,6 +211,7 @@ void TestMessageComposer::crashRestoresLastEditAndAttachmentBytes()
         for (const auto &file : QDir(root + '/' + folder).entryList(QDir::Files))
             QVERIFY(!(QFileInfo(root + '/' + folder + '/' + file).permissions() & (QFile::ReadGroup | QFile::ReadOther)));
     }
+#endif
 }
 
 void TestMessageComposer::restartKeepsIsolationRenamesAndAttachmentRemoval()
@@ -288,7 +296,7 @@ void TestMessageComposer::storageFailureKeepsDraftAndBlocksDispatch()
     QVERIFY(!setSendingReady(composer, "one")); QVERIFY(!composer.editor()->isReadOnly());
     QCOMPARE(composer.editor()->toPlainText(), "Still editable");
     QVERIFY(blocker.remove()); composer.editor()->insertPlainText("X");
-    QTRY_VERIFY(status(composer)->text().contains("saved locally"));
+    QTRY_VERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
     MessageComposer restored; setSessionReady(restored, "one"); QCOMPARE(restored.editor()->toPlainText(), composer.editor()->toPlainText());
 }
 
@@ -345,10 +353,12 @@ void TestMessageComposer::typingDoesNotRewriteAttachmentSnapshots()
     ComposerDraftStore::flushWrites();
     const auto folders = QDir(ComposerDraftStore::directory()).entryList(QDir::Dirs | QDir::NoDotAndDotDot); QCOMPARE(folders.size(), 1);
     const QDir folder(ComposerDraftStore::directory() + '/' + folders[0]); const auto files = folder.entryList({"*.bin"}, QDir::Files); QCOMPARE(files.size(), 1);
-    QFile snapshot(folder.filePath(files[0])); const auto timestamp = QDateTime::fromSecsSinceEpoch(1000000000);
+    QFile snapshot(folder.filePath(files[0])); const auto timestamp = QDateTime::fromSecsSinceEpoch(1000000000, QTimeZone::UTC);
     QVERIFY(snapshot.open(QIODevice::ReadWrite)); QVERIFY(snapshot.setFileTime(timestamp, QFileDevice::FileModificationTime)); snapshot.close();
     QTest::keyClicks(composer.editor(), "Every character is saved");
-    QCOMPARE(QFileInfo(snapshot).lastModified(), timestamp);
+    // In UTC: Windows file times converted through local time may disagree with Qt
+    // on historic daylight saving time.
+    QCOMPARE(QFileInfo(snapshot).lastModified(QTimeZone::UTC), timestamp);
     QVERIFY(composer.addAttachment("second.bin", "application/octet-stream", "second"));
     const auto before = composer.editor()->toPlainText();
     MessageComposer restored; setSessionReady(restored, "one"); QCOMPARE(restored.editor()->toPlainText(), before);
@@ -359,6 +369,8 @@ void TestMessageComposer::typingDoesNotRewriteAttachmentSnapshots()
 void TestMessageComposer::slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestState()
 {
     MessageComposer composer; setSessionReady(composer, "slow\nexact"); composer.setAvailability(true);
+    composer.resize(440, 220); composer.show(); QTest::qWait(20);
+    QVERIFY(status(composer)->isHidden()); const auto quietSize = composer.sizeHint();
     QSemaphore entered, release;
     std::atomic<int> writes = 0;
     QThread *writer = nullptr;
@@ -380,15 +392,20 @@ void TestMessageComposer::slowDraftWriteDoesNotBlockTypingAndSendOrdersLatestSta
     bool heartbeat = false;
     QTimer::singleShot(0, &composer, [&] { heartbeat = true; });
     QTRY_VERIFY(heartbeat);
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
+    QCOMPARE(composer.sizeHint(), quietSize);
     release.release(); ComposerDraftStore::flushWrites();
     QCOMPARE(ComposerDraftStore().load("slow\nexact").text, latest);
     QVERIFY(writes <= 2); // At most the in-flight and coalesced latest edit.
     QVERIFY(setSendingReady(composer, "slow\nexact"));
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
     QVERIFY(ComposerDraftStore().load("slow\nexact").uncertain);
     composer.deliveryFinished("slow\nexact", true, {});
     QCoreApplication::processEvents(); // Obsolete async acknowledgements cannot restore the text.
     QVERIFY(ComposerDraftStore().load("slow\nexact").text.isEmpty());
     QVERIFY(composer.editor()->toPlainText().isEmpty());
+    QVERIFY(status(composer)->text().isEmpty()); QVERIFY(status(composer)->isHidden());
+    QCOMPARE(composer.sizeHint(), quietSize);
 }
 
 void TestMessageComposer::sendPreparationWaitsForDurableLatestSnapshot()
@@ -780,8 +797,9 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     const auto *send = composer.findChild<QPushButton *>("sendMessage");
     QCOMPARE(composer.width(), 280); QVERIFY(attach->geometry().right() < button->geometry().left());
     QVERIFY(button->geometry().right() < send->geometry().left()); QVERIFY(send->geometry().right() < composer.width());
-    QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
+    QVERIFY(status(composer)->isHidden());
     composer.deliveryFinished("arch/session", false, "Check terminal before retrying", true); QTest::qWait(20);
+    QVERIFY(status(composer)->isVisible()); QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
     const auto *retry = composer.findChild<QPushButton *>("allowMessageRetry"); QVERIFY(retry->isVisible());
     QCOMPARE(composer.width(), 280); QVERIFY(retry->geometry().top() > button->geometry().bottom());
     QVERIFY(retry->geometry().right() < composer.width()); QVERIFY(send->geometry().right() < composer.width());
@@ -1205,6 +1223,7 @@ void TestMessageComposer::attachmentRowOpensStoredCopyAndPreviews()
     QTest::mouseClick(row, Qt::LeftButton, Qt::NoModifier, QPoint(row->width() / 2, row->height() / 2));
     QTRY_COMPARE(opened.size(), 1); QVERIFY(opened[0].isLocalFile());
     QFile stored(opened[0].toLocalFile()); QVERIFY(stored.open(QIODevice::ReadOnly)); QCOMPARE(stored.readAll(), png);
+    stored.close();   // Windows cannot remove an open file.
     QVERIFY(!chip->popover()->isVisible());
     QVERIFY(QDir(AttachmentFiles::root()).removeRecursively());
 }

@@ -124,10 +124,22 @@ public:
     }
 };
 QString profileKey(const QString &host, const QString &id) { return host + QChar('\x1f') + id; }
+// Machines that keep agent accounts. A control-only computer (hgs.exe on
+// Windows) has none of its own, so only remote machines are listed there.
+QStringList accountHosts(const FleetState &fleet, const QString &explicitHost = {}) {
+    QStringList hosts; if (fleet.local().localSessions) hosts << QString();
+    hosts.append(fleet.peerNames());
+    if (!explicitHost.isEmpty() && !hosts.contains(explicitHost)) hosts << explicitHost;
+    return hosts;
+}
+QString remoteOnlyHint() {
+    return QObject::tr("Add a remote machine in Machines to manage agent accounts; this computer runs no agents.");
+}
+QString machineChoice(const FleetState &fleet, const QString &host) {
+    return host.isEmpty() ? fleet.local().host + QObject::tr(" (this machine)") : host;
+}
 void fillMachines(QComboBox *combo, const FleetState &fleet, const QString &explicitHost = {}) {
-    combo->addItem(fleet.local().host + QObject::tr(" (this machine)"), QString());
-    for (const auto &peer : fleet.peerNames()) combo->addItem(peer, peer);
-    if (!explicitHost.isEmpty() && !fleet.peerNames().contains(explicitHost)) combo->addItem(explicitHost, explicitHost);
+    for (const auto &host : accountHosts(fleet, explicitHost)) combo->addItem(machineChoice(fleet, host), host);
 }
 }
 AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsageStore *usage) : QWidget(parent), m_client(hgsPath, this)
@@ -272,10 +284,11 @@ void AccountsPage::showEvent(QShowEvent *event) { QWidget::showEvent(event); ens
 void AccountsPage::setFleet(const FleetState &fleet)
 {
     m_fleet = fleet;m_usageStore->setFleet(fleet); const QString selectedHost = m_machine->currentData().toString();
-    QStringList current; for (int i = 2; i < m_machine->count(); ++i) current << m_machine->itemData(i).toString();
-    QStringList desired = fleet.peerNames();
-    if (!m_explicitHost.isEmpty() && !desired.contains(m_explicitHost)) desired << m_explicitHost;
-    if (current == desired && m_machine->count() > 1 && m_machine->itemText(1) == fleet.local().host + tr(" (this machine)")) { render(); return; }
+    const auto desired = accountHosts(fleet, m_explicitHost);
+    bool same = m_machine->count() == desired.size() + 1;
+    for (int i = 0; same && i < desired.size(); ++i)
+        same = m_machine->itemData(i + 1).toString() == desired[i] && m_machine->itemText(i + 1) == machineChoice(fleet, desired[i]);
+    if (same) { render(); return; }
     const QSignalBlocker blocker(m_machine); m_machine->clear(); m_machine->addItem(tr("All machines"), "*"); fillMachines(m_machine, fleet, m_explicitHost);
     m_machine->setCurrentIndex(qMax(0, m_machine->findData(selectedHost)));
     for (auto it = m_catalogs.begin(); it != m_catalogs.end();) { if (!it.key().isEmpty() && !fleet.peerNames().contains(it.key()) && it.key() != m_explicitHost) { m_catalogChecked.remove(it.key()); it = m_catalogs.erase(it); } else ++it; }
@@ -312,8 +325,7 @@ void AccountsPage::reload()
 int AccountsPage::pendingAccounts() const
 {
     int pending = 0;
-    QStringList hosts{QString()}; hosts.append(m_fleet.peerNames());
-    if (!m_explicitHost.isEmpty() && !hosts.contains(m_explicitHost)) hosts << m_explicitHost;
+    const auto hosts = accountHosts(m_fleet, m_explicitHost);
     for (const auto &host : hosts) {
         if (!m_catalogChecked.contains(host)) { ++pending; continue; }
         for (const auto &request : m_requests) if (request.first == host && request.second == "ls") ++pending;
@@ -335,13 +347,13 @@ void AccountsPage::updateRefreshState()
     const auto caption = pending ? tr("Updating accounts… %1 remaining").arg(pending) : tr("Refresh accounts");
     m_refresh->setToolTip(caption); m_refresh->setAccessibleName(caption);
     QSet<QString> loadedHosts;for(const auto &value:m_displayProfiles)loadedHosts.insert(value.toObject()["host"].toString());
+    if (accountHosts(m_fleet, m_explicitHost).isEmpty()) { m_summary->setText(remoteOnlyHint()); return; }
     m_summary->setText(!m_hasSnapshot ? tr("Loading accounts…") : tr("%1 accounts, %2 machines loaded").arg(m_list->count()).arg(loadedHosts.size())
         + (pending ? tr(" (Updating… %1 remaining)").arg(pending) : QString()));
 }
 void AccountsPage::ensureCatalogs(bool force)
 {
-    QStringList hosts{QString()};hosts.append(m_fleet.peerNames());
-    if(!m_explicitHost.isEmpty() && !hosts.contains(m_explicitHost))hosts<<m_explicitHost;
+    const auto hosts=accountHosts(m_fleet,m_explicitHost);
     const auto now=QDateTime::currentMSecsSinceEpoch();
     for(const auto &host:hosts) {
         bool pending=false;for(const auto &r:m_requests)if(r.first==host && r.second=="ls")pending=true;
@@ -477,7 +489,9 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
-    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool()); m_remove->setEnabled(has && idle && online(p["host"].toString())); m_add->setEnabled(idle);
+    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool()); m_remove->setEnabled(has && idle && online(p["host"].toString()));
+    const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
+    m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint());
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()));
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
@@ -534,7 +548,8 @@ void AccountsPage::inspectProfiles(bool refresh)
 }
 bool AccountsPage::online(const QString &host) const
 {
-    if (host.isEmpty()) return true;
+    // This computer: usable unless it is control-only (no agents of its own).
+    if (host.isEmpty()) return m_fleet.local().localSessions;
     const auto *box = m_fleet.peer(host);
     return !box || m_fleet.peerPolledAt(host) <= 0 || box->ok;
 }
@@ -547,8 +562,7 @@ void AccountsPage::renderMachines()
         const auto p = value.toObject(); present << p["host"].toString();
         signature << AccountCatalog::profileKey(p) << p["label"].toString() << QString::number(online(p["host"].toString()));
     }
-    QStringList hosts{QString()}; hosts.append(m_fleet.peerNames());
-    if (!m_explicitHost.isEmpty() && !hosts.contains(m_explicitHost)) hosts << m_explicitHost;
+    const auto hosts = accountHosts(m_fleet, m_explicitHost);
     for (const auto &host : hosts) signature << host << QString::number(online(host));
     int available = 0; for (const auto &host : hosts) if (!account.isEmpty() && !present.contains(host)) ++available;
     m_copy->setEnabled(!account.isEmpty() && m_requests.isEmpty() && available > 0);
@@ -624,10 +638,12 @@ void AccountsPage::add()
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel); auto *create = buttons->addButton(tr("Create and sign in"), QDialogButtonBox::AcceptRole); create->setEnabled(false); layout->addWidget(buttons);
     const auto update=[=] {
         const bool reuse=!saved->currentData().toJsonObject().isEmpty();const auto host=machine->currentData().toString();
+        // No machine to choose (a control-only computer without remote machines).
+        const bool none=machine->count()==0;
         name->setVisible(!reuse);nameLabel->setVisible(!reuse);
-        create->setEnabled(online(host) && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
+        create->setEnabled(!none && online(host) && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
         create->setText(reuse?tr("Add account"):provider->currentText()=="dsh"?tr("Enter API key…"):tr("Create and sign in"));
-        hint->setText(reuse?tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(host.isEmpty()?m_fleet.local().host:host)
+        hint->setText(none?remoteOnlyHint():reuse?tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(host.isEmpty()?m_fleet.local().host:host)
             :provider->currentText()=="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in."));
     };
     const auto populate=[=] {
@@ -643,7 +659,7 @@ void AccountsPage::add()
     connect(machine,&QComboBox::currentIndexChanged,&dialog,populate);connect(provider,&QComboBox::currentIndexChanged,&dialog,populate);populate();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     dialog.ensurePolished();dialog.adjustSize();
-    if (dialog.exec() != QDialog::Accepted) return;
+    if (dialog.exec() != QDialog::Accepted || machine->count() == 0 || !online(machine->currentData().toString())) return;
     const auto existing=saved->currentData().toJsonObject();if(!existing.isEmpty()){useSavedProfile(existing);return;}
     if (provider->currentText() == "dsh") { setupDeepSeek(machine->currentData().toString(), name->text().trimmed()); return; }
     const QString id = provider->currentText() + "-" + QUuid::createUuid().toString(QUuid::Id128).left(10); const QString host = machine->currentData().toString();
@@ -662,9 +678,7 @@ void AccountsPage::copy(const QString &target)
     layout->addWidget(label(tr("Use %1 on another machine.").arg(account["label"].toString())));
     auto *form = new QFormLayout; auto *machine = new QComboBox; machine->setObjectName("accountDestination");
     QStringList present; for (const auto &member : account["members"].toArray()) present << member.toObject()["host"].toString();
-    QStringList hosts{QString()}; hosts.append(m_fleet.peerNames());
-    if (!m_explicitHost.isEmpty() && !hosts.contains(m_explicitHost)) hosts << m_explicitHost;
-    for (const auto &host : hosts) if (!present.contains(host) && online(host)) machine->addItem(host.isEmpty() ? m_fleet.local().host : host, host);
+    for (const auto &host : accountHosts(m_fleet, m_explicitHost)) if (!present.contains(host) && online(host)) machine->addItem(host.isEmpty() ? m_fleet.local().host : host, host);
     if (machine->count() == 0) return;
     if (target != "*") machine->setCurrentIndex(qMax(0, machine->findData(target)));
     if (p["provider"] == "dsh") {

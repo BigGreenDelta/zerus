@@ -34,9 +34,9 @@ expressions and source repositories are recorded in `docs/rust-dependencies.json
 This inventory is metadata, not a replacement for dependency license texts.
 Cargo downloads the corresponding sources and license files from crates.io.
 
-The GUI links Qt 6 (Widgets, Network and WebEngineWidgets), and on Linux the KDE
-Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These retain their
-own licenses.
+The GUI links Qt 6 (Widgets, Network, WebEngineWidgets and Multimedia), and on
+Linux the KDE Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These
+retain their own licenses.
 Qt WebEngine includes Chromium and additional third-party components. See the
 [Qt WebEngine licensing documentation](https://doc.qt.io/qt-6.8/qtwebengine-licensing.html)
 and the notices supplied by the exact Qt distribution used to build the application.
@@ -49,6 +49,36 @@ alongside the Zerus and vendored libvterm and md4c licenses. A missing dependenc
 fails packaging. Review notices and any source/relinking obligations again if
 the linkage or bundled components change. MIT licensing of Zerus itself does
 not relicense its dependencies.
+
+The Windows portable zip is different: it bundles Qt 6 for MSVC, including Qt
+WebEngine with Chromium and Qt Multimedia with its audio runtime, next to the
+application. These are separate, replaceable DLLs. Qt is used under the GNU LGPL
+version 3; its third-party components retain their own licenses. The zip carries
+the SPDX documents supplied
+with the exact Qt installation, which name the license and copyright of each Qt
+module and of the third-party code inside it (libjpeg-turbo, FreeType, HarfBuzz,
+libpng, zlib and others), and `packaging/windows/licenses` with the text of every
+standard license and exception those documents name; the Chromium documents carry
+their own license texts. Based in part on the work of the Independent JPEG Group
+and of the FreeType Team. The zip also carries the Rust, libvterm, md4c and Codex
+notices and the Microsoft Visual C++ runtime DLLs, redistributed with the
+application from Visual Studio's redistributable folder. It contains no Windows
+system library, such as ICU or the Direct3D shader compiler, no Windows SDK shader
+compiler and no software OpenGL fallback. `scripts/package-windows.py` fails when
+the Qt documents are missing or name a license without a shipped text, and when
+the bundle contains one of those libraries.
+
+The macOS application distributed through the Homebrew cask is different: it
+bundles the official Qt 6.11.2 frameworks and plugins it needs (including Qt
+WebEngine, Qt Quick/QML runtime, Qt SVG, Qt WebChannel, Qt Positioning and Qt
+Multimedia) as unmodified, dynamically linked and replaceable Qt components under
+LGPL-3.0-only. Third-party audio components retain their own license notices.
+`Zerus.app/Contents/Resources/licenses/qt` contains the LGPL-3.0 and GPL-3.0
+texts, Qt's official SPDX documents for every bundled module, including the
+third-party components of Qt WebEngine and Chromium, and the location of the
+exact Qt sources. The same folder also carries the Zerus, libvterm, md4c, Codex and
+Cargo dependency notices; `scripts/check-macos-bundle.py` rejects a bundle when
+any of them is missing.
 
 The CLI's `rusqlite` build includes SQLite through `libsqlite3-sys`. The collected
 notices also preserve its upstream public-domain dedication, separate from the

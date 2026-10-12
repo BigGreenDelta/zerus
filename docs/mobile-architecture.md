@@ -320,9 +320,11 @@ glyphs reuse the desktop drawing geometry.
 
 `SessionCardPresentation` ports the desktop card rules from
 `SessionPresentation.h` and the session tree in `SessionsWindow.cpp`. The
-checkout line is `branchContext` (branch or detached HEAD, none for `not_repo`),
-with the desktop Git branch glyph. `checkout` keeps the `projectContext`
-worktree suffix for headers, Details and spoken descriptions. The counter is
+checkout line is `checkoutLine`: `checkoutFolder` (a linked worktree's main
+checkout from `git_common_dir`) and `branchContext` (branch or detached HEAD,
+none for `not_repo`), with the desktop Git branch glyph, or the folder glyph for
+an ordinary folder. `checkout` adds the `projectContext` worktree mark for
+headers and Details; the spoken description keeps the worktree's own folder. The counter is
 `childCount` without completed children. Rows come only from the snapshot
 `subagents` roster, never previews, and never for `hook_profiles`. They use
 `childStatus`, `Recorded` without current activity, and the `showChild`
@@ -615,7 +617,11 @@ Stop hooks may contain only the first 1,200 Unicode characters of a reply plus
 an ellipsis. Cross-source reconciliation recognizes that native clipping shape
 while retaining time and one-to-one matching checks. Older derived indexes are
 reconciled in bounded batches; corrected rows retain aliases, and changed
-incoming numbering invalidates the old epoch and cursors.
+incoming numbering invalidates the old epoch and cursors. A rewritten provider
+source also resets the index and its epoch. Connectors report a rejected cursor
+only as a failed command, so when a cursor read fails or is answered only from
+the page cache, Android checks the verified head and reopens it if its epoch
+changed. It never replays the old epoch's cached pages as current history.
 
 Android retains a separate movable window of at most 500 messages and two MiB.
 Paging evicts the opposite end of that window without discarding native history.
@@ -623,7 +629,8 @@ An independent encrypted page cache holds at most 128 entries and 64 MiB;
 retained viewport pages allow reopening an older reading position. A lightweight
 unread-head probe cannot overwrite a full cached page. Metadata checks rotate
 between tracked conversations so a slow or unavailable source cannot starve
-other unread counts.
+other unread counts. After a catalog refresh they continue two at a time until
+every stale conversation has been tried, rather than waiting for later refreshes.
 
 Read positions are private to the phone and follow the canonical conversation
 across a verified resume. Incoming agent messages count; tool events and the
@@ -668,7 +675,10 @@ files. Drafts and outgoing envelopes refer to those snapshots, so later changes
 to the source document do not change a pending message. A send uses the existing
 native `attachments: [{name, mime, data_base64, reference?}]` contract. No phone
 supplied path is opened on the computer. `hgs` creates its own private attachment
-files and retains them when input may have reached the native agent.
+files and retains them when input may have reached the native agent. Claude may
+record pasted input as `<pasted_content id="…">…</pasted_content id="…">`; `hgs`
+keeps only the inner text, so the native prompt still matches its delivery
+receipt and the message appears once.
 
 Limits match native input: eight files, ten MiB per file, twenty MiB total and
 64 KiB of message text. `/v1/requests` accepts a bounded 29 MiB JSON envelope;

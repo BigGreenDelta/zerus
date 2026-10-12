@@ -65,13 +65,31 @@ jobs:
           with os.fdopen(descriptor, 'w') as stream:
               stream.write(key.rstrip() + '\n')
           PY
-      - name: Publish immutable assets and synchronize AUR
+      - name: Prepare dedicated Homebrew tap identity
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          # Arch-only candidates do not need the key; the publisher requires it for a macOS candidate.
+          key = os.environ.get('HOMEBREW_TAP_DEPLOY_KEY', '')
+          if key:
+              path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'zerus-tap-key'
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, 'w') as stream:
+                  stream.write(key.rstrip() + '\n')
+          PY
+      - name: Publish immutable assets and synchronize AUR and Homebrew
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
         run: |
+          set -euo pipefail
+          tap=()
+          if [ -f "$RUNNER_TEMP/zerus-tap-key" ]; then tap=(--tap-ssh-key "$RUNNER_TEMP/zerus-tap-key"); fi
           python3 scripts/publish-release.py --candidate dist --version "$RELEASE_VERSION" \
-            --ssh-key "$RUNNER_TEMP/zerus-aur-key"
-      - name: Remove temporary identity
+            --ssh-key "$RUNNER_TEMP/zerus-aur-key" "${tap[@]}"
+      - name: Remove temporary identities
         if: always()
-        run: rm -f "$RUNNER_TEMP/zerus-aur-key"
+        run: rm -f "$RUNNER_TEMP/zerus-aur-key" "$RUNNER_TEMP/zerus-tap-key"

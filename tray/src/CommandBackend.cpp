@@ -1,5 +1,7 @@
 #include "CommandBackend.h"
 
+#include "WindowsConsole.h"
+
 #include <QDir>
 #include <QProcess>
 
@@ -62,17 +64,32 @@ QString CommandBackend::systemTerminalTemplate(
     return QString();
 }
 
+void CommandBackend::prepare(QProcess &process, QStringList argv)
+{
+    process.setProgram(argv.takeFirst());
+    process.setArguments(argv);
+    process.setWorkingDirectory(QDir::homePath());
+#ifdef Q_OS_WIN
+    // A template names a console program or a GUI one (wt.exe), which ignores
+    // the new console.
+    WindowsConsole::show(process, true);
+#endif
+}
+
 bool CommandBackend::open(const QString &command, QString *error)
 {
-    QStringList argv = buildArgv(m_template, command, error);
+    const QStringList argv = buildArgv(m_template, command, error);
     if (argv.isEmpty())
         return false;
 
-    const QString program = argv.takeFirst();
     // Детач обязателен: терминал переживает трей, а не висит его дочерним процессом
     // (иначе «Quit» из меню убивал бы открытые вкладки).
-    if (!QProcess::startDetached(program, argv, QDir::homePath())) {
-        *error = QStringLiteral("cannot start '%1'").arg(program);
+    // Outside Windows this is exactly the static QProcess::startDetached(program,
+    // arguments, QDir::homePath()), which Qt implements this way.
+    QProcess process;
+    prepare(process, argv);
+    if (!process.startDetached()) {
+        *error = QStringLiteral("cannot start '%1'").arg(process.program());
         return false;
     }
     return true;

@@ -14,7 +14,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
 
+#[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
+#[cfg(unix)]
 pub(crate) use store::replace;
 
 /// Machine UUIDs this computer itself obtained through each configured SSH
@@ -23,6 +25,7 @@ pub(crate) use store::replace;
 /// redirects and the `machines` listing, comes from other members and is not
 /// identity evidence. Lock-free like `preferences`; a damaged or foreign store
 /// reports none.
+#[cfg(unix)]
 pub(crate) fn verified_bindings(
     config: &Config,
     local: &str,
@@ -53,6 +56,11 @@ pub(crate) fn verified_bindings(
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or
 /// unreadable catalog reports the defaults.
+/// `{running, current}` for the background catalog worker.
+pub(crate) fn worker_status(config: &Config) -> Value {
+    service::status(config).json()
+}
+
 pub(crate) fn preferences(config: &Config) -> Value {
     std::fs::read(config.dir.join("swarm/catalog.json"))
         .ok()

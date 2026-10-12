@@ -20,6 +20,14 @@ def main():
     cmake = (ROOT / "tray/CMakeLists.txt").read_text()
     if f"project(hgs-tray VERSION {version} " not in cmake:
         raise SystemExit("VERSION and the desktop version must match before release.")
+    android = (ROOT / "mobile/android/app/build.gradle.kts").read_text()
+    mobile_version = re.search(r'val stableVersionName = "([0-9]+\.[0-9]+\.[0-9]+)"', android)
+    if not mobile_version:
+        raise SystemExit("Cannot verify the stable Android version.")
+    for stable, path in ((version, ROOT / "DEV_VERSION"), (mobile_version[1], ROOT / "mobile/android/DEV_VERSION")):
+        dev = path.read_text().strip()
+        if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', dev) or tuple(map(int, dev.split('.'))) <= tuple(map(int, stable.split('.'))):
+            raise SystemExit(f"{path.relative_to(ROOT)} must name a release newer than stable.")
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
     if cargo["package"]["license"] != "MIT":
         raise SystemExit("Review the package license and notices.")
@@ -37,7 +45,7 @@ def main():
         path = ROOT / name
         if not path.is_file():
             continue
-        if path.suffix == ".py" or name == "packaging/linux/zerus-setup":
+        if path.suffix == ".py" or name in {"packaging/linux/zerus-setup", "packaging/macos/zerus-setup"}:
             ast.parse(path.read_text(), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             subprocess.run(["bash", "-n", str(path)], check=True)

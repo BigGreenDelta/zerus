@@ -19,11 +19,23 @@
 #include <QCryptographicHash>
 #include <QUuid>
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <utility>
 
 namespace {
+
+// The executable a start would use: a path as given, otherwise a PATH lookup
+// (which honors PATHEXT on Windows, where C:\Zerus\hgs.exe is a path as well).
+QString resolvedProgram(const QString &program)
+{
+    bool path = program.contains(QLatin1Char('/'));
+#ifdef Q_OS_WIN
+    path = path || program.contains(QLatin1Char('\\')) || QFileInfo(program).isAbsolute();
+#endif
+    return path ? program : QStandardPaths::findExecutable(program);
+}
 
 ProcessRunner::Request processRequest(const QString &program, const QStringList &arguments)
 {
@@ -87,6 +99,11 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    const auto work = obj.value("process_work").toObject();
+    s.backgroundProcesses = work.value("count").toInt(-1);
+    s.backgroundStarted = work.value("started_at").toDouble();
+    s.backgroundObservedAt = work.value("sampled_at").toDouble();
+    s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
@@ -151,6 +168,7 @@ BoxState boxFromObject(const QJsonObject &obj)
     box.error = obj.value(QStringLiteral("error")).toString();
     const auto errorDetail = obj.value(QStringLiteral("error_detail")).toString();
     if (!errorDetail.isEmpty()) box.error = errorDetail;
+    box.localSessions = obj.value(QStringLiteral("local_sessions")).toBool(true);
     box.peersKnown = obj.value("peers").isArray();
     for (const auto &peer : obj.value("peers").toArray()) if (peer.isString()) box.peers.append(peer.toString());
 
@@ -555,6 +573,26 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
                emit inspectionFailed(host, name, detail, archiveId);
            });
     return true;
+}
+
+quint64 HgsClient::downloadFile(const QString &host, const QString &path, const QString &destination)
+{
+    const auto id = ++m_fileDownloadRequest;
+    runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
+        [this, id, host, path, destination](const QByteArray &out) {
+            if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
+            const auto object = QJsonDocument::fromJson(out).object();
+            const QFileInfo saved(destination);
+            if (object.value("host").toString() != host || object.value("path").toString() != path
+                || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
+                || !saved.isFile() || object.value("bytes").toDouble() != saved.size()) {
+                emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
+            }
+            emit fileDownloaded(id, destination);
+        }, [this, id](const QString &, const QString &error) {
+            emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
+        });
+    return id;
 }
 
 quint64 HgsClient::requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
@@ -1052,7 +1090,7 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
         || (conversationId.isEmpty() && !startupTrust && !startupPermission && !startupHooks && !startupUpdate) || answers.isEmpty() || (!question.value("can_answer").toBool() && !canSkip)) {
         reject(tr("This request is not ready to answer. Wait for an updated request or open Terminal.")); return request;
     }
-    const QString program = m_hgs.contains(QLatin1Char('/')) ? m_hgs : QStandardPaths::findExecutable(m_hgs);
+    const QString program = resolvedProgram(m_hgs);
     const QFileInfo executable(program);
     if (program.isEmpty() || !executable.isFile() || !executable.isExecutable()) {
         reject(tr("Cannot start hgs: executable not found or not executable: %1").arg(m_hgs)); return request;
@@ -1151,8 +1189,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
     // A missing CLI would otherwise look like a delivery-uncertain exit127.
     // Detect definite startup failures before passing any message bytes; an
     // actual executable exiting127 must still remain uncertain.
-    const QString program = m_hgs.contains(QLatin1Char('/'))
-        ? m_hgs : QStandardPaths::findExecutable(m_hgs);
+    const QString program = resolvedProgram(m_hgs);
     const QFileInfo executable(program);
     if (program.isEmpty() || !executable.isFile() || !executable.isExecutable()) {
         reject(tr("Cannot start hgs: executable not found or not executable: %1").arg(m_hgs));

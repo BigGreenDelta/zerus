@@ -155,8 +155,8 @@ groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
 Session cards follow the desktop cards. A checkout line shows a small Git branch
-mark and the branch, or detached HEAD; ordinary folders have none. As on the
-desktop, the worktree name is not repeated on the card. A subagent counter uses
+mark and `folder / branch` (or detached HEAD); a linked worktree names its main
+checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
 the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
 the children that are working, waiting for input, paused, failed or unknown,
 in stable ID order. Finished turns stay hidden, as with the desktop default,
@@ -361,6 +361,9 @@ Installation saves private drafts first and waits for active deliveries or
 commands. Android's install-source permission and confirmation remain required;
 the updater explicitly requests user action through
 [PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
+Install is the consent to that prompt: it opens directly for the session the tap
+committed while Updates stays open in the foreground. Continue Android
+confirmation remains only when the prompt could not open then.
 An installer session is recorded before commit and never recommitted after
 interruption. A lost confirmation screen requires explicit cancellation before
 another attempt. Success is shown only after the installed package version is

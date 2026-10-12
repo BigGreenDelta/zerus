@@ -264,7 +264,12 @@ pub(super) fn hook() -> Result<i32> {
     else {
         return Ok(0);
     };
-    let event = stdin_json()?;
+    let mut event = stdin_json()?;
+    if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
+        if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
+            event["prompt"] = json!(prompt);
+        }
+    }
     let sid = event
         .get("session_id")
         .and_then(Value::as_str)

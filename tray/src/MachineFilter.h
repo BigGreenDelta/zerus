@@ -18,6 +18,9 @@ public:
     void setFleet(const FleetState &fleet);
     void setTheme(bool dark);
     void refreshColors();
+    // The chip row shows with a selection unless its owner has no room for it
+    // (the session strip); a poll then cannot show it for a moment.
+    void setConcealed(bool concealed);
 signals:
     void selectionChanged(const QSet<QString> &hosts);
 private:
@@ -31,5 +34,5 @@ private:
     QMenu *m_menu;
     QLayout *m_flow;
     QString m_signature;
-    bool m_dark = false;
+    bool m_dark = false, m_concealed = false;
 };

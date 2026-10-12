@@ -83,6 +83,7 @@ void MachineFilter::toggle(const QString &host, bool selected) {
 void MachineFilter::setFleet(const FleetState &fleet) { m_fleet=fleet; rebuildChips(); }
 void MachineFilter::setTheme(bool dark) { m_dark=dark; refreshColors(); }
 void MachineFilter::refreshColors() { m_signature.clear(); rebuildChips(); }
+void MachineFilter::setConcealed(bool concealed) { m_concealed = concealed; setVisible(!m_concealed && !m_selection.isEmpty()); }
 void MachineFilter::rebuildChips() {
     QStringList ids(m_selection.begin(),m_selection.end()); ids.sort();
     QString signature=QString::number(m_dark);
@@ -90,7 +91,7 @@ void MachineFilter::rebuildChips() {
     m_button->setIcon(workspaceIcon("machines", QColor(m_selection.isEmpty() ? (m_dark ? "#a1adbb" : "#647386") : (m_dark ? "#8bdfc0" : "#167357"))));
     m_button->setText(m_selection.isEmpty() ? QString() : QString::number(m_selection.size()));
     m_button->setToolTip(m_selection.isEmpty() ? tr("All machines: choose one or more") : tr("%1 machines selected; click to change").arg(m_selection.size()));
-    setVisible(!ids.isEmpty());
+    setVisible(!m_concealed && !ids.isEmpty());
     if (signature==m_signature) return;
     m_signature=signature;
     while (auto *item=m_flow->takeAt(0)) { item->widget()->deleteLater(); item->widget()->hide(); delete item; }
@@ -116,7 +117,7 @@ void MachineFilter::rebuildMenu() {
         setSelection({}); all->setChecked(true);
         for (auto *check:m_menu->findChildren<QCheckBox *>()) { const QSignalBlocker blocker(check); check->setChecked(false); }
     });
-    QStringList ids{"@local"}; ids.append(m_fleet.peerNames());
+    QStringList ids; if (m_fleet.local().localSessions) ids << "@local"; ids.append(m_fleet.peerNames());
     for (const auto &id:ids) {
         auto *check=new MachineChoice(name(id)+(id=="@local" ? tr(" (this machine)") : QString()),m_dark); check->setObjectName("machineFilterChoice");
         check->setAttribute(Qt::WA_LayoutUsesWidgetRect);

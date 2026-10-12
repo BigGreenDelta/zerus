@@ -1,0 +1,167 @@
+"""Inspect the Windows portable zip without extracting or executing anything."""
+import json
+from pathlib import Path
+import re
+import stat
+import zipfile
+
+from release_common import require
+
+TOP = "zerus-windows-x86_64"
+# GitHub release mirror limit for a single asset (update_feed.ASSET_LIMIT).
+ZIP_LIMIT = 512 * 1024 * 1024
+# The same bound fetch-release-candidate.py applies to a whole candidate.
+UNPACKED_LIMIT = 500_000_000
+ENTRY_LIMIT = 10_000
+MANIFEST_LIMIT = 64 * 1024
+# Standard SPDX license and exception identifiers named by the SPDX documents
+# of the bundled Qt modules; packaging/windows/licenses holds a <ID>.txt for each.
+QT_LICENSE_TEXTS = (
+    "AFL-2.1", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "BSD-Source-Code", "BSL-1.0", "CC0-1.0", "FTL",
+    "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "HPND", "HPND-sell-variant", "IJG", "ISC", "Imlib2",
+    "LGPL-2.1-or-later", "LGPL-3.0-only", "LLVM-exception", "Libpng", "Linux-syscall-note", "MIT", "MIT-0", "MIT-open-group", "MPL-2.0",
+    "Qt-GPL-exception-1.0", "Unicode-3.0", "Unlicense", "X11", "Zlib", "blessing", "libpng-2.0",
+)
+# The tested executables, the Qt/WebEngine runtime windeployqt must deploy, the
+# app-local MSVC runtime and the notices that make the bundle redistributable.
+REQUIRED = (
+    "hgs.exe", "hgs-tray.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll", "Qt6Multimedia.dll",
+    "Qt6WebEngineCore.dll", "Qt6WebEngineWidgets.dll", "QtWebEngineProcess.exe",
+    "platforms/qwindows.dll", "imageformats/qsvg.dll", "iconengines/qsvgicon.dll",
+    "multimedia/ffmpegmediaplugin.dll", "multimedia/windowsmediaplugin.dll",
+    "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swresample-5.dll", "swscale-8.dll",
+    "resources/icudtl.dat", "resources/qtwebengine_resources.pak", "resources/v8_context_snapshot.bin",
+    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+    "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/rust/inventory.json",
+    *(f"licenses/qt/{name}.txt" for name in QT_LICENSE_TEXTS),
+)
+# Never shipped: windeployqt copies ICU from the build machine's System32 (a
+# forwarder to icu.dll on current Windows; Qt6Core uses the system ICU), the
+# Mesa software OpenGL fallback has no notices in the bundle, and Microsoft's
+# Direct3D shader compilers (D3DCompiler_47.dll is part of Windows, DXC of the
+# Windows SDK) are not redistributed.
+FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:icu[^/]*|opengl32sw|d3dcompiler[^/]*|dxcompiler|dxil)\.dll$")
+WINDOWS_INVALID = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\]')
+WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
+VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+
+def safe_name(name):
+    """A relative file path that extracts identically and safely on Windows."""
+    require(isinstance(name, str) and name.startswith(TOP + "/") and not WINDOWS_INVALID.search(name),
+            f"Unsafe Windows portable entry: {name!r}")
+    for part in name.split("/"):
+        require(part not in {"", ".", ".."} and not part.endswith((".", " ")) and
+                part.split(".", 1)[0].upper() not in WINDOWS_RESERVED,
+                f"Unsafe Windows portable entry: {name!r}")
+    return name
+
+
+def inspect(path, required=REQUIRED):
+    """Return build-info.json after checking every entry and the expected layout."""
+    path = Path(path)
+    require(path.is_file() and not path.is_symlink(), "Windows portable bundle is not a regular file.")
+    require(0 < path.stat().st_size <= ZIP_LIMIT, "Windows portable bundle exceeds the release asset limit.")
+    try:
+        archive = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        raise ValueError("Windows portable bundle is not a valid zip archive.") from None
+    with archive:
+        entries = archive.infolist()
+        require(0 < len(entries) <= ENTRY_LIMIT, "Unexpected Windows portable entry count.")
+        names, folded, total = set(), set(), 0
+        for entry in entries:
+            name = safe_name(entry.filename)
+            require(not FORBIDDEN.search(name), f"Windows portable bundle must not contain {name}")
+            # Unix file type bits, when present, must say "regular file" (no symlinks).
+            require(not entry.is_dir() and stat.S_IFMT(entry.external_attr >> 16) in {0, stat.S_IFREG},
+                    f"Windows portable entries must be regular files: {name}")
+            require(not entry.flag_bits & 0x1 and entry.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED},
+                    f"Unsupported Windows portable entry encoding: {name}")
+            # NTFS is case-insensitive: two spellings would overwrite each other.
+            require(name.casefold() not in folded, f"Duplicate Windows portable entry: {name}")
+            names.add(name)
+            folded.add(name.casefold())
+            total += entry.file_size
+        require(total <= UNPACKED_LIMIT, "Windows portable bundle unpacks beyond its size limit.")
+        missing = sorted(item for item in required if f"{TOP}/{item}" not in names)
+        require(not missing, "Windows portable bundle lacks: " + ", ".join(missing))
+        info = archive.getinfo(f"{TOP}/build-info.json")
+        require(info.file_size <= MANIFEST_LIMIT, "Windows portable build-info.json is too large.")
+        with archive.open(info) as stream:
+            raw = stream.read(MANIFEST_LIMIT + 1)
+    require(len(raw) <= MANIFEST_LIMIT, "Windows portable build-info.json is too large.")
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("Windows portable build-info.json is not valid JSON.") from None
+    require(isinstance(manifest, dict), "Windows portable build-info.json is not an object.")
+    require(manifest.get("product") == "Zerus" and manifest.get("platform") == "Windows" and
+            manifest.get("architecture") == "x86_64" and manifest.get("native_agents_bundled") is False,
+            "Unexpected Windows portable product/platform.")
+    for key in ("version", "cli_version", "qt_version"):
+        require(isinstance(manifest.get(key), str) and VERSION.fullmatch(manifest[key]),
+                f"Invalid Windows portable {key}.")
+    require(isinstance(manifest.get("source_commit"), str) and re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"]),
+            "Windows portable bundle lacks its exact source commit.")
+    return manifest
+
+
+SPDX_LICENSE_FIELDS = {"PackageLicenseConcluded", "PackageLicenseDeclared", "PackageLicenseInfoFromFiles",
+                       "LicenseConcluded", "LicenseInfoInFile"}
+SPDX_KEYWORDS = {"AND", "OR", "WITH", "NOASSERTION", "NONE"}
+
+
+def spdx_tags(text):
+    """(tag, value) pairs of an SPDX tag-value document; <text> values may span lines."""
+    lines = iter(text.splitlines())
+    for line in lines:
+        tag, separator, value = line.partition(":")
+        if not separator or not re.fullmatch(r"[A-Za-z]+", tag):
+            continue
+        value = value.strip()
+        if value.startswith("<text>"):
+            parts = [value[len("<text>"):]]
+            while "</text>" not in parts[-1]:
+                following = next(lines, None)
+                require(following is not None, f"Unterminated <text> value for {tag} in an SPDX document.")
+                parts.append(following)
+            parts[-1] = parts[-1][:parts[-1].index("</text>")]
+            value = "\n".join(parts)
+        yield tag, value
+
+
+def sbom_licenses(text):
+    """License and exception identifiers an SPDX document names, and the LicenseRef
+    identifiers it defines with a non-empty extracted text."""
+    named, defined, license_id = set(), set(), None
+    for tag, value in spdx_tags(text):
+        if tag in SPDX_LICENSE_FIELDS:
+            named.update(token for token in re.split(r"[\s()]+", value) if token and token not in SPDX_KEYWORDS)
+        elif tag == "LicenseID":
+            license_id = value
+        elif tag == "ExtractedText":
+            if license_id and value.strip():
+                defined.add(license_id)
+            license_id = None
+    return named, defined
+
+
+def missing_license_texts(documents, texts):
+    """'document: identifier' for each license the documents name without a text:
+    a standard identifier needs <ID>.txt among texts, a LicenseRef its extracted
+    text in the same document (or, through a DocumentRef, in another one)."""
+    parsed = {name: sbom_licenses(text) for name, text in documents.items()}
+    everywhere = set().union(*(defined for _, defined in parsed.values()))
+    missing = []
+    for name, (named, defined) in sorted(parsed.items()):
+        for identifier in sorted(named):
+            reference = identifier.rpartition(":")[2]
+            if reference.startswith("LicenseRef-"):
+                known = reference in (everywhere if identifier.startswith("DocumentRef-") else defined)
+            else:
+                known = identifier in texts
+            if not known:
+                missing.append(f"{name}: {identifier}")
+    return missing

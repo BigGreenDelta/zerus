@@ -50,7 +50,7 @@ fn sampled_cpu(root: &Path, mut current: CpuSample) -> std::io::Result<(Option<f
         // hold this lock for moments; wait briefly rather than report CPU unavailable.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while let Err(error) = lock.try_lock_exclusive() {
-            if error.kind() != std::io::ErrorKind::WouldBlock || std::time::Instant::now() >= deadline {
+            if !crate::platform::lock_contended(&error) || std::time::Instant::now() >= deadline {
                 return Err(error);
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -74,7 +74,7 @@ fn sampled_cpu(root: &Path, mut current: CpuSample) -> std::io::Result<(Option<f
         }
         let mut file = tempfile::NamedTempFile::new_in(&directory)?;
         file.write_all(&serde_json::to_vec(&current)?)?;
-        file.persist(path).map_err(|e| e.error)?;
+        crate::platform::persist(file, path).map_err(|e| e.error)?;
         Ok((current.percent, current.interval))
     };
     attempt()
@@ -236,7 +236,35 @@ fn native() -> (Option<CpuSample>, Option<(u64, u64)>, Option<f64>) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn native() -> (Option<CpuSample>, Option<(u64, u64)>, Option<f64>) {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::{
+            SystemInformation::{GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            Threading::GetSystemTimes,
+        },
+    };
+    let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    let uptime = unsafe { GetTickCount64() } as f64 / 1000.;
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut idle, mut kernel, mut user) = (zero, zero, zero);
+    // Kernel time includes idle time, as Linux's total includes idle.
+    let cpu = (unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0).then(|| CpuSample {
+        total: ticks(kernel).saturating_add(ticks(user)),
+        idle: ticks(idle),
+        uptime,
+        percent: None,
+        interval: None,
+    });
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    let memory = (unsafe { GlobalMemoryStatusEx(&mut status) } != 0 && status.ullTotalPhys > 0)
+        .then(|| (status.ullTotalPhys, status.ullTotalPhys - status.ullAvailPhys.min(status.ullTotalPhys)));
+    (cpu, memory, Some(uptime))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn native() -> (Option<CpuSample>, Option<(u64, u64)>, Option<f64>) {
     (None, None, None)
 }
@@ -253,8 +281,15 @@ pub fn snapshot(root: &Path) -> Value {
     } else {
         "warming"
     };
-    let mut load = [0.; 3];
-    let loaded = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+    #[cfg(unix)]
+    let (load, loaded) = {
+        let mut load = [0.; 3];
+        let loaded = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+        (load, loaded)
+    };
+    // Windows has no load average; its load fields stay null.
+    #[cfg(not(unix))]
+    let (load, loaded): ([f64; 3], i32) = ([0.; 3], 0);
     let (total, used) = memory
         .map(|(total, used)| (Some(total), Some(used)))
         .unwrap_or((None, None));

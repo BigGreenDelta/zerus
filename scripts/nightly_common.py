@@ -4,11 +4,17 @@ from pathlib import Path
 import re
 import tarfile
 
+from macos_release import require_template_cask, validate_macos_info
 from release_common import BINARY_LIBRARIES, metadata, retains_description_update, require, sha256
+import windows_portable
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "zerus-ade-nightly-bin"
 PACKAGES = (PACKAGE,)
+
+
+def windows_asset(version):
+    return f"zerus-{version}-windows-x86_64.zip"
 
 
 def nightly_version(product, count, commit, number):
@@ -32,8 +38,11 @@ def render_recipe(info, binary_hash):
 
 def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     info = json.loads((directory / "release-info.json").read_text())
-    require(info.get("schema") == 1 and info.get("channel") == "nightly" and
+    schema = info.get("schema")
+    require(schema in (1, 2) and info.get("channel") == "nightly" and
             info.get("publication") == "candidate", "Not a sealed nightly candidate.")
+    require(schema == 2 or ("macos" not in info and "homebrew_casks" not in info),
+            "Schema 1 nightlies carry no macOS asset.")
     require(info.get("architecture") == "x86_64" and info.get("distribution") == "Arch Linux" and
             info.get("native_agents_bundled") is False, "Unexpected nightly platform/runtime.")
     require(info.get("aur_packages") == list(PACKAGES), "Unexpected nightly package family.")
@@ -51,8 +60,18 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
         re.fullmatch(r"[0-9][0-9A-Za-z.+:~_-]*", value) for value in floors.values()),
         "Invalid nightly binary library provenance.")
     version = info["version"]
+    # Schema 2 adds the notarized Apple Silicon bundle and the zerus@nightly cask.
+    macos = validate_macos_info(info, version, "nightly") if schema == 2 else None
     expected_files = {f"zerus-{version}-arch-x86_64.tar.gz", f"zerus-{version}-aur.tar.gz",
                       f"{PACKAGE}-{version}-1-x86_64.pkg.tar.zst", "release-info.json"}
+    # Nightlies built before the Windows job have no portable zip; retrying their
+    # publication must keep working. A manifest that names the zip requires it.
+    windows = info.get("windows_portable")
+    if windows is not None:
+        require(windows == windows_asset(version), "Invalid Windows nightly asset.")
+        expected_files.add(windows)
+    if macos:
+        expected_files.add(macos["asset"])
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.+-]+)", line)
@@ -63,9 +82,21 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
         require(path.is_file() and not path.is_symlink() and sha256(path) == digest,
                 f"Nightly checksum mismatch: {name}")
         sums[name] = digest
+    directories = {"aur", "homebrew"} if macos else {"aur"}
     require(set(sums) == expected_files and
-            {path.name for path in directory.iterdir()} == expected_files | {"aur", "SHA256SUMS"},
+            {path.name for path in directory.iterdir()} == expected_files | directories | {"SHA256SUMS"},
             "Unsealed/missing nightly assets.")
+    if windows is not None:
+        # Bounded reads of the zip directory and build-info.json; nothing is extracted or run.
+        manifest = windows_portable.inspect(directory / windows)
+        require(manifest["source_commit"] == info["source_commit"] and
+                manifest["version"] == info["product_version"],
+                "Windows portable bundle belongs to another commit/version.")
+    if macos:
+        cask = directory / "homebrew/zerus@nightly.rb"
+        require(sorted(path.name for path in (directory / "homebrew").iterdir()) == [cask.name] and
+                cask.is_file() and not cask.is_symlink(), "Unexpected Homebrew cask files.")
+        require_template_cask(cask.read_text(), version, sums[macos["asset"]], "nightly", info["release_tag"])
     members_expected = {f"aur/{PACKAGE}/{name}" for name in ("PKGBUILD", ".SRCINFO")}
     with tarfile.open(directory / f"zerus-{version}-aur.tar.gz", "r:gz") as archive:
         members = archive.getmembers()

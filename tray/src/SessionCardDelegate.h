@@ -95,7 +95,7 @@ public:
     static CardStatus statusOf(const QModelIndex &index, bool selected) {
         CardStatus s;
         s.attention = index.data(SessionRoles::Attention).toBool();
-        s.unread = index.data(SessionRoles::Unread).toBool();
+        s.unread = index.data(SessionRoles::Unread).toBool() && index.data(SessionRoles::Working).toInt() <= 0;
         s.state = index.data(SessionRoles::Status).toString();
         const bool error = index.data(SessionRoles::Failure).toBool() || s.state == "Error";
         s.working = index.data(SessionRoles::Working).toInt() > 0;
@@ -106,7 +106,7 @@ public:
             : s.working ? SessionStatusBadge::Working : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
             : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
             : s.paused ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
-        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
+        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
@@ -367,10 +367,11 @@ private:
         if (!gitBadge.isEmpty()) GitStatusBadge::paint(p, gitBadge,
             GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), option.font, gitBadge.width()), option.font, dark);
         const int metadataWidth = qMax(0, (gitBadge.isEmpty() ? machineBadge.left() : gitBadge.left()) - textX - 8);
-        const int branchInset = index.data(SessionRoles::BranchIcon).toBool() && metadataWidth >= 32 ? 18 : 0;
-        if (branchInset) workspaceIcon("git-branch", muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
-        CachedText::draw(p, QRect(textX + branchInset, metadataY, qMax(0, metadataWidth - branchInset), 18), Qt::AlignVCenter,
-                    CachedText::elided(font, index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - branchInset)));
+        const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
+        const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;
+        if (iconInset) workspaceIcon(metaIcon, muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
+        CachedText::draw(p, QRect(textX + iconInset, metadataY, qMax(0, metadataWidth - iconInset), 18), Qt::AlignVCenter,
+                    CachedText::elided(font, index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - iconInset)));
 
         QString detail = index.data(SessionRoles::Detail).toString();
         // Status is already beside the title. Keep the activity excerpt useful

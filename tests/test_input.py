@@ -622,6 +622,23 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
         self.assertFalse(Path("/tmp/no-hgs-input-test").exists())
         self.assertEqual(self.tmux("list-buffers", "-F", "#{buffer_name}"), "")
 
+    def test_trailing_backslash_gets_a_pasted_newline_where_enter_continues(self):
+        # Claude and Kimi read backslash-Enter as line continuation; Codex submits.
+        prompts = dict(claude=("\x1b[2J\x1b[H❯ ", "2:0"), codex=("\x1b[2J\x1b[H› ", "2:0"),
+                       kimi=("\x1b[2J\x1b[H ╭──────────────╮\r\n │ >          │\r\n ╰──────────────╯\x1b[2;6H", "5:1"))
+        text = 'Путь C:\\temp\\'
+        for agent, (screen, cursor) in prompts.items():
+            with self.subTest(agent=agent):
+                (self.root / "received").unlink(missing_ok=True)
+                self.record["agent"] = agent
+                self.write_record()
+                self.screen(screen, cursor)
+                receipt = self.send(self.payload(text=text))
+                self.wait_for(lambda: self.received().endswith(b"\r"))
+                final = b"" if agent == "codex" else b"\n"
+                self.assertEqual(self.received(), b"\x1b[200~" + text.encode() + final + b"\x1b[201~\r")
+                self.assertEqual(receipt["submitted_text"], text)
+
     def test_attachments_transferred_privately_and_referenced_on_agent_host(self):
         data = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
         payload = self.payload(attachments=[dict(name="../../screen shot.png", mime="image/png",

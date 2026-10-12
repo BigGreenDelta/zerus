@@ -16,13 +16,23 @@
 #include <QTextLayout>
 #include <ctime>
 #include <limits>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace {
 // CPU time of the calling thread; unlike wall time it excludes preemption by other processes.
 qint64 threadCpuMs()
 {
+#ifdef Q_OS_WIN
+    FILETIME created{}, exited{}, kernel{}, user{};
+    GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user);
+    const auto ticks = [](const FILETIME &time) { return (qint64(time.dwHighDateTime) << 32) | time.dwLowDateTime; };
+    return (ticks(kernel) + ticks(user)) / 10000;   // 100 ns units
+#else
     timespec now{}; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+#endif
 }
 const MarkdownTheme &light()
 {

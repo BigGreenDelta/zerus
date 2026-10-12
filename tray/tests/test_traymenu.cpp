@@ -49,6 +49,8 @@ private slots:
     void emptyAndBrokenStates();
     void opennessFollowsAboutToShow();
     void survivesExternalMenuDeletion();
+    void controlOnlyComputerHasNoSessionSection();
+    void windowsModesNameWindowsTerminal();
 };
 
 void TestTrayMenu::quickAccessOnly()
@@ -161,5 +163,26 @@ void TestTrayMenu::survivesExternalMenuDeletion()
     auto *tm = new TrayMenu(kModes, "clipboard", false); tm->rebuild(twoBoxFleet());
     delete tm->menu(); QVERIFY(!tm->menu()); delete tm;
 }
+void TestTrayMenu::controlOnlyComputerHasNoSessionSection()
+{
+    auto state = twoBoxFleet(); auto local = state.local(); local.sessions.clear(); local.localSessions = false;
+    state.setLocal(local, 1000);
+    TrayMenu tm(kModes, "auto", false); tm.rebuild(state);
+    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "mac", "● kimi/docs", "---", "Open in", "Refresh", "Quit"}));
+    FleetState alone; alone.setLocal(local, 1000);
+    tm.rebuild(alone);
+    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "No remote machines", "---", "Open in", "Refresh", "Quit"}));
+    QVERIFY(!tm.menu()->actions()[2]->isEnabled());
+}
+
+void TestTrayMenu::windowsModesNameWindowsTerminal()
+{
+    TrayMenu tm({"auto", "tab", "window", "console", "clipboard"}, "console", false); tm.rebuild(twoBoxFleet());
+    QCOMPARE(labels(submenu(tm.menu(), "Open in")),
+             QStringList({"Automatic", "Windows Terminal tab", "Windows Terminal window", "Console window", "Clipboard"}));
+    TrayMenu other(kModes, "auto", false); other.rebuild(twoBoxFleet());
+    QCOMPARE(labels(submenu(other.menu(), "Open in")), QStringList({"Automatic", "Tab", "Window", "Clipboard"}));
+}
+
 QTEST_MAIN(TestTrayMenu)
 #include "test_traymenu.moc"

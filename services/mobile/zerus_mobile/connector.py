@@ -458,6 +458,11 @@ class Connector:
         # the relay's unchanged-snapshot shortcut.
         presence = snapshot.pop("desktop_presence", None)
         self.presence = presence if isinstance(presence, dict) else None
+        # Observation clocks are control freshness evidence, not a change in
+        # the background work itself. Preserve semantic snapshot deduplication.
+        for row in snapshot["sessions"]:
+            if isinstance(row, dict) and isinstance(row.get("process_work"), dict):
+                row["process_work"].pop("sampled_at", None)
         self.sessions = {row["name"] for row in snapshot["sessions"]
                          if isinstance(row, dict) and isinstance(row.get("name"), str)
                          and not is_archived(row)}

@@ -1,3 +1,4 @@
+#include "FakeCli.h"
 #include "ProcessView.h"
 #include "HgsClient.h"
 #include "BusyIndicator.h"
@@ -26,9 +27,9 @@ private slots:
 };
 void TestProcessView::disabledDoesNotReadOrContinuePolling(){
     QTemporaryDir dir;QFile file(dir.filePath("hgs"));QVERIFY(file.open(QIODevice::WriteOnly));
-    file.write("#!/bin/sh\nprintf 'called\\n' >> \"$(dirname \"$0\")/calls\"\nprintf '{}'\n");file.close();file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+    file.write("#!/usr/bin/env python3\nimport os\nopen(os.path.join(os.path.dirname(__file__),'calls'),'a').write('called\\n')\nprint('{}',end='')\n");file.close();QVERIFY(FakeCli::makeRunnable(file.fileName()));
     QSettings().setValue("processes/enabled",false);QSettings().setValue("processes/activeSeconds",1);
-    HgsClient client(file.fileName());ProcessView view(&client);view.show();
+    HgsClient client(FakeCli::program(file.fileName()));ProcessView view(&client);view.show();
     QJsonObject job{{"id","shell"},{"command","sleep 300"},{"status","running"},{"capabilities",QJsonObject{{"output",true},{"stop",true}}}};
     view.setSession({},"session",{},QJsonObject{{"run_id","run"},{"conversation_id","conversation"},{"processes",QJsonObject{{"items",QJsonArray{job}}}}},true,true);
     QTest::qWait(1200);QVERIFY(!QFile::exists(dir.filePath("calls")));QVERIFY(!view.findChild<QPushButton *>("stopProcess")->isEnabled());
@@ -44,8 +45,8 @@ a=sys.argv[1:]
 def get(k): return a[a.index(k)+1]
 time.sleep(.1)
 print(json.dumps(dict(id=get('--output'),run_id=get('--run'),conversation_id=get('--conversation'),output='\n'.join(get('--conversation')+' line '+str(i) for i in range(150)))))
-)");script.close();QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());ProcessView view(&client);view.resize(900,620);view.show();
+)");script.close();QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));ProcessView view(&client);view.resize(900,620);view.show();
     QJsonObject a{{"id","a"},{"command","echo '<unsafe>'"},{"cwd","/workspace"},{"owner","main"},{"status","running"},{"started_at",1},{"updated_at",2},{"capabilities",QJsonObject{{"stop",true}}}};
     auto b=a;b["id"]="b";b["status"]="completed";b["capabilities"]=QJsonObject{{"stop",false}};
     QJsonObject data{{"run_id","run"},{"conversation_id","first"},{"processes",QJsonObject{{"items",QJsonArray{a,b}}}}};
@@ -77,7 +78,7 @@ with open(pathlib.Path(__file__).with_suffix('.log'),'a') as f:
  f.write(json.dumps(dict(id=identity,stop=stop,run=get('--run'),conversation=get('--conversation')))+'\n')
 time.sleep(.8 if identity=='slow' else .15 if stop else .08)
 print(json.dumps(dict(id=identity,run_id=get('--run'),conversation_id=get('--conversation'),status='requested',output=identity+' output')))
-)");file.close();return file.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner);
+)");file.close();return FakeCli::makeRunnable(file.fileName());
 }
 QJsonObject job(const QString &id,bool control=true,const QString &state="running") {
     return {{"id",id},{"command","echo "+id},{"owner","main"},{"status",state},{"started_at",1},{"updated_at",2},{"capabilities",QJsonObject{{"stop",control}}}};
@@ -94,7 +95,7 @@ QTreeWidgetItem *row(QTreeWidget *list,const QString &id){
 }
 }
 void TestProcessView::multiSelectStopStaysPinnedAndSurvivesRefresh(){
-    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(dir.filePath("hgs"));ProcessView view(&client);view.resize(900,620);view.show();
+    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(FakeCli::program(dir.filePath("hgs")));ProcessView view(&client);view.resize(900,620);view.show();
     auto a=job("a"),b=job("b"),c=job("c");auto data=inspection({a,b,c});view.setSession("arch","dsh/project","",data,true,true);
     auto *list=view.findChild<QTreeWidget*>("processList");auto *stop=view.findChild<QPushButton*>("stopProcess");auto *notice=view.findChild<QLabel*>("processStopNotice");
     QCOMPARE(list->selectionMode(),QAbstractItemView::ExtendedSelection);
@@ -122,7 +123,7 @@ void TestProcessView::multiSelectStopStaysPinnedAndSurvivesRefresh(){
     for(auto *button:view.findChildren<QPushButton*>())QVERIFY(button->text()!="Open Terminal");
 }
 void TestProcessView::sessionChangeCancelsRemainingStops(){
-    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(dir.filePath("hgs"));ProcessView view(&client);view.resize(900,620);view.show();
+    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(FakeCli::program(dir.filePath("hgs")));ProcessView view(&client);view.resize(900,620);view.show();
     auto data=inspection({job("slow"),job("next")});view.setSession("arch","dsh/project","",data,true,true);
     auto *list=view.findChild<QTreeWidget*>("processList");auto *stop=view.findChild<QPushButton*>("stopProcess");
     view.selectProcess("slow");row(list,"next")->setSelected(true);stop->click();
@@ -132,7 +133,7 @@ void TestProcessView::sessionChangeCancelsRemainingStops(){
     QVERIFY(view.findChild<QLabel*>("processStopNotice")->isHidden());
 }
 void TestProcessView::delayedLoadingAndQuietCompletedOutput(){
-    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(dir.filePath("hgs"));ProcessView view(&client);view.resize(900,620);view.show();
+    QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(FakeCli::program(dir.filePath("hgs")));ProcessView view(&client);view.resize(900,620);view.show();
     auto done=job("fast",false,"completed");auto data=inspection({done,job("slow",false,"completed")});view.setSession("arch","dsh/project","",data,true,true);
     auto *busy=view.findChild<QWidget*>("processBusy");auto *output=view.findChild<QPlainTextEdit*>("processOutput");
     QVERIFY(busy->isHidden());QTRY_COMPARE(output->toPlainText(),QString("fast output"));QVERIFY(busy->isHidden());

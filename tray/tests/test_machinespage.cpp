@@ -17,6 +17,7 @@
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
+#include "FakeCli.h"
 #include "MachinesPage.h"
 #include "MachineAppearance.h"
 
@@ -34,6 +35,7 @@ private slots:
     void staleResolutionCannotPopulateAnotherMachine();
     void colorsWorkForLocalAndPersistWithoutSavingConnection();
     void dashboardSelectionWaitsForProfiles();
+    void controlOnlyComputerIsAConsoleWithoutSessions();
     void preview();
 private:
     template<class T> T *widget(MachinesPage &page, const char *name) {
@@ -86,7 +88,7 @@ elif command=='setup':
  print('Setup complete: hgs fixture')
 else: raise AssertionError(args)
 )");
-    fixture.close(); QVERIFY(fixture.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     QFile data(m_dir.filePath("data.json")); QVERIFY(data.open(QIODevice::WriteOnly));
     data.write(R"({"local":"arch","revision":"revision-1","machines":[{"alias":"mac","connection":{"enabled":true},"enabled":true,"source":"config","inherited":true}]})");
 }
@@ -111,7 +113,7 @@ QJsonArray TestMachinesPage::calls() const
 }
 void TestMachinesPage::localReadOnlyAndNewProfileCannotOverwrite()
 {
-    MachinesPage page(m_script); start(page);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
     QVERIFY(!widget<QPushButton>(page, "browseMachineKey")->isEnabled());
     QVERIFY(!widget<QPushButton>(page, "saveMachine")->isEnabled());
     QSignalSpy accounts(&page, &MachinesPage::accountsRequested);
@@ -149,7 +151,7 @@ void TestMachinesPage::newMachineDraftCancelAndDiscard_data()
 }
 void TestMachinesPage::newMachineDraftCancelAndDiscard()
 {
-    QFETCH(QString,answer);MachinesPage page(m_script);start(page);
+    QFETCH(QString,answer);MachinesPage page(FakeCli::program(m_script));start(page);
     auto *list=widget<QListWidget>(page,"machineProfiles");auto *alias=widget<QLineEdit>(page,"machineAlias");
     widget<QPushButton>(page,"addMachine")->click();QCOMPARE(list->count(),3);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("@new"));
@@ -187,7 +189,7 @@ void TestMachinesPage::newMachineDraftCancelAndDiscard()
 
 void TestMachinesPage::editsKeepDraftWhileFleetRefreshesAndFailuresAreVisible()
 {
-    MachinesPage page(m_script); start(page);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
     widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1);
     QVERIFY(widget<QLineEdit>(page, "machineAlias")->isReadOnly());
     auto *hostname = widget<QLineEdit>(page, "machineHostname"); hostname->setText("changed.local");
@@ -203,7 +205,7 @@ void TestMachinesPage::editsKeepDraftWhileFleetRefreshesAndFailuresAreVisible()
 }
 void TestMachinesPage::testConnectionAndOpenSshKeepSelectedAlias()
 {
-    MachinesPage page(m_script); start(page);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
     widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1);
     auto *check = widget<QPushButton>(page, "checkMachine"); check->click();
     QVERIFY(!widget<QListWidget>(page, "machineProfiles")->isEnabled());
@@ -218,7 +220,7 @@ void TestMachinesPage::testConnectionAndOpenSshKeepSelectedAlias()
 }
 void TestMachinesPage::installationStreamsOutputAndKeepsProfileLocked()
 {
-    MachinesPage page(m_script); start(page);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
     widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1);
     QTimer::singleShot(0, &page, [&] {
         auto *dialog = page.findChild<QDialog *>("machineSetupDialog"); QVERIFY(dialog);
@@ -238,7 +240,7 @@ void TestMachinesPage::installationStreamsOutputAndKeepsProfileLocked()
 }
 void TestMachinesPage::effectiveValuesNeverBecomeOverridesOrReplaceDrafts()
 {
-    MachinesPage page(m_script); start(page); flag("resolve-delay");
+    MachinesPage page(FakeCli::program(m_script)); start(page); flag("resolve-delay");
     widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1);
     auto *hostname = widget<QLineEdit>(page, "machineHostname"); auto *effective = widget<QLabel>(page, "effectiveMachineConnection");
     QCOMPARE(hostname->text(), "");
@@ -261,7 +263,7 @@ void TestMachinesPage::staleResolutionCannotPopulateAnotherMachine()
     QFile file(m_dir.filePath("data.json")); QVERIFY(file.open(QIODevice::ReadOnly)); auto data = QJsonDocument::fromJson(file.readAll()).object(); file.close();
     auto machines = data["machines"].toArray(); machines.append(QJsonObject{{"alias","studio"},{"connection",QJsonObject{}},{"enabled",true},{"source","config"}}); data["machines"] = machines;
     QVERIFY(file.open(QIODevice::WriteOnly)); file.write(QJsonDocument(data).toJson()); file.close();
-    MachinesPage page(m_script); BoxState box; box.host = "arch"; box.ok = true; FleetState fleet; fleet.setLocal(box, 0); page.setFleet(fleet); page.show();
+    MachinesPage page(FakeCli::program(m_script)); BoxState box; box.host = "arch"; box.ok = true; FleetState fleet; fleet.setLocal(box, 0); page.setFleet(fleet); page.show();
     auto *list = widget<QListWidget>(page, "machineProfiles"); QTRY_COMPARE(list->count(), 3);
     list->setCurrentRow(1); list->setCurrentRow(2);
     auto *effective = widget<QLabel>(page, "effectiveMachineConnection");
@@ -273,7 +275,7 @@ void TestMachinesPage::staleResolutionCannotPopulateAnotherMachine()
 }
 void TestMachinesPage::colorsWorkForLocalAndPersistWithoutSavingConnection()
 {
-    MachinesPage page(m_script); start(page);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
     auto *color = widget<QPushButton>(page, "machineColor"); auto *reset = widget<QPushButton>(page, "resetMachineColor");
     QVERIFY(color->isEnabled()); QVERIFY(reset->isEnabled());
     const QColor automatic = MachineAppearance::color("arch");
@@ -304,7 +306,7 @@ void TestMachinesPage::colorsWorkForLocalAndPersistWithoutSavingConnection()
 }
 void TestMachinesPage::dashboardSelectionWaitsForProfiles()
 {
-    flag("list-delay"); MachinesPage page(m_script);
+    flag("list-delay"); MachinesPage page(FakeCli::program(m_script));
     BoxState local; local.host = "arch"; local.ok = true; FleetState fleet; fleet.setLocal(local, 0); page.setFleet(fleet);
     page.show(); page.selectMachine("mac");
     QTRY_COMPARE(widget<QLineEdit>(page, "machineAlias")->text(), "mac");
@@ -317,7 +319,7 @@ void TestMachinesPage::preview()
     const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
     if (directory.isEmpty()) QSKIP("Set HGS_PREVIEW_DIR to render the machines preview");
     QDir().mkpath(directory);
-    MachinesPage page(m_script); start(page); page.resize(1000, 680); page.setTheme(true);
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.resize(1000, 680); page.setTheme(true);
     page.setStyleSheet("QWidget#machinesPage { background:#171e24; color:#e8edf4; } "
         "QLabel,QCheckBox { color:#e8edf4; } QLabel#muted { color:#a1adbb; } QLabel#heading { font-size:20px; } "
         "QLineEdit,QSpinBox,QListWidget,QPlainTextEdit { background:#1e262e; color:#e8edf4; border:1px solid #34414d; border-radius:6px; padding:6px; } "
@@ -332,5 +334,39 @@ void TestMachinesPage::preview()
     widget<QLineEdit>(page, "machineKey")->setText("~/.ssh/id_ed25519");
     QTest::qWait(30); QVERIFY(page.grab().save(directory + "/machines-dark.png"));
 }
+void TestMachinesPage::controlOnlyComputerIsAConsoleWithoutSessions()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    QVERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    BoxState local; local.host = "arch"; local.ok = true; local.localSessions = false;
+    FleetState fleet; fleet.setLocal(local, 0); page.setFleet(fleet);
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    QCOMPARE(list->item(0)->text(), QString("arch\nThis computer: control console"));
+    QVERIFY(!widget<QPushButton>(page, "machineSessions")->isVisible());
+    QVERIFY(!widget<QPushButton>(page, "machineAccounts")->isVisible());
+    bool console = false, counted = false;
+    for (auto *label : page.findChildren<QLabel *>("muted")) {
+        console |= label->text().contains("control console");
+        // As on Overview, the console itself is not a machine of the fleet.
+        counted |= label->text() == "0 connected, 1 machines";
+    }
+    QVERIFY(console); QVERIFY(counted);
+    // It has no SSH connection to edit, test or remove; only its color.
+    QVERIFY(!widget<QLineEdit>(page, "machineAlias")->isVisible());
+    QVERIFY(!widget<QLineEdit>(page, "machineHostname")->isVisible());
+    QVERIFY(!widget<QCheckBox>(page, "machineEnabled")->isVisible());
+    for (const char *name : {"saveMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine"})
+        QVERIFY2(!widget<QPushButton>(page, name)->isVisible(), name);
+    QVERIFY(widget<QPushButton>(page, "machineColor")->isVisible());
+    // Remote machines keep every action.
+    list->setCurrentRow(1);
+    QTRY_VERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    QVERIFY(widget<QPushButton>(page, "machineAccounts")->isVisible());
+    QVERIFY(widget<QLineEdit>(page, "machineHostname")->isVisible());
+    QVERIFY(widget<QCheckBox>(page, "machineEnabled")->isVisible());
+    for (const char *name : {"saveMachine", "checkMachine", "sshMachine", "installMachine", "removeMachine"})
+        QVERIFY2(widget<QPushButton>(page, name)->isVisible(), name);
+}
+
 QTEST_MAIN(TestMachinesPage)
 #include "test_machinespage.moc"

@@ -20,6 +20,7 @@ class TestWorkspace : public QObject {
     Q_OBJECT
 private slots:
     void durableIdentityAndMissingSessions();
+    void observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership();
     void orderingAndRemoval();
     void invalidDataAndMoves();
     void nativeDropPlacement();
@@ -108,8 +109,8 @@ void TestWorkspace::gitStatusCardsKeepMetadataAndMachineReadable()
         list.setFrameShape(QFrame::NoFrame); list.setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         for (int i = 0; i < titles.size(); ++i) {
             auto *item = new QListWidgetItem(&list);
-            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "main");
-            item->setData(SessionRoles::BranchIcon, true);
+            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "zerus / main");
+            item->setData(SessionRoles::MetaIcon, "git-branch");
             item->setData(SessionRoles::Host, "arch"); item->setData(SessionRoles::MachineName, "arch");
             item->setData(SessionRoles::Agent, "codex"); item->setData(SessionRoles::Status, "Ready");
             item->setData(SessionRoles::Detail, "Git status follows this checkout and branch");
@@ -250,6 +251,35 @@ void TestWorkspace::durableIdentityAndMissingSessions()
     QVERIFY(archive != renamed); QCOMPARE(reloaded.groupFor(archive), QString("ungrouped"));
     QCOMPARE(reloaded.observe("arch", "codex/project/renamed-archive", "run-2", "archive-1"), archive);
     QCOMPARE(SessionOrganization(reloaded.toJson()).toJson(), reloaded.toJson());
+}
+
+void TestWorkspace::observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership()
+{
+    SessionOrganization model;
+    const auto one = model.observe("arch", "codex/example/one", "run-one");
+    const auto two = model.observe("arch", "codex/example/two", "run-two");
+    const auto archive = model.observe("arch", "codex/example/one", "run-one", "archive-one");
+    model = SessionOrganization(model.toJson());
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({one, two, archive}));
+    QCOMPARE(model.toJson()["unassigned_sessions"].toArray().size(), 3);
+    model.moveSession(one, "missing"); // Rejected moves do not create intent.
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(one));
+    model.moveSession(two, "ungrouped", one); // Explicit same-project ordering.
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({two, one, archive}));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(two));
+    const auto renamed = model.observe("arch", "codex/example/renamed", "run-one");
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(renamed));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(one));
+    // A catalog assignment may arrive for the new name before a fleet refresh.
+    const auto work = model.createGroup("Work");
+    model.moveSession("arch\ncodex/example/final", work);
+    const auto finalName = model.observe("arch", "codex/example/final", "run-one");
+    QCOMPARE(model.groupFor(finalName), work);
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(finalName));
+    QVERIFY(!model.group("ungrouped")->sessions.contains(renamed));
+    QCOMPARE(model.observe("arch", "codex/example/final", "run-one", "archive-one"), archive);
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(archive));
+    QCOMPARE(SessionOrganization(model.toJson()).toJson(), model.toJson());
 }
 
 void TestWorkspace::orderingAndRemoval()
@@ -503,7 +533,9 @@ void TestWorkspace::draftStatusSitsBetweenWorkAndReplies()
     item->setData(SessionRoles::Unread, true);
     QCOMPARE(status().kind, SessionStatusBadge::Draft); QVERIFY(status().additionalUnread);
     item->setData(SessionRoles::Working, 1);
-    QCOMPARE(status().kind, SessionStatusBadge::Working);
+    QCOMPARE(status().kind, SessionStatusBadge::Working); QVERIFY(!status().additionalUnread);
+    QVERIFY(!status().unread); QCOMPARE(status().emphasis, IdentityBadges::Normal);
+    QVERIFY(item->data(SessionRoles::Unread).toBool()); // Presentation never consumes the read identity.
     item->setData(SessionRoles::Working, 0); item->setData(SessionRoles::Attention, true);
     QCOMPARE(status().kind, SessionStatusBadge::Attention);
     item->setData(SessionRoles::Attention, false); item->setData(SessionRoles::Unread, false); item->setData(SessionRoles::Status, "Paused");

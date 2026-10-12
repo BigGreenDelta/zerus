@@ -54,6 +54,9 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QProgressBar>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QComboBox>
@@ -146,7 +149,7 @@ QColor tone(const QString &status, bool dark)
 {
     if (status == "Needs approval" || status == "Needs input" || status == "Sign in") return QColor(dark ? "#f0c77b" : "#885400");
     if (status == "Error") return QColor(dark ? "#ff9298" : "#b52b3d");
-    if (status == "Working" || status == "Using a tool" || status == "Compacting") return QColor(dark ? "#55e39a" : "#12834e");
+    if (status == "Working" || status == "Using a tool" || status == "Compacting" || status == "Background") return QColor(dark ? "#55e39a" : "#12834e");
     if (status == "Ready") return QColor(dark ? "#78dabb" : "#11775d");
     if (status == "Paused") return QColor(dark ? "#b9a5ed" : "#7051a4");
     return QColor(dark ? "#9aa4b2" : "#646f7e");
@@ -576,11 +579,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
         const QString host = entry->host, machine = entry->machine;
-        const bool local = host.isEmpty();
+        const bool local = host.isEmpty(), online = entry->online;
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
         QUrl desktopTarget;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
-        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(560, 210);
+        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(local ? 560 : 650, 230);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
         auto *source = new QLabel(local ? tr("File on this machine") : tr("File on %1").arg(machine));
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
@@ -597,9 +600,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("This path belongs to %1. Copy it and open the machine's SSH terminal to access the file.").arg(machine));
+            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+        hint->setObjectName("sessionFileHint");
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
         auto *buttons = new QDialogButtonBox; layout->addWidget(buttons);
+        QString savedPath;
+        quint64 pending = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
             connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget] {
@@ -615,8 +622,70 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 dialog.accept();
             });
         } else if (!local) {
+            auto *progress = new QProgressBar; progress->setObjectName("sessionFileProgress");
+            progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
+            progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
+            auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
+            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
+            const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
+            const bool downloadable = online && !remotePath.isEmpty();
+            download->setEnabled(downloadable); open->setEnabled(downloadable);
+            if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
+            else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
+            auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
+                if (pending) return;
+                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                const auto destination = save.selectedFiles().first();
+                download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
+                progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
+                openAfterDownload = opening;
+                pending = m_client.downloadFile(host, remotePath, destination);
+                auto *completion = new QObject(this);
+                const QPointer<QDialog> shownDialog(&dialog);
+                const auto request = pending;
+                connect(&m_client, &HgsClient::fileDownloaded, completion, [this, completion, shownDialog, request, opening](quint64 id, const QString &localPath) {
+                    if (id != request) return;
+                    if (!shownDialog) {
+                        if (opening) QTimer::singleShot(0, this, [this, localPath] {
+                            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)))
+                                showNotice(tr("Saved to %1, but no application could open the file.").arg(localPath), true);
+                        });
+                        else showNotice(tr("Downloaded to %1").arg(localPath));
+                    }
+                    completion->deleteLater();
+                });
+                connect(&m_client, &HgsClient::fileDownloadFailed, completion, [this, completion, shownDialog, request](quint64 id, const QString &error) {
+                    if (id != request) return;
+                    if (!shownDialog) showNotice(tr("Download failed: %1").arg(error), true);
+                    completion->deleteLater();
+                });
+            };
+            connect(download, &QPushButton::clicked, &dialog, [startDownload] { startDownload(false); });
+            connect(open, &QPushButton::clicked, &dialog, [startDownload] { startDownload(true); });
+            connect(&m_client, &HgsClient::fileDownloadFailed, &dialog, [&, progress, download, open, downloadable](quint64 request, const QString &error) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Download failed: %1").arg(error));
+            });
+            connect(&m_client, &HgsClient::fileDownloaded, &dialog, [&, progress, download, open, savedOpen, downloadable](quint64 request, const QString &destination) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); savedPath = destination;
+                download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Saved on this computer: %1").arg(destination)); open->hide(); savedOpen->show();
+                if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); dialog.accept(); }
+            });
+            connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
+                if (!QFileInfo(savedPath).isFile()) { hint->setText(tr("The local copy is no longer available.")); return; }
+                desktopTarget = QUrl::fromLocalFile(savedPath); dialog.accept();
+            });
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");
             connect(ssh, &QPushButton::clicked, &dialog, [this, host, &dialog] { emit machineSshRequested(host); dialog.accept(); });
+            auto *close = buttons->addButton(QDialogButtonBox::Close);
+            close->setAutoDefault(false);
         }
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         dialog.exec();
@@ -1124,7 +1193,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_settingsPage->appearanceChanged=[this]{
         m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
         m_sessionDock->setStripWidth(SessionStrip::width(m_sessions->property("compact").toBool()));
-        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());applyTheme();rebuild();
+        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
+        const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
+        applyTheme();rebuild();
     };
     m_settingsPage->contentScaleChanged=[this]{applyContentScale();};
     m_settingsPage->activityWidthChanged=[this]{applyActivityWidth();};
@@ -1179,6 +1250,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(updates, &UpdateController::changed, this, updateEntryState);
     connect(updateEntry, &QPushButton::clicked, this, &SessionsWindow::showUpdates);
     updateEntryState();
+    auto *restartEntry = new QPushButton(tr("Restart to finish update"));
+    restartEntry->setObjectName("restartToUpdate");
+    restartEntry->setProperty("glyph", "zerus");
+    restartEntry->setIconSize(QSize(14, 14));
+    restartEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; agents and tmux keep running."));
+    restartEntry->setAccessibleName(restartEntry->toolTip());
+    statusLayout->addWidget(restartEntry);
+    auto restartEntryState = [updates, restartEntry] { restartEntry->setVisible(updates->restartRequired()); };
+    connect(updates, &UpdateController::changed, this, restartEntryState);
+    connect(restartEntry, &QPushButton::clicked, updates, &UpdateController::restartIntoInstalledBundle);
+    restartEntryState();
     m_connectionRetry = new QPushButton(tr("Retry now")); m_connectionRetry->setObjectName("connectionRetry");
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
@@ -1478,8 +1561,8 @@ void SessionsWindow::applyTheme()
         QLabel#notice { color:%6; font-size:11px; }
         QLabel#workspaceConnectionStatus { color:%12; font-size:11px; }
         QPushButton#connectionRetry { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
-        QPushButton#updatesAvailable { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
-        QPushButton#updatesAvailable:hover { background:%7; }
+        QPushButton#updatesAvailable, QPushButton#restartToUpdate { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
+        QPushButton#updatesAvailable:hover, QPushButton#restartToUpdate:hover { background:%7; }
         QLabel#notice[error="true"] { color:%12; }
         QSplitter::handle { background:transparent; width:8px; }
         QFrame#sessionInspectorPanel { background:%11; border:1px solid %4; border-radius:8px; }
@@ -1490,7 +1573,7 @@ void SessionsWindow::applyTheme()
               m_dark ? "#12372b" : "#ffffff", m_dark ? "#aae9d2" : "#115d46", selected,
               m_dark ? "#151b21" : "#f3f6f8", tone("Error", m_dark).name()) + workspaceScrollbars(m_dark));
     for (auto *button : findChildren<QPushButton *>()) if (button != m_windowPin && !button->property("glyph").toString().isEmpty())
-        button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" ? m_accent : m_muted)));
+        button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance();
     if (m_sessionDock) m_sessionDock->setEdgeColor(QColor(m_border));
     if (m_brand) m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
@@ -1582,8 +1665,18 @@ void SessionsWindow::applySessionStrip()
     const int side = SessionStrip::cardSide(m_sessions->property("compact").toBool());
     setWorkspaceStyle(m_stripSearch, QString("QPushButton { min-height:%1px; max-height:%1px; min-width:%2px; max-width:%2px; }")
         .arg(qMax(0, m_search->sizeHint().height() - 2)).arg(side - 2));
-    m_search->setVisible(!strip); m_stripSearch->setVisible(strip);
-    m_stripSpacer->setFixedHeight(m_stripReserve); m_stripSpacer->setVisible(strip && m_stripReserve > 0);
+    // Rows hide before others show: showing a widget lays the panel out at once,
+    // and a row still to go would hold the list a row lower until the next layout.
+    const bool folder = !strip && !m_folderFilterPath.isEmpty(), spacer = strip && m_stripReserve > 0;
+    (strip ? static_cast<QWidget *>(m_search) : m_stripSearch)->hide();
+    if (strip) m_machineFilter->setConcealed(true);
+    if (!folder) m_folderFilterClear->hide();
+    if (!spacer) m_stripSpacer->hide();
+    m_stripSpacer->setFixedHeight(m_stripReserve);
+    (strip ? static_cast<QWidget *>(m_stripSearch) : m_search)->show();
+    if (spacer) m_stripSpacer->show();
+    if (!strip) m_machineFilter->setConcealed(false);
+    if (folder) m_folderFilterClear->show();
     // Narrow filters keep the active one and the most urgent beside it: sessions
     // that need attention, otherwise active ones, otherwise all of them.
     QString urgent;
@@ -1607,8 +1700,6 @@ void SessionsWindow::applySessionStrip()
         if (m_filterRow->itemAt(m_filterRow->indexOf(button))->alignment() != align) m_filterRow->setAlignment(button, align);
     }
     m_machineFilter->button()->setVisible(!filters);
-    m_machineFilter->setVisible(!strip && !m_hostFilters.isEmpty());
-    m_folderFilterClear->setVisible(!strip && !m_folderFilterPath.isEmpty());
     m_listStack->setCurrentIndex(!strip && m_searchResults->active() ? 1 : 0);
     m_count->setText(strip ? m_countShort : m_countFull);
     m_count->setAlignment(strip ? Qt::AlignCenter : Qt::AlignLeft | Qt::AlignVCenter);
@@ -1794,7 +1885,7 @@ void SessionsWindow::showWorkspaceSettings()
 
 void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
-    m_settingsPage->setPeers(fleet.peerNames());
+    m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
     m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
@@ -1949,7 +2040,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
             showNotice(tr("Resuming sessions on %1…").arg(machine)); renderDetails();
         });
     };
-    addMachine({}, m_fleet.local(), m_fleet.local().ok && m_connectionError.isEmpty());
+    if (m_fleet.local().localSessions) addMachine({}, m_fleet.local(), m_fleet.local().ok && m_connectionError.isEmpty());
     for (const auto &host : m_fleet.peerNames())
         if (const auto *box = m_fleet.peer(host))
             addMachine(host, *box, box->ok && QDateTime::currentMSecsSinceEpoch()
@@ -2319,7 +2410,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
-        item->setData(SessionRoles::BranchIcon, false);
+        item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
@@ -2345,8 +2436,8 @@ void SessionsWindow::rebuild()
             // Attention remains visible even when a search or state filter hides a member.
             for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == row.group) {
                 if (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e)))) ++alerts;
-                if (e.session.unreadReply) ++unread;
-                if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++busy;
+                if (e.session.visibleUnreadReply(e.online)) ++unread;
+                if (SessionPresentation::working(e.session, e.online)) ++busy;
             }
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled | Qt::ItemIsDragEnabled);
             item->setData(TitleRole, group->name);
@@ -2390,8 +2481,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
         item->setData(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
         item->setData(TitleRole, sessionLabel(s)); item->setData(AgentRole, s.cmd);
-        QString meta = SessionPresentation::branchContext(s);
-        item->setData(SessionRoles::BranchIcon, !meta.isEmpty());
+        QString meta = SessionPresentation::checkoutLine(s);
+        item->setData(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
         if (s.state == "archived" && s.archivedAt > 0) {
             if (!meta.isEmpty()) meta += QStringLiteral(" / ");
             meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
@@ -2407,19 +2498,19 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::ReviewLater, s.reviewLater);
         item->setData(SessionRoles::Failure, s.phase=="error");
         item->setData(SessionRoles::Draft, m_composer->hasDraft(e.key));
-        item->setData(SessionRoles::Unread, !terminating && s.unreadReply);
-        item->setData(SessionRoles::Working, !isTerminating(e) && currentActivity(s, e.online) && s.activity == "busy" && !s.needsAction());
-        item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+        item->setData(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
+        item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
+        item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
-            accessibleFields << tr("%1 since %2").arg(s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
+            accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
-        if (s.unreadReply) accessibleFields << tr("New reply (not viewed yet)");
+        if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
@@ -2448,13 +2539,14 @@ void SessionsWindow::rebuild()
     int visibleWorking = 0, visibleAttention = 0;
     for (const auto &e : visible) {
         if (entryNeedsAttention(e)) ++visibleAttention;
-        if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++visibleWorking;
+        if (SessionPresentation::working(e.session, e.online)) ++visibleWorking;
     }
     m_count->setText(visible.isEmpty() ? tr("No matching sessions") : tr("%1 shown, %2 working, %3 attention").arg(visible.size()).arg(visibleWorking).arg(visibleAttention));
     const int starting = std::count_if(rows.cbegin(), rows.cend(), [](const Row &row) { return !row.launch.isEmpty(); });
     if (starting) m_count->setText(visible.isEmpty() ? tr("%1 starting").arg(starting) : m_count->text() + tr(", %1 starting").arg(starting));
     m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
-    m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty());
+    // The strip keeps this row hidden (applySessionStrip()).
+    m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
     m_folderFilterClear->setText(tr("Folder: %1   ×").arg(m_folderFilterPath.section('/',-1)));m_folderFilterClear->setToolTip(m_folderFilterPath+tr("\nClear folder filter"));
     m_count->setToolTip(m_countFull);
     m_count->setVisible(!m_searchResults->active());
@@ -2755,6 +2847,7 @@ void SessionsWindow::renderDetails()
     s.gitBranch = m_details.value("git_branch").toString(s.gitBranch);
     s.gitWorktree = m_details.value("git_worktree").toBool(s.gitWorktree);
     s.gitWorktreeName = m_details.value("git_worktree_name").toString(s.gitWorktreeName);
+    s.gitCommonDir = m_details.value("git_common_dir").toString(s.gitCommonDir);
     s.gitDetached = m_details.value("git_detached").toBool(s.gitDetached);
     const bool terminating=isTerminating(*entry);
     const QString state = terminating?tr("Terminating…"):status(s, entry->online);
@@ -2774,6 +2867,7 @@ void SessionsWindow::renderDetails()
     m_badge->setText(state); const auto color = tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
+    m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
     s.model = m_details.value("model").toString(s.model); s.effort = m_details.value("effort").toString(s.effort);
     const QString modelText = s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort);
     // Details render on every poll; elide again only when the text or font changes.
@@ -2824,6 +2918,10 @@ void SessionsWindow::renderDetails()
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
+    else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
+        ? tr("The agent has replied, but a command is still running.") : tr("The agent has replied, but %1 commands are still running.").arg(s.backgroundProcesses))
+        + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."))
+        + QStringLiteral(" ") + tr("You can send another message.");
     else if (s.activity != "idle") hint = tr("Waiting for the agent to confirm its state. Open its terminal if it needs attention.");
     else hint = tr("Ready for your next message. Finishing a response does not mark the task complete.");
     m_hint->setText(hint);
@@ -3930,6 +4028,9 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
     if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available);
+    if (!archived && SessionPresentation::backgroundIdle(original.session))
+        add(tr("Show running commands"), "contextOpenProcesses", SessionMenuAction::OpenProcesses, original.online && ProcessSettings::enabled(),
+            ProcessSettings::enabled() ? tr("Follow this session's background work in Processes") : tr("Enable Settings > Processes to inspect running commands"));
     const bool localFolder = original.host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -4044,6 +4145,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
     }
     switch (action) {
+    case SessionMenuAction::OpenProcesses:
+        if (entry->online && ProcessSettings::enabled()) m_detailTabs->setCurrentWidget(m_processes);
+        return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
         if (entry->online && m_open->isEnabled() && entry->session.state != "archived")

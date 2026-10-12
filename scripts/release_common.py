@@ -7,6 +7,8 @@ import re
 import subprocess
 import tarfile
 
+from macos_release import cask_for, require_template_cask, validate_macos_info
+
 REPOSITORY = "ufna/zerus"
 PACKAGES = ("zerus", "zerus-ade-bin", "zerus-git")
 BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
@@ -67,6 +69,9 @@ def finish_candidate(directory, packages=PACKAGES):
     """Seal generated AUR metadata and all flat release assets after makepkg checks."""
     info = json.loads((directory / "release-info.json").read_text())
     info.update(schema=1, aur_packages=list(packages))
+    if "macos" in info:
+        # Schema 2 only adds the signed macOS asset and its cask; Arch fields stay as in schema 1.
+        info.update(schema=2, homebrew_casks=[cask_for(info.get("channel", "stable"))])
     (directory / "release-info.json").write_text(json.dumps(info, indent=2) + "\n")
     archive = directory / f"zerus-{info['version']}-aur.tar.gz"
     with archive.open("wb") as output, gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
@@ -80,14 +85,19 @@ def finish_candidate(directory, packages=PACKAGES):
                     member.mtime = 0
                     with path.open("rb") as content:
                         bundled.addfile(member, content)
-    assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), directory / "release-info.json"])
+    # Zips are sealed too; validation accepts only the declared macOS or Windows asset.
+    assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), *directory.glob("*.zip"),
+                     directory / "release-info.json"])
     (directory / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in assets))
 
 
 def validate_candidate(directory, version, commit=None):
     require(re.fullmatch(r"\d+\.\d+\.\d+", version), "Use a stable semantic version without v.")
     info = json.loads((directory / "release-info.json").read_text())
-    require(info.get("schema") == 1 and info.get("version") == version, "Candidate schema/version mismatch; regenerate old candidates.")
+    schema = info.get("schema")
+    require(schema in (1, 2) and info.get("version") == version, "Candidate schema/version mismatch; regenerate old candidates.")
+    require(schema == 2 or ("macos" not in info and "homebrew_casks" not in info), "Schema 1 candidates carry no macOS asset.")
+    macos = validate_macos_info(info, version) if schema == 2 else None
     require(info.get("architecture") == "x86_64" and info.get("distribution") == "Arch Linux", "Only Arch x86_64 is supported.")
     require(info.get("publication") == "candidate" and info.get("native_agents_bundled") is False, "Unexpected candidate manifest.")
     require(info.get("aur_packages") == list(PACKAGES), "Unexpected AUR package family.")
@@ -103,12 +113,20 @@ def validate_candidate(directory, version, commit=None):
         require(path.is_file() and not path.is_symlink() and sha256(path) == digest, f"Checksum mismatch: {name}")
         sums[name] = digest
     required = {f"zerus-{version}-{suffix}.tar.gz" for suffix in ("source", "arch-x86_64", "aur")} | {"release-info.json"}
+    if macos:
+        required.add(macos["asset"])
     package_files = {name for name in sums if name.endswith(".pkg.tar.zst")}
     patterns = [re.fullmatch(rf"(zerus|zerus-ade-bin)-{re.escape(version)}-\d+-x86_64\.pkg\.tar\.zst", name) for name in package_files]
     require(len(package_files) == 2 and all(patterns) and {match[1] for match in patterns if match} == {"zerus", "zerus-ade-bin"}, "Expected checked stable source and binary x86_64 pacman packages.")
     require(set(sums) == required | package_files, "Unexpected/missing release assets.")
-    flat_files = {path.name for path in directory.iterdir() if path.name != "aur"}
+    directories = {"aur", "homebrew"} if macos else {"aur"}
+    flat_files = {path.name for path in directory.iterdir() if path.name not in directories}
     require(flat_files == set(sums) | {"SHA256SUMS"}, "Unsealed candidate files.")
+    if macos:
+        casks = sorted(path.name for path in (directory / "homebrew").iterdir())
+        cask = directory / "homebrew/zerus.rb"
+        require(casks == ["zerus.rb"] and cask.is_file() and not cask.is_symlink(), "Unexpected Homebrew cask files.")
+        require_template_cask(cask.read_text(), version, sums[macos["asset"]])
     expected_members = {f"aur/{package}/{name}" for package in PACKAGES for name in ("PKGBUILD", ".SRCINFO")}
     with tarfile.open(directory / f"zerus-{version}-aur.tar.gz", "r:gz") as archive:
         members = archive.getmembers()

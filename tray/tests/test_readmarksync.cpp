@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QTemporaryDir>
 
+#include "FakeCli.h"
 #include "HgsClient.h"
 #include "ReadMarkSync.h"
 
@@ -40,7 +41,7 @@ if (root/'fail').exists(): print('ssh: connect to host mac port 22: No route to 
 read={'conversation_id':payload['conversation_id'],'reply_id':payload['reply_id'],'attention_signature':payload['attention_signature'],'at':1.0}
 print(json.dumps({'ok':True,'applied':{'reply_id':payload['reply_id'] is not None,'attention_signature':payload['attention_signature'] is not None},'read':read}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
 
 void TestReadMarkSync::init()
@@ -58,7 +59,7 @@ QList<QJsonObject> TestReadMarkSync::calls() const
 
 void TestReadMarkSync::sendsExactPayloadToEachSessionHost()
 {
-    HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
     const ReadMark local{{}, "codex/project/review", "run-1", "conversation-1", "7:100.5", {}};
     const ReadMark peer{"mac", "claude/project/fix", "run-2", "conversation-2", {}, QString(64, 'a')};
     sync.setPending({{local.key(), local.toJson()}, {peer.key(), peer.toJson()}});
@@ -76,7 +77,7 @@ void TestReadMarkSync::sendsExactPayloadToEachSessionHost()
 void TestReadMarkSync::unreachableHostBacksOffAndConfirmedMarksWaitForSnapshots()
 {
     qint64 now = 1000000;
-    HgsClient client(hgs()); ReadMarkSync sync(&client); sync.setClock([&now] { return now; });
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); sync.setClock([&now] { return now; });
     QSignalSpy done(&sync, &ReadMarkSync::markFinished);
     touch("fail");
     const ReadMark mark{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", {}};
@@ -100,7 +101,7 @@ void TestReadMarkSync::unreachableHostBacksOffAndConfirmedMarksWaitForSnapshots(
 void TestReadMarkSync::limitsConcurrentHostWrites()
 {
     touch("slow");
-    HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
     QJsonObject pending;
     for (int i = 0; i < 6; ++i) {
         const ReadMark mark{"mac", QString("codex/project/s%1").arg(i), "run", QString("conversation-%1").arg(i), "1:1.0", {}};
@@ -114,7 +115,7 @@ void TestReadMarkSync::limitsConcurrentHostWrites()
 
 void TestReadMarkSync::keyedPendingPassesThroughOneWritePerKey()
 {
-    HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
     const ReadMark one{"mac", "codex/project/a", "run-1", "conversation-1", "7:100.5", {}};
     const ReadMark two{"mac", "codex/project/b", "run-2", "conversation-2", "8:1.5", {}};
     sync.setPending({{one.key(), one.toJson()}, {two.key(), two.toJson()}});
@@ -134,7 +135,7 @@ void TestReadMarkSync::duplicateKeysMergeFieldsWhateverTheObjectKeyOrder()
 {
     QFETCH(QString, replyKey); QFETCH(QString, signatureKey);
     touch("slow");
-    HgsClient client(hgs()); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
     const ReadMark reply{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", {}};
     const ReadMark signature{"mac", "codex/project/review", "run-1", "conversation-1", {}, QString(64, 'a')};
     QJsonObject pending; pending[replyKey] = reply.toJson(); pending[signatureKey] = signature.toJson();

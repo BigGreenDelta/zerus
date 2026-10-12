@@ -19,6 +19,7 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QStyleOptionComboBox>
+#include "FakeCli.h"
 #include "AccountCatalog.h"
 #include "AccountUsage.h"
 #include "AccountsPage.h"
@@ -54,6 +55,7 @@ private slots:
     void claudeSignInAndKeychainStatus();
     void defaultAccountIsMachineScopedAndUsedForNewSessions();
     void detailsPaneShowsPageBackground();
+    void controlOnlyComputerManagesAccountsOnRemoteMachinesOnly();
     void preview();
 private:
     FleetState fleet(bool remote = true) const;
@@ -75,8 +77,11 @@ void TestAccountsPage::init()
     script.write(R"(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
+# Tests read these once they exist, so each appears complete.
+def publish(name,text):staged=root/(name+'.tmp');staged.write_text(text);staged.replace(root/name)
 args=sys.argv[1:]; host=''
 if args[0].startswith('@'): host=args.pop(0)[1:]
+with (root/'calls').open('a') as calls:calls.write(json.dumps([host]+args)+'\n')
 if host and (root/'slow').exists(): time.sleep(.15)
 if args[0]=='account':
  if args[1]=='ls' and host:
@@ -95,14 +100,14 @@ if args[0]=='account':
   if host and args[2].startswith('native-') and not ((root/'shared-identity').exists() and provider=='codex'):email=host+'-'+email
   print(json.dumps({'id':args[2],'home':'~/.config/hgs/accounts/work' if args[2].startswith('work-') else '~/.'+provider,'provider':provider,'identity':{} if provider=='dsh' else {'email':email,'plan':'Pro'},'status':'signed_out' if provider=='dsh' else 'ok','checked_at':time.time(),'windows':[] if provider=='dsh' else [{'id':'5h','used_percent':78,'window_minutes':300,'resets_at':time.time()+3600},{'id':'7d','used_percent':94,'window_minutes':10080,'resets_at':time.time()+86400}]}));sys.exit(0)
  if args[1] in ('copy','add'):
-  (root/'action').write_text(json.dumps({'host':host,'args':args}))
+  publish('action',json.dumps({'host':host,'args':args}))
  if args[1]=='permissions':
-  (root/'permissions').write_text(json.dumps({'host':host,'args':args}))
+  publish('permissions',json.dumps({'host':host,'args':args}))
  if args[1]=='default':
-  (root/'default-action').write_text(json.dumps({'host':host,'args':args}))
+  publish('default-action',json.dumps({'host':host,'args':args}))
   (root/('default-'+(host or 'local'))).write_text(args[2])
  if args[1]=='rename':
-  (root/'renamed').write_text(json.dumps({'host':host,'args':args}))
+  publish('renamed',json.dumps({'host':host,'args':args}))
   with (root/'rename-calls').open('a') as out:out.write(json.dumps({'host':host,'args':args})+'\n')
  removed_file=root/('removed-'+(host or 'local'))
  if args[1]=='set-key':
@@ -132,13 +137,13 @@ if args[0]=='account':
 elif args[0]=='dirs': print(json.dumps({'path':args[1] if len(args)>1 else '/tmp/sample','directories':[]}))
 elif args[0]=='project': print(json.dumps([{'name':'sample','dir':'/tmp/sample','src':'local','exists':True}]))
 else: print('{}')
-)"); script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+)"); script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
 void TestAccountsPage::permissionBadgesReflectInheritedAndMixedModes()
 {
     QFile modes(m_dir.filePath("permission-modes")); QVERIFY(modes.open(QIODevice::WriteOnly)); modes.close();
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.resize(1000,700); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.resize(1000,700); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles");
     page.showAccount({},"native-codex");
     auto *state = page.findChild<QLabel *>("accountPermissionState");
@@ -166,7 +171,7 @@ void TestAccountsPage::claudeSignInAndKeychainStatus()
     QFETCH(QString,status);QFETCH(QString,authStatus);QFETCH(QString,message);
     QFile data(m_dir.filePath("claude-status.json"));QVERIFY(data.open(QIODevice::WriteOnly));
     data.write(QJsonDocument(QJsonObject{{"status",status},{"auth_status",authStatus}}).toJson());data.close();
-    AccountsPage page(m_script);page.setFleet(fleet());page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
     QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
     page.showAccount("mac","native-claude");
     auto *detail=page.findChild<QLabel *>("accountMachineStatus");
@@ -177,7 +182,7 @@ void TestAccountsPage::claudeSignInAndKeychainStatus()
 
 void TestAccountsPage::defaultAccountIsMachineScopedAndUsedForNewSessions()
 {
-    AccountsPage page(m_script);page.setFleet(fleet());page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
     QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
     page.showAccount("mac","work-mac");auto *button=page.findChild<QPushButton *>("defaultAccount");
     QTRY_VERIFY(button->isEnabled());QVERIFY(button->text().contains("mac"));button->click();
@@ -186,7 +191,7 @@ void TestAccountsPage::defaultAccountIsMachineScopedAndUsedForNewSessions()
     auto data=QJsonDocument::fromJson(action.readAll()).object();QCOMPARE(data["host"].toString(),QString("mac"));
     QCOMPARE(data["args"].toArray(),QJsonArray({"account","default","work-mac","--revision","rev1"}));
     QVERIFY(!QFile::exists(m_dir.filePath("default-local")));
-    NewSessionDialog dialog(m_script,fleet(),"mac","codex");dialog.show();
+    NewSessionDialog dialog(FakeCli::program(m_script),fleet(),"mac","codex");dialog.show();
     auto *accounts=dialog.findChild<QComboBox *>("launchAccount");
     QTRY_COMPARE(accounts->currentData().toString(),QString("work-mac"));QVERIFY(accounts->currentText().contains("default"));
     dialog.selectAccount("native-codex");QCOMPARE(accounts->currentData().toString(),QString("native-codex"));
@@ -200,7 +205,7 @@ void TestAccountsPage::permissionsStayBoundToSelectedMachine_data()
 }
 void TestAccountsPage::permissionsStayBoundToSelectedMachine()
 {
-    QFETCH(int,fontPixels);AccountsPage page(m_script);page.setFleet(fleet());
+    QFETCH(int,fontPixels);AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());
     page.setStyleSheet(QString("QWidget {font-size:%1px;} QPushButton {padding:8px 13px;min-height:18px;} QComboBox {padding:9px 10px;} QComboBox::drop-down {width:24px;}").arg(fontPixels));page.show();
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),8);
     page.showAccount("mac","native-kimi");
@@ -227,7 +232,7 @@ void TestAccountsPage::permissionsStayBoundToSelectedMachine()
 void TestAccountsPage::renameAndDetailsStayBoundToSelectedProfile()
 {
     QFile slow(m_dir.filePath("slow-inspect"));QVERIFY(slow.open(QIODevice::WriteOnly));slow.close();
-    AccountsPage page(m_script);page.setFleet(fleet());page.show();QSignalSpy notices(&page,&AccountsPage::notice);
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();QSignalSpy notices(&page,&AccountsPage::notice);
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),8);
     page.showAccount("mac","work-mac");
     QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["id"].toString(),QString("work-mac"));
@@ -249,7 +254,7 @@ void TestAccountsPage::detailsPaneShowsPageBackground()
 {
     // The window themes the page with a style sheet while the application
     // palette keeps the desktop colour, which the details pane must not paint.
-    AccountsPage page(m_script);page.setStyleSheet("QWidget#accountsPage{background:#161b21;}");page.setFleet(fleet());page.resize(1400,900);page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setStyleSheet("QWidget#accountsPage{background:#161b21;}");page.setFleet(fleet());page.resize(1400,900);page.show();
     QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
     auto *viewport=page.findChild<QScrollArea *>("accountDetailsScroll")->viewport();QVERIFY(viewport->width()>page.findChild<QWidget *>("accountDetails")->width());
     const auto image=page.grab().toImage();const qreal ratio=image.devicePixelRatio();
@@ -262,9 +267,50 @@ FleetState TestAccountsPage::fleet(bool remote) const
     FleetState fleet; BoxState local; local.host = "arch"; local.ok = true; local.peersKnown = true;
     if (remote) local.peers = {"mac"}; fleet.setLocal(local, 0); return fleet;
 }
+void TestAccountsPage::controlOnlyComputerManagesAccountsOnRemoteMachinesOnly()
+{
+    // hgs.exe on Windows runs no agents: no account command goes to this computer.
+    auto lonely = fleet(false); auto local = lonely.local(); local.localSessions = false; lonely.setLocal(local, 0);
+    const auto hinted = [](AccountsPage &page) {
+        for (auto *label : page.findChildren<QLabel *>())
+            if (label->isVisible() && label->text().startsWith("Add a remote machine in Machines")) return true;
+        return false;
+    };
+    {
+        AccountsPage page(FakeCli::program(m_script)); page.setFleet(lonely); page.show();
+        auto *add = page.findChild<QPushButton *>("addAccount");
+        QTRY_VERIFY(hinted(page)); QVERIFY(!add->isEnabled()); QVERIFY(add->toolTip().startsWith("Add a remote machine in Machines"));
+    }
+    auto remote = fleet(); local = remote.local(); local.localSessions = false; remote.setLocal(local, 0);
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(remote); page.show();
+    auto *add = page.findChild<QPushButton *>("addAccount");
+    auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 4);
+    QTRY_VERIFY(add->isEnabled()); QVERIFY(add->toolTip().isEmpty()); QVERIFY(!hinted(page));
+    QTimer::singleShot(0, &page, [&] {
+        auto *dialog = page.findChild<QDialog *>("accountDialog"); QVERIFY(dialog);
+        const auto closeOnFailure = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        auto *machine = dialog->findChild<QComboBox *>("addAccountMachine");
+        QCOMPARE(machine->count(), 1); QCOMPARE(machine->itemData(0).toString(), QString("mac"));
+        dialog->findChild<QLineEdit *>("addAccountName")->setText("Team");
+        for (auto *button : dialog->findChildren<QPushButton *>())
+            if (button->text() == "Create and sign in") { QVERIFY(button->isEnabled()); button->click(); return; }
+        QFAIL("No create button");
+    });
+    add->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("action")));
+    QFile action(m_dir.filePath("action")); QVERIFY(action.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(action.readAll()).object()["host"].toString(), QString("mac"));
+    QFile calls(m_dir.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly)); int remoteCalls = 0;
+    for (const auto &line : calls.readAll().split('\n')) {
+        if (line.isEmpty()) continue;
+        const auto call = QJsonDocument::fromJson(line).array();
+        QVERIFY2(!call.first().toString().isEmpty(), line.constData()); ++remoteCalls;
+    }
+    QVERIFY(remoteCalls > 0);
+}
 void TestAccountsPage::nativeDefaultsAndMachineScopedActions()
 {
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); auto *add = page.findChild<QPushButton *>("addAccount");
     QTRY_COMPARE(list->count(), 8); QTRY_VERIFY(add->isEnabled());
     list->setCurrentRow(0);
@@ -281,7 +327,7 @@ void TestAccountsPage::nativeDefaultsAndMachineScopedActions()
 void TestAccountsPage::repliesFromRemovedMachineAreIgnored()
 {
     QFile slow(m_dir.filePath("slow")); QVERIFY(slow.open(QIODevice::WriteOnly)); slow.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     page.setFleet(fleet(false));
     auto *list = page.findChild<QListWidget *>("accountProfiles");
     QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
@@ -291,7 +337,7 @@ void TestAccountsPage::repliesFromRemovedMachineAreIgnored()
 void TestAccountsPage::explicitMachineOutsidePollingSurvivesRefreshAndExpiresWithFilter()
 {
     QFile slow(m_dir.filePath("slow")); QVERIFY(slow.open(QIODevice::WriteOnly)); slow.close();
-    AccountsPage page(m_script); page.setFleet(fleet(false)); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet(false)); page.show();
     // showEvent has already requested the local catalog; the explicit request must still start.
     page.showMachine("disabled"); page.setFleet(fleet(false));
     auto *filter = page.findChild<QComboBox *>("accountMachineFilter");
@@ -310,7 +356,7 @@ void TestAccountsPage::explicitMachineOutsidePollingSurvivesRefreshAndExpiresWit
 void TestAccountsPage::launchCarriesAccountForSelectedMachine()
 {
     auto available=fleet();BoxState mac;mac.host="mac";mac.ok=true;available.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
-    NewSessionDialog dialog(m_script, available, "mac", "codex");
+    NewSessionDialog dialog(FakeCli::program(m_script), available, "mac", "codex");
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/tmp/sample"); projects.addFolder("ungrouped","mac","/tmp/sample");
     dialog.setGroups(projects,"ungrouped"); dialog.show();
     auto *accounts = dialog.findChild<QComboBox *>("launchAccount"); auto *start = dialog.findChild<QPushButton *>("primary");
@@ -329,7 +375,7 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     auto available=fleet();BoxState mac;mac.host="mac";mac.ok=true;available.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/tmp/sample"); projects.addFolder("ungrouped","mac","/tmp/sample");
     const auto launch=[&](const QString &agent,const QString &account) {
-        NewSessionDialog dialog(m_script,available,"mac"); dialog.setGroups(projects,"ungrouped"); dialog.show();
+        NewSessionDialog dialog(FakeCli::program(m_script),available,"mac"); dialog.setGroups(projects,"ungrouped"); dialog.show();
         dialog.findChild<QComboBox *>("launchAgent")->setCurrentText(agent);
         auto *accounts=dialog.findChild<QComboBox *>("launchAccount"); QTRY_VERIFY(accounts->findData(account)>=0);
         accounts->setCurrentIndex(accounts->findData(account));
@@ -338,12 +384,12 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     };
     {
         // Nothing is remembered yet, and cancelling a dialog remembers nothing.
-        NewSessionDialog dialog(m_script,available,"mac"); dialog.show();
+        NewSessionDialog dialog(FakeCli::program(m_script),available,"mac"); dialog.show();
         QCOMPARE(dialog.findChild<QComboBox *>("launchAgent")->currentText(),QString("codex"));
         dialog.findChild<QComboBox *>("launchAgent")->setCurrentText("kimi"); dialog.reject();
     }
     launch("codex","work-mac"); launch("claude","native-claude");
-    NewSessionDialog dialog(m_script,available,"mac"); dialog.setGroups(projects,"ungrouped"); dialog.show();
+    NewSessionDialog dialog(FakeCli::program(m_script),available,"mac"); dialog.setGroups(projects,"ungrouped"); dialog.show();
     auto *agent=dialog.findChild<QComboBox *>("launchAgent"); auto *accounts=dialog.findChild<QComboBox *>("launchAccount");
     QCOMPARE(agent->currentText(),QString("claude"));
     agent->setCurrentText("codex"); QTRY_COMPARE(accounts->count(),2); QCOMPARE(accounts->currentData().toString(),QString("work-mac"));
@@ -352,26 +398,26 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     QTRY_COMPARE(accounts->itemData(1).toString(),QString("work-local")); QCOMPARE(accounts->currentData().toString(),QString("native-codex"));
     // A remembered account that disappeared falls back to the default without an error.
     QFile removed(m_dir.filePath("removed-mac"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("work-mac");removed.close();
-    NewSessionDialog fallback(m_script,available,"mac"); fallback.setGroups(projects,"ungrouped"); fallback.show();
+    NewSessionDialog fallback(FakeCli::program(m_script),available,"mac"); fallback.setGroups(projects,"ungrouped"); fallback.show();
     fallback.findChild<QComboBox *>("launchAgent")->setCurrentText("codex");
     auto *fallbackAccounts=fallback.findChild<QComboBox *>("launchAccount");
     QTRY_VERIFY(fallbackAccounts->currentText().contains("default")); QCOMPARE(fallbackAccounts->currentData().toString(),QString("native-codex"));
     QVERIFY(fallback.findChild<QLabel *>("launchError")->text().isEmpty());
     // An agent requested by the caller wins over the remembered one.
-    NewSessionDialog requested(m_script,available,"mac","kimi");
+    NewSessionDialog requested(FakeCli::program(m_script),available,"mac","kimi");
     QCOMPARE(requested.findChild<QComboBox *>("launchAgent")->currentText(),QString("kimi"));
 }
 void TestAccountsPage::hiddenDefaultIsNotOfferedForNewSessions()
 {
     QFile removed(m_dir.filePath("removed-local"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("native-codex");removed.close();
-    NewSessionDialog dialog(m_script,fleet(false),{},"codex","/tmp/sample");dialog.show();
+    NewSessionDialog dialog(FakeCli::program(m_script),fleet(false),{},"codex","/tmp/sample");dialog.show();
     auto *accounts=dialog.findChild<QComboBox *>("launchAccount");
     QTRY_COMPARE(accounts->count(),1);QTRY_COMPARE(accounts->itemData(0).toString(),QString("work-local"));
 }
 
 void TestAccountsPage::removeAndReAddNativeAccount()
 {
-    AccountsPage page(m_script);page.setFleet(fleet(false));page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.show();
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),4);
     // Catalog and identity replies can finish in any order. Pin the provider
     // under test rather than relying on the first row selected during loading.
@@ -408,7 +454,7 @@ void TestAccountsPage::removeAndReAddNativeAccount()
 void TestAccountsPage::sameAccountHasMachineTagsAndScopedActions()
 {
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 7);
     page.showAccount("mac", "native-codex");
     QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray().size(), 2);
@@ -473,7 +519,7 @@ void TestAccountsPage::sameAccountHasMachineTagsAndScopedActions()
 
 void TestAccountsPage::savedSignInKeepsDifferentAccountsSeparate()
 {
-    AccountsPage page(m_script);page.setFleet(fleet());page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),8);
     page.showAccount("mac","native-codex");QTRY_VERIFY(page.findChild<QLabel *>("accountTitle")->text().contains("mac-native-codex"));
     QTimer::singleShot(0,&page,[&]{
@@ -518,7 +564,7 @@ void TestAccountsPage::identityGroupingSeparatesProvidersOrganizationsAndUnknown
 void TestAccountsPage::addToMachineOffersCopyOrNativeSignIn()
 {
     QFile auth(m_dir.filePath("portable-auth")); QVERIFY(auth.open(QIODevice::WriteOnly)); auth.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 8);
     QTRY_VERIFY(page.findChild<QPushButton *>("copyAccount")->isEnabled());
     page.showAccount({}, "native-codex");
@@ -552,7 +598,7 @@ void TestAccountsPage::addToMachineOffersCopyOrNativeSignIn()
 void TestAccountsPage::missingAgentInstallsOnSelectedMachine()
 {
     QFile missing(m_dir.filePath("missing-agent")); QVERIFY(missing.open(QIODevice::WriteOnly)); missing.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 8);
     page.showAccount("mac", "native-codex");
     auto *install = page.findChild<QPushButton *>("installAccountAgent");
@@ -566,7 +612,7 @@ void TestAccountsPage::deepSeekKeyStaysOnSelectedMachine()
 {
     QFile dsh(m_dir.filePath("deepseek")); QVERIFY(dsh.open(QIODevice::WriteOnly)); dsh.close();
     QFile removed(m_dir.filePath("removed-mac")); QVERIFY(removed.open(QIODevice::WriteOnly)); removed.write("native-dsh"); removed.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 9);
     page.showAccount({}, "native-dsh");
     QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
@@ -610,7 +656,7 @@ void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
     QFile hold(m_dir.filePath("hold-inspect")); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
     QFile catalogHold(m_dir.filePath("hold-remote-catalog")); QVERIFY(catalogHold.open(QIODevice::WriteOnly)); catalogHold.close();
-    AccountsPage page(m_script);page.setFleet(fleet());page.resize(1000,700);page.show();page.showAccount("mac","native-codex");
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.resize(1000,700);page.show();page.showAccount("mac","native-codex");
     auto *list=page.findChild<QListWidget *>("accountProfiles");auto *loading=page.findChild<QWidget *>("accountsLoading");
     auto *content=page.findChild<QWidget *>("accountsContent");auto *refresh=page.findChild<QPushButton *>("refreshAccounts");
     QVERIFY(loading->isVisible());QVERIFY(!content->isVisible());QCOMPARE(list->count(),0);
@@ -649,7 +695,7 @@ void TestAccountsPage::loadingFinishesWithPartialOrUnavailableResults()
     QFETCH(QString,failure);QFETCH(int,expected);
     QFile marker(m_dir.filePath(failure));QVERIFY(marker.open(QIODevice::WriteOnly));marker.close();
     auto machines=fleet();if(failure=="offline"){BoxState mac;mac.host="mac";mac.ok=false;machines.setPeer(mac,QDateTime::currentMSecsSinceEpoch());}
-    AccountsPage page(m_script);page.setFleet(machines);page.show();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(machines);page.show();
     auto *content=page.findChild<QWidget *>("accountsContent");auto *refresh=page.findChild<QPushButton *>("refreshAccounts");
     QTRY_VERIFY(content->isVisible());QTRY_VERIFY(refresh->isEnabled());
     QCOMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),expected);
@@ -659,7 +705,7 @@ void TestAccountsPage::loadingFinishesWithPartialOrUnavailableResults()
 void TestAccountsPage::refreshPreservesRowsAndShowsPendingUsage()
 {
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
-    AccountsPage page(m_script); page.setFleet(fleet()); page.show();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
     auto *list = page.findChild<QListWidget *>("accountProfiles"); auto *refresh = page.findChild<QPushButton *>("refreshAccounts");
     QTRY_COMPARE(list->count(), 7); QTRY_VERIFY(refresh->isEnabled());
     page.showAccount("mac", "native-codex");
@@ -684,7 +730,7 @@ void TestAccountsPage::preview()
     const QString dir = qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW"); if (dir.isEmpty()) QSKIP("Set HGS_ACCOUNTS_PREVIEW for screenshots");
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
     QFile modes(m_dir.filePath("permission-modes")); QVERIFY(modes.open(QIODevice::WriteOnly)); modes.close();
-    QDir().mkpath(dir); AccountsPage page(m_script); page.setFleet(fleet()); page.resize(1080, 700);
+    QDir().mkpath(dir); AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.resize(1080, 700);
     page.setStyleSheet("QWidget { background:#171e24; color:#e4e9ee; font-size:14px; } QLabel#heading {font-size:20px;} QLabel#muted {color:#9babb8;} QPushButton,QComboBox {padding:9px 13px;border:1px solid #34414b;border-radius:6px;background:#1d262e;} QPushButton:disabled {color:#75808a;} QListWidget {border:1px solid #34414b;border-radius:8px;background:#1d262e;} QListWidget::item {padding:8px;} QListWidget::item:selected {background:#21453c;} ");
     QFile hold(m_dir.filePath("hold-inspect")); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
     page.setTheme(true); page.show(); QTRY_COMPARE(page.profiles().size(),8); QTest::qWait(120);
@@ -714,7 +760,7 @@ void TestAccountsPage::preview()
     QVERIFY(page.grab().save(dir+"/accounts-updating-light.png"));
     QVERIFY(QFile::remove(hold.fileName())); QTRY_VERIFY(refresh->isEnabled());
     QVERIFY(page.grab().save(dir+"/accounts-light.png"));
-    NewSessionDialog dialog(m_script, fleet(), "mac", "codex", "", &page); dialog.show(); QTRY_COMPARE(dialog.findChild<QComboBox *>("launchAccount")->count(), 2);
+    NewSessionDialog dialog(FakeCli::program(m_script), fleet(), "mac", "codex", "", &page); dialog.show(); QTRY_COMPARE(dialog.findChild<QComboBox *>("launchAccount")->count(), 2);
     dialog.findChild<QComboBox *>("launchAccount")->setCurrentIndex(1); QVERIFY(dialog.grab().save(dir+"/new-session-account.png"));
 }
 QTEST_MAIN(TestAccountsPage)

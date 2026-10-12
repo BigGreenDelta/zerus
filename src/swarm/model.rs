@@ -16,105 +16,6 @@ pub struct Patch {
     pub versions: BTreeMap<String, Vec<String>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::swarm::{catalog::new_id, store::Binding};
-    fn store() -> Store {
-        let node_id = new_id();
-        Store {
-            node_id: node_id.clone(),
-            catalog: Catalog::default(),
-            imported: false,
-            bindings: BTreeMap::from([(
-                "local".into(),
-                Binding {
-                    id: node_id,
-                    verified: true,
-                },
-            )]),
-            peers: BTreeMap::new(),
-        }
-    }
-    fn org(name: &str) -> Value {
-        json!({"projects":[{"id":"project","name":name,"color":"#123456","vivid":false,"folders":[],"sessions":[]}]})
-    }
-    #[test]
-    fn patches_use_observed_versions_and_do_not_overwrite_unseen_edits() {
-        let mut a = store();
-        a.initialize(&org("Initial")).unwrap();
-        let versions = a.catalog.versions();
-        let mut b = a.clone();
-        b.node_id = new_id();
-        b.apply(Patch {
-            base: org("Initial"),
-            desired: org("Peer edit"),
-            versions: versions.clone(),
-        })
-        .unwrap();
-        a.catalog
-            .merge(
-                &b.catalog.swarm_id,
-                b.catalog.operations.into_values().collect(),
-            )
-            .unwrap();
-        a.apply(Patch {
-            base: org("Initial"),
-            desired: org("Local edit"),
-            versions,
-        })
-        .unwrap();
-        assert_eq!(a.catalog.heads()[&Key::project("project", "name")].len(), 2);
-    }
-    #[test]
-    fn local_preferences_are_not_exported_and_import_is_idempotent() {
-        let mut a = store();
-        let mut document = org("Initial");
-        document["default_project"] = json!("project");
-        document["ssh_private_key"] = json!("SECRET");
-        document["projects"][0]["collapsed"] = json!(true);
-        a.initialize(&document).unwrap();
-        let before = a.catalog.digest();
-        a.initialize(&org("Outdated GUI cache")).unwrap();
-        assert_eq!(a.catalog.digest(), before);
-        let wire = serde_json::to_string(&a.catalog).unwrap();
-        for private in ["SECRET", "collapsed", "default_project", "ssh_private_key"] {
-            assert!(!wire.contains(private));
-        }
-    }
-    #[test]
-    fn observing_a_session_does_not_undo_a_remote_project_assignment() {
-        let mut a = store();
-        a.initialize(&org("Initial")).unwrap();
-        let versions = a.catalog.versions();
-        let key = Key::Session {
-            machine: a.node_id.clone(),
-            session: "codex/test/one".into(),
-        };
-        a.catalog
-            .set(&new_id(), key.clone(), json!("another-project"))
-            .unwrap();
-        let mut desired = org("Initial");
-        desired["projects"][0]["sessions"] = json!(["local\ncodex/test/one"]);
-        a.apply(Patch {
-            base: org("Initial"),
-            desired,
-            versions,
-        })
-        .unwrap();
-        assert_eq!(a.catalog.values()[&key], "another-project");
-    }
-    #[test]
-    fn verified_connection_cannot_silently_change_machine_identity() {
-        let mut a = store();
-        let placeholder = a.machine_id("peer").unwrap();
-        let real = new_id();
-        a.bind("peer", &real).unwrap();
-        assert_eq!(a.catalog.machine(&placeholder), real);
-        assert!(a.bind("peer", &new_id()).is_err());
-    }
-}
-
 impl Store {
     pub fn flatten(&mut self, organization: &Value) -> Result<BTreeMap<Key, Value>> {
         let mut fields = BTreeMap::new();
@@ -209,12 +110,14 @@ impl Store {
             if before.get(&key) == after.get(&key) {
                 continue;
             }
-            // Seeing an unknown session in a fleet snapshot gives it the local
-            // default project. This observation must not move an existing shared
-            // membership that arrived since the GUI's previous snapshot.
+            // Older desktops publish passive default placement as membership.
+            // Keep their late observations from undoing shared assignments.
+            // New desktops omit passive rows and identify explicit membership,
+            // whose unseen concurrent edits must remain genuine conflicts.
             if matches!(key, Key::Session { .. })
                 && !before.contains_key(&key)
                 && current.contains_key(&key)
+                && patch.desired["session_assignments_explicit"] != true
             {
                 continue;
             }
@@ -382,5 +285,133 @@ impl Store {
         json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
             "organization":{"version":2,"default_project":"ungrouped","projects":projects.into_values().collect::<Vec<_>>()},
             "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swarm::{catalog::new_id, store::Binding};
+    fn store() -> Store {
+        let node_id = new_id();
+        Store {
+            node_id: node_id.clone(),
+            catalog: Catalog::default(),
+            imported: false,
+            bindings: BTreeMap::from([(
+                "local".into(),
+                Binding {
+                    id: node_id,
+                    verified: true,
+                },
+            )]),
+            peers: BTreeMap::new(),
+        }
+    }
+    fn org(name: &str) -> Value {
+        json!({"projects":[{"id":"project","name":name,"color":"#123456","vivid":false,"folders":[],"sessions":[]}]})
+    }
+    #[test]
+    fn patches_use_observed_versions_and_do_not_overwrite_unseen_edits() {
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let versions = a.catalog.versions();
+        let mut b = a.clone();
+        b.node_id = new_id();
+        b.apply(Patch {
+            base: org("Initial"),
+            desired: org("Peer edit"),
+            versions: versions.clone(),
+        })
+        .unwrap();
+        a.catalog
+            .merge(
+                &b.catalog.swarm_id,
+                b.catalog.operations.into_values().collect(),
+            )
+            .unwrap();
+        a.apply(Patch {
+            base: org("Initial"),
+            desired: org("Local edit"),
+            versions,
+        })
+        .unwrap();
+        assert_eq!(a.catalog.heads()[&Key::project("project", "name")].len(), 2);
+    }
+    #[test]
+    fn local_preferences_are_not_exported_and_import_is_idempotent() {
+        let mut a = store();
+        let mut document = org("Initial");
+        document["default_project"] = json!("project");
+        document["ssh_private_key"] = json!("SECRET");
+        document["projects"][0]["collapsed"] = json!(true);
+        a.initialize(&document).unwrap();
+        let before = a.catalog.digest();
+        a.initialize(&org("Outdated GUI cache")).unwrap();
+        assert_eq!(a.catalog.digest(), before);
+        let wire = serde_json::to_string(&a.catalog).unwrap();
+        for private in ["SECRET", "collapsed", "default_project", "ssh_private_key"] {
+            assert!(!wire.contains(private));
+        }
+    }
+    #[test]
+    fn observing_a_session_does_not_undo_a_remote_project_assignment() {
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let versions = a.catalog.versions();
+        let key = Key::Session {
+            machine: a.node_id.clone(),
+            session: "codex/test/one".into(),
+        };
+        a.catalog
+            .set(&new_id(), key.clone(), json!("another-project"))
+            .unwrap();
+        let mut desired = org("Initial");
+        desired["projects"][0]["sessions"] = json!(["local\ncodex/test/one"]);
+        a.apply(Patch {
+            base: org("Initial"),
+            desired,
+            versions,
+        })
+        .unwrap();
+        assert_eq!(a.catalog.values()[&key], "another-project");
+    }
+    #[test]
+    fn explicit_initial_assignment_preserves_an_unseen_competing_choice() {
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let versions = a.catalog.versions();
+        let key = Key::Session {
+            machine: a.node_id.clone(),
+            session: "codex/test/one".into(),
+        };
+        a.catalog
+            .set(&new_id(), key.clone(), json!("another-project"))
+            .unwrap();
+        let mut desired = org("Initial");
+        desired["projects"][0]["sessions"] = json!(["local\ncodex/test/one"]);
+        desired["session_assignments_explicit"] = json!(true);
+        a.apply(Patch {
+            base: org("Initial"),
+            desired,
+            versions,
+        })
+        .unwrap();
+        let heads = a.catalog.heads();
+        assert_eq!(heads[&key].len(), 2);
+        let values: BTreeSet<_> = heads[&key]
+            .iter()
+            .map(|op| op.value.as_str().unwrap())
+            .collect();
+        assert_eq!(values, BTreeSet::from(["project", "another-project"]));
+    }
+    #[test]
+    fn verified_connection_cannot_silently_change_machine_identity() {
+        let mut a = store();
+        let placeholder = a.machine_id("peer").unwrap();
+        let real = new_id();
+        a.bind("peer", &real).unwrap();
+        assert_eq!(a.catalog.machine(&placeholder), real);
+        assert!(a.bind("peer", &new_id()).is_err());
     }
 }

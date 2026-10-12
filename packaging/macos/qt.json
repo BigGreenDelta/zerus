@@ -1,0 +1,80 @@
+{
+  "qt_version": "6.11.2",
+  "repository": "https://download.qt.io/online/qtsdkrepository/mac_x64",
+  "packages": [
+    {
+      "directory": "desktop/qt6_6112/qt6_6112",
+      "name": "qt.qt6.6112.clang_64",
+      "archives": [
+        "qtbase",
+        "qtdeclarative",
+        "qtsvg"
+      ]
+    },
+    {
+      "directory": "desktop/qt6_6112/qt6_6112",
+      "name": "qt.qt6.6112.addons.qtwebchannel.clang_64",
+      "archives": [
+        "qtwebchannel"
+      ]
+    },
+    {
+      "directory": "desktop/qt6_6112/qt6_6112",
+      "name": "qt.qt6.6112.addons.qtpositioning.clang_64",
+      "archives": [
+        "qtpositioning"
+      ]
+    },
+    {
+      "directory": "extensions/qtwebengine/6112/clang_64",
+      "name": "extensions.qtwebengine.6112.clang_64",
+      "archives": [
+        "qtwebengine"
+      ]
+    },
+    {
+      "directory": "desktop/qt6_6112/qt6_6112",
+      "name": "qt.qt6.6112.addons.qtmultimedia.clang_64",
+      "archives": [
+        "qtmultimedia"
+      ]
+    }
+  ],
+  "archives": [
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qtbase-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 31039494,
+      "sha256": "9592f84f7e26d532c5c56824d1da7c9214a766cb0a17beb5af71022bcfbcd271"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qtdeclarative-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 130537813,
+      "sha256": "ceb8e3f3830531a52de5007ef3f50ffc5525021feb132ee322f59583eb2903cf"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qtsvg-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 420077,
+      "sha256": "c52f6cec6ce4b52ca017e0046345a85d33b2b73e0f6a93474bb7a60f8e829317"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.addons.qtwebchannel.clang_64/6.11.2-0-202608131016qtwebchannel-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 177017,
+      "sha256": "a2d4cc08c35c400134fd62e2162172b6067e8bc36ce7e997507106f6fb8ecd03"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.addons.qtpositioning.clang_64/6.11.2-0-202608131016qtpositioning-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 569097,
+      "sha256": "2fd9706071c5931a11723238d07e0299834c964972b67284d9042c8d6297a747"
+    },
+    {
+      "path": "extensions/qtwebengine/6112/clang_64/extensions.qtwebengine.6112.clang_64/6.11.2-0-202608131118qtwebengine-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 152274415,
+      "sha256": "533a52d5d613cd588e7e9daeb3c8b71dd7fd575785e6733ac44535eba17add83"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.addons.qtmultimedia.clang_64/6.11.2-0-202608131016qtmultimedia-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 54605821,
+      "sha256": "2ec021dd24caec0c31982c7889a6cd91a179243ffafed51942f77bed48ee9ef7"
+    }
+  ]
+}

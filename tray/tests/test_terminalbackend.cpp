@@ -25,6 +25,8 @@ private slots:
     void sessionCommandsPreserveIdentityAndQuoting();
     void archiveCommandsRestoreTheSelectedInstance();
     void folderShellQuotesPathsAndUsesMachineProfiles();
+    void powerShellCommandsQuoteEveryNonPlainArgument();
+    void programBackendsReceiveTheDisplayedCommand();
     // ClipboardBackend -- только чистые части: цепочка способов, проверка команды и текст
     // уведомления. Сам буфер обмена тест не трогает (это буфер живого пользователя).
     void clipboardChainPrefersKlipperOnLinux();
@@ -45,33 +47,82 @@ private slots:
 #endif
 };
 
+// Commands are written for the platform's shell: POSIX sh here, PowerShell on
+// Windows (see powerShellCommandsQuoteEveryNonPlainArgument).
+constexpr auto Posix = SessionCommands::Shell::Posix;
+constexpr auto PowerShell = SessionCommands::Shell::PowerShell;
+
 void TestTerminalBackend::sessionCommandsPreserveIdentityAndQuoting()
 {
-    QCOMPARE(SessionCommands::open({}, {}, "codex/docs/review"), QString("hgs a codex/docs/review"));
-    QCOMPARE(SessionCommands::open("/opt/hgs", "mac", "codex/проект/Новый план"),
+    QCOMPARE(SessionCommands::open({}, {}, "codex/docs/review", {}, Posix), QString("hgs a codex/docs/review"));
+    QCOMPARE(SessionCommands::open("/opt/hgs", "mac", "codex/проект/Новый план", {}, Posix),
              QString("/opt/hgs @mac a 'codex/проект/Новый план'"));
-    QCOMPARE(SessionCommands::open("/tmp/hgs's bin/hgs", "mac", "codex/docs/it's $(exit 7); `exit 8`"),
+    QCOMPARE(SessionCommands::open("/tmp/hgs's bin/hgs", "mac", "codex/docs/it's $(exit 7); `exit 8`", {}, Posix),
              QString("'/tmp/hgs'\\''s bin/hgs' @mac a 'codex/docs/it'\\''s $(exit 7); `exit 8`'"));
-    QCOMPARE(SessionCommands::command({}, {"codex", "/work/a project", "--new", "-n", "plan"}),
+    QCOMPARE(SessionCommands::command({}, {"codex", "/work/a project", "--new", "-n", "plan"}, Posix),
              QString("hgs codex '/work/a project' --new -n plan"));
+#ifndef Q_OS_WIN
+    QCOMPARE(SessionCommands::command({}, {"a", "b c"}), SessionCommands::command({}, {"a", "b c"}, Posix));
+#endif
 }
 
 void TestTerminalBackend::folderShellQuotesPathsAndUsesMachineProfiles()
 {
-    QVERIFY(SessionCommands::folderShell({}, {}, "relative").isEmpty());
-    QCOMPARE(SessionCommands::folderShell({}, {}, "/work/a folder"), QString("cd -- '/work/a folder' && exec \"${SHELL:-/bin/sh}\" -l"));
-    QCOMPARE(SessionCommands::folderShell("/opt/hgs", "mac", "/work/it's $(literal)"),
-        SessionCommands::command("/opt/hgs", {"machine","ssh","mac","--directory","/work/it's $(literal)"}));
+    QVERIFY(SessionCommands::folderShell({}, {}, "relative", Posix).isEmpty());
+    QCOMPARE(SessionCommands::folderShell({}, {}, "/work/a folder", Posix), QString("cd -- '/work/a folder' && exec \"${SHELL:-/bin/sh}\" -l"));
+    QCOMPARE(SessionCommands::folderShell("/opt/hgs", "mac", "/work/it's $(literal)", Posix),
+        SessionCommands::command("/opt/hgs", {"machine","ssh","mac","--directory","/work/it's $(literal)"}, Posix));
+    // A control console (Windows) has no local folders; remote ones stay POSIX paths.
+    QVERIFY(SessionCommands::folderShell({}, {}, "/work/a folder", PowerShell).isEmpty());
+    QCOMPARE(SessionCommands::folderShell("C:/Zerus/hgs.exe", "mac", "/work/a folder", PowerShell),
+             QString("C:\\Zerus\\hgs.exe machine ssh mac --directory '/work/a folder'"));
 }
 
 void TestTerminalBackend::archiveCommandsRestoreTheSelectedInstance()
 {
-    QCOMPARE(SessionCommands::open("/usr/local/bin/hgs", "mac", "claude/infra/review", "archive-one"),
+    QCOMPARE(SessionCommands::open("/usr/local/bin/hgs", "mac", "claude/infra/review", "archive-one", Posix),
              QString("/usr/local/bin/hgs @mac resume claude/infra/review --archive archive-one"));
     QVERIFY(SessionCommands::open({}, {}, "codex/docs/review", "older") !=
             SessionCommands::open({}, {}, "codex/docs/review", "newer"));
-    QCOMPARE(SessionCommands::open({}, {}, "codex/docs/review", "id with ' quotes"),
+    QCOMPARE(SessionCommands::open({}, {}, "codex/docs/review", "id with ' quotes", Posix),
              QString("hgs resume codex/docs/review --archive 'id with '\\'' quotes'"));
+}
+
+void TestTerminalBackend::powerShellCommandsQuoteEveryNonPlainArgument()
+{
+    // @host would splat and commas build arrays; quoted text keeps $ and backticks literal.
+    QCOMPARE(SessionCommands::open("C:/Program Files/Zerus/hgs.exe", "mac", "codex/проект/Новый план", {}, PowerShell),
+             QString("& 'C:\\Program Files\\Zerus\\hgs.exe' '@mac' a 'codex/проект/Новый план'"));
+    QCOMPARE(SessionCommands::open("C:\\Zerus\\hgs.exe", {}, "codex/docs/review", {}, PowerShell),
+             QString("C:\\Zerus\\hgs.exe a codex/docs/review"));
+    QCOMPARE(SessionCommands::command({}, {"it's", "$HOME", "`x`", "a,b", "(1)", "50%", "C:\\dir\\", "--new", "-n"}, PowerShell),
+             QString("hgs 'it''s' '$HOME' '`x`' 'a,b' '(1)' '50%' C:\\dir\\ --new -n"));
+    // Windows PowerShell 5.1 would drop an empty argument and pass quotes and a
+    // final backslash after a space wrongly: the exact command line goes through
+    // Start-Process instead.
+    QCOMPARE(SessionCommands::open("C:/Program Files/Zerus/hgs.exe", "mac", "claude/p/fix \"login\" it's", {}, PowerShell),
+             QString("Start-Process -FilePath 'C:\\Program Files\\Zerus\\hgs.exe' "
+                     "-ArgumentList '@mac a \"claude/p/fix \\\"login\\\" it''s\"' -NoNewWindow -Wait"));
+    QCOMPARE(SessionCommands::command({}, {"codex", "/work/my dir\\", "-n", ""}, PowerShell),
+             QString("Start-Process -FilePath hgs -ArgumentList 'codex \"/work/my dir\"\\ -n \"\"' -NoNewWindow -Wait"));
+    // PowerShell also ends single-quoted strings at typographic quotes.
+    QCOMPARE(SessionCommands::powerShellQuote(QString::fromUtf8("don\u2019t")), QString::fromUtf8("'don\u2019\u2019t'"));
+    QCOMPARE(SessionCommands::open({}, {}, "codex/p", "id with ' quotes", PowerShell),
+             QString("hgs resume codex/p --archive 'id with '' quotes'"));
+    QCOMPARE(SessionCommands::openArguments("mac", "codex/p"), QStringList({"@mac", "a", "codex/p"}));
+    QCOMPARE(SessionCommands::openArguments({}, "codex/p", "old"), QStringList({"resume", "codex/p", "--archive", "old"}));
+}
+
+void TestTerminalBackend::programBackendsReceiveTheDisplayedCommand()
+{
+    // Backends that run a command line get exactly the text a user would copy.
+    struct Recording : TerminalBackend {
+        QString command;
+        bool open(const QString &value, QString *) override { command = value; return true; }
+    } backend;
+    QString error;
+    QVERIFY(backend.openProgram("/opt/hgs", {"@mac", "a", "codex/p/a b"}, &error));
+    QCOMPARE(backend.command, SessionCommands::command("/opt/hgs", {"@mac", "a", "codex/p/a b"}));
 }
 
 void TestTerminalBackend::substitutesCommandAsOneArgument()

@@ -2,10 +2,12 @@
 """Stage a system package without running installers or touching user data."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tomllib
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,6 +66,13 @@ def main():
                 "cli_version": cli_version, "platform": "Arch Linux", "native_agents_bundled": False}
     if (ROOT / ".git").exists():
         manifest["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    with tempfile.TemporaryDirectory(prefix="zerus-build-identity-") as home:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("HGS_")}
+        env["HOME"] = home
+        identity = json.loads(subprocess.check_output([str(args.gui.resolve()), "--build-info"], env=env, text=True, timeout=20))
+    if identity.get("version") != manifest["version"] or (manifest.get("source_commit") and identity.get("sourceCommit") != manifest["source_commit"]):
+        parser.error("GUI build identity does not match the packaged source/version")
+    manifest["desktop_build"] = identity
     install_info = documentation / "build-info.json"
     install_info.write_text(json.dumps(manifest, indent=2) + "\n")
     print("Staged CLI, desktop, user service definitions, icons, documentation and dependency notices.")

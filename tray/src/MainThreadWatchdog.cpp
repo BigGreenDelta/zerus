@@ -4,13 +4,26 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#else
 #include <pthread.h>
+#endif
 
 std::int64_t MainThreadWatchdog::nowMs()
 {
+#ifdef Q_OS_WIN
+    // steady_clock is QueryPerformanceCounter, which keeps counting while the
+    // machine sleeps; a resume would look like a hang. The unbiased interrupt
+    // time (100 ns units) excludes sleep and hibernation.
+    ULONGLONG ticks = 0;
+    QueryUnbiasedInterruptTime(&ticks);
+    return static_cast<std::int64_t>(ticks / 10000);
+#else
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                Clock::now().time_since_epoch())
         .count();
+#endif
 }
 
 MainThreadWatchdog::MainThreadWatchdog(int thresholdMs, std::function<void()> onHang)
@@ -28,6 +41,8 @@ MainThreadWatchdog::MainThreadWatchdog(int thresholdMs, std::function<void()> on
         pthread_setname_np("hgs-watchdog");
 #elif defined(Q_OS_LINUX)
         pthread_setname_np(pthread_self(), "hgs-watchdog");
+#elif defined(Q_OS_WIN)
+        SetThreadDescription(GetCurrentThread(), L"hgs-watchdog");
 #endif
         const auto period = std::chrono::milliseconds(std::max(1, m_thresholdMs / 2));
         std::unique_lock<std::mutex> lock(m_mutex);

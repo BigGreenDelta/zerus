@@ -33,6 +33,12 @@ public:
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
+        auto *usageIndicator=new QComboBox;usageIndicator->setObjectName("workspaceUsageIndicator");
+        usageIndicator->addItem(tr("Usage and elapsed time bars"),"rails");usageIndicator->addItem(tr("Pace marker"),"marker");usageIndicator->addItem(tr("Pace marker and reset countdown"),"marker-countdown");
+        usageIndicator->setCurrentIndex(qMax(0,usageIndicator->findData(QSettings().value("workspace/usageIndicator","rails"))));
+        appearance->addWidget(new QLabel(tr("Usage limit indicator")));appearance->addWidget(usageIndicator);
+        auto *usageHint=new QLabel(tr("Compares used quota with the elapsed part of each limit window. The bars show usage above elapsed time; the marker shows elapsed time on the usage bar. Colors warn when the current pace would use up the limit before it resets."));usageHint->setWordWrap(true);appearance->addWidget(usageHint);
+        connect(usageIndicator,&QComboBox::currentIndexChanged,this,[this,usageIndicator]{QSettings().setValue("workspace/usageIndicator",usageIndicator->currentData());if(appearanceChanged)appearanceChanged();});
         appearance->addWidget(new QLabel(tr("Content scale")));
         auto *scaleRow=new QHBoxLayout;scaleRow->setSpacing(4);auto *scale=new QSlider(Qt::Horizontal);scale->setObjectName("workspaceContentScale");
         // Twentieths keep the slider on 5% steps for both dragging and the keyboard.
@@ -98,7 +104,7 @@ public:
         mobileLayout->addWidget(new RelaySettings::Panel);mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         aboutSection=pages->count();
-        auto *about=makePage(tr("About"));about->addWidget(new QLabel(tr("Zerus %1").arg(QCoreApplication::applicationVersion())));
+        auto *about=makePage(tr("About"));auto *installedVersion=new QLabel(tr("Zerus %1").arg(UpdateController::installedVersion()));installedVersion->setObjectName("aboutZerusVersion");installedVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);about->addWidget(installedVersion);
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");
         cliVersion->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);about->addWidget(cliVersion);
         versionClient=new HgsClient(executable,this);
@@ -112,6 +118,12 @@ public:
         connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();});
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);}
+    // A control-only computer is no mobile gateway and keeps no recovery policy:
+    // the Mobile connection page is hidden (the row stays, so indices do not move).
+    void setLocalSessions(bool enabled){
+        sync->setLocalSessions(enabled);nav->item(5)->setHidden(!enabled);
+        if(!enabled&&nav->currentRow()==5)nav->setCurrentRow(0);
+    }
     void openUpdates(){nav->setCurrentRow(4);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}

@@ -55,6 +55,9 @@ public:
     // пользователя; картинку статус-айтема ни то ни другое не трогает.
     void showMessage(const QString &title, const QString &body,
                      QSystemTrayIcon::MessageIcon icon, int msecs) override;
+    void showClickableMessage(const QString &title, const QString &body,
+                              QSystemTrayIcon::MessageIcon icon, int msecs,
+                              std::function<void()> clicked) override;
     void show() override;
 
 private:

@@ -16,6 +16,8 @@ belong to your terminal emulator; tmux provides the persistent session.
 hgs claude sample-project           # attach if present; otherwise start Claude
 hgs @mac claude sample-project      # the same operation over SSH
 hgs ls                             # local and peer sessions
+hgs status                         # version, sessions and services here and on peers
+hgs version                        # this hgs version (also hgs --version)
 hgs a claude/sample-project/review  # attach by full name
 hgs kill claude/sample-project      # remove the hgs binding; keep native history
 hgs pause --all                     # pause verified idle sessions
@@ -243,8 +245,12 @@ Linux application badges and the macOS Dock show the attention count, hiding zer
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
-the session is idle and has no reported active children; intermediate replies
-remain unread in Activity while work continues. Routine replies from a turn the
+the session is idle and has no reported active children. While native agent work,
+live background commands or active subagents continue, intermediate replies remain
+unread in Activity but show no new-reply badge or reply-only attention count on
+desktop or Android. The pending reply becomes visible when work finishes; this
+never marks it as read. Explicit questions, approvals, errors and review reminders
+remain actionable. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -320,8 +326,18 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. Working
-and compacting timers use native start evidence and update locally without extra
+**Ready** means a reply ended, not that a long-running task is complete. An idle
+agent with confirmed live shell commands shows **Background**, with the
+command preview and elapsed time. Open **Processes** to follow output or inspect
+the running commands. The session remains in **Active** and still accepts new
+messages. Input/approval requests take precedence; ordinary agent work takes
+precedence over background work, followed by Scheduled and Ready. Offline and
+historical/unconfirmed process records never establish background work. The CLI's
+additive `process_work` summary uses current owned OS trees (one process-table
+sample per fleet listing) or the native DeepSeek job registry; it does not scan
+native transcripts on each fleet poll.
+
+Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
 `CronCreate`) is **Scheduled**: its badge and detail show the next run time
 instead of a timer, or "due" once that time has passed. A question, approval or
@@ -342,6 +358,18 @@ width** in the same menu restores the default column. Narrower panes use their
 full width, and Terminal, Processes and Native UI are not affected. A reset icon
 appears beside an Appearance slider's value once it differs from the default and
 restores that default.
+**Settings → Appearance → Usage limit indicator** sets how the account usage in the
+status bar and on Overview account cards shows each limit window. The default, **Usage and elapsed time bars**, draws usage above a gray
+bar for the elapsed part of the window; a longer usage bar means a faster than
+even pace. **Pace marker** shows elapsed time as a mark on the usage bar, and
+usage beyond the mark takes the warning color. **Pace marker and reset
+countdown** adds an hourglass with the time until reset, such as `26h` or `6d`;
+compact Overview cards omit the countdown. Colors follow the average pace since
+the window started: green when the limit lasts until reset, orange when it would
+run out in the second half of the remaining time or 90% is used, and red when it
+would run out sooner or is exhausted. The first 8% of a window, and windows
+without a reported length or reset time, keep the fixed 70%/90% thresholds. The
+tooltip adds the time until reset and the pace forecast.
 **Settings → Appearance → Keep Zerus above other windows** keeps the Zerus window
 over other applications on X11, macOS and KDE Plasma 6 on Wayland. On KDE Wayland,
 Zerus uses temporary KWin scripts scoped to its own window and confirms the
@@ -490,10 +518,10 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
-For Claude messages ending in a literal backslash, the paste includes a final
-newline so the single Enter submits the unchanged message instead of activating
-Claude's backslash-Enter line continuation. This is verified against native
-history; no second Enter is sent as an automatic retry.
+For Claude and Kimi messages ending in a literal backslash, the paste includes a
+final newline so the single Enter submits the unchanged message instead of
+activating the agent's backslash-Enter line continuation. This is verified
+against native history; no second Enter is sent as an automatic retry.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue
@@ -522,8 +550,18 @@ nor shown in Activity.
 
 File links retain their visible path and source position. Relative references
 resolve against that session's folder. Local references can open the file or its
-parent folder; remote references identify the host and offer an SSH terminal
-instead of treating the remote path as local. Display alone downloads or launches
+parent folder; remote references identify the host and offer **Download…** and
+**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
+use that machine's configured SSH profile and SFTP, stream directly to disk and
+replace the chosen destination only after a successful transfer. Errors remain
+in the dialog; a saved copy can be opened with **Open local copy**. Offline or
+unresolved relative references explain why downloading is unavailable. The
+download continues if its dialog is closed, with a completion or error notice;
+an explicitly requested open still happens after successful saving. The
+120-second transfer deadline leaves an existing destination unchanged on failure.
+`hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
+transfer from the CLI, including empty files and paths starting with `~/`.
+Display alone downloads or launches
 nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is
 destroyed so Wayland activation does not depend on a disappearing window.
@@ -623,6 +661,14 @@ then exits and the session needs an explicit resume. **Skip** and **Skip until
 next version** continue startup, and Codex records the dismissal itself. Only
 reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
 recognized; other or clipped commands stay in Terminal.
+After a resume, Codex asks **Resume paused goal?** when the conversation's goal
+is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
+database once the centered dialog over the transcript shows the same goal and
+both choices; the session waits for this choice instead of Restoring
+conversation. **Resume goal** marks the goal active, and Codex continues it by
+itself when idle. **Leave paused** keeps it paused and the conversation waits
+for your message. A dialog too narrow to read, or for another goal, stays in
+Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
 Queue arrows navigate optional requests from newest to oldest while retaining
@@ -648,6 +694,8 @@ account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Claude controls and unverified states fall back to Terminal with an explanation.
+A choice that the agent's status line already shows is confirmed without typing
+anything into Terminal.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.
@@ -747,6 +795,14 @@ agent processes. Drag headers, use the context menu or Alt-Up/Down to change loc
 order. Empty-project visibility, collapse state and default project are local.
 **All swarm projects** explicitly shows the full shared catalog.
 
+A newly discovered session appears in the local default project until a shared
+assignment arrives. Discovery alone does not publish that fallback as a project
+assignment, so another desktop can launch the session into its chosen project
+without racing an automatic Inbox assignment. Launching or explicitly moving a
+session publishes its project choice, including a deliberate move to Inbox.
+Update the desktops that observe sessions to receive this behavior; existing
+catalog assignments and unresolved conflicts remain available for review.
+
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
@@ -828,7 +884,8 @@ once every ten minutes and only for the default configuration directory, never
 under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
 `hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
 running worker stays outdated, Settings → Mobile connection asks you to restart the
-sync service.
+sync service. Windows has no service manager for the worker; the desktop app runs
+it there ([Windows control console](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
@@ -896,10 +953,13 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Worktrees and ordinary folders
 
-Session cards show only the Git branch, or **detached HEAD**, in their checkout
-line, preceded by a small Git branch icon. The opened session's header and
-**Details** retain the worktree name and folder path. Ordinary folders without
-Git metadata have no branch label.
+Session cards show a checkout line of the form `folder / branch`, such as
+`zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
+replaces a missing branch. A linked worktree names its main checkout folder
+rather than its own generated folder. Ordinary folders without Git metadata
+show only their name, preceded by a folder icon. The opened session's header and
+**Details** show the same line, marked `· worktree` for a linked worktree; the
+full folder path stays in the header tooltip and **Details**.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
@@ -1156,6 +1216,12 @@ Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
 and quoted error examples cannot change the session state. New native progress
 clears the failure; changing the account counter alone does not.
+Matching Codex log and completion records retain their exact failure references,
+so delayed duplicate evidence keeps the same recovery episode, deadline and
+attempt budget. Separate native turns remain separate even for identical errors.
+A previous cancellation caused by switching those sources can resume only with
+confirmed matching native evidence and zero delivery attempts; user cancellation,
+new input, interruption, changed identity and uncertain delivery still stop recovery.
 
 A chip in the toolbar above the message field shows the countdown; its popover
 shows the attempt number, **Attempts**, **Retry now** and **Cancel retry**. Retry now respects a known Retry-After and the reset deadline in reset mode. Policy edits apply to new
@@ -1168,6 +1234,9 @@ GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live o
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
+On Linux, client policy refreshes start the configured user service without
+restarting an active executor. A detached worker remains the fallback when no
+installed service or usable user manager is available.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
@@ -1181,6 +1250,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
+The small **Background** summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. A
+background session's context menu offers **Show running commands** when Processes
+is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal
@@ -1283,14 +1356,41 @@ Enabling that API grants other session-bus processes control of terminal tabs.
 Terminal.app remains the native macOS backend; alternate terminal bundles need a
 supported explicit launch template, not an executable path guessed from a bundle.
 
+Windows offers `auto`, `tab`, `window`, `console` and `clipboard`. `auto` and `tab`
+open a tab in the most recent Windows Terminal (`wt.exe`) window and `window` a new
+Windows Terminal window; Windows Terminal starts `hgs.exe` directly. When `wt.exe`
+is missing or would change an argument (it re-joins the command line and expands
+`%NAME%`), the session opens in a console window instead; `tab` and `window` report
+that, `auto` does not. `console` always uses a console window, hosted by
+`hgs-tray.exe --console-run`: it starts `hgs.exe` with the exact arguments and no
+shell, and stays open with the exit code until Enter when `hgs` fails. A
+`--terminal` template (`terminal=` in `tray.conf`) takes the place of every mode
+but `clipboard`: Zerus starts the template's own program with `{cmd}` replaced by
+the PowerShell command, and a console program gets a console window of its own.
+Name a shell that runs that command, for example
+`powershell.exe -NoExit -Command {cmd}`. A Linux template from a shared
+`tray.conf`, such as `foot -e bash -lc {cmd}`, does not work on Windows. A
+`tray.conf` shared with Linux keeps its mode; a macOS mode such as `terminal`
+falls back to `auto` with a warning.
+
 Clipboard mode copies the shell-safe connect/restore command instead of launching
 a terminal. Explicit **Open terminal** still opens one without changing that mode.
-Linux uses its desktop clipboard; macOS uses the native clipboard. New-session
-**Open terminal window** remains an independent preference.
+Linux uses its desktop clipboard; macOS and Windows use the native clipboard.
+New-session **Open terminal window** remains an independent preference.
 
-The tray config lives at `~/.config/hgs/tray.conf` unless overridden. CLI flags win
-at startup; a later tray-menu selection takes effect immediately and writes the
-config for subsequent runs. A later launch with the same explicit flag wins again.
+On Windows, copied and displayed commands are written for PowerShell: arguments
+are single-quoted when needed, `'@host'` is always quoted, and a quoted `hgs.exe`
+path gets the `&` call operator. When Windows PowerShell 5.1 would pass an argument
+incorrectly (an empty one, a double quote, or a space before a final backslash),
+the command is copied as `Start-Process -FilePath … -ArgumentList … -NoNewWindow -Wait`
+instead. A computer without local sessions offers no local folder shell.
+
+The tray config lives at `~/.config/hgs/tray.conf` unless overridden; on Windows
+`~` is `HOME` when set, otherwise the account's profile folder (normally
+`%USERPROFILE%`; unlike `hgs.exe`, the desktop app ignores a changed
+`USERPROFILE`). CLI flags win at startup; a later tray-menu selection takes effect
+immediately and writes the config for subsequent runs. A later launch with the
+same explicit flag wins again.
 
 <a id="installation"></a>
 
@@ -1298,6 +1398,16 @@ config for subsequent runs. A later launch with the same explicit flag wins agai
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+
+`hgs status` only reads. For this computer and each peer it shows the hgs
+version, live sessions by what they need (working, needing attention, ready),
+stopped and archived sessions, and whether the desktop app, swarm worker,
+recovery worker and mobile connector are running. This computer also shows the
+running `hgs` executable. A peer whose hgs predates `status` still reports its
+version and sessions; update it to see its services. `--local` limits the report
+to this computer, `@host status` to one peer, and `--json` prints the same data
+for scripts. `hgs version` and `hgs @host version` print `hgs X.Y.Z`, like
+`--version`.
 Configurations are data assignments, not executable shell scripts:
 
 ```sh
@@ -1308,12 +1418,24 @@ HGS_TAB_COLORS="macbook=#80ff80"
 ```
 
 The CLI config is `~/.config/hgs/config`; `HGS_CONFIG_DIR` and `HGS_STATE_DIR` permit
-isolated setups. Runtime storage, `HGS_*` variables and application/service IDs
-stay compatible with existing installations. Source is [MIT](../LICENSE); see
+isolated setups. `HGS_SSH` names the OpenSSH client for every peer connection
+(dry runs still print `ssh`); without it `hgs` runs `ssh` from `PATH`, and on
+Windows `%SystemRoot%\System32\OpenSSH\ssh.exe` first. Runtime storage, `HGS_*`
+variables and application/service IDs stay compatible with existing installations. Source is [MIT](../LICENSE); see
 [third-party notices](../THIRD_PARTY_NOTICES.md) for dependency licensing.
 
 The GUI installer updates only Zerus and its desktop integration. It never
-restarts native agents, tmux servers or DeepSeek hosts. Use
+restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces a
+running Zerus through `tray/update-installed.py`, the only supported live update:
+Zerus quits as its Quit action does, so drafts are saved, then starts again through
+systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
+hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
+restores it when the new GUI does not start, and confirms the running image,
+unchanged nonempty drafts and native agent and tmux processes. It records the
+installed builds in `~/.local/share/hgs/build-provenance.json`. A failed check
+leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
+is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 
@@ -1348,12 +1470,12 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
 | `--icon-color COLOR` | Override tray mark/counter foreground |
-| `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard |
+| `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace |
 
@@ -1364,6 +1486,101 @@ unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,
 credentials, runtime journals and personal connection values belong outside the
 repository.
+
+<a id="windows"></a>
+
+## Windows control console
+
+On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines;
+the local session host is not compiled in. See
+[installation and limitations](installation.md#windows).
+
+**Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
+remote command stays `~/.local/bin/hgs` with POSIX quoting. Locally, `ls`,
+`machine`, `project`, `swarm` and `presence` work. `account ls` and `account
+default` without an ID print an empty catalog, and `account copy` works between
+two remote machines. Every other local command, such as `a`, `send`, `inspect` of a
+local session or a launch without `@host`, exits with code 2:
+
+```text
+hgs: Local sessions are not supported on Windows yet; choose a remote machine.
+```
+
+The DeepSeek Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`)
+and the mobile-peer commands also exit with code 2, each with its own message.
+
+**Listing.** The local element of `hgs ls --json` and `hgs ls --json --local` is a
+control-only box with `"local_sessions": false`, `projects: {}` and `sessions: []`.
+Its metrics include CPU, memory and uptime; load averages are null. Plain `hgs ls`
+prints `(control console: sessions run on remote machines)` for this computer, and
+`--dry-run ls` prints nothing for it. The computer's name is `HGS_SELF` when set,
+otherwise its lowercase `COMPUTERNAME`. Configuration and state live under `HOME`
+when set, otherwise `%USERPROFILE%`, in the usual `.config\hgs` and
+`.local\state\hgs` folders.
+
+**OpenSSH.** Windows OpenSSH never exits after it has used a synchronous pipe for
+one of its standard streams, the kind that Rust's standard library, Python and
+PowerShell create. It never sends the end of a non-empty file or of `NUL` given
+as input, so a remote command reading its input waits forever, and it writes an
+output file from its start, over what `>>` keeps. Every stream that carries data
+between `hgs.exe` and `ssh.exe` is therefore a console or an overlapped pipe:
+`hgs.exe` relays its own input and output unless they are a console, so `< NUL`
+ends the remote input and `>> log` appends. Scripts must not run `ssh.exe` with
+such streams directly: call `hgs.exe @host …`. `hgs.exe` runs in a kill-on-close
+job object, so its `ssh.exe` and `tar.exe` children end when it is killed. Windows
+OpenSSH has no connection sharing, so every poll is a full SSH handshake.
+
+**Interactive links.** `hgs @host a SESSION` runs `ssh.exe -t` on the inherited
+console. Ctrl+C and Ctrl+Break reach the remote program; `hgs.exe` ignores them while
+it waits. Windows OpenSSH runs the `LocalCommand` that marks an established link
+through `cmd.exe`, as `type nul > "%%HGS_LINK_MARKER%%"`: the marker path travels in
+that environment variable, so a `%` or another special character in the temporary
+folder is never expanded. Each link uses a `hgs-link-<pid>-<random>` folder in
+`%TEMP%`. A closing console window removes its folder. A client the desktop app
+kills leaves its folder behind until the next interactive link, which removes the
+folders of ended processes.
+
+**Embedded terminal.** The built-in Terminal runs `hgs.exe @host a SESSION
+--existing` in a Windows pseudoconsole (ConPTY). Disconnect closes the
+pseudoconsole, waits up to a second and then ends `hgs.exe` and `ssh.exe` through a
+job object; the session keeps running on the remote machine.
+
+**Machine setup.** `hgs machine setup` (**Install / update HGS…**) needs a source
+checkout on Windows. It packs the checkout with the system `tar.exe` and refuses one
+whose `install.sh` or `hgs_state.py` has CRLF line endings; `.gitattributes` keeps
+`*.sh` and `*.py` in LF. Identity files in `machines.local.json` may be Windows
+paths or `~\…`.
+
+**Swarm worker.** Windows has no user service manager. The desktop app runs one
+hidden `hgs.exe swarm worker` and restarts it after an exit. The delay doubles
+from one second up to five minutes and resets after a run of a minute or more. A
+kill-on-close job ends the worker with the app, also after a crash. Without the
+desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when needed.
+`hgs swarm get` reports `worker: {running, current}` as elsewhere.
+
+**Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
+`PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS
+fallback to `~/.local/bin` and Homebrew does not apply. Settings are in
+`%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
+user. When the local box reports
+`local_sessions: false`, the app offers remote machines only: in New session,
+Overview, the tray menu, Accounts, Projects and search. The Machines page lists
+this computer as a control console without SSH settings. Settings → Mobile
+connection is hidden, automatic recovery settings are saved to the first
+reachable remote machine, no desktop presence is recorded, and this computer is
+listed at most once every 15 seconds. Attention notices are tray notifications
+with a taskbar badge. After a main-thread watchdog abort, Windows Error Reporting
+restarts the app with the same options.
+
+**Updates.** The portable zip has no installer or self-update, and only nightly
+releases carry it. Settings → Updates therefore uses the nightly channel by
+default on a portable installation. It reports a nightly with a newer product
+version than the running app and links to its release page; nightlies of the same
+product version cannot be told apart. Stable releases and Dev builds have no
+Windows build: on those channels Updates says so, never reports an update and
+offers no dev download. The zip is published on GitHub only: the zerus.dev mirror
+neither stores it nor lists it in the v1 desktop feed, and the v2 Dev catalogs
+have no Windows artifact.
 
 ## JSON and external clients
 
@@ -1394,6 +1611,11 @@ an empty array. A minimal shape is:
   }]
 }
 ```
+
+A computer that runs no sessions of its own (`hgs.exe` on Windows) adds
+`"local_sessions": false` and returns empty `projects` and `sessions`. The key
+appears only when false; a missing key means true, so Linux and macOS snapshots
+are unchanged. [Windows control console](#windows).
 
 Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.

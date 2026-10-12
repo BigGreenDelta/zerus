@@ -13,6 +13,32 @@ to GitHub/AUR, dispatch hosted CI, or install anything on a client.
 
 ## Verified main dev channel
 
+### Version rule
+
+Stable bug-fix releases increment the patch version (`0.42.1`, `0.42.2`);
+feature releases increment the minor version. Dev names the **next planned
+stable release** plus the growing upstream CI sequence: `0.42.1-dev.215`,
+`0.42.1-dev.216`. `DEV_VERSION` commits the next desktop release base;
+`mobile/android/DEV_VERSION` does the same for the independently versioned
+Android app. Each must stay newer than its stable version. Advance the Dev base
+when preparing a stable release, never bump the product version for each CI run.
+
+The checked Arch package embeds its Dev identity during trusted main CI, before
+qualification and sealing. About, Installed in Updates and update notices show
+that identity. `hgs-tray --build-info` exposes the embedded product version,
+full Dev version, build sequence, source commit and dirty state. Ordinary local
+builds show their source revision (and local changes) without inventing a CI
+sequence. Selecting a channel never changes the installed identity.
+
+Android follows the same `next-version-dev.N` convention with its existing
+package and signer. `versionCode` must increase across both Stable and Dev,
+independently of the visible version; switching channels never permits a
+downgrade. Existing published assets and seals retain their original versions.
+Stable publication remains an explicit owner action; each verified Dev build
+advances the existing tag/catalog without creating another GitHub Release.
+
+### Publication and discovery
+
 Dev is a channel in the existing application, with the same Android package ID
 and signing certificate as stable. Settings selects Stable or Dev on Android,
 and Stable, Nightly or Dev on desktop. Changing channels never installs another
@@ -21,7 +47,7 @@ remain explicit; desktop continues to provide notifications and instructions.
 
 For dev, the provenance origin is successful upstream-main **CI artifacts** plus
 the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
-`ci.yml` invokes `dev.yml` only after its complete Linux/Arch/macOS gate succeeds,
+`ci.yml` invokes `dev.yml` only after its complete Linux/Arch/macOS/Windows gate succeeds,
 and only on an upstream main push. Dev assembly reuses the checked Arch package,
 builds/tests a signed Android APK, and includes exact `git archive` source bytes.
 The final main-only release-environment job advances `refs/tags/dev` to that
@@ -56,7 +82,10 @@ The same signing configuration builds stable and dev APKs; no dev-specific
 application ID or generated replacement signer is used. `-PzerusVersionCode=N`
 sets the shared Android version sequence; CI dev uses `10000 + CI run_number`.
 All subsequent stable APKs must use a code larger than already distributed dev
-APKs. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
+APKs, and subsequent dev APKs must exceed that stable code as well. The current
+fixed dev offset does not coordinate this later Stable-to-Dev transition; track
+the shared publication sequence in `zerus-osef.3` before publishing a stable APK
+above distributed dev codes. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
 channel with an older version leaves the current app/data installed until a newer
 compatible APK is published. Do not reset the version-code sequence when changing
 workflow names or channels.
@@ -137,10 +166,14 @@ never repoint it to incompatible schema 2 data.
 The initial desktop dev candidate contains an Arch x86_64 package and source.
 macOS clients can discover source updates, but an installable signed macOS dev
 bundle is still dependent on the macOS distribution/signing work. This workflow
-does not claim that Linux binaries are macOS installers. Stable Android may remain
-unpublished initially; selecting it reports an unavailable catalog without
-changing the installed app. Public deployment, key provisioning and bootstrap
-publication are separate from local source validation.
+does not claim that Linux binaries are macOS installers. Dev has no Windows build:
+the Windows job gates Dev like every other suite, but its portable zip stays a
+nightly-only GitHub asset, and schema 2 has no artifact kind for it. A portable
+Windows build on the Dev channel says so, never reports a dev build as an update
+and offers no dev download. Stable Android may remain unpublished initially;
+selecting it reports an unavailable catalog without changing the installed app.
+Public deployment, key provisioning and bootstrap publication are separate from
+local source validation.
 
 ## Seal an Android development release
 
@@ -249,6 +282,15 @@ The pull publisher consumes current main's sealed `release-info.json`,
 workflow version provenance. It resolves each tag to its real source commit and
 never substitutes GitHub's generic `/latest` endpoint for independent channels.
 
+Nightly releases can also carry the Windows portable zip,
+`zerus-<version>-windows-x86_64.zip`, named as `windows_portable` in
+`release-info.json` and sealed in `SHA256SUMS`. It is a GitHub-only asset: the
+mirror checks its exact name and GitHub digest but neither downloads nor serves
+it, and the v1 desktop feed does not list it, because deployed GUIs reject unknown
+artifact kinds. A zip in a stable release fails closed. Deploy the updated
+`update_feed.py` before the first nightly that carries a zip; older mirror code
+rejects the new asset family and stops updating the nightly catalog.
+
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy
 of the stable version. The feed describes the release recipes; live AUR
@@ -287,8 +329,17 @@ nightly versions never imply that an unowned executable is up to date. Arch is
 detected independently by bounded parsing of os-release, never by sourcing it.
 Available yay/paru helpers supply safe copied commands. An unowned local build
 on Arch gets an explicitly optional AUR installation command rather than a false
-package-ownership claim; no command is executed by Zerus. There is currently no
-published macOS installer. Updates never stop agents, tmux or resident adapters.
+package-ownership claim; no command is executed by Zerus. A Homebrew cask
+installation is recognized by its single `Caskroom/zerus/<version>` or
+`Caskroom/zerus@nightly/<version>` record. The UI copies `brew upgrade --cask` for
+the cask matching the selected channel, or the uninstall-and-install command that
+switches casks; a `zerus@nightly` installation starts on the nightly channel.
+Nightlies compare by Nightly run number. Zerus offers **Restart to finish update**
+once the bundle's `ZerusReleaseVersion` differs from the one the GUI started with.
+The Windows portable build has no installer or self-update: it follows the nightly
+channel by default and links newer nightlies to their GitHub release page. On
+Stable or Dev it reports that the channel has no Windows build and never reports
+an update. Updates never stop agents, tmux or resident adapters.
 
 ## Desktop mobile-connection settings
 
@@ -329,6 +380,16 @@ path), `GH_TOKEN` or `GITHUB_TOKEN`. Only `api.github.com` requests receive it;
 redirected asset/CDN requests never receive authorization. Credentials and signed
 CDN URLs are not logged or placed in published files. No GitHub deploy secret is
 needed on the website.
+
+Stable releases and nightly prereleases from candidate schema 2 also carry the
+notarized `zerus-<version>-macos-arm64.zip` of the `zerus` or `zerus@nightly`
+Homebrew cask. Like the Windows nightly zip it stays on GitHub, where Homebrew
+downloads it: the mirror checks its sealed name and GitHub digest but neither
+stores it (it never deletes and has a fixed disk budget) nor lists it in catalog
+artifacts, which existing desktop clients would reject as an unknown kind.
+**Deploy the current `update_feed.py` to the mirror before setting
+`MACOS_CASKS_ENABLED`**; an older mirror rejects such a release and keeps the
+previous catalog.
 
 Downloaded assets are checked against GitHub sizes/digests and sealed checksums.
 Existing assets are streamed and rehashed for reuse, avoiding repeated binary

@@ -282,6 +282,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

@@ -36,14 +36,25 @@ object SessionFilters {
                 recovery in listOf("uncertain", "blocked", "exhausted"))
     }
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
-        session.raw.string("activity") == "busy" && !needsAction(session)
+        (session.raw.string("activity") == "busy" || backgroundIdle(session)) && !needsAction(session)
+    private fun positiveCount(value: Any?) = (value as? Number)?.toDouble()?.let { it.isFinite() && it > 0 && it % 1.0 == 0.0 } == true
+    fun replyInProgress(session: Session, online: Boolean) = currentActivity(session, online) &&
+        (session.raw.string("activity") == "busy" || positiveCount(session.raw.optJSONObject("process_work")?.opt("count")) ||
+            positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")))
+    /** Keep the read identity while postponing reply badges and reply-only attention. */
+    fun visibleUnreadReply(session: Session, online: Boolean) = !archived(session) && !replyInProgress(session, online) &&
+        (session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"))
+    fun backgroundIdle(session: Session): Boolean {
+        val count = (session.raw.optJSONObject("process_work")?.opt("count") as? Number)?.toDouble() ?: return false
+        return count.isFinite() && count > 0 && count % 1.0 == 0.0 && session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle"
+    }
     /** Jobs the agent scheduled for itself start its next turns: neither Ready nor Working (SessionPresentation::scheduledIdle). */
     fun scheduledIdle(session: Session): Boolean {
         val jobs = session.raw.optJSONObject("schedules")?.opt("count") as? Number
         return session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && (jobs?.toInt() ?: 0) > 0
     }
     fun scheduled(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
-        !needsAction(session) && scheduledIdle(session)
+        !needsAction(session) && !backgroundIdle(session) && scheduledIdle(session)
     /** The next run as a time of day, "due" once it has passed, or empty if unknown. */
     fun nextScheduledRun(session: Session, now: Long = System.currentTimeMillis(), locale: Locale = Locale.getDefault(),
         zone: TimeZone = TimeZone.getDefault()): String {
@@ -63,7 +74,7 @@ object SessionFilters {
         val children = session.raw.optJSONObject("subagents")?.let { roster -> roster.keys().asSequence().mapNotNull { roster.optJSONObject(it) }.toList() }.orEmpty() +
             session.raw.optJSONArray("subagent_previews")?.objects().orEmpty()
         val childAttention = currentActivity(session, online) && session.raw.string("subagent_source") != "hook_profiles" && children.any { it.string("display_state", "state") in listOf("approval", "input", "attention") }
-        return !acknowledged && (needsAction(session) || childAttention) || session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply") ||
+        return !acknowledged && (needsAction(session) || childAttention) || visibleUnreadReply(session, online) ||
             currentActivity(session, online) && session.pendingCount > 0
     }
     /** Composer drafts remain local and count even when their machine is offline. */
@@ -78,7 +89,8 @@ object SessionFilters {
         } }.mapTo(mutableSetOf()) { it.target.key }
     }
     fun active(session: Session, online: Boolean, hasDraft: Boolean = false) =
-        !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online) || scheduled(session, online))
+        !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online) || scheduled(session, online) ||
+            replyInProgress(session, online) && session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle")
     fun matches(session: Session, filter: SessionFilter, online: Boolean, hasDraft: Boolean = false): Boolean = when (filter) {
         SessionFilter.All -> !archived(session)
         SessionFilter.Attention -> needsAttention(session, online)
@@ -119,6 +131,7 @@ object SessionFilters {
             raw.string("phase") == "starting" -> "Starting"
             raw.string("phase") == "tool" -> "Using a tool"
             raw.string("activity") == "busy" -> "Working"
+            backgroundIdle(session) -> "Background"
             scheduledIdle(session) -> nextScheduledRun(session).let { if (it.isEmpty()) "Scheduled" else "Scheduled · $it" }
             raw.string("activity") == "idle" -> "Ready"
             raw.string("activity") in listOf("ended", "unknown") -> "Status unknown"

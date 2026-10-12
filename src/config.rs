@@ -1,6 +1,9 @@
 //! Compatibility with hgs' assignment-based configuration and project maps.
 //! Configuration is data: unlike the former shell implementation, reading it does not execute it.
-use crate::cli::{Error, Result};
+use crate::{
+    cli::{Error, Result},
+    platform,
+};
 use fs2::FileExt;
 use std::{
     collections::{HashMap, HashSet},
@@ -24,14 +27,24 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let home = env::var("HOME").map_err(|_| Error::new(1, "HOME is not set"))?;
+        let home = platform::home().ok_or_else(|| {
+            Error::new(
+                1,
+                if cfg!(windows) {
+                    "HOME or USERPROFILE is not set"
+                } else {
+                    "HOME is not set"
+                },
+            )
+        })?;
         let dir = PathBuf::from(
-            env::var("HGS_CONFIG_DIR").unwrap_or_else(|_| format!("{home}/.config/hgs")),
+            env::var("HGS_CONFIG_DIR").unwrap_or_else(|_| platform::below(&home, ".config/hgs")),
         );
         let raw_state = env::var("HGS_STATE_DIR").unwrap_or_else(|_| {
-            format!(
-                "{}/hgs/sessions",
-                env::var("XDG_STATE_HOME").unwrap_or_else(|_| format!("{home}/.local/state"))
+            platform::below(
+                &env::var("XDG_STATE_HOME")
+                    .unwrap_or_else(|_| platform::below(&home, ".local/state")),
+                "hgs/sessions",
             )
         });
         let state = if Path::new(&raw_state).is_absolute() {
@@ -87,10 +100,7 @@ impl Config {
             .or_else(|| values.get("HGS_SELF").cloned())
             .unwrap_or_default();
         if self_names.is_empty() {
-            self_names = crate::platform::capture("hostname", &["-s"])
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
+            self_names = platform::hostname();
             if self_names.is_empty() {
                 self_names = "localhost".into();
             }
@@ -126,6 +136,11 @@ impl Config {
         self.selves.iter().any(|v| v == host)
     }
     pub fn expand_home(&self, path: &str) -> String {
+        if cfg!(windows) {
+            if let Some(tail) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+                return platform::below(&self.home, tail);
+            }
+        }
         path.strip_prefix('~')
             .map(|tail| format!("{}{tail}", self.home))
             .unwrap_or_else(|| path.to_owned())
@@ -207,10 +222,9 @@ impl Config {
             writeln!(temporary, "{name}={directory}")?;
         }
         temporary.as_file().sync_all()?;
-        temporary
-            .persist(&file)
+        platform::persist(temporary, &file)
             .map_err(|e| Error::new(1, format!("cannot replace {}: {e}", file.display())))?;
-        fs::File::open(&self.dir)?.sync_all()?;
+        platform::sync_dir(&self.dir)?;
         Ok(())
     }
 }

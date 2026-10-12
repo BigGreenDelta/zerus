@@ -13,11 +13,18 @@ target_include_directories(hgs-vterm PUBLIC ${HGS_VTERM_ROOT}/include PRIVATE ${
 add_library(hgs-terminal STATIC
     ${HGS_TERMINAL_ROOT}/src/TerminalView.h ${HGS_TERMINAL_ROOT}/src/TerminalView.cpp
     ${HGS_TERMINAL_ROOT}/src/TerminalScreen.h ${HGS_TERMINAL_ROOT}/src/TerminalScreen.cpp
-    ${HGS_TERMINAL_ROOT}/src/PtyProcess.h ${HGS_TERMINAL_ROOT}/src/PtyProcess.cpp)
+    ${HGS_TERMINAL_ROOT}/src/PtyProcess.h)
+# forkpty on Unix, a pseudoconsole (ConPTY) on Windows; one public API.
+if(WIN32)
+    target_sources(hgs-terminal PRIVATE ${HGS_TERMINAL_ROOT}/src/PtyProcess_win.cpp
+        ${HGS_TERMINAL_ROOT}/src/WindowsCommandLine.h)
+else()
+    target_sources(hgs-terminal PRIVATE ${HGS_TERMINAL_ROOT}/src/PtyProcess.cpp)
+endif()
 set_target_properties(hgs-terminal PROPERTIES AUTOMOC ON POSITION_INDEPENDENT_CODE ON)
 target_include_directories(hgs-terminal PUBLIC ${HGS_TERMINAL_ROOT}/src)
 target_link_libraries(hgs-terminal PUBLIC Qt6::Widgets hgs-vterm Threads::Threads)
-if(NOT APPLE)
+if(UNIX AND NOT APPLE)
     find_library(HGS_UTIL_LIBRARY util)
     if(HGS_UTIL_LIBRARY)
         target_link_libraries(hgs-terminal PRIVATE ${HGS_UTIL_LIBRARY})

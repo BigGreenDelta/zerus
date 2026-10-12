@@ -175,6 +175,7 @@ class AndroidUpdates private constructor(private val context: Context) {
             if(recorded) save(state.value.copy(error="Installation status is unknown. Check or cancel the existing Android session."))
             throw e
         }
+        id
     } }
     suspend fun cancelInstall() = withContext(Dispatchers.IO) { mutex.withLock {
         load();val old=state.value

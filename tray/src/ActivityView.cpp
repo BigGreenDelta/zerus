@@ -1052,7 +1052,7 @@ QJsonObject activityInput(QJsonObject details, const QJsonArray &events, const Q
 {
     QJsonArray processes;
     for (const auto &job : details.value("processes").toObject().value("items").toArray()) processes.append(job.toObject().value("id"));
-    for (const auto &key : {"goal_observed_at", "cache_hint", "session_usage"}) details.remove(QLatin1String(key));
+    for (const auto &key : {"goal_observed_at", "cache_hint", "session_usage", "process_work"}) details.remove(QLatin1String(key));
     details["processes"] = processes;
     return {{"details", details}, {"events", events}, {"prompt", fallbackPrompt}, {"tracked", tracked}, {"process_links", ProcessSettings::enabled()}};
 }
@@ -1515,6 +1515,7 @@ void ActivityView::startRender()
                 const auto from = sourceLayout->lineAt(i);
                 auto line = text->createLine();
                 if (!line.isValid()) break;
+                line.setLeadingIncluded(from.leadingIncluded());
                 line.setLineWidth(from.width());
                 line.setPosition(from.position());
             }
