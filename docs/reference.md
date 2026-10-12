@@ -1401,9 +1401,62 @@ In a Git repository, the evidence for review is a commit that exists there.
 Agents use `hgs overmind` on their own machine; `@host` is for people.
 
 Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
-blobs by SHA-256 and a `rev` file that changes with every write). Replication
-between machines, sending tasks into sessions and the desktop and phone
-interfaces are described in `docs/superpowers/specs/2026-10-11-overmind-core-design.md`.
+blobs by SHA-256 and a `rev` file that changes with every write). The desktop
+and phone interfaces are described in
+`docs/superpowers/specs/2026-10-11-overmind-core-design.md`.
+
+**Sending.** `send --json {task, session: {machine?, name}, confirm?}` claims a
+task in Queue for a session and types the project's `dispatch` template into it
+through the same path as `hgs send`. `machine` is optional and defaults to this
+computer. A refusal that a person may overrule has `state: "missing"` and the
+field `confirm`; repeat the request with `confirm` listing its code. The
+confirmable codes are `agent_busy`, `wip_exceeded`, `predecessors_open` and
+`pinned_elsewhere`. Other refusals, such as `session_unavailable` (the session
+is stopped, paused, blocked by a dialog or a DeepSeek native session, which is
+not supported yet) and `attachment_unavailable` (no reachable machine holds an
+image of the task), are never confirmable, and nothing is written when one
+occurs. The result reports an outcome. `sent` means the text was submitted.
+`not_delivered` means it definitely was not, and the task returns to Queue.
+`uncertain` sets the flag `delivery_uncertain`; a person settles it with
+`resolve-delivery --json {task, delivered: true|false}`. Overmind never resends
+by itself. Retrying with the same `request_id` never types twice: an
+interrupted send resumes its claim, and a delivery is reported as not sent only
+when the session has no input receipt for the request.
+
+`review-send --json {task, session, confirm?}` sends the `review` template to a
+reviewer session, `rework-send --json {task, confirm?}` sends the `rework`
+template to the assignee, and `answer --json {task, answer, confirm?}` records
+the answer to a question in Your Call and sends the `answer` template. The
+answer is recorded before it is typed; if it was not delivered, repeat the
+request with the same `request_id`, which the refusal names. `unpin --json
+{task}` removes a pin.
+
+`templates get --json {project}` shows the templates of a project and
+`templates set --json {project, templates: {dispatch|review|rework|answer:
+text|null}}` changes them; `null` restores the built-in text. A template can
+use `{task.ref}`, `{task.title}`, `{task.prompt}`, `{task.stage}`,
+`{task.journal_tail}`, `{review.report}`, `{answer.text}` and `{tools}`.
+Values are inserted as they are and never expanded again. The rendered text
+follows the `hgs send` rules: at most 64 KiB, not starting with `/` or `!`.
+
+**Replication.** The swarm worker exchanges Overmind events with every swarm
+peer whose version runs Overmind, and does so within seconds of a local write.
+One call pushes and pulls, so it works when SSH goes in one direction only. An
+exchange continues while the peer still lacks events, so a peer that lost its
+data is refilled in one exchange; it ends when a round makes no progress.
+`hgs overmind status` shows each peer's last exchange and last error, including
+events the peer did not accept. An unreachable peer appears in the swarm sync
+result, and its Overmind status keeps the last good state. Images are not part
+of the exchange. `attachment --json {task, sha256}` returns the local path of a
+task image and fetches it from another machine when needed, in ranges of at
+most 512 KiB verified by SHA-256. People may use it, and so may the assignee or
+reviewer session of the task. A peer accepts at most 8 pushed images per call,
+10 MiB each and 20 MiB in total.
+
+A send to a session on another machine runs on that machine. The caller first
+exchanges events with the host, pushes the task's images, and runs the command
+there as a person, so the host writes the claim. The host checks the gates, not
+the caller; an offline host shows `host_unreachable`.
 
 <a id="windows"></a>
 

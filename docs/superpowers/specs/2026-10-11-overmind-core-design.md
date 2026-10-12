@@ -186,9 +186,16 @@ The fold itself enforces authority. It refuses human-only event kinds from non-h
   with each peer in its loop, through a new internal command over the same SSH
   route. One call pushes and pulls, so it works when SSH goes in one direction
   only. Batches are at most 4 MiB.
+- The nudge is the `rev` file: the worker compares `<state>/overmind/rev` on
+  every pass (3 s) and exchanges at once when it changed, like a changed catalog
+  digest. There is no extra socket or signal.
+- An exchange continues while the peer still lacks events and ends when a round
+  makes no progress; events a peer did not accept are reported in `status`.
 - A local write nudges the worker to exchange with reachable peers right away.
 - Blobs are not part of the exchange. They are fetched by hash on demand, in
-  ranges, when a card is opened or a task is delivered to a session host.
+  ranges of at most 512 KiB verified by SHA-256, when a card is opened or a task
+  is delivered to a session host. A peer accepts at most 8 pushed images per
+  call, 10 MiB each and 20 MiB in total.
 - Peers advertise `overmind:1` in swarm `hello`. Peers without it are skipped.
 - Events carry `v`. A version that meets an event kind or payload version it
   does not know keeps the event, shows the task read-only, and refuses to write
@@ -295,10 +302,13 @@ machine. Commands are flat. Commands accept CRLF text and store it with LF. Malf
 Human and general commands: `board`, `show`, `create`, `edit`, `move`,
 `reorder`, `pin`, `unpin`, `label`, `link`, `comment`, `send`, `review-send`,
 `rework-send`, `answer`, `resolve-delivery`, `done`, `reopen`, `delete`,
-`workflow get|set`, `templates get|set`, `status`, `rev`, `mcp`.
+`workflow get|set`, `templates get|set`, `status`, `attachment`, `rev`, `mcp`.
+`send` and `review-send` take `session: {machine?, name}`; `machine` defaults to
+the local computer. Peers advertise `overmind:1` in the `features` of swarm `hello`.
 
 Agent commands: `mine`, `show`, `comment`, `advance`, `call-human`, `return`,
-`decompose`, `file`, `attach`, `review`.
+`decompose`, `file`, `attach`, `attachment`, `review`. `attachment` is open to
+people and to the task's assignee or reviewer session.
 
 Commands accept a task as a full `uuid`, a `ref` or any unambiguous `om-`
 prefix. A `ref` can grow longer as tasks arrive, so an older, shorter `ref` that
@@ -357,11 +367,18 @@ references.
 `send` always starts on the caller's machine: the desktop runs it locally, the
 phone runs it through the connector on the gateway.
 
-1. The caller checks the gate against its replica.
-2. If the session lives on another machine, the caller builds a bundle: all
-   events of the task, the project workflow and settings events, and the blobs
-   of its attachments. It delivers the bundle over the swarm SSH route with an
-   internal command. The target merges the bundle (idempotent) and continues.
+1. The caller does not check the gates against its replica when the session is
+   on another machine; the host checks them (step 3). A refusal therefore costs
+   an SSH round trip, and an offline host shows `host_unreachable`. For a local
+   session the gates are checked in step 3 as well.
+2. If the session lives on another machine, the bundle is an exchange. A store
+   holds a contiguous `seq` prefix of every origin (Part 2), so it cannot take
+   "all events of one task" alone. The caller first runs the normal exchange
+   with that host, so the host holds everything the caller holds, then pushes
+   the blobs of the task's attachments and runs the command there over the swarm
+   SSH route. The cost is at most the 4 MiB batches the worker would send anyway.
+   The forwarded command runs as a person on the host (`Actor::human(host)`), so
+   the host writes the claim, as Part 2 requires.
 3. On the session's host: gate check against the merged state, then the existing
    `checked_input` preflight (run and conversation identity, pause, blocking
    dialogs). A failure returns the reason; nothing is written.
@@ -373,10 +390,29 @@ phone runs it through the connector on the gateway.
    else). Overmind never resends. The human resolves an uncertain delivery
    with "It was delivered" or "Return to Queue".
 
+Confirmations are refusal codes. `send`, `review-send`, `rework-send` and
+`answer` take `confirm: [codes]`. A confirmable refusal has field `confirm` and
+state `missing`: `agent_busy`, `wip_exceeded`, `predecessors_open`,
+`pinned_elsewhere`. Other refusals are never confirmable.
+
+DeepSeek native sessions are refused with `session_unavailable` in stage 1: their
+input does not go through `input::submit`.
+
+The input request ID is the Overmind request ID. A send interrupted after its
+claim resumes that claim without new gates or session checks. `review-send`,
+`rework-send` and `answer` skip gates and their intent write when an input
+receipt already exists. A failed delivery is "not sent" only when no input
+receipt exists; anything else is uncertain. An answer is recorded before it is
+typed; one that was not delivered is sent again by repeating the request with
+the same `request_id`, which the refusal names.
+
 Sending while the agent works is allowed after confirmation; the native agent
 receives it as a queued message. `review-send`, `rework-send` and `answer`
 follow the same path with their templates. `hgs send`'s request schema does not
 change.
+
+Deferred: the `orphaned` flag for tasks whose assignee session was terminated or
+archived (tracked in Beads), and the rename-ordering question `zerus-89h.2.4`.
 
 ## Part 6. Desktop GUI
 
