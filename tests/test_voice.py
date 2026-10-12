@@ -25,7 +25,10 @@ class VoiceInstaller(unittest.TestCase):
         script=Path(__file__).resolve().parents[1]/"scripts/install-voice-service.py"
         for arguments,expected in [(["--help"],0),(["/nonexistent/zerus-voice-test"],2),([],2)]:
             with tempfile.TemporaryDirectory(prefix="hgs-voice-install-") as home:
-                run=subprocess.run([sys.executable,str(script),*arguments],env={**os.environ,"HOME":home},
+                # Apple Python stores its own import cache under HOME. Exclude
+                # interpreter bytecode writes from the installer's side effects.
+                run=subprocess.run([sys.executable,str(script),*arguments],
+                    env={**os.environ,"HOME":home,"PYTHONDONTWRITEBYTECODE":"1"},
                     capture_output=True,text=True,timeout=5)
                 self.assertEqual(run.returncode,expected,run.stderr)
                 self.assertEqual(list(Path(home).iterdir()),[])
