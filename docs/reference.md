@@ -573,7 +573,12 @@ puts the prompt back into its own input instead; HGS then moves exactly that
 text from Terminal to the message field (Ctrl+Y in Terminal brings it back) and
 leaves any other input untouched. Supported DeepSeek hosts use native cancel.
 Native queue behavior still applies: Codex Escape may start a queued follow-up.
-Uncertain interruption is not repeated.
+Uncertain interruption is not repeated. Stop notices name the original session
+and computer even if you navigate away. If the turn has already ended or is
+waiting for input, no interruption is sent and no action is needed; Zerus refreshes
+the status and briefly shows that outcome. Other failures retain the diagnostic
+and ask you to refresh status or check Terminal before trying again. The status
+bar's **Dismiss notification** button clears a notice without changing the session.
 
 When Claude suggests your next message after a turn, Activity shows it as the
 empty message field's placeholder, as Claude's terminal does; Tab inserts it.
@@ -656,6 +661,19 @@ estimated lifetime has expired. Resuming with the full conversation can increase
 token usage, cost or subscription usage. **Cancel** keeps the form answers.
 Compaction or clearing can invalidate the pending question, so this confirmation
 offers neither action. A changed question, session or draft cancels consent.
+Kimi's native cold-cache chooser already provides the explicit cost and context
+choices. Its selected row is submitted directly, without a second full-context
+confirmation; the same identity and durable delivery checks still apply.
+App-owned desktop and Android dialog action rows place **Cancel**, **Close** or
+the equivalent dismissal at the far right, after the available actions. Long
+Android rows wrap, keeping dismissal last and visible with larger text. Destructive
+and full-context desktop confirmations default to Cancel; Android dialogs focus
+their dismissal after the dialog window gains focus. Enter on a valid desktop
+editing form may save or create; Escape/Back dismisses without submitting.
+Accepted operations that cannot safely be abandoned keep their existing pending
+locks; closing a review never repeats an uncertain command. Destructive buttons
+name their action and the dialog identifies its original target. System file,
+permission and installation prompts follow the operating system's own layout.
 
 Unsupported or truncated native prompts remain in Terminal.
 Claude wraps prompts, options, review answers, key hints and Bash commands to

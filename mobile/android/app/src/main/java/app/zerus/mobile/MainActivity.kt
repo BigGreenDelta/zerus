@@ -309,7 +309,7 @@ class MainActivity : ComponentActivity() {
         }
     }
     LaunchSessionDialog(model)
-    if (pairing) AlertDialog(onDismissRequest = { if (!model.busy) { pairing = false;code = "" } }, title = { Text("Pair a workspace") },
+    if (pairing) ZerusAlertDialog(onDismissRequest = { if (!model.busy) { pairing = false;code = "" } }, title = { Text("Pair a workspace") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Scan an invitation from your machine, or enter its code. Review the gateway before pairing.", color = Muted)
             ScanPairingButton(enabled = !model.busy) { invite -> server = invite.server;code = invite.code }
@@ -319,18 +319,20 @@ class MainActivity : ComponentActivity() {
         } }, confirmButton = { TextButton(enabled = !model.busy && model.storageReady && code.isNotBlank() && server.isNotBlank(),
             onClick = { model.pair(server, code) { pairing = false; code = ""; onNotifications() } }) { Text("Pair") } },
         dismissButton = { TextButton(onClick = { pairing = false;code = "" }, enabled = !model.busy) { Text("Cancel") } })
-    disconnect?.let { connection -> AlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
+    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
         text = { Text("This removes the gateway credential from this phone. Saved drafts remain available.") },
         confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text("Disconnect") } },
         dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Cancel") } }) }
-    review?.let { draft -> AlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
+    review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Your message may already have reached ${draft.target.session}. Check its conversation and receipt before preparing another send.")
             SelectionContainer { Text(draft.text.ifBlank { draft.answers }, maxLines = 8, overflow = TextOverflow.Ellipsis) }
             Text("Preparing again keeps the draft. Sending remains a separate action.", color = Muted, style = MaterialTheme.typography.bodySmall)
-        } }, confirmButton = { TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") } },
-        dismissButton = { TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") } }) }
-    reviewOutgoing?.let { message -> AlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
+        } }, confirmButton = {
+            TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") }
+            TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") }
+        }, dismissButton = { TextButton(onClick = { review = null }) { Text("Cancel") } }) }
+    reviewOutgoing?.let { message -> ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation before preparing another send."
                 else "This message was not accepted. Review it before trying again.")
@@ -338,14 +340,15 @@ class MainActivity : ComponentActivity() {
             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
             Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
         } }, confirmButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
-            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") } },
-        dismissButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
-            onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") } }) }
-    discard?.let { draft -> AlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
+            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
+            TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
+                onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") }
+        }, dismissButton = { TextButton(onClick = { reviewOutgoing = null }) { Text("Cancel") } }) }
+    discard?.let { draft -> ZerusAlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
         text = { Text("This removes the private draft for ${draft.target.session} from this phone.") },
         confirmButton = { TextButton(onClick = { model.discard(draft); discard = null }) { Text("Discard") } },
         dismissButton = { TextButton(onClick = { discard = null }) { Text("Cancel") } }) }
-    stopRequest?.let { (session, turn) -> AlertDialog(onDismissRequest = { stopRequest = null }, title = { Text("Stop this turn?") },
+    stopRequest?.let { (session, turn) -> ZerusAlertDialog(onDismissRequest = { stopRequest = null }, title = { Text("Stop this turn?") },
         text = { Text("Interrupt the current turn in " + session.title + ". The session remains available.") },
         confirmButton = { TextButton(onClick = { model.interrupt(session.target, turn); stopRequest = null }) { Text("Stop turn") } },
         dismissButton = { TextButton(onClick = { stopRequest = null }) { Text("Cancel") } }) }
@@ -645,7 +648,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (visible.isEmpty()) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
-    if (machineDialog) AlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
+    if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { model.allMachines() }) { Text("All machines") }
             model.machines.forEach { machine ->
@@ -1181,7 +1184,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
         }
     }
-    blockedSendReason?.let { reason -> AlertDialog(onDismissRequest = { blockedSendReason = null },
+    blockedSendReason?.let { reason -> ZerusAlertDialog(onDismissRequest = { blockedSendReason = null },
         title = { Text("Sending unavailable") }, text = { Text(reason) },
         confirmButton = { TextButton(onClick = { blockedSendReason = null }) { Text("Close") } }) }
     coldDraft?.let { captured ->
@@ -1193,7 +1196,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         val context = remember(model.activity, model.activityVerified) { ContextPresentation.from(model.activity, !model.activityVerified) }
         val compactReason = model.contextActionReason(captured.target, "compact_context").ifBlank { context.compactReason }
         val clearReason = model.contextActionReason(captured.target, "clear_context").ifBlank { context.clearReason }
-        AlertDialog(onDismissRequest = { coldDraft = null }, title = { Text("Continue with a cold cache?") },
+        ZerusAlertDialog(onDismissRequest = { coldDraft = null }, title = { Text("Continue with a cold cache?") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("The next message may process the full conversation again, increasing token use or cost. Send with full context, compact it into a summary first, or clear it and keep your draft. Compaction uses tokens and may omit details.")
                 if (!sameDraft) Text("The draft changed. Cancel and review the current composition.", color = Amber)

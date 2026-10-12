@@ -144,6 +144,7 @@ private:
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
     void showNotice(const QString &message, bool error = false);
+    void clearNotice();
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);
     void jumpToLatestActivity(QListWidgetItem *item);
@@ -220,6 +221,7 @@ private:
     QString m_clearKey;
     quint64 m_interruptRequest = 0;
     QString m_interruptKey;
+    QString m_interruptName, m_interruptMachine;
     quint64 m_queueSendRequest = 0;
     QString m_queueSendKey;
     void runSessionMenuAction(const Entry &original, SessionMenuAction action);
@@ -308,6 +310,7 @@ private:
     QLabel *m_heading, *m_count, *m_title, *m_meta, *m_badge, *m_model, *m_hint, *m_notice;
     QString m_modelElision;
     QLabel *m_connectionStatus;
+    QPushButton *m_noticeDismiss;
     QPushButton *m_connectionRetry;
     QSet<QString> m_pollingHosts;
     void updateConnectionStatus();

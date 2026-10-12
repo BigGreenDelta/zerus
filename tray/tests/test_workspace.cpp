@@ -14,6 +14,7 @@
 #include "WorkspaceIcons.h"
 #include "MessageBoxIcons.h"
 #include <QDir>
+#include <algorithm>
 
 class ListProbe : public SessionList { public: using SessionList::mimeData; using SessionList::initViewItemOption; };
 class TestWorkspace : public QObject {
@@ -38,6 +39,10 @@ private slots:
     void shortIdentityLabelsFitWithoutElision();
     void workspaceIconsAreReused();
     void darkQuestionBoxesShowLightGlyph();
+    void confirmationCancelIsRightmost_data();
+    void confirmationCancelIsRightmost();
+    void dialogDismissalStaysRightmostAcrossChanges_data();
+    void dialogDismissalStaysRightmostAcrossChanges();
     void draftStatusSitsBetweenWorkAndReplies();
     void gitStatusSeparatesEvidenceAndExpires();
     void gitStatusCardsKeepMetadataAndMachineReadable();
@@ -175,6 +180,84 @@ void TestWorkspace::darkQuestionBoxesShowLightGlyph()
     QCOMPARE(question.icon(), QMessageBox::Question);
     question.setPalette(dark);
     QTRY_COMPARE(image(question), lightGlyph);
+}
+
+void TestWorkspace::confirmationCancelIsRightmost_data()
+{
+    QTest::addColumn<bool>("extraActions");
+    QTest::newRow("submit") << false;
+    QTest::newRow("send-compact-clear") << true;
+}
+
+void TestWorkspace::confirmationCancelIsRightmost()
+{
+    QFETCH(bool, extraActions);
+    MessageBoxIcons::install();
+    QMessageBox box(QMessageBox::Warning, "Cold cache", "Choose how to continue.");
+    // Exercise the Mac order even on Linux. The per-box policy must override it.
+    box.setStyleSheet("QDialogButtonBox { button-layout: 1; }");
+    auto *proceed = box.addButton("Continue", QMessageBox::AcceptRole);
+    if (extraActions) {
+        box.addButton("Compact and continue", QMessageBox::ActionRole);
+        box.addButton("Clear context", QMessageBox::ActionRole);
+    }
+    auto *cancel = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(cancel); box.setEscapeButton(cancel);
+    box.show(); QVERIFY(QTest::qWaitForWindowExposed(&box));
+    QVERIFY(!box.testAttribute(Qt::WA_DontShowOnScreen));
+    for (auto *button : box.buttons()) if (button != cancel)
+        QVERIFY2(button->geometry().right() < cancel->geometry().left(), qPrintable(button->text()));
+    QCOMPARE(box.defaultButton(), cancel); QCOMPARE(box.escapeButton(), cancel);
+    QCOMPARE(box.buttonRole(proceed), QMessageBox::AcceptRole);
+    QTest::keyClick(&box, Qt::Key_Escape);
+    QTRY_COMPARE(box.clickedButton(), cancel);
+}
+
+void TestWorkspace::dialogDismissalStaysRightmostAcrossChanges_data()
+{
+    QTest::addColumn<int>("kind");
+    QTest::newRow("save-cancel") << 0;
+    QTest::newRow("apply-cancel") << 1;
+    QTest::newRow("review-remove-close") << 2;
+}
+
+void TestWorkspace::dialogDismissalStaysRightmostAcrossChanges()
+{
+    QFETCH(int, kind); MessageBoxIcons::install();
+    QDialog dialog; auto *layout = new QVBoxLayout(&dialog);
+    auto *buttons = new QDialogButtonBox(kind == 0 ? QDialogButtonBox::Save | QDialogButtonBox::Cancel
+        : kind == 1 ? QDialogButtonBox::Apply | QDialogButtonBox::Cancel : QDialogButtonBox::Close);
+    if (kind == 2) {
+        buttons->addButton("Review again", QDialogButtonBox::ResetRole);
+        buttons->addButton("Remove selected…", QDialogButtonBox::ActionRole);
+    }
+    layout->addWidget(buttons);
+    auto *dismiss = buttons->button(kind == 2 ? QDialogButtonBox::Close : QDialogButtonBox::Cancel);
+    dismiss->setDefault(true);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    const auto ordered = [&] {
+        for (auto *button : buttons->buttons()) if (button != dismiss && button->isVisible())
+            if (button->geometry().right() >= dismiss->geometry().left()) return false;
+        return true;
+    };
+    QTRY_VERIFY(ordered());
+    // Adding actions and changing appearance recreates Qt's internal layout.
+    auto *help = buttons->addButton(QDialogButtonBox::Help);
+    buttons->setStyleSheet("QDialogButtonBox { button-layout: 1; }");
+    QTRY_VERIFY(ordered());
+    help->setText("Help for this operation"); QTRY_VERIFY(ordered());
+    auto visual = buttons->buttons();
+    std::sort(visual.begin(), visual.end(), [](const QAbstractButton *a, const QAbstractButton *b) { return a->geometry().left() < b->geometry().left(); });
+    for (int index = 0; index + 1 < visual.size(); ++index) {
+        auto *next = visual[index]->nextInFocusChain();
+        for (int skipped = 0; !visual.contains(qobject_cast<QAbstractButton *>(next)) && skipped < 100; ++skipped) next = next->nextInFocusChain();
+        QCOMPARE(next, visual[index+1]);
+    }
+    for (auto *button : buttons->buttons()) if (button != dismiss) button->setEnabled(false);
+    QTRY_VERIFY(ordered()); QVERIFY(dismiss->isEnabled()); QVERIFY(dismiss->isDefault());
+    QTest::keyClick(&dialog, Qt::Key_Return); QTRY_VERIFY(!dialog.isVisible());
+    QCOMPARE(dialog.result(), int(QDialog::Rejected));
 }
 
 void TestWorkspace::shortIdentityLabelsFitWithoutElision()

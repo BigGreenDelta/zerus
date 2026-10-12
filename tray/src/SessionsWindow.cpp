@@ -963,6 +963,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         cancelCompactContinuation(m_selectedKey, tr("Interrupted. Your draft was kept without sending."));
         if (m_startSend.key == m_selectedKey) cancelStartContinuation(tr("Interrupted. Your draft was kept without sending."));
         m_interruptKey=key;
+        m_interruptName=entry->session.name; m_interruptMachine=entry->machine;
         // As in Terminal, the prompt of an interrupted turn returns to the message field.
         const QString prompt=interruptedPrompt(key);
         if(prompt.isEmpty())m_interruptPrompts.remove(key);
@@ -975,8 +976,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(id!=m_interruptRequest)return;
         m_interruptRequest=0;
         if(!ok)m_interruptPrompts.remove(m_interruptKey);
-        showNotice(ok?tr("Interrupt sent. Waiting for the agent to stop…"):error,!ok);
+        const auto target = tr("%1 (%2)").arg(m_interruptName, m_interruptMachine);
+        const bool alreadyStopped = error.trimmed() == "hgs: This turn is no longer working"
+            || error.trimmed() == "This turn is no longer working";
+        if (ok) showNotice(tr("Interrupt sent to %1. Waiting for the agent to stop…").arg(target));
+        else if (alreadyStopped) showNotice(tr("Stop %1: the turn already ended or is waiting for input. No action needed.").arg(target));
+        else showNotice(tr("Stop %1 failed: %2\nRefresh status or open Terminal to check the agent before trying again.").arg(target, error), true);
         if(m_selectedKey==m_interruptKey)inspect();
+        emit refreshRequested();
         renderDetails();
     });
     connect(m_question, &QuestionCard::draftRestored, this, [this] { renderDetails(); });
@@ -1284,6 +1291,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
     m_notice = new StatusMessage; m_notice->hide(); statusLayout->addWidget(m_notice, 1);
+    m_noticeDismiss = new QPushButton; m_noticeDismiss->setObjectName("dismissNotice");
+    m_noticeDismiss->setProperty("glyph", "close"); m_noticeDismiss->setIconSize(QSize(14, 14));
+    m_noticeDismiss->setFixedSize(20, 20); m_noticeDismiss->setFlat(true);
+    m_noticeDismiss->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    m_noticeDismiss->setToolTip(tr("Dismiss notification")); m_noticeDismiss->setAccessibleName(m_noticeDismiss->toolTip());
+    m_noticeDismiss->hide(); statusLayout->addWidget(m_noticeDismiss);
+    connect(m_noticeDismiss, &QPushButton::clicked, this, &SessionsWindow::clearNotice);
     m_worktreeCleanup = new QPushButton(tr("Clean up worktree…")); m_worktreeCleanup->setObjectName("archivedWorktreeCleanup");
     m_worktreeCleanup->setFlat(true); m_worktreeCleanup->hide(); statusLayout->addWidget(m_worktreeCleanup);
     connect(m_worktreeCleanup, &QPushButton::clicked, this, &SessionsWindow::cleanUpArchivedWorktree);
@@ -1585,6 +1599,8 @@ void SessionsWindow::applyTheme()
         QLabel#notice { color:%6; font-size:11px; }
         QLabel#workspaceConnectionStatus { color:%12; font-size:11px; }
         QPushButton#connectionRetry { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
+        QPushButton#dismissNotice { background:transparent; border:0; padding:0; min-height:0; }
+        QPushButton#dismissNotice:hover { background:%7; border-radius:4px; }
         QPushButton#updatesAvailable, QPushButton#restartToUpdate { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
         QPushButton#updatesAvailable:hover, QPushButton#restartToUpdate:hover { background:%7; }
         QLabel#notice[error="true"] { color:%12; }
@@ -3637,7 +3653,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         compact->setToolTip(tr("Run native /compact, then send this draft only after successful completion."));
         auto *clear=dialog.addButton(tr("Clear context"),QMessageBox::ActionRole);
         clear->setEnabled(m_details.value("clear_context_supported").toBool() && !m_clearRequest);
-        auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.exec();
+        auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=proceed && dialog.clickedButton()!=clear && dialog.clickedButton()!=compact)return;
         entry=selected();
         if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=runId||m_details.value("conversation_id")!=conversationId)return;
@@ -3900,8 +3916,12 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
     };
     const auto question = actionableQuestion(true);
     if (question.isEmpty()) return;
+    // This reviewed native panel already asks the user how to handle its cold
+    // cache. Deliver the chosen row, without asking to resume with full context.
+    const bool nativeCacheChoice = question.value("source") == "kimi_cache_hint"
+        && question.value("answer_transport") == "kimi_tui";
     bool fullContextConsent = false;
-    if (CacheStatus::expired(m_details)) {
+    if (!nativeCacheChoice && CacheStatus::expired(m_details)) {
         const Entry original = *selected();
         const auto run = m_details.value("run_id"), conversation = m_details.value("conversation_id");
         const auto draft = m_question->submissionSnapshot(targetKey, targetQuestionId);
@@ -3937,7 +3957,7 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
     const QJsonObject cacheEvidence = sendEvidence(m_details);
     beginSendEvidence(targetKey, cacheEvidence);
     m_question->prepareSendingAsync(targetKey, targetQuestionId,
-        [this, target, targetKey, targetQuestionId, question, requestedAnswers, pinnedIdentity, skipping, consentIdentity, fullContextConsent, cacheEvidence](bool okay) {
+        [this, target, targetKey, targetQuestionId, question, requestedAnswers, pinnedIdentity, skipping, consentIdentity, nativeCacheChoice, fullContextConsent, cacheEvidence](bool okay) {
             if (!okay) { finishSendEvidence(targetKey); return; }
             const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == targetKey; });
             const auto evidence = targetKey == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(targetKey, cacheEvidence);
@@ -3953,7 +3973,7 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
                 || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"
                 || evidence.value("run_id") != question.value("run_id") || evidence.value("conversation_id") != question.value("conversation_id")
                 || consentIdentity(refreshed) != pinnedIdentity
-                || (!fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)))
+                || (!nativeCacheChoice && !fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)))
                 || !(skipping ? refreshed.value("can_skip").toBool() : refreshed.value("can_answer").toBool())
                 || m_question->hasSubmittedAnswer(targetKey, refreshed)) {
                 m_question->setError(targetKey, targetQuestionId, tr("The question changed. Your answers were kept without submitting.")); return;
@@ -3989,15 +4009,22 @@ void SessionsWindow::openExternalFile(const QString &path, bool otherMachine)
 void SessionsWindow::showNotice(const QString &message, bool error)
 {
     m_notice->show();
+    m_noticeDismiss->show();
     m_notice->setText(message.isEmpty() ? tr("Operation failed. Open the terminal for details.") : message);
     m_notice->setToolTip(Qt::convertFromPlainText(m_notice->text()));
     m_notice->setProperty("error", error);
     m_notice->style()->unpolish(m_notice); m_notice->style()->polish(m_notice); m_notice->update();
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
-    if (!error) QTimer::singleShot(5000, m_notice, [notice=m_notice,revision] {
-        if (notice->property("noticeRevision").toInt()==revision) { notice->clear(); notice->setToolTip({}); notice->hide(); }
+    if (!error) QTimer::singleShot(5000, this, [this,revision] {
+        if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
+}
+
+void SessionsWindow::clearNotice()
+{
+    m_notice->setProperty("noticeRevision", m_notice->property("noticeRevision").toInt() + 1);
+    m_notice->clear(); m_notice->setToolTip({}); m_notice->hide(); m_noticeDismiss->hide();
 }
 
 bool SessionsWindow::selectSessionEntry(const Entry &original)
@@ -4366,11 +4393,16 @@ void SessionsWindow::terminateSession()
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
     const bool live = e->session.state == "running", archived = e->session.state == "archived";
     const bool keepArchive = live && e->session.tracked && QStringList{"codex","claude","kimi"}.contains(e->session.cmd);
-    const auto answer = QMessageBox::question(this, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
+    QMessageBox confirm(QMessageBox::Warning, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
         live ? (keepArchive ? tr("Stop %1 and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept.").arg(name) : tr("Terminate %1? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept.").arg(name))
              : archived ? tr("Remove this archived instance of %1 from HGS? Other sessions with this name and the agent’s native conversation history are kept.").arg(name)
-             : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (answer != QMessageBox::Yes || !selectSessionEntry(original)) return;
+             : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
+    confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
+    confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
+    confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
+        : archived ? tr("Forget archived session") : tr("Forget saved session"));
+    confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
+    if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();
     if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty()) return;
     if ((current->session.state == "running") != live) {

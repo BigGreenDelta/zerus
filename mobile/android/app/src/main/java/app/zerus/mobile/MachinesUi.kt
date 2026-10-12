@@ -67,7 +67,7 @@ private val Muted = Color(0xFF9AACB2)
         val saving=key in model.machineNameSaving
         val valid=runCatching { MachineNames.checked(name) }.isSuccess
         fun saveName() { if(valid&&!saving) model.renameMachine(key,name) { naming=null } }
-        AlertDialog(onDismissRequest={ if(!saving) naming=null },title={ Text("Name on this phone") },text={
+        ZerusAlertDialog(onDismissRequest={ if(!saving) naming=null },title={ Text("Name on this phone") },text={
             Column(verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 Text("This private label applies only to this machine in this workspace. Its hostname, SSH settings and session identity stay unchanged.")
                 Text(model.connections.find { it.id==machine.connectionId }?.displayName.orEmpty(),style=MaterialTheme.typography.labelMedium)

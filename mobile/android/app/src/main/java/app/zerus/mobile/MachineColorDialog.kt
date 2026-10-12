@@ -21,7 +21,7 @@ import androidx.compose.ui.unit.dp
     onSave: (String?) -> Unit, onDismiss: () -> Unit) {
     var choice by remember(key, selected) { mutableStateOf(selected) }
     val preview = choice ?: MachineColors.automatic(key)
-    AlertDialog(onDismissRequest = { if (!saving) onDismiss() }, title = { Text("Machine label color") }, text = {
+    ZerusAlertDialog(onDismissRequest = { if (!saving) onDismiss() }, title = { Text("Machine label color") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Saved only on this phone for this machine in this workspace. You can change it while offline.")
             MachineLabel(name, colorHex = preview)

@@ -18,11 +18,14 @@ internal data class QuestionSendIntent(val target: Target, val navigation: Long,
     fun permitsPrepared(target: Target?, navigation: Long, current: Question?, prepared: Draft,
         requestId: String, cold: Boolean, consent: Boolean): Boolean =
         requestId.isNotBlank() && prepared.requestId == requestId && prepared.status == "submitting" &&
-            (!cold || consent) && matches(target, navigation, current,
+            (!QuestionSendPolicies.requiresCacheConsent(question, cold) || consent) && matches(target, navigation, current,
                 prepared.copy(status = "editing", answers = draft.answers)) && prepared.answers == answers
 }
 
 internal object QuestionSendPolicies {
+    // Kimi's reviewed native chooser already asks how to handle its cold cache.
+    fun requiresCacheConsent(question: Question, cold: Boolean) = cold &&
+        !(question.source == "kimi_cache_hint" && question.toolCallId == "kimi_cache_hint")
     fun schema(question: Question) = question.copy(canAnswer = false, canSkip = false, delivery = "",
         createdAt = 0.0, unavailableReason = "", answerDelivery = null)
     fun capture(target: Target, navigation: Long, question: Question, draft: Draft, answers: String) =
@@ -51,7 +54,7 @@ internal class QuestionSendGate {
     var pending: QuestionSendIntent? = null; private set
     fun request(intent: QuestionSendIntent, cold: Boolean): QuestionSendIntent? {
         if (pending != null) return null
-        if (!cold) return intent
+        if (!QuestionSendPolicies.requiresCacheConsent(intent.question, cold)) return intent
         pending = intent
         return null
     }

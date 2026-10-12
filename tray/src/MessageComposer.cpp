@@ -897,6 +897,7 @@ void MessageComposer::showSavedDrafts()
                 tr("Replace the unsent draft in %1 with the selected saved draft?").arg(QString(target).replace('\n', " / ")),
                 QMessageBox::Ok | QMessageBox::Cancel, &dialog);
             confirm.setObjectName("replaceDraftConfirm"); confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::Cancel);
+            confirm.button(QMessageBox::Ok)->setText(tr("Replace draft")); confirm.setEscapeButton(QMessageBox::Cancel);
             if (confirm.exec() != QMessageBox::Ok || m_recording || m_key != target || isSending(target) || isWaitingToSend(target)) return;
         }
         selected.label.clear(); selected.formState = {};

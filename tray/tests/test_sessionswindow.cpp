@@ -68,6 +68,7 @@
 #include "DirectoryDialog.h"
 #include "ProjectsDialog.h"
 #include "MessageComposer.h"
+#include "MessageBoxIcons.h"
 #include "ComposerToolbar.h"
 #include "SessionList.h"
 #include "SessionCardDelegate.h"
@@ -194,6 +195,8 @@ private slots:
     void durableSubmissionKeepsGuiResponsive_data();
     void durableSubmissionKeepsGuiResponsive();
     void coldCacheConfirmationPreservesDraftAndPinsConversation();
+    void nativeColdCacheChoiceKeepsExactAnswer_data();
+    void nativeColdCacheChoiceKeepsExactAnswer();
     void coldCacheClearKeepsDraftAndPinsIdentity();
     void stoppedSessionStartsFreshOrSendsAfterStart();
     void clearInspectionUpdatesActivityAndCountersImmediately();
@@ -305,6 +308,8 @@ private slots:
     void collapsedStripDoesNotOpenSubagents();
     void collapsingKeepsRowsInPlace();
     void escapeInActivityInterruptsAndRestoresPrompt();
+    void stopNoticesExplainOriginalTargetAndCanBeDismissed_data();
+    void stopNoticesExplainOriginalTargetAndCanBeDismissed();
     void escapeInterruptsFromAnywhereAndNeverCloses();
     void suggestedMessageIsPlaceholderAndTabTakesIt();
     void preview();
@@ -352,6 +357,7 @@ void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
 
 void TestSessionsWindow::initTestCase()
 {
+    MessageBoxIcons::install();
     m_dir = std::make_unique<QTemporaryDir>(); QVERIFY(m_dir->isValid());
     QCoreApplication::setOrganizationName("hgs-tests");
     QCoreApplication::setApplicationName("sessions-window");
@@ -3049,6 +3055,93 @@ else: print('{}')
     QFile calls(directory.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly)); QCOMPARE(calls.readAll(), QByteArray("call\n"));
 }
 
+void TestSessionsWindow::nativeColdCacheChoiceKeepsExactAnswer_data()
+{
+    QTest::addColumn<int>("choice"); QTest::addColumn<QString>("change");
+    for (int choice = 0; choice < 4; ++choice)
+        QTest::newRow(qPrintable(QString("choice-%1").arg(choice))) << choice << QString();
+    for (const auto *change : {"hash", "run", "source"}) QTest::newRow(change) << 0 << QString(change);
+}
+
+void TestSessionsWindow::nativeColdCacheChoiceKeepsExactAnswer()
+{
+    QFETCH(int, choice); QFETCH(QString, change);
+    QTemporaryDir directory;
+    const auto program = directory.filePath("hgs"), state = directory.filePath("details.json"), capture = directory.filePath("answer.json");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import json,pathlib,sys,time
+root=pathlib.Path(__file__).parent
+if sys.argv[1]=='inspect': print((root/'details.json').read_text())
+elif sys.argv[1]=='answer':
+ p=json.load(sys.stdin)
+ with (root/'calls').open('a') as f:f.write('call\n')
+ (root/'answer.json').write_text(json.dumps(p))
+ time.sleep(.1)
+ print(json.dumps(dict(status='answered',request_id=p['request_id'],name=sys.argv[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],question_id=p['question_id'],question_hash=p['expected_question_hash'])))
+else: print('{}')
+)PY");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(program));
+    QJsonArray options;
+    const QStringList labels{"Compact and continue", "Start a new session", "Continue as-is", "Don't ask me again"};
+    for (int index = 0; index < labels.size(); ++index)
+        options.append(QJsonObject{{"id", QString("cache_%1").arg(index)}, {"label", labels[index]}});
+    QJsonObject question{{"question_id", "kimi-cache:exact"}, {"question_hash", "hash-cold"}, {"run_id", "run-cold"},
+        {"conversation_id", "conversation-cold"}, {"can_answer", true}, {"source", "kimi_cache_hint"},
+        {"answer_transport", "kimi_tui"}, {"tool_call_id", "kimi_cache_hint"}, {"agent_id", "main"},
+        {"questions", QJsonArray{QJsonObject{{"id", "cache"}, {"header", "Context"}, {"question", "Cache expired"},
+            {"body", "The next message re-sends the entire history at full price."},
+            {"multi_select", false}, {"allow_other", false}, {"options", options}}}}};
+    QJsonObject details{{"tracked", true}, {"run_id", "run-cold"}, {"conversation_id", "conversation-cold"},
+        {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "input"}, {"activity", "busy"},
+        {"pending_questions", QJsonArray{question}}, {"cache_hint", QJsonObject{{"status", "cold"}, {"tokens", 490252}}}};
+    QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "kimi/docs/research");
+    auto *card = window.findChild<QuestionCard *>(); auto *client = window.findChild<HgsClient *>();
+    QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
+    const auto key = window.findChild<QListWidget *>("sessionList")->currentItem()->data(Qt::UserRole).toString();
+    for (auto *button : card->findChildren<QAbstractButton *>("questionOption"))
+        if (button->property("optionId") == QString("cache_%1").arg(choice)) button->click();
+    auto *submit = card->findChild<QPushButton *>("submitQuestionAnswer"); QVERIFY(submit->isEnabled());
+    ComposerDraftStore::flushWrites();
+    QSemaphore entered, release;
+    if (!change.isEmpty()) ComposerDraftStore::setWriteObserver([&] { entered.release(); release.acquire(); });
+    auto unblock = qScopeGuard([&] { release.release(10); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({}); });
+    bool unwantedConfirmation = false;
+    QTimer modal; modal.setInterval(5);
+    connect(&modal, &QTimer::timeout, &window, [&] {
+        if (auto *box = window.findChild<QMessageBox *>("questionColdCacheConfirm")) {
+            unwantedConfirmation = true; box->reject();
+        }
+    });
+    QSignalSpy completed(client, &HgsClient::questionAnswered);
+    modal.start(); submit->click(); QVERIFY(!unwantedConfirmation); modal.stop();
+    if (!change.isEmpty()) {
+        QTRY_VERIFY(entered.available() > 0); entered.acquire();
+        ComposerDraftStore::setWriteObserver({});
+        if (change == "hash") question["question_hash"] = "changed";
+        if (change == "source") question["source"] = "unreviewed";
+        if (change == "run") { question["run_id"] = "changed"; details["run_id"] = "changed"; }
+        details["pending_questions"] = QJsonArray{question};
+        QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
+        client->inspectionReady({}, "kimi/docs/research", details, {});
+        release.release(10); ComposerDraftStore::flushWrites(); QTest::qWait(200);
+        QVERIFY(!QFileInfo::exists(capture)); QCOMPARE(completed.size(), 0); return;
+    }
+    card->answerRequested(key, "kimi-cache:exact", QJsonArray{}); // No duplicate delivery during the save barrier.
+    QTRY_COMPARE(completed.size(), 1);
+    QFile result(capture); QVERIFY(result.open(QIODevice::ReadOnly));
+    const auto payload = QJsonDocument::fromJson(result.readAll()).object();
+    QCOMPARE(payload["question_id"].toString(), QString("kimi-cache:exact"));
+    QCOMPARE(payload["expected_question_hash"].toString(), QString("hash-cold"));
+    QCOMPARE(payload["expected_run_id"].toString(), QString("run-cold"));
+    QCOMPARE(payload["expected_conversation_id"].toString(), QString("conversation-cold"));
+    const auto answer = payload["answers"].toArray().first().toObject();
+    QCOMPARE(answer["question_id"].toString(), QString("cache"));
+    QCOMPARE(answer["selected_option_ids"].toArray(), QJsonArray{QString("cache_%1").arg(choice)});
+    QFile calls(directory.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly)); QCOMPARE(calls.readAll(), QByteArray("call\n"));
+}
+
 void TestSessionsWindow::questionAnswersStayWithOriginalSession()
 {
     QTemporaryDir directory;
@@ -5539,6 +5632,64 @@ void TestSessionsWindow::escapeInActivityInterruptsAndRestoresPrompt()
     QVERIFY(!composer->editor()->hasFocus()); QTest::qWait(150); QCOMPARE(requests(), 2);
 }
 
+void TestSessionsWindow::stopNoticesExplainOriginalTargetAndCanBeDismissed_data()
+{
+    QTest::addColumn<QString>("outcome");
+    for (const auto *outcome : {"inactive", "failed", "navigated"}) QTest::newRow(outcome) << QString(outcome);
+}
+
+void TestSessionsWindow::stopNoticesExplainOriginalTargetAndCanBeDismissed()
+{
+    QFETCH(QString, outcome);
+    QTemporaryDir directory;
+    const auto program = directory.filePath("hgs"), state = directory.filePath("details.json");
+    QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"},
+        {"runtime_state", "live"}, {"process_state", "running"}, {"activity", "busy"}, {"phase", "working"},
+        {"interrupt_supported", true}, {"turn_started", 1790928000.0}, {"prompt", "Original turn prompt"}, {"events", QJsonArray{}}, {"cursor", 0}};
+    QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
+    QVERIFY(FakeCli::replace(directory.filePath("failure"), outcome == "failed" ? QByteArray("hgs: Native interruption could not be verified") : QByteArray("hgs: This turn is no longer working")));
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import json,pathlib,sys,time
+root=pathlib.Path(__file__).parent
+if sys.argv[1]=='inspect': print((root/'details.json').read_text())
+elif sys.argv[1]=='interrupt':
+ p=json.load(sys.stdin)
+ with (root/'calls').open('a') as f:f.write('call\n')
+ d=json.loads((root/'details.json').read_text());d.update(activity='idle',phase='idle',interrupt_supported=False)
+ (root/'details.json').write_text(json.dumps(d))
+ time.sleep(.15)
+ print((root/'failure').read_text(),file=sys.stderr);sys.exit(1)
+else: print('{}')
+)PY"); fixture.close(); QVERIFY(FakeCli::makeRunnable(program));
+    SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *notice = window.findChild<QLabel *>("notice"); auto *dismiss = window.findChild<QPushButton *>("dismissNotice");
+    QVERIFY(dismiss); QVERIFY(dismiss->isHidden());
+    auto *stop = composer->findChild<QPushButton *>("interruptAgent"); QTRY_VERIFY(stop->isEnabled());
+    setComposerText(composer, "Keep my draft");
+    QSignalSpy refresh(&window, &SessionsWindow::refreshRequested);
+    window.showNotificationNotice("Earlier information"); stop->click();
+    if (outcome == "navigated") window.showSession({}, "kimi/docs/research");
+    QTRY_VERIFY(notice->text().startsWith("Stop codex/hgs/dashboard ("));
+    QVERIFY(!notice->text().contains("kimi/docs/research")); QVERIFY(!refresh.isEmpty());
+    QCOMPARE(notice->property("error").toBool(), outcome == "failed");
+    if (outcome == "failed") {
+        QVERIFY(notice->text().contains("Native interruption could not be verified"));
+        QVERIFY(notice->text().contains("Refresh status or open Terminal"));
+        QVERIFY(notice->toolTip().contains("Terminal"));
+        // An older information timeout must not erase the newer error.
+        QTest::qWait(5100); QVERIFY(notice->isVisible()); QVERIFY(dismiss->isVisible());
+    } else QVERIFY(notice->text().contains("No action needed"));
+    if (outcome == "navigated") window.showSession({}, "codex/hgs/dashboard");
+    QTRY_VERIFY(!stop->isEnabled()); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
+    QVERIFY(dismiss->isVisible()); QVERIFY(!dismiss->accessibleName().isEmpty());
+    auto *statusBar = window.findChild<QFrame *>("workspaceStatus");
+    QVERIFY(statusBar->rect().contains(QRect(dismiss->mapTo(statusBar, QPoint()), dismiss->size())));
+    dismiss->click(); QVERIFY(notice->isHidden()); QVERIFY(dismiss->isHidden()); QVERIFY(notice->text().isEmpty()); QVERIFY(notice->toolTip().isEmpty());
+    QFile calls(directory.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly)); QCOMPARE(calls.readAll(), QByteArray("call\n"));
+}
+
 void TestSessionsWindow::escapeInterruptsFromAnywhereAndNeverCloses()
 {
     QTemporaryDir fixture; QFile fake(fixture.filePath("hgs")), original(script());
@@ -6840,8 +6991,14 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);QCOMPARE(menu->actions().size(),1);
     QVERIFY(menu->findChild<QAction *>("contextAddProjectFolder"));delete menu.data();
     QTimer::singleShot(0,&window,[&]{auto *dialog=page->findChild<QDialog *>("deleteProjectDialog");QVERIFY(dialog);
-        if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/delete-project.png"));}dialog->reject();});
+        auto *buttons=dialog->findChild<QDialogButtonBox *>();QVERIFY(buttons);
+        QVERIFY(buttons->button(QDialogButtonBox::Cancel)->isDefault());
+        QVERIFY(dialog->findChild<QLabel *>()->text().contains("First"));
+        if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/delete-project.png"));}
+        QTest::keyClick(dialog,Qt::Key_Return);});
     page->deleteProject(first);
+    const SessionOrganization afterDelete(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    QVERIFY(afterDelete.group(first));
 }
 
 void TestSessionsWindow::projectColorsApplyOrCancel()

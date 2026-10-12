@@ -108,7 +108,7 @@ import java.util.UUID
         SpeechConfigurationEditor(manager, selected, baseline, profile) { editor = null }
     }
     if (selected != null) removal?.let { (baseline, profile) ->
-        AlertDialog(onDismissRequest = { removal = null }, title = { Text("Remove speech provider?") },
+        ZerusAlertDialog(onDismissRequest = { removal = null }, title = { Text("Remove speech provider?") },
             text = { Text("Remove ${profile.name} from ${selected.name}? Saved recordings and voice history are kept. Clients using this provider will need an explicit new selection.") },
             confirmButton = { TextButton(onClick = {
                 removal = null
@@ -148,7 +148,7 @@ import java.util.UUID
         }
     }
     fun dismiss() { secret = ""; onDismiss() }
-    AlertDialog(onDismissRequest = ::dismiss, title = { Text(if (original.revision == 0L) "Add speech provider" else "Edit speech provider") },
+    ZerusAlertDialog(onDismissRequest = ::dismiss, title = { Text(if (original.revision == 0L) "Add speech provider" else "Edit speech provider") },
         text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Processing computer: ${host.name}", style = MaterialTheme.typography.labelMedium)
             Text(speechServiceReadiness(host, latest, manager.loading), style = MaterialTheme.typography.bodySmall)

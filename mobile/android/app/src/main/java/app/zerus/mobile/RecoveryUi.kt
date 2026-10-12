@@ -40,7 +40,7 @@ import kotlinx.coroutines.delay
     }
     if(history) {
         ObscureConversation()
-        AlertDialog(onDismissRequest = { history = false },title = { Text("Native recovery") },text = {
+        ZerusAlertDialog(onDismissRequest = { history = false },title = { Text("Native recovery") },text = {
             SelectionContainer { Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(job.status(now));Text(job.attempts)
                 if(job.reason.isNotBlank()) Text(job.reason)

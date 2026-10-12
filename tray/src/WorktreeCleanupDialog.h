@@ -167,7 +167,7 @@ private:
         QMessageBox box(QMessageBox::Warning,windowTitle(),rows.size()==1?tr("Remove 1 worktree on %1?").arg(m_machine):tr("Remove %1 worktrees on %2?").arg(rows.size()).arg(m_machine),QMessageBox::Cancel,this);
         box.setObjectName("confirmWorktreeCleanup");box.setInformativeText(lines.join('\n'));
         auto *accept=box.addButton(rows.size()==1?tr("Remove worktree"):tr("Remove %1 worktrees").arg(rows.size()),QMessageBox::DestructiveRole);accept->setObjectName("confirmRemoveWorktrees");
-        box.setDefaultButton(QMessageBox::Cancel);box.exec();if(box.clickedButton()!=accept)return;
+        box.setDefaultButton(QMessageBox::Cancel);box.setEscapeButton(QMessageBox::Cancel);box.exec();if(box.clickedButton()!=accept)return;
         m_queue=rows;m_results.clear();m_done=0;m_failures.clear();m_branchNotes.clear();next();
     }
     void setRowState(const QString &path,const QString &text) {

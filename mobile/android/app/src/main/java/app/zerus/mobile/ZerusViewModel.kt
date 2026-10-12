@@ -2023,7 +2023,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         answerFlights[sending.key]=sending.requestId;preparingTargets+=target.key
         try {
             save(sending);persistence!!.flush()
-            if (consent == null && ContextPresentation.isCold(activity)) {
+            if (consent == null && QuestionSendPolicies.requiresCacheConsent(native, ContextPresentation.isCold(activity))) {
                 durable({ state -> intent.restoreAfterExpiry(state, sending.requestId) })
                 refuseQuestionSend(intent, "The prompt cache expired before sending. Review your answer and confirm full context; nothing was sent.")
                 return@launch

@@ -102,7 +102,7 @@ import org.json.JSONObject
     if(terminal) {
         val reason = model.terminalOpenReason(target)
         if(reason.isBlank()) TerminalDialog(model,session) { terminal = false }
-        else AlertDialog(onDismissRequest = { terminal = false },title = { Text("Terminal unavailable") },text = { Text(reason) },
+        else ZerusAlertDialog(onDismissRequest = { terminal = false },title = { Text("Terminal unavailable") },text = { Text(reason) },
             confirmButton = { TextButton(onClick = { terminal = false }) { Text("Close") } })
     }
     if (details) SessionDetailsSheet(model,session) { details = false }
@@ -241,7 +241,7 @@ import org.json.JSONObject
             TextButton(onClick = { model.checkSessionAction(action) }) { Text("Check original receipt") }
             var review by remember(action.requestId) { mutableStateOf(false) }
             TextButton(onClick = { review = true }) { Text("Review") }
-            if(review) AlertDialog(onDismissRequest = { review = false }, title = { Text("Review ${actionLabel(action.operation).lowercase()}?") },
+            if(review) ZerusAlertDialog(onDismissRequest = { review = false }, title = { Text("Review ${actionLabel(action.operation).lowercase()}?") },
                 text = { Text("This action may already have changed the machine. Marking it reviewed does not undo or repeat it. Check the original receipt and native state first.") },
                 confirmButton = { TextButton(onClick = { model.reviewSessionAction(action); review = false }) { Text("Mark reviewed") } },
                 dismissButton = { TextButton(onClick = { review = false }) { Text("Cancel") } })
@@ -268,7 +268,7 @@ import org.json.JSONObject
             }
         }
     } }
-    if(review) AlertDialog(onDismissRequest = { review = false },title = { Text("Review native action?") },
+    if(review) ZerusAlertDialog(onDismissRequest = { review = false },title = { Text("Review native action?") },
         text = { Text(if(action.needsProjectReview) "${action.resultTarget?.session}\nThe session was created. Review its project placement before dismissing this notice. Marking reviewed never creates another session."
             else "${sessionActionTitle(action)}\nThis action may already have changed the machine. Check its original receipt and native state first. Marking it reviewed does not undo or repeat it.") },
         confirmButton = { TextButton(onClick = { model.reviewSessionAction(action); review = false }) { Text("Mark reviewed") } },
@@ -288,7 +288,7 @@ import org.json.JSONObject
     val reason = model.actionReason(target,operation).ifBlank { SessionControlPresentation.reason(target,operation,model.activity) }.ifBlank {
         runCatching { SessionActionPolicies.arguments(operation,args); SessionActionPolicies.inspectReason(target,operation,args,model.activity ?: JSONObject()) }.getOrElse { it.message ?: "Enter a valid name." }
     }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(actionLabel(operation,target) + " " + session.title + "?") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(actionLabel(operation,target) + " " + session.title + "?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("${target.session} on $computer")
             when(operation) {
@@ -312,7 +312,7 @@ import org.json.JSONObject
     val computer = remember(target) { model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.name ?: "selected machine" }
     val args = JSONObject().put("process_id",process.id).also { if(generation.isNotBlank()) it.put("generation",generation) }
     val reason = model.actionReason(target,"process_stop").ifBlank { SessionActionPolicies.inspectReason(target,"process_stop",args,model.activity ?: JSONObject()) }
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Stop this process?") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Stop this process?") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("${target.session} on $computer")
         SelectionContainer { Text(process.command.ifBlank { process.description }) }
         Text("Only the selected native process is targeted. The stop must be confirmed by the machine.")
@@ -324,7 +324,7 @@ import org.json.JSONObject
 @Composable private fun ProcessOutputDialog(model: ZerusViewModel, target: Target, process: DetailProcess, onDismiss: () -> Unit) {
     val result = model.processOutputResult.takeIf { value -> value != null && model.processOutputId == process.id && value.string("name") == target.session &&
         value.string("run_id") == target.run && value.string("conversation_id") == target.conversation && value.string("archive_id") == target.archiveId }
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Process output") },text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Process output") },text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
         if(model.processOutputLoading) Text("Reading output…")
         if(model.processOutputError.isNotBlank()) Text(model.processOutputError)
         result?.let { SelectionContainer { Text(it.string("output").ifEmpty { "No output reported." }) }
@@ -350,7 +350,7 @@ import org.json.JSONObject
             else -> ""
         }
     }
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Model and effort") },text = { Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Model and effort") },text = { Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Settings apply to ${target.session}.",style = MaterialTheme.typography.bodySmall)
         if(snapshot.pendingId.isNotBlank()) Text("Pending: ${snapshot.pendingModel} / ${snapshot.pendingEffort.ifBlank { "Default" }}",style = MaterialTheme.typography.bodySmall)

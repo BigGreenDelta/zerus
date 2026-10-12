@@ -150,14 +150,14 @@ private val TerminalForeground = Color(0xFFD4D4D4)
                 }
             }
         }
-        reviewInput?.let { action -> AlertDialog(onDismissRequest = { reviewInput = null },title = { Text("Review uncertain Terminal input") },
+        reviewInput?.let { action -> ZerusAlertDialog(onDismissRequest = { reviewInput = null },title = { Text("Review uncertain Terminal input") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Input may already have reached ${session.title}. Check its original receipt and the native screen before preparing it again. Marking reviewed does not resend it.")
                 val arguments = remember(action.arguments) { runCatching { JSONObject(action.arguments) }.getOrNull() }
                 SelectionContainer { Text(arguments?.string("text","key").orEmpty(),modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())) }
             } },confirmButton = { TextButton(onClick = { model.reviewSessionAction(action);reviewInput = null }) { Text("Mark reviewed") } },
             dismissButton = { TextButton(onClick = { reviewInput = null }) { Text("Cancel") } }) }
-        dangerousKey?.let { (key,binding) -> AlertDialog(onDismissRequest = { dangerousKey = null },
+        dangerousKey?.let { (key,binding) -> ZerusAlertDialog(onDismissRequest = { dangerousKey = null },
             title = { Text(if(key == "C-c") "Send Ctrl+C?" else "Send Ctrl+D?") },
             text = { Text("Send $key to ${session.title} on ${model.machines.find { it.id == target.computerId && it.connectionId == target.connectionId }?.name ?: target.computerId}? This may interrupt or close the native program.") },
             confirmButton = { TextButton(onClick = {

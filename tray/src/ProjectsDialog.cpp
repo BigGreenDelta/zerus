@@ -312,12 +312,13 @@ void ProjectsDialog::deleteProject(const QString &id)
     if(!m_projects->group(id)||m_projects->groups().size()<2)return;
     QDialog dialog(this);dialog.setWindowTitle(tr("Delete project"));dialog.setObjectName("deleteProjectDialog");dialog.setMinimumWidth(480);
     auto *layout=new QVBoxLayout(&dialog);layout->setContentsMargins(24,22,24,20);layout->setSpacing(18);
-    auto *hint=new QLabel(tr("Choose the project that will receive its sessions. Files and running agents stay in place."));hint->setWordWrap(true);hint->setMinimumWidth(360);layout->addWidget(hint);
+    auto *hint=new QLabel(tr("Delete “%1”? Choose the project that will receive its sessions. Files and running agents stay in place.").arg(m_projects->group(id)->name));hint->setTextFormat(Qt::PlainText);hint->setWordWrap(true);hint->setMinimumWidth(360);layout->addWidget(hint);
     auto *target=new QComboBox;target->setObjectName("projectTransferTarget");
     for(const auto &p:m_projects->groups())if(p.id!=id)target->addItem(p.name,p.id);
     const int defaultRow=target->findData(m_projects->defaultProject());if(defaultRow>=0)target->setCurrentIndex(defaultRow);layout->addWidget(target);
     layout->addSpacing(4);
     auto *buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);buttons->button(QDialogButtonBox::Ok)->setText(tr("Move sessions and delete"));layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Cancel)->setDefault(true);
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
     if(m_projects->removeGroup(id,target->currentData().toString()))changed();

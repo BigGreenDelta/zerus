@@ -1,5 +1,7 @@
 #pragma once
+#include "DialogButtons.h"
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QImage>
 #include <QMessageBox>
 #include <QTimer>
@@ -24,19 +26,36 @@ inline QPixmap darkPaletteQuestionGlyph(const QPixmap &glyph)
     return result;
 }
 
-// Applies the light glyph to every question box shown on a dark palette and
-// restores the native one when the palette turns light while it is open.
+// Keeps confirmations in the application's widget theme and button order.
+// Applies the light question glyph on dark palettes and restores the native
+// glyph when the palette turns light while the box is open.
 class MessageBoxIcons : public QObject {
 public:
     static void install() {
-        if (qApp && !qApp->findChild<QObject *>("messageBoxIcons", Qt::FindDirectChildrenOnly)) new MessageBoxIcons;
+        if (qApp && !qApp->findChild<QObject *>("messageBoxIcons", Qt::FindDirectChildrenOnly)) {
+            // Set before boxes are constructed: macOS native helpers bypass
+            // widget layout and icon handling. Other native dialogs are kept.
+            qApp->setStyleSheet(qApp->styleSheet() + "QMessageBox { button-layout: 0; }");
+            new MessageBoxIcons;
+            DialogButtons::install();
+        }
     }
 protected:
     bool eventFilter(QObject *object, QEvent *event) override {
         const auto type = event->type();
         if (type != QEvent::Show && type != QEvent::PaletteChange && type != QEvent::StyleChange) return false;
         auto *box = qobject_cast<QMessageBox *>(object);
-        if (!box || (box->icon() != QMessageBox::Question && !box->property(kLightGlyph).toBool())) return false;
+        if (!box) return false;
+        if (type == QEvent::Show) {
+            // Use one confirmation order on every platform, including macOS.
+            // Changing the layout leaves button roles, default and Escape intact.
+            if (auto *buttons = box->findChild<QDialogButtonBox *>()) {
+                const QString rule = "QDialogButtonBox { button-layout: 0; }";
+                if (!buttons->styleSheet().contains(rule)) buttons->setStyleSheet(buttons->styleSheet() + rule);
+                buttons->setLayoutDirection(Qt::LeftToRight);
+            }
+        }
+        if (box->icon() != QMessageBox::Question && !box->property(kLightGlyph).toBool()) return false;
         // Show reaches filters before QMessageBox::showEvent sizes the box. A
         // style change resets the native icon in changeEvent, so apply after it.
         if (type == QEvent::Show) apply(box);

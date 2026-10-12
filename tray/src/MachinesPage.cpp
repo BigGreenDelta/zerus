@@ -157,9 +157,20 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     connect(m_accounts, &QPushButton::clicked, this, [this] { emit accountsRequested(m_selected == "@local" ? QString() : alias()); });
     for (auto *button : {m_remove, m_reset}) connect(button, &QPushButton::clicked, this, [this, button] {
         const bool remove = button == m_remove;
-        if (remove && QMessageBox::question(this, tr("Remove machine"), tr("Remove %1 from this Zerus? Its agents keep running and its files stay unchanged.").arg(alias())) != QMessageBox::Yes) return;
+        const auto target = alias(), selection = m_selected, revision = m_data.value("revision").toString();
+        if (remove) {
+            QMessageBox confirm(QMessageBox::Question, tr("Remove machine?"),
+                tr("Remove %1 from this Zerus? Its agents keep running and its files stay unchanged.").arg(target), QMessageBox::Cancel, this);
+            confirm.setObjectName("removeMachineConfirm"); confirm.setTextFormat(Qt::PlainText);
+            auto *proceed = confirm.addButton(tr("Remove machine"), QMessageBox::DestructiveRole);
+            confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
+            confirm.exec(); if (confirm.clickedButton() != proceed) return;
+            if (m_request || alias() != target || m_selected != selection || m_data.value("revision").toString() != revision) {
+                report(tr("The connection changed. Review it before removing."), true); return;
+            }
+        }
         m_operation = remove ? "remove" : "reset";
-        m_request = m_client->requestMachines({m_operation, alias(), "--revision", m_data.value("revision").toString()}); updateControls();
+        m_request = m_client->requestMachines({m_operation, target, "--revision", revision}); updateControls();
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &data) {
         if (request == m_resolveRequest) {

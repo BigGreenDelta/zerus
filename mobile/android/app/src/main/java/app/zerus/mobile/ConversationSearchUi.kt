@@ -30,7 +30,7 @@ import kotlinx.coroutines.withContext
         value = query to withContext(Dispatchers.Default) { ConversationSearch.find(messages,query) }
     }
     val results = searched?.takeIf { it.first == query }?.second
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Search loaded messages") },text = {
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Search loaded messages") },text = {
         Column(Modifier.heightIn(max = 520.dp),verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("${events.size} messages currently loaded. Earlier or unloaded pages are outside this search.",
                 style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)

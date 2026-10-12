@@ -25,6 +25,24 @@ class QuestionSendConfirmationTest {
         answers = answers, generation = "generation", revision = "revision")
     private fun intent(q: Question = question, payload: String = answers) = QuestionSendPolicies.capture(target, 1, q, draft, payload)
 
+    @Test fun nativeKimiCacheChoicesKeepExactAnswersWithoutSecondConsent() {
+        val cachePrompt = prompt.copy(id = "cache", choices = (0..3).map { Choice("cache_$it", "Native choice $it", "") })
+        val cache = question.copy(source = "kimi_cache_hint", toolCallId = "kimi_cache_hint", prompts = listOf(cachePrompt))
+        for (choice in 0..3) {
+            val payload = QuestionPolicies.answers(cache.prompts, mapOf("cache" to setOf("cache_$choice")), emptyMap()).toString()
+            val pending = intent(cache, payload); val gate = QuestionSendGate()
+            assertSame(pending, gate.request(pending, true)); assertNull(gate.pending)
+            val prepared = draft.copy(status = "submitting", requestId = "request", answers = payload)
+            assertTrue(pending.permitsPrepared(target, 1, cache, prepared, "request", true, false))
+            assertEquals("cache_$choice", JSONArray(pending.answers).getJSONObject(0).getJSONArray("selected_option_ids").getString(0))
+            assertFalse(pending.permitsPrepared(target, 1, cache.copy(hash = "changed"), prepared, "request", true, false))
+            assertFalse(pending.permitsPrepared(target.copy(run = "changed"), 1, cache, prepared, "request", true, false))
+            assertFalse(pending.permitsPrepared(target, 1, cache.copy(source = "claude"), prepared, "request", true, false))
+        }
+        assertTrue(QuestionSendPolicies.requiresCacheConsent(cache.copy(toolCallId = "other"), true))
+        assertTrue(QuestionSendPolicies.requiresCacheConsent(question, true))
+    }
+
     @Test fun defaultColdRequestCannotReleaseTransportOrChangeSavedForm() {
         val gate = QuestionSendGate(); val original = draft
         val pending = intent()

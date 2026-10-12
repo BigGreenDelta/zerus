@@ -117,7 +117,7 @@ import androidx.compose.ui.unit.dp
     }
     if (microphoneDenied) {
         ObscureConversation()
-        AlertDialog(onDismissRequest = { microphoneDenied = false }, title = { Text("Microphone access is off") },
+        ZerusAlertDialog(onDismissRequest = { microphoneDenied = false }, title = { Text("Microphone access is off") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("In Android app settings, open Permissions, then Microphone, and allow access while using Zerus. Return here and tap Voice input to start recording.")
                 if (systemSettingsError) Text("Android could not open this page. Open Android Settings, then Apps, Zerus, Permissions and Microphone.", color = MaterialTheme.colorScheme.error)
@@ -131,7 +131,7 @@ import androidx.compose.ui.unit.dp
     }
     if (settings) {
         ObscureConversation()
-        AlertDialog(onDismissRequest = { settings = false }, title = { Text("Voice input") },
+        ZerusAlertDialog(onDismissRequest = { settings = false }, title = { Text("Voice input") },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) { SpeechSettingsContent(model) } },
             confirmButton = { TextButton(onClick = { settings = false; start() }, enabled = speech.startReason(target).isBlank()) { Text("Start recording") } },
             dismissButton = { TextButton(onClick = { settings = false }) { Text("Close") } })
@@ -185,7 +185,7 @@ import androidx.compose.ui.unit.dp
     }
     providerSettings?.let { captured ->
         ObscureConversation()
-        AlertDialog(onDismissRequest = { providerSettings = null }, title = { Text("Transcription provider") },
+        ZerusAlertDialog(onDismissRequest = { providerSettings = null }, title = { Text("Transcription provider") },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("Recording for ${captured.target.session}")
                 SpeechSettingsContent(model, captured.target, captured, showPreview = false)
@@ -193,7 +193,7 @@ import androidx.compose.ui.unit.dp
             confirmButton = { TextButton(onClick = { providerSettings = null }) { Text("Done") } })
     }
     confirmCold?.let { captured ->
-        AlertDialog(onDismissRequest = { confirmCold = null }, title = { Text("Send with full context?") },
+        ZerusAlertDialog(onDismissRequest = { confirmCold = null }, title = { Text("Send with full context?") },
             text = { Text("The prompt cache for ${captured.target.session} has expired. Sending this voice message can process the full conversation again and use more tokens. Your typed draft will stay here.") },
             confirmButton = { TextButton(onClick = {
                 confirmCold = null
@@ -202,7 +202,7 @@ import androidx.compose.ui.unit.dp
             dismissButton = { TextButton(onClick = { confirmCold = null }) { Text("Cancel") } })
     }
     confirmDiscard?.let { captured ->
-        AlertDialog(onDismissRequest = { confirmDiscard = null }, title = { Text("Discard recording?") },
+        ZerusAlertDialog(onDismissRequest = { confirmDiscard = null }, title = { Text("Discard recording?") },
             text = { Text("Discard the saved voice recording for ${captured.target.session}? This removes only this unsent recording. Your typed draft and sent messages are kept.") },
             confirmButton = { TextButton(onClick = {
                 confirmDiscard = null
@@ -263,7 +263,7 @@ import androidx.compose.ui.unit.dp
             } }
         }
     }
-    remove?.let { entry -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove local voice copy?") },
+    remove?.let { entry -> ZerusAlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove local voice copy?") },
         text = { Text("Remove this phone's saved audio and receipt for ${entry.target.session}? This does not cancel delivery or remove the message from the computer's conversation history.") },
         confirmButton = { TextButton(onClick = { model.attachments.stopAudio(); speech.dismiss(entry); remove = null }) { Text("Remove local copy") } },
         dismissButton = { TextButton(onClick = { remove = null }) { Text("Keep") } }) }
