@@ -187,6 +187,13 @@ view. Back returns to project details and preserves the normal Sessions query
 and filter. Archives are assigned by their UUID, so an archived and live session
 with the same name can belong to different projects.
 
+When the relay and the gateway computer serve Overmind, a project's Tasks
+button opens its board, and the composer and the session long-press sheet
+offer Add as task and Send a task here; otherwise Tasks stay hidden. Task
+writes wait in an encrypted outbox with an explicit retry. See Overmind tasks
+in [the mobile architecture](../../docs/mobile-architecture.md#overmind-tasks),
+including its compatibility notes.
+
 ## Conversation history and native controls
 
 The conversation keeps a bounded hot window rather than imposing a total chat
@@ -333,9 +340,9 @@ and [launcher asset documentation](https://developer.android.com/studio/write/cr
 ## Notifications
 
 In Machines, Session alerts has independent settings for input and approvals,
-errors, and turn completion. Input and errors are on by default; completed turns
-are off. The master switch disables all session alerts. Disabling a type also
-removes its existing cards.
+errors, turn completion and task decisions (Your Call). Input, errors and
+decisions are on by default; completed turns are off. The master switch
+disables all session alerts. Disabling a type also removes its existing cards.
 
 There is one updated card per workspace, computer and live session slot. The
 normal shade shows the authenticated session title and the computer's private

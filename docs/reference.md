@@ -1392,6 +1392,16 @@ returns the first result; another command or request with the same ID is
 refused. A task that holds events from a newer version of hgs is shown
 read-only and refuses changes until hgs is updated.
 
+Commands run by people (not `mcp`) take `--device <label>` to name the client
+they act from, such as a phone. The label is informational, not an identity:
+it is recorded as `device` on the actor of the events the command writes, for
+example in `created_by` and on journal entries. It has 1–64 characters, no
+control characters, does not start with `-` or `@` and is given once. Another
+label, or any label in a session environment (`HGS_SESSION` or `HGS_RUN_ID`
+set), is refused `invalid_request` with the field `device`. `hgs --help`
+carries the line `hgs overmind <command> --json (mobile ABI overmind-v1)`,
+which the mobile connector probes before it serves the phone.
+
 Tasks are referenced by `om-` plus at least five characters, or by UUID. A
 reference grows when needed to stay unambiguous. Pins, assignees and reviewers
 follow a session when it is renamed on its machine. A pin written on another
@@ -1460,8 +1470,8 @@ running tmux server, because Zerus passes it on with `-e`.
 
 Data lives in `$HGS_STATE_DIR/overmind/` (an SQLite event log, attachment
 blobs by SHA-256 and a `rev` file that changes with every write). The desktop
-is described [below](#overmind-desktop); the phone interface is planned in
-`docs/superpowers/specs/2026-10-11-overmind-core-design.md`.
+is described [below](#overmind-desktop) and the phone in
+[the mobile architecture](mobile-architecture.md#overmind-tasks).
 
 **Boards and decisions.** `rev --json` returns `{ok, cursor}`; it opens the
 store without the write lock, so polling it is cheap, and the cursor changes
@@ -1489,6 +1499,15 @@ included so that a reader can drop them. Any event after the cursor that
 belongs to no task (a workflow or template change, or a session rename, in any
 project) lists every task of the project.
 
+For readers with a size budget, `board` also takes `stage` (one stage name),
+`limit` (1–1000 tasks) and `after` (the `next` of an earlier page), together
+with `since` or without it. With any of the three, the answer adds `next`: an
+opaque cursor of the board position (stage, rank and UUID) to pass as `after`
+for the following page, or `null` on the last page. A page therefore continues
+in board order even when the task it ended with has moved or was deleted.
+Without them the answer is as before. A `limit` out of range, an empty `stage`
+or a malformed `after` is refused `invalid_field`.
+
 `decisions --json {}` lists the tasks waiting in a stage with role
 `needs_human`, in every project, oldest first and at most 50: `{ok, cursor,
 decisions: [{task, ref, project, title, stage, question, assignee,
@@ -1500,7 +1519,15 @@ empty when that transition wrote none); `assignee` is `{machine, name}` or
 the task but not with comments, so a reader notifies once per signature.
 `show` adds `head`, the event ID of the task's last transition: the question a
 task in Your Call waits with is the `[needs-human]` journal entry whose `event`
-is the head; an older one belongs to an earlier stay.
+is the head; an older one belongs to an earlier stay. `show --json {task,
+journal_limit?, journal_before?}` pages the journal for readers with a size
+budget: at most `journal_limit` (1–500) entries ending before the index
+`journal_before`, which counts from the oldest entry, is clamped to the total
+and defaults to the newest end. A page keeps the oldest-first order, and the
+task then carries `journal_total` and `journal_from`, the index of its first
+entry; read older entries with `journal_before` set to `journal_from` until it
+is 0. A late-synced event can shift the indexes, which `journal_total` shows.
+Without either field `show` returns the whole journal.
 `projects --json {}` lists the projects that hold tasks, sorted by ID: `{ok,
 cursor, projects: [{project, total, roles: {backlog, ready, active, review,
 needs_human, done, parked}}]}`, every role present and deleted tasks not
@@ -1542,20 +1569,28 @@ stays recorded. A definite failure is
 not a result but the refusal `not_delivered` (`ok: false`). After it, `send`
 takes its claim back and the task returns to Queue; `review-send` clears the
 reviewer; `rework-send` changes nothing; for `answer` the answer stays recorded
-and is sent again by repeating the request. Overmind never resends
-by itself. Retrying with the same `request_id` never types twice: an
-interrupted send resumes its claim, and a delivery is reported as not sent only
-when the session has no input receipt for the request.
+and is sent again by repeating the request or by a new request with `repeat`.
+Overmind never resends by itself. Retrying with the same `request_id` never
+types twice: an interrupted send resumes its claim, and a delivery is reported
+as not sent only when the session has no input receipt for the request.
 
 `review-send --json {task, session, confirm?}` sends the `review` template to a
 reviewer session, `rework-send --json {task, confirm?}` sends the `rework`
-template to the assignee, and `answer --json {task, answer, confirm?}` records
-the answer to a question in Your Call and sends the `answer` template. The
-answer is recorded before it is typed; if it was not delivered, repeat the
-request with the same `request_id`, which the refusal names; the same
-`request_id` with another answer is refused `request_reused`. `pin --json
-{task, session?: {machine?, name}}` reserves a task for a session, with
-`machine` defaulting to this computer as for `send`; without `session` it
+template to the assignee, and `answer --json {task, answer, confirm?,
+repeat?}` records the answer to a question in Your Call and sends the `answer`
+template. The answer is recorded before it is typed; if it was not delivered,
+repeat the request with the same `request_id`, which the refusal names; the
+same `request_id` with another answer is refused `request_reused`. A client
+that cannot reuse a `request_id`, such as the phone, whose relay answers a
+known one with its first receipt, sends a new request with `repeat` set to the
+`request_id` that recorded the answer. hgs then types the recorded answer under
+that request's input identity, so it is never typed twice, and keeps the result
+under the new `request_id`. The answer text must be the recorded one
+(`answer_changed` otherwise) and `repeat` a UUID (`invalid_field`). When that
+request recorded no answer that is still unsent, because it was typed, its
+delivery is uncertain or the task moved on, the refusal is `nothing_to_repeat`.
+`pin --json {task, session?: {machine?, name}}` reserves a task for a session,
+with `machine` defaulting to this computer as for `send`; without `session` it
 removes the pin, as `unpin --json {task}` does.
 
 `templates get --json {project}` shows the templates of a project and
@@ -1613,9 +1648,10 @@ images per call, 10 MiB each and 20 MiB in total.
 
 A send to a session on another machine runs on that machine. The caller first
 exchanges events with the host, pushes the task's images, and runs the command
-there as a person, so the host writes the claim. The host checks the gates, not
-the caller. The caller keeps the host's result as the result of the request, so
-a retry with the same `request_id` replays it without reaching the host.
+there as a person with the caller's device label, so the host writes the claim.
+The host checks the gates, not the caller. The caller keeps the host's result
+as the result of the request, so a retry with the same `request_id` replays it
+without reaching the host.
 
 Every failure of a forwarded command is a JSON refusal. `host_unreachable`
 comes before the caller reaches the host: this computer has no verified route

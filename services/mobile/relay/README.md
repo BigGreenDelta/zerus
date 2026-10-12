@@ -77,10 +77,10 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   bounds. `device`, an informational label, follows `hgs overmind --device`:
   1–64 characters, no control character (C0, DEL or C1), not starting with
   `-` or `@`. A canonical read payload is at most 64 KiB and a write
-  payload at most the 29 MiB request maximum (inline images); other envelope
-  violations are 400. Submission requires the gateway snapshot to advertise
-  the operation and an available local route of the named computer: a
-  computer reachable only through a peer route is refused with 409, so a
+  payload at most the 29 MiB request maximum (inline images), else 413; other
+  envelope violations are 400. Submission requires the gateway snapshot to
+  advertise the operation and an available local route of the named computer:
+  a computer reachable only through a peer route is refused with 409, so a
   gateway operation never runs on another machine's connector, and its claim
   carries no peer route. `overmind_read` is a read with the attachment
   retention class and its own partial `overmind_history` index;
@@ -247,16 +247,22 @@ as `attachment_history`. On a large PostgreSQL deployment, pre-create it with
 WHERE operation='overmind_read' AND state IN ('completed','failed','uncertain')`
 before the cutover, so worker startup does not block writes; confirm
 `pg_index.indisvalid`, since startup keeps an invalid index of that name.
-Deploy `hgs`, the
-desktop and the connector first,
-then Android, then the relay, replacing all PostgreSQL workers together: an
-older worker refuses the operations as invalid and derives no `decision`
-alerts. Phones use the operations only when both relay capabilities and the
-gateway snapshot list them. Android builds that predate the `decision` kind
-treat its alert rows and ordinary events as plain refreshes. Snapshots are
-stored verbatim, so an upgraded relay compares against the digest stored before
-it; tasks already waiting in Your Call before either upgrade raise nothing, only
-later entries and signature changes do.
+Deploy `hgs` and the connector first, then Android, then the relay, replacing
+all PostgreSQL workers together: an older worker refuses the operations as
+invalid and derives no `decision` alerts. There is no separate feature flag.
+Phones use the operations only when both relay capabilities and the gateway
+snapshot list them, so an older relay or connector hides Tasks on the phone.
+The connector lists them only on the gateway, while its `hgs --help` carries
+the mobile Overmind ABI line. It always pages task and board reads, so the
+gateway's `hgs` must accept the paging fields; an older `hgs` refuses them, and
+on the gateway or the session's machine it refuses an answer's `repeat`.
+Android builds that predate the `decision` kind treat its alert rows and
+ordinary events as plain refreshes. Snapshots are stored verbatim, so an
+upgraded relay compares against the digest stored before it; tasks already
+waiting in Your Call before either upgrade raise nothing, only later entries
+and signature changes do. Before the deployment, run the PostgreSQL contract
+test above and the `tests/load.py` memory qualification below for the new
+write path (Beads `zerus-89h.4.1`).
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite

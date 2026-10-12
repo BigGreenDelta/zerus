@@ -12,9 +12,9 @@ The existing `hgs` CLI remains the authority for native session identity and inp
 The Android client connects to existing computers, browses logical projects and
 sessions, and operates native session workflows: conversations and attachments,
 questions, queues, model settings, context, lifecycle actions, process output,
-session creation and supported terminals. It preserves private drafts, reading
-positions and uncertain delivery receipts. Native capabilities determine which
-actions are available for each adapter and running version.
+session creation, supported terminals and Overmind tasks. It preserves private
+drafts, reading positions and uncertain delivery receipts. Native capabilities
+determine which actions are available for each adapter and running version.
 
 Account enrollment, project catalog administration, desktop filesystem windows
 and global recovery policy remain native or desktop setup tasks. Mobile recovery
@@ -701,6 +701,179 @@ no app can open the type. Rows show progress and errors; a failed read is never
 retried automatically. Without the operation on the relay and the computer, the
 row says "Update Zerus on this computer to open attachments."
 
+## Overmind tasks
+
+The phone works with [Overmind tasks](reference.md#overmind-tasks) as the
+desktop does: boards, task cards, Add as task, Send a task here and Your Call
+decisions. It acts as a person with its device label. `hgs overmind` on the
+gateway computer remains the authority for every field, gate and workflow rule.
+
+### Gateway operations
+
+`overmind_read` and `overmind_write` are gateway-scoped. Their session is
+empty, and the relay routes them only to an available local route of the named
+computer, which is the gateway's own connector. A computer reachable only
+through a peer route is refused with 409, and the connector fails a claim whose
+`gateway_route` names a peer route, so Overmind never runs on another
+machine's connector. Every machine holds a full replica, and `send` reaches the
+session's machine by itself.
+
+The payload is `{action, request, device?}` for a read and `{request_id,
+action, request, device?}` for a write, whose `request_id` repeats the
+envelope's. It is the Overmind `request_id` and, for `create`, the new task's
+UUID, so a retry never creates a second task or a second delivery. Read actions
+are `projects`, `board`, `task`, `decisions` and `attachment`. Write actions
+are `create`, `edit`, `move`, `reorder`, `pin`, `unpin`, `label`, `link`,
+`comment`, `send`, `review-send`, `rework-send`, `answer`, `resolve-delivery`,
+`done`, `reopen` and `delete`. The relay checks only this envelope: the action
+lists, an object `request`, an attachment range, the device label and the
+canonical payload size, at most 64 KiB for a read and the 29 MiB request
+maximum for a write, which carries images inline as `send` does. `hgs`
+validates the request fields, so a new field needs no relay deployment. The
+device label is informational, not an identity, and follows
+`hgs overmind --device`: 1–64 characters, no control character, not starting
+with `-` or `@`.
+
+`overmind_read` has the short retention of `attachment_read`: the relay deletes
+a terminal row five seconds after the phone reads its receipt, or 60 seconds
+after completion. `overmind_write` is an ordinary mutation: the same
+`request_id` returns the first receipt, and other content under it is 409.
+
+The connector runs `hgs overmind <command> --json [--device <label>]` with the
+request on stdin, through the guarded `swarm __mobile-peer-local` entrypoint
+and its exact argv allowlist; the `task` action is `show`. It cleans the label
+(controls dropped; leading space, `-` and `@` stripped; at most 64 characters)
+and omits the flag when nothing remains. A completed receipt holds the `hgs`
+answer: `ok: true`, or a refusal `{ok: false, error: {code, message, field,
+state}}`, so the phone always reads `result.ok`. A connector validation
+failure, an unsupported `hgs` or a failed read is `failed`. A write whose
+native call ended without a valid answer is `uncertain`.
+
+An applied write answers with a compact card: every top-level field of the
+`hgs` answer, such as `delivery`, with its task cut down to `uuid`, `ref`,
+`project`, `title`, `stage`, `priority`, `rank`, `labels`, `pinned`,
+`assignee`, `reviewer`, `flags`, `parent`, `follows`, `created_at`,
+`updated_at`, `read_only`, `deleted`, `journal_count`, `head` and
+`pinned_current`. The cut is deterministic, so a replayed receipt is identical.
+A write may read up to 32 MiB of native output before the cut.
+
+Results stay below 1 MiB. `task` and `board` reads are pages: the connector
+sends `journal_limit` 100 and `limit` 200 unless the phone asks for fewer, and
+treats a `null` page field as absent. When the escaped answer exceeds 1 MiB
+less 4 KiB, or its native output exceeds the connector's cap, the connector
+halves the window and reads again. If one journal entry or task still does
+not fit, the answer is the refusal `too_large` on that field. The phone
+continues a board with `after: next` until `next` is null, restarting
+when `cursor` changes between pages, then reconciles with `since`. It reads
+older journal entries with `journal_before: journal_from` until `journal_from`
+is 0, starting again from the newest page when `journal_total` changes.
+`projects` and `decisions` are not paged; `hgs` bounds them, with at most 50
+decisions and clipped text.
+
+An `attachment` read names `{task, sha256, offset, length}`, a range of at most
+512 KiB within 10 MiB. The connector asks `hgs overmind attachment` for the
+image's local path, which fetches it from another machine when needed. It
+requires the file name to equal the requested SHA-256, opens only a regular
+file without following links and returns `{ok, task, sha256, name, mime, size,
+offset, length, data_base64}`. The phone verifies the assembled image against
+its SHA-256 and shows only bytes it recognizes as PNG, JPEG, GIF, WebP or BMP.
+
+### Digest and decision alerts
+
+The gateway snapshot carries a small `mobile_overmind` digest: `{schema: 1,
+rev, projects: {<project ID>: {<role>: count}}, decisions: [{task, project,
+title, signature}]}`. `rev` is the `decisions` cursor. `decisions` lists at
+most 50 Your Call tasks with titles clipped to 120 characters and no question;
+the phone reads the question with `task` or `decisions`. The digest is at most
+64 KiB: every decision fits, and project counts take the remaining room. The
+connector reads `projects` and `decisions` at most every 15 seconds. Only the
+gateway publishes a digest; direct peers never do.
+
+The connector carries its latest digest in every gateway snapshot. It omits
+the digest only while none is known, when `hgs` lacks the Overmind ABI, or for
+a heartbeat that would otherwise exceed 1 MiB. It never substitutes an empty
+list, and a failed refresh or `--help` probe keeps the previous digest.
+
+The relay derives `decision` events from the gateway's own snapshots, never
+from a peer heartbeat. Of the first 50 entries, those with a canonical UUID
+`task` and a 1–128 character `signature` count, first entry per task. A task
+that enters the list or changes its signature appends an ordinary `decision`
+event in the slot `overmind:<task>` and an alert candidate held under the
+presence rules below. While the digest is known, the candidate is resolved
+when the task leaves the list or its signature changes. A snapshot without the
+digest is unknown, not empty: it raises nothing and keeps held candidates,
+unless the gateway's valid capabilities no longer list `overmind_read`, which
+drops them. Tasks already waiting when the relay is upgraded raise nothing. A
+delivered candidate is an `alert` with `alert_kind: "decision"`; push payloads
+stay generic wakes without task text.
+
+### Android Tasks
+
+Tasks appear only when the relay's `/v1/capabilities` and the gateway
+snapshot's `mobile_capabilities` both list `overmind_read` and
+`overmind_write`; otherwise the app hides them. Projects → project → Tasks
+opens a full-window board. Your Call is a strip above it, and every other stage
+is a swiped page. A long-press drag or Move up and Move down reorder a column;
+Move to… offers only the stages a person may choose and asks first where the
+desktop does. The full-screen task card edits the title, prompt, images,
+priority, pin, labels and relations, shows the journal as Markdown and offers
+the desktop's actions, Delete task… and a comment box. Add as task in the
+composer and Send a task here in the session long-press sheet follow the
+desktop. Project badges come from the digest; session badges come from at most
+eight boards read for visible projects.
+
+Boards, cards, project counts and decisions are cached in a private encrypted
+store of at most 128 entries and 64 MiB, one MiB per entry, for seven days.
+Disconnecting a workspace purges its cache, its task writes and its unsaved
+card drafts. Writes are saved in an encrypted outbox before the network and
+carry the phone's model as the device label. A write still being sent blocks
+update installation. A write the relay never confirmed offers an explicit Retry
+with the same `request_id` and body; a retry becomes failed only when the relay
+answers 404 or 409, which come only after it has looked up the identity. A
+delivery that may have arrived offers Resolve delivery and is never sent again.
+
+A refusal that a person may overrule (`field: "confirm"`) offers "… anyway" as
+a new write with a new `request_id` and the refusal code added to `confirm`.
+The desktop repeats the refused `request_id`, which `hgs` allows because it
+keeps no receipt for a refusal; through the relay, a known `request_id` only
+returns its first receipt. An answer refused `not_delivered` is recorded but not
+typed. "Send the answer again" is a new `answer` write whose `repeat` names the
+request that recorded it; `hgs` types it under that request's input identity,
+so it is never typed twice.
+
+Decision notifications, "Task decisions (Your Call)", are on by default. They
+come from the gateway digest when the relay and the gateway list both
+operations: one card per task, even across gateways, with the task title and
+"Needs your decision on <computer>". As for sessions, a new card needs the
+relay's `decision` alert. A posted card stays unchanged while its gateway sends
+no digest. Tapping it opens the task when Tasks are available; otherwise it
+refreshes.
+
+### Overmind compatibility and rollout
+
+Deploy `hgs` and the connector first, then Android, then the relay, replacing
+all PostgreSQL workers together. There is no separate feature flag; each side
+reads the operation lists:
+
+- A connector advertises the operations only on the gateway, and only while
+  `hgs --help` carries `overmind <command> --json (mobile ABI overmind-v1)`. An
+  older relay or connector therefore hides Tasks on the phone, and an older
+  relay derives no decision alerts.
+- The connector always pages `task` and `board` reads, so the gateway's `hgs`
+  must accept the paging fields; an older one refuses them as unknown fields.
+  "Send the answer again" needs `repeat` on the gateway and on the session's
+  machine, which runs a forwarded answer; an older `hgs` refuses it, and the
+  phone shows that refusal.
+- Android builds that predate the `decision` kind treat its events and alerts
+  as plain refreshes.
+- Before the relay deployment, run the PostgreSQL contract test and the
+  `tests/load.py` memory qualification (Beads `zerus-89h.4.1`); see the
+  [relay README](../services/mobile/relay/README.md).
+
+Android release note: an app older than this one, installed over it, drops the
+pending Overmind writes it cannot read and drops posted decision notification
+records instead of crashing.
+
 ## Protocol version 1
 
 Authenticated requests use `Authorization: Bearer <credential>`. Bodies and
@@ -729,8 +902,9 @@ are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 `compact_context`, `clear_context`, `send_now`, `settings`, `process_output`
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
 `terminal_input`, `history`, `catalog`, `dirs`, `launch`, `worktrees`,
-`worktree_create`, `recovery_action`, `mark_read`, `set_mobile_delivery` and
-`attachment_read`.
+`worktree_create`, `recovery_action`, `mark_read`, `set_mobile_delivery`,
+`attachment_read`, and the gateway-scoped `overmind_read` and `overmind_write`
+described under [Overmind tasks](#overmind-tasks).
 
 `attachment_read` is a read of one byte range of a file in the exact
 conversation's own delivery receipt. Its payload is `{request_id,
@@ -846,7 +1020,9 @@ event, so an alert is delivered once.
 
 A delivered candidate appends `{id, computer_id, session, kind: "alert",
 alert_kind, created_at}` to `GET /v1/events`, with `alert_kind` `attention`,
-`error` or `completed`, and coalesces one generic wake per registered phone.
+`error`, `completed` or `decision` (an Overmind task in Your Call, see
+[above](#digest-and-decision-alerts)), and coalesces one generic wake per
+registered phone.
 A wake job still being sent records the newer alert and is sent again. Ordinary
 events no longer wake phones themselves. Phones that know the feature create
 cards only from alert events: an `attention` or `error` alert announces the
@@ -861,13 +1037,14 @@ Android builds released before this change keep only the newest event per
 session in a batch, so an alert following a completion can hide their opt-in
 completion card.
 
-Android notification preferences distinguish input and approvals, errors, and
-turn completion. Input and errors are enabled by default; completion is opt-in.
-The master Session alerts switch controls all three. Each paired workspace,
-canonical computer and live session slot has one replaceable notification,
-showing its current authenticated session title and the computer's private name
-on this phone. The explicit lock-screen public version remains generic and
-never includes question text or conversation content.
+Android notification preferences distinguish input and approvals, errors,
+turn completion and task decisions. Input, errors and decisions are enabled by
+default; completion is opt-in. The master Session alerts switch controls all
+four. Each paired workspace, canonical computer and live session slot has one
+replaceable notification, showing its current authenticated session title and
+the computer's private name on this phone. The explicit lock-screen public
+version remains generic and never includes question text or conversation
+content.
 
 Push is only a wake hint and does not create a second visible alert. The client
 drains bounded event pages, coalesces session slots and validates candidates

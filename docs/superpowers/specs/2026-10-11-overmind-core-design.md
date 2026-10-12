@@ -608,18 +608,24 @@ that reason after the attempt.
 ## Part 7. Mobile client
 
 Full parity with the desktop. The phone acts as `human` with its device label.
+The mobile plan took the decisions listed at the end of this part;
+`docs/mobile-architecture.md` (Overmind tasks) describes the implementation.
 
 ### Reading
 
-- The gateway snapshot gains a small `mobile_overmind` digest: `rev`, per
-  project counts by role, and `decisions` (at most 50 entries of `{task, project,
-  title ≤120, signature}`) for Your Call. Only the gateway publishes it. The full
-  board is never put into snapshots: they are resent every 5 s and share a 1 MiB
-  catalog.
+- The gateway snapshot gains a small `mobile_overmind` digest: `{schema, rev,
+  projects: {<id>: {<role>: count}}, decisions}`, where `rev` is the
+  `decisions` cursor and `decisions` holds at most 50 entries of `{task,
+  project, title ≤120, signature}` for Your Call, without the question. It is
+  at most 64 KiB. Only the gateway publishes it. The full board is never put
+  into snapshots: they are resent every 5 s and share a 1 MiB catalog.
 - A new relay operation **`overmind_read`** (a read, gateway-scoped, result at
-  most 1 MiB, paginated) with actions `projects`, `board` (delta since a cursor),
-  `task`, `attachment` (by SHA-256, ranges of at most 512 KiB, like
-  `attachment_read`) and `sessions` (send targets with their state).
+  most 1 MiB) with actions `projects`, `board` (delta since a cursor),
+  `task`, `decisions` and `attachment` (by SHA-256, ranges of at most 512 KiB,
+  like `attachment_read`). `task` and `board` are paginated: `show` takes
+  `journal_limit`/`journal_before` and answers `journal_total`/`journal_from`,
+  `board` takes `stage`/`limit`/`after` and answers `next`, and the connector
+  halves the window until the answer fits.
 - The phone caches boards and cards in its encrypted private store with the
   existing cache bounds and purges them on disconnect.
 
@@ -627,14 +633,23 @@ Full parity with the desktop. The phone acts as `human` with its device label.
 
 - A new relay operation **`overmind_write`** (a mutation, gateway-scoped, with a
   durable `request_id`) with the actions of every human desktop command: create,
-  edit, move, reorder, pin, label, link, comment, send, review-send,
+  edit, move, reorder, pin, unpin, label, link, comment, send, review-send,
   rework-send, answer, resolve-delivery, done, reopen, delete.
-- Task creation uses the request UUID as the task `uuid`, so a retry never
-  duplicates a task. Writes made without a connection wait in the phone's
-  encrypted outbox with an explicit retry, like drafts: the relay keeps queued
-  requests only 120 s.
+- The envelope `request_id` is the Overmind `request_id`, and task creation
+  uses it as the task `uuid`, so a retry never duplicates a task or a delivery.
+  Writes made without a connection wait in the phone's encrypted outbox with an
+  explicit retry, like drafts: the relay keeps queued requests only 120 s.
+- An applied write answers with a compact card (the summary fields of the task
+  plus `head`), so its receipt always fits one result and replays identically.
+- A refusal a person may overrule is confirmed on the phone by a new write with
+  a new `request_id` and the code in `confirm`: the relay answers a known
+  `request_id` only with its first receipt and refuses other content under it.
+  An answer refused `not_delivered` is sent again by a new `answer` request
+  whose `repeat` names the request that recorded it; hgs types it under that
+  request's input identity, so it is never typed twice.
 - `send` runs on the gateway and reaches other machines through Part 5's bundle
-  delivery. The `claim` is still written by the session's host.
+  delivery, carrying the phone's device label to the host. The `claim` is
+  still written by the session's host.
 
 ### Validation split
 
@@ -642,16 +657,21 @@ The relay validates the envelope of the two operations: the `action` allowlist,
 sizes and identity. `hgs` validates fields and gates and remains the single
 source of rules, so most new Overmind actions need no relay deployment. This is
 a deliberate exception to the per-operation strict schemas used elsewhere.
-Every new `hgs overmind` command used by the connector is added to the
-`mobile_peers` argv allowlist and to the `--help` markers the connector probes.
+Every `hgs overmind` command used by the connector is in the `mobile_peers`
+argv allowlist. The connector probes one `hgs --help` line, which names the
+ABI: `overmind <command> --json (mobile ABI overmind-v1)`.
 
 ### Your Call alerts
 
-The relay derives a new alert kind `decision` from `mobile_overmind.decisions`,
-with the slot `overmind:<task uuid>`, under the existing presence rules. It
-resolves when the task leaves the list or its signature changes. Android gains a
-Decision card kind and a preference toggle; tapping opens the task. Older apps
-treat the unknown kind as a refresh.
+The relay derives a new alert kind `decision` from `mobile_overmind.decisions`
+of the gateway's own snapshots, with the slot `overmind:<task uuid>`, under the
+existing presence rules. While the digest is known, it resolves when the task
+leaves the list or its signature changes. A snapshot without the digest is
+unknown, not resolved: the connector carries its latest digest in every gateway
+snapshot and omits it only while none is known, never sending an empty list in
+its place. A gateway whose capabilities stop listing `overmind_read` drops its
+decisions. Android gains a Decision card kind and a preference toggle; tapping
+opens the task. Older apps treat the unknown kind as a refresh.
 
 ### Android UI
 
@@ -661,6 +681,35 @@ treat the unknown kind as a refresh.
 - Full-screen task card with prompt, images, journal and all actions.
 - **Add as task** in the session composer; **Send a task here** in the session
   long-press sheet; queue and Your Call badges on projects and sessions.
+
+### Decisions of the mobile plan
+
+1. **Gateway scope.** A new relay operation class `GATEWAY` next to `COMPUTER`:
+   `session` is empty and the request is routed to the gateway's own connector,
+   never to a peer route (409). The connector refuses a gateway operation whose
+   claim carries a peer `gateway_route`.
+2. **Retention.** `overmind_read` has its own short retention class, like
+   `attachment_read`. There is no change to the `READ_SQL` index; one additive
+   partial index `overmind_history`, like `attachment_history`, serves its
+   cleanup.
+3. **Read actions:** `projects`, `board` (with `since`), `task`, `decisions`,
+   `attachment` (`{task, sha256, offset, length ≤ 524288}` → `{size,
+   data_base64}` with its identity). The planned `sessions` action is dropped:
+   the phone already knows every session and its state from the snapshots.
+4. **Write actions:** `create`, `edit`, `move`, `reorder`, `pin`, `unpin`,
+   `label`, `link`, `comment`, `send`, `review-send`, `rework-send`, `answer`,
+   `resolve-delivery`, `done`, `reopen`, `delete`. The envelope `request_id` is
+   the Overmind `request_id` (and the task `uuid` for `create`), so a retry
+   never duplicates.
+5. **Device label.** `hgs overmind ... --device <label>` sets `actor.device` for
+   people and is refused for agents. The phone sends its label in the payload,
+   and the connector passes it as the flag. It is informational, not identity.
+6. **Attachments for the phone** are read by the connector from the path
+   `hgs overmind attachment` returns (it fetches from other machines when
+   needed), in ranges of at most 512 KiB.
+7. **Rollout.** `hgs` and the connector first, then Android, then the relay (all
+   PostgreSQL workers together), as the relay README requires; each side
+   tolerates older neighbours through the capability lists (Part 9).
 
 ### Privacy
 
@@ -691,10 +740,26 @@ payloads never contain task content.
 
 - New namespace `hgs overmind`; no change to `hgs send`, `HGS_*` variables or
   existing state paths. Old peers simply do not take part.
-- New relay operations, feature flag `overmind`, snapshot field and alert kind
-  are additive within API v1. Rollout order: hgs, desktop and connector; then
-  Android; then the relay with all PostgreSQL workers replaced together. Relay
-  memory qualification is re-run because new payload paths are added.
+- New relay operations, the snapshot field `mobile_overmind`, the alert kind
+  `decision` and the partial index `overmind_history` are additive within API
+  v1 (schema version 1). The planned feature flag `overmind` is in fact the
+  operation lists: the relay's `/v1/capabilities` and the gateway snapshot's
+  `mobile_capabilities.operations`, which the connector fills only on the
+  gateway and only when `hgs --help` carries the mobile ABI line. The phone
+  shows Tasks only when both list `overmind_read` and `overmind_write`.
+- Rollout order: `hgs` and the connector; then Android; then the relay with all
+  PostgreSQL workers replaced together. An older relay or connector hides
+  Tasks on the phone, and an older relay derives no decision alerts. The
+  connector always pages `task` and `board` reads, so the gateway's `hgs` must
+  accept the paging fields, and `repeat` needs a current `hgs` on the gateway
+  and on the session's machine; an older one refuses them as unknown fields.
+  Android builds older than the Tasks build treat decision events and alerts as
+  refreshes; installed over it, they drop pending Overmind writes and posted
+  decision records instead of crashing.
+- Before the relay deployment, the PostgreSQL contract test and the relay
+  memory qualification (`tests/load.py`) are run, because new payload paths
+  are added. A large PostgreSQL deployment may pre-create `overmind_history`
+  with `CREATE INDEX CONCURRENTLY` before the cutover.
 - The inspector tab rename is UI-only.
 - `.beads/` is not touched by stage 1.
 
