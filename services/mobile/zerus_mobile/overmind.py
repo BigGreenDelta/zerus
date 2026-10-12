@@ -25,6 +25,9 @@ HELP_MARKER = "overmind <command> --json (mobile ABI overmind-v1)"
 READ_MAX = 64 * 1024
 DEVICE_MAX = 64
 DIGEST_MAX = 64 * 1024
+# Every gateway's digest shares the relay's 1 MiB `/v1/computers` catalog, so project
+# counts take at most this many escaped bytes; decisions keep priority.
+PROJECTS_MAX = 16 * 1024
 DIGEST_SECONDS = 15
 DECISIONS_MAX = 50
 DECISION_SLOT = "overmind:"
@@ -102,7 +105,7 @@ def digest(projects, decisions) -> dict:
     """`mobile_overmind` from native `projects` and `decisions` answers, at most 64 KiB:
     `{schema, rev, projects: {id: {role: count}}, decisions: [{task, project, title, signature}]}`.
     Every Your Call entry fits (bounded fields, titles clipped to 120 characters and 600
-    escaped bytes); project counts fill the remaining room in hgs order."""
+    escaped bytes); project counts fill the remaining room in hgs order, at most 16 KiB."""
     if not (isinstance(projects, dict) and projects.get("ok") is True and isinstance(projects.get("projects"), list)
             and isinstance(decisions, dict) and decisions.get("ok") is True and isinstance(decisions.get("decisions"), list)):
         raise ValueError("native Overmind digest is invalid")
@@ -115,7 +118,7 @@ def digest(projects, decisions) -> dict:
             while escaped(title) > TITLE_BYTES:
                 title = title[:-1]
             value["decisions"].append({"task": row["task"], "project": row["project"], "title": title, "signature": row["signature"]})
-    room = DIGEST_MAX - len(json.dumps(value))
+    room = min(PROJECTS_MAX - 2, DIGEST_MAX - len(json.dumps(value)))
     for row in projects["projects"]:
         if room >= 0 and isinstance(row, dict) and isinstance(row.get("project"), str) and isinstance(row.get("roles"), dict):
             roles = {role: count for role, count in row["roles"].items() if type(count) is int}

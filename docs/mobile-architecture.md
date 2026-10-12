@@ -785,9 +785,15 @@ rev, projects: {<project ID>: {<role>: count}}, decisions: [{task, project,
 title, signature}]}`. `rev` is the `decisions` cursor. `decisions` lists at
 most 50 Your Call tasks with titles clipped to 120 characters and no question;
 the phone reads the question with `task` or `decisions`. The digest is at most
-64 KiB: every decision fits, and project counts take the remaining room. The
-connector reads `projects` and `decisions` at most every 15 seconds. Only the
-gateway publishes a digest; direct peers never do.
+64 KiB: every decision fits, and project counts take the remaining room, at
+most 16 KiB. The connector reads `projects` and `decisions` at most every 15
+seconds. Only the gateway publishes a digest; direct peers never do.
+
+Each gateway's digest is part of its snapshot in the shared 1 MiB
+`/v1/computers` catalog, so N gateways' digests take up to N × 64 KiB of it.
+The 16 KiB cap on project counts keeps a typical digest small, so several
+gateways leave room for their session listings; decisions keep priority, and
+50 decisions with the longest fields take about 62 KB.
 
 The connector carries its latest digest in every gateway snapshot. It omits
 the digest only while none is known, when `hgs` lacks the Overmind ABI, or for

@@ -137,6 +137,19 @@ class OvermindDigestTests(unittest.TestCase):
         self.assertGreater(len(result["projects"]), 10)
         self.assertEqual(list(result["projects"]), [row["project"] for row in projects["projects"][:len(result["projects"])]])
 
+    def test_project_counts_take_at_most_16_kib_of_the_digest(self):
+        # Every gateway's digest shares the relay's 1 MiB computer catalog, so project counts stay small.
+        projects = {**PROJECTS, "projects": [{"project": "project-%05d" % index, "total": 1, "roles": ROLES} for index in range(2000)]}
+        self.assertEqual(overmind.PROJECTS_MAX, 16 * 1024)
+        for decisions in (DECISIONS, {**DECISIONS, "decisions": []}):
+            with self.subTest(decisions=len(decisions["decisions"])):
+                result = overmind.digest(projects, decisions)
+                self.assertEqual(result["decisions"], overmind.digest(PROJECTS, decisions)["decisions"])
+                size = len(json.dumps(result["projects"]))
+                self.assertLessEqual(size, 16 * 1024)
+                self.assertGreater(size, 15 * 1024)
+                self.assertEqual(list(result["projects"]), [row["project"] for row in projects["projects"][:len(result["projects"])]])
+
     def test_all_fifty_decisions_fit_with_astral_titles_and_projects_are_trimmed(self):
         astral = "\U0001F600"  # Twelve escaped bytes each.
         decisions = {**DECISIONS, "decisions": [{**DECISION, "task": str(uuid.UUID(int=index)), "project": astral * 32,
