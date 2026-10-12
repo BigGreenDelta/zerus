@@ -313,6 +313,20 @@ accounts in private configuration.
      `hgs.exe '@winpeer' swarm get` must report the same `digest`. With
      `hgs.exe swarm worker` running, a preference change reaches the peer within
      seconds;
+   - agents, when a change touches agent control: install the reviewed Claude,
+     Codex, Kimi and DeepSeek CLIs on the peer and point them at a loopback-only
+     fake model (`ANTHROPIC_BASE_URL`, a Codex `model_providers` entry, a Kimi
+     `providers` entry and the DeepSeek test model from
+     `tests/fixtures/dsh-model.mjs`), never at an account. For each agent, run
+     from `hgs.exe`: a `--new -d --launch-id` launch, `answer` for the startup
+     dialogs, `send` with Cyrillic, several lines and a trailing backslash plus an
+     image attachment, `history`, `terminal` snapshot, `interrupt`,
+     `compact-context`, `clear-context`, and the `session-action` steps the
+     session offers. Run the same sequence from a Linux client; every step must
+     give the same result. Attach through a pseudoconsole with
+     `a <session> --existing --run-id <run>`, type, resize and detach with
+     `Ctrl+B d`. On 2026-10-12 both clients matched for Claude 2.1.296, Codex
+     0.162.1, Kimi 2.1.1 and dsh 0.2.0-rc.2;
    - when the PC's desktop is free: attach the desktop app's Terminal to the peer's
      session, type, resize, interrupt a running command with Ctrl+C and
      disconnect. `hgs.exe` and `ssh.exe` must end, and the session must stay on
