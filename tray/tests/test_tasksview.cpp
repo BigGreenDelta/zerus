@@ -1619,17 +1619,16 @@ void TestTasksView::imagesOpenOnlyAsPictures()
     QFile::remove(opened.last().toLocalFile());
 }
 
-// Images are added from files or the clipboard and removed after a question;
-// each change sends the whole list through `edit`. On another machine's board
-// only a task without images gains one, and only a sole image is removed.
+// Images are added from files or the clipboard and removed after a question.
+// Each change sends the task's new list through `edit`: kept images by their
+// digest, new ones with their bytes, so another machine's board works alike.
 void TestTasksView::imagesAddPasteAndRemove()
 {
     Board b; QVERIFY(b.open());
     QImage shot(48, 32, QImage::Format_RGB32); shot.fill(Qt::red);
     QVERIFY(shot.save(b.f.dir.filePath("image-aaaa.png"), "PNG"));
     QVERIFY(b.f.put("show-t5.json", compact({{"attachments", QJsonArray{QJsonObject{{"name", "shot.png"}, {"mime", "image/png"}, {"bytes", 100}, {"sha256", "aaaa"}}}}})));
-    QFile existing(b.f.dir.filePath("image-aaaa.png")); QVERIFY(existing.open(QIODevice::ReadOnly));
-    const QByteArray shotBytes = existing.readAll();
+    const QJsonObject kept{{"sha256", "aaaa"}};
     const QString added = b.f.dir.filePath("plan.png");
     QImage plan(20, 20, QImage::Format_RGB32); plan.fill(Qt::blue);
     QVERIFY(plan.save(added, "PNG"));
@@ -1646,7 +1645,7 @@ void TestTasksView::imagesAddPasteAndRemove()
     panel->pickImages = [&] { return picked; };
     b.find<QPushButton>("taskImageAdd")->click();
     QTRY_COMPARE(b.f.calls("edit").size(), 1);
-    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray{entry("shot.png", shotBytes), entry("plan.png", planBytes)}}}));
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray{kept, entry("plan.png", planBytes)}}}));
     QTRY_COMPARE(b.message()->text(), QString("Added 1 image(s) to om-t5."));
     // A file that is not a picture is refused here.
     QVERIFY(b.f.put("notes.png", "not a picture"));
@@ -1660,7 +1659,7 @@ void TestTasksView::imagesAddPasteAndRemove()
     QTRY_COMPARE(b.f.calls("edit").size(), 2);
     const auto list = b.f.calls("edit").last()["attachments"].toArray();
     QCOMPARE(list.size(), 2);
-    QCOMPARE(list[0].toObject(), entry("shot.png", shotBytes));
+    QCOMPARE(list[0].toObject(), kept);
     const auto clip = list[1].toObject();
     QVERIFY2(clip["name"].toString().startsWith("pasted-") && clip["name"].toString().endsWith(".png"), qPrintable(clip["name"].toString()));
     QCOMPARE(clip["mime"].toString(), QString("image/png"));
@@ -1680,26 +1679,32 @@ void TestTasksView::imagesAddPasteAndRemove()
     b.find<QToolButton>("taskImageRemove")->click();
     QTRY_COMPARE(b.f.calls("edit").size(), 3);
     QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray()}}));
-    // Another machine's board: the kept images would have to come from there.
+    // Another machine's board: the same requests reach mac's CLI, and the
+    // kept image goes by its digest although its bytes are only there.
     b.f.model->setHost("mac");
     QVERIFY(b.show("t1"));
     QVERIFY(b.show("t5"));
-    QVERIFY(!b.find<QPushButton>("taskImageAdd")->isEnabled());
-    QVERIFY(b.find<QPushButton>("taskImageAdd")->toolTip().contains("mac"));
-    QVERIFY(b.find<QToolButton>("taskImageRemove")->isEnabled());
-    dialogs.answer(true);
-    b.find<QToolButton>("taskImageRemove")->click();
-    QTRY_COMPARE(b.f.calls("edit").size(), 4);
-    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray()}}));
-    QCOMPARE(b.f.hosts("edit").last(), QString("mac"));
-    // A task without images gains one there: the request reaches mac's CLI.
-    QVERIFY(b.show("t1"));
     picked = {added};
     QVERIFY(b.find<QPushButton>("taskImageAdd")->isEnabled());
     b.find<QPushButton>("taskImageAdd")->click();
-    QTRY_COMPARE(b.f.calls("edit").size(), 5);
-    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t1"}, {"attachments", QJsonArray{entry("plan.png", planBytes)}}}));
+    QTRY_COMPARE(b.f.calls("edit").size(), 4);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray{kept, entry("plan.png", planBytes)}}}));
     QCOMPARE(b.f.hosts("edit").last(), QString("mac"));
+    QVERIFY(b.find<QToolButton>("taskImageRemove")->isEnabled());
+    dialogs.answer(true);
+    b.find<QToolButton>("taskImageRemove")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 5);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray()}}));
+    QCOMPARE(b.f.hosts("edit").last(), QString("mac"));
+    // The limits are checked here first: a task that holds 20 MiB of images takes no more.
+    QVERIFY(b.f.put("show-t1.json", compact({{"attachments", QJsonArray{
+        QJsonObject{{"name", "a.png"}, {"mime", "image/png"}, {"bytes", 10 * 1024 * 1024}, {"sha256", "a1"}},
+        QJsonObject{{"name", "b.png"}, {"mime", "image/png"}, {"bytes", 10 * 1024 * 1024}, {"sha256", "b1"}}}}})));
+    QVERIFY(b.show("t1"));
+    b.find<QPushButton>("taskImageAdd")->click();
+    QCOMPARE(b.message()->text(), QString("The images of a task are limited to 20 MiB in total."));
+    QTest::qWait(100);
+    QCOMPARE(b.f.calls("edit").size(), 5);
 }
 
 QTEST_MAIN(TestTasksView)

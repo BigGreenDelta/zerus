@@ -282,6 +282,20 @@ class Overmind(unittest.TestCase):
         self.assertEqual(len(list((self.state / 'archives').glob('*.json'))), 1)
         self.assertEqual(self.ok('show', task['ref'])['task']['flags'], ['orphaned'])
 
+    def test_edit_keeps_images_by_digest(self):
+        first = base64.b64encode(b'\x89PNG one').decode()
+        created = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x',
+                                                     'attachments': [{'name': 'one.png', 'mime': 'image/png', 'data_base64': first}]})
+        ref, kept = created['task']['ref'], created['task']['attachments'][0]
+        second = base64.b64encode(b'\x89PNG two').decode()
+        edited = self.ok('edit', '--json', data={'task': ref, 'attachments': [
+            {'sha256': kept['sha256']}, {'name': 'two.png', 'mime': 'image/png', 'data_base64': second}]})
+        self.assertEqual(edited['task']['attachments'][0], kept)
+        self.assertEqual(edited['task']['attachments'][1]['sha256'], hashlib.sha256(b'\x89PNG two').hexdigest())
+        refused = self.refused('edit', '--json', data={'task': ref, 'attachments': [{'sha256': '0' * 64}]})
+        self.assertEqual((refused['code'], refused['field']), ('invalid_field', 'attachments'))
+        self.assertEqual(len(self.ok('show', ref)['task']['attachments']), 2)
+
     def test_pin_without_a_machine_and_unpin(self):
         ref = self.ok('create', '--json', data={'project': 'demo', 'prompt': 'x', 'stage': 'Queue'})['task']['ref']
         pinned = self.ok('pin', '--json', data={'task': ref, 'session': {'name': 'codex/demo/w1'}})['task']['pinned']

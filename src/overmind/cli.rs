@@ -17,7 +17,8 @@ const HUMAN_USAGE: &str = "usage: hgs [@host] overmind <command> [--json]   (JSO
   projects --json {}                       projects that have tasks, with counts per stage role
   show <ref> | show --json {task}          one task with its prompt and journal
   create --json {project, prompt, title?, stage?, priority?, labels?, pinned?, attachments?, parent?, follows?}
-  edit --json {task, title?, prompt?, priority?, attachments?}
+  edit --json {task, title?, prompt?, priority?, attachments?}   attachments: the whole new list of
+                                           new images {name, mime, data_base64} and kept ones {sha256}
   move --json {task, to}  |  done --json {task}  |  reopen --json {task}
   reorder --json {task, before?}  |  pin --json {task, session?: {machine?, name}}  |  unpin --json {task}
   send --json {task, session: {machine?, name}, confirm?: [codes]}   claim and type the task into a session

@@ -43,10 +43,9 @@ class TaskFlow;
 //
 // Images are opened only when they decode as pictures, from a copy named for
 // their real format: an agent chooses an image's name. Adding or removing one
-// sends the task's whole list again (`edit {attachments}`), so the images it
-// keeps must be readable here: on a computer that reads another machine's
-// board (`@host`) only a task without images gains one, and only a sole image
-// is removed.
+// sends the task's new list (`edit {attachments}`): the images it keeps by
+// reference ({sha256}), only new ones with their bytes. So it works the same
+// on a computer that reads another machine's board (`@host`).
 class TaskPanel : public QWidget {
     Q_OBJECT
 public:
@@ -122,7 +121,8 @@ private:
     void addImageFiles(const QStringList &paths);
     void pasteImage();
     void removeImage(const QString &sha256, const QString &name);
-    // Sends the task's images again: the kept ones without `removed`, then `added`.
+    // Sends the task's new list of images: the kept ones (without `removed`) by
+    // reference, then `added` with their bytes.
     void changeImages(const QList<Image> &added, const QString &removed, const QString &removedName = {});
     void setImage(QToolButton *button, const QString &sha256);
     void renderMarkdown(MarkdownText *text, const QString &markdown);

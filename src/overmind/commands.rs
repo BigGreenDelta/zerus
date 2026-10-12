@@ -756,16 +756,64 @@ struct EditRequest {
     prompt: Option<String>,
     #[serde(default)]
     priority: Option<u8>,
+    /// The task's whole new list of images: new ones and references.
     #[serde(default)]
-    attachments: Option<Vec<NewAttachment>>,
+    attachments: Option<Vec<Value>>,
+}
+
+/// An image the task already has, kept as stored: named by its digest alone.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptAttachment {
+    sha256: String,
+}
+
+/// One place in an edited list of images.
+enum EditImage {
+    /// A reference, resolved against the task inside the write.
+    Keep(String),
+    /// The index of a new image among those stored for the request.
+    New(usize),
+}
+
+fn is_digest(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Splits an edited list into its order and its new images. Each item is
+/// either a new image `{name, mime, data_base64}` or a reference `{sha256}`;
+/// both shapes are strict, so a mix of the two is refused.
+fn edit_images(items: &[Value]) -> Result<(Vec<EditImage>, Vec<NewAttachment>), Refusal> {
+    let bad = |message: String| Refusal::field("invalid_field", "attachments", "invalid", message);
+    let mut order = Vec::new();
+    let mut new = Vec::new();
+    for item in items {
+        if item.get("sha256").is_some() {
+            let kept: KeptAttachment = serde_json::from_value(item.clone())
+                .map_err(|_| bad("an image the task keeps is named by its sha256 alone".into()))?;
+            if !is_digest(&kept.sha256) {
+                return Err(bad(format!("{:?} is not an image digest", kept.sha256)));
+            }
+            order.push(EditImage::Keep(kept.sha256));
+        } else {
+            let image: NewAttachment = serde_json::from_value(item.clone()).map_err(|e| bad(format!("invalid image: {e}")))?;
+            order.push(EditImage::New(new.len()));
+            new.push(image);
+        }
+    }
+    Ok((order, new))
 }
 
 pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let mut req: EditRequest = parse(&request)?;
     req.prompt = req.prompt.map(|p| normalize(&p));
-    let attachments = match &req.attachments {
-        Some(items) => Some(store_attachments(ctx.store, items)?),
+    // New images are stored before the write; references need no bytes.
+    let images = match &req.attachments {
+        Some(items) => {
+            let (order, new) = edit_images(items)?;
+            Some((order, store_attachments(ctx.store, &new)?))
+        }
         None => None,
     };
     write(ctx, "edit", &request, |tx, actor| {
@@ -789,8 +837,30 @@ pub fn edit(ctx: &mut Ctx, request: Value) -> Result<Value> {
             }
             changes.push(("priority", json!(priority)));
         }
-        if let Some(attachments) = &attachments {
-            changes.push(("attachments", json!(attachments)));
+        if let Some((order, stored)) = &images {
+            let task = load_writable(tx, &uuid)?;
+            let bad = |message: String| -> anyhow::Error { Refusal::field("invalid_field", "attachments", "invalid", message).into() };
+            let mut list: Vec<Attachment> = Vec::new();
+            for image in order {
+                list.push(match image {
+                    EditImage::Keep(sha) => task
+                        .attachments
+                        .iter()
+                        .find(|a| &a.sha256 == sha)
+                        .cloned()
+                        .ok_or_else(|| bad(format!("this task has no image {sha}")))?,
+                    EditImage::New(index) => stored[*index].clone(),
+                });
+            }
+            // The limits apply to the list the task ends with.
+            if list.len() > MAX_ATTACHMENTS {
+                return Err(bad(format!("at most {MAX_ATTACHMENTS} images per task")));
+            }
+            let total = list.iter().map(|a| a.bytes).fold(0u64, u64::saturating_add);
+            if list.iter().any(|a| a.bytes > MAX_ATTACHMENT as u64) || total > MAX_ATTACHMENTS_TOTAL as u64 {
+                return Err(bad("images are limited to 10 MiB each and 20 MiB in total".into()));
+            }
+            changes.push(("attachments", json!(list)));
         }
         for (field, value) in changes {
             let task = load_writable(tx, &uuid)?;
@@ -1627,6 +1697,71 @@ mod tests {
         assert_eq!(refusal(text).field, "attachments");
         let empty = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": [{"name": "a.png", "mime": "image/png", "data_base64": ""}]})).unwrap_err();
         assert_eq!(refusal(empty).field, "attachments");
+    }
+
+    fn image(bytes: &[u8], name: &str) -> Value {
+        json!({"name": name, "mime": "image/png", "data_base64": base64::engine::general_purpose::STANDARD.encode(bytes)})
+    }
+
+    #[test]
+    fn edit_keeps_images_by_digest_and_adds_new_ones() {
+        let (_dir, mut store) = store();
+        let created = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": [image(b"\x89PNG a", "a.png")]})).unwrap();
+        let uuid = created["task"]["uuid"].as_str().unwrap().to_owned();
+        let a = created["task"]["attachments"][0].clone();
+        // Keep a as stored, add b.
+        let both = edit(&mut human(&mut store), json!({"task": uuid, "attachments": [{"sha256": a["sha256"]}, image(b"\x89PNG b", "b.png")]})).unwrap();
+        let list = both["task"]["attachments"].as_array().unwrap().clone();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], a);
+        assert_eq!(list[1]["name"], "b.png");
+        assert!(blobs::path(store.dir(), list[1]["sha256"].as_str().unwrap()).unwrap().exists());
+        // Keep only b, then none.
+        let kept = edit(&mut human(&mut store), json!({"task": uuid, "attachments": [{"sha256": list[1]["sha256"]}]})).unwrap();
+        assert_eq!(kept["task"]["attachments"], json!([list[1]]));
+        let none = edit(&mut human(&mut store), json!({"task": uuid, "attachments": []})).unwrap();
+        assert_eq!(none["task"]["attachments"], json!([]));
+    }
+
+    #[test]
+    fn edit_refuses_unknown_and_malformed_image_references() {
+        let (_dir, mut store) = store();
+        let created = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": [image(b"\x89PNG a", "a.png")]})).unwrap();
+        let uuid = created["task"]["uuid"].as_str().unwrap().to_owned();
+        let a = created["task"]["attachments"][0].clone();
+        let sha = a["sha256"].as_str().unwrap().to_owned();
+        let second = new_task(&mut store, "Queue");
+        let other = edit(&mut human(&mut store), json!({"task": second, "attachments": [image(b"\x89PNG c", "c.png")]})).unwrap();
+        let elsewhere = other["task"]["attachments"][0]["sha256"].clone();
+        for wrong in [json!({"sha256": "0".repeat(64)}), json!({"sha256": elsewhere}), json!({"sha256": "xyz"}), json!({"sha256": sha.to_uppercase()}),
+                      json!({"sha256": sha, "name": "a.png"}), json!({"name": "a.png"})] {
+            let refused = refusal(edit(&mut human(&mut store), json!({"task": uuid, "attachments": [{"sha256": sha}, wrong.clone()]})).unwrap_err());
+            assert_eq!((refused.code.as_str(), refused.field.as_str()), ("invalid_field", "attachments"), "{wrong}");
+        }
+        let shown = show(&mut human(&mut store), json!({"task": uuid})).unwrap();
+        assert_eq!(shown["task"]["attachments"], json!([a]));
+    }
+
+    #[test]
+    fn edit_limits_apply_to_the_final_list() {
+        let (_dir, mut store) = store();
+        let eight: Vec<Value> = (0..8).map(|n| image(format!("PNG {n}").as_bytes(), &format!("{n}.png"))).collect();
+        let created = create(&mut human(&mut store), json!({"project": "p", "prompt": "x", "attachments": eight})).unwrap();
+        let uuid = created["task"]["uuid"].as_str().unwrap().to_owned();
+        let mut list: Vec<Value> = created["task"]["attachments"].as_array().unwrap().iter().map(|a| json!({"sha256": a["sha256"]})).collect();
+        list.push(image(b"\x89PNG ninth", "9.png"));
+        let refused = refusal(edit(&mut human(&mut store), json!({"task": uuid, "attachments": list})).unwrap_err());
+        assert_eq!(refused.field, "attachments");
+        // Two images at the size limit fill the total: one more byte is refused,
+        // although it is the only new image.
+        let full = create(&mut human(&mut store), json!({"project": "p", "prompt": "x",
+            "attachments": [image(&vec![1; MAX_ATTACHMENT], "1.png"), image(&vec![2; MAX_ATTACHMENT], "2.png")]})).unwrap();
+        let uuid = full["task"]["uuid"].as_str().unwrap().to_owned();
+        let kept: Vec<Value> = full["task"]["attachments"].as_array().unwrap().iter().map(|a| json!({"sha256": a["sha256"]})).collect();
+        let over = refusal(edit(&mut human(&mut store), json!({"task": uuid, "attachments": [kept[0].clone(), kept[1].clone(), image(b"x", "x.png")]})).unwrap_err());
+        assert_eq!(over.field, "attachments");
+        let fits = edit(&mut human(&mut store), json!({"task": uuid, "attachments": [kept[0].clone(), image(b"x", "x.png")]})).unwrap();
+        assert_eq!(fits["task"]["attachments"].as_array().unwrap().len(), 2);
     }
 
     #[test]

@@ -856,7 +856,6 @@ void TaskPanel::renderImages(const QJsonObject &task)
 {
     const auto attachments = task.value(QStringLiteral("attachments")).toArray();
     const bool editable = !task.value(QStringLiteral("read_only")).toBool() && !m_gone;
-    const QString host = m_model ? m_model->host() : QString();
     m_imageFlow->clear();
     for (const auto &value : attachments) {
         const auto attachment = value.toObject();
@@ -880,11 +879,7 @@ void TaskPanel::renderImages(const QJsonObject &task)
             remove->setIcon(workspaceIcon(QStringLiteral("close"), m_view->palette().fg));
             remove->setIconSize(QSize(10, 10));
             remove->setAccessibleName(tr("Remove %1").arg(name));
-            // The other images would have to be sent again from here.
-            const bool allowed = host.isEmpty() || attachments.size() == 1;
-            remove->setEnabled(allowed);
-            remove->setToolTip(allowed ? tr("Remove %1").arg(name)
-                                       : tr("The other images are stored on %1: remove it on that computer.").arg(host));
+            remove->setToolTip(tr("Remove %1").arg(name));
             connect(remove, &QToolButton::clicked, this, [this, sha, name] { removeImage(sha, name); });
         }
         m_imageFlow->addWidget(chip);
@@ -892,12 +887,11 @@ void TaskPanel::renderImages(const QJsonObject &task)
         fetchImage(sha);
     }
     m_noImages->setVisible(attachments.isEmpty());
-    const bool full = attachments.size() >= MaxImages, elsewhere = !host.isEmpty() && !attachments.isEmpty();
+    const bool full = attachments.size() >= MaxImages;
     for (auto *button : {m_imageAdd, m_imagePaste}) {
         button->setVisible(editable);
-        button->setEnabled(editable && !full && !elsewhere);
+        button->setEnabled(editable && !full);
         button->setToolTip(full ? tr("A task holds at most %1 images.").arg(MaxImages)
-                           : elsewhere ? tr("The task's images are stored on %1: add images on that computer.").arg(host)
                            : button == m_imageAdd ? tr("Add image files, up to 10 MiB each") : tr("Add the image on the clipboard"));
     }
 }
@@ -1038,40 +1032,27 @@ void TaskPanel::removeImage(const QString &sha256, const QString &name)
     changeImages({}, sha256, name);
 }
 
-// `edit {attachments}` replaces the whole list: every image the task keeps is
-// read here and sent again with the new ones, within the CLI's limits.
+// `edit {attachments}` takes the whole new list: an image the task keeps is
+// named by its digest and stays as stored, a new one carries its bytes. The
+// CLI's limits apply to that list; they are checked here first.
 void TaskPanel::changeImages(const QList<Image> &added, const QString &removed, const QString &removedName)
 {
     if (m_uuid.isEmpty() || !m_model) return;
     QJsonArray list;
     qint64 total = 0;
-    const auto encode = [&list, &total](const QString &name, const QString &mime, const QByteArray &bytes) {
-        total += bytes.size();
-        list.append(QJsonObject{{QStringLiteral("name"), name}, {QStringLiteral("mime"), mime},
-                                {QStringLiteral("data_base64"), QString::fromLatin1(bytes.toBase64())}});
-    };
     for (const auto &value : current().value(QStringLiteral("attachments")).toArray()) {
         const auto attachment = value.toObject();
-        const QString sha = attachment.value(QStringLiteral("sha256")).toString(), name = attachment.value(QStringLiteral("name")).toString();
+        const QString sha = attachment.value(QStringLiteral("sha256")).toString();
         if (sha == removed) continue;
-        const QString path = m_images.value(sha);
-        if (path.isEmpty()) {
-            if (!m_model->host().isEmpty()) m_view->notify(tr("The images of %1 are stored on %2: change them on that computer.").arg(ref(), m_model->host()));
-            else if (m_imageErrors.contains(sha)) m_view->notify(tr("The image %1 is not available on this computer: %2").arg(name, m_imageErrors.value(sha)));
-            else m_view->notify(tr("The images of %1 are still loading; try again in a moment.").arg(ref()));
-            return;
-        }
-        QFile file(path);
-        if (file.size() > MaxImageBytes || !file.open(QIODevice::ReadOnly)) {
-            m_view->notify(tr("The image %1 cannot be read on this computer.").arg(name));
-            return;
-        }
-        encode(name, attachment.value(QStringLiteral("mime")).toString(), file.readAll());
+        total += attachment.value(QStringLiteral("bytes")).toInteger();
+        list.append(QJsonObject{{QStringLiteral("sha256"), sha}});
     }
     for (const auto &image : added) {
         QString mime = QMimeDatabase().mimeTypeForData(image.bytes).name();
         if (!mime.startsWith(QLatin1String("image/"))) mime = QStringLiteral("image/") + QString::fromLatin1(imageFormat(image.bytes));
-        encode(image.name, mime, image.bytes);
+        total += image.bytes.size();
+        list.append(QJsonObject{{QStringLiteral("name"), image.name}, {QStringLiteral("mime"), mime},
+                                {QStringLiteral("data_base64"), QString::fromLatin1(image.bytes.toBase64())}});
     }
     if (list.size() > MaxImages) {
         m_view->notify(tr("A task holds at most %1 images.").arg(MaxImages));
