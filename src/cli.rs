@@ -1786,7 +1786,8 @@ fn launch(
     environment.extend(account_environment);
     environment.extend(platform::gui_env());
     // A setting of the launching shell reaches the run although the tmux server,
-    // which started earlier, has never seen it.
+    // which started earlier, has never seen it. Windows launches no local sessions.
+    #[cfg(unix)]
     if let Some(setting) = state::overmind_mcp_setting() {
         environment.push(format!("HGS_OVERMIND_MCP={setting}"));
     }
