@@ -169,6 +169,7 @@ public:
     quint64 requestSearch(const QString &host, const QString &query);
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
+    quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -221,6 +222,8 @@ signals:
     void sessionActionFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void recoveryFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
+    void fileDownloaded(quint64 request, const QString &destination);
+    void fileDownloadFailed(quint64 request, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -307,6 +310,7 @@ private:
     quint64 m_nativeUiRequest = 0;
     quint64 m_searchRequest = 0;
     quint64 m_attachmentRequest = 0;
+    quint64 m_fileDownloadRequest = 0;
     quint64 m_effortRequest = 0;
     quint64 m_settingsRequest = 0;
     quint64 m_recoveryRequest = 0;

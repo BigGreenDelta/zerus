@@ -16,6 +16,8 @@ belong to your terminal emulator; tmux provides the persistent session.
 hgs claude sample-project           # attach if present; otherwise start Claude
 hgs @mac claude sample-project      # the same operation over SSH
 hgs ls                             # local and peer sessions
+hgs status                         # version, sessions and services here and on peers
+hgs version                        # this hgs version (also hgs --version)
 hgs a claude/sample-project/review  # attach by full name
 hgs kill claude/sample-project      # remove the hgs binding; keep native history
 hgs pause --all                     # pause verified idle sessions
@@ -331,6 +333,18 @@ width** in the same menu restores the default column. Narrower panes use their
 full width, and Terminal, Processes and Native UI are not affected. A reset icon
 appears beside an Appearance slider's value once it differs from the default and
 restores that default.
+**Settings → Appearance → Usage limit indicator** sets how the account usage in the
+status bar and on Overview account cards shows each limit window. The default, **Usage and elapsed time bars**, draws usage above a gray
+bar for the elapsed part of the window; a longer usage bar means a faster than
+even pace. **Pace marker** shows elapsed time as a mark on the usage bar, and
+usage beyond the mark takes the warning color. **Pace marker and reset
+countdown** adds an hourglass with the time until reset, such as `26h` or `6d`;
+compact Overview cards omit the countdown. Colors follow the average pace since
+the window started: green when the limit lasts until reset, orange when it would
+run out in the second half of the remaining time or 90% is used, and red when it
+would run out sooner or is exhausted. The first 8% of a window, and windows
+without a reported length or reset time, keep the fixed 70%/90% thresholds. The
+tooltip adds the time until reset and the pace forecast.
 **Settings → Appearance → Keep Zerus above other windows** keeps the Zerus window
 over other applications on X11, macOS and KDE Plasma 6 on Wayland. On KDE Wayland,
 Zerus uses temporary KWin scripts scoped to its own window and confirms the
@@ -511,8 +525,18 @@ nor shown in Activity.
 
 File links retain their visible path and source position. Relative references
 resolve against that session's folder. Local references can open the file or its
-parent folder; remote references identify the host and offer an SSH terminal
-instead of treating the remote path as local. Display alone downloads or launches
+parent folder; remote references identify the host and offer **Download…** and
+**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
+use that machine's configured SSH profile and SFTP, stream directly to disk and
+replace the chosen destination only after a successful transfer. Errors remain
+in the dialog; a saved copy can be opened with **Open local copy**. Offline or
+unresolved relative references explain why downloading is unavailable. The
+download continues if its dialog is closed, with a completion or error notice;
+an explicitly requested open still happens after successful saving. The
+120-second transfer deadline leaves an existing destination unchanged on failure.
+`hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
+transfer from the CLI, including empty files and paths starting with `~/`.
+Display alone downloads or launches
 nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is
 destroyed so Wayland activation does not depend on a disappearing window.
@@ -1167,6 +1191,12 @@ Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
 and quoted error examples cannot change the session state. New native progress
 clears the failure; changing the account counter alone does not.
+Matching Codex log and completion records retain their exact failure references,
+so delayed duplicate evidence keeps the same recovery episode, deadline and
+attempt budget. Separate native turns remain separate even for identical errors.
+A previous cancellation caused by switching those sources can resume only with
+confirmed matching native evidence and zero delivery attempts; user cancellation,
+new input, interruption, changed identity and uncertain delivery still stop recovery.
 
 A chip in the toolbar above the message field shows the countdown; its popover
 shows the attempt number, **Attempts**, **Retry now** and **Cancel retry**. Retry now respects a known Retry-After and the reset deadline in reset mode. Policy edits apply to new
@@ -1340,6 +1370,16 @@ same explicit flag wins again.
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+
+`hgs status` only reads. For this computer and each peer it shows the hgs
+version, live sessions by what they need (working, needing attention, ready),
+stopped and archived sessions, and whether the desktop app, swarm worker,
+recovery worker and mobile connector are running. This computer also shows the
+running `hgs` executable. A peer whose hgs predates `status` still reports its
+version and sessions; update it to see its services. `--local` limits the report
+to this computer, `@host status` to one peer, and `--json` prints the same data
+for scripts. `hgs version` and `hgs @host version` print `hgs X.Y.Z`, like
+`--version`.
 Configurations are data assignments, not executable shell scripts:
 
 ```sh
@@ -1357,7 +1397,17 @@ variables and application/service IDs stay compatible with existing installation
 [third-party notices](../THIRD_PARTY_NOTICES.md) for dependency licensing.
 
 The GUI installer updates only Zerus and its desktop integration. It never
-restarts native agents, tmux servers or DeepSeek hosts. Use
+restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces a
+running Zerus through `tray/update-installed.py`, the only supported live update:
+Zerus quits as its Quit action does, so drafts are saved, then starts again through
+systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
+hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
+restores it when the new GUI does not start, and confirms the running image,
+unchanged nonempty drafts and native agent and tmux processes. It records the
+installed builds in `~/.local/share/hgs/build-provenance.json`. A failed check
+leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
+is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 

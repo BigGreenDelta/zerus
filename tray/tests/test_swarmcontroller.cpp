@@ -150,7 +150,7 @@ print(json.dumps(result))
         QVERIFY(local.toJson()["unassigned_sessions"].toArray().isEmpty());
     }
     void unchangedRefreshDoesNotRewriteSettings() {
-        HgsClient client(m_program); SwarmController controller(&client);
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
         controller.start(organization("Original")); QTRY_VERIFY(controller.settled());
         const auto settingsPath = QSettings().fileName();
         const auto checkpoint = QDateTime::fromSecsSinceEpoch(946684800, QTimeZone::UTC);

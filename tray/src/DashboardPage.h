@@ -3,6 +3,7 @@
 #include <QWidget>
 #include <QHash>
 #include "FleetState.h"
+#include "AccountUsage.h"
 
 class QLabel;
 class QPushButton;
@@ -18,6 +19,7 @@ public:
     void setFleet(const FleetState &fleet, const QSet<QString> &drafts = {});
     void setTheme(bool dark);
     void setAccounts(const QJsonArray &profiles);
+    void setUsageIndicator(AccountUsage::Indicator indicator);
 signals:
     void sessionRequested(const QString &host, const QString &name);
     void machinesRequested(const QString &host);
@@ -42,6 +44,7 @@ private:
     QGridLayout *m_accountGrid;
     QLabel *m_accountsEmpty;
     QHash<QString,DashboardAccountCard *> m_accountCards;
+    AccountUsage::Indicator m_usageIndicator = AccountUsage::indicator();
     QStringList m_accountOrder;
     int m_accountColumns = 0;
     QHash<QString, DashboardMachineCard *> m_machineCards;

@@ -15,6 +15,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileDialog>
+#include <QProgressBar>
 #include <QSaveFile>
 #include <QSemaphore>
 #include <atomic>
@@ -156,6 +158,7 @@ private slots:
     void workingCardsKeepTurnClockAcrossUpdates();
     void questionReplyPreviewUsesCompletePrompt();
     void accountUsageRejectsOtherSessionReplies();
+    void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
     void dashboardAndMultiMachineNavigation();
     void hiddenPagesRenderWhenShown();
@@ -216,6 +219,8 @@ private slots:
     void fileReferencesKeepMachineAndWorkspace();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
+    void remoteFileDownloads_data();
+    void remoteFileDownloads();
     void buttonFocusFollowsKeyboardAndNotClicks();
     void separatesConversationProcessAndTerminal();
     void activityEscapingAndActions();
@@ -1324,6 +1329,22 @@ void TestSessionsWindow::accountUsageRejectsOtherSessionReplies()
     client->accountsFailed(3,"mac","offline");QVERIFY(!refresh->isRefreshing());QVERIFY(refresh->isEnabled());QVERIFY(usage->toolTip().contains("second@example.test"));
 }
 
+void TestSessionsWindow::usageIndicatorSettingUpdatesFooter()
+{
+    QSettings().remove("workspace/usageIndicator");
+    SessionsWindow window(script()); window.setFleet(fleet());
+    auto *usage = static_cast<AccountUsage::Button *>(window.findChild<QPushButton *>("sessionAccountUsage"));
+    auto *option = window.findChild<QComboBox *>("workspaceUsageIndicator"); QVERIFY(option);
+    QCOMPARE(option->currentData().toString(), QString("rails")); QCOMPARE(usage->indicator(), AccountUsage::Indicator::Rails);
+    option->setCurrentIndex(option->findData("marker-countdown"));
+    QCOMPARE(QSettings().value("workspace/usageIndicator").toString(), QString("marker-countdown"));
+    QCOMPARE(usage->indicator(), AccountUsage::Indicator::MarkerCountdown);
+    SessionsWindow restored(script()); restored.setFleet(fleet());
+    QCOMPARE(restored.findChild<QComboBox *>("workspaceUsageIndicator")->currentData().toString(), QString("marker-countdown"));
+    QCOMPARE(static_cast<AccountUsage::Button *>(restored.findChild<QPushButton *>("sessionAccountUsage"))->indicator(), AccountUsage::Indicator::MarkerCountdown);
+    QSettings().remove("workspace/usageIndicator");
+}
+
 void TestSessionsWindow::separatesConversationProcessAndTerminal()
 {
     SessionInfo session; session.tracked = true; session.state = "running";
@@ -1549,6 +1570,13 @@ else: print('{}')
     const auto save = [&] { return FakeCli::replace(fixtureDir.filePath("details.json"), QJsonDocument(details).toJson()); };
     QVERIFY(save()); SessionsWindow window(FakeCli::program(program)); window.setFleet(state); window.show(); window.showSession({}, name);
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    // A fixture inspection replies with details.json as it was when it started, so one
+    // in flight across save() could restore the old identity after the injected one
+    // and admit the held submission. HgsClient runs one inspection per session: once
+    // ours starts, none is older, and its reply is current.
+    const auto settle = [&] { QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+        QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, name) && (issued = replies.size(), true)));
+        QTRY_VERIFY(std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) { return reply.at(1).toString() == name; })); };
     auto *card = window.findChild<QuestionCard *>(); auto *send = composer->findChild<QPushButton *>("sendMessage");
     QSignalSpy inspected(client, &HgsClient::inspectionReady); QTRY_VERIFY(!inspected.isEmpty());
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
@@ -1589,7 +1617,7 @@ else: print('{}')
         QCOMPARE(composer->sessionKey(), QString("\ncodex/hgs/dashboard"));
     }
     if (outcome == "run" || outcome == "conversation") {
-        details[outcome == "run" ? "run_id" : "conversation_id"] = "changed-identity"; QVERIFY(save()); client->inspectionReady({}, name, details);
+        details[outcome == "run" ? "run_id" : "conversation_id"] = "changed-identity"; QVERIFY(save()); client->inspectionReady({}, name, details); settle();
     }
     if (outcome == "cancel") { auto *cancel = window.findChild<QPushButton *>("cancelCompactSend"); QVERIFY(cancel->isVisible()); cancel->click(); }
     if (outcome == "failure") { QVERIFY(QDir(storageRoot).removeRecursively()); QFile blocker(storageRoot); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close(); }
@@ -1625,7 +1653,7 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
     const auto writeDetails=[&]{QVERIFY(FakeCli::replace(inspected,QJsonDocument(details).toJson()));};
     writeDetails();
     QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
-    fixture.write("#!/usr/bin/env python3\nimport sys,json\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin)\n open("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0],'w').write(json.dumps(p))\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
+    fixture.write("#!/usr/bin/env python3\nimport sys,json,pathlib\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin);target=pathlib.Path("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0])\n staged=target.with_name(target.name+'.tmp');staged.write_text(json.dumps(p));staged.replace(target)\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     QTest::qWait(100);auto *client=window.findChild<HgsClient *>();
@@ -1702,7 +1730,7 @@ import sys,json,pathlib,time
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 if 'clear-context' in args:
- p=json.load(sys.stdin);p['args']=args;(root/'clear.json').write_text(json.dumps(p));time.sleep(.2);print(json.dumps(dict(request_id=p['request_id'],name=args[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='confirmed')))
+ p=json.load(sys.stdin);p['args']=args;staged=root/'clear.tmp';staged.write_text(json.dumps(p));staged.replace(root/'clear.json');time.sleep(.2);print(json.dumps(dict(request_id=p['request_id'],name=args[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='confirmed')))
 elif 'inspect' in args: print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
 else: print('{}')
 )PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
@@ -1999,9 +2027,10 @@ root=pathlib.Path(__file__).parent
 a=sys.argv[1:]
 if a[0].startswith('@'):a=a[1:]
 if a[0] in ['compact-context','send']:
- p=json.load(sys.stdin);staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
+ p=json.load(sys.stdin)
  if a[0]=='send':
   with (root/'send-targets.txt').open('a') as log:log.write(a[1]+'\n')
+ staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
  print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
 elif a[0]=='inspect':print((root/'details.json').read_text() if a[1]=='claude/infra/review' and (root/'details.json').exists() else '{}')
 else:print('{}')
@@ -2855,8 +2884,8 @@ root=pathlib.Path(__file__).parent
 if sys.argv[1]=='inspect': print((root/'details.json').read_text())
 elif sys.argv[1]=='answer':
  p=json.load(sys.stdin)
- (root/'answer.json').write_text(json.dumps({'args':sys.argv[1:],'payload':p}))
  with (root/'calls').open('a') as f:f.write('call\n')
+ staged=root/'answer.tmp';staged.write_text(json.dumps({'args':sys.argv[1:],'payload':p}));staged.replace(root/'answer.json')
  time.sleep(.1)
  print(json.dumps(dict(status='answered',request_id=p['request_id'],name=sys.argv[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],question_id=p['question_id'],question_hash=p['expected_question_hash'])))
 else: print('{}')
@@ -3199,22 +3228,44 @@ elif args[0]=='answer':
 
 void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
 {
-    SessionsWindow window(program());window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");QTest::qWait(100);
-    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>();
-    setComposerText(composer, "An unrelated follow-up");
     QJsonObject question{{"question_id","optional-one"},{"question_hash","hash"},{"run_id","run-one"},{"conversation_id","conversation-one"},
         {"optional",true},{"can_answer",false},{"can_skip",true},{"questions",QJsonArray{QJsonObject{{"id","q_0"},{"question","Which option?"},{"required",false},{"allow_other",true},{"options",QJsonArray{}}}}}};
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},{"runtime_state","live"},{"process_state","running"},
-        {"activity","idle"},{"phase","idle"},{"pending_questions",QJsonArray{question}}};
-    client->inspectionReady({},"codex/hgs/dashboard",details);
+        {"activity","idle"},{"phase","idle"},{"pending_questions",QJsonArray{}}};
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto fixture = m_dir->filePath("optional-question-hgs");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n",
+        "if False:pass\nelif c=='inspect':print(open(__file__+'.details').read())\n")));
+    QVERIFY(FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson()));
+    SessionsWindow window(FakeCli::program(fixture));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>();
+    const auto applyDetails = [&] {
+        if (!FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson())) return false;
+        // Wait for an inspection started after the atomic update: an older
+        // in-flight reply must not replace the form while its draft loads.
+        QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+        return QTest::qWaitFor([&] {
+            if (issued < 0) {
+                if (!client->requestInspection({}, "codex/hgs/dashboard")) return false;
+                issued = replies.size();
+            }
+            return std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) {
+                return reply[0].toString().isEmpty() && reply[1].toString() == "codex/hgs/dashboard"
+                    && reply[2].toJsonObject() == details && reply[3].toString().isEmpty();
+            });
+        });
+    };
+    QVERIFY(applyDetails());
+    setComposerText(composer, "An unrelated follow-up");
+    details["pending_questions"] = QJsonArray{question}; QVERIFY(applyDetails());
     QVERIFY(card->isVisible());QTRY_VERIFY(!card->isDraftLoading());QVERIFY(composer->isInputVisible());QVERIFY(composer->findChild<QPushButton *>("sendMessage")->isEnabled());
     QVERIFY(card->findChild<QPushButton *>("skipQuestion")->isEnabled());
-    client->inspectionReady({},"codex/hgs/dashboard",details);QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
+    QVERIFY(applyDetails());QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
     auto latest=question;latest["question_id"]="latest";latest["created_at"]=20;
     latest["questions"]=QJsonArray{QJsonObject{{"id","q_0"},{"question","Most recent question?"},{"required",false},{"allow_other",true},{"options",QJsonArray{}}}};
     question["created_at"]=10;question["can_answer"]=true;
     auto olderItems=question["questions"].toArray();auto secondItem=olderItems.first().toObject();secondItem["id"]="q_1";secondItem["question"]="Another older question?";olderItems.append(secondItem);question["questions"]=olderItems;
-    details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{question,latest,question,QJsonObject{}};QVERIFY(applyDetails());
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("3 pending"));
     QStringList labels=questionPrompts(card);
     QVERIFY(labels.contains("Most recent question?"));QVERIFY(!labels.contains("Which option?"));
@@ -3227,47 +3278,51 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
             if(editor->property("questionId").toString()=="q_0")return editor;
         return static_cast<QLineEdit *>(nullptr);
     };
-    QTRY_VERIFY(!card->isDraftLoading());firstAnswer()->setText("Latest draft");
+    const auto answerReady = [&](const QString &prompt) {
+        return card->isVisible() && !card->isDraftLoading() && questionPrompts(card).contains(prompt) && firstAnswer();
+    };
+    QTRY_VERIFY(answerReady("Most recent question?"));firstAnswer()->setText("Latest draft");
     next->click();QTRY_VERIFY(!card->isDraftLoading());
     labels=questionPrompts(card);
     QVERIFY(labels.contains("Which option?"));QVERIFY(!labels.contains("Most recent question?"));
     QVERIFY(previous->isEnabled());QVERIFY(!next->isEnabled());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #2/2"));
-    QTRY_VERIFY(!card->isDraftLoading());firstAnswer()->setText("Older draft");
+    QTRY_VERIFY(answerReady("Which option?"));firstAnswer()->setText("Older draft");
     auto *pages=card->findChild<QTabBar *>("questionTabs");pages->setCurrentIndex(1);
     previous->click();QTRY_VERIFY(!card->isDraftLoading());
-    QTRY_COMPARE(firstAnswer()->text(),QString("Latest draft"));
+    QTRY_VERIFY(answerReady("Most recent question?") && firstAnswer()->text() == "Latest draft");
     next->click();QTRY_VERIFY(!card->isDraftLoading());
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     QCOMPARE(card->findChild<QTabBar *>("questionTabs")->currentIndex(),1);
     auto newest=latest;newest["question_id"]="newest";newest["created_at"]=30;
-    details["pending_questions"]=QJsonArray{newest,question,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{newest,question,latest};QVERIFY(applyDetails());
     QCOMPARE(card->findChild<QLabel *>("questionPendingCount")->text(),QString("4 pending"));
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Optional question #3/3"));
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     // A required confirmation preempts browsing, then returns to the chosen draft.
     auto required=latest;required["optional"]=false;required["question_id"]="required";required["can_answer"]=true;
-    details["pending_questions"]=QJsonArray{newest,question,required,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{newest,question,required,latest};QVERIFY(applyDetails());
     QVERIFY(previous->isHidden());QVERIFY(next->isHidden());QVERIFY(!composer->isInputVisible());
     QCOMPARE(card->findChild<QLabel *>("questionHeading")->text(),QString("Agent needs your answer"));
     card->queueNavigationRequested(1); // Stale navigation cannot bypass a required request.
     QVERIFY(!composer->isInputVisible());QVERIFY(next->isHidden());
-    details["pending_questions"]=QJsonArray{newest,question,latest};client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    details["pending_questions"]=QJsonArray{newest,question,latest};QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     QVERIFY(composer->isInputVisible());QCOMPARE(answers.size(),0);
     // A different conversation must start from its own newest question.
-    details["conversation_id"]="conversation-two";client->inspectionReady({},"codex/hgs/dashboard",details);
-    client->inspectionReady({},"codex/hgs/dashboard",details); // Initial history fetch after the conversation changed.
+    details["conversation_id"]="conversation-two";QVERIFY(applyDetails());
+    QVERIFY(applyDetails()); // Initial history fetch after the conversation changed.
+    QTRY_VERIFY(answerReady("Most recent question?"));
     QCOMPARE(firstAnswer()->text(),QString());
     QVERIFY(!previous->isEnabled());
-    details["conversation_id"]="conversation-one";client->inspectionReady({},"codex/hgs/dashboard",details);
-    client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Older draft"));
+    details["conversation_id"]="conversation-one";QVERIFY(applyDetails());
+    QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Which option?") && firstAnswer()->text() == "Older draft");
     // When the selected request resolves elsewhere, fall back to a pending one.
-    details["pending_questions"]=QJsonArray{latest};client->inspectionReady({},"codex/hgs/dashboard",details);
-    QTRY_COMPARE(firstAnswer()->text(),QString("Latest draft"));
+    details["pending_questions"]=QJsonArray{latest};QVERIFY(applyDetails());
+    QTRY_VERIFY(answerReady("Most recent question?") && firstAnswer()->text() == "Latest draft");
     QVERIFY(previous->isHidden());QVERIFY(next->isHidden());
-    details["pending_questions"]=QJsonArray{};client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["pending_questions"]=QJsonArray{};QVERIFY(applyDetails());
     QVERIFY(card->isHidden());QVERIFY(composer->isInputVisible());QCOMPARE(composer->editor()->toPlainText(),QString("An unrelated follow-up"));
 }
 
@@ -4153,6 +4208,97 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     activity->fileReferenceActivated("docs/README.md");
     QCOMPARE(copied.size(), 1); QCOMPARE(copied.takeFirst().at(0).toString(), QString("/Users/remote/project/docs/README.md"));
     QCOMPARE(ssh.size(), 1); QCOMPARE(ssh.takeFirst().at(0).toString(), QString("mac"));
+}
+
+void TestSessionsWindow::remoteFileDownloads_data()
+{
+    QTest::addColumn<int>("mode");
+    QTest::newRow("download-and-open-local-copy") << 0;
+    QTest::newRow("download-and-open-directly") << 1;
+    QTest::newRow("failure-keeps-dialog-and-existing-copy") << 2;
+    QTest::newRow("cancel-save-does-not-download") << 3;
+    QTest::newRow("closing-dialog-keeps-requested-download-and-open") << 4;
+}
+
+void TestSessionsWindow::remoteFileDownloads()
+{
+    QFETCH(int, mode);
+    const auto nativeDialogs = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto destination = directory.filePath("local résumé's copy.png");
+    if (mode == 2) { QFile file(destination); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("previous copy"); }
+    const auto fixture = m_dir->filePath("file-download-hgs");
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer = R"PY(elif c=='download':
+ import pathlib,time
+ open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\n')
+ time.sleep(.1)
+ if pathlib.Path(__file__+'.fail').exists():
+  print('Permission denied (publickey).',file=sys.stderr);sys.exit(1)
+ target=a[a.index('--output')+1];path=a[a.index('--path')+1]
+ pathlib.Path(target).write_bytes(b'synthetic image')
+ print(json.dumps(dict(host=sys.argv[1][1:],path=path,local_path=target,bytes=15)))
+)PY";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    QFile::remove(fixture + ".calls"); QFile::remove(fixture + ".fail");
+    if (mode == 2) { QFile fail(fixture + ".fail"); QVERIFY(fail.open(QIODevice::WriteOnly)); }
+    FolderUrlRecorder opened;
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
+    window.showSession("mac", "claude/infra/review");
+    auto *client = window.findChild<HgsClient *>();
+    QSignalSpy downloaded(client, &HgsClient::fileDownloaded), failed(client, &HgsClient::fileDownloadFailed);
+    const QString path = "/remote/project/résumé ' $(literal).png";
+    QPointer<QDialog> dialog;
+    QTimer::singleShot(0, &window, [&] {
+        dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([&] { if (dialog) dialog->reject(); });
+        QVERIFY(opened.urls.isEmpty()); QVERIFY(!QFile::exists(fixture + ".calls"));
+        if (mode == 0 && qEnvironmentVariableIsSet("HGS_TEST_FILE_DIALOG_PREVIEW"))
+            QVERIFY(dialog->grab().save(qEnvironmentVariable("HGS_TEST_FILE_DIALOG_PREVIEW")));
+        auto *download = dialog->findChild<QPushButton *>(mode == 1 || mode == 4 ? "downloadOpenSessionFile" : "downloadSessionFile");
+        QVERIFY(download); QVERIFY(download->isEnabled());
+        QTimer::singleShot(0, &window, [&] {
+            auto *save = window.findChild<QFileDialog *>("sessionFileSaveDialog"); QVERIFY(save);
+            if (mode == 3) { save->reject(); return; }
+            save->setOption(QFileDialog::DontConfirmOverwrite); save->selectFile(destination);
+            QMetaObject::invokeMethod(save, "accept", Qt::DirectConnection);
+        });
+        download->click();
+        if (mode == 3) {
+            QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
+            QVERIFY(!QFile::exists(fixture + ".calls")); QVERIFY(!QFile::exists(destination)); return;
+        }
+        QVERIFY(!download->isEnabled()); QVERIFY(dialog->findChild<QProgressBar *>("sessionFileProgress")->isVisible());
+        if (mode == 4) { dialog->reject(); return; }
+        // Navigation cannot rebind the file transfer to a different machine.
+        window.showSession({}, "codex/hgs/dashboard");
+        QTRY_COMPARE(downloaded.size() + failed.size(), 1);
+        QVERIFY(opened.urls.isEmpty());
+        if (mode == 2) {
+            QCOMPARE(failed.size(), 1); QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
+            QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains("Permission denied"));
+            QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("previous copy")); return;
+        }
+        QCOMPARE(downloaded.size(), 1);
+        QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("synthetic image"));
+        if (mode == 0) {
+            QVERIFY(dialog->isVisible());
+            QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains(destination));
+            dialog->findChild<QPushButton *>("openDownloadedSessionFile")->click();
+        }
+        QVERIFY(!dialog->isVisible());
+    });
+    window.findChild<ActivityView *>("mainActivity")->fileReferenceActivated(QString::fromUtf8(QUrl::toPercentEncoding(path, "/")));
+    QVERIFY(dialog.isNull());
+    if (mode == 0 || mode == 1 || mode == 4) {
+        QTRY_COMPARE(downloaded.size(), 1);
+        QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(destination));
+        QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+        const auto args = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
+        QCOMPARE(args, (QJsonArray{"@mac", "download", "--path", path, "--output", destination}));
+    } else { QVERIFY(opened.urls.isEmpty()); }
 }
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()

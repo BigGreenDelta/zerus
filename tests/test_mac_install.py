@@ -26,8 +26,12 @@ data = sys.stdin.buffer.read()
 with open(os.environ['TRANSPORT_LOG'], 'a') as log:
     log.write('ssh\\n')
 command = sys.argv[-1]
+# Native builds, the desktop installer and the live tmux server stay out of scope.
+if command == 'bash -s' or 'tray/install.sh' in command or 'tmux source-file' in command:
+    sys.exit(0)
 if command.startswith('bash -s -- '):
     sys.exit(subprocess.run(shlex.split(command), input=data).returncode)
+sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
 ''')
         self.script(self.bin / 'scp', '#!/bin/sh\n[ "$1" = -o ] && [ "$2" = BatchMode=yes ]\n')
         self.script(self.bin / 'tar', '#!/bin/sh\nexit 0\n')
@@ -88,6 +92,22 @@ if command.startswith('bash -s -- '):
         result = self.run_install('fixture-mac', '--no-tray')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.config(), original)
+
+    def test_moved_sources_do_not_survive_on_the_mac(self):
+        (self.bin / 'tar').unlink()  # pack and unpack for real
+        build = self.home / '.local/src/hgs/.rust-build'
+        for stale in ('src/platform.rs', 'target/release/keep'):
+            (build / stale).parent.mkdir(parents=True, exist_ok=True)
+            (build / stale).write_text('previous')
+        result = self.run_install('fixture-mac')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((build / 'src/platform.rs').exists())
+        self.assertTrue((build / 'src/platform/mod.rs').is_file())
+        self.assertEqual((build / 'target/release/keep').read_text(), 'previous')
+        # The desktop build reads its Dev base version beside tray/.
+        self.assertEqual((self.home / '.local/src/hgs/DEV_VERSION').read_text(),
+                         (REPO / 'DEV_VERSION').read_text())
+        self.assertTrue((self.home / '.local/src/hgs/tray/CMakeLists.txt').is_file())
 
     def test_incomplete_or_injected_peer_config_never_connects(self):
         for settings in [dict(HGS_MAC_PEER_HOST='workstation.example'),

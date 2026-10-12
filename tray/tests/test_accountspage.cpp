@@ -77,6 +77,8 @@ void TestAccountsPage::init()
     script.write(R"(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
+# Tests read these once they exist, so each appears complete.
+def publish(name,text):staged=root/(name+'.tmp');staged.write_text(text);staged.replace(root/name)
 args=sys.argv[1:]; host=''
 if args[0].startswith('@'): host=args.pop(0)[1:]
 with (root/'calls').open('a') as calls:calls.write(json.dumps([host]+args)+'\n')
@@ -98,14 +100,14 @@ if args[0]=='account':
   if host and args[2].startswith('native-') and not ((root/'shared-identity').exists() and provider=='codex'):email=host+'-'+email
   print(json.dumps({'id':args[2],'home':'~/.config/hgs/accounts/work' if args[2].startswith('work-') else '~/.'+provider,'provider':provider,'identity':{} if provider=='dsh' else {'email':email,'plan':'Pro'},'status':'signed_out' if provider=='dsh' else 'ok','checked_at':time.time(),'windows':[] if provider=='dsh' else [{'id':'5h','used_percent':78,'window_minutes':300,'resets_at':time.time()+3600},{'id':'7d','used_percent':94,'window_minutes':10080,'resets_at':time.time()+86400}]}));sys.exit(0)
  if args[1] in ('copy','add'):
-  (root/'action').write_text(json.dumps({'host':host,'args':args}))
+  publish('action',json.dumps({'host':host,'args':args}))
  if args[1]=='permissions':
-  (root/'permissions').write_text(json.dumps({'host':host,'args':args}))
+  publish('permissions',json.dumps({'host':host,'args':args}))
  if args[1]=='default':
-  (root/'default-action').write_text(json.dumps({'host':host,'args':args}))
+  publish('default-action',json.dumps({'host':host,'args':args}))
   (root/('default-'+(host or 'local'))).write_text(args[2])
  if args[1]=='rename':
-  (root/'renamed').write_text(json.dumps({'host':host,'args':args}))
+  publish('renamed',json.dumps({'host':host,'args':args}))
   with (root/'rename-calls').open('a') as out:out.write(json.dumps({'host':host,'args':args})+'\n')
  removed_file=root/('removed-'+(host or 'local'))
  if args[1]=='set-key':

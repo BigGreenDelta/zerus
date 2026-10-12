@@ -170,16 +170,32 @@ fn seconds(v: &Value, key: &str) -> f64 {
     v[key].as_f64().unwrap_or(0.0)
 }
 fn failure_id(s: &Value) -> String {
-    let e = &s["provider_error"];
-    if !e.is_object() {
-        return String::new();
+    provider_errors::failure_id(&s["provider_error"])
+}
+fn same_failure(job: &Value, snapshot: &Value) -> bool {
+    job["failure_id"] == failure_id(snapshot)
+        || (snapshot["agent"] == "codex"
+            && ["codex_native_log", "codex_native_transcript"].contains(&string(&snapshot["provider_error"], "source"))
+            && (snapshot["provider_error"]["failure_ids"].as_array().is_some_and(|ids| ids.contains(&job["failure_id"]))
+                || job["failure_ids"].as_array().is_some_and(|ids|
+                    ids.contains(&json!(failure_id(snapshot))) || snapshot["provider_error"]["failure_ids"].as_array()
+                        .is_some_and(|current| ids.iter().any(|id| current.contains(id))))))
+}
+fn remember_failure_copies(job: &mut Value, snapshot: &Value) {
+    if !confirmed_codex_copies(snapshot) { return; }
+    let mut ids = vec![job["failure_id"].clone(), json!(failure_id(snapshot))];
+    for values in [&snapshot["provider_error"]["failure_ids"], &job["failure_ids"]] {
+        if let Some(values) = values.as_array() {
+            for id in values { if !ids.contains(id) && ids.len() < 32 { ids.push(id.clone()); } }
+        }
     }
-    format!(
-        "{}:{}:{}",
-        string(e, "source"),
-        string(e, "message_id"),
-        seconds(e, "at")
-    )
+    ids.sort_by(|a, b| a.as_str().cmp(&b.as_str())); ids.dedup();
+    job["failure_ids"] = json!(ids);
+}
+fn confirmed_codex_copies(snapshot: &Value) -> bool {
+    let Some(ids) = snapshot["provider_error"]["failure_ids"].as_array() else { return false; };
+    snapshot["agent"] == "codex" && ["codex_native_log:", "codex_native_transcript:"].iter()
+        .all(|prefix| ids.iter().any(|id| id.as_str().is_some_and(|id| id.starts_with(prefix))))
 }
 fn identity(s: &Value) -> Value {
     json!([
@@ -330,6 +346,8 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
     job["class_attempt"] = json!(n);
     let delays = job["delays"].as_array().cloned().unwrap_or_default();
     job["failure_id"] = json!(failure_id(s));
+    job.as_object_mut().unwrap().remove("failure_ids");
+    remember_failure_copies(job, s);
     job["failure_at"] = s["provider_error"]["at"].clone();
     job["class"] = json!(category);
     let minimum = seconds(&s["provider_error"], "retry_not_before");
@@ -369,7 +387,7 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
         && user_at >= seconds(&job, "sent_at")
         && seconds(&job, "sent_at") > 0.0;
     let new_input = same && user_at > seconds(&job, "user_at") && !own_input;
-    if job.is_object() && !same && job["failure_id"] == fid {
+    if job.is_object() && !same && same_failure(&job, s) {
         stop(
             &mut job,
             "cancelled",
@@ -377,7 +395,19 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
         );
         return job;
     }
+    // Repair only the old source-switch cancellation before any delivery. A
+    // cancelled/uncertain attempted send and a person's cancellation stay final.
+    if same && job["state"] == "cancelled" && job["reason"] == "The failed turn is no longer current"
+        && job["attempt"].as_u64() == Some(0) && seconds(&job, "sent_at") == 0.0 && job["request_id"].is_null()
+        && !new_input && seconds(s, "recovery_cancel_at") <= seconds(&job, "started_at")
+        && seconds(s, "recovery_success_at") <= seconds(&job, "started_at")
+        && s["phase"] == "error" && s["process_state"] == "running"
+        && enabled(p, class(error)) && seconds(error, "at") > p.enabled_at
+        && confirmed_codex_copies(s) && same_failure(&job, s) {
+        stop(&mut job, "waiting", "");
+    }
     if same && active(&job) {
+        if same_failure(&job, s) { remember_failure_copies(&mut job, s); }
         // Upgrade durable pre-v3 episodes without restarting them or losing budgets.
         if job["session_limit_mode"].is_null() {
             job["session_limit_mode"] = json!(p.session_limit_mode);
@@ -419,7 +449,7 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
             return job;
         } else if string(&job, "state") == "retrying" {
             if !fid.is_empty()
-                && job["failure_id"] != fid
+                && !same_failure(&job, s)
                 && seconds(error, "at") > seconds(&job, "sent_at")
             {
                 if job["acknowledged"] != true {
@@ -442,7 +472,7 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
             }
             return job;
         } else if job["state"] == "waiting" {
-            if job["failure_id"] != fid || s["phase"] != "error" {
+            if !same_failure(&job, s) || s["phase"] != "error" {
                 stop(
                     &mut job,
                     "cancelled",
@@ -516,6 +546,59 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn codex_copy(snapshot: &mut Value) {
+        let original = failure_id(snapshot);
+        snapshot["provider_error"]["source"] = json!("codex_native_log");
+        snapshot["provider_error"]["message_id"] = json!("log-copy");
+        snapshot["provider_error"]["at"] = json!(10.000328);
+        snapshot["provider_error"]["failure_ids"] = json!([original, failure_id(snapshot)]);
+    }
+    #[test]
+    fn equivalent_native_evidence_preserves_deadline_budget_and_retry_acknowledgement() {
+        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
+        let waiting = advance(Value::Null, &s, &on(), 11.0);
+        codex_copy(&mut s);
+        let observed = advance(waiting.clone(), &s, &on(), 12.0);
+        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id", "state"] { assert_eq!(observed[key], waiting[key]); }
+        assert!(same_failure(&observed, &s));
+        let mut retrying = observed; retrying["state"] = json!("retrying");
+        retrying["attempt"] = json!(1); retrying["sent_at"] = json!(10.0001); retrying["acknowledged"] = json!(true);
+        assert_eq!(advance(retrying.clone(), &s, &on(), 12.0), retrying);
+        let mut completion_only = snapshot("codex"); completion_only["provider_error"]["source"] = json!("codex_native_transcript");
+        assert_eq!(advance(retrying.clone(), &completion_only, &on(), 12.0), retrying);
+        s["provider_error"]["message_id"] = json!("new-turn-error");
+        s["provider_error"]["at"] = json!(20.0); s["provider_error"]["failure_ids"] = json!([failure_id(&s)]);
+        let following = advance(retrying, &s, &on(), 21.0);
+        assert_eq!(following["state"], "waiting"); assert_eq!(following["attempt"], 1);
+        assert_eq!(following["failure_id"], failure_id(&s));
+        assert!(!same_failure(&following, &completion_only));
+    }
+    #[test]
+    fn repairs_only_proven_source_switch_cancellations_without_an_attempt() {
+        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
+        let mut cancelled = advance(Value::Null, &s, &on(), 11.0);
+        stop(&mut cancelled, "cancelled", "The failed turn is no longer current");
+        codex_copy(&mut s);
+        let repaired = advance(cancelled.clone(), &s, &on(), 30.0);
+        assert_eq!(repaired["state"], "waiting");
+        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id"] { assert_eq!(repaired[key], cancelled[key]); }
+        for (key, value) in [("attempt", json!(1)), ("sent_at", json!(12.0)), ("request_id", json!("request")),
+            ("reason", json!("Cancelled by user")), ("state", json!("uncertain"))] {
+            let mut protected = cancelled.clone(); protected[key] = value;
+            assert_eq!(advance(protected.clone(), &s, &on(), 30.0), protected);
+        }
+        for (key, value) in [("recovery_cancel_at", json!(20.0)), ("recovery_success_at", json!(20.0)),
+            ("phase", json!("idle")), ("process_state", json!("exited"))] {
+            let mut changed = s.clone(); changed[key] = value;
+            assert_eq!(advance(cancelled.clone(), &changed, &on(), 30.0), cancelled);
+        }
+        let mut changed = s.clone(); changed["recovery_user_at"] = json!(20.0);
+        assert!(advance(cancelled.clone(), &changed, &on(), 30.0).is_null());
+        let mut disabled = on(); disabled.enabled = false;
+        assert_eq!(advance(cancelled.clone(), &s, &disabled, 30.0), cancelled);
+        s["provider_error"]["failure_ids"] = Value::Null;
+        assert_eq!(advance(cancelled.clone(), &s, &on(), 30.0), cancelled);
+    }
     fn snapshot(agent: &str) -> Value {
         json!({"name":"session","agent":agent,"run_id":"run","conversation_id":"conversation","model":"model","account_id":"account",
             "phase":"error","process_state":"running","recovery_user_at":5.0,
@@ -773,7 +856,7 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
     if job["id"] != id
         || job["state"] != "dispatching"
         || job["identity"] != identity(&s)
-        || job["failure_id"] != failure_id(&s)
+        || !same_failure(&job, &s)
         || s["phase"] != "error"
         || !enabled(&p, class(&s["provider_error"]))
         || seconds(&s, "recovery_user_at") > seconds(&job, "user_at")
@@ -787,7 +870,7 @@ pub(super) fn check_native_submission(snapshot: &Value) -> Result<()> {
     let job = load_job(string(snapshot, "name"));
     if job["state"] != "dispatching"
         || job["identity"] != identity(snapshot)
-        || job["failure_id"] != failure_id(snapshot)
+        || !same_failure(&job, snapshot)
         || !enabled(&policy()?, class(&snapshot["provider_error"]))
     {
         return Err("Native recovery was cancelled or changed".into());

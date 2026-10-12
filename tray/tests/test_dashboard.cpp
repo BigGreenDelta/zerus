@@ -129,6 +129,12 @@ private slots:
         QVERIFY(first->width()<page.width()/2);
         auto changed=accounts();changed.removeLast();page.setAccounts(changed);QCOMPARE(page.findChildren<QPushButton *>("dashboardAccountCard").size(),2);
     }
+    void accountCardsFollowUsageIndicator() {
+        DashboardPage page;page.setUsageIndicator(AccountUsage::Indicator::Marker);page.setAccounts(accounts());
+        auto usage=[&]{QList<AccountUsage::Button *> buttons;for(auto *button:page.findChildren<QPushButton *>("dashboardAccountUsage"))buttons<<static_cast<AccountUsage::Button *>(button);return buttons;};
+        QCOMPARE(usage().size(),3);for(auto *button:usage())QCOMPARE(button->indicator(),AccountUsage::Indicator::Marker);
+        page.setUsageIndicator(AccountUsage::Indicator::Rails);for(auto *button:usage())QCOMPARE(button->indicator(),AccountUsage::Indicator::Rails);
+    }
     void onlineCountsExcludeArchivedAndOffline()
     {
         DashboardPage page; page.setFleet(fixture()); page.resize(1120, 900); page.show();

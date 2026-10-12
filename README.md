@@ -173,6 +173,7 @@ The same sessions are available from your terminal:
 hgs codex /workspace/orbit -n api       # local agent in tmux
 hgs @build-01 claude /workspace/orbit   # agent on another machine
 hgs ls                                # sessions here and on connected machines
+hgs status                            # versions and running services here and there
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 
