@@ -179,12 +179,18 @@ fn send_gates(tx: &Tx, wf: &Workflow, task: &Task, session: &SessionRef, confirm
 /// The claim this request wrote whose outcome is not recorded yet: a send that
 /// stopped between claiming and recording.
 fn pending_claim(tx: &Tx, task: &Task, request_id: &str) -> Result<Option<Event>> {
+    pending_transition(tx, task, request_id, "claim")
+}
+
+/// The head transition of `action` that this request wrote and no `[sent]` or
+/// `[sent?]` entry references yet.
+fn pending_transition(tx: &Tx, task: &Task, request_id: &str, action: &str) -> Result<Option<Event>> {
     if request_id.is_empty() {
         return Ok(None);
     }
     let events = tx.load(&Filter::Task(task.uuid.clone()))?;
     let Some(claim) = events.iter().find(|e| {
-        e.id == task.head && e.kind == "transition" && e.request_id == request_id && e.payload["action"] == "claim"
+        e.id == task.head && e.kind == "transition" && e.request_id == request_id && e.payload["action"] == action
     }) else {
         return Ok(None);
     };
@@ -394,10 +400,20 @@ fn target_for(store: &Store, session: &SessionRef, confirmed: &Confirmed, resume
     Ok(Ok(target))
 }
 
-fn deliver_resumed(session: &SessionRef, target: Result<DeliveryTarget>, attachments: Result<Vec<Value>>, input: &str, text: &str) -> Outcome {
-    match (target, attachments) {
-        (Ok(target), Ok(files)) => deliver(session, &target, input, text, files),
-        (Err(error), _) | (_, Err(error)) => Outcome::Uncertain(format!("{error:#}")),
+fn deliver_resumed(session: &SessionRef, target: Result<DeliveryTarget>, attachments: Result<Vec<Value>>, text: Result<String>, input: &str) -> Outcome {
+    match (target, attachments, text) {
+        (Ok(target), Ok(files), Ok(text)) => deliver(session, &target, input, &text, files),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Outcome::Uncertain(format!("{error:#}")),
+    }
+}
+
+/// A rendering failure refuses a fresh request but not a retry after typing,
+/// whose text may be typed already.
+fn lenient<T>(result: Result<T>, resumed: bool) -> Result<Result<T>> {
+    if resumed {
+        Ok(result)
+    } else {
+        Ok(Ok(result?))
     }
 }
 
@@ -411,6 +427,8 @@ fn settle(
     purpose: &str,
     session: &SessionRef,
     outcome: Outcome,
+    settles: &str,
+    hint: &str,
     undo: impl FnOnce(&mut Tx, &Actor, &Task) -> Result<()>,
 ) -> Result<Value> {
     let actor = ctx.actor.clone();
@@ -421,9 +439,9 @@ fn settle(
         }
         let task = load(tx, uuid)?;
         match &outcome {
-            Outcome::Sent => journal(tx, &actor, &task, "[sent]", &format!("{purpose}: {}", session.name), "")?,
+            Outcome::Sent => journal(tx, &actor, &task, "[sent]", &format!("{purpose}: {}", session.name), settles)?,
             Outcome::Uncertain(why) => {
-                journal(tx, &actor, &task, "[sent?]", &format!("{purpose}: {why}"), "")?;
+                journal(tx, &actor, &task, "[sent?]", &format!("{purpose}: {why}"), settles)?;
                 flag(tx, &actor, &task, "delivery_uncertain", true)?;
             }
             Outcome::NotSent(_) => undo(tx, &actor, &task)?,
@@ -436,7 +454,7 @@ fn settle(
         Ok(result)
     })?;
     if let Outcome::NotSent(why) = outcome {
-        return Err(Refusal::new("not_delivered", format!("not delivered: {why}")).into());
+        return Err(Refusal::new("not_delivered", format!("not delivered: {why}{hint}")).into());
     }
     Ok(result)
 }
@@ -478,10 +496,10 @@ pub fn review_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
             review_gates(tx, &task, &session)?;
             simple(tx, &actor, &task, "reviewer_set", json!({"session": session}), "")?;
         }
-        render(tx, &load(tx, &uuid)?, "review", "")
+        lenient(render(tx, &load(tx, &uuid)?, "review", ""), resumed)
     })?;
-    let outcome = deliver_resumed(&session, target, attachments, &input_id(&req.request_id), &text);
-    settle(ctx, "review-send", &request, &uuid, "review", &session, outcome, |tx, actor, task| {
+    let outcome = deliver_resumed(&session, target, attachments, text, &input_id(&req.request_id));
+    settle(ctx, "review-send", &request, &uuid, "review", &session, outcome, "", "", |tx, actor, task| {
         simple(tx, actor, task, "reviewer_set", json!({"session": null}), "")?;
         Ok(())
     })
@@ -509,12 +527,12 @@ pub fn rework_send(ctx: &mut Ctx, request: Value) -> Result<Value> {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
         let session = if resumed { assignee_of(&task)? } else { assignee_for(&task, "rework")? };
-        Ok((uuid, session, render(tx, &task, "rework", "")?, files(&dir, &task)))
+        Ok((uuid, session, lenient(render(tx, &task, "rework", ""), resumed)?, files(&dir, &task)))
     })?;
     let attachments = if resumed { attachments } else { Ok(attachments?) };
     let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
-    let outcome = deliver_resumed(&session, target, attachments, &input_id(&req.request_id), &text);
-    settle(ctx, "rework-send", &request, &uuid, "rework", &session, outcome, |_, _, _| Ok(()))
+    let outcome = deliver_resumed(&session, target, attachments, text, &input_id(&req.request_id));
+    settle(ctx, "rework-send", &request, &uuid, "rework", &session, outcome, "", "", |_, _, _| Ok(()))
 }
 
 #[derive(Deserialize)]
@@ -534,27 +552,37 @@ pub fn answer(ctx: &mut Ctx, request: Value) -> Result<Value> {
     if let Some(result) = ctx.store.read(|tx| commands::replay(tx, "answer", &request))? {
         return Ok(result);
     }
+    let input = input_id(&req.request_id);
     let resumed = typed_before(&req.request_id);
-    let text = commands::normalize(&req.answer);
-    let (uuid, session) = ctx.store.read(|tx| {
+    // An answer this request recorded but did not settle is sent again.
+    let (uuid, session, pending) = ctx.store.read(|tx| {
         let uuid = resolve(tx, &req.task)?;
         let task = load_writable(tx, &uuid)?;
-        let session = if resumed { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
-        Ok((uuid, session))
+        let pending = pending_transition(tx, &task, &req.request_id, "answer")?;
+        let session = if resumed || pending.is_some() { assignee_of(&task)? } else { assignee_for(&task, "answer")? };
+        Ok((uuid, session, pending))
     })?;
     let target = target_for(ctx.store, &session, &req.confirm, resumed)?;
     let actor = ctx.actor.clone();
-    let typed = ctx.store.write(|tx| {
+    let recorded = pending.as_ref().map(|e| e.payload["fields"]["answer"].as_str().unwrap_or_default().to_owned());
+    let (typed, settles) = ctx.store.write(|tx| {
         let task = load_writable(tx, &uuid)?;
-        if !resumed {
-            let fields = BTreeMap::from([("answer".to_owned(), text.clone())]);
-            transition(tx, &actor, &task, Action::Answer, super::workflow::RESUME, fields, None, vec![], "")?;
-        }
-        render(tx, &load(tx, &uuid)?, "answer", &text)
+        let (text, settles) = match (&pending, &recorded) {
+            (Some(event), Some(text)) => (text.clone(), event.id.clone()),
+            _ if resumed => (commands::normalize(&req.answer), String::new()),
+            _ => {
+                let text = commands::normalize(&req.answer);
+                let fields = BTreeMap::from([("answer".to_owned(), text.clone())]);
+                let event = transition(tx, &actor, &task, Action::Answer, super::workflow::RESUME, fields, None, vec![], &input)?;
+                (text, event.id)
+            }
+        };
+        Ok((lenient(render(tx, &load(tx, &uuid)?, "answer", &text), resumed)?, settles))
     })?;
-    let outcome = deliver_resumed(&session, target, Ok(Vec::new()), &input_id(&req.request_id), &typed);
-    // The answer stays recorded; the person sees it was not delivered.
-    settle(ctx, "answer", &request, &uuid, "answer", &session, outcome, |tx, actor, task| {
+    let outcome = deliver_resumed(&session, target, Ok(Vec::new()), typed, &input);
+    // The answer stays recorded; the person can repeat the request to send it again.
+    let hint = format!("; the answer is recorded, repeat this answer with request_id {input} to send it again");
+    settle(ctx, "answer", &request, &uuid, "answer", &session, outcome, &settles, &hint, |tx, actor, task| {
         journal(tx, actor, task, "[comment]", &format!("the answer was not delivered to {}", session.name), "")
     })
 }

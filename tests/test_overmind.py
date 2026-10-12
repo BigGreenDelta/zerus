@@ -359,8 +359,80 @@ class AgentSession(unittest.TestCase):
         self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
         markers = [j['marker'] for j in body['task']['journal']]
         self.assertEqual(markers.count('[sent?]'), 1)
-        self.assertNotIn('reviewer_set', json.dumps(body['task']['journal']))
+        self.assertIsNone(body['task']['reviewer'])
         self.assertIn('delivery_uncertain', body['task']['flags'])
+
+    def type_directly(self, request_id):
+        """Types through `hgs send` as a first, interrupted attempt of a command would."""
+        typed = subprocess.run(
+            [str(HGS), 'send', self.name, '--json'], env=self.env, text=True, capture_output=True, timeout=20,
+            input=json.dumps({'request_id': request_id, 'text': 'typed before the crash',
+                              'expected_run_id': self.record['run_id'],
+                              'expected_conversation_id': self.record['conversation_id']}))
+        self.assertEqual(typed.returncode, 0, typed.stderr)
+        self.wait_for(lambda: b'\r' in self.received())
+
+    def asks_a_question(self, ref):
+        self.claim()
+        self.ok('advance', '--json', data={'task': ref, 'to': 'Build', 'spec': 's'})
+        self.ok('call-human', '--json', data={'task': ref, 'question': 'REST or gRPC?'})
+
+    def advance_to_review(self, agent):
+        self.append('transition', {'action': 'advance', 'to': 'Review', 'fields': {'worklog': 'w', 'evidence': 'e'}}, actor=agent)
+
+    def review_failed(self, ref):
+        """A task in Build assigned to this session after a review asked for changes."""
+        self.claim()
+        self.ok('advance', '--json', data={'task': ref, 'to': 'Build', 'spec': 's'})
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.advance_to_review({'kind': 'agent', 'machine': machine, 'session': self.name})
+        reviewer = {'kind': 'agent', 'machine': machine, 'session': 'codex/other'}
+        self.append('reviewer_set', {'session': {'machine': machine, 'name': 'codex/other'}})
+        self.append('transition', {'action': 'needs_work', 'to': 'Build', 'fields': {'report': 'tests missing'}}, actor=reviewer)
+
+    def test_rework_send_types_the_review_report(self):
+        ref = self.task()
+        self.review_failed(ref)
+        code, body = self.overmind('rework-send', '--json', data={'task': ref}, agent=False)
+        self.assertEqual((code, body.get('delivery')), (0, 'sent'), body)
+        self.wait_for(lambda: b'tests missing' in self.received())
+        self.assertIn(b'Rework: Fix the drafts', self.received())
+
+    def test_a_rework_retry_after_typing_skips_the_gates(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.review_failed(ref)
+        self.type_directly(request_id)
+        machine = self.person('show', ref)['task']['created_by']['machine']
+        self.advance_to_review({'kind': 'agent', 'machine': machine, 'session': self.name})  # no longer reworkable
+        before = self.received()
+        code, body = self.overmind('rework-send', '--json', data={'task': ref, 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
+        self.assertEqual(self.received(), before)
+
+    def test_an_answer_retry_after_typing_skips_the_gates(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.asks_a_question(ref)
+        self.type_directly(request_id)
+        before = self.received()
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body.get('delivery')), (0, 'uncertain'), body)
+        self.assertEqual(self.received(), before)
+
+    def test_a_recorded_but_unsent_answer_is_sent_by_repeating_the_request(self):
+        request_id = str(uuid.uuid4())
+        ref = self.task()
+        self.asks_a_question(ref)
+        self.append('transition', {'action': 'answer', 'to': '@resume', 'fields': {'answer': 'REST'}, 'session': None,
+                                   'children': []}, request_id=request_id)  # as if hgs stopped after recording it
+        code, body = self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)
+        self.assertEqual((code, body['delivery'], body['task']['stage']), (0, 'sent', 'Build'), body)
+        self.wait_for(lambda: b'REST' in self.received())
+        markers = [j['marker'] for j in body['task']['journal']]
+        self.assertEqual((markers.count('[answer]'), markers.count('[sent]')), (1, 1), markers)
+        self.assertEqual(self.received().count(b'[Overmind '), 1)
+        self.assertEqual(self.overmind('answer', '--json', data={'task': ref, 'answer': 'REST', 'request_id': request_id}, agent=False)[1], body)
 
     def commit(self, repo):
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
