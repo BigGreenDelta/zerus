@@ -1565,6 +1565,13 @@ else: print('{}')
     const auto save = [&] { return FakeCli::replace(fixtureDir.filePath("details.json"), QJsonDocument(details).toJson()); };
     QVERIFY(save()); SessionsWindow window(FakeCli::program(program)); window.setFleet(state); window.show(); window.showSession({}, name);
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    // A fixture inspection replies with details.json as it was when it started, so one
+    // in flight across save() could restore the old identity after the injected one
+    // and admit the held submission. HgsClient runs one inspection per session: once
+    // ours starts, none is older, and its reply is current.
+    const auto settle = [&] { QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+        QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, name) && (issued = replies.size(), true)));
+        QTRY_VERIFY(std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) { return reply.at(1).toString() == name; })); };
     auto *card = window.findChild<QuestionCard *>(); auto *send = composer->findChild<QPushButton *>("sendMessage");
     QSignalSpy inspected(client, &HgsClient::inspectionReady); QTRY_VERIFY(!inspected.isEmpty());
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
@@ -1605,7 +1612,7 @@ else: print('{}')
         QCOMPARE(composer->sessionKey(), QString("\ncodex/hgs/dashboard"));
     }
     if (outcome == "run" || outcome == "conversation") {
-        details[outcome == "run" ? "run_id" : "conversation_id"] = "changed-identity"; QVERIFY(save()); client->inspectionReady({}, name, details);
+        details[outcome == "run" ? "run_id" : "conversation_id"] = "changed-identity"; QVERIFY(save()); client->inspectionReady({}, name, details); settle();
     }
     if (outcome == "cancel") { auto *cancel = window.findChild<QPushButton *>("cancelCompactSend"); QVERIFY(cancel->isVisible()); cancel->click(); }
     if (outcome == "failure") { QVERIFY(QDir(storageRoot).removeRecursively()); QFile blocker(storageRoot); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close(); }
@@ -1641,7 +1648,7 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
     const auto writeDetails=[&]{QVERIFY(FakeCli::replace(inspected,QJsonDocument(details).toJson()));};
     writeDetails();
     QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
-    fixture.write("#!/usr/bin/env python3\nimport sys,json\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin)\n open("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0],'w').write(json.dumps(p))\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
+    fixture.write("#!/usr/bin/env python3\nimport sys,json,pathlib\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin);target=pathlib.Path("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0])\n staged=target.with_name(target.name+'.tmp');staged.write_text(json.dumps(p));staged.replace(target)\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     QTest::qWait(100);auto *client=window.findChild<HgsClient *>();
@@ -1718,7 +1725,7 @@ import sys,json,pathlib,time
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 if 'clear-context' in args:
- p=json.load(sys.stdin);p['args']=args;(root/'clear.json').write_text(json.dumps(p));time.sleep(.2);print(json.dumps(dict(request_id=p['request_id'],name=args[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='confirmed')))
+ p=json.load(sys.stdin);p['args']=args;staged=root/'clear.tmp';staged.write_text(json.dumps(p));staged.replace(root/'clear.json');time.sleep(.2);print(json.dumps(dict(request_id=p['request_id'],name=args[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='confirmed')))
 elif 'inspect' in args: print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
 else: print('{}')
 )PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
@@ -2015,9 +2022,10 @@ root=pathlib.Path(__file__).parent
 a=sys.argv[1:]
 if a[0].startswith('@'):a=a[1:]
 if a[0] in ['compact-context','send']:
- p=json.load(sys.stdin);staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
+ p=json.load(sys.stdin)
  if a[0]=='send':
   with (root/'send-targets.txt').open('a') as log:log.write(a[1]+'\n')
+ staged=root/(a[0]+'.tmp');staged.write_text(json.dumps(p));staged.replace(root/(a[0]+'.json'))
  print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
 elif a[0]=='inspect':print((root/'details.json').read_text() if a[1]=='claude/infra/review' and (root/'details.json').exists() else '{}')
 else:print('{}')
@@ -2866,8 +2874,8 @@ root=pathlib.Path(__file__).parent
 if sys.argv[1]=='inspect': print((root/'details.json').read_text())
 elif sys.argv[1]=='answer':
  p=json.load(sys.stdin)
- (root/'answer.json').write_text(json.dumps({'args':sys.argv[1:],'payload':p}))
  with (root/'calls').open('a') as f:f.write('call\n')
+ staged=root/'answer.tmp';staged.write_text(json.dumps({'args':sys.argv[1:],'payload':p}));staged.replace(root/'answer.json')
  time.sleep(.1)
  print(json.dumps(dict(status='answered',request_id=p['request_id'],name=sys.argv[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],question_id=p['question_id'],question_hash=p['expected_question_hash'])))
 else: print('{}')
