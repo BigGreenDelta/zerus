@@ -69,6 +69,8 @@ public:
         QList<Task> tasks;      // board order: by stage, then by rank
         QString error;          // the last read failed; the tasks are those of the read before
         QJsonObject refusal;    // its parsed `error` object, when the CLI refused
+        // Tasks queued per session ("machine\nname" of queue_of), counted once per read.
+        QHash<QString, int> queues;
         QString role(const QString &stage) const;   // empty for a stage the workflow lacks
     };
     struct Decision {
@@ -125,12 +127,13 @@ public:
     QString decisionsError() const { return m_decisionsError; }   // the last read failed
     // The node ID of the machine whose replica is read; empty until known.
     QString machine() const { return m_machine; }
-    // Tasks queued for the session in the watched boards. An empty machine
-    // means machine(); 0 while it is unknown.
-    int queueCount(const QString &machine, const QString &session) const;
-    // The session's tasks waiting in Your Call, from decisions(); the machine
-    // as in queueCount.
-    QList<Decision> decisionsFor(const QString &machine, const QString &session) const;
+    // Tasks queued for the session: in the project's board, or in every
+    // watched board when the project is empty. An empty machine means
+    // machine(); 0 while it is unknown. A lookup, not a scan of the tasks.
+    int queueCount(const QString &machine, const QString &session, const QString &project = {}) const;
+    // The session's tasks waiting in Your Call, from decisions(), of the
+    // project when one is named; the machine as in queueCount.
+    QList<Decision> decisionsFor(const QString &machine, const QString &session, const QString &project = {}) const;
     qint64 cursor() const { return m_cursor; }   // -1 before the first answer
     QString error() const { return m_error; }    // the last poll failed
 

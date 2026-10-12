@@ -4046,9 +4046,14 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
         task("p7c1d", "alpha", "Pick a store for drafts", "Your Call", {{"assignee", dashboard}})}}})));
     QVERIFY(put(".board-beta", json(QJsonObject{{"tasks", QJsonArray{
         task("b1q2w", "beta", "Compare lifecycles", "Queue", {{"pinned", research}, {"queue_of", research}}),
-        task("b3e4r", "beta", "Summarize resume rules", "Queue", {{"pinned", research}, {"queue_of", research}})}}})));
+        task("b3e4r", "beta", "Summarize resume rules", "Queue", {{"pinned", research}, {"queue_of", research}}),
+        // Queued for a session of another project: its chip and row count only their own project.
+        task("b5t6y", "beta", "Port the dashboard notes", "Queue", {{"pinned", dashboard}, {"queue_of", dashboard}})}}})));
+    const auto navigation = person("node-arch", "codex/website/navigation");
     QVERIFY(put(".decisions", json(QJsonArray{QJsonObject{{"task", "p7c1d"}, {"ref", "om-p7c1d"}, {"project", "alpha"},
-        {"title", "Pick a store for drafts"}, {"stage", "Your Call"}, {"question", "SQLite or plain files?"}, {"assignee", dashboard}, {"signature", "s1"}}})));
+        {"title", "Pick a store for drafts"}, {"stage", "Your Call"}, {"question", "SQLite or plain files?"}, {"assignee", dashboard}, {"signature", "s1"}},
+        QJsonObject{{"task", "b8n7m"}, {"ref", "om-b8n7m"}, {"project", "beta"}, {"title", "Name the beta menus"}, {"stage", "Your Call"},
+                    {"question", "Short or long names?"}, {"assignee", navigation}, {"signature", "s2"}}})));
     QSettings().setValue("workspace/organization", QByteArray(R"({"projects":[
         {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
         {"id":"beta","name":"Beta","color":"#30a46c","sessions":["arch\nkimi/docs/research"]}],"default_project":"alpha"})"));
@@ -4095,15 +4100,22 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     QTRY_COMPARE(row("\nkimi/docs/research")->data(SessionRoles::Queue).toInt(), 2);
     QVERIFY(!row("\nkimi/docs/research")->data(SessionRoles::YourCall).toBool());
     QCOMPARE(row("\ncodex/website/navigation")->data(SessionRoles::Queue).toInt(), 0);
+    QVERIFY(!row("\ncodex/website/navigation")->data(SessionRoles::YourCall).toBool());   // its decision is in another project
+    // An empty queue shows no chip.
+    window.showSession({}, "codex/website/navigation");
+    QTRY_VERIFY(!chip->isVisible());
+    window.showSession({}, "codex/hgs/dashboard");
+    QTRY_VERIFY(chip->isVisible()); QCOMPARE(chip->fullLabel(), QString("Tasks 1"));
 
-    // Alt+Enter: this session's Queue, pinned to it, with the draft's images.
+    // Alt+Enter: this session's Queue, pinned to it, with the draft's images,
+    // titled after the first line without its attachment references.
     editor->setFocus(); editor->setPlainText("Polish the empty state");
     QVERIFY(composer->addAttachment("shot.png", "image/png", png));
     QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
     QTRY_COMPARE(creates().size(), 1);
     auto request = creates()[0];
     QVERIFY(!QUuid(request.take("request_id").toString()).isNull());
-    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "[Image #1] Polish the empty state"}, {"stage", "Queue"}, {"pinned", dashboard},
+    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "[Image #1] Polish the empty state"}, {"title", "Polish the empty state"}, {"stage", "Queue"}, {"pinned", dashboard},
         {"attachments", QJsonArray{QJsonObject{{"name", "shot.png"}, {"mime", "image/png"}, {"data_base64", QString::fromLatin1(png.toBase64())}}}}}));
     QTRY_VERIFY(editor->toPlainText().isEmpty());
     QVERIFY(!composer->hasDraft("\ncodex/hgs/dashboard"));
@@ -4117,8 +4129,9 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     QCOMPARE(creates().size(), 2);
     QCOMPARE(editor->toPlainText(), QString("Keep me")); QVERIFY(composer->hasDraft("\ncodex/hgs/dashboard"));
     QVERIFY(QFile::remove(hgs + ".refuse"));
-    // A create without an answer in time may have happened: the same draft is
-    // added again with the same request_id, which replays instead of adding twice.
+    // A create that failed, or had no answer in time and may have happened, keeps
+    // its request_id: the same draft goes again with it, so the board replays a
+    // create that happened instead of adding the task twice.
     OvermindModel::Timeouts quick; quick.local = quick.remote = quick.deliveryLocal = quick.deliveryRemote = 500;
     model->setTimeouts(quick); QVERIFY(put(".slow", "1"));
     add->click();
@@ -4128,20 +4141,29 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     add->click();
     QTRY_VERIFY(editor->toPlainText().isEmpty());
     auto all = creates(); QCOMPARE(all.size(), 4);
-    QCOMPARE(all[3]["request_id"], all[2]["request_id"]); QVERIFY(all[2]["request_id"] != all[1]["request_id"]);
+    QCOMPARE(all[2]["request_id"], all[1]["request_id"]); QCOMPARE(all[3]["request_id"], all[2]["request_id"]);
+    QVERIFY(all[1]["request_id"] != all[0]["request_id"]);
     QCOMPARE(status->text(), QString("Added om-n4 to this session's queue."));
+    // Once added, the same draft again is a new task.
+    editor->setPlainText("Keep me"); add->click();
+    QTRY_VERIFY(editor->toPlainText().isEmpty());
+    all = creates(); QCOMPARE(all.size(), 5); QVERIFY(all[4]["request_id"] != all[3]["request_id"]);
 
     // The arrow: the project pool (Queue, not pinned) and Backlog (the workflow's first backlog stage).
-    editor->setPlainText("Pool idea"); more->menu()->actions().at(0)->trigger();
+    // A first line of references alone: the title is the next line.
+    editor->setPlainText("\nPool idea"); QVERIFY(composer->addAttachment("plan.png", "image/png", png));
+    QCOMPARE(editor->toPlainText(), QString("[Image #1]\nPool idea"));
+    more->menu()->actions().at(0)->trigger();
     QTRY_VERIFY(editor->toPlainText().isEmpty());
     request = creates().last(); request.remove("request_id");
-    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "Pool idea"}, {"stage", "Queue"}}));
-    QCOMPARE(status->text(), QString("Added om-n5 to the Alpha pool."));
+    QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "[Image #1]\nPool idea"}, {"title", "Pool idea"}, {"stage", "Queue"},
+        {"attachments", QJsonArray{QJsonObject{{"name", "plan.png"}, {"mime", "image/png"}, {"data_base64", QString::fromLatin1(png.toBase64())}}}}}));
+    QCOMPARE(status->text(), QString("Added om-n6 to the Alpha pool."));
     editor->setPlainText("Later idea"); more->menu()->actions().at(1)->trigger();
     QTRY_VERIFY(editor->toPlainText().isEmpty());
     request = creates().last(); request.remove("request_id");
     QCOMPARE(request, (QJsonObject{{"project", "alpha"}, {"prompt", "Later idea"}}));
-    QCOMPARE(status->text(), QString("Added om-n6 to Backlog."));
+    QCOMPARE(status->text(), QString("Added om-n7 to Backlog."));
 
     // A session whose computer Overmind does not know offers only the pool and
     // Backlog, and shows no queue: its count would be a guess.

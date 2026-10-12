@@ -602,6 +602,10 @@ void TestOvermindModel::boardsDecisionsQueuesAndHost()
     QCOMPARE(model.queueCount({}, "codex/demo"), 30);   // this machine: m1
     QCOMPARE(model.queueCount("m1", "claude/demo"), 0);
     QCOMPARE(model.queueCount("m1", {}), 0);
+    // One project's board: what the chip and the session row count.
+    QCOMPARE(model.queueCount("m1", "codex/demo", "demo"), 30);
+    QCOMPARE(model.queueCount({}, "codex/demo", "demo"), 30);
+    QCOMPARE(model.queueCount("m1", "codex/demo", "other"), 0);   // a board not watched
 
     QCOMPARE(model.decisions().size(), 1);
     const auto &decision = model.decisions()[0];
@@ -618,6 +622,8 @@ void TestOvermindModel::boardsDecisionsQueuesAndHost()
     QVERIFY(model.decisionsFor("m2", "codex/demo").isEmpty());
     QVERIFY(model.decisionsFor("m1", "claude/demo").isEmpty());
     QVERIFY(model.decisionsFor("m1", {}).isEmpty());
+    QCOMPARE(model.decisionsFor("m1", "codex/demo", "demo").size(), 1);
+    QVERIFY(model.decisionsFor("m1", "codex/demo", "other").isEmpty());
 
     // Another host clears what came from the previous one and asks it with @host.
     model.setIntervals(60000, 60000);

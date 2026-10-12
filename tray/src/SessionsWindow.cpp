@@ -97,6 +97,32 @@
 #include <algorithm>
 
 namespace {
+// The CLI titles a task after the prompt's first line. A draft that starts with
+// attachment references ("[Image #1]") is titled after the words that follow
+// them instead; empty when the CLI's own title is already right or nothing remains.
+QString taskTitle(const QString &prompt, const QList<MessageAttachment> &attachments)
+{
+    bool skipped = false;   // a line of references alone came first
+    for (const auto &raw : prompt.split(QLatin1Char('\n'))) {
+        QString line = raw.trimmed();
+        if (line.isEmpty()) continue;
+        bool stripped = false;
+        for (bool again = true; again;) {
+            again = false;
+            for (const auto &attachment : attachments)
+                if (!attachment.reference.isEmpty() && line.startsWith(attachment.reference)) {
+                    line = line.mid(attachment.reference.size()).trimmed(); stripped = again = true;
+                }
+        }
+        if (line.isEmpty()) { skipped = true; continue; }
+        if (!stripped && !skipped) return {};
+        // As the CLI's title: at most 200 characters, no control characters.
+        auto characters = line.toUcs4().mid(0, 200);
+        for (auto &character : characters) if (QChar::category(character) == QChar::Other_Control) character = ' ';
+        return QString::fromUcs4(reinterpret_cast<const char32_t *>(characters.constData()), characters.size()).trimmed();
+    }
+    return {};
+}
 
 enum Roles { KeyRole = SessionRoles::Key, TitleRole, MetaRole, StatusRole, DetailRole, AgentRole, HostRole, ChildrenRole };
 
@@ -989,7 +1015,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
-    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, agents, details and worktrees"), m_dark);
+    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show plan, agents, details and worktrees"), m_dark);
     tabs->setCornerWidget(m_inspectorToggle);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
@@ -1643,7 +1669,7 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setToolTip(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
+    m_inspectorToggle->setToolTip(visible ? tr("Collapse side panel") : tr("Show plan, agents, details and worktrees"));
     m_inspectorToggle->setAccessibleName(m_inspectorToggle->toolTip());
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
@@ -2410,8 +2436,9 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         // Overmind: a session whose computer is not known shows no queue rather than a guess.
         QString overmind; const bool known = m_overmind && s.state != "archived" && overmindKnown(e, &overmind);
-        const int queue = known ? m_overmind->queueCount(overmind, s.name) : 0;
-        const bool yourCall = known && !m_overmind->decisionsFor(overmind, s.name).isEmpty();
+        // The session's own project: what its chip and a click on it open.
+        const int queue = known ? m_overmind->queueCount(overmind, s.name, row.group) : 0;
+        const bool yourCall = known && !m_overmind->decisionsFor(overmind, s.name, row.group).isEmpty();
         item->setData(SessionRoles::Queue, queue); item->setData(SessionRoles::YourCall, yourCall);
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
@@ -2767,10 +2794,13 @@ void SessionsWindow::updateComposerTasks()
     const bool ready = known && m_overmind->isEnabled() && m_overmind->board(project).loaded
         && !(machine.isEmpty() && m_overmind->machine().isEmpty());
     if (!ready) { m_tasksChip->setActive(false); return; }
-    const int queue = m_overmind->queueCount(machine, entry->session.name);
-    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name);
+    // Only the session's own project counts: the board a click opens.
+    const int queue = m_overmind->queueCount(machine, entry->session.name, project);
+    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name, project);
+    // Nothing queued and no decision: no chip.
+    if (queue == 0 && decisions.isEmpty()) { m_tasksChip->setActive(false); return; }
     m_tasksChip->setLabels(tr("Tasks %1").arg(queue), QString::number(queue));
-    m_tasksChip->setTone(!decisions.isEmpty() ? ChipTone::Danger : queue > 0 ? ChipTone::Neutral : ChipTone::Quiet);
+    m_tasksChip->setTone(!decisions.isEmpty() ? ChipTone::Danger : ChipTone::Neutral);
     QStringList detail{queue == 0 ? tr("No tasks in this session's queue.")
                        : queue == 1 ? tr("1 task in this session's queue.") : tr("%1 tasks in this session's queue.").arg(queue)};
     for (const auto &decision : decisions) detail << tr("%1 waits for your call: %2").arg(decision.ref, decision.title);
@@ -2785,11 +2815,10 @@ void SessionsWindow::openSessionTasks()
     if (!entry || !m_tasks) return;
     const QString project = m_organization.groupFor(entry->identity), key = entry->key;
     QString machine; overmindKnown(*entry, &machine);
-    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name);
+    const auto decisions = m_overmind->decisionsFor(machine, entry->session.name, project);
     m_tasks->showProject(project, key);
     // A decision waiting on this session is what its Danger tone asks for.
-    for (const auto &decision : decisions)
-        if (decision.project == project && m_tasks->project() == project) { m_tasks->openTask(decision.task); break; }
+    if (!decisions.isEmpty() && m_tasks->project() == project) m_tasks->openTask(decisions.first().task);
 }
 
 void SessionsWindow::addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments,
@@ -2802,6 +2831,8 @@ void SessionsWindow::addTask(const QString &key, const QString &text, const QLis
     const auto *group = m_organization.group(project);
     const QString projectName = group ? group->name : project;
     QJsonObject request{{"project", project}, {"prompt", text}};
+    const QString title = taskTitle(text, attachments);
+    if (!title.isEmpty()) request.insert("title", title);
     if (!attachments.isEmpty()) {
         // Like hgs send, without the inline reference: the prompt carries it.
         QJsonArray images;
@@ -2824,14 +2855,15 @@ void SessionsWindow::addTask(const QString &key, const QString &text, const QLis
         request.insert("pinned", pinned);
     }
     const auto create = [this, key, destination, projectName](QJsonObject request) {
-        // A create that may have happened goes again with its request_id: the
-        // board then replays it instead of adding the task twice.
+        // A request that failed goes again with its request_id until it is
+        // added: the board replays a create that happened instead of adding
+        // the task twice, and evaluates one that did not anew.
         const QByteArray fingerprint = QCryptographicHash::hash(QJsonDocument(request).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256);
-        const auto previous = m_uncertainTasks.value(key);
-        if (!previous.requestId.isEmpty() && previous.fingerprint == fingerprint) request.insert("request_id", previous.requestId);
+        const QString previous = m_failedTasks.value(fingerprint);
+        if (!previous.isEmpty()) request.insert("request_id", previous);
         m_overmind->write("create", request, [this, key, destination, projectName, fingerprint](const OvermindModel::Result &result) {
             if (result.ok) {
-                m_uncertainTasks.remove(key);
+                m_failedTasks.remove(fingerprint); m_failedTaskOrder.removeAll(fingerprint);
                 const auto task = result.reply.value("task").toObject();
                 const QString ref = task.value("ref").toString().isEmpty() ? tr("the task") : task.value("ref").toString();
                 const QString message = destination == MessageComposer::TaskDestination::Queue ? tr("Added %1 to this session's queue.").arg(ref)
@@ -2841,10 +2873,12 @@ void SessionsWindow::addTask(const QString &key, const QString &text, const QLis
                 m_composer->taskAdded(key, true, message);
                 return;
             }
-            if (result.uncertain()) m_uncertainTasks.insert(key, {fingerprint, result.requestId});
-            else m_uncertainTasks.remove(key);
+            if (!result.requestId.isEmpty() && !m_failedTasks.contains(fingerprint)) {
+                m_failedTasks.insert(fingerprint, result.requestId); m_failedTaskOrder.append(fingerprint);
+                while (m_failedTaskOrder.size() > 64) m_failedTasks.remove(m_failedTaskOrder.takeFirst());
+            }
             m_composer->taskAdded(key, false, result.uncertain()
-                ? tr("The task board did not answer in time, so the task may have been added. Adding the same draft again does not add it twice.")
+                ? tr("The task board did not answer in time, so the task may have been added. Adding the same draft again while Zerus stays open does not add it twice.")
                 : tr("The task was not added: %1").arg(result.refusal.value("message").toString()));
         }, this);
     };

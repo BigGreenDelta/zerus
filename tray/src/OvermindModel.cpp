@@ -67,6 +67,8 @@ OvermindModel::Board boardFrom(const QString &project, const QJsonObject &reply)
     const auto tasks = reply.value(QStringLiteral("tasks")).toArray();
     board.tasks.reserve(tasks.size());
     for (const auto &value : tasks) board.tasks.append(taskFrom(value.toObject()));
+    for (const auto &task : std::as_const(board.tasks))
+        if (!task.queueOf.isEmpty()) ++board.queues[task.queueOf.machine + QLatin1Char('\n') + task.queueOf.name];
     return board;
 }
 
@@ -226,24 +228,25 @@ const OvermindModel::Board &OvermindModel::board(const QString &project) const
     return it == m_boards.constEnd() ? empty : *it;
 }
 
-int OvermindModel::queueCount(const QString &machine, const QString &session) const
+int OvermindModel::queueCount(const QString &machine, const QString &session, const QString &project) const
 {
     const QString &owner = machine.isEmpty() ? m_machine : machine;
     if (owner.isEmpty() || session.isEmpty()) return 0;
+    const QString key = owner + QLatin1Char('\n') + session;
+    if (!project.isEmpty()) return board(project).queues.value(key);
     int count = 0;
-    for (const auto &board : m_boards)
-        for (const auto &task : board.tasks)
-            if (task.queueOf.name == session && task.queueOf.machine == owner) ++count;
+    for (const auto &board : m_boards) count += board.queues.value(key);
     return count;
 }
 
-QList<OvermindModel::Decision> OvermindModel::decisionsFor(const QString &machine, const QString &session) const
+QList<OvermindModel::Decision> OvermindModel::decisionsFor(const QString &machine, const QString &session, const QString &project) const
 {
     const QString &owner = machine.isEmpty() ? m_machine : machine;
     QList<Decision> out;
     if (owner.isEmpty() || session.isEmpty()) return out;
     for (const auto &decision : m_decisions)
-        if (decision.assignee.name == session && decision.assignee.machine == owner) out.append(decision);
+        if (decision.assignee.name == session && decision.assignee.machine == owner && (project.isEmpty() || decision.project == project))
+            out.append(decision);
     return out;
 }
 

@@ -95,14 +95,17 @@ protected:
     }
 };
 
-// The arrow of Add as task: its width while there is room, none in the
-// composer's minimum, so a narrow column never has to widen for it.
+// The arrow of Add as task: its full width while there is room, and a narrow
+// but still usable one in the composer's minimum, so that a narrow column
+// keeps both the arrow and its other actions.
 class SplitArrow : public QPushButton {
 public:
     using QPushButton::QPushButton;
     QSize sizeHint() const override { return {24, 34}; }
-    QSize minimumSizeHint() const override { return {0, 34}; }
+    QSize minimumSizeHint() const override { return {18, 34}; }
 };
+// The narrow form of Add as task: its icon alone.
+constexpr int AddTaskIconWidth = 30;
 
 class ComposeEdit : public QPlainTextEdit {
 public:
@@ -241,7 +244,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_addTask = new QPushButton(tr("Add as task")); m_addTask->setObjectName("addAsTask"); m_addTask->setAccessibleName(tr("Add as task"));
     m_addTask->setFixedHeight(34); m_addTask->setIconSize(QSize(15, 15)); m_addTask->setAutoDefault(false);
     // Never widens the composer: a narrow one shows only the icon (resizeEvent).
-    m_addTask->setMinimumWidth(34);
+    m_addTask->setMinimumWidth(AddTaskIconWidth);
     m_addTaskMenu = new SplitArrow; m_addTaskMenu->setObjectName("addAsTaskMenu");
     m_addTaskMenu->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed); m_addTaskMenu->setFixedHeight(34); m_addTaskMenu->setMaximumWidth(24);
     m_addTaskMenu->setIconSize(QSize(12, 12)); m_addTaskMenu->setAutoDefault(false);
@@ -350,8 +353,8 @@ void MessageComposer::resizeEvent(QResizeEvent *event)
     m_narrow = narrow;
     // A narrow row keeps Add as task as its icon; the name stays its accessible name.
     m_addTask->setText(narrow ? QString() : tr("Add as task"));
-    if (narrow) m_addTask->setFixedWidth(34);
-    else { m_addTask->setMinimumWidth(34); m_addTask->setMaximumWidth(QWIDGETSIZE_MAX); }
+    if (narrow) m_addTask->setFixedWidth(AddTaskIconWidth);
+    else { m_addTask->setMinimumWidth(AddTaskIconWidth); m_addTask->setMaximumWidth(QWIDGETSIZE_MAX); }
     if (narrow) {
         m_actions->setStretch(1, 1);
         m_actions->removeWidget(m_status);
@@ -595,9 +598,15 @@ void MessageComposer::explainDisabled(const QString &reason)
 
 void MessageComposer::addTask(TaskDestination destination)
 {
-    if (m_key.isEmpty() || !m_taskActions) return;
-    auto *button = destination == TaskDestination::Queue ? m_addTask : m_addTaskMenu;
+    if (m_key.isEmpty()) return;
     const auto draft = m_drafts.value(m_key);
+    if (!m_taskActions) {
+        // A subagent's field: Alt+Enter neither adds nor sends; it says where tasks come from.
+        if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty())
+            explainDisabled(tr("Tasks are added from Main activity. Enter sends this message to the agent."));
+        return;
+    }
+    auto *button = destination == TaskDestination::Queue ? m_addTask : m_addTaskMenu;
     if (!button->isEnabled()) {
         // Like Send: a draft that cannot go says why, an empty field stays quiet.
         const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();

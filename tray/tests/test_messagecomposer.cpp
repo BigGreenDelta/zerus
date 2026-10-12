@@ -659,6 +659,7 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     const auto inRow = [&](const QWidget *widget) { return QRect(widget->mapTo(&composer, QPoint()), widget->size()); };
     QVERIFY(inRow(button).right() < inRow(add).left()); QVERIFY(inRow(add).right() < inRow(more).left() + 1);
     QVERIFY(inRow(more).right() < inRow(send).left());
+    QVERIFY2(more->width() >= 18, qPrintable(QString::number(more->width())));   // the arrow never vanishes
     composer.resize(720, 220); QTest::qWait(20);
     QCOMPARE(add->text(), QString("Add as task"));
     QVERIFY(inRow(button).right() < inRow(add).left()); QVERIFY(inRow(more).right() < inRow(send).left());
@@ -1258,11 +1259,15 @@ void TestMessageComposer::addAsTaskOffersPoolBacklogAndAltEnter()
     QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier); QCOMPARE(tasks.size(), 5);
     composer.setTaskAvailability(true);
     QVERIFY(add->isEnabled());
-    // A composer without task actions (a subagent's) shows none and Alt+Enter does nothing.
+    // A composer without task actions (a subagent's) shows none: Alt+Enter
+    // neither adds nor sends, and says where tasks are added instead.
     composer.setTaskActionsVisible(false);
     QVERIFY(!add->isVisible()); QVERIFY(!more->isVisible());
+    QToolTip::hideText();
     QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
     QCOMPARE(tasks.size(), 5); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(QToolTip::text(), QString("Tasks are added from Main activity. Enter sends this message to the agent."));
+    QCOMPARE(editor->toPlainText(), QString("Idea\n"));
 }
 
 void TestMessageComposer::toolbarPreview()

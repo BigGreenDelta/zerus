@@ -364,10 +364,13 @@ private:
     ToolbarChip *m_tasksChip = nullptr;
     QStringList m_listedProjects;   // projects of the sessions in the list
     bool m_overmindRefreshPending = false;
-    // An Add as task that timed out, per session: the same request again
-    // reuses its request_id, so the board replays it instead of adding twice.
-    struct UncertainTask { QByteArray fingerprint; QString requestId; };
-    QHash<QString, UncertainTask> m_uncertainTasks;
+    // Add as task requests that failed (or had no answer in time), by a hash
+    // of the request: the same request again reuses its request_id until it
+    // succeeds, so the board replays a create that happened instead of adding
+    // the task twice. Keyed by content, so a session rename does not lose it;
+    // the oldest are forgotten first. Kept while the window lives.
+    QHash<QByteArray, QString> m_failedTasks;
+    QList<QByteArray> m_failedTaskOrder;
     QWidget *m_nativeSignIn = nullptr;
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;
