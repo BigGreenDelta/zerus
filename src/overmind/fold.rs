@@ -240,6 +240,7 @@ fn create(uuid: &str, event: &Event, wf: &Workflow) -> Option<Task> {
     Some(task)
 }
 
+/// Every refusal comes before the first change, so a rejected event leaves only its `[rejected]` entry.
 fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refusal> {
     let p: Transition = serde_json::from_value(event.payload.clone())
         .map_err(|_| Refusal::new("invalid_event", INVALID_EVENT))?;
@@ -288,17 +289,17 @@ fn transition(task: &mut Task, event: &Event, wf: &Workflow) -> Result<(), Refus
             task.journal("[unclaim]", text("reason"), event);
         }
         Action::Advance => {
+            if to_role == Role::Review && task.labels.contains("bug") && text("root_cause").is_empty() {
+                return Err(Refusal::field(
+                    "missing_field",
+                    "root_cause",
+                    "missing",
+                    "a bug needs `root_cause` before review",
+                ));
+            }
             // Any re-entry clears verdicts, including the one into Review.
             task.clear_verdicts();
             if to_role == Role::Review {
-                if task.labels.contains("bug") && text("root_cause").is_empty() {
-                    return Err(Refusal::field(
-                        "missing_field",
-                        "root_cause",
-                        "missing",
-                        "a bug needs `root_cause` before review",
-                    ));
-                }
                 let mut body = format!("Worklog: {}\nEvidence: {}", text("worklog"), text("evidence"));
                 if !text("root_cause").is_empty() {
                     body = format!("Root cause: {}\n{body}", text("root_cause"));
@@ -779,6 +780,27 @@ mod tests {
         assert_eq!(task.rejections[&no_cause.id].field, "root_cause");
         assert_eq!(task.rejections[&self_review.id].code, "not_reviewer");
         assert!(task.labels.contains("reviewed"));
+    }
+
+    #[test]
+    fn a_rejected_advance_keeps_the_verdict() {
+        let c = created("Queue");
+        let bug = ev(A, 2, 2, human(), "label_set", "", json!({"label": "bug", "present": true}));
+        let claim = transition(A, 3, 3, human(), &c.id, "claim", "Design", json!({}), session("w1"));
+        let spec = transition(A, 4, 4, agent("w1"), &claim.id, "advance", "Build", json!({"spec": "s"}), Value::Null);
+        let review = transition(A, 5, 5, agent("w1"), &spec.id, "advance", "Review", json!({"worklog": "w", "evidence": "e", "root_cause": "r"}), Value::Null);
+        let reviewer = ev(A, 6, 6, human(), "reviewer_set", "", json!({"session": session("w2")}));
+        let needs_work = transition(A, 7, 7, agent("w2"), &review.id, "needs_work", "Build", json!({"report": "fix"}), Value::Null);
+        let no_cause = transition(A, 8, 8, agent("w1"), &needs_work.id, "advance", "Review", json!({"worklog": "w", "evidence": "e"}), Value::Null);
+        let events = [c, bug, claim, spec, review, reviewer, needs_work.clone(), no_cause.clone()];
+        let task = run(&events);
+        assert_eq!(task.rejections[&no_cause.id].field, "root_cause");
+        assert_eq!((task.stage.as_str(), task.head.as_str()), ("Build", needs_work.id.as_str()));
+        assert!(task.labels.contains("review-failed"));
+        let fixed = transition(A, 9, 9, agent("w1"), &needs_work.id, "advance", "Review", json!({"worklog": "w", "evidence": "e", "root_cause": "r"}), Value::Null);
+        let mut events = events.to_vec();
+        events.push(fixed);
+        assert!(!run(&events).labels.contains("review-failed"));
     }
 
     #[test]
