@@ -24,7 +24,11 @@ object MachineCatalog {
         hgsVersion = (raw.optJSONObject("snapshot")?.opt("hgs_version") as? String)
             ?.takeIf { it.length <= 128 && versionFormat.matches(it) }.orEmpty(),
         mobileDelivery = MobileDelivery.parse(raw.optJSONObject("snapshot")),
-        lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 })
+        lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }, nodeId = nodeId(raw))
+
+    /** The relay's verified machine UUID, else the native catalog's node: Overmind names sessions by it. */
+    fun nodeId(raw: JSONObject): String = listOf(raw.opt("machine_id"), raw.optJSONObject("snapshot")?.optJSONObject("mobile_projects")?.opt("node_id"))
+        .firstNotNullOfOrNull { value -> (value as? String)?.takeIf(OvermindDigests::canonical) }.orEmpty()
 
     /** Relay availability only; an offline row is never a usable target. */
     fun status(machine: Machine): String = when {

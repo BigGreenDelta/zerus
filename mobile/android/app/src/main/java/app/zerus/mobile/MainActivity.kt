@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
     CompositionLocalProvider(LocalConversationObscuration provides obscuration) {
         ZerusAppContent(model,invitation,updateRequest,onInvitationUsed,onNotifications,onLive,onAttach)
         AttachmentViewerHost(model.attachments)
+        OvermindTasksHost(model)
     }
 }
 
@@ -489,6 +490,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Tag("$count ${if (count == 1) "session" else "sessions"}", accent)
                         if (project.stale) Tag("Last known catalog", Amber)
                         if (!project.catalogued) Tag("Folder", Muted)
+                        OvermindProjectBadges(model, project)
                     }
                     ProjectFoldersPreview(model,project,Muted)
                     if (model.connections.size > 1) Text(model.connections.find { it.id == project.key.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall)
@@ -507,6 +509,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (project.stale) Text("Last known project catalog", color = Amber, style = MaterialTheme.typography.bodySmall)
         Text("$count ${if (count == 1) "session" else "sessions"} across ${project.computers.size} ${if (project.computers.size == 1) "machine" else "machines"}", color = Muted)
         Button(onClick = onViewSessions, modifier = Modifier.fillMaxWidth()) { Icon(DesktopIcons.Sessions, null); Spacer(Modifier.width(8.dp)); Text("View sessions") }
+        OvermindProjectTasksButton(model, project)
         Text("Folders", style = MaterialTheme.typography.titleLarge)
         ProjectFolderDetails(model,project,Surface,Muted)
     }
@@ -545,6 +548,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     DisposableEffect(listState, scrollScope, scrollReset) { onDispose { model.saveSessionScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, scrollScope, scrollReset) } }
     var machineDialog by remember { mutableStateOf(false) }
+    if (!model.demo) OvermindWatchBoards(model, visible)
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -619,6 +623,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
+                        OvermindSessionBadges(model, session)
                         SessionCheckoutLine(session)
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
@@ -1093,6 +1098,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
+        OvermindComposerNotice(model, session)
         if (model.pickerDraft?.target == target) Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (model.attachmentImporting) "Saving selected files…" else "File selection is pending.", Modifier.weight(1f), color = Muted, style = MaterialTheme.typography.labelSmall)
             TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel") }
@@ -1105,6 +1111,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     enabled = !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
                 }
+                OvermindAddAsTask(model, session) { model.edit(target, editor.text.toString()) }
                 BasicTextField(state = editor, modifier = Modifier.weight(1f).padding(horizontal = 3.dp, vertical = 10.dp)
                     .heightIn(max = if (expanded) 280.dp else 168.dp).focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },
                     readOnly = draft.status != "editing" || model.demo,
@@ -1243,7 +1250,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         if(sessionActions.isNotEmpty()) item { Text("Native actions",style = MaterialTheme.typography.titleMedium) }
         items(sessionActions.sortedByDescending { it.createdAt },key = { "action:" + it.requestId }) { action -> SessionActionRecoveryCard(model,action) }
-        if (unsent.isEmpty() && unresolved.isEmpty() && contextOperations.isEmpty() && sessionActions.isEmpty()) item { Text("Your unsent messages will appear here.", color = Muted, modifier = Modifier.padding(vertical = 32.dp)) }
+        val taskChanges = model.overmindWrites.any { it.pending || it.status == "failed" }
+        if (taskChanges) item(key = "overmind:changes") { OvermindTaskChanges(model) }
+        if (unsent.isEmpty() && unresolved.isEmpty() && contextOperations.isEmpty() && sessionActions.isEmpty() && !taskChanges) item { Text("Your unsent messages will appear here.", color = Muted, modifier = Modifier.padding(vertical = 32.dp)) }
     }
     reviewContext?.let { operation -> ContextOperationReview(model, operation, onDismiss = { reviewContext = null }) }
 }

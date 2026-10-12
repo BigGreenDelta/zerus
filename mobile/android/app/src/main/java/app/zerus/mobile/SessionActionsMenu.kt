@@ -39,7 +39,9 @@ data class SessionMenuRead(val unavailable: String = "", val canMark: Boolean = 
 /** Exact row facts captured by the view model. [supported] is the gateway and computer operation intersection. */
 data class SessionMenuFacts(val target: Target, val row: JSONObject, val state: String, val archived: Boolean, val online: Boolean,
     val supported: Set<String>, val blocked: String = "", val busy: String = "", val needsAttention: Boolean = false,
-    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "")
+    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "",
+    /** Send a task here: null hides it (no Tasks for this session), "" offers it, any other text disables it. */
+    val tasks: String? = null)
 /** A native action chosen in Sessions, consumed once by the conversation header it opened. */
 data class SessionMenuRequest(val target: Target, val operation: String, val navigation: Long)
 
@@ -56,6 +58,8 @@ object SessionActionsMenu {
         return listOf(
             if (archived) emptyList() else listOf(SessionMenuItem("terminal","Open terminal",terminalReason(facts))),
             if (archived || facts.target.agentId.isNotBlank()) emptyList() else listOf(readItem(facts)),
+            if (archived || facts.tasks == null) emptyList() else listOf(SessionMenuItem("send_task","Send a task here…",facts.blocked.ifBlank { facts.tasks },
+                "Choose a Queue task of this project; nothing is sent until you confirm.")),
             buildList {
                 add(if (archived) native("restore","Restore session…") else if (running) native("pause","Pause session…") else native("resume","Resume session…"))
                 add(native("rename","Rename…"))
@@ -150,6 +154,7 @@ internal fun Modifier.sessionCardGestures(shape: Shape, onOpen: () -> Unit, onAc
                         "copy_reference" -> SessionReference.create(target,model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }
                             ?.nativeName.orEmpty())?.let { clipboard.setText(AnnotatedString(it)) }
                         "copy_folder" -> current.raw.string("cwd").takeIf { it.isNotBlank() }?.let { clipboard.setText(AnnotatedString(it)) }
+                        "send_task" -> model.tasks.chooseTaskFor(current)
                         else -> model.openWithSessionAction(current,item.id)
                     }
                 } }
@@ -160,6 +165,7 @@ internal fun Modifier.sessionCardGestures(shape: Shape, onOpen: () -> Unit, onAc
 
 private fun menuIcon(id: String): ImageVector = when (id) {
     "terminal" -> Icons.Default.Terminal
+    "send_task" -> Icons.Default.AddTask
     "mark_read" -> Icons.Default.DoneAll
     "clear_reminder" -> Icons.Default.NotificationsOff
     "review_later" -> Icons.Default.MarkEmailUnread

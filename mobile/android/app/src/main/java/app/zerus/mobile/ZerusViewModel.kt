@@ -516,6 +516,69 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (write.requestId in overmindFlights) return
         try { editState { OvermindWrites.review(it, write.requestId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
+    /** The Tasks screens: boards, cards, images and messages, kept per workspace and dropped on disconnect. */
+    val tasks = OvermindTasks(viewModelScope, overmind, ::overmindTarget, { connection, action, request, files, settled ->
+        submitOvermindWrite(connection, action, request, files, settled) }) { write, settled -> retryOvermindWrite(write, settled) }
+    fun tasksAvailable(connectionId: String) = overmindTarget(connectionId) != null
+    /** The Overmind project of a phone project, or null when Tasks are hidden for it. */
+    fun overmindProject(project: ProjectSummary?): String? = OvermindEntry.project(project != null && tasksAvailable(project.key.connectionId), project)
+    fun overmindProject(session: Session): String? = OvermindEntry.project(tasksAvailable(session.target.connectionId), session, projects)
+    fun overmindSession(session: Session): OvermindSession? = OvermindSessions.ref(session, machines)
+    /** The digest of the gateway that serves Tasks for this workspace; its `rev` tells when boards are stale. */
+    fun overmindDigest(connectionId: String): OvermindDigest? = overmindGateway(connectionId)?.let { overmindDigests[MachineKey(connectionId, it.id)] }
+    fun overmindProjectName(connectionId: String, project: String) =
+        projects.find { it.key.connectionId == connectionId && it.catalogued && it.key.id == project }?.name ?: project.ifEmpty { "Tasks" }
+    /** Add as task: the composer's draft becomes a task; it clears only once the task was added and the draft is unchanged. */
+    fun addAsTask(target: Target, destination: OvermindDestination) {
+        val session = sessions.find { it.target == target } ?: return
+        val project = overmindProject(session) ?: run { error = OvermindTasks.UNAVAILABLE; return }
+        val captured = draft(target)
+        if (demo || !storageReady || updateInstallPreparing || captured.status != "editing") return
+        OvermindRequests.addReason(captured.text, captured.attachments).takeIf { it.isNotBlank() }?.let { error = it; return }
+        val ref = overmindSession(session)
+        if (destination == OvermindDestination.Queue && ref == null) { error = OvermindRequests.UNKNOWN_MACHINE; return }
+        tasks.addAsTask(target.key, target.connectionId, project, captured.text, captured.attachments, destination, ref) { clearAddedDraft(captured) }
+    }
+    /** Retries an unconfirmed Add as task with its own request_id; the draft clears once added if it still holds that prompt. */
+    fun retryAddAsTask(target: Target, write: OvermindWrite) {
+        if (!write.retryable || write.action != "create") return
+        val captured = draft(target)
+        val prompt = runCatching { JSONObject(write.request).optString("prompt") }.getOrDefault("")
+        tasks.retry(write, OvermindWriteContext("the task", done = "Added the task."), { tasks.notify(target.key, it) }) {
+            if (it.status == "completed" && captured.text == prompt) clearAddedDraft(captured)
+        }
+    }
+    private fun clearAddedDraft(captured: Draft) {
+        val current = drafts.find { it.key == captured.key } ?: return
+        if (current.generation != captured.generation || current.revision != captured.revision || current.status != "editing") return
+        emptyDrafts.remove(Triple(captured.target, captured.questionId, captured.questionHash))
+        try { editState { state -> state.copy(drafts = state.drafts.filterNot { it.key == captured.key && it.revision == captured.revision }) }; flushDrafts() }
+        catch (e: Exception) { error = e.message.orEmpty(); return }
+        releaseOvermindFiles(captured.attachments)
+    }
+    /** Removes saved image copies that no draft, outbox entry or Overmind write names any more. */
+    fun releaseOvermindFiles(files: List<Attachment>) {
+        if (files.isEmpty()) return
+        viewModelScope.launch { val protected = protectedAttachmentIds(); files.forEach { if (it.id !in protected) runCatching { attachmentStore.remove(it.id, protected) } } }
+    }
+    /** Saves picked images for a task edit. Only files whose bytes are a picture are kept: names and types are not trusted. */
+    fun importOvermindImages(uris: List<Uri>, onImported: (List<Attachment>) -> Unit) {
+        if (uris.isEmpty() || demo || !storageReady || attachmentImporting) return
+        viewModelScope.launch {
+            val added = mutableListOf<Attachment>()
+            try {
+                require(uris.size <= AttachmentPolicy.MAX_FILES) { "A task holds at most ${AttachmentPolicy.MAX_FILES} images." }
+                for (uri in uris) {
+                    val file = attachmentStore.importDocument(uri, added).also { added += it }
+                    val head = java.io.ByteArrayOutputStream()
+                    attachmentStore.decrypt(file) { chunk -> if (head.size() < 64) head.write(chunk, 0, minOf(chunk.size, 64 - head.size())) }
+                    require(file.mime.startsWith("image/") && OvermindImages.format(head.toByteArray()) != null) { "${file.name} is not a picture." }
+                }
+                onImported(added.toList())
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = "The images were not added. ${e.message.orEmpty()}"; releaseOvermindFiles(added) }
+        }
+    }
     private val frames = LinkedHashMap<String, Frame>(24, 0.75f, true)
     private val inspections = mutableMapOf<String, Pair<Target, Deferred<Frame>>>()
     private var presentationJob: Job? = null
@@ -1317,7 +1380,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SessionActionsMenu.items(SessionMenuFacts(target,session.raw,SessionFilters.state(session),SessionFilters.archived(session),online,
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
-            SessionReference.create(target,machine?.nativeName.orEmpty()),session.raw.string("cwd")))
+            SessionReference.create(target,machine?.nativeName.orEmpty()),session.raw.string("cwd"),
+            OvermindEntry.sendTaskReason(tasksAvailable(target.connectionId),session,projects,machines)))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
@@ -1663,6 +1727,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
             runCatching { overmind.purgeWorkspace(connection.id) }
+            tasks.purge(connection.id)
             overmindDigests = overmindDigests.filterKeys { it.connectionId != connection.id }
             if (overmindOpenRequest?.connectionId == connection.id) overmindOpenRequest = null
             attachments.clear()
