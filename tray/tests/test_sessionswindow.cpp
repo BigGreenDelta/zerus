@@ -3842,8 +3842,29 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
     add("o6d5f", "Drop the old migration", "Backlog", {{"priority", 0}, {"markers", QJsonArray{"orphaned"}}});
     add("h2k9l", "Ship 1.4", "Done", {});
     add("c3x8m", "Dark charts", "Icebox", {});
+    // The default workflow's rules (src/overmind/workflow.rs), so the card shows the actions it really has.
+    QJsonArray rules;
+    const auto rule = [&rules](const QString &action, const QStringList &from, const QString &to, const QStringList &actors,
+                               const QStringList &requires = {}, bool own = false) {
+        rules.append(QJsonObject{{"action", action}, {"from", QJsonArray::fromStringList(from)}, {"to", to},
+                                 {"actors", QJsonArray::fromStringList(actors)}, {"requires", QJsonArray::fromStringList(requires)}, {"own", own}});
+    };
+    const QStringList working{"Backlog", "Queue", "Design", "Build", "Review", "Your Call"};
+    rule("create", {}, "Backlog", {"human", "manager"}); rule("create", {}, "Backlog", {"agent"}, {"breaks"});
+    rule("create", {}, "Queue", {"human", "manager"}); rule("create", {}, "Queue", {"agent"}, {"decomposed_from"});
+    rule("move", {"Backlog"}, "Queue", {"human"}); rule("move", {"Queue"}, "Backlog", {"human"});
+    rule("claim", {"Queue"}, "Design", {"human", "autopilot"});
+    rule("advance", {"Design"}, "Build", {"agent"}, {"spec"}, true); rule("advance", {"Build"}, "Review", {"agent"}, {"worklog", "evidence"}, true);
+    rule("call_human", {"Design", "Build"}, "Your Call", {"agent"}, {"question"}, true);
+    rule("answer", {"Your Call"}, "@resume", {"human"}, {"answer"});
+    rule("return", {"Backlog", "Queue", "Design", "Build", "Your Call"}, "Backlog", {"agent"}, {"reason"}, true);
+    rule("decompose", {"Design", "Build"}, "Backlog", {"agent"}, {}, true);
+    rule("approve", {"Review"}, "Review", {"agent", "human"}, {"report"}); rule("needs_work", {"Review"}, "Build", {"agent", "human"}, {"report"});
+    rule("done", {"Review"}, "Done", {"human"}); rule("unclaim", {"Design", "Build"}, "Queue", {"human", "autopilot"});
+    rule("move", working, "Icebox", {"human"}); rule("move", {"Icebox"}, "Backlog", {"human"}); rule("move", {"Icebox"}, "Queue", {"human"});
+    rule("reopen", {"Done"}, "Queue", {"human"});
     QFile board(hgs + ".board"); QVERIFY(board.open(QIODevice::WriteOnly));
-    board.write(QJsonDocument(QJsonObject{{"workflow", QJsonObject{{"version", 1}, {"stages", stages}, {"rules", QJsonArray()},
+    board.write(QJsonDocument(QJsonObject{{"workflow", QJsonObject{{"version", 1}, {"stages", stages}, {"rules", rules},
         {"evidence", "git_sha_or_text"}, {"session_wip", 1}}}, {"tasks", tasks}}).toJson(QJsonDocument::Compact)); board.close();
     const QByteArray organization = R"({"projects":[
         {"id":"alpha","name":"Alpha","color":"#e5484d","sessions":["arch\ncodex/hgs/dashboard"]},
@@ -3961,7 +3982,7 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-yourcall.png"));
         view->openTask("m2q8a"); QTest::qWait(150);
         // A refused drop: the card stays and the reason shows above the board.
-        view->dropTask("s8g4z", "Review", {});
+        view->dropTask("s8g4z", "Queue", {});
         QTRY_VERIFY(window.findChild<QLabel *>("tasksMessage")->isVisible());
         QVERIFY(window.grab().save(directory + "/tasks-window-" + theme + "-refused.png"));
         window.resize(1760, 760); QTest::qWait(150);

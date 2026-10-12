@@ -85,7 +85,6 @@ public:
         QString key, project, host;   // as in Selection
         OvermindModel::Session session;   // machine "" = unknown: offered, but disabled
         QString status;               // the session's state as the window shows it ("Working", "Ready", ...)
-        bool working = false;
     };
     // A write, and what the message bar says about it.
     struct Write {
@@ -134,6 +133,8 @@ public:
     bool isDelivering(const QString &uuid) const { return m_delivering.value(uuid) > 0; }
     // Asks before a destructive action: Cancel is the default.
     static bool confirm(QWidget *parent, const QString &title, const QString &text, const QString &accept);
+    // A message about the open card in the message bar (an error by default).
+    void notify(const QString &text, bool error = true);
 
 signals:
     // A card was opened: clicked on the board or in the Your Call strip.
@@ -144,6 +145,7 @@ signals:
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void setProject(const QString &project, bool persist);
@@ -176,6 +178,9 @@ private:
     void showCardMenu(const QString &uuid, const QPoint &global);
     // Shows the panel of the open card, if any, at its remembered width.
     void showPanel(const QString &uuid);
+    // Shares the width between the board and the panel: the board keeps at
+    // least a column; too narrow for both, the panel takes the board's place.
+    void layoutPanel(bool opening);
     // Marks the open card's Your Call button.
     void markDecisions();
     enum class Tone { Info, Warning, Error };
@@ -210,7 +215,6 @@ private:
     QString m_resolveTask;                        // the task Resolve delivery opens
     QList<Recipient> m_recipients;
     QHash<QString, int> m_delivering;             // delivering writes running, per task
-    bool m_panelSized = false;
 
     QComboBox *m_projects;
     QLineEdit *m_filter;

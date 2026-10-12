@@ -1,5 +1,7 @@
 #include <QtTest>
 #include <QApplication>
+#include <QBuffer>
+#include <QClipboard>
 #include <QComboBox>
 #include <QFile>
 #include <QFrame>
@@ -127,7 +129,8 @@ QJsonObject workflow(const QList<QPair<QString, QString>> &stages)
         // An agent's move and a move that needs a field are not a person's drag.
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Doing"}}, {"to", "Later"}, {"actors", QJsonArray{"agent"}}},
         QJsonObject{{"action", "move"}, {"from", QJsonArray{"Inbox"}}, {"to", "Later"}, {"actors", QJsonArray{"human"}}, {"requires", QJsonArray{"reason"}}},
-        QJsonObject{{"action", "done"}, {"from", QJsonArray{"Check"}}, {"to", "Shipped"}, {"actors", QJsonArray{"human"}}}};
+        QJsonObject{{"action", "done"}, {"from", QJsonArray{"Check"}}, {"to", "Shipped"}, {"actors", QJsonArray{"human"}}},
+        QJsonObject{{"action", "move"}, {"from", QJsonArray{"Check"}}, {"to", "Later"}, {"actors", QJsonArray{"human"}}}};
     return {{"version", 1}, {"stages", list}, {"rules", rules}, {"evidence", "text"}, {"session_wip", 1}};
 }
 
@@ -212,6 +215,19 @@ struct Fixture {
         }
         return out;
     }
+    // The `@host` of each call of the command, "" for a local one.
+    QStringList hosts(const QString &words) const
+    {
+        QStringList out;
+        QFile file(dir.filePath("calls"));
+        if (!file.open(QIODevice::ReadOnly)) return out;
+        for (const auto &line : file.readAll().split('\n')) {
+            auto argv = QJsonDocument::fromJson(line).object()["argv"].toVariant().toStringList();
+            const QString host = !argv.isEmpty() && argv.first().startsWith('@') ? argv.takeFirst().mid(1) : QString();
+            if (argv.mid(1, argv.size() - 2).join(' ') == words) out << host;
+        }
+        return out;
+    }
 };
 
 // Columns in display order, left to right.
@@ -291,15 +307,15 @@ bool takes(QWidget *target, QFrame *column, const QString &uuid, bool *lit = nul
 // The sessions a card can go to: the window passes every session it knows.
 QList<TasksView::Recipient> recipients()
 {
-    const auto make = [](const QString &project, const QString &machine, const QString &name, const QString &status, bool working) {
+    const auto make = [](const QString &project, const QString &machine, const QString &name, const QString &status) {
         TasksView::Recipient recipient;
         recipient.key = machine + '\n' + name; recipient.project = project; recipient.session = {machine, name};
-        recipient.status = status; recipient.working = working;
+        recipient.status = status;
         return recipient;
     };
-    return {make("demo", "m1", "codex/demo/one", "Working", true), make("demo", "m1", "claude/demo/review", "Ready", false),
-            make("demo", "m2", "codex/demo/two", "Ready", false), make("other", "m1", "codex/other/one", "Ready", false),
-            make("demo", "", "kimi/demo/far", "Ready", false)};
+    return {make("demo", "m1", "codex/demo/one", "Working"), make("demo", "m1", "claude/demo/review", "Ready"),
+            make("demo", "m2", "codex/demo/two", "Ready"), make("other", "m1", "codex/other/one", "Ready"),
+            make("demo", "", "kimi/demo/far", "Ready")};
 }
 
 // A view on the demo board with codex/demo/one selected, waiting for the cards.
@@ -324,8 +340,10 @@ struct Board {
     {
         const int before = f.calls("show").size();
         view->openTask(uuid);
-        return QTest::qWaitFor([&] { return f.calls("show").size() > before && find<QWidget>("taskPanel")->property("task").toString() == uuid
-                                           && find<QWidget>("taskPanel")->property("loaded").toBool(); });
+        const bool shown = QTest::qWaitFor([&] { return f.calls("show").size() > before && find<QWidget>("taskPanel")->property("task").toString() == uuid
+                                                       && find<QWidget>("taskPanel")->property("loaded").toBool(); });
+        QCoreApplication::processEvents();   // menus fill on the next turn
+        return shown;
     }
     QLabel *message() const { return find<QLabel>("tasksMessage"); }
     QPushButton *anyway() const { return find<QPushButton>("tasksSendAnyway"); }
@@ -401,6 +419,9 @@ private slots:
     void uncertainDeliveriesOfferResolve();
     void cardMenuMovesByKeyboard();
     void promptDraftSurvivesChanges();
+    void panelSharesTheWidth();
+    void imagesOpenOnlyAsPictures();
+    void imagesAddPasteAndRemove();
 private:
     std::unique_ptr<QTemporaryDir> m_settings;
 };
@@ -1103,6 +1124,32 @@ void TestTasksView::panelEditsRunTheirCommands()
     QCOMPARE(plain(b.f.calls("unpin").last()), (QJsonObject{{"task", "t2"}}));
     // Leaving the title field after Enter wrote nothing more.
     QCOMPARE(b.f.calls("edit").size(), 3);
+    // A refused title stays in the field, also when the board changes; Enter tries it again.
+    QVERIFY(b.show("t3"));
+    QVERIFY(b.f.put("refuse-edit.json", R"({"ok":false,"error":{"code":"invalid_field","message":"the title is not accepted","field":"title","state":"invalid"}})"));
+    title->setFocus();
+    title->selectAll();
+    QTest::keyClicks(title, "Pool task");
+    QTest::keyClick(title, Qt::Key_Return);
+    QTRY_COMPARE(b.message()->text(), QString("the title is not accepted"));
+    QCOMPARE(title->text(), QString("Pool task"));
+    auto board = demoBoard();
+    auto tasks = board["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["uuid"] == "t3") { task["title"] = "From the pool, renamed"; tasks[i] = task; }
+    }
+    board["tasks"] = tasks;
+    QVERIFY(b.f.put("board-demo.json", compact(board)));
+    QVERIFY(b.f.put("rev", "100"));
+    QTRY_COMPARE(card(*b.view, "t3")->data(TaskRoles::Title).toString(), QString("From the pool, renamed"));
+    QTest::qWait(100);
+    QCOMPARE(title->text(), QString("Pool task"));
+    QVERIFY(QFile::remove(b.f.dir.filePath("refuse-edit.json")));
+    title->setFocus();
+    QTest::keyClick(title, Qt::Key_Return);
+    QTRY_COMPARE(b.f.calls("edit").size(), 5);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t3"}, {"title", "Pool task"}}));
 }
 
 // Actions run send, review-send, rework-send, answer, move, done and
@@ -1274,7 +1321,7 @@ void TestTasksView::destructiveActionsAskFirst()
     QCOMPARE(actionData(move->menu()), QStringList{"Ready"});
     dialogs.answer(false);
     action(move->menu(), "Ready")->trigger();
-    QCOMPARE(dialogs.texts.size(), 3);
+    QTRY_COMPARE(dialogs.texts.size(), 3);
     QVERIFY2(dialogs.texts.last().contains("om-t5") && dialogs.texts.last().contains("codex/demo/one"), qPrintable(dialogs.texts.last()));
     QTest::qWait(150);
     QVERIFY(b.f.calls("move").isEmpty());
@@ -1298,6 +1345,15 @@ void TestTasksView::destructiveActionsAskFirst()
     QTRY_COMPARE(b.f.calls("move").size(), 2);
     QVERIFY2(dialogs.texts.last().contains("Reopen om-t8"), qPrintable(dialogs.texts.last()));
     QCOMPARE(plain(b.f.calls("move").last()), (QJsonObject{{"task", "t8"}, {"to", "Ready"}}));
+    // Moving a task out of review while a session reviews it; Done does not ask.
+    QVERIFY(b.show("t6"));
+    QCOMPARE(actionData(move->menu()), (QStringList{"Shipped", "Later"}));
+    dialogs.answer(false);
+    action(move->menu(), "Later")->trigger();
+    QTRY_COMPARE(dialogs.texts.size(), 7);
+    QVERIFY2(dialogs.texts.last().contains("om-t6") && dialogs.texts.last().contains("claude/demo/review"), qPrintable(dialogs.texts.last()));
+    QTest::qWait(150);
+    QCOMPARE(b.f.calls("move").size(), 2);
     // Not delivered takes the send back.
     QVERIFY(b.show("t5"));
     dialogs.answer(false);
@@ -1322,7 +1378,7 @@ void TestTasksView::destructiveActionsAskFirst()
     QCOMPARE(prompt->toPlainText(), QString("Prompt of From the pool"));
     QVERIFY(!discard->isVisible());
     QVERIFY(b.f.calls("edit").isEmpty());
-    QCOMPARE(dialogs.texts.size(), 10);
+    QCOMPARE(dialogs.texts.size(), 11);
     for (const auto &text : std::as_const(dialogs.texts)) QVERIFY2(!text.isEmpty() && !text.startsWith("unexpected"), qPrintable(text));
 }
 
@@ -1354,6 +1410,13 @@ void TestTasksView::uncertainDeliveriesOfferResolve()
     QTRY_VERIFY(resolve->isVisible());
     QCOMPARE(b.message()->text(), QString("The review request for om-t6 may not have reached codex/demo/one: the session did not confirm the input. "
                                           "Check the task before sending it again."));
+    // An edit meanwhile leaves the warning and its offer in place.
+    QTest::keyClicks(b.find<QLineEdit>("taskLabelAdd"), "later");
+    QTest::keyClick(b.find<QLineEdit>("taskLabelAdd"), Qt::Key_Return);
+    QTRY_COMPARE(b.f.calls("label").size(), 1);
+    QTest::qWait(200);
+    QVERIFY(resolve->isVisible());
+    QVERIFY(b.message()->text().startsWith("The review request for om-t6"));
     // A deadline: it may have been sent. The panel cannot send it again meanwhile.
     QVERIFY(b.f.put("sleep-send", "1.5"));
     auto timeouts = b.f.model->timeouts(); timeouts.deliveryLocal = 300; b.f.model->setTimeouts(timeouts);
@@ -1394,11 +1457,11 @@ void TestTasksView::cardMenuMovesByKeyboard()
     check->setCurrentItem(card(*b.view, "t6"));
     QTest::keyClick(check, Qt::Key_F10, Qt::ShiftModifier);
     QTRY_VERIFY((menu = b.view->findChild<QMenu *>("taskCardMenu")) && menu->isVisible());
-    QCOMPARE(actionData(menu->findChild<QMenu *>("taskMoveMenu")), QStringList{"Shipped"});
+    QCOMPARE(actionData(menu->findChild<QMenu *>("taskMoveMenu")), (QStringList{"Shipped", "Later"}));
     action(menu, "open")->trigger();
     QCOMPARE(b.view->openedTask(), QString("t6"));
     QTRY_VERIFY(b.panel()->isVisible());
-    QCOMPARE(actionData(b.find<QPushButton>("taskMove")->menu()), QStringList{"Shipped"});
+    QTRY_COMPARE(actionData(b.find<QPushButton>("taskMove")->menu()), (QStringList{"Shipped", "Later"}));
     menu->close();
 }
 
@@ -1427,6 +1490,16 @@ void TestTasksView::promptDraftSurvivesChanges()
     QTRY_COMPARE(b.find<QLineEdit>("taskTitle")->text(), QString("From the pool, renamed"));
     QTRY_VERIFY(note->isVisible());
     QVERIFY2(note->text().contains("changed"), qPrintable(note->text()));
+    QVERIFY(note->property("warning").toBool());
+    QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
+    // The version saved now is shown on request; the draft stays.
+    auto *showCurrent = b.find<QPushButton>("taskPromptShowCurrent");
+    auto *saved = b.find<QPlainTextEdit>("taskPromptCurrent");
+    QVERIFY(showCurrent->isVisible());
+    QVERIFY(!saved->isVisible());
+    showCurrent->click();
+    QVERIFY(saved->isVisible());
+    QCOMPARE(saved->toPlainText(), QString("Their prompt"));
     QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
     // Another card and back.
     QVERIFY(b.show("t1"));
@@ -1435,8 +1508,17 @@ void TestTasksView::promptDraftSurvivesChanges()
     QVERIFY(b.show("t3"));
     QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
     QVERIFY(save->isVisible());
+    // Saving over the other version asks first.
+    Confirmations dialogs;
+    dialogs.answer(false);
+    save->click();
+    QCOMPARE(dialogs.texts.size(), 1);
+    QVERIFY2(dialogs.texts.last().contains("changed elsewhere"), qPrintable(dialogs.texts.last()));
+    QTest::qWait(150);
+    QVERIFY(b.f.calls("edit").isEmpty());
     // A refused save keeps it.
     QVERIFY(b.f.put("refuse-edit.json", R"({"ok":false,"error":{"code":"read_only","message":"this task was written by a newer version of hgs"}})"));
+    dialogs.answer(true);
     save->click();
     QTRY_COMPARE(b.message()->text(), QString("this task was written by a newer version of hgs"));
     QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
@@ -1450,11 +1532,174 @@ void TestTasksView::promptDraftSurvivesChanges()
     // Saved: the draft is gone.
     QVERIFY(QFile::remove(b.f.dir.filePath("refuse-edit.json")));
     prompt->setPlainText("My better prompt");
+    dialogs.answer(true);
     save->click();
     QTRY_VERIFY(!save->isVisible());
     QCOMPARE(prompt->toPlainText(), QString("My better prompt"));
     QVERIFY(!note->isVisible());
+    QVERIFY(!showCurrent->isVisible());
+    QCOMPARE(dialogs.texts.size(), 3);
     QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t3"}, {"prompt", "My better prompt"}}));
+}
+
+// The board keeps at least a column next to the panel; too narrow for both,
+// the panel takes the board's place until it is closed.
+void TestTasksView::panelSharesTheWidth()
+{
+    Board b; QVERIFY(b.open({840, 700}));
+    auto *board = b.find<QScrollArea>("tasksBoard");
+    auto *panel = b.panel();
+    QVERIFY(b.show("t1"));
+    QTRY_VERIFY(board->isVisible() && panel->isVisible());
+    QVERIFY2(board->width() >= 244, qPrintable(QString::number(board->width())));
+    QVERIFY(panel->width() >= 300);
+    // A remembered wide panel is capped.
+    b.view->closeTask();
+    QSettings().setValue("workspace/tasksPanelWidth", 2000);
+    b.view->resize(960, 700);
+    QVERIFY(b.show("t3"));
+    QTRY_VERIFY(board->isVisible());
+    QVERIFY2(board->width() >= 244, qPrintable(QString::number(board->width())));
+    // Too narrow: the panel only; closing it brings the board back.
+    b.view->resize(480, 700);
+    QTRY_VERIFY(!board->isVisible());
+    QVERIFY(panel->isVisible());
+    QVERIFY(b.view->property("panelOnly").toBool());
+    b.find<QAbstractButton>("taskPanelClose")->click();
+    QVERIFY(board->isVisible());
+    QVERIFY(!panel->isVisible());
+    // Opened narrow, then widened: both again, the board with a column.
+    QVERIFY(b.show("t1"));
+    QTRY_VERIFY(!board->isVisible());
+    b.view->resize(840, 700);
+    QTRY_VERIFY(board->isVisible() && board->width() >= 244);
+    QVERIFY(panel->isVisible());
+    QVERIFY(!b.view->property("panelOnly").toBool());
+}
+
+// An image opens only when its bytes are a picture, from a copy named for its
+// real format; anything else shows why.
+void TestTasksView::imagesOpenOnlyAsPictures()
+{
+    Board b; QVERIFY(b.open());
+    QImage image(40, 30, QImage::Format_RGB32); image.fill(Qt::green);
+    QVERIFY(image.save(b.f.dir.filePath("image-cccc.png"), "PNG"));
+    QVERIFY(b.f.put("image-bbbb.png", "#!/bin/sh\necho opened\n"));
+    const auto attachment = [](const QString &name, const QString &sha) {
+        return QJsonObject{{"name", name}, {"mime", "image/png"}, {"bytes", 20}, {"sha256", sha}};
+    };
+    QVERIFY(b.f.put("show-t5.json", compact({{"attachments", QJsonArray{attachment("notes.command", "bbbb"), attachment("evil.command", "cccc"),
+                                                                        attachment("missing.png", "dddd")}}})));
+    QVERIFY(b.show("t5"));
+    QTRY_COMPARE(b.f.calls("attachment").size(), 3);
+    QList<QUrl> opened;
+    bool opens = true;
+    qobject_cast<TaskPanel *>(b.panel())->openUrl = [&](const QUrl &url) { opened << url; return opens; };
+    const auto thumb = [&](const QString &sha) -> QToolButton * {
+        for (auto *button : b.panel()->findChildren<QToolButton *>("taskImage")) if (button->property("sha256") == sha) return button;
+        return nullptr;
+    };
+    QTRY_VERIFY(thumb("dddd") && thumb("dddd")->text() == "!");
+    // Not a picture: nothing is opened.
+    thumb("bbbb")->click();
+    QVERIFY(opened.isEmpty());
+    QCOMPARE(b.message()->text(), QString("notes.command is not a picture this computer can show, so it is not opened."));
+    QVERIFY(b.message()->property("error").toBool());
+    // A picture with another name opens as what it is.
+    thumb("cccc")->click();
+    QCOMPARE(opened.size(), 1);
+    QVERIFY2(opened.first().toLocalFile().endsWith("/evil.png"), qPrintable(opened.first().toLocalFile()));
+    QFile::remove(opened.first().toLocalFile());
+    // A missing image and a desktop that cannot open it say so.
+    thumb("dddd")->click();
+    QCOMPARE(b.message()->text(), QString("Cannot open missing.png: the image is not on this machine"));
+    opens = false;
+    thumb("cccc")->click();
+    QCOMPARE(b.message()->text(), QString("No application could open evil.command."));
+    QFile::remove(opened.last().toLocalFile());
+}
+
+// Images are added from files or the clipboard and removed after a question;
+// each change sends the whole list through `edit`. On another machine's board
+// only a task without images gains one, and only a sole image is removed.
+void TestTasksView::imagesAddPasteAndRemove()
+{
+    Board b; QVERIFY(b.open());
+    QImage shot(48, 32, QImage::Format_RGB32); shot.fill(Qt::red);
+    QVERIFY(shot.save(b.f.dir.filePath("image-aaaa.png"), "PNG"));
+    QVERIFY(b.f.put("show-t5.json", compact({{"attachments", QJsonArray{QJsonObject{{"name", "shot.png"}, {"mime", "image/png"}, {"bytes", 100}, {"sha256", "aaaa"}}}}})));
+    QFile existing(b.f.dir.filePath("image-aaaa.png")); QVERIFY(existing.open(QIODevice::ReadOnly));
+    const QByteArray shotBytes = existing.readAll();
+    const QString added = b.f.dir.filePath("plan.png");
+    QImage plan(20, 20, QImage::Format_RGB32); plan.fill(Qt::blue);
+    QVERIFY(plan.save(added, "PNG"));
+    QFile addedFile(added); QVERIFY(addedFile.open(QIODevice::ReadOnly));
+    const QByteArray planBytes = addedFile.readAll();
+    const auto entry = [](const QString &name, const QByteArray &bytes) {
+        return QJsonObject{{"name", name}, {"mime", "image/png"}, {"data_base64", QString::fromLatin1(bytes.toBase64())}};
+    };
+    QVERIFY(b.show("t5"));
+    auto *panel = qobject_cast<TaskPanel *>(b.panel());
+    QTRY_VERIFY(!b.find<QToolButton>("taskImage")->icon().isNull());
+    // A file: the kept image and the new one.
+    QStringList picked{added};
+    panel->pickImages = [&] { return picked; };
+    b.find<QPushButton>("taskImageAdd")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 1);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray{entry("shot.png", shotBytes), entry("plan.png", planBytes)}}}));
+    QTRY_COMPARE(b.message()->text(), QString("Added 1 image(s) to om-t5."));
+    // A file that is not a picture is refused here.
+    QVERIFY(b.f.put("notes.png", "not a picture"));
+    picked = {b.f.dir.filePath("notes.png")};
+    b.find<QPushButton>("taskImageAdd")->click();
+    QCOMPARE(b.message()->text(), QString("notes.png is not a picture."));
+    // The clipboard's image, as PNG.
+    QImage pasted(16, 12, QImage::Format_RGB32); pasted.fill(Qt::yellow);
+    QGuiApplication::clipboard()->setImage(pasted);
+    b.find<QPushButton>("taskImagePaste")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 2);
+    const auto list = b.f.calls("edit").last()["attachments"].toArray();
+    QCOMPARE(list.size(), 2);
+    QCOMPARE(list[0].toObject(), entry("shot.png", shotBytes));
+    const auto clip = list[1].toObject();
+    QVERIFY2(clip["name"].toString().startsWith("pasted-") && clip["name"].toString().endsWith(".png"), qPrintable(clip["name"].toString()));
+    QCOMPARE(clip["mime"].toString(), QString("image/png"));
+    QCOMPARE(QImage::fromData(QByteArray::fromBase64(clip["data_base64"].toString().toLatin1())).size(), QSize(16, 12));
+    QGuiApplication::clipboard()->clear();
+    b.find<QPushButton>("taskImagePaste")->click();
+    QCOMPARE(b.message()->text(), QString("The clipboard holds no image."));
+    // Removing asks; then the rest of the list is sent.
+    Confirmations dialogs;
+    dialogs.answer(false);
+    b.find<QToolButton>("taskImageRemove")->click();
+    QCOMPARE(dialogs.texts.size(), 1);
+    QVERIFY2(dialogs.texts.last().contains("shot.png") && dialogs.texts.last().contains("om-t5"), qPrintable(dialogs.texts.last()));
+    QTest::qWait(100);
+    QCOMPARE(b.f.calls("edit").size(), 2);
+    dialogs.answer(true);
+    b.find<QToolButton>("taskImageRemove")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 3);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray()}}));
+    // Another machine's board: the kept images would have to come from there.
+    b.f.model->setHost("mac");
+    QVERIFY(b.show("t1"));
+    QVERIFY(b.show("t5"));
+    QVERIFY(!b.find<QPushButton>("taskImageAdd")->isEnabled());
+    QVERIFY(b.find<QPushButton>("taskImageAdd")->toolTip().contains("mac"));
+    QVERIFY(b.find<QToolButton>("taskImageRemove")->isEnabled());
+    dialogs.answer(true);
+    b.find<QToolButton>("taskImageRemove")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 4);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t5"}, {"attachments", QJsonArray()}}));
+    QCOMPARE(b.f.hosts("edit").last(), QString("mac"));
+    // A task without images gains one there: the request reaches mac's CLI.
+    QVERIFY(b.show("t1"));
+    picked = {added};
+    QVERIFY(b.find<QPushButton>("taskImageAdd")->isEnabled());
+    b.find<QPushButton>("taskImageAdd")->click();
+    QTRY_COMPARE(b.f.calls("edit").size(), 5);
+    QCOMPARE(plain(b.f.calls("edit").last()), (QJsonObject{{"task", "t1"}, {"attachments", QJsonArray{entry("plan.png", planBytes)}}}));
+    QCOMPARE(b.f.hosts("edit").last(), QString("mac"));
 }
 
 QTEST_MAIN(TestTasksView)

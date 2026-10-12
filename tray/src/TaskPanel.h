@@ -36,9 +36,17 @@ class TaskFlow;
 // and discarding a changed prompt ask first.
 //
 // The task is read again (`show`) whenever its board entry changes. An edited
-// prompt or a typed answer is a draft of its task while the window lives: it
-// survives other cards, changes made elsewhere (the prompt then says so) and a
-// refused save; it goes once saved or discarded.
+// prompt, a typed title or answer is a draft of its task while the window
+// lives: it survives other cards, changes made elsewhere and a refused save; it
+// goes once saved or discarded. A prompt changed elsewhere meanwhile is shown
+// on request, and saving over it asks first.
+//
+// Images are opened only when they decode as pictures, from a copy named for
+// their real format: an agent chooses an image's name. Adding or removing one
+// sends the task's whole list again (`edit {attachments}`), so the images it
+// keeps must be readable here: on a computer that reads another machine's
+// board (`@host`) only a task without images gains one, and only a sole image
+// is removed.
 class TaskPanel : public QWidget {
     Q_OBJECT
 public:
@@ -54,6 +62,8 @@ public:
     void setTheme(bool dark);
     // Opens a copy of an image; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
+    // Chooses image files to add; tests replace the file dialog.
+    std::function<QStringList()> pickImages;
 
 signals:
     void closeRequested();
@@ -63,6 +73,10 @@ protected:
 
 private:
     enum class Purpose { Send, Review, Pin };
+    struct Image {
+        QString name, mime;
+        QByteArray bytes;
+    };
     struct Draft {
         QString text;   // the edited prompt
         QString base;   // the prompt it was edited from
@@ -81,14 +95,21 @@ private:
     void renderRelations(const QJsonObject &task);
     void renderJournal(const QJsonObject &task);
     void updatePromptControls();
+    // The prompt was changed elsewhere since its draft began.
+    bool promptConflict() const;
     // The prompt field follows its text: 4 to 14 lines.
     void fitPrompt();
     void fillSessions(QMenu *menu, Purpose purpose);
+    void fillMoves();
+    // Menus are filled on the next event-loop turn (and when they open), never
+    // inside the signal of one of their own actions.
+    void scheduleMenus();
     void applyStyle();
     // A write about the open task; `session` names the receiving session.
     void write(const QString &command, QJsonObject request, const QString &session = {}, const QString &done = {},
                OvermindModel::Callback after = {});
-    void commitTitle();
+    // Saves a typed title: when it changed, or on Enter (`force`) to retry a refused one.
+    void commitTitle(bool force = false);
     void savePrompt();
     void discardPrompt();
     void sendAnswer();
@@ -98,6 +119,11 @@ private:
     void addRelation();
     void fetchImage(const QString &sha256);
     void openImage(const QString &sha256, const QString &name);
+    void addImageFiles(const QStringList &paths);
+    void pasteImage();
+    void removeImage(const QString &sha256, const QString &name);
+    // Sends the task's images again: the kept ones without `removed`, then `added`.
+    void changeImages(const QList<Image> &added, const QString &removed, const QString &removedName = {});
     void setImage(QToolButton *button, const QString &sha256);
     void renderMarkdown(MarkdownText *text, const QString &markdown);
 
@@ -111,6 +137,8 @@ private:
     quint64 m_generation = 0;
     QString m_error;
     QHash<QString, Draft> m_drafts;     // per task
+    QHash<QString, QString> m_titleDrafts;   // a title not saved yet, per task
+    bool m_menusPending = false;
     QHash<QString, QString> m_answers;  // per task
     QHash<QString, QString> m_images;   // sha256 -> local path
     QHash<QString, QString> m_imageErrors;
@@ -133,9 +161,12 @@ private:
     QPlainTextEdit *m_answer;
     QPushButton *m_answerSend;
     QPlainTextEdit *m_prompt;
-    QPushButton *m_promptSave, *m_promptDiscard;
+    QPushButton *m_promptSave, *m_promptDiscard, *m_promptShowCurrent;
     QLabel *m_promptNote;
+    QPlainTextEdit *m_promptCurrent;
     QWidget *m_imagesSection;
+    QPushButton *m_imageAdd, *m_imagePaste;
+    QLabel *m_noImages;
     TaskFlow *m_imageFlow;
     QComboBox *m_priority;
     QLabel *m_pinned;

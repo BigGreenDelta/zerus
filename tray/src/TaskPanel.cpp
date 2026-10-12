@@ -7,11 +7,19 @@
 #include "WorkspaceStyle.h"
 
 #include <QComboBox>
-#include <QDateTime>
 #include <QAbstractTextDocumentLayout>
+#include <QBuffer>
+#include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QEvent>
 #include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QImageReader>
+#include <QMimeData>
+#include <QMimeDatabase>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -103,6 +111,28 @@ namespace {
 
 // The CLI's MAX_PROMPT, the same limit as a message (`hgs send`).
 constexpr qsizetype MaxPromptBytes = HgsClient::MaximumMessageBytes;
+// The CLI's image limits (MAX_ATTACHMENTS, MAX_ATTACHMENT, MAX_ATTACHMENTS_TOTAL).
+constexpr int MaxImages = HgsClient::MaximumAttachments;
+constexpr qsizetype MaxImageBytes = HgsClient::MaximumAttachmentBytes, MaxImagesBytes = HgsClient::MaximumAttachmentsBytes;
+
+// The format of bytes Qt decodes as a picture, empty for anything else. SVG
+// is a document with scripts and links, not a picture: it is refused.
+QByteArray imageFormat(const QByteArray &bytes)
+{
+    QBuffer buffer;
+    buffer.setData(bytes);
+    if (!buffer.open(QIODevice::ReadOnly)) return {};
+    QImageReader reader(&buffer);
+    const QByteArray format = reader.format().toLower();
+    if (format.isEmpty() || format.startsWith("svg") || !reader.canRead()) return {};
+    return format;
+}
+
+QString extension(const QByteArray &format)
+{
+    return format == "jpeg" ? QStringLiteral("jpg") : QString::fromLatin1(format);
+}
+
 // Labels the workflow sets; a person does not remove them.
 const QStringList ReservedLabels{QStringLiteral("reviewed"), QStringLiteral("review-failed"), QStringLiteral("epic"), QStringLiteral("epic-ready")};
 
@@ -346,17 +376,49 @@ TaskPanel::TaskPanel(TasksView *view, OvermindModel *model, QWidget *parent)
     m_prompt->setTabChangesFocus(true);
     m_prompt->installEventFilter(this);
     body->addWidget(m_prompt);
+    auto *noteRow = new QHBoxLayout;
+    noteRow->setSpacing(6);
     m_promptNote = new QLabel;
     m_promptNote->setObjectName(QStringLiteral("taskPromptNote"));
     m_promptNote->setWordWrap(true);
     m_promptNote->setTextFormat(Qt::PlainText);
-    body->addWidget(m_promptNote);
+    noteRow->addWidget(m_promptNote, 1);
+    m_promptShowCurrent = new QPushButton(tr("Show the current version"));
+    m_promptShowCurrent->setObjectName(QStringLiteral("taskPromptShowCurrent"));
+    m_promptShowCurrent->setToolTip(tr("Show the prompt as it is saved now; your draft stays"));
+    m_promptShowCurrent->setCheckable(true);
+    m_promptShowCurrent->setAutoDefault(false);
+    noteRow->addWidget(m_promptShowCurrent, 0, Qt::AlignTop);
+    body->addLayout(noteRow);
+    m_promptCurrent = new QPlainTextEdit;
+    m_promptCurrent->setObjectName(QStringLiteral("taskPromptCurrent"));
+    m_promptCurrent->setAccessibleName(tr("The prompt as saved now"));
+    m_promptCurrent->setReadOnly(true);
+    m_promptCurrent->setFixedHeight(110);
+    body->addWidget(m_promptCurrent);
 
     m_imagesSection = new QWidget;
     auto *images = new QVBoxLayout(m_imagesSection);
     images->setContentsMargins(0, 0, 0, 0);
     images->setSpacing(4);
-    images->addWidget(heading(tr("Images")));
+    auto *imagesHead = new QHBoxLayout;
+    imagesHead->setSpacing(6);
+    imagesHead->addWidget(heading(tr("Images")));
+    imagesHead->addStretch();
+    m_imageAdd = new QPushButton(tr("Add…"));
+    m_imageAdd->setObjectName(QStringLiteral("taskImageAdd"));
+    m_imageAdd->setAccessibleName(tr("Add images"));
+    m_imageAdd->setAutoDefault(false);
+    imagesHead->addWidget(m_imageAdd);
+    m_imagePaste = new QPushButton(tr("Paste"));
+    m_imagePaste->setObjectName(QStringLiteral("taskImagePaste"));
+    m_imagePaste->setAccessibleName(tr("Paste an image"));
+    m_imagePaste->setAutoDefault(false);
+    imagesHead->addWidget(m_imagePaste);
+    images->addLayout(imagesHead);
+    m_noImages = new QLabel(tr("No images"));
+    m_noImages->setObjectName(QStringLiteral("taskPanelMeta"));
+    images->addWidget(m_noImages);
     auto *imageBox = new QWidget;
     imageBox->setObjectName(QStringLiteral("taskImages"));
     m_imageFlow = new TaskFlow(imageBox, 6);
@@ -456,7 +518,9 @@ TaskPanel::TaskPanel(TasksView *view, OvermindModel *model, QWidget *parent)
     layout->addWidget(m_scroll, 1);
 
     connect(m_close, &QToolButton::clicked, this, &TaskPanel::closeRequested);
-    connect(m_title, &QLineEdit::editingFinished, this, &TaskPanel::commitTitle);
+    // Enter saves (and retries a refused title); leaving the field saves a change.
+    connect(m_title, &QLineEdit::returnPressed, this, [this] { commitTitle(true); });
+    connect(m_title, &QLineEdit::editingFinished, this, [this] { commitTitle(false); });
     connect(m_rework, &QPushButton::clicked, this, [this] {
         if (m_uuid.isEmpty() || m_view->isDelivering(m_uuid)) return;
         const QString name = nameOf(current().value(QStringLiteral("assignee")));
@@ -484,6 +548,15 @@ TaskPanel::TaskPanel(TasksView *view, OvermindModel *model, QWidget *parent)
     });
     connect(m_prompt, &QPlainTextEdit::textChanged, this, &TaskPanel::fitPrompt);
     connect(m_promptSave, &QPushButton::clicked, this, &TaskPanel::savePrompt);
+    connect(m_promptShowCurrent, &QPushButton::toggled, this, &TaskPanel::updatePromptControls);
+    pickImages = [this] {
+        return QFileDialog::getOpenFileNames(this, tr("Add images"), {}, tr("Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp)"));
+    };
+    connect(m_imageAdd, &QPushButton::clicked, this, [this] {
+        const QStringList paths = pickImages ? pickImages() : QStringList();
+        if (!paths.isEmpty()) addImageFiles(paths);
+    });
+    connect(m_imagePaste, &QPushButton::clicked, this, &TaskPanel::pasteImage);
     connect(m_promptDiscard, &QPushButton::clicked, this, &TaskPanel::discardPrompt);
     connect(m_priority, &QComboBox::activated, this, [this](int index) {
         const int priority = m_priority->itemData(index).toInt();
@@ -509,6 +582,7 @@ TaskPanel::TaskPanel(TasksView *view, OvermindModel *model, QWidget *parent)
         const Purpose purpose = button == m_send ? Purpose::Send : button == m_review ? Purpose::Review : Purpose::Pin;
         connect(button->menu(), &QMenu::aboutToShow, this, [this, button, purpose] { fillSessions(button->menu(), purpose); });
     }
+    connect(m_move->menu(), &QMenu::aboutToShow, this, &TaskPanel::fillMoves);
     applyStyle();
     render();
 }
@@ -635,7 +709,8 @@ void TaskPanel::render()
     m_ref->setText(ref());
     m_stage->setText(stage);
     m_stage->setVisible(!stage.isEmpty());
-    const QString title = task.value(QStringLiteral("title")).toString();
+    // A title that was not saved stays until it is.
+    const QString title = m_titleDrafts.value(m_uuid, task.value(QStringLiteral("title")).toString());
     if (!m_title->isModified() && m_title->text() != title) {
         m_title->setText(title);
         m_title->setCursorPosition(0);
@@ -732,13 +807,33 @@ void TaskPanel::updatePromptControls()
     m_promptSave->setVisible(draft);
     m_promptDiscard->setVisible(draft);
     m_promptSave->setEnabled(draft && !empty && !tooLong && !m_savingPrompts.contains(m_uuid) && !m_gone);
+    const bool conflict = promptConflict();
     QString note;
     if (draft && tooLong) note = tr("The prompt is longer than 64 KiB (%1 KiB): shorten it to save it.").arg((bytes + 1023) / 1024);
     else if (draft && empty) note = tr("Write the task's prompt to save it.");
-    else if (draft && m_loaded && m_drafts.value(m_uuid).base != current().value(QStringLiteral("prompt")).toString())
-        note = tr("The prompt was changed elsewhere since you started editing; saving replaces that version.");
+    else if (conflict) note = tr("The prompt was changed elsewhere since you started editing; saving replaces that version.");
     m_promptNote->setText(note);
     m_promptNote->setVisible(!note.isEmpty());
+    if (m_promptNote->property("warning").toBool() != conflict) {
+        m_promptNote->setProperty("warning", conflict);
+        m_promptNote->style()->unpolish(m_promptNote);
+        m_promptNote->style()->polish(m_promptNote);
+    }
+    m_promptShowCurrent->setVisible(conflict);
+    if (!conflict && m_promptShowCurrent->isChecked()) {
+        const QSignalBlocker block(m_promptShowCurrent);
+        m_promptShowCurrent->setChecked(false);
+    }
+    m_promptShowCurrent->setText(m_promptShowCurrent->isChecked() ? tr("Hide the current version") : tr("Show the current version"));
+    const QString saved = current().value(QStringLiteral("prompt")).toString();
+    if (conflict && m_promptCurrent->toPlainText() != saved) m_promptCurrent->setPlainText(saved);
+    m_promptCurrent->setVisible(conflict && m_promptShowCurrent->isChecked());
+}
+
+bool TaskPanel::promptConflict() const
+{
+    return !m_uuid.isEmpty() && m_loaded && m_drafts.contains(m_uuid)
+        && m_drafts.value(m_uuid).base != current().value(QStringLiteral("prompt")).toString();
 }
 
 void TaskPanel::fitPrompt()
@@ -760,23 +855,50 @@ bool TaskPanel::eventFilter(QObject *watched, QEvent *event)
 void TaskPanel::renderImages(const QJsonObject &task)
 {
     const auto attachments = task.value(QStringLiteral("attachments")).toArray();
-    m_imagesSection->setVisible(!attachments.isEmpty());
+    const bool editable = !task.value(QStringLiteral("read_only")).toBool() && !m_gone;
+    const QString host = m_model ? m_model->host() : QString();
     m_imageFlow->clear();
     for (const auto &value : attachments) {
         const auto attachment = value.toObject();
         const QString sha = attachment.value(QStringLiteral("sha256")).toString(), name = attachment.value(QStringLiteral("name")).toString();
-        auto *button = new QToolButton;
+        auto *chip = new QWidget;
+        chip->setObjectName(QStringLiteral("taskImageChip"));
+        chip->setFixedSize(84, 64);
+        auto *button = new QToolButton(chip);
         button->setObjectName(QStringLiteral("taskImage"));
         button->setProperty("sha256", sha);
         button->setProperty("name", name);
-        button->setFixedSize(84, 64);
+        button->setGeometry(0, 0, 84, 64);
         button->setIconSize(QSize(76, 56));
         button->setAccessibleName(tr("Open %1").arg(name));
-        const QString openSha = sha, openName = name;
-        connect(button, &QToolButton::clicked, this, [this, openSha, openName] { openImage(openSha, openName); });
-        m_imageFlow->addWidget(button);
+        connect(button, &QToolButton::clicked, this, [this, sha, name] { openImage(sha, name); });
+        if (editable) {
+            auto *remove = new QToolButton(chip);
+            remove->setObjectName(QStringLiteral("taskImageRemove"));
+            remove->setProperty("sha256", sha);
+            remove->setGeometry(84 - 21, 3, 18, 18);
+            remove->setIcon(workspaceIcon(QStringLiteral("close"), m_view->palette().fg));
+            remove->setIconSize(QSize(10, 10));
+            remove->setAccessibleName(tr("Remove %1").arg(name));
+            // The other images would have to be sent again from here.
+            const bool allowed = host.isEmpty() || attachments.size() == 1;
+            remove->setEnabled(allowed);
+            remove->setToolTip(allowed ? tr("Remove %1").arg(name)
+                                       : tr("The other images are stored on %1: remove it on that computer.").arg(host));
+            connect(remove, &QToolButton::clicked, this, [this, sha, name] { removeImage(sha, name); });
+        }
+        m_imageFlow->addWidget(chip);
         setImage(button, sha);
         fetchImage(sha);
+    }
+    m_noImages->setVisible(attachments.isEmpty());
+    const bool full = attachments.size() >= MaxImages, elsewhere = !host.isEmpty() && !attachments.isEmpty();
+    for (auto *button : {m_imageAdd, m_imagePaste}) {
+        button->setVisible(editable);
+        button->setEnabled(editable && !full && !elsewhere);
+        button->setToolTip(full ? tr("A task holds at most %1 images.").arg(MaxImages)
+                           : elsewhere ? tr("The task's images are stored on %1: add images on that computer.").arg(host)
+                           : button == m_imageAdd ? tr("Add image files, up to 10 MiB each") : tr("Add the image on the clipboard"));
     }
 }
 
@@ -794,7 +916,8 @@ void TaskPanel::setImage(QToolButton *button, const QString &sha256)
             button->setToolButtonStyle(Qt::ToolButtonIconOnly);
             return;
         }
-        button->setText(tr("Image"));
+        button->setText(QStringLiteral("?"));
+        button->setToolTip(tr("%1 is not a picture this computer can show").arg(name));
         return;
     }
     const QString error = m_imageErrors.value(sha256);
@@ -823,15 +946,144 @@ void TaskPanel::fetchImage(const QString &sha256)
                   }, this);
 }
 
-// The store keeps images by hash, without a name: the viewer gets a named copy.
+// The store keeps images by hash, without a name, and an agent chooses the
+// name: only bytes that decode as a picture are opened, from a copy named for
+// their real format, so a name such as notes.command never reaches the desktop.
 void TaskPanel::openImage(const QString &sha256, const QString &name)
 {
     const QString path = m_images.value(sha256);
-    if (path.isEmpty()) return;
+    if (path.isEmpty()) {
+        const QString error = m_imageErrors.value(sha256);
+        m_view->notify(error.isEmpty() ? tr("%1 is still loading.").arg(name) : tr("Cannot open %1: %2").arg(name, error));
+        return;
+    }
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly) || file.size() > HgsClient::MaximumAttachmentBytes) return;
-    const QString copy = AttachmentFiles::store(name, file.readAll());
-    if (!copy.isEmpty() && openUrl) openUrl(QUrl::fromLocalFile(copy));
+    if (file.size() > MaxImageBytes) {
+        m_view->notify(tr("Cannot open %1: it is larger than 10 MiB.").arg(name));
+        return;
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        m_view->notify(tr("Cannot open %1: %2").arg(name, file.errorString()));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    const QByteArray format = imageFormat(bytes);
+    if (format.isEmpty()) {
+        m_view->notify(tr("%1 is not a picture this computer can show, so it is not opened.").arg(name));
+        return;
+    }
+    QString base = QFileInfo(name).completeBaseName();
+    if (base.isEmpty()) base = QStringLiteral("image");
+    const QString copy = AttachmentFiles::store(base + QLatin1Char('.') + extension(format), bytes);
+    if (copy.isEmpty()) {
+        m_view->notify(tr("Cannot open %1: its copy could not be saved.").arg(name));
+        return;
+    }
+    if (!openUrl || !openUrl(QUrl::fromLocalFile(copy))) m_view->notify(tr("No application could open %1.").arg(name));
+}
+
+void TaskPanel::addImageFiles(const QStringList &paths)
+{
+    QList<Image> added;
+    for (const auto &path : paths) {
+        const QFileInfo info(path);
+        if (info.size() > MaxImageBytes) {
+            m_view->notify(tr("%1 is larger than 10 MiB.").arg(info.fileName()));
+            return;
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            m_view->notify(tr("Cannot read %1: %2").arg(info.fileName(), file.errorString()));
+            return;
+        }
+        Image image{info.fileName(), {}, file.readAll()};
+        if (imageFormat(image.bytes).isEmpty()) {
+            m_view->notify(tr("%1 is not a picture.").arg(image.name));
+            return;
+        }
+        added.append(image);
+    }
+    changeImages(added, {});
+}
+
+void TaskPanel::pasteImage()
+{
+    const QMimeData *data = QGuiApplication::clipboard()->mimeData();
+    if (data && data->hasImage()) {
+        const QImage image = qvariant_cast<QImage>(data->imageData());
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        if (!image.isNull() && buffer.open(QIODevice::WriteOnly) && image.save(&buffer, "PNG")) {
+            const QString name = QStringLiteral("pasted-%1.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+            changeImages({Image{name, {}, bytes}}, {});
+            return;
+        }
+    }
+    QStringList files;
+    if (data)
+        for (const auto &url : data->urls())
+            if (url.isLocalFile()) files << url.toLocalFile();
+    if (!files.isEmpty()) {
+        addImageFiles(files);
+        return;
+    }
+    m_view->notify(tr("The clipboard holds no image."));
+}
+
+void TaskPanel::removeImage(const QString &sha256, const QString &name)
+{
+    if (m_uuid.isEmpty()) return;
+    const QString uuid = m_uuid;
+    if (!TasksView::confirm(this, tr("Remove the image"), tr("Remove %1 from %2?").arg(name, ref()), tr("Remove")) || uuid != m_uuid) return;
+    changeImages({}, sha256, name);
+}
+
+// `edit {attachments}` replaces the whole list: every image the task keeps is
+// read here and sent again with the new ones, within the CLI's limits.
+void TaskPanel::changeImages(const QList<Image> &added, const QString &removed, const QString &removedName)
+{
+    if (m_uuid.isEmpty() || !m_model) return;
+    QJsonArray list;
+    qint64 total = 0;
+    const auto encode = [&list, &total](const QString &name, const QString &mime, const QByteArray &bytes) {
+        total += bytes.size();
+        list.append(QJsonObject{{QStringLiteral("name"), name}, {QStringLiteral("mime"), mime},
+                                {QStringLiteral("data_base64"), QString::fromLatin1(bytes.toBase64())}});
+    };
+    for (const auto &value : current().value(QStringLiteral("attachments")).toArray()) {
+        const auto attachment = value.toObject();
+        const QString sha = attachment.value(QStringLiteral("sha256")).toString(), name = attachment.value(QStringLiteral("name")).toString();
+        if (sha == removed) continue;
+        const QString path = m_images.value(sha);
+        if (path.isEmpty()) {
+            if (!m_model->host().isEmpty()) m_view->notify(tr("The images of %1 are stored on %2: change them on that computer.").arg(ref(), m_model->host()));
+            else if (m_imageErrors.contains(sha)) m_view->notify(tr("The image %1 is not available on this computer: %2").arg(name, m_imageErrors.value(sha)));
+            else m_view->notify(tr("The images of %1 are still loading; try again in a moment.").arg(ref()));
+            return;
+        }
+        QFile file(path);
+        if (file.size() > MaxImageBytes || !file.open(QIODevice::ReadOnly)) {
+            m_view->notify(tr("The image %1 cannot be read on this computer.").arg(name));
+            return;
+        }
+        encode(name, attachment.value(QStringLiteral("mime")).toString(), file.readAll());
+    }
+    for (const auto &image : added) {
+        QString mime = QMimeDatabase().mimeTypeForData(image.bytes).name();
+        if (!mime.startsWith(QLatin1String("image/"))) mime = QStringLiteral("image/") + QString::fromLatin1(imageFormat(image.bytes));
+        encode(image.name, mime, image.bytes);
+    }
+    if (list.size() > MaxImages) {
+        m_view->notify(tr("A task holds at most %1 images.").arg(MaxImages));
+        return;
+    }
+    if (total > MaxImagesBytes) {
+        m_view->notify(tr("The images of a task are limited to 20 MiB in total."));
+        return;
+    }
+    const QString done = removed.isEmpty() ? tr("Added %n image(s) to %1.", nullptr, int(added.size())).arg(ref())
+                                           : tr("Removed %1 from %2.").arg(removedName, ref());
+    write(QStringLiteral("edit"), {{QStringLiteral("task"), m_uuid}, {QStringLiteral("attachments"), list}}, {}, done);
 }
 
 void TaskPanel::renderPin(const QJsonObject &task)
@@ -1040,20 +1292,7 @@ void TaskPanel::updateActions()
     m_done->setEnabled(editable);
     m_move->setVisible(!m_gone);
     m_move->setEnabled(editable && !targets.isEmpty());
-    if (!m_move->menu()->isVisible()) {
-        auto *menu = m_move->menu();
-        menu->clear();
-        const QString uuid = m_uuid;
-        for (const auto &target : targets) {
-            auto *action = menu->addAction(target.name);
-            action->setData(target.name);
-            const QString name = target.name;
-            connect(action, &QAction::triggered, this, [this, uuid, name] { m_view->moveTask(uuid, name); });
-        }
-    }
-    for (auto *button : {m_send, m_review, m_pin})
-        if (!button->menu()->isVisible())
-            fillSessions(button->menu(), button == m_send ? Purpose::Send : button == m_review ? Purpose::Review : Purpose::Pin);
+    scheduleMenus();
     m_pin->setEnabled(editable);
     m_unpin->setEnabled(editable);
     m_delivered->setEnabled(editable && !busy);
@@ -1062,6 +1301,36 @@ void TaskPanel::updateActions()
     m_answer->setReadOnly(!editable);
     m_delete->setVisible(!m_gone);
     m_delete->setEnabled(editable);
+}
+
+void TaskPanel::scheduleMenus()
+{
+    if (m_menusPending) return;
+    m_menusPending = true;
+    QMetaObject::invokeMethod(this, [this] {
+        m_menusPending = false;
+        if (m_uuid.isEmpty()) return;
+        // A menu on screen keeps its entries.
+        if (!m_move->menu()->isVisible()) fillMoves();
+        for (auto *button : {m_send, m_review, m_pin})
+            if (!button->menu()->isVisible())
+                fillSessions(button->menu(), button == m_send ? Purpose::Send : button == m_review ? Purpose::Review : Purpose::Pin);
+    }, Qt::QueuedConnection);
+}
+
+void TaskPanel::fillMoves()
+{
+    auto *menu = m_move->menu();
+    menu->clear();
+    const QString uuid = m_uuid;
+    if (uuid.isEmpty()) return;
+    for (const auto &target : m_view->moveTargets(uuid)) {
+        auto *action = menu->addAction(target.name);
+        action->setData(target.name);
+        const QString name = target.name;
+        // A move may ask first: it runs after the menu, not inside its signal.
+        connect(action, &QAction::triggered, this, [this, uuid, name] { m_view->moveTask(uuid, name); }, Qt::QueuedConnection);
+    }
 }
 
 // The sessions of the project, with their state. A session whose computer
@@ -1117,20 +1386,24 @@ void TaskPanel::write(const QString &command, QJsonObject request, const QString
     m_view->perform({command, std::move(request), m_uuid, ref(), session, done}, std::move(after));
 }
 
-void TaskPanel::commitTitle()
+void TaskPanel::commitTitle(bool force)
 {
-    if (m_uuid.isEmpty() || !m_title->isModified()) return;
+    if (m_uuid.isEmpty() || !(m_title->isModified() || force) || m_title->isReadOnly()) return;
     m_title->setModified(false);
     const QString uuid = m_uuid, title = m_title->text().trimmed(), saved = current().value(QStringLiteral("title")).toString();
     if (title.isEmpty() || title == saved) {
+        m_titleDrafts.remove(uuid);
         m_title->setText(saved);
         return;
     }
+    // Kept, like a prompt draft, until it is saved: a refusal leaves it in the field.
+    m_titleDrafts.insert(uuid, title);
     write(QStringLiteral("edit"), {{QStringLiteral("task"), uuid}, {QStringLiteral("title"), title}}, {}, {},
           [this, uuid, title](const OvermindModel::Result &result) {
+              if (result.ok && m_titleDrafts.value(uuid) == title) m_titleDrafts.remove(uuid);
               if (uuid != m_uuid) return;
               if (result.ok) m_detail.insert(QStringLiteral("title"), title);
-              if (!m_title->isModified()) m_title->setText(current().value(QStringLiteral("title")).toString());
+              if (!m_title->isModified()) m_title->setText(m_titleDrafts.value(uuid, current().value(QStringLiteral("title")).toString()));
           });
 }
 
@@ -1138,6 +1411,12 @@ void TaskPanel::savePrompt()
 {
     if (m_uuid.isEmpty() || !m_drafts.contains(m_uuid) || !m_promptSave->isEnabled()) return;
     const QString uuid = m_uuid, text = m_drafts.value(uuid).text;
+    if (promptConflict()
+        && (!TasksView::confirm(this, tr("Replace the prompt"),
+                                tr("The prompt of %1 was changed elsewhere since you started editing. Save your version in its place?").arg(ref()),
+                                tr("Replace"))
+            || uuid != m_uuid || !m_drafts.contains(uuid)))
+        return;
     m_savingPrompts.insert(uuid);
     updatePromptControls();
     write(QStringLiteral("edit"), {{QStringLiteral("task"), uuid}, {QStringLiteral("prompt"), text}}, {}, {},
@@ -1253,6 +1532,10 @@ void TaskPanel::applyStyle()
         QLineEdit#taskTitle:hover { border-color:{border}; }
         QLineEdit#taskTitle:focus { border-color:{accent}; background:{surface}; }
         QLabel#taskPanelMeta, QLabel#taskPromptNote, QLabel#taskJournalHeader, QLabel#taskRelationKindLabel { color:{muted}; font-size:12px; }
+        QLabel#taskPromptNote[warning="true"] { color:{warning}; font-weight:600; }
+        QPlainTextEdit#taskPromptCurrent { color:{muted}; background:{column}; border:1px dashed {border}; border-radius:6px; padding:4px; }
+        QToolButton#taskImageRemove { background:{surface}; border:1px solid {border}; border-radius:9px; padding:0; }
+        QToolButton#taskImageRemove:hover { border-color:{danger}; }
         QLabel#taskPanelStatus { color:{muted}; font-size:12px; }
         QLabel#taskPanelStatus[error="true"] { color:{danger}; }
         QLabel#taskPanelHeading { color:{muted}; font-size:11px; font-weight:600; }
@@ -1273,7 +1556,8 @@ void TaskPanel::applyStyle()
         QToolButton#taskImage:hover { border-color:{accent}; }
         QPushButton#taskSend, QPushButton#taskReviewSend, QPushButton#taskRework, QPushButton#taskDone, QPushButton#taskMove,
         QPushButton#taskPin, QPushButton#taskUnpin, QPushButton#taskPromptSave, QPushButton#taskPromptDiscard, QPushButton#taskRelationAdd,
-        QPushButton#taskDelivered, QPushButton#taskNotDelivered, QPushButton#taskAnswerSend, QPushButton#taskDelete { padding:5px 10px; min-height:16px; }
+        QPushButton#taskDelivered, QPushButton#taskNotDelivered, QPushButton#taskAnswerSend, QPushButton#taskDelete,
+        QPushButton#taskImageAdd, QPushButton#taskImagePaste, QPushButton#taskPromptShowCurrent { padding:5px 10px; min-height:16px; }
         QPushButton#taskSend::menu-indicator, QPushButton#taskReviewSend::menu-indicator, QPushButton#taskMove::menu-indicator,
         QPushButton#taskPin::menu-indicator { image:none; width:0; }
         QPushButton#taskDelete { color:{danger}; }

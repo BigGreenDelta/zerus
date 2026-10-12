@@ -776,6 +776,7 @@ TasksView::TasksView(OvermindModel *model, QWidget *parent)
     connect(m_split, &QSplitter::splitterMoved, this, [this] {
         if (m_panel->isVisible()) QSettings().setValue(PanelWidthSetting, m_panel->width());
     });
+    m_split->installEventFilter(this);
     if (m_model) {
         connect(m_model, &OvermindModel::boardChanged, this, [this](const QString &project) {
             if (project == m_project) render();
@@ -1300,7 +1301,9 @@ void TasksView::perform(const Write &write, OvermindModel::Callback after)
 void TasksView::run(const Write &write, OvermindModel::Callback after, const QString &sessionKey)
 {
     if (!m_model) return;
-    clearMessage();
+    // A delivery that may have arrived stays on show, with Resolve delivery,
+    // until another delivery or a dismissal: edits do not hide it.
+    if (m_resolveTask.isEmpty() || OvermindModel::delivers(write.command)) clearMessage();
     const bool delivering = OvermindModel::delivers(write.command) && !write.task.isEmpty();
     if (delivering) {
         ++m_delivering[write.task];
@@ -1342,7 +1345,7 @@ void TasksView::report(const Write &write, const OvermindModel::Result &result, 
                 text = reason.isEmpty() ? tr("Your answer on %1 may not have reached %2. Check the task before sending it again.").arg(ref, name)
                                         : tr("Your answer on %1 may not have reached %2: %3. Check the task before sending it again.").arg(ref, name, reason);
             showMessage(text, Tone::Warning, {}, write.task);
-        } else if (!write.done.isEmpty()) {
+        } else if (!write.done.isEmpty() && (m_resolveTask.isEmpty() || delivery)) {
             showMessage(write.done, Tone::Info);
         }
         return;
@@ -1493,6 +1496,10 @@ QString TasksView::moveQuestion(const QString &uuid, const QString &stage, QStri
             *accept = tr("Move to %1").arg(stage);
             return tr("Move %1 to %2 without an answer? %3 keeps waiting for one.").arg(task.ref, stage, holder);
         }
+        if (from == QLatin1String("review") && !task.reviewer.isEmpty() && to != QLatin1String("done")) {
+            *accept = tr("Move to %1").arg(stage);
+            return tr("Move %1 to %2? %3 was asked to review it and is not told.").arg(task.ref, stage, task.reviewer.name);
+        }
         if (from == QLatin1String("done")) {
             *accept = to == QLatin1String("ready") ? tr("Reopen") : tr("Move to %1").arg(stage);
             return to == QLatin1String("ready") ? tr("Reopen %1? It moves back to %2, and its review verdict is cleared.").arg(task.ref, stage)
@@ -1556,7 +1563,7 @@ void TasksView::setRecipients(const QList<Recipient> &recipients)
     for (int i = 0; same && i < recipients.size(); ++i) {
         const auto &a = recipients[i], &b = m_recipients[i];
         same = a.key == b.key && a.project == b.project && a.host == b.host && a.session.machine == b.session.machine
-            && a.session.name == b.session.name && a.status == b.status && a.working == b.working;
+            && a.session.name == b.session.name && a.status == b.status;
     }
     if (same) return;
     m_recipients = recipients;
@@ -1616,11 +1623,38 @@ void TasksView::showPanel(const QString &uuid)
     const bool shown = m_panel->isVisibleTo(this);
     m_panel->setTask(m_project, uuid);
     m_panel->setVisible(!uuid.isEmpty());
-    if (uuid.isEmpty() || shown) return;
-    // The board keeps the rest; a width the person chose is remembered.
+    layoutPanel(!uuid.isEmpty() && !shown);
+}
+
+void TasksView::layoutPanel(bool opening)
+{
+    if (!m_panel->isVisibleTo(this)) {
+        m_board->setVisible(true);
+        setProperty("panelOnly", false);
+        return;
+    }
+    const int minimum = m_panel->minimumWidth();
+    const bool narrow = m_split->width() < ColumnWidth + m_split->handleWidth() + minimum;
+    m_board->setVisible(!narrow);
+    setProperty("panelOnly", narrow);
+    if (narrow) return;
+    // A width the person chose is remembered; the board keeps at least a column.
     const int total = m_split->width() - m_split->handleWidth();
-    const int width = qBound(m_panel->minimumSizeHint().width(), QSettings().value(PanelWidthSetting, PanelWidth).toInt(), qMax(PanelWidth, total / 2));
-    if (total > width) m_split->setSizes({total - width, width});
+    const auto sizes = m_split->sizes();
+    const int chosen = opening || sizes.value(1) <= 0 ? QSettings().value(PanelWidthSetting, PanelWidth).toInt() : sizes.value(1);
+    const int width = qBound(minimum, chosen, total - ColumnWidth);
+    if (opening || sizes.value(1) != width || sizes.value(0) != total - width) m_split->setSizes({total - width, width});
+}
+
+bool TasksView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_split && event->type() == QEvent::Resize) layoutPanel(false);
+    return QWidget::eventFilter(watched, event);
+}
+
+void TasksView::notify(const QString &text, bool error)
+{
+    showMessage(text, error ? Tone::Error : Tone::Info);
 }
 
 // Selects the card in its column and clears the others. Revealing opens a

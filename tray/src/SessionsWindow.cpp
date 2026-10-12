@@ -2681,7 +2681,6 @@ void SessionsWindow::updateTasksView()
         recipient.key = e.key; recipient.project = m_organization.groupFor(e.identity); recipient.host = e.host;
         recipient.session = {overmindMachine(e), e.session.name};
         recipient.status = SessionPresentation::status(e.session, e.online);
-        recipient.working = SessionPresentation::working(e.session, e.online);
         recipients.append(recipient);
     }
     m_tasks->setRecipients(recipients);
