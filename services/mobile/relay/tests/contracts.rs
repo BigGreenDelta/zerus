@@ -2220,13 +2220,16 @@ fn overmind_envelopes_are_exact() {
     ] {
         assert_eq!(refusal(write(action, json!({}))), 0, "{action}");
     }
-    // The informational device label: at most 64 characters, any script.
-    let mut labelled = write(
-        "create",
-        json!({"project":"example","title":"Pick a database"}),
-    );
-    labelled["payload"]["device"] = json!("Ü".repeat(64));
-    assert_eq!(refusal(labelled), 0);
+    // The informational device label follows hgs `--device`: 1–64 characters,
+    // any script, no control characters, not starting with `-` or `@`.
+    for label in ["Ü".repeat(64), "Pixel 9 @home - work".into(), "x".into()] {
+        let mut labelled = write(
+            "create",
+            json!({"project":"example","title":"Pick a database"}),
+        );
+        labelled["payload"]["device"] = json!(label);
+        assert_eq!(refusal(labelled), 0, "{label}");
+    }
     // Writes carry inline images up to the request maximum, beyond the 1 MiB bound of other operations.
     let image = json!({"images":[{"data_base64":"A".repeat(2 * protocol::MIB)}]});
     assert_eq!(refusal(write("create", image)), 0);
@@ -2282,6 +2285,11 @@ fn overmind_envelopes_are_exact() {
             ("payload/device", Some(json!("d".repeat(65)))),
             ("payload/device", Some(json!("phone\nlabel"))),
             ("payload/device", Some(json!("phone\u{7f}"))),
+            ("payload/device", Some(json!("phone\u{80}"))),
+            ("payload/device", Some(json!("phone\u{9f}label"))),
+            ("payload/device", Some(json!("-phone"))),
+            ("payload/device", Some(json!("--json"))),
+            ("payload/device", Some(json!("@peer"))),
             ("payload/device", Some(json!(7))),
         ] {
             denied.push((path, value, base.clone()));
@@ -2429,6 +2437,83 @@ async fn overmind_ops_run_only_on_the_advertising_gateway() {
 }
 
 #[tokio::test]
+async fn overmind_ops_refuse_a_gateway_reached_only_through_a_peer_route() {
+    let f = Fixture::new().await;
+    // A second gateway is also a direct peer of the first one.
+    let other = f
+        .store
+        .node(&f.node.workspace, "Other computer")
+        .await
+        .unwrap();
+    let other = f
+        .store
+        .authenticate(s(&other, "node_token"), Role::Node)
+        .await
+        .unwrap();
+    let (root, machine, route) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut caps = advertising(protocol::OPERATIONS);
+    caps["mobile_capabilities"]["features"] = json!(["gateway_one_hop"]);
+    let own = json!({"snapshot":caps,"machine_id":machine,"peers":[]});
+    f.store
+        .heartbeat(&other, &own, &canonical(&caps).unwrap())
+        .await
+        .unwrap();
+    let peers = json!([{"route_id":route,"machine_id":machine,"name":"Other","online":true}]);
+    gateway_beat(&f, &root, &peers, &caps).await;
+    peer_beat(&f, &route, &machine, &caps, &Value::Null).await;
+    // While its own route is live, the other gateway's connector serves it.
+    let op = || gateway_op(&other.id, "overmind_read", "projects", json!({}));
+    let served = op();
+    assert_eq!(f.submit(&served).await.unwrap()["state"], "queued");
+    let claim = f
+        .store
+        .claim(&other, true)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(claim["requests"][0]["request_id"], served["request_id"]);
+    assert!(claim["requests"][0]["gateway_route"]["route_id"].is_null());
+    // Its own route goes stale; the first gateway still reaches it one hop away.
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET last_seen=? WHERE id=?",
+            args![now() - 100.0, &other.id],
+        )
+        .await
+        .unwrap();
+    let mut send = f.command("send");
+    send["computer_id"] = json!(other.id);
+    assert_eq!(f.submit(&send).await.unwrap()["state"], "queued");
+    let relayed = f
+        .store
+        .claim(&f.node, true)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(relayed["requests"][0]["gateway_route"]["route_id"], route);
+    // A gateway operation is refused rather than run on the first gateway's connector.
+    for op in [
+        op(),
+        gateway_op(&other.id, "overmind_write", "create", json!({})),
+    ] {
+        assert_eq!(f.submit(&op).await.unwrap_err().0.as_u16(), 409);
+    }
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    assert!(f.store.claim(&other, true).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
+}
+
+#[tokio::test]
 async fn overmind_reads_are_short_lived_and_writes_keep_their_identity() {
     let f = Fixture::new().await;
     assert_eq!(
@@ -2534,6 +2619,19 @@ async fn overmind_reads_are_short_lived_and_writes_keep_their_identity() {
     );
     assert_eq!(f.submit(&write).await.unwrap()["state"], "queued");
     assert_eq!(usage(&f).await.1, 1);
+    // The same request identity never carries another task: a different
+    // request, action or device label conflicts while queued, after completion
+    // and after the body expired.
+    let conflicting = || {
+        let mut changed = vec![write.clone(), write.clone(), write.clone()];
+        changed[0]["payload"]["request"]["title"] = json!("Pick another database");
+        changed[1]["payload"]["device"] = json!("Pixel 9");
+        changed[2]["payload"]["action"] = json!("edit");
+        changed
+    };
+    for changed in conflicting() {
+        assert_eq!(f.submit(&changed).await.unwrap_err().0.as_u16(), 409);
+    }
     complete(
         &write,
         json!({"ok":true,"task":{"uuid":write["request_id"]}}),
@@ -2558,7 +2656,15 @@ async fn overmind_reads_are_short_lived_and_writes_keep_their_identity() {
             "completed",
             "{age}"
         );
+        for changed in conflicting() {
+            assert_eq!(
+                f.submit(&changed).await.unwrap_err().0.as_u16(),
+                409,
+                "{age}"
+            );
+        }
     }
+    assert_eq!(usage(&f).await.1, 1);
     assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
     f.check_accounting().await;
     f.close().await;
@@ -2638,5 +2744,34 @@ async fn decision_alerts_are_held_and_delivered_from_the_gateway_digest() {
         serde_json::from_str::<Value>(s(&jobs[0], "payload")).unwrap(),
         json!({"event_id":alerts[0]["id"],"kind":"wake"})
     );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn decision_candidates_drop_when_the_gateway_stops_serving_overmind() {
+    let f = Fixture::new().await;
+    let active = presence(1.0, None);
+    let snapshot = |operations: &[&str], decisions: Option<Value>| {
+        let mut s = advertising(operations);
+        if let Some(items) = decisions {
+            s["mobile_overmind"] = json!({"schema":1,"rev":"1","projects":{},"decisions":items});
+        }
+        s
+    };
+    let serving = ["overmind_read", "overmind_write"];
+    let waiting = json!([{"task":Uuid::new_v4().to_string(),"project":"example","title":"t","signature":signature('1')}]);
+    f.beat_with(&snapshot(&serving, Some(json!([]))), &active)
+        .await;
+    f.beat_with(&snapshot(&serving, Some(waiting.clone())), &active)
+        .await;
+    assert_eq!(f.count("alert_candidates WHERE kind='decision'").await, 1);
+    // An older connector (or hgs) no longer serves Overmind and drops the
+    // digest: the held decision resolves instead of waiting for a digest.
+    f.beat_with(&snapshot(&["send"], None), &active).await;
+    assert_eq!(f.count("alert_candidates").await, 0);
+    // The lock that follows delivers nothing.
+    f.beat_with(&snapshot(&["send"], None), &presence(2.0, Some(1.0)))
+        .await;
+    assert_eq!(f.alert_count().await, 0);
     f.close().await;
 }

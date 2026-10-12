@@ -74,8 +74,9 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   and `delete`. `request` is an object whose fields and gates `hgs overmind`
   on the gateway validates, so new request fields need no relay deployment;
   an `attachment` read's `offset` and `length` follow the `attachment_read`
-  bounds. `device`, an informational label, has 1–64 characters without
-  control characters. A canonical read payload is at most 64 KiB and a write
+  bounds. `device`, an informational label, follows `hgs overmind --device`:
+  1–64 characters, no control character (C0, DEL or C1), not starting with
+  `-` or `@`. A canonical read payload is at most 64 KiB and a write
   payload at most the 29 MiB request maximum (inline images); other envelope
   violations are 400. Submission requires the gateway snapshot to advertise
   the operation and an available local route of the named computer: a
@@ -131,7 +132,12 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
   is an ordinary `decision` event and a candidate in the slot
   `overmind:<task>`, which captures the signature; leaving the list or a
   changed signature resolves it. A snapshot without the digest is missing
-  data: it raises nothing against a digest, and keeps held decisions.
+  data: it raises nothing against a digest, and keeps held decisions, unless
+  its valid capabilities (protocol version 1 with an `operations` array) no
+  longer list `overmind_read`, which drops them. This relies on the connector
+  contract: the gateway connector carries its latest digest in every
+  snapshot; it omits the digest only while none is known and never
+  substitutes an empty list.
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
   state only. Changed snapshots and new presence evaluate candidates on the
@@ -236,7 +242,13 @@ PostgreSQL workers together so every worker accepts and expires the operation.
 
 Overmind operations add only the `overmind_history` partial index (schema
 version 1; the Python reference creates it too), with the same one-time scan
-as `attachment_history`. Deploy `hgs`, the desktop and the connector first,
+as `attachment_history`. On a large PostgreSQL deployment, pre-create it with
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS overmind_history ON requests(updated,id)
+WHERE operation='overmind_read' AND state IN ('completed','failed','uncertain')`
+before the cutover, so worker startup does not block writes; confirm
+`pg_index.indisvalid`, since startup keeps an invalid index of that name.
+Deploy `hgs`, the
+desktop and the connector first,
 then Android, then the relay, replacing all PostgreSQL workers together: an
 older worker refuses the operations as invalid and derives no `decision`
 alerts. Phones use the operations only when both relay capabilities and the

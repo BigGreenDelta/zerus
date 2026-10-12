@@ -608,6 +608,10 @@ fn digest(decisions: Value) -> Value {
 fn decision(task: &str, signature: &str) -> Value {
     json!({"task":task,"project":"example","title":"Pick a database","signature":signature})
 }
+/// One session still waiting for input with its captured signature.
+fn listing_row() -> Value {
+    json!({"sessions":[state(json!({}))]})
+}
 fn changes(before: &Value, after: &Value, gateway: bool) -> Vec<(String, String)> {
     let previous = canonical(before).unwrap();
     event_changes(Some(previous.as_str()), after, gateway).unwrap()
@@ -685,6 +689,59 @@ fn decision_alerts_follow_the_digest() {
     for (name, snapshot, dropped) in cases {
         assert_eq!(held.resolved_in(&snapshot), dropped, "{name}");
     }
+    // A gateway whose valid capabilities stop listing `overmind_read` no
+    // longer serves Overmind: its decisions drop, digest or not. Missing or
+    // malformed capabilities say nothing and leave the digest rule.
+    let serving = |caps: Value, digest: bool| {
+        let mut s = if digest {
+            waiting.clone()
+        } else {
+            none.clone()
+        };
+        s["mobile_capabilities"] = caps;
+        s
+    };
+    let listed = json!({"protocol_version":1,"operations":["send","overmind_read"],"features":[]});
+    let unlisted =
+        json!({"protocol_version":1,"operations":["send","overmind_write"],"features":[]});
+    let capability_cases = [
+        (
+            "listed with the digest",
+            serving(listed.clone(), true),
+            false,
+        ),
+        ("listed without a digest", serving(listed, false), false),
+        (
+            "unlisted with the digest",
+            serving(unlisted.clone(), true),
+            true,
+        ),
+        ("unlisted without a digest", serving(unlisted, false), true),
+        (
+            "no operations",
+            serving(json!({"protocol_version":1,"operations":[]}), false),
+            true,
+        ),
+        (
+            "another protocol version",
+            serving(json!({"protocol_version":2,"operations":[]}), true),
+            false,
+        ),
+        (
+            "malformed operations",
+            serving(json!({"protocol_version":1,"operations":"send"}), true),
+            false,
+        ),
+        ("malformed capabilities", serving(json!([]), false), false),
+    ];
+    for (name, snapshot, dropped) in capability_cases {
+        assert_eq!(held.resolved_in(&snapshot), dropped, "{name}");
+    }
+    // Session candidates never depend on the Overmind capability.
+    let attention = Candidate::capture(&listing_row(), "s", "attention");
+    let mut unserved = listing_row();
+    unserved["mobile_capabilities"] = json!({"protocol_version":1,"operations":[]});
+    assert!(!attention.resolved_in(&unserved));
     // A stored row reads back the captured identity and the same rule.
     let stored = Candidate::from_row(
         &json!({"session":slot,"kind":"decision","run_id":null,"conversation_id":null,"attention_signature":"s1","reply_id":null}),

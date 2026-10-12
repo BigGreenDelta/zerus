@@ -433,12 +433,24 @@ fn gateway(op: &str, p: &Value, id: &str) -> Result<()> {
         return Err(Error::BAD);
     }
     if let Some(d) = p.get("device") {
-        text(d, DEVICE_MAX, false)?;
+        device(d)?;
     }
     if read && p["action"] == "attachment" {
         range(&p["request"]["offset"], &p["request"]["length"])?;
     }
     json::size(p, if read { OVERMIND_READ_MAX } else { REQUEST_MAX })?;
+    Ok(())
+}
+/// The device label rule of `hgs overmind --device`: 1–64 characters, no
+/// control character (C0, DEL or C1), not starting with `-` or `@`.
+fn device(v: &Value) -> Result<()> {
+    let s = v.as_str().ok_or(Error::BAD)?;
+    if !(1..=DEVICE_MAX).contains(&s.chars().count())
+        || s.chars().any(char::is_control)
+        || s.starts_with(['-', '@'])
+    {
+        return Err(Error::BAD);
+    }
     Ok(())
 }
 fn agent(v: &Value) -> Result<()> {

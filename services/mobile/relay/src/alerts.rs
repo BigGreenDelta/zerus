@@ -240,10 +240,16 @@ impl Candidate {
     }
     /// Resolution against a computer's current snapshot: the live session row,
     /// or for a decision its slot in the `mobile_overmind` digest. A snapshot
-    /// without a digest is missing data and keeps a decision.
+    /// without a digest is missing data and keeps a decision, unless its valid
+    /// capabilities show that the gateway no longer serves `overmind_read`.
     pub fn resolved_in(&self, snapshot: &Value) -> bool {
         if self.kind == DECISION {
-            return entry(snapshot, &self.session).is_some_and(|e| self.resolved(e));
+            let caps = &snapshot["mobile_capabilities"];
+            let unserved = caps["protocol_version"].as_i64() == Some(1)
+                && caps["operations"]
+                    .as_array()
+                    .is_some_and(|a| !a.iter().any(|v| v == "overmind_read"));
+            return unserved || entry(snapshot, &self.session).is_some_and(|e| self.resolved(e));
         }
         self.resolved(live(snapshot, &self.session))
     }
