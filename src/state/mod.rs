@@ -80,6 +80,11 @@ use storage::*;
 pub(super) type Result<T> = std::result::Result<T, String>;
 pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi"];
 
+/// Whether the automatic recovery worker holds its lock.
+pub(crate) fn recovery_worker_running() -> Option<bool> {
+    Some(crate::status::locked(&root().join("recovery/worker.lock")))
+}
+
 pub(crate) fn account_context(name: &str) -> Result<Value> {
     if dsh::exists(name) {
         return dsh::account_context(name);

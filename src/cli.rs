@@ -45,6 +45,8 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
        hgs [@host] ls                 sessions here and on peers
        hgs ls --json --local          this box as JSON (for the tray; no ssh)
+       hgs [@host] status [--json] [--local]   version, sessions and background services here and on peers
+       hgs [@host] version            this hgs version (also --version)
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
@@ -224,6 +226,11 @@ fn nested_guard(dry: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn usage() -> &'static str {
+    USAGE
+}
+
 pub fn dispatch(args: Vec<String>) -> Result<i32> {
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
@@ -280,10 +287,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             print!("{USAGE}");
             return Ok(0);
         }
-        "--version" => {
-            println!("hgs {}", env!("CARGO_PKG_VERSION"));
-            return Ok(0);
-        }
+        "--version" | "version" => return crate::status::version(&config, &target, args),
+        // Read-only on every machine; never routed as an agent launch.
+        "status" => return crate::status::run(&config, &target, args, dry),
         _ => {}
     }
     if args.first().is_some_and(|value| value.starts_with("zerus://")) {
@@ -676,7 +682,7 @@ fn remote(
     Ok(rc)
 }
 
-fn local_json(config: &Config) -> Result<Value> {
+pub(crate) fn local_json(config: &Config) -> Result<Value> {
     if !platform::LOCAL_SESSIONS {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.

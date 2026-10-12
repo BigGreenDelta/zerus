@@ -17,6 +17,9 @@ pub(crate) fn with_launch_binding<T>(
 ) -> anyhow::Result<T> {
     anyhow::bail!(UNSUPPORTED)
 }
+pub(crate) fn recovery_worker_running() -> Option<bool> {
+    None
+}
 pub(crate) fn account_context(_: &str) -> Result<Value> {
     Err(UNSUPPORTED.into())
 }
