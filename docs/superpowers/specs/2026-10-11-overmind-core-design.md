@@ -600,8 +600,10 @@ otherwise. A changed cursor reloads the affected boards (`board --json
 hundreds of tasks costs one read per change. There is no file watcher: it could
 not watch other machines, and `rev` is cheap. One model in the tray agent serves
 the window's boards, the badges and the Your Call notifications. Writes run
-locally; `send` routes as in Part 5. A session host without Overmind support
-disables sending with "Update HGS on this machine".
+locally; `send` routes as in Part 5. Sending is not disabled in advance for a
+session host without Overmind support: the CLI refuses the delivery with
+`host_outdated` ("update HGS on the session's machine"), and the board shows
+that reason after the attempt.
 
 ## Part 7. Mobile client
 
