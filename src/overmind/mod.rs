@@ -19,6 +19,7 @@ mod templates;
 mod workflow;
 
 pub use cli::dispatch;
+pub(crate) use cli::valid_device;
 pub use sessions::{session_ended, session_renamed};
 
 pub use sync::FEATURE;

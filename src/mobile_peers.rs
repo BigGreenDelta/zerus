@@ -539,7 +539,7 @@ fn validate(request: &LocalRequest) -> Result<()> {
             );
             ensure!(rest[1] == "--json", "overmind requests are JSON");
             ensure!(
-                rest.get(3).is_none_or(|v| (1..=64).contains(&v.chars().count()) && !v.chars().any(char::is_control) && !v.starts_with(['-', '@'])),
+                rest.get(3).is_none_or(|v| crate::overmind::valid_device(v)),
                 "invalid overmind device label"
             );
             ensure!(

@@ -95,7 +95,7 @@ fn read_stdin() -> Result<Value> {
 }
 
 /// The one label rule: CLI, forwarded deliveries and the mobile peer allowlist.
-pub fn valid_device(label: &str) -> bool {
+pub(crate) fn valid_device(label: &str) -> bool {
     (1..=64).contains(&label.chars().count()) && !label.chars().any(char::is_control) && !label.starts_with(['-', '@'])
 }
 
