@@ -270,7 +270,7 @@ fn kimi_effort(screen: &str, names: &[&str], custom: bool) -> Option<String> {
                 } else if tail == " thinking" {
                     "on".to_owned()
                 } else if let Some(level) = tail.strip_prefix(" thinking: ") {
-                    level.to_ascii_lowercase()
+                    level.split_whitespace().next().unwrap_or_default().to_ascii_lowercase()
                 } else {
                     continue;
                 };
@@ -1941,6 +1941,7 @@ mod tests {
             ("Ask When Needed plan  K3 thinking: max  ~/work", "K3", "max"),
             ("swarm  [goal ● paused · 7m · 3 turns]  K3 thinking: high  ~/work", "K3", "high"),
             ("~/work  K3 thinking: low", "K3", "low"),
+            ("Ask When Needed  K3 thinking: high /fixture", "K3", "high"),
         ] {
             assert_eq!(effort(&composer(status), name).as_deref(), Some(expected), "{status}");
         }
