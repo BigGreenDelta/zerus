@@ -605,8 +605,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             ProviderBadge(session.agent, Modifier.size(24.dp))
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             // A reply read on another device needs no badge here.
-                            (if (SharedReadPolicies.replyRead(session)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
-                                session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply")))?.let { unread ->
+                            (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
+                                SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
                                 Surface(color = Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
                                     Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Background,
                                         style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)

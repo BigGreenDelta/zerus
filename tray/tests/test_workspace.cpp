@@ -533,7 +533,9 @@ void TestWorkspace::draftStatusSitsBetweenWorkAndReplies()
     item->setData(SessionRoles::Unread, true);
     QCOMPARE(status().kind, SessionStatusBadge::Draft); QVERIFY(status().additionalUnread);
     item->setData(SessionRoles::Working, 1);
-    QCOMPARE(status().kind, SessionStatusBadge::Working);
+    QCOMPARE(status().kind, SessionStatusBadge::Working); QVERIFY(!status().additionalUnread);
+    QVERIFY(!status().unread); QCOMPARE(status().emphasis, IdentityBadges::Normal);
+    QVERIFY(item->data(SessionRoles::Unread).toBool()); // Presentation never consumes the read identity.
     item->setData(SessionRoles::Working, 0); item->setData(SessionRoles::Attention, true);
     QCOMPARE(status().kind, SessionStatusBadge::Attention);
     item->setData(SessionRoles::Attention, false); item->setData(SessionRoles::Unread, false); item->setData(SessionRoles::Status, "Paused");

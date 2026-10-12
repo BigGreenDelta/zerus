@@ -57,8 +57,17 @@ struct SessionInfo {
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
     int subagentCount = 0;
+    bool replyInProgress() const {
+        return state == QLatin1String("running") && processState != QLatin1String("exited")
+            && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
+            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
+    }
+    // Intermediate replies remain unread; only their notification presentation waits.
+    bool visibleUnreadReply(bool online = true) const {
+        return state != QLatin1String("archived") && unreadReply && (!online || !replyInProgress());
+    }
     bool needsAttention() const { return (needsAction() && !attentionAcknowledged)
-        || (state != QLatin1String("archived") && (unreadReply || reviewLater)); }
+        || (state != QLatin1String("archived") && (visibleUnreadReply() || reviewLater)); }
     bool needsAction() const {
         const auto recoveryState = recovery.value("state").toString();
         const bool recovering = recoveryState == "waiting" || recoveryState == "dispatching" || recoveryState == "retrying";

@@ -95,7 +95,7 @@ public:
     static CardStatus statusOf(const QModelIndex &index, bool selected) {
         CardStatus s;
         s.attention = index.data(SessionRoles::Attention).toBool();
-        s.unread = index.data(SessionRoles::Unread).toBool();
+        s.unread = index.data(SessionRoles::Unread).toBool() && index.data(SessionRoles::Working).toInt() <= 0;
         s.state = index.data(SessionRoles::Status).toString();
         const bool error = index.data(SessionRoles::Failure).toBool() || s.state == "Error";
         s.working = index.data(SessionRoles::Working).toInt() > 0;
@@ -106,7 +106,7 @@ public:
             : s.working ? SessionStatusBadge::Working : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
             : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
             : s.paused ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
-        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background work" ? tr("Background work") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
+        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;

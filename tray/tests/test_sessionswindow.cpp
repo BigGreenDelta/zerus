@@ -1160,9 +1160,14 @@ void TestSessionsWindow::unreadRepliesNeedAnActiveVisibleResult()
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     // The hidden list renders when shown; reading the reply takes a visible dwell.
     window.showSessionList();
-    QVERIFY(row()->data(SessionRoles::Unread).toBool()); QVERIFY(row()->data(SessionRoles::Working).toBool());
+    QVERIFY(!row()->data(SessionRoles::Unread).toBool()); QVERIFY(row()->data(SessionRoles::Working).toBool());
+    QVERIFY(state.local().sessions[0].unreadReply);
     QCOMPARE(row()->data(SessionRoles::Detail).toString(), QString("Bash: Check the next deployment"));
     QVERIFY(window.findChild<QLabel *>("listSummary")->text().contains("1 working"));
+    box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QVERIFY(row()->data(SessionRoles::Unread).toBool());
+    QCOMPARE(state.local().sessions[0].replyId, QString("11:101"));
 }
 
 void TestSessionsWindow::unsentDraftBecomesARowStatus()
@@ -2288,7 +2293,8 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
         QVERIFY(button->property("filter") != "working");
     }
     QVERIFY(active); QVERIFY(attention); QCOMPARE(active->accessibleName(), QString("Active"));
-    QCOMPARE(active->property("count").toInt(), 7); QCOMPARE(attention->property("count").toInt(), 6);
+    // The working session's intermediate reply remains Active without adding attention.
+    QCOMPARE(active->property("count").toInt(), 7); QCOMPARE(attention->property("count").toInt(), 5);
     auto *list = window.findChild<QListWidget *>("sessionList"); active->click(); QCOMPARE(list->count(), 7);
     QSet<QString> keys;
     for (int i = 0; i < list->count(); ++i) keys.insert(list->item(i)->data(Qt::UserRole).toString());
@@ -2309,14 +2315,17 @@ void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
     s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1;
     s.backgroundStarted = QDateTime::currentSecsSinceEpoch() - 90;
     s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    s.conversationId = "background-conversation"; s.replyId = "progress-reply"; s.sharedRead = true;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(script()); window.setFleet(state); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     QListWidgetItem *row = nullptr;
     for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) row=list->item(i);
     QVERIFY(row);
-    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background work"));
+    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background"));
     QVERIFY(row->data(SessionRoles::Working).toBool());
+    QVERIFY(!row->data(SessionRoles::Unread).toBool());
+    QVERIFY(state.local().sessions[1].unreadReply);
     QVERIFY(!row->data(SessionRoles::Scheduled).toBool());
     QCOMPARE(row->data(SessionRoles::WorkingSince).toDouble(),s.backgroundStarted);
     QVERIFY(row->data(SessionRoles::Detail).toString().contains("build --wait"));
@@ -2338,6 +2347,7 @@ void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
     for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) {
         QCOMPARE(list->item(i)->data(SessionRoles::Status).toString(),QString("Ready"));
         QVERIFY(!list->item(i)->data(SessionRoles::Working).toBool());
+        QVERIFY(list->item(i)->data(SessionRoles::Unread).toBool());
     }
 }
 

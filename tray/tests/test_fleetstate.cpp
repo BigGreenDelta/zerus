@@ -48,14 +48,45 @@ private slots:
     void controlOnlyComputerHasNoLocalCount();
     void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
     void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
+    void intermediateRepliesStayUnreadUntilWorkFinishes();
 };
+
+void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
+{
+    for (const bool sharedRead : {false, true}) {
+        BoxState box; box.ok = true; box.host = "computer"; box.sessions = {shared()};
+        auto &s = box.sessions[0]; s.sharedRead = sharedRead; s.tracked = true;
+        s.activity = "busy"; s.phase = "working";
+        FleetState fleet;
+        const auto waiting = [&] {
+            fleet.setLocal(box, 0);
+            const auto &observed = fleet.local().sessions[0];
+            QVERIFY(observed.unreadReply); QVERIFY(!observed.visibleUnreadReply());
+            QVERIFY(!observed.needsAttention()); QCOMPARE(fleet.attentionSessions(0), 0);
+            QVERIFY(SessionPresentation::active(observed));
+            QCOMPARE(observed.replyId, s.replyId); QVERIFY(observed.readReplyId.isEmpty());
+            QVERIFY(fleet.readReplies().isEmpty()); QVERIFY(fleet.takeNewReadMarks().isEmpty());
+        };
+        waiting();
+        s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1; waiting();
+        s.backgroundProcesses = 0; s.subagentActiveCount = 1; waiting();
+        s.reviewLater = true; QVERIFY(s.needsAttention()); s.reviewLater = false;
+        s.phase = "approval"; QVERIFY(s.needsAttention()); s.phase = "idle";
+        s.subagentActiveCount = 0; fleet.setLocal(box, 1);
+        QVERIFY(fleet.local().sessions[0].unreadReply);
+        QVERIFY(fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(1), 1);
+        QCOMPARE(fleet.local().sessions[0].replyId, s.replyId);
+        QVERIFY(fleet.markReplyRead({}, s.name, s.conversationId, s.replyId));
+        QVERIFY(!fleet.local().sessions[0].visibleUnreadReply());
+    }
+}
 
 void TestFleetState::idleShellWorkKeepsActiveAndPreservesInputAndAttention()
 {
     auto s = shared(); s.tracked = true; s.activity = "idle"; s.phase = "idle";
     s.processState = "running"; s.backgroundProcesses = 1; s.backgroundStarted = 100;
     s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
-    QCOMPARE(SessionPresentation::status(s), QString("Background work"));
+    QCOMPARE(SessionPresentation::status(s), QString("Background"));
     QVERIFY(SessionPresentation::working(s)); QVERIFY(SessionPresentation::active(s));
     QVERIFY(!SessionPresentation::scheduled(s)); QVERIFY(!s.needsAction());
     QVERIFY(SessionPresentation::currentAction(s).contains("build --wait"));

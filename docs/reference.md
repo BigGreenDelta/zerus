@@ -243,8 +243,12 @@ Linux application badges and the macOS Dock show the attention count, hiding zer
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
-the session is idle and has no reported active children; intermediate replies
-remain unread in Activity while work continues. Routine replies from a turn the
+the session is idle and has no reported active children. While native agent work,
+live background commands or active subagents continue, intermediate replies remain
+unread in Activity but show no new-reply badge or reply-only attention count on
+desktop or Android. The pending reply becomes visible when work finishes; this
+never marks it as read. Explicit questions, approvals, errors and review reminders
+remain actionable. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -296,7 +300,7 @@ Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
 **Ready** means a reply ended, not that a long-running task is complete. An idle
-agent with confirmed live shell commands shows **Background work**, with the
+agent with confirmed live shell commands shows **Background**, with the
 command preview and elapsed time. Open **Processes** to follow output or inspect
 the running commands. The session remains in **Active** and still accepts new
 messages. Input/approval requests take precedence; ordinary agent work takes
@@ -1188,7 +1192,7 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
-The small **Background work** summary is part of ordinary fleet polling even
+The small **Background** summary is part of ordinary fleet polling even
 when this tab is disabled. Full process history and output remain opt-in. A
 background session's context menu offers **Show running commands** when Processes
 is enabled.

@@ -8,12 +8,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopSessionPaletteTest {
-    @Test fun backgroundWorkRetainsDistinctCaptionAndUnreadMarker() {
+    @Test fun backgroundWorkRetainsDistinctCaptionWithoutAnIntermediateUnreadMarker() {
         val row=session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"mobile_unread_reply":true}""")
         val badge=DesktopSessionPalette.badge(row,true)
-        assertEquals("Background work",badge.caption)
+        assertEquals("Background",badge.caption)
         assertEquals(DesktopBadgeKind.Working,badge.kind)
-        assertTrue(badge.additionalUnread)
+        assertFalse(badge.additionalUnread)
+        val finished = row.copy(raw = JSONObject(row.raw.toString()).put("process_work", JSONObject().put("count", 0)))
+        assertEquals(DesktopBadgeKind.Unread, DesktopSessionPalette.badge(finished, true).kind)
     }
     private fun session(raw: String = "{}", pending: Int = 0, archive: String = "") = Session(
         Target("computer", "codex/project/task", "run", "conversation", "workspace", archive),
@@ -24,7 +26,7 @@ class DesktopSessionPaletteTest {
         assertEquals(DesktopBadgeKind.Unread,DesktopSessionPalette.badge(session("""{"activity":"idle","mobile_unread_reply":true}"""),true).kind)
         val busy=DesktopSessionPalette.badge(session("""{"activity":"busy","mobile_unread_reply":true}"""),true)
         assertEquals(DesktopBadgeKind.Working,busy.kind)
-        assertTrue(busy.additionalUnread)
+        assertFalse(busy.additionalUnread)
     }
 
     @Test fun desktopPairsAreExactForBothThemes() {
@@ -116,10 +118,10 @@ class DesktopSessionPaletteTest {
         assertFalse(ready.additionalUnread)
         val working = DesktopSessionPalette.badge(session("""{"activity":"busy","unread_reply":true}"""), true)
         assertEquals(DesktopBadgeKind.Working, working.kind)
-        assertTrue(working.additionalUnread)
+        assertFalse(working.additionalUnread)
         val attention = DesktopSessionPalette.badge(session("""{"activity":"busy","phase":"input","unread_reply":true}"""), true)
         assertEquals(DesktopBadgeKind.Attention, attention.kind)
-        assertTrue(attention.additionalUnread)
+        assertFalse(attention.additionalUnread)
         assertEquals(DesktopBadgeKind.Unread, DesktopSessionPalette.badge(session("""{"state":"paused","unread_reply":true}"""), true).kind)
     }
 

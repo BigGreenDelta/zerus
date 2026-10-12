@@ -295,6 +295,7 @@ void TestAttention::intermediateRepliesWaitForIdleAndKeepExplicitQuestions()
     BoxState box; box.ok=true; box.host="arch"; box.sessions={s};
     FleetState fleet; fleet.setLocal(box,0); AttentionTracker tracker;
     QVERIFY(fleet.local().sessions[0].unreadReply);
+    QVERIFY(!fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(0), 0);
     QVERIFY(tracker.observe({},fleet.local()).raised.isEmpty());
     AttentionTracker restarted(tracker.state());
     box.sessions[0].replyId="progress-2"; fleet.setLocal(box,1);
@@ -309,6 +310,7 @@ void TestAttention::intermediateRepliesWaitForIdleAndKeepExplicitQuestions()
     QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
     box.sessions[0].phase="idle"; box.sessions[0].subagentActiveCount=1; fleet.setLocal(box,4);
     QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
+    QVERIFY(!fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(4), 0);
 
     box.sessions[0].activity="busy"; box.sessions[0].phase="working";
     box.sessions[0].subagents={{"reviewer",QJsonObject{{"label","Reviewer"},{"display_state","input"},{"question_id","q1"}}}};
@@ -322,12 +324,14 @@ void TestAttention::intermediateRepliesWaitForIdleAndKeepExplicitQuestions()
     // Main-agent approvals also stay actionable while replies wait.
     box.sessions[0].subagents={}; box.sessions[0].phase="approval"; box.sessions[0].attentionId="approval-1";
     fleet.setLocal(box,6);
+    QCOMPARE(fleet.attentionSessions(6), 1);
     changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
     QVERIFY(changes.raised[0].body.contains("Approval needed"));
     QCOMPARE(changes.cleared.size(),1);
 
     box.sessions[0].activity="idle"; box.sessions[0].phase="idle";
     box.sessions[0].subagentActiveCount=0; box.sessions[0].replyId="final"; fleet.setLocal(box,7);
+    QVERIFY(fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(7), 1);
     changes=restarted.observe({},fleet.local()); QCOMPARE(changes.raised.size(),1);
     QCOMPARE(AttentionTracker::target(changes.raised[0].token).value("reply").toString(),QString("final"));
     QCOMPARE(changes.cleared.size(),1);

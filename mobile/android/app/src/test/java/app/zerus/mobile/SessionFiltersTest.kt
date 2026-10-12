@@ -6,9 +6,34 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionFiltersTest {
+    @Test fun intermediateRepliesKeepTheirIdentityAndReappearWhenAllWorkFinishes() {
+        for (readFlag in listOf("unread_reply", "mobile_unread_reply")) {
+            for (work in listOf("""{"activity":"busy","phase":"working"}""",
+                """{"activity":"idle","phase":"idle","process_work":{"count":1}}""",
+                """{"activity":"idle","phase":"idle","subagent_active_count":1}""",
+                """{"activity":"idle","phase":"idle","subagent_count":1}""")) {
+                val raw = JSONObject(work).put(readFlag, true).put("reply_id", "progress")
+                val item = session(raw.toString())
+                assertFalse(SessionFilters.visibleUnreadReply(item, true))
+                assertFalse(SessionFilters.needsAttention(item, true))
+                assertTrue(SessionFilters.active(item, true))
+                assertTrue(item.raw.optBoolean(readFlag)); assertEquals("progress", item.raw.string("reply_id"))
+                val finished = item.copy(raw = JSONObject(item.raw.toString()).put("activity", "idle").put("phase", "idle")
+                    .put("process_work", JSONObject().put("count", 0)).put("subagent_active_count", 0).put("subagent_count", 0))
+                assertTrue(SessionFilters.visibleUnreadReply(finished, true))
+                assertTrue(SessionFilters.needsAttention(finished, true))
+                assertEquals("progress", finished.raw.string("reply_id"))
+                for (phase in listOf("input", "approval", "error")) {
+                    assertTrue(SessionFilters.needsAttention(item.copy(raw = JSONObject(item.raw.toString()).put("phase", phase)), true))
+                }
+                assertTrue(SessionFilters.needsAttention(item.copy(raw = JSONObject(item.raw.toString()).put("mobile_review_later", true)), true))
+            }
+        }
+    }
+
     @Test fun liveShellWorkIsActiveAndOutranksScheduleWhileNativeInputStaysIdle() {
         val item = session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"schedules":{"count":1}}""")
-        assertEquals("Background work",SessionFilters.status(item,true))
+        assertEquals("Background",SessionFilters.status(item,true))
         assertTrue(SessionFilters.working(item,true))
         assertTrue(SessionFilters.active(item,true))
         assertFalse(SessionFilters.scheduled(item,true))

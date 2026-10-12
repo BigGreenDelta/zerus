@@ -173,7 +173,7 @@ public:
         set(SessionRoles::Effort, session.effort);
         set(SessionRoles::Attention, session.reviewLater || (online && !session.attentionAcknowledged && session.needsAction()));
         set(SessionRoles::ReviewLater, session.reviewLater);
-        set(SessionRoles::Unread, session.unreadReply);
+        set(SessionRoles::Unread, session.visibleUnreadReply(online));
         set(SessionRoles::Working, working(session, online));
         set(SessionRoles::Draft, draft);
         set(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(session) ? session.backgroundStarted : session.phase == "compacting" ? session.compactionStarted : session.turnStarted);

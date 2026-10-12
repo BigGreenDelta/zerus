@@ -132,7 +132,7 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "starting") return QObject::tr("Starting");
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
-    if (backgroundIdle(s)) return QObject::tr("Background work");
+    if (backgroundIdle(s)) return QObject::tr("Background");
     if (scheduledIdle(s)) {
         const auto next = nextScheduledRun(s);
         return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
@@ -244,7 +244,8 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
 
 inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
 {
-    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online));
+    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online)
+        || (online && s.replyInProgress() && s.activity == "idle" && s.phase == "idle"));
 }
 
 inline QString promptPreview(const QString &text)
@@ -276,7 +277,7 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
         const QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s.prompt);
         return status(s) + (detail.isEmpty() ? QString() : QStringLiteral(": ") + detail);
     }
-    if (s.unreadReply && s.activity != "busy" && !backgroundIdle(s) && !s.needsAction()) return status(s, online);
+    if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);
     if (!currentActivity(s, online)) return status(s, online);
     if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 running command") : QObject::tr("%1 running commands").arg(s.backgroundProcesses))
         + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);

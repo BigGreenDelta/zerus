@@ -12,7 +12,7 @@ object DesktopSessionPalette {
         val attention = raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later") || online && !raw.optBoolean("attention_acknowledged") &&
             (SessionFilters.needsAction(session) || childAttention(session, online))
         val working = SessionFilters.working(session, online)
-        val unread = raw.optBoolean("unread_reply") || raw.optBoolean("mobile_unread_reply")
+        val unread = SessionFilters.visibleUnreadReply(session, online)
         val kind = when {
             attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention
             working -> DesktopBadgeKind.Working
@@ -22,7 +22,7 @@ object DesktopSessionPalette {
             else -> DesktopBadgeKind.Neutral
         }
         val caption = when {
-            working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background work" else "Working"
+            working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background" else "Working"
             unread && !attention -> "New reply"
             online && !SessionFilters.archived(session) && SessionFilters.state(session) !in listOf("paused", "stopped") &&
                 raw.string("process_state") != "exited" && !raw.optBoolean("tracked") && raw.string("activity").isBlank() -> "Untracked"
