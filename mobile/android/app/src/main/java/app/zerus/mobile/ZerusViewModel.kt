@@ -2046,7 +2046,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             preparingTargets-=target.key
         }
     }
-    fun sendingBlocked(target: Target) = contextBlocked(target) || target.key in preparingTargets || outgoing.any { it.belongsTo(target) && it.blocksSending } || pickerDraft?.target == target
+    fun sendingBlocked(target: Target) = speech.recording || contextBlocked(target) || target.key in preparingTargets || outgoing.any { it.belongsTo(target) && it.blocksSending } || pickerDraft?.target == target
     fun sendMessage(target: Target, expectedDraft: Draft? = null, expectedCompactionId: String = "", allowColdCache: Boolean = false) =
         sendMessageInternal(target, expectedDraft, expectedCompactionId, allowColdCache, "")
     private fun sendMessageInternal(target: Target, expectedDraft: Draft?, expectedCompactionId: String, allowColdCache: Boolean, continuationId: String) = viewModelScope.launch {
@@ -2124,7 +2124,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
     fun beginAttachmentPick(target: Target, onReady: (String) -> Unit) {
-        if (target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
+        if (speech.recording || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
         if (continuation?.draft?.target == target) cancelCompactContinuation("Selecting files canceled the automatic continuation. Your composition is preserved.")
         val origin = draft(target); if (origin.status != "editing") return
         val id = UUID.randomUUID().toString()
@@ -2178,7 +2178,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return (refs(messageState) + persistence?.durableState?.let(::refs).orEmpty()).map { it.id }.toSet() + speech.protectedAudioIds()
     }
     fun removeAttachment(target: Target, id: String) = viewModelScope.launch {
-        if (target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch
+        if (speech.recording || target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch
         if (continuation?.draft?.target == target) cancelCompactContinuation()
         val current = draft(target); if (current.status != "editing") return@launch
         try {

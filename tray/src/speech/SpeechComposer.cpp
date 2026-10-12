@@ -3,6 +3,7 @@
 #include "SpeechRecorder.h"
 #include "ComposerToolbar.h"
 #include "AttachmentViewer.h"
+#include <QApplication>
 #include <QAudioOutput>
 #include <QComboBox>
 #include <QDesktopServices>
@@ -10,6 +11,7 @@
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QJsonArray>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMediaPlayer>
 #include <QMessageBox>
@@ -37,7 +39,7 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
       m_recorder(recorder ? recorder : new SpeechRecorder(this)), m_currentTarget(std::move(target)),
       m_openSettings(openSettings ? std::move(openSettings) : QDesktopServices::openUrl)
 {
-    m_recorder->setParent(this);m_composer->installEventFilter(this);
+    m_recorder->setParent(this);qApp->installEventFilter(this);
     m_voice=new ToolbarChip;m_voice->setObjectName("voiceRecord");m_voice->setIconName("microphone");
     m_cancel=new ToolbarChip;m_cancel->setObjectName("voiceCancel");m_cancel->setIconName("close");m_cancel->setLabels(tr("Cancel recording"),tr("Cancel"));
     m_result=new ToolbarChip;m_result->setObjectName("voiceResult");m_result->setIconName("microphone");
@@ -52,8 +54,11 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     m_discard=new QPushButton(tr("Discard"));m_discard->setObjectName("voiceDiscard");row->addWidget(m_discard);
     m_send=new QPushButton(tr("Send voice"));m_send->setObjectName("voiceSend");row->addWidget(m_send);
     qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_preview);
+    m_recordingHint=new QLabel(tr("Space / Esc to stop"),composer);m_recordingHint->setObjectName("voiceRecordingHint");
+    m_recordingHint->setContentsMargins(0,4,0,4);m_recordingHint->setTextFormat(Qt::PlainText);
+    qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_recordingHint);
     for(auto *button:{m_play,m_discard,m_send})button->setAutoDefault(false);
-    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording){m_state=State::Saving;update();m_recorder->stop();}else start();});
+    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)stopRecording();else start();});
     connect(m_cancel,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_result,&QPushButton::clicked,this,&SpeechComposer::showResult);
     connect(m_send,&QPushButton::clicked,this,[this]{if(m_state==State::Uncertain)check();else send();});
@@ -83,7 +88,31 @@ QJsonObject SpeechComposer::identityPayload(const QString &action) const {
 }
 bool SpeechComposer::eventFilter(QObject *watched,QEvent *event) {
     if(watched==m_composer && event->type()==QEvent::Hide){stopPlayback();if(m_state==State::Checking || m_state==State::Starting || m_state==State::Recording)discard();}
+    if(event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress || event->type()==QEvent::KeyRelease){
+        auto *widget=qobject_cast<QWidget *>(watched);auto *key=static_cast<QKeyEvent *>(event);
+        // Window-scoped, before Qt chooses the agent's Escape shortcut. Other
+        // windows and modal dialogs retain their own keyboard handling.
+        if(widget && widget->window()==m_composer->window()){
+            // A fresh physical press also recovers a release lost while the
+            // application was inactive. Only auto-repeat belongs to the old press.
+            if(event->type()!=QEvent::KeyRelease && !key->isAutoRepeat())m_stopKeys.remove(key->key());
+            const bool stoppingKey=key->key()==Qt::Key_Space || key->key()==Qt::Key_Escape;
+            const bool capture=m_state==State::Starting || m_state==State::Recording;
+            if(m_stopKeys.contains(key->key()) || (capture && stoppingKey && key->modifiers()==Qt::NoModifier)){
+                event->accept();
+                if(event->type()==QEvent::KeyPress && !key->isAutoRepeat() && !m_stopKeys.contains(key->key())){
+                    m_stopKeys.insert(key->key());stopRecording();
+                }else if(event->type()==QEvent::KeyRelease && !key->isAutoRepeat())m_stopKeys.remove(key->key());
+                return true;
+            }
+        }else if(event->type()==QEvent::KeyRelease && !key->isAutoRepeat())m_stopKeys.remove(key->key());
+    }
     return QObject::eventFilter(watched,event);
+}
+void SpeechComposer::stopRecording() {
+    if(m_state==State::Starting){++m_generation;m_recorder->cancel();m_state=State::Idle;update();return;}
+    if(m_state!=State::Recording)return;
+    m_state=State::Saving;update();m_recorder->stop();
 }
 void SpeechComposer::syncTarget() {
     if(m_syncing)return;
@@ -154,6 +183,7 @@ void SpeechComposer::recorded(const QByteArray &base64) {
     const auto decoded=QByteArray::fromBase64Encoding(base64,QByteArray::AbortOnBase64DecodingErrors);
     if(!decoded || decoded.decoded.size()<3200 || decoded.decoded.size()>SpeechPcmConverter::MaximumBytes){fail(tr("The voice recording is invalid."));return;}
     m_pcm=decoded.decoded;m_seconds=m_pcm.size()/32000;m_id=QUuid::createUuid().toString(QUuid::WithoutBraces);m_state=State::Saving;
+    update();
     saveVoice([this](bool saved){m_state=State::Preview;if(!saved)m_notice=tr("Could not save this recording. Keep Zerus open and try Send voice again.");update();});
 }
 void SpeechComposer::saveVoice(std::function<void(bool)> done,bool requireGeneration) {
@@ -260,6 +290,8 @@ void SpeechComposer::play() {
 void SpeechComposer::fail(const QString &error,Notice notice){m_state=State::Idle;m_notice=error;m_noticeKind=notice;update();}
 void SpeechComposer::update() {
     const auto current=m_currentTarget();const bool recording=m_state==State::Recording;
+    m_composer->setRecording(recording || m_state==State::Starting);
+    m_recordingHint->setVisible(recording);
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
     m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?"stop":"microphone");
     m_voice->setLabels(recording?tr("Stop voice (%1)").arg(duration(m_seconds)):m_state==State::Checking?tr("Checking voice…"):m_state==State::Starting?tr("Opening microphone…"):tr("Voice"));

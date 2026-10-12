@@ -129,7 +129,7 @@ protected:
         // Tab takes the suggested next message into an empty field, as in Claude's
         // terminal; otherwise it keeps moving focus.
         if (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Tab
-            && static_cast<QKeyEvent *>(event)->modifiers() == Qt::NoModifier && document()->isEmpty() && suggestion) {
+            && !isReadOnly() && static_cast<QKeyEvent *>(event)->modifiers() == Qt::NoModifier && document()->isEmpty() && suggestion) {
             const QString text = suggestion();
             if (!text.isEmpty()) { insertPlainText(text); event->accept(); return true; }
         }
@@ -168,6 +168,9 @@ protected:
     }
     void inputMethodEvent(QInputMethodEvent *event) override {
         m_composing = !event->preeditString().isEmpty();
+        // A queued IME commit can arrive after capture/delivery made the field
+        // read-only; QPlainTextEdit still accepts that commit unless guarded.
+        if(isReadOnly()){event->ignore();return;}
         QPlainTextEdit::inputMethodEvent(event);
     }
 private:
@@ -404,7 +407,7 @@ bool MessageComposer::requestInterrupt()
 
 bool MessageComposer::offerDraft(const QString &key, const QString &text)
 {
-    if (key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if ((m_recording && key==m_key) || key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
@@ -471,14 +474,14 @@ bool MessageComposer::setWaitingToSend(const QString &key, const QString &reason
 {
     if (key.isEmpty()) return false;
     if (reason.isEmpty()) { if (m_waitingSends.remove(key)) ++m_saveRevision[key]; m_preparingWaiting.remove(key); updateControls(); return true; }
-    if (isSending(key) || isWaitingToSend(key) || isDraftLoading(key) || m_drafts.value(key).uncertain
+    if ((m_recording && key==m_key) || isSending(key) || isWaitingToSend(key) || isDraftLoading(key) || m_drafts.value(key).uncertain
         || !m_drafts.value(key).storageError.isEmpty()) return false;
     prepareWaitingToSendAsync(key, reason, [](bool) {}); return true;
 }
 
 void MessageComposer::prepareWaitingToSendAsync(const QString &key, const QString &reason, std::function<void(bool)> done)
 {
-    if (key.isEmpty() || reason.isEmpty() || isSending(key) || m_preparingWaiting.contains(key)
+    if ((m_recording && key==m_key) || key.isEmpty() || reason.isEmpty() || isSending(key) || m_preparingWaiting.contains(key)
         || isDraftLoading(key) || m_drafts.value(key).uncertain) { done(false); return; }
     m_waitingSends.insert(key, reason); m_preparingWaiting.insert(key);
     const auto revision = ++m_saveRevision[key]; m_savingKeys.insert(key);
@@ -494,14 +497,14 @@ void MessageComposer::prepareWaitingToSendAsync(const QString &key, const QStrin
 
 bool MessageComposer::setSending(const QString &key, bool preserveDraft)
 {
-    if (key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key)
+    if ((m_recording && key==m_key) || key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key)
         || (m_drafts.value(key).uncertain && !preserveDraft)) return false;
     prepareSendingAsync(key, preserveDraft, [](bool) {}); return true;
 }
 
 void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done)
 {
-    if (key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key) || (m_drafts.value(key).uncertain && !preserveDraft)) { done(false); return; }
+    if ((m_recording && key==m_key) || key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key) || (m_drafts.value(key).uncertain && !preserveDraft)) { done(false); return; }
     m_waitingSends.remove(key); m_preparingKeys.insert(key);
     if (preserveDraft) m_preservedDrafts.insert(key, m_drafts.value(key));
     auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Saving before sending…");
@@ -601,7 +604,7 @@ void MessageComposer::send()
 
 void MessageComposer::attachFiles()
 {
-    if (m_key.isEmpty() || isSending(m_key)) return;
+    if (!canAttachFiles()) return;
     const QString key = m_key;
     const auto files = QFileDialog::getOpenFileNames(this, tr("Attach files"), {}, tr("All files (*)"));
     if (key != m_key) return;
@@ -694,7 +697,7 @@ void MessageComposer::rebuildAttachments()
 
 void MessageComposer::removeAttachment(int index)
 {
-    auto &current = m_drafts[m_key]; if (current.sending || isWaitingToSend(m_key) || index < 0 || index >= current.attachments.size()) return;
+    auto &current = m_drafts[m_key]; if (!canAttachFiles() || index < 0 || index >= current.attachments.size()) return;
     QWidget *focus = QApplication::focusWidget();
     const bool keepFocus = focus && focus->objectName() == "removeAttachment" && m_attachmentList->isAncestorOf(focus);
     const auto reference = current.attachments.takeAt(index).reference;
@@ -774,6 +777,12 @@ void MessageComposer::setInputVisible(bool visible)
 
 bool MessageComposer::isInputVisible() const { return m_input->isVisibleTo(this); }
 
+void MessageComposer::setRecording(bool recording)
+{
+    if(m_recording==recording)return;
+    m_recording=recording;updateControls();
+}
+
 void MessageComposer::updateControls()
 {
     notifyDraft(m_key);   // typing, attachments and retries end here
@@ -781,13 +790,14 @@ void MessageComposer::updateControls()
     const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
     const bool tooLong = draft.text.toUtf8().size() > MaxTextBytes;
     const bool waiting = isWaitingToSend(m_key);
-    const bool locked = draft.sending || waiting || m_loadingKeys.contains(m_key);
+    const bool locked = m_recording || draft.sending || waiting || m_loadingKeys.contains(m_key);
     // Disabling a focused editor makes Qt focus another action (often Stop).
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
     m_editor->setReadOnly(locked);
-    m_editor->setToolTip(waiting ? m_waitingSends.value(m_key) : QString());
-    m_editor->setAccessibleDescription(waiting ? m_waitingSends.value(m_key) : QString());
+    const auto lockHint=m_recording?tr("Recording voice. Space / Esc to stop."):waiting?m_waitingSends.value(m_key):QString();
+    m_editor->setToolTip(lockHint);
+    m_editor->setAccessibleDescription(lockHint);
     m_attach->setEnabled(!m_key.isEmpty() && !locked);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && !tooLong && !locked && !draft.uncertain);
@@ -847,7 +857,7 @@ void MessageComposer::showSavedDrafts()
         if(selected.storageError.isEmpty() && selected.formState.value("kind")=="voice_message")
             detail->setText(tr("Open the original conversation (%1) to review or check this voice message.").arg(selected.formState.value("session").toString()));
         copy->setEnabled(!selected.text.isEmpty());
-        restore->setEnabled(!target.isEmpty() && !isSending(target) && !isWaitingToSend(target)
+        restore->setEnabled(!m_recording && !target.isEmpty() && !isSending(target) && !isWaitingToSend(target)
             && !isDraftLoading(target) && selected.storageError.isEmpty() && list->currentItem()
             && selected.formState.value("kind") != "voice_message");
     };
@@ -871,7 +881,7 @@ void MessageComposer::showSavedDrafts()
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
         if(selected.formState.value("kind")=="voice_message")return;
-        if (m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target) || isDraftLoading(target)) return;
+        if (m_recording || m_key != target || target.isEmpty() || isSending(target) || isWaitingToSend(target) || isDraftLoading(target)) return;
         const auto current = m_drafts.value(target);
         if ((!current.text.isEmpty() || !current.attachments.isEmpty())
             && list->currentItem()->data(Qt::UserRole).toString() != target) {
@@ -879,7 +889,7 @@ void MessageComposer::showSavedDrafts()
                 tr("Replace the unsent draft in %1 with the selected saved draft?").arg(QString(target).replace('\n', " / ")),
                 QMessageBox::Ok | QMessageBox::Cancel, &dialog);
             confirm.setObjectName("replaceDraftConfirm"); confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::Cancel);
-            if (confirm.exec() != QMessageBox::Ok || m_key != target || isSending(target) || isWaitingToSend(target)) return;
+            if (confirm.exec() != QMessageBox::Ok || m_recording || m_key != target || isSending(target) || isWaitingToSend(target)) return;
         }
         selected.label.clear(); selected.formState = {};
         m_drafts[target] = selected; saveDraft(target);

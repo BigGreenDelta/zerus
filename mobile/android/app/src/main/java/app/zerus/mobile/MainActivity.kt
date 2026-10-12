@@ -1,9 +1,11 @@
 package app.zerus.mobile
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -108,6 +111,14 @@ private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, sec
 
 class MainActivity : ComponentActivity() {
     private val model: ZerusViewModel by viewModels()
+    // Public Activity callback; AndroidX's inherited core bridge has a class-level restriction.
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean = when (model.speech.recordingKeys.handle(
+        event.keyCode, event.deviceId, event.action, event.repeatCount, model.speech.recording, event.modifiers != 0)) {
+        RecordingKeys.Result.Stop -> { model.speech.stop(); true }
+        RecordingKeys.Result.Consume -> true
+        RecordingKeys.Result.Pass -> super.dispatchKeyEvent(event)
+    }
     private var invitation by mutableStateOf<PairingInvite?>(null)
     private var updateRequest by mutableIntStateOf(0)
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -1022,6 +1033,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     onReview: (Draft) -> Unit, onAttach: (Target) -> Unit) {
     val target = session.target
     val draft = model.draft(target)
+    val recording = model.speech.recording
     // Exclude the initial conversation ID promotion from the editor identity.
     val lane = ComposerIdentity.lane(target)
     val editor = remember(lane) { TextFieldState(initialText = draft.text, initialSelection = TextRange(draft.text.length)) }
@@ -1073,6 +1085,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         draft.status == "editing" && !model.demo && online && target.run.isNotBlank() && model.storageReady && blockReason.isBlank()
     val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.status in listOf("sending", "uncertain") }
     val sendReason = when {
+        recording -> "Stop recording before sending a message. Your typed draft is kept."
         model.demo -> "Pair to send a message."
         !model.storageReady -> "Private storage is not ready. Sending is unavailable."
         draft.status == "submitting" -> "Sending the saved draft. Wait for its result."
@@ -1103,7 +1116,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp), tint = Muted)
                     Text(attachment.name, Modifier.widthIn(max = 150.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     IconButton(onClick = { model.removeAttachment(target, attachment.id) },
-                    enabled = model.pickerDraft?.target != target && draft.status == "editing", modifier = Modifier.size(24.dp)) {
+                    enabled = !recording && model.pickerDraft?.target != target && draft.status == "editing", modifier = Modifier.size(24.dp)) {
                     Icon(Icons.Default.Close, "Remove " + attachment.name, Modifier.size(16.dp))
                     }
                 }
@@ -1118,7 +1131,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         Surface(color = Surface, shape = RoundedCornerShape(26.dp), border = BorderStroke(1.dp, Color(0xFF354449))) {
             Row(Modifier.fillMaxWidth().padding(start = 2.dp, end = 5.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
                 }
                 SpeechComposerButton(model, target) {
@@ -1126,7 +1139,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 BasicTextField(state = editor, modifier = Modifier.weight(1f).padding(horizontal = 3.dp, vertical = 10.dp)
                     .heightIn(max = if (expanded) 280.dp else 168.dp).focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },
-                    readOnly = draft.status != "editing" || model.demo,
+                    readOnly = recording || draft.status != "editing" || model.demo,
+                    // Reject IME/paste/drop edits even before the read-only recomposition lands.
+                    inputTransformation = InputTransformation { if (model.speech.recording) revertAllChanges() },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface, lineHeight = 24.sp),
                     keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Default, capitalization = KeyboardCapitalization.Sentences),
                     lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = if (expanded) 14 else 6),
@@ -1150,11 +1165,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             if (ContextPresentation.isCold(model.activity)) coldDraft = captured
                             else model.sendMessage(target, expectedDraft = captured)
                         } else if (sendReason.isNotBlank()) blockedSendReason = sendReason
-                    }, enabled = canSend || sendReason.isNotBlank(), modifier = Modifier.size(44.dp), shape = CircleShape,
+                    }, enabled = !recording && (canSend || sendReason.isNotBlank()), modifier = Modifier.size(44.dp), shape = CircleShape,
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
                             disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted)) {
-                        if (!canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
+                        if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
                         else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
                     }
                 }

@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import android.Manifest
+import android.content.res.Configuration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -16,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -131,6 +133,9 @@ import androidx.compose.ui.unit.dp
         when {
             speech.recording -> {
                 Text("Recording ${speech.seconds / 60}:${(speech.seconds % 60).toString().padStart(2, '0')} (up to 2 minutes)", color = MaterialTheme.colorScheme.error)
+                val configuration = LocalConfiguration.current
+                if (configuration.keyboard != Configuration.KEYBOARD_NOKEYS && configuration.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO)
+                    Text("Space or Esc stops recording. Your typed draft is kept.", style = MaterialTheme.typography.bodySmall)
                 Row {
                     TextButton(onClick = { speech.stop() }) { Text("Stop recording") }
                     TextButton(onClick = { speech.discardRecording() }) { Text("Cancel") }

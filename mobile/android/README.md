@@ -271,6 +271,11 @@ capture finishes can lose the unfinished recording. Completed previews survive
 restart and remain accessible in Drafts. Capture and bounded 48 kHz fallback
 conversion run off the main thread.
 
+While recording, the typed draft stays visible and read-only, and ordinary message
+sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
+into the saved preview; holding or releasing that key never sends, discards or
+starts playback. Editing resumes when capture ends, subject to existing send locks.
+
 Denied microphone access opens a focused explanation with **Open app settings**.
 This opens Zerus's Android settings; choose **Permissions → Microphone** and allow
 access while using the app. Return and tap the microphone again to record.
@@ -332,7 +337,9 @@ The clear command removes app data on that emulator. The smoke checks durable
 preview without implicit upload, explicit Send, local and authenticated remote
 playback, processing/history cards, recognized text, concurrent typed-draft
 preservation, lost-submit status-only recovery, cancellation and background capture
-stop. It also denies microphone access twice, opens Android's app permission
+stop. Hardware Space/Escape coverage verifies the read-only draft, blocked ordinary
+send, held-key/release consumption, retained preview and restored editing. It also
+denies microphone access twice, opens Android's app permission
 settings, grants access there and verifies recording requires a new explicit tap
 after returning.
 It does not measure recognition accuracy or replace a physical microphone test.

@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -51,7 +52,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
             if (!playerOnly) runSmoke()
             runPlayerSmoke()
             result.putString("stream", if (playerOnly) "Voice player smoke passed: waveform tap/drag/accessibility seeking, paused/end/replay/playing seek, scoped playback, retained drafts and narrow light/dark screenshots.\n"
-                else "Voice message smoke passed: microphone settings recovery, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop, waveform tap/drag/accessibility seeking, scoped playback and narrow light/dark player screenshots.\n")
+                else "Voice message smoke passed: microphone settings recovery, recording editor/send lock, hardware Space/Escape with held-key and modifier handling, durable preview, explicit send only, local and authenticated remote playback, transcript history, typed draft preservation, status-only recovery, cancellation, background stop, waveform tap/drag/accessibility seeking, scoped playback and narrow light/dark player screenshots.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Speech smoke failed: ${error.stackTraceToString()}\n")
@@ -76,6 +77,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
     private fun node(label: String): AccessibilityNodeInfo {
         fun find(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if (root == null) return null
+            root.refresh()
             if (root.text?.toString()?.replace('’', '\'') == label || root.contentDescription?.toString() == label) return root
             for (index in 0 until root.childCount) find(root.getChild(index))?.let { return it }
             return null
@@ -100,6 +102,68 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         SystemClock.sleep(300) // Let the newly opened system page finish its transition.
         uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").use { FileInputStream(it.fileDescriptor).readBytes() }
         SystemClock.sleep(300)
+    }
+    private fun keyboardStop(activity: MainActivity, model: ZerusViewModel, target: Target, code: Int) {
+        val original = main { model.draft(target) }
+        waitForIdleSync()
+        val editor = node(original.text)
+        // Compose keeps EditableText semantics for selection/copy even when read-only.
+        check(editor.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) { "Recording draft exposes text replacement" }
+        val replacement = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Must not replace the recording draft") }
+        check(!editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+        var send = node("Send message")
+        while (send.isEnabled && !send.isClickable) send = checkNotNull(send.parent)
+        check(!send.isEnabled) { "Ordinary Send stayed enabled during recording" }
+        runBlocking { main { model.sendMessage(target) }.join() }
+        var pickerOpened = false
+        main { model.beginAttachmentPick(target) { pickerOpened = true } }
+        for (file in original.attachments) runBlocking { main { model.removeAttachment(target, file.id) }.join() }
+        check(!pickerOpened && main { model.pickerDraft == null && !model.attachmentPreparing }) { "Recording opened attachment selection" }
+        check(runBlocking { AttachmentStore(targetContext).payload(original.attachments) }.length() == original.attachments.size)
+        check(main { model.outgoing.isEmpty() && model.draft(target) == original }) { "Recording allowed ordinary delivery or changed its draft" }
+        if (code == KeyEvent.KEYCODE_SPACE) {
+            val screenshot = checkNotNull(uiAutomation.takeScreenshot())
+            File(targetContext.getExternalFilesDir(null), "voice-recording-locked.png").outputStream().use {
+                screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            screenshot.recycle()
+        }
+        val down = SystemClock.uptimeMillis()
+        fun key(action: Int, repeat: Int = 0, modifiers: Int = 0) = main {
+            activity.dispatchKeyEvent(KeyEvent(down, SystemClock.uptimeMillis(), action, code, repeat, modifiers, 12, 0))
+        }
+        // Modified shortcuts must not stop recording or mutate the read-only editor.
+        key(KeyEvent.ACTION_DOWN, modifiers = KeyEvent.META_CTRL_ON)
+        key(KeyEvent.ACTION_UP, modifiers = KeyEvent.META_CTRL_ON)
+        check(main { model.speech.recording && model.draft(target) == original })
+        check(key(KeyEvent.ACTION_DOWN)) { "Recording did not own the stop key" }
+        await("hardware stop durable preview") { !model.speech.busy && model.speech.draft != null }
+        val preview = main { model.speech.draft }
+        node("Play").performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        check(key(KeyEvent.ACTION_DOWN, repeat = 1))
+        check(key(KeyEvent.ACTION_DOWN, repeat = 2, modifiers = KeyEvent.META_SHIFT_ON))
+        check(key(KeyEvent.ACTION_UP, modifiers = KeyEvent.META_SHIFT_ON))
+        check(main { model.speech.draft == preview && !model.attachments.playing && model.outgoing.isEmpty() && model.draft(target) == original }) {
+            "Held stop key changed the preview, started playback, sent, or changed the typed draft"
+        }
+        waitForIdleSync()
+        val restored = node(original.text)
+        check(restored.isEditable && restored.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) { "Editing did not resume after capture" }
+        val edited = original.text + " Restored."
+        check(restored.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, edited)
+        }))
+        await("post-recording draft edit") { model.draft(target).text == edited }
+        main { check(model.speechComposer?.editor?.text.toString() == edited) { "Resumed editor differs from its draft" }; model.flushDrafts() }
+        await("resumed draft checkpoint") { PrivateStore(targetContext).messageState().drafts.any { it.target == target && it.text == edited } }
+        check(main { model.draft(target).text == edited && model.speechComposer?.editor?.text.toString() == edited }) {
+            main { "Resumed text reverted: editor=${model.speechComposer?.editor?.text}; draft=${model.draft(target).text}; generation=${model.draft(target).generation}" }
+        }
+        // Restore the fixture's exact prior text for the remaining transport/recovery checks.
+        check(node(edited).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, original.text)
+        }))
+        await("restored original typed draft") { model.draft(target).text == original.text }
     }
     private fun permissionRecovery(model: ZerusViewModel, target: Target) {
         var settingsIntent: Intent? = null
@@ -149,6 +213,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         val submitted = AtomicInteger()
         val statusReads = AtomicInteger()
         val audioReads = AtomicInteger()
+        val ordinarySends = AtomicInteger()
         val complete = AtomicBoolean(false)
         val interruptSubmit = AtomicBoolean(false)
         val target = Target("session-host", "voice-fixture", "fixture-run", "fixture-conversation", "speech-fixture")
@@ -212,7 +277,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
                         .put("index", 0).put("bytes", bytes.size).put("sha256", java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
                         .put("offset", offset).put("length", length).put("data_base64", Base64.encodeToString(bytes.copyOfRange(offset, offset + length), Base64.NO_WRAP))
                 }
-                "send" -> error("The phone must never submit a second native send after recognizing voice")
+                "send" -> { ordinarySends.incrementAndGet(); error("The phone must never submit a second native send after recognizing voice") }
                 else -> JSONObject()
             }
             val receipt = JSONObject().put("request_id", input.string("request_id")).put("state", "completed").put("result", result)
@@ -238,9 +303,14 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         main { model.speech.refreshProfiles() }
         await("voice profiles") { !model.speech.loading && model.speech.profile?.available == true }
         await("fresh session") { model.activityVerified && model.voiceSendReason(target).isBlank() }
+        val retainedAttachment = runBlocking { AttachmentStore(targetContext).importRecording(VoiceProtocol.wav(ByteArray(6_400))) }
+        main {
+            model.javaClass.getDeclaredMethod("save", Draft::class.java).apply { isAccessible = true }
+                .invoke(model, model.draft(target).copy(attachments = listOf(retainedAttachment)))
+        }
         permissionRecovery(model, target)
         await("microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
-        main { model.speech.stop() }
+        keyboardStop(activity, model, target, KeyEvent.KEYCODE_SPACE)
         await("durable voice preview") { !model.speech.busy && model.speech.draft != null }
         check(submitted.get() == 0) { "Stopping the recorder uploaded without explicit Send" }
         check(PrivateStore(targetContext).voiceState().draft != null)
@@ -264,9 +334,16 @@ class SpeechSmokeInstrumentation : Instrumentation() {
 
         // Lost acceptance recovers by stable message ID, never a second create/upload.
         complete.set(false); interruptSubmit.set(true)
-        main { model.speech.start(target) }
+        check(node("Edited while voice is processing.").performAction(AccessibilityNodeInfo.ACTION_FOCUS))
+        main {
+            model.speech.start(target)
+            // A physical edit in this same UI dispatch precedes read-only recomposition.
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_A))
+            check(model.speechComposer?.editor?.text.toString() == "Edited while voice is processing.")
+        }
         await("second recording") { model.speech.recording && model.speech.seconds >= 1 }
-        main { model.speech.stop() }
+        keyboardStop(activity, model, target, KeyEvent.KEYCODE_ESCAPE)
         await("second preview") { model.speech.draft != null && !model.speech.savingRecording }
         main { model.speech.submit() }
         await("status-only recovery") { submitted.get() == 2 && model.speech.outgoing.last().state == "transcribing" }
@@ -287,7 +364,9 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         tap("Keep recording")
         check(main { model.speech.draft == persisted.draft })
         check(PrivateStore(targetContext).messageState().drafts.single { it.target == target }.text == "Edited while voice is processing.")
+        check(main { model.draft(target).attachments } == listOf(retainedAttachment))
         check(main { model.outgoing.isEmpty() })
+        check(ordinarySends.get() == 0) { "Recording dispatched an ordinary send" }
         main { activity.finish() }
     }
     private fun runPlayerSmoke() {

@@ -44,6 +44,7 @@ internal class SpeechController(private val context: Context, private val model:
     var legacyResult by mutableStateOf<SpeechAttempt?>(null); private set
     val busy get() = recording || savingRecording || activeRequests.isNotEmpty()
     private var recorder: SpeechRecorder? = null
+    val recordingKeys = RecordingKeys()
     private var discardWhenStopped = false
     private var profileJob: Job? = null
     private var profileRevision = 0L
@@ -141,6 +142,7 @@ internal class SpeechController(private val context: Context, private val model:
         !ready || !model.storageReady -> "Private storage is not ready."
         model.updateInstallPreparing -> "Finish the app update first."
         recording || savingRecording || draft != null -> "Send or discard the saved recording first."
+        model.sendingBlocked(target) -> "Finish the pending message or session action before recording."
         target.archiveId.isNotBlank() || target.agentId.isNotBlank() -> "Voice messages are available in live parent conversations."
         outgoing.sumOf { it.audio?.bytes ?: 0 } > 100L * 1024 * 1024 - VoiceProtocol.MAX_PCM_BYTES - 44 -> "Remove an old local voice copy in Drafts to make room for another recording."
         model.selected?.target != target -> "Open the conversation first."

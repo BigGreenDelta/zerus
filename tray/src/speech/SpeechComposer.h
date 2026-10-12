@@ -34,6 +34,7 @@ private:
     enum class State { Idle, Checking, Starting, Recording, Saving, Preview, Submitting, Uncertain };
     enum class Notice { General, MicrophonePermission };
     void start();
+    void stopRecording();
     void recorded(const QByteArray &base64);
     void send();
     void check();
@@ -55,7 +56,7 @@ private:
     SpeechRecorder *m_recorder;
     ToolbarChip *m_voice, *m_cancel, *m_result;
     QWidget *m_preview;
-    QLabel *m_previewLabel;
+    QLabel *m_previewLabel, *m_recordingHint;
     QPushButton *m_play, *m_send, *m_discard;
     QComboBox *m_provider;
     QMediaPlayer *m_player = nullptr;
@@ -71,4 +72,5 @@ private:
     Notice m_noticeKind = Notice::General;
     quint64 m_generation = 0;
     int m_seconds = 0;
+    QSet<int> m_stopKeys;
 };

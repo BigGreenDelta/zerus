@@ -1501,7 +1501,7 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
         QPushButton#railButton:checked { background:%10; border-color:%4; }
         QPushButton#sessionFilter { padding:4px 2px; min-height:22px; font-size:11px; background:transparent; border-color:transparent; }
         QPushButton#sessionFilter:checked { background:%10; border-color:%4; color:%5; }

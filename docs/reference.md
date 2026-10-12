@@ -292,8 +292,15 @@ not install or download a model and never falls back to another provider.
 
 Use **Voice** in the message toolbar, allow microphone access, then stop recording
 to review the recording with **Play**, **Discard** or **Send voice**. Recordings
-are limited to two minutes and remain separate from the typed draft. The preview
-lists speech profiles reachable from the conversation computer. Explicit Send
+are limited to two minutes and remain separate from the typed draft. During
+capture, the typed draft stays visible and read-only, and ordinary message
+submission and attachment changes are blocked. History remains readable.
+**Space** or **Escape** stops recording into the retained preview; neither sends
+nor discards it. Recording takes priority over Escape's agent-interruption
+action. Holding either key stops capture only once, and editing resumes after
+capture ends unless another delivery lock applies. Android supports the same
+controls with a hardware keyboard; its touch Stop control remains available.
+The preview lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
 the pinned agent conversation. One history card retains the playable original,
 expandable transcript and processing or delivery errors across devices. Its
@@ -542,8 +549,9 @@ unless its native UI offers the supported promotion operation.
 **Stop** interrupts the current turn and cancels recovery without terminating the
 session; Escape anywhere in the workspace except Terminal does the same while
 the selected session's turn is working, after first clearing a search being
-typed. Once the turn is interrupted, its prompt returns to an empty message field
-for editing; a started draft is kept. Claude, Codex and Kimi use verified native
+typed. While recording voice, Escape stops the recording instead and preserves
+its preview. Once the turn is interrupted, its prompt returns to an empty message
+field for editing; a started draft is kept. Claude, Codex and Kimi use verified native
 Escape; Claude sends no event for it, so HGS records the interruption once
 Claude shows it. Stopped before its first reply, Claude rewinds the turn and
 puts the prompt back into its own input instead; HGS then moves exactly that
