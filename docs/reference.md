@@ -465,10 +465,10 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
-For Claude messages ending in a literal backslash, the paste includes a final
-newline so the single Enter submits the unchanged message instead of activating
-Claude's backslash-Enter line continuation. This is verified against native
-history; no second Enter is sent as an automatic retry.
+For Claude and Kimi messages ending in a literal backslash, the paste includes a
+final newline so the single Enter submits the unchanged message instead of
+activating the agent's backslash-Enter line continuation. This is verified
+against native history; no second Enter is sent as an automatic retry.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue
