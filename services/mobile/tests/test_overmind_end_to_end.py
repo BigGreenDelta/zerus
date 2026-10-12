@@ -7,6 +7,11 @@ temporary HOME, XDG and state directories and none of the test process's environ
 there answer every tmux, ssh and agent call and reach no server, agent or peer.
 Sending to a session and Your Call need a live agent, so fixture_hgs.py serves them.
 Every case runs on the Rust relay when it is built, and on the reference relay.
+
+A phone retry here is answered by the relay from its stored receipt, so it never
+reaches the connector again; the hgs receipt replay and the connector's journal
+replay of a re-claimed request are covered by the unit tests in
+test_mobile_overmind.py.
 """
 import asyncio
 import base64
@@ -72,12 +77,12 @@ def isolated_hgs(root):
     for tool in ("tmux", "ssh", "scp", "codex", "claude", "kimi", "dsh"):
         (shims / tool).write_text(SHIM.format(log=root / "tools.log"))
         (shims / tool).chmod(0o755)
-    for name in ("config", "state", "tmux", "run"):
+    for name in ("config", "state", "tmux", "run", "tmp"):
         (root / name).mkdir(mode=0o700)
     env = {"HOME": str(home), "PATH": f"{shims}:/usr/bin:/bin", "LANG": "C.UTF-8",
            "XDG_CONFIG_HOME": str(home / ".config"), "XDG_STATE_HOME": str(home / ".local/state"),
            "XDG_DATA_HOME": str(home / ".local/share"), "XDG_CACHE_HOME": str(home / ".cache"),
-           "XDG_RUNTIME_DIR": str(root / "run"), "TMUX_TMPDIR": str(root / "tmux"),
+           "XDG_RUNTIME_DIR": str(root / "run"), "TMUX_TMPDIR": str(root / "tmux"), "TMPDIR": str(root / "tmp"),
            "HGS_CONFIG_DIR": str(root / "config"), "HGS_STATE_DIR": str(root / "state"), "HGS_TAB": "0"}
     (root / "native.json").write_text(json.dumps({"hgs": str(HGS), "env": env}))
     wrapper = root / "hgs"
@@ -102,7 +107,7 @@ class Phone:
                 self.test.assertEqual(response.status, status, data)
             return data
 
-    async def until(self, check, seconds=30):
+    async def until(self, what, check, seconds=30):
         deadline = asyncio.get_running_loop().time() + seconds
         while True:
             if self.connector.done():
@@ -113,7 +118,7 @@ class Phone:
             if value:
                 return value
             if asyncio.get_running_loop().time() > deadline:
-                self.test.fail("the phone did not see the expected state")
+                self.test.fail(f"the phone did not see {what} within {seconds} s")
             await asyncio.sleep(0.05)
 
     async def computer(self):
@@ -127,13 +132,13 @@ class Phone:
             snapshot = (row or {}).get("snapshot") or {}
             operations = set(snapshot.get("mobile_capabilities", {}).get("operations", []))
             return row if row and row["online"] and {"overmind_read", "overmind_write"} <= operations and "mobile_overmind" in snapshot else None
-        return await self.until(ready)
+        return await self.until("the gateway online, serving Overmind with a digest", ready)
 
-    async def digest(self, check):
+    async def digest(self, what, check):
         async def seen():
             value = (await self.computer())["snapshot"].get("mobile_overmind")
             return value if value is not None and check(value) else None
-        return await self.until(seen)
+        return await self.until("a digest with " + what, seen)
 
     async def submit(self, body):
         receipt = await self.call("POST", "/v1/requests", body)
@@ -143,7 +148,7 @@ class Phone:
             if receipt["state"] in {"queued", "claimed"}:
                 receipt = await self.call("GET", "/v1/requests/" + body["request_id"])
             return receipt["state"] not in {"queued", "claimed"}
-        await self.until(settled)
+        await self.until(f"the {body['operation']} receipt settle", settled)
         return receipt
 
     async def overmind(self, operation, action, request, *, request_id=None, device=DEVICE):
@@ -181,28 +186,33 @@ class OvermindEndToEnd:
         workspace = store.workspace("Integration")
         node = store.node(workspace, "Gateway computer")
         invitation = store.invite(workspace)
-        with patch.dict(os.environ, {"ZERUS_RELAY_BINARY": str(self.relay or "")}):
-            runner, url = await start_relay(store, Config(background=False))
-        connector = Connector({"server_url": url, "node_token": node["node_token"], "hgs_path": str(native),
-                               "state_dir": str(root / "journal"), "poll_interval": 1}, allow_insecure_localhost=True)
-        # The digest is refreshed on every heartbeat instead of every fifteen seconds.
-        with patch.dict(os.environ, environment or {}), patch.object(overmind, "DIGEST_SECONDS", 0):
-            task = asyncio.create_task(connector.run())
-            try:
-                async with ClientSession() as client:
-                    async with client.post(url + "/v1/pair", json={"code": invitation["pair_code"], "device_name": "Test phone"}) as response:
-                        self.assertEqual(response.status, 200)
-                        token = (await response.json())["device_token"]
-                    self.store = store
-                    yield Phone(self, client, url, token, node["node_id"], task)
-            finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+        self.store, self.node = store, node
+        runner = connector = None
+        try:
+            with patch.dict(os.environ, {"ZERUS_RELAY_BINARY": str(self.relay or "")}):
+                runner, url = await start_relay(store, Config(background=False))
+            connector = Connector({"server_url": url, "node_token": node["node_token"], "hgs_path": str(native),
+                                   "state_dir": str(root / "journal"), "poll_interval": 1}, allow_insecure_localhost=True)
+            # The digest is refreshed on every heartbeat instead of every fifteen seconds.
+            with patch.dict(os.environ, environment or {}), patch.object(overmind, "DIGEST_SECONDS", 0):
+                task = asyncio.create_task(connector.run())
+                try:
+                    async with ClientSession() as client:
+                        async with client.post(url + "/v1/pair", json={"code": invitation["pair_code"], "device_name": "Test phone"}) as response:
+                            self.assertEqual(response.status, 200)
+                            token = (await response.json())["device_token"]
+                        yield Phone(self, client, url, token, node["node_id"], task)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        finally:
+            if connector is not None:
                 connector.journal.close()
-                # The reference relay ends the connector's abandoned long poll once its credential is revoked.
-                store.revoke("nodes", node["node_id"])
+            # The reference relay ends the connector's abandoned long poll once its credential is revoked.
+            store.revoke("nodes", node["node_id"])
+            if runner is not None:
                 await runner.cleanup()
-                store.close()
+            store.close()
 
     @unittest.skipUnless(HGS.is_file(), "the real hgs is not built (cargo build --locked)")
     async def test_the_phone_creates_reads_and_changes_tasks_through_the_real_hgs(self):
@@ -219,7 +229,7 @@ class OvermindEndToEnd:
                 # Requests reach hgs through its mobile allowlist once the gateway has named its own machine.
                 async def routed():
                     return (await phone.computer()).get("machine_id") == machine
-                await phone.until(routed)
+                await phone.until("the gateway name its own machine", routed)
                 self.assertEqual((await phone.computer())["snapshot"]["mobile_overmind"],
                                  {"schema": 1, "rev": 0, "projects": {}, "decisions": []})
 
@@ -280,8 +290,9 @@ class OvermindEndToEnd:
                 self.assertEqual(decisions["decisions"], [])
                 projects = (await phone.read("projects", {}))["projects"]
                 self.assertEqual([(row["project"], row["total"], row["roles"]["backlog"]) for row in projects], [("demo", 1, 1)])
-                digest = await phone.digest(lambda value: value["projects"].get("demo", {}).get("backlog") == 1)
-                self.assertEqual((digest["rev"], digest["decisions"]), (decisions["cursor"], []))
+                # The digest of the latest write: its rev is the cursor of the reads above.
+                digest = await phone.digest("the latest rev", lambda value: value["rev"] == decisions["cursor"])
+                self.assertEqual((digest["projects"]["demo"]["backlog"], digest["projects"]["demo"]["ready"], digest["decisions"]), (1, 0, []))
 
             calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
             # Every phone request reached hgs as `swarm __mobile-peer-local` for this machine, in an exact shape.
@@ -316,6 +327,11 @@ class OvermindEndToEnd:
             def held():
                 return self.store.db.execute("SELECT count(*) FROM alert_candidates WHERE kind='decision'").fetchone()[0]
 
+            def presence():
+                """The gateway presence the Rust relay last stored: active until its away time, else away."""
+                row = self.store.db.execute("SELECT presence_at, presence_until FROM nodes WHERE id=?", (self.node["node_id"],)).fetchone()
+                return None if row[0] is None else "active" if row[1] > row[0] else "away"
+
             async def typed(text):
                 """Whether the fixture session received this text, as the phone inspects it."""
                 inspect = {"request_id": str(uuid.uuid4()), "computer_id": phone.computer_id, "operation": "inspect",
@@ -328,7 +344,7 @@ class OvermindEndToEnd:
             configure()
             async with self.gateway(root, native, {"ZERUS_MOBILE_FIXTURE_DIR": directory}) as phone:
                 await phone.serving()
-                await phone.digest(lambda value: value["decisions"] == [])
+                await phone.digest("no decisions", lambda value: value["decisions"] == [])
                 body, created = await phone.overmind("overmind_write", "create", {"project": "demo", "prompt": "Pick the storage engine"})
                 task, ref = body["request_id"], created["result"]["task"]["ref"]
                 self.assertEqual(created["result"]["task"]["stage"], "Backlog")
@@ -344,15 +360,15 @@ class OvermindEndToEnd:
                 # The agent asks a person: the digest lists the task and the phone gets a decision.
                 fixture_hgs.overmind_call_human(root, task, "SQLite or PostgreSQL?")
                 slot = "overmind:" + task
-                digest = await phone.digest(lambda value: value["decisions"])
+                digest = await phone.digest("a decision", lambda value: value["decisions"])
                 self.assertEqual(digest["decisions"], [{"task": task, "project": "demo", "title": "Pick the storage engine",
                                                         "signature": digest["decisions"][0]["signature"]}])
-                raised = await phone.until(lambda: phone.events("decision"))
+                raised = await phone.until("a decision event", lambda: phone.events("decision"))
                 self.assertEqual([(event["session"], event["computer_id"], "alert_kind" in event) for event in raised],
                                  [(slot, phone.computer_id, False)])
                 if self.relay:
                     # No presence is known, so the Rust relay alerts at once.
-                    alerts = await phone.until(lambda: phone.events("alert"))
+                    alerts = await phone.until("a decision alert", lambda: phone.events("alert"))
                     self.assertEqual([(event["alert_kind"], event["session"], event["computer_id"]) for event in alerts],
                                      [("decision", slot, phone.computer_id)])
                 question = (await phone.read("decisions", {}))["decisions"]
@@ -362,23 +378,26 @@ class OvermindEndToEnd:
                 answered = await phone.write("answer", {"task": task, "answer": "SQLite"})
                 self.assertEqual((answered["delivery"], answered["task"]["stage"]), ("sent", "Design"))
                 self.assertTrue(await typed("SQLite"))
-                await phone.digest(lambda value: value["decisions"] == [])
+                await phone.digest("the answered decision resolved", lambda value: value["decisions"] == [])
 
-                # At the desk the next question is held, and it resolves without an alert.
+                # At the desk the next question is held, and it resolves without an alert. The reference
+                # relay has neither presence nor alert candidates: only its decision events are checked.
                 configure(desktop_presence={"idle_seconds": 1.0, "locked": False, "locked_seconds": None})
-                await asyncio.sleep(2.5)
-                fixture_hgs.overmind_call_human(root, task, "Which index?")
-                await phone.until(lambda: counted("decision", 2))
                 if self.relay:
-                    await phone.until(lambda: held() == 1)
+                    await phone.until("the desk presence at the relay", lambda: presence() == "active")
+                fixture_hgs.overmind_call_human(root, task, "Which index?")
+                await phone.until("a second decision event", lambda: counted("decision", 2))
+                if self.relay:
+                    await phone.until("the second decision held", lambda: held() == 1)
                 self.assertTrue(await counted("alert", 1 if self.relay else 0))
                 await phone.write("answer", {"task": task, "answer": "By name"})
-                await phone.digest(lambda value: value["decisions"] == [])
+                await phone.digest("the held decision resolved", lambda value: value["decisions"] == [])
                 if self.relay:
-                    await phone.until(lambda: held() == 0)
-                # Away from the desk now: a resolved decision is never delivered late.
-                configure(desktop_presence={"idle_seconds": 600.0, "locked": False, "locked_seconds": None})
-                await asyncio.sleep(2.5)
+                    await phone.until("the held decision dropped", lambda: held() == 0)
+                    # Away from the desk now: the heartbeat that stores it re-evaluates what is held,
+                    # and a resolved decision is never delivered late.
+                    configure(desktop_presence={"idle_seconds": 600.0, "locked": False, "locked_seconds": None})
+                    await phone.until("the away presence at the relay", lambda: presence() == "away")
                 self.assertTrue(await counted("decision", 2))
                 self.assertTrue(await counted("alert", 1 if self.relay else 0))
                 self.assertEqual([row["operation"] for row in mutations()], ["overmind-send", "overmind-answer", "overmind-answer"])
