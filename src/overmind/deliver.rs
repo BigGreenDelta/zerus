@@ -362,6 +362,39 @@ struct ResolveRequest {
     delivered: bool,
 }
 
+/// What an uncertain delivery sent, from the latest `[sent?]` entry: the one
+/// the `delivery_uncertain` flag belongs to.
+enum Uncertain {
+    /// A send: the entry references its claim.
+    Claim,
+    /// A review: the entry names review.
+    Review,
+    /// An answer or rework, or no entry at all.
+    Other,
+}
+
+fn uncertain_delivery(tx: &Tx, task: &Task) -> Result<Uncertain> {
+    let events = tx.load(&Filter::Task(task.uuid.clone()))?;
+    let latest = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == "journal" && e.payload["marker"] == "[sent?]" && !task.rejections.contains_key(&e.id));
+    let Some(entry) = latest else {
+        return Ok(Uncertain::Other);
+    };
+    let settles = entry.payload["transition"].as_str().unwrap_or_default();
+    if !settles.is_empty() && events.iter().any(|e| e.id == settles && e.kind == "transition" && e.payload["action"] == "claim") {
+        return Ok(Uncertain::Claim);
+    }
+    if entry.payload["text"].as_str().is_some_and(|text| text.starts_with("review: ")) {
+        return Ok(Uncertain::Review);
+    }
+    Ok(Uncertain::Other)
+}
+
+/// `delivered: false` undoes only what the uncertain delivery started: a send
+/// takes its claim back, a review clears the reviewer, and an answer or rework
+/// is only noted.
 pub fn resolve_delivery(ctx: &mut Ctx, request: Value) -> Result<Value> {
     human_only(&ctx.actor)?;
     let req: ResolveRequest = parse(&request)?;
@@ -371,15 +404,25 @@ pub fn resolve_delivery(ctx: &mut Ctx, request: Value) -> Result<Value> {
         if !task.flags.contains("delivery_uncertain") {
             return refuse("not_uncertain", "this task has no unconfirmed delivery");
         }
+        let sent = uncertain_delivery(tx, &task)?;
         flag(tx, actor, &task, "delivery_uncertain", false)?;
         let task = load(tx, &uuid)?;
-        let back = rule_target(&workflow(tx, &task.project)?, Action::Unclaim, &task.stage);
-        match (req.delivered, back) {
-            (true, _) => journal(tx, actor, &task, "[sent]", "delivery confirmed by a person", "")?,
-            (false, Some(back)) if task.assignee.is_some() => {
-                transition(tx, actor, &task, Action::Unclaim, &back, reason("not delivered, confirmed by a person"), None, vec![], "")?;
+        let lost = "not delivered, confirmed by a person";
+        if req.delivered {
+            journal(tx, actor, &task, "[sent]", "delivery confirmed by a person", "")?;
+            return commands::task_result(tx, &uuid);
+        }
+        match sent {
+            Uncertain::Claim => match rule_target(&workflow(tx, &task.project)?, Action::Unclaim, &task.stage) {
+                Some(back) if task.assignee.is_some() => {
+                    transition(tx, actor, &task, Action::Unclaim, &back, reason(lost), None, vec![], "")?;
+                }
+                _ => journal(tx, actor, &task, "[comment]", lost, "")?,
+            },
+            Uncertain::Review => {
+                simple(tx, actor, &task, "reviewer_set", json!({"session": null}), "")?;
             }
-            (false, _) => journal(tx, actor, &task, "[comment]", "not delivered, confirmed by a person", "")?,
+            Uncertain::Other => journal(tx, actor, &task, "[comment]", lost, "")?,
         }
         commands::task_result(tx, &uuid)
     })
@@ -785,6 +828,78 @@ mod tests {
             assert!(!result["task"]["flags"].as_array().unwrap().contains(&json!("delivery_uncertain")));
             assert_eq!(result["task"]["stage"], if delivered { "Design" } else { "Queue" });
         }
+    }
+
+    /// A task in Build assigned to w1.
+    fn in_build(store: &mut Store) -> String {
+        let uuid = new_task(store, "Queue");
+        claim(store, &uuid, "w1", "");
+        agent_step(store, &uuid, Action::Advance, "Build", &[("spec", "s")]);
+        uuid
+    }
+    fn agent_step(store: &mut Store, uuid: &str, action: Action, to: &str, fields: &[(&str, &str)]) -> Event {
+        let fields = fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        store.write(|tx| transition(tx, &Actor::agent(MACHINE, "w1"), &load(tx, uuid)?, action, to, fields, None, vec![], "")).unwrap()
+    }
+    fn not_delivered(ctx: &mut Ctx, uuid: &str) -> Value {
+        let result = resolve_delivery(ctx, json!({"task": uuid, "delivered": false})).unwrap();
+        assert!(!result["task"]["flags"].as_array().unwrap().contains(&json!("delivery_uncertain")));
+        result["task"].clone()
+    }
+
+    fn uncertain() -> Outcome {
+        Outcome::Uncertain("?".into())
+    }
+    fn last_entry(task: &Value) -> Value {
+        task["journal"].as_array().unwrap().last().unwrap().clone()
+    }
+
+    #[test]
+    fn a_lost_review_clears_only_the_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let review = in_build(&mut store);
+        agent_step(&mut store, &review, Action::Advance, "Review", &[("worklog", "w"), ("evidence", "e")]);
+        store
+            .write(|tx| commands::simple(tx, &Actor::human(MACHINE), &load(tx, &review)?, "reviewer_set", json!({"session": session("w2")}), ""))
+            .unwrap();
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        settle(&mut ctx, "review-send", &json!({"task": review}), &review, "review", &session("w2"), uncertain(), "", "", |_, _, _| Ok(())).unwrap();
+        let task = not_delivered(&mut ctx, &review);
+        assert_eq!((task["stage"].as_str(), task["assignee"]["name"].as_str(), &task["reviewer"]), (Some("Review"), Some("w1"), &Value::Null));
+    }
+
+    #[test]
+    fn a_lost_answer_stays_recorded_and_keeps_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let answered = in_build(&mut store);
+        agent_step(&mut store, &answered, Action::CallHuman, "Your Call", &[("question", "q")]);
+        let answer = store
+            .write(|tx| {
+                let fields = BTreeMap::from([("answer".to_owned(), "REST".to_owned())]);
+                transition(tx, &Actor::human(MACHINE), &load(tx, &answered)?, Action::Answer, super::super::workflow::RESUME, fields, None, vec![], "")
+            })
+            .unwrap();
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        settle(&mut ctx, "answer", &json!({"task": answered}), &answered, "answer", &session("w1"), uncertain(), &answer.id, "", |_, _, _| Ok(())).unwrap();
+        let task = not_delivered(&mut ctx, &answered);
+        assert_eq!((task["stage"].as_str(), task["assignee"]["name"].as_str()), (Some("Build"), Some("w1")));
+        assert_eq!(last_entry(&task)["marker"], "[comment]");
+        assert!(last_entry(&task)["text"].as_str().unwrap().contains("not delivered"));
+        assert!(task["journal"].as_array().unwrap().iter().any(|j| j["marker"] == "[answer]" && j["text"] == "REST"));
+    }
+
+    #[test]
+    fn a_lost_rework_only_records_a_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), MACHINE).unwrap();
+        let rework = in_build(&mut store);
+        let mut ctx = Ctx { store: &mut store, actor: Actor::human(MACHINE), cwd: None };
+        settle(&mut ctx, "rework-send", &json!({"task": rework}), &rework, "rework", &session("w1"), uncertain(), "", "", |_, _, _| Ok(())).unwrap();
+        let task = not_delivered(&mut ctx, &rework);
+        assert_eq!((task["stage"].as_str(), task["assignee"]["name"].as_str()), (Some("Build"), Some("w1")));
+        assert_eq!(last_entry(&task)["marker"], "[comment]");
     }
 
     #[test]

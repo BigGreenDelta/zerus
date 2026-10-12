@@ -403,7 +403,12 @@ phone runs it through the connector on the gateway.
 6. Write `[sent]` (receipt `submitted`), `[unclaim]` with the reason (no receipt:
    definitely not sent), or `[sent?]` plus `delivery_uncertain` (anything
    else). Overmind never resends. The human resolves an uncertain delivery
-   with "It was delivered" or "Return to Queue".
+   with "It was delivered" (records `[sent]`) or "Not delivered", which undoes
+   only what the uncertain delivery started, decided from the latest `[sent?]`
+   entry: a send (the entry references its claim) takes the claim back and
+   returns the task to Queue, a review clears the reviewer, and a rework or an
+   answer only records a `[comment]`; the task keeps its session and an answer
+   stays recorded.
 
 Confirmations are refusal codes. `send`, `review-send`, `rework-send` and
 `answer` take `confirm: [codes]`. A confirmable refusal has field `confirm` and

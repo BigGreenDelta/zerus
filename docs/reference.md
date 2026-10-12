@@ -1417,7 +1417,12 @@ not supported yet) and `attachment_unavailable` (no reachable machine holds an
 image of the task), are never confirmable, and nothing is written when one
 occurs. A successful result has `delivery` set to `sent` (the text was submitted) or
 `uncertain`, which sets the flag `delivery_uncertain`; a person settles it with
-`resolve-delivery --json {task, delivered: true|false}`. A definite failure is
+`resolve-delivery --json {task, delivered: true|false}`. `delivered: true`
+records the delivery. `delivered: false` undoes what the uncertain delivery
+started: after `send` the claim is taken back and the task returns to Queue,
+after `review-send` the reviewer is cleared, and after `rework-send` or
+`answer` only a comment records it, so the task keeps its session and an answer
+stays recorded. A definite failure is
 not a result but the refusal `not_delivered` (`ok: false`). After it, `send`
 takes its claim back and the task returns to Queue; `review-send` clears the
 reviewer; `rework-send` changes nothing; for `answer` the answer stays recorded
