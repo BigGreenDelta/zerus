@@ -2,11 +2,15 @@
 #include <algorithm>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QVBoxLayout>
 #include "DashboardPage.h"
+#include "SessionPresentation.h"
 
 class PaintCounter : public QObject {
 public:
@@ -49,6 +53,44 @@ private:
         offline.ok = false; fleet.setPeer(offline, now); return fleet;
     }
 private slots:
+    void filtersFollowSharedAndroidContract()
+    {
+        QFile file(QFileInfo(QString::fromUtf8(__FILE__)).dir().filePath(
+            "../../mobile/android/app/src/test/resources/session-filter-contract.json"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto contract = QJsonDocument::fromJson(file.readAll()).object();
+        const QStringList filters{"all", "attention", "active", "paused", "archived"};
+        QCOMPARE(QJsonArray::fromStringList(filters), contract.value("filters").toArray());
+        for (const auto &value : contract.value("cases").toArray()) {
+            const auto example = value.toObject(); auto raw = example.value("raw").toObject();
+            raw["name"] = "codex/contract/" + example.value("name").toString();
+            QString error;
+            const auto box = HgsClient::parseBox(QJsonDocument(QJsonObject{{"host", "fixture"}, {"ok", true},
+                {"sessions", QJsonArray{raw}}}).toJson(), &error);
+            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(box.sessions.size(), 1);
+            auto session = box.sessions.first(); const bool online = example.value("online").toBool();
+            // Desktop overlays these device/read marks after parsing CLI rows.
+            session.reviewLater = raw.value("review_later").toBool();
+            session.attentionAcknowledged = raw.value("attention_acknowledged").toBool();
+            QStringList matches;
+            if (session.state != "archived") matches << "all";
+            if (SessionPresentation::needsAttention(session, online)) matches << "attention";
+            if (SessionPresentation::active(session, online, example.value("draft").toBool())) matches << "active";
+            if (session.state != "running" && session.state != "archived") matches << "paused";
+            if (session.state == "archived") matches << "archived";
+            QVERIFY2(QJsonArray::fromStringList(matches) == example.value("matches").toArray(), qPrintable(example.value("name").toString()));
+        }
+    }
+    void draftsJoinActiveOnceAndStayOffline()
+    {
+        auto state = fixture(); const QSet<QString> drafts{"\ncodex/hgs/ready", "\ncodex/hgs/dashboard",
+            "\ncodex/hgs/done", "mac\nkimi/docs/research", "studio\ncodex/hgs/dashboard"};
+        DashboardPage page; page.setFleet(state, drafts);
+        QCOMPARE(page.findChild<QPushButton *>("dashboardActive")->text(), QString("4\nActive"));
+        QCOMPARE(page.findChild<QPushButton *>("dashboardAttention")->text(), QString("1\nNeeds attention"));
+        QCOMPARE(page.findChildren<QPushButton *>("dashboardSessionRow").size(), 4);
+        page.setFleet(state); QCOMPARE(page.findChild<QPushButton *>("dashboardActive")->text(), QString("2\nActive"));
+    }
     void pendingNativeIdentityDoesNotCreateAnotherAccount()
     {
         auto profiles=accounts();auto pending=profiles.last().toObject();
@@ -99,6 +141,17 @@ private slots:
         for (const auto *status : page.findChildren<QLabel *>("dashboardMachineStatus")) statuses << status->text();
         QCOMPARE(statuses.count("Offline"), 1); QCOMPARE(statuses.count("Connected"), 2);
         QVERIFY(page.findChildren<QLabel *>("dashboardMuted").size() > 5);
+    }
+    void controlOnlyComputerHasNoMachineCard()
+    {
+        auto fleet = fixture(); auto local = fleet.local(); local.sessions.clear(); local.localSessions = false;
+        fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+        DashboardPage page; page.setFleet(fleet); page.resize(1120, 900); page.show();
+        QCOMPARE(page.findChild<QPushButton *>("dashboardConnected")->text(), QString("1 / 2\nMachines online"));
+        QStringList machines;
+        for (const auto *title : page.findChildren<QLabel *>("dashboardMachineTitle")) machines << title->toolTip();
+        machines.sort();
+        QCOMPARE(machines, QStringList({"mac", "studio"}));
     }
     void reviewLaterStaysActiveOnOfflineMachine()
     {

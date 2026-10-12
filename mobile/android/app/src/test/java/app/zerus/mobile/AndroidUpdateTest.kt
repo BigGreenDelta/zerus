@@ -70,6 +70,28 @@ class AndroidUpdateTest {
         assertTrue(UpdatePolicy.shouldCheck(0,1));assertFalse(UpdatePolicy.shouldCheck(100,101))
         assertTrue(UpdatePolicy.shouldCheck(100,100+UpdatePolicy.CHECK_INTERVAL));assertTrue(UpdatePolicy.shouldCheck(100,99))
     }
+    @Test fun devRunCatalogAndStableCatalogStaySeparateInTheSamePackage() {
+        val raw=feed().put("schemaVersion",2).put("buildId",12345).put("buildNumber",50).put("channelTag","dev")
+            .put("buildUrl","https://github.com/ufna/zerus/actions/runs/12345")
+        raw.remove("releaseId");raw.remove("releaseUrl")
+        raw.getJSONArray("artifacts").getJSONObject(0).put("url","https://zerus.dev/downloads/dev-android-12345/zerus.apk")
+        assertEquals(12345L,UpdatePolicy.parse(raw.toString()).releaseId)
+        assertEquals("dev",UpdatePolicy.parseSaved(raw.toString()).channel)
+        reject { UpdatePolicy.parse(raw.toString(),"stable") }
+        for(key in listOf("buildId","buildNumber","channelTag","buildUrl")) {
+            val bad=JSONObject(raw.toString()).put(key,"bad")
+            reject { UpdatePolicy.parse(bad.toString()) }
+        }
+        reject { UpdatePolicy.parse(JSONObject(raw.toString()).put("sourceDirty",false).toString()) }
+        val stable=feed().put("channel","stable")
+        assertEquals("stable",UpdatePolicy.parse(stable.toString(),"stable").channel)
+        assertEquals("stable",UpdatePolicy.parseSaved(stable.toString()).channel)
+        reject { UpdatePolicy.parse(stable.toString(),"dev") }
+        assertEquals("https://zerus.dev/updates/v2/android/dev.json",UpdatePolicy.feedUrl("dev"))
+        assertEquals("https://zerus.dev/updates/v1/android/stable.json",UpdatePolicy.feedUrl("stable"))
+        assertTrue(UpdatePolicy.shouldCheck(100,100+UpdatePolicy.DEV_CHECK_INTERVAL,"dev"))
+        assertFalse(UpdatePolicy.shouldCheck(100,100+UpdatePolicy.DEV_CHECK_INTERVAL,"stable"))
+    }
     @Test fun streamingVerifierRejectsShortOversizeAndTamperedBytes() = runBlocking {
         val out=ByteArrayOutputStream();copyVerified(ByteArrayInputStream(data),out,data.size.toLong(),sha(data));assertArrayEquals(data,out.toByteArray())
         for(bytes in listOf(data.copyOf(data.size-1),data+byteArrayOf(1),data.copyOf().apply { this[0]=1 })) {
@@ -105,6 +127,14 @@ class AndroidUpdateTest {
         assertTrue(UpdateInstallGuard.ownsCallback(7,"nonce",7,"nonce"))
         assertFalse(UpdateInstallGuard.ownsCallback(7,"nonce",8,"nonce"));assertFalse(UpdateInstallGuard.ownsCallback(7,"nonce",7,"other"))
         assertFalse(UpdateInstallGuard.ownsCallback(7,"",7,""))
+    }
+    @Test fun installTapOpensAndroidConfirmationOnlyForItsOwnPendingSession() {
+        assertTrue(UpdateInstallGuard.opensConfirmation(7,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(-1,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(-1,-1,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(6,7,"confirmation",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(7,7,"installing",true))
+        assertFalse(UpdateInstallGuard.opensConfirmation(7,7,"confirmation",false))
     }
     @Test fun preparationWaitsForMessagesQuestionsTerminalAndContextActionsButAllowsSavedDrafts() {
         val target=Target("computer","session","run","conversation","workspace")

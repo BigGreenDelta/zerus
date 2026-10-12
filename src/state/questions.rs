@@ -344,6 +344,9 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
     if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
         cards.push(terminal);
     }
+    if cards.is_empty() {
+        cards.extend(startup_choice::current(record));
+    }
     cards.sort_by(|a, b| {
         a["created_at"]
             .as_f64()

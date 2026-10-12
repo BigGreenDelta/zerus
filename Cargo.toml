@@ -1,6 +1,6 @@
 [package]
 name = "hgs"
-version = "1.49.0"
+version = "1.51.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Persistent local and remote agent sessions for Zerus"
@@ -27,6 +27,18 @@ shell-words = "1"
 tempfile = "3"
 toml_edit = "0.25"
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 strip = true

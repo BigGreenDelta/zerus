@@ -6,6 +6,7 @@
 #include <QPainterPath>
 #include <QPalette>
 #include <QPixmap>
+#include <QSettings>
 #include <QTransform>
 
 namespace {
@@ -86,7 +87,17 @@ QColor IconFactory::foreground(const QString &override)
     //
     // Each counter gets a contrasting surface, including on macOS where the
     // menu-bar wallpaper can differ from the application palette.
+#ifdef Q_OS_WIN
+    // Windows: the taskbar has its own theme, dark by default even when apps are
+    // light. The registry value is what Explorer itself follows.
+    const QSettings personalize(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        QSettings::NativeFormat);
+    return personalize.value(QStringLiteral("SystemUsesLightTheme"), 0).toInt() == 1 ? QColor(Qt::black)
+                                                                                     : QColor(Qt::white);
+#else
     return QApplication::palette().windowText().color();
+#endif
 }
 
 QPixmap IconFactory::brandPixmap(int size, const QColor &color)

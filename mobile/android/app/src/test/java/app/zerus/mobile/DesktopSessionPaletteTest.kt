@@ -24,15 +24,34 @@ class DesktopSessionPaletteTest {
         val dark = listOf(
             DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0), DesktopBadgeColors(0xFF194D36, 0xFF97F0BA),
             DesktopBadgeColors(0xFFFFDA76, 0xFF392900), DesktopBadgeColors(0xFFFFABB6, 0xFF46202A),
-            DesktopBadgeColors(0xFF443654, 0xFFDEC3FF), DesktopBadgeColors(0xFFFFDA76, 0xFF392900))
+            DesktopBadgeColors(0xFF443654, 0xFFDEC3FF), DesktopBadgeColors(0xFFFFDA76, 0xFF392900),
+            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0))
         val light = listOf(
             DesktopBadgeColors(0xFFE7EDF2, 0xFF566575), DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37),
             DesktopBadgeColors(0xFFF4CE65, 0xFF392900), DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF),
-            DesktopBadgeColors(0xFFE8DDF5, 0xFF634187), DesktopBadgeColors(0xFFF4CE65, 0xFF392900))
+            DesktopBadgeColors(0xFFE8DDF5, 0xFF634187), DesktopBadgeColors(0xFFF4CE65, 0xFF392900),
+            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B))
         DesktopBadgeKind.entries.forEachIndexed { index, kind ->
             assertEquals(dark[index], DesktopSessionPalette.colors(kind, true))
             assertEquals(light[index], DesktopSessionPalette.colors(kind, false))
         }
+    }
+
+    @Test fun scheduledAgentsShowTheirNextRunInsteadOfReady() {
+        val next = System.currentTimeMillis() / 1000 + 600
+        val raw = """{"activity":"idle","phase":"idle","process_state":"running","schedules":{"count":1,"recurring":1,"next_at":$next}}"""
+        val badge = DesktopSessionPalette.badge(session(raw), true)
+        assertEquals(DesktopBadgeKind.Scheduled, badge.kind)
+        assertEquals("Scheduled · " + SessionFilters.nextScheduledRun(session(raw)), badge.caption)
+        assertTrue(badge.caption.matches(Regex("""Scheduled · (\d{2}:\d{2}|\d{1,2} \S+ \d{2}:\d{2})""")))
+        assertEquals("Scheduled · due", DesktopSessionPalette.badge(session(raw.replace("$next", "1")), true).caption)
+        assertEquals("Scheduled", DesktopSessionPalette.badge(session(raw.replace("$next", "null")), true).caption)
+        // Questions, work and a new reply outrank the schedule; offline and unknown are not scheduled.
+        assertEquals(DesktopBadgeKind.Attention, DesktopSessionPalette.badge(session(raw.replace("\"phase\":\"idle\"", "\"phase\":\"input\"")), true).kind)
+        assertEquals(DesktopBadgeKind.Unread, DesktopSessionPalette.badge(session(raw.replace("}}", "},\"mobile_unread_reply\":true}")), true).kind)
+        assertEquals("Offline", DesktopSessionPalette.badge(session(raw), false).caption)
+        assertEquals(DesktopBadgeKind.Neutral, DesktopSessionPalette.badge(session(raw.replace("\"count\":1", "\"count\":0")), true).kind)
+        assertEquals("Ready", DesktopSessionPalette.badge(session("""{"activity":"idle","phase":"idle","process_state":"running","schedules":null}"""), true).caption)
     }
 
     @Test fun workingToolThinkingAndCompactionAreGreenButIdleIsNeutral() {

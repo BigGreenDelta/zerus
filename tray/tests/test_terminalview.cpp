@@ -1,6 +1,8 @@
+#include "FakeCli.h"
 #include "PtyProcess.h"
 #include "TerminalScreen.h"
 #include "TerminalView.h"
+#include "WindowsCommandLine.h"
 
 #include <QFile>
 #include <QFontInfo>
@@ -10,6 +12,7 @@
 #include <QProcess>
 #include <QPaintEvent>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -44,6 +47,30 @@ bool executable(const QString &path, const QByteArray &contents) {
          file.write(contents) == contents.size() &&
          file.setPermissions(QFile::ReadOwner | QFile::WriteOwner |
                              QFile::ExeOwner);
+}
+// Child programs of the PTY tests: /bin/sh on Unix, the test helper's steps in a
+// pseudoconsole on Windows (support/TestHelper.cpp).
+struct Child {
+  QString program;
+  QStringList arguments;
+};
+Child child(const QString &script, const QStringList &steps) {
+#ifdef Q_OS_WIN
+  Q_UNUSED(script);
+  return {QStringLiteral(ZERUS_TEST_HELPER), steps};
+#else
+  Q_UNUSED(steps);
+  return {QStringLiteral("/bin/sh"), {QStringLiteral("-c"), script}};
+#endif
+}
+// What a terminal shows: ConPTY re-renders output, so Windows checks the screen.
+QString rendered(const QByteArray &bytes) {
+  TerminalScreen screen;
+  screen.resize(1200, 600);
+  screen.show();
+  QTest::qWait(10);
+  screen.feed(bytes);
+  return screen.screenText();
 }
 Qt::KeyboardModifier physicalControl() {
 #ifdef Q_OS_MACOS
@@ -349,12 +376,11 @@ private slots:
         errors(&process, &PtyProcess::errorOccurred);
     QSignalSpy framed(&screen, &TerminalScreen::output);
     connect(&screen, &TerminalScreen::output, &process, &PtyProcess::write);
-    QVERIFY(
-        process.start(QStringLiteral("/bin/sh"),
-                      {QStringLiteral("-c"),
-                       QStringLiteral("stty -echo; printf 'READY\\n'; read "
-                                      "line; printf 'GOT:%s\\n' \"$line\"")},
-                      QProcessEnvironment::systemEnvironment(), QSize(80, 24)));
+    const auto noEcho = child(QStringLiteral("stty -echo; printf 'READY\\n'; read "
+                                             "line; printf 'GOT:%s\\n' \"$line\""),
+                              {"noecho", "line", "READY", "read", "got"});
+    QVERIFY(process.start(noEcho.program, noEcho.arguments,
+                          QProcessEnvironment::systemEnvironment(), QSize(80, 24)));
     QTRY_VERIFY(combined(bytes).contains("READY"));
     screen.feed("\x1b[?2004h");
     screen.pasteText(QString(4 * 1024 * 1024, QLatin1Char('x')));
@@ -423,27 +449,90 @@ private slots:
     PtyProcess process;
     QSignalSpy bytes(&process, &PtyProcess::output),
         finished(&process, &PtyProcess::finished);
-    QVERIFY(
-        process.start(QStringLiteral("/bin/sh"),
-                      {QStringLiteral("-c"),
-                       QStringLiteral("printf 'READY\\n'; read line; stty "
-                                      "size; printf 'GOT:%s\\n' \"$line\"")},
-                      QProcessEnvironment::systemEnvironment(), QSize(81, 27)));
+    const auto probe = child(QStringLiteral("printf 'READY\\n'; read line; stty "
+                                            "size; printf 'GOT:%s\\n' \"$line\""),
+                             {"line", "READY", "read", "size", "got"});
+    QVERIFY(process.start(probe.program, probe.arguments,
+                          QProcessEnvironment::systemEnvironment(), QSize(81, 27)));
     QTRY_VERIFY(combined(bytes).contains("READY"));
     process.resize(QSize(93, 31));
     process.write("hello\r");
     QTRY_VERIFY(!finished.isEmpty());
     QCOMPARE(finished.last().at(0).toInt(), 0);
+#ifdef Q_OS_WIN
+    QVERIFY2(rendered(combined(bytes)).contains("31 93"),
+             qPrintable(rendered(combined(bytes)) + QString::fromLatin1(combined(bytes).toPercentEncoding())));
+    QVERIFY(rendered(combined(bytes)).contains("GOT:hello"));
+    QVERIFY(!process.isRunning());
+#else
     QVERIFY(combined(bytes).contains("31 93"));
     QVERIFY(combined(bytes).contains("GOT:hello"));
+#endif
   }
 
+  // The pseudoconsole command line must give the child the argv QProcess would.
+  void windowsCommandLineMatchesQProcessQuoting() {
+    using WindowsCommandLine::build;
+    QCOMPARE(build("C:/Program Files/Zerus/hgs.exe", {"@mac", "a", "codex/p/my name"}),
+             QString("\"C:\\Program Files\\Zerus\\hgs.exe\"  @mac a \"codex/p/my name\""));
+    QCOMPARE(build("hgs.exe", {"", "say \"hi\"", "C:\\dir\\", "C:\\my dir\\", "a\\\"b"}),
+             QString("hgs.exe  \"\" \"say \\\"hi\\\"\" C:\\dir\\ \"C:\\my dir\"\\ a\\\\\\\"b"));
+  }
+
+#ifdef Q_OS_WIN
+  // Every argument byte reaches the attached program, as through QProcess.
+  void pseudoconsoleArgumentsSurviveQuoting() {
+    const QString script = m_dir.filePath(QStringLiteral("argv"));
+    QVERIFY(FakeCli::install(script, "#!/usr/bin/env python3\nimport os,sys\n"
+        "open(__file__+'.json','w').write(repr(sys.argv[1:]))\n"));
+    const QStringList arguments{QString::fromUtf8("codex/проект/my name"), "say \"hi\"", "C:\\dir\\",
+                                "C:\\my dir\\", "a\\\"b", "$HOME `x`", "tab\there"};
+    PtyProcess process;
+    QSignalSpy finished(&process, &PtyProcess::finished);
+    QVERIFY(process.start(FakeCli::program(script), arguments,
+                          QProcessEnvironment::systemEnvironment(), QSize(80, 24)));
+    QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 20000);
+    QFile result(script + QStringLiteral(".json"));
+    QVERIFY(result.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(result.readAll()),
+             QString::fromUtf8("['codex/проект/my name', 'say \"hi\"', 'C:\\\\dir\\\\', "
+                               "'C:\\\\my dir\\\\', 'a\\\\\"b', '$HOME `x`', 'tab\\there']"));
+  }
+
+  // Disconnect ends the attach client and its descendants: PtyProcess's
+  // kill-on-close job is the only thing that reaches this grandchild, which has
+  // no console and runs in no job of the client's own.
+  void stopEndsTheWholeClient() {
+    const QString pidFile = m_dir.filePath(QStringLiteral("grandchild.pid"));
+    QFile::remove(pidFile);
+    PtyProcess process;
+    QVERIFY(process.start(QStringLiteral(ZERUS_TEST_HELPER), {"spawn", pidFile, "sleep", "60"},
+                          QProcessEnvironment::systemEnvironment(), QSize(80, 24)));
+    QTRY_VERIFY_WITH_TIMEOUT(QFile(pidFile).size() > 0, 20000);
+    QFile file(pidFile);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const qint64 grandchild = file.readAll().trimmed().toLongLong();
+    const auto cleanup = qScopeGuard([grandchild] { FakeCli::terminate(grandchild); });
+    const qint64 client = process.processId();
+    QVERIFY(FakeCli::processAlive(grandchild));
+    QVERIFY(FakeCli::processAlive(client));
+    QTest::qWait(300);
+    QVERIFY(FakeCli::processAlive(grandchild));
+    process.stop();
+    QVERIFY(!process.isRunning());
+    QVERIFY(!FakeCli::processAlive(client));
+    QTRY_VERIFY_WITH_TIMEOUT(!FakeCli::processAlive(grandchild), 5000);
+  }
+#endif
+
   void noAutomaticAttachAndGuardedArguments() {
-    const QString path = m_dir.filePath(QStringLiteral("capture"));
-    QVERIFY(executable(
-        path,
-        "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\"\nprintf 'ENV:%s:%s:%s\\n' "
-        "\"${TMUX-unset}\" \"${TMUX_PANE-unset}\" \"$HGS_TAB\"\nexec cat\n"));
+    const QString script = m_dir.filePath(QStringLiteral("capture"));
+    QVERIFY(FakeCli::install(
+        script,
+        "#!/usr/bin/env python3\nimport os,sys\nfor a in sys.argv[1:]:print('ARG:'+a)\n"
+        "print('ENV:%s:%s:%s'%(os.environ.get('TMUX','unset'),os.environ.get('TMUX_PANE','unset'),"
+        "os.environ.get('HGS_TAB','')),flush=True)\nsys.stdin.buffer.read()\n"));
+    const QString path = FakeCli::program(script);
     TerminalView view;
     view.resize(700, 340);
     view.show();
@@ -477,8 +566,9 @@ private slots:
   }
 
   void delayedRunTokenDoesNotDetach() {
-    const QString path = m_dir.filePath(QStringLiteral("cat"));
-    QVERIFY(executable(path, "#!/bin/sh\nexec cat\n"));
+    const QString script = m_dir.filePath(QStringLiteral("cat"));
+    QVERIFY(FakeCli::install(script, "#!/usr/bin/env python3\nimport sys\nsys.stdin.buffer.read()\n"));
+    const QString path = FakeCli::program(script);
     TerminalView view;
     view.setSession(path, {}, QStringLiteral("codex/p/name"));
     view.connectSession();

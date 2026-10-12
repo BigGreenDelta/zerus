@@ -33,6 +33,11 @@
 // Что НЕ считается зависанием: модальные диалоги (QMessageBox::exec крутит вложенный цикл,
 // таймер тикает), любая обычная работа. Порог в десятки секунд с запасом покрывает даже
 // очень тормозящий бокс.
+//
+// Windows has no steady clock that stops during sleep, so nowMs() reads the
+// unbiased interrupt time there. Nothing supervises the tray on Windows; main.cpp
+// registers it with Windows Error Reporting (RegisterApplicationRestart) instead,
+// which restarts it after the abort once it has run for at least a minute.
 class MainThreadWatchdog {
 public:
     MainThreadWatchdog(int thresholdMs, std::function<void()> onHang);

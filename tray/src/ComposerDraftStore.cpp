@@ -9,6 +9,12 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
+#include <QCoreApplication>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QPointer>
+#include <QThread>
+#include <optional>
 
 namespace {
 const auto PrivateDirectory = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner;
@@ -24,6 +30,79 @@ bool atomicWrite(const QString &path, const QByteArray &bytes, QString &error)
     }
     return true;
 }
+
+struct WriteResult { bool okay; ComposerDraft draft; };
+class DraftWrites : public QObject {
+    struct Work {
+        std::function<WriteResult()> write;
+        QPointer<QObject> owner;
+        std::function<void(bool, const ComposerDraft &)> done;
+    };
+public:
+    static QPointer<DraftWrites> &reference() { static QPointer<DraftWrites> value; return value; }
+    static void flushExisting() { if (auto value = reference()) value->flush(); }
+    static DraftWrites *instance() {
+        Q_ASSERT(QCoreApplication::instance()
+                 && QThread::currentThread() == QCoreApplication::instance()->thread());
+        auto &value = reference();
+        if (!value) value = new DraftWrites;
+        return value;
+    }
+    DraftWrites() : QObject(QCoreApplication::instance()), m_worker(new QObject) {
+        m_thread.setObjectName("zerus-draft-writer");
+        m_worker->moveToThread(&m_thread);
+        connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &DraftWrites::flush);
+        m_thread.start();
+    }
+    ~DraftWrites() override { flush(); m_thread.quit(); m_thread.wait(); }
+    void flush() { QMetaObject::invokeMethod(m_worker, [] {}, Qt::BlockingQueuedConnection); }
+    void observer(std::function<void()> value) { QMutexLocker lock(&m_mutex); m_observer = std::move(value); }
+    WriteResult sync(const QString &identity, std::function<WriteResult()> write) {
+        { QMutexLocker lock(&m_mutex); m_pending.remove(identity); }
+        WriteResult result{};
+        QMetaObject::invokeMethod(m_worker, [this, &result, &write] {
+            observe(); result = write();
+        }, Qt::BlockingQueuedConnection);
+        return result;
+    }
+    void async(const QString &identity, std::function<WriteResult()> write, QObject *owner,
+               std::function<void(bool, const ComposerDraft &)> done) {
+        bool scheduled;
+        {
+            QMutexLocker lock(&m_mutex);
+            scheduled = m_pending.contains(identity);
+            m_pending.insert(identity, {std::move(write), owner, std::move(done)});
+        }
+        if (scheduled) return;
+        QMetaObject::invokeMethod(m_worker, [this, identity] {
+            std::optional<Work> work;
+            {
+                QMutexLocker lock(&m_mutex);
+                auto it = m_pending.find(identity);
+                if (it == m_pending.end()) return;
+                work = std::move(it.value()); m_pending.erase(it);
+            }
+            observe(); auto result = work->write();
+            // Results arrive on the application thread. Destroyed editors do
+            // not cancel persistence, and are never called after destruction.
+            QMetaObject::invokeMethod(this, [work = std::move(*work), result = std::move(result)] {
+                if (work.owner) work.done(result.okay, result.draft);
+            }, Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
+    }
+private:
+    void observe() {
+        std::function<void()> observer;
+        { QMutexLocker lock(&m_mutex); observer = m_observer; }
+        if (observer) observer();
+    }
+    QThread m_thread;
+    QObject *m_worker;
+    QMutex m_mutex;
+    QHash<QString, Work> m_pending;
+    std::function<void()> m_observer;
+};
 }
 
 QString ComposerDraftStore::directory()
@@ -33,10 +112,34 @@ QString ComposerDraftStore::directory()
     return QSettings().fileName() + QStringLiteral(".drafts");
 }
 
-QString ComposerDraftStore::folder(const QString &key) const { return directory() + '/' + hash(key.toUtf8()); }
+QString ComposerDraftStore::root() const { return m_root.isEmpty() ? directory() : m_root; }
+QString ComposerDraftStore::folder(const QString &key) const { return root() + '/' + hash(key.toUtf8()); }
+
+void ComposerDraftStore::flushWrites() { DraftWrites::flushExisting(); }
+void ComposerDraftStore::setWriteObserver(std::function<void()> observer) { DraftWrites::instance()->observer(std::move(observer)); }
+
+bool ComposerDraftStore::save(const QString &key, ComposerDraft &draft) const
+{
+    if (key.isEmpty()) return true;
+    auto store = *this; store.m_root = root();
+    auto result = DraftWrites::instance()->sync(store.m_root + QChar(0) + key,
+        [store, key, copy = draft]() mutable { const bool okay = store.saveDirect(key, copy); return WriteResult{okay, std::move(copy)}; });
+    draft = std::move(result.draft); return result.okay;
+}
+
+void ComposerDraftStore::saveAsync(const QString &key, const ComposerDraft &draft, QObject *owner,
+                                 std::function<void(bool, const ComposerDraft &)> done) const
+{
+    if (key.isEmpty()) return;
+    auto store = *this; store.m_root = root();
+    DraftWrites::instance()->async(store.m_root + QChar(0) + key,
+        [store, key, copy = draft]() mutable { const bool okay = store.saveDirect(key, copy); return WriteResult{okay, std::move(copy)}; },
+        owner, std::move(done));
+}
 
 ComposerDraft ComposerDraftStore::load(const QString &key) const
 {
+    flushWrites();
     ComposerDraft draft;
     QFile file(folder(key) + "/draft.json");
     if (!file.exists()) return draft;
@@ -74,11 +177,11 @@ ComposerDraft ComposerDraftStore::load(const QString &key) const
     return draft;
 }
 
-bool ComposerDraftStore::save(const QString &key, ComposerDraft &draft) const
+bool ComposerDraftStore::saveDirect(const QString &key, ComposerDraft &draft) const
 {
     if (key.isEmpty()) return true;
     const auto path = folder(key);
-    if (!QDir().mkpath(path) || !QFile::setPermissions(directory(), PrivateDirectory) || !QFile::setPermissions(path, PrivateDirectory)) {
+    if (!QDir().mkpath(path) || !QFile::setPermissions(root(), PrivateDirectory) || !QFile::setPermissions(path, PrivateDirectory)) {
         draft.storageError = QObject::tr("Draft not saved: cannot create private draft storage. Keep this window open until saving succeeds.");
         return false;
     }
@@ -110,6 +213,7 @@ bool ComposerDraftStore::save(const QString &key, ComposerDraft &draft) const
 
 QStringList ComposerDraftStore::keys() const
 {
+    flushWrites();
     QStringList result;
     for (const auto &name : QDir(directory()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         QFile file(directory() + '/' + name + "/draft.json");
@@ -117,13 +221,14 @@ QStringList ComposerDraftStore::keys() const
         const auto object = QJsonDocument::fromJson(file.readAll()).object();
         const auto key = object.value("key").toString();
         if (object.value("version").toInt() == 1 && name == hash(key.toUtf8())
-            && (!object.value("text").toString().isEmpty() || !object.value("attachments").toArray().isEmpty())) result.append(key);
+            && (!object.value("text").toString().trimmed().isEmpty() || !object.value("attachments").toArray().isEmpty())) result.append(key);
     }
     result.sort(); return result;
 }
 
 QString ComposerDraftStore::label(const QString &key) const
 {
+    flushWrites();
     QFile file(folder(key) + "/draft.json");
     if (file.open(QIODevice::ReadOnly)) {
         const auto label = QJsonDocument::fromJson(file.readAll()).object().value("label").toString();

@@ -1,9 +1,58 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+# support/FakeCli.h starts fixture scripts as fake executables on every platform.
+set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
+if(WIN32)
+    # Windows cannot start scripts: a native shim runs Python fixtures with their
+    # command line unchanged and replaces /bin/sh in process tests (TestHelper.cpp).
+    # 3.9: fixtures use str.removeprefix.
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    add_executable(zerus-test-helper support/TestHelper.cpp)
+    # A static runtime: copies of the helper run from temporary directories.
+    set_target_properties(zerus-test-helper PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_compile_definitions(zerus-test-helper PRIVATE ZERUS_TEST_PYTHON="${Python3_EXECUTABLE}")
+endif()
+# Applied to every test program at the end of this file. On Windows each one also
+# gets isolated INI settings (TestIsolation.cpp) and the manifest of hgs-tray.exe.
+function(zerus_test_support target)
+    target_include_directories(${target} PRIVATE "${ZERUS_TEST_SUPPORT}")
+    if(WIN32)
+        target_sources(${target} PRIVATE "${ZERUS_TEST_SUPPORT}/TestIsolation.cpp" "${ZERUS_TEST_SUPPORT}/FakeCliWindows.cpp"
+            "${PROJECT_SOURCE_DIR}/packaging/windows/hgs-tray.manifest")
+        add_dependencies(${target} zerus-test-helper)
+        target_compile_definitions(${target} PRIVATE ZERUS_TEST_HELPER="$<TARGET_FILE:zerus-test-helper>")
+        # Programs with Qt GUI get the Windows UI font (TestFonts.cpp).
+        get_target_property(libraries ${target} LINK_LIBRARIES)
+        foreach(library IN LISTS libraries)
+            if(library MATCHES "^(Qt6::(Gui|Widgets|WebEngineWidgets)|hgs-(markdown|terminal|window-layer|updates))$")
+                target_sources(${target} PRIVATE "${ZERUS_TEST_SUPPORT}/TestFonts.cpp")
+                break()
+            endif()
+        endforeach()
+    endif()
+endfunction()
+# Windows test programs find the Qt DLLs through PATH. The offscreen platform
+# reads fonts from QT_QPA_FONTDIR there; without it text has no glyphs or size.
+function(zerus_test_environment)
+    if(NOT WIN32)
+        return()
+    endif()
+    if(CMAKE_VERSION VERSION_LESS 3.22)
+        message(FATAL_ERROR "Windows tests need CMake 3.22 or later (ENVIRONMENT_MODIFICATION)")
+    endif()
+    file(TO_CMAKE_PATH "$ENV{SystemRoot}/Fonts" fonts)
+    get_property(tests DIRECTORY PROPERTY TESTS)
+    foreach(test IN LISTS tests)
+        set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>" "QT_QPA_FONTDIR=set:${fonts}")
+    endforeach()
+endfunction()
+
 add_executable(test_attention test_attention.cpp ../src/AttentionTracker.cpp ../src/FleetState.cpp)
 target_include_directories(test_attention PRIVATE ../src)
-target_link_libraries(test_attention PRIVATE Qt6::Test Qt6::Core)
+target_link_libraries(test_attention PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME attention COMMAND test_attention)
+set_tests_properties(attention PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(LINUX)
     find_program(DBUS_RUN_SESSION dbus-run-session REQUIRED)
     add_executable(test_linuxattention test_linuxattention.cpp ../src/LinuxAttentionNotifier.cpp ../src/AttentionNotifier.h)
@@ -211,8 +260,12 @@ endforeach()
 add_executable(test_nativeuiview test_nativeuiview.cpp ../src/NativeUiView.cpp ../src/HgsClient.cpp ../src/ProcessRunner.cpp)
 target_include_directories(test_nativeuiview PRIVATE ../src)
 target_link_libraries(test_nativeuiview PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets)
-add_test(NAME nativeuiview COMMAND test_nativeuiview)
-set_tests_properties(nativeuiview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
+# The DeepSeek native UI needs SSH ControlPersist, which Windows OpenSSH lacks; it
+# is not offered from Windows in Phase 1. The program is still built there.
+if(NOT WIN32)
+    add_test(NAME nativeuiview COMMAND test_nativeuiview)
+    set_tests_properties(nativeuiview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
+endif()
 
 add_executable(test_activityview test_activityview.cpp ../src/ActivityView.cpp)
 target_include_directories(test_activityview PRIVATE ../src)
@@ -234,7 +287,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_questioncard test_questioncard.cpp ../src/QuestionCard.cpp ../src/ComposerDraftStore.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
-target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown)
 add_test(NAME questioncard COMMAND test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -338,3 +391,31 @@ target_include_directories(test_mobiledeliverysettings PRIVATE ../src)
 target_link_libraries(test_mobiledeliverysettings PRIVATE Qt6::Test Qt6::Widgets)
 add_test(NAME mobiledeliverysettings COMMAND test_mobiledeliverysettings)
 set_tests_properties(mobiledeliverysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Windows pieces with portable logic: the Windows Terminal command, the console
+# host, terminal templates, tray-icon notifications and the swarm worker the
+# Windows tray supervises.
+add_executable(test_windowsdesktop test_windowsdesktop.cpp ../src/WindowsTerminalBackend.cpp ../src/ConsoleHost.cpp
+               ../src/CommandBackend.cpp ../src/WindowsAttentionNotifier.cpp ../src/AttentionNotifier.h
+               ../src/SwarmWorkerSupervisor.cpp)
+target_include_directories(test_windowsdesktop PRIVATE ../src)
+target_link_libraries(test_windowsdesktop PRIVATE Qt6::Test Qt6::Widgets)
+if(WIN32)
+    # The console host is hgs-tray.exe itself (--console-run).
+    add_dependencies(test_windowsdesktop hgs-tray)
+    target_compile_definitions(test_windowsdesktop PRIVATE ZERUS_TRAY_EXE="$<TARGET_FILE:hgs-tray>")
+endif()
+add_test(NAME windowsdesktop COMMAND test_windowsdesktop)
+set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+get_property(zerus_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS zerus_test_targets)
+    if(target MATCHES "^test_")
+        zerus_test_support(${target})
+    endif()
+endforeach()
+# Defined by cmake/Terminal.cmake in the parent directory.
+if(TARGET test_terminalview)
+    zerus_test_support(test_terminalview)
+endif()
+zerus_test_environment()

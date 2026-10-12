@@ -1,11 +1,11 @@
 //! Claude's native auto-mode onboarding has no question hook, even though
 //! SessionStart may already have bound a conversation. Mirror only its complete
 //! startup panel; changing the account default always needs an explicit answer.
+//! The title and exact choices frame it; the explanation is shown verbatim.
 use super::*;
 use sha2::{Digest, Sha256};
 
 const TITLE: &str = "Make auto mode your default permission mode?";
-const BODY: &str = "Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.";
 const ACCEPT: &str = "Yes, set auto mode as my default permission mode";
 
 struct Panel {
@@ -35,8 +35,8 @@ fn parse(screen: &str) -> Option<Panel> {
     {
         return None;
     }
-    let body = rows[divider + 3..end].join("\n");
-    if body.split_whitespace().collect::<Vec<_>>().join(" ") != BODY {
+    let body = rows[divider + 3..end].join("\n").trim().to_owned();
+    if body.is_empty() {
         return None;
     }
     let mut labels = [String::new(), String::new()];
@@ -208,8 +208,10 @@ mod tests {
         );
         assert_eq!(q["conversation_id"], "bound");
         assert!(q["questions"][0]["options"][0].get("selected").is_none());
+        let blank = SCREEN.lines().map(|row| if row.starts_with("   Auto mode") || row.starts_with("   call for")
+            || row.starts_with("   as lower") { "" } else { row }).collect::<Vec<_>>().join("\n");
         for invalid in [
-            SCREEN.replace("and blocks the rest.", ""),
+            blank,
             SCREEN.replace(ACCEPT, "Yes, continue"),
             format!("User quoted:\n{SCREEN}"),
             format!("{SCREEN}\n❯ "),
@@ -217,6 +219,16 @@ mod tests {
             SCREEN.replace("❯ Yes", "Yes"),
         ] {
             assert!(parse(&invalid).is_none());
+        }
+    }
+    #[test]
+    fn unfamiliar_explanation_is_shown_verbatim() {
+        let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
+        for screen in [SCREEN.replace("and blocks the rest.", "and asks about the rest."), SCREEN.replace("and blocks the rest.", "")] {
+            let panel = parse(&screen).unwrap();
+            let question = card(&record(), &panel).unwrap();
+            assert_eq!(question["questions"][0]["body"], json!(panel.body));
+            assert_ne!(question["question_hash"], original["question_hash"]);
         }
     }
     #[test]
@@ -239,7 +251,6 @@ mod tests {
         r["launch_dir"] = json!(home().join("work/example"));
         assert_eq!(question["question_hash"], card(&r, &parse(&changed_banner).unwrap()).unwrap()["question_hash"]);
         for invalid in [
-            HOME_SCREEN.replace("and blocks the rest.", ""),
             format!("User quoted:\n{HOME_SCREEN}"),
             format!("{HOME_SCREEN}\nAnother prompt"),
         ] {

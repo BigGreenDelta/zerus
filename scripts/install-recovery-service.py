@@ -7,11 +7,14 @@ import shutil
 import subprocess
 import sys
 
+import launchd_agent
+
 binary = str(Path(sys.argv[1]).resolve())
 restart = '--restart' in sys.argv[2:]
 home = Path.home()
-path = os.pathsep.join(dict.fromkeys([str(home / '.local/bin'), str(home / '.cargo/bin'),
-                                    '/opt/homebrew/bin', '/usr/local/bin', os.environ.get('PATH', '/usr/bin:/bin')]))
+path = os.pathsep.join(part for part in dict.fromkeys([str(home / '.local/bin'), str(home / '.cargo/bin'),
+                                    '/opt/homebrew/bin', '/usr/local/bin',
+                                    *os.environ.get('PATH', '/usr/bin:/bin').split(os.pathsep)]) if part)
 
 def run(*args, check=True):
     return subprocess.run(args, check=check, stdin=subprocess.DEVNULL, capture_output=True, text=True)
@@ -25,18 +28,11 @@ if sys.platform == 'darwin':
                                  RunAtLoad=True, KeepAlive=True, ThrottleInterval=10,
                                  EnvironmentVariables={'PATH': path},
                                  StandardErrorPath=str(logs / 'recovery.log')))
-    changed = not destination.exists() or destination.read_bytes() != content
-    if changed:
-        destination.write_bytes(content); destination.chmod(0o644)
-        run('launchctl', 'bootout', f'gui/{os.getuid()}/{label}', check=False)
-    if run('launchctl', 'print', f'gui/{os.getuid()}/{label}', check=False).returncode:
-        result = run('launchctl', 'bootstrap', f'gui/{os.getuid()}', str(destination), check=False)
-        if result.returncode:
-            print('Recovery service installed for next login: ' + result.stderr.strip())
-        else:
-            print('Installed automatic recovery worker (disabled until enabled in Settings).')
-    elif restart:
-        run('launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{label}')
+    state, reason = launchd_agent.install(label, destination, content, restart)
+    if state == 'loaded':
+        print('Installed automatic recovery worker (disabled until enabled in Settings).')
+    elif state == 'deferred':
+        print('Recovery service installed for next login: ' + reason)
 elif sys.platform.startswith('linux') and shutil.which('systemctl'):
     destination = home / '.config/systemd/user/hgs-recovery.service'
     destination.parent.mkdir(parents=True, exist_ok=True)

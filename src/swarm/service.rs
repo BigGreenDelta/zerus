@@ -6,13 +6,15 @@
 //! service manager. Only the default configuration directory is the one the
 //! service uses; other directories never touch a service.
 use super::{store, transport::now};
-use crate::config::Config;
+use crate::{
+    config::Config,
+    platform::{self, FileIdentity as Identity},
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -82,12 +84,7 @@ fn older(version: &str, ours: &str) -> bool {
 }
 
 fn alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    pid > 0
-        && (unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    platform::process_alive(pid)
 }
 
 /// A shared probe conflicts only with the worker's exclusive lock.
@@ -156,27 +153,31 @@ fn due(last: Option<u64>, now: u64) -> bool {
 
 /// Restarts only the swarm worker unit; agents, tmux servers, DeepSeek hosts
 /// and hgs-recovery run elsewhere.
+#[cfg(target_os = "linux")]
 fn command() -> Option<(&'static str, Vec<String>)> {
-    if cfg!(target_os = "linux") {
-        Some((
-            "systemctl",
-            ["--user", "--no-block", "try-restart", "hgs-swarm.service"]
-                .map(String::from)
-                .to_vec(),
-        ))
-    } else if cfg!(target_os = "macos") {
-        let uid = unsafe { libc::getuid() };
-        Some((
-            "launchctl",
-            vec![
-                "kickstart".into(),
-                "-k".into(),
-                format!("gui/{uid}/com.hgdev.hgs-swarm"),
-            ],
-        ))
-    } else {
-        None
-    }
+    Some((
+        "systemctl",
+        ["--user", "--no-block", "try-restart", "hgs-swarm.service"]
+            .map(String::from)
+            .to_vec(),
+    ))
+}
+#[cfg(target_os = "macos")]
+fn command() -> Option<(&'static str, Vec<String>)> {
+    let uid = unsafe { libc::getuid() };
+    Some((
+        "launchctl",
+        vec![
+            "kickstart".into(),
+            "-k".into(),
+            format!("gui/{uid}/com.hgdev.hgs-swarm"),
+        ],
+    ))
+}
+/// No service manager runs the worker here: the Windows desktop app supervises it.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn command() -> Option<(&'static str, Vec<String>)> {
+    None
 }
 
 /// Waits briefly; a hung service manager never holds up the command.
@@ -201,22 +202,8 @@ fn run(program: &str, args: &[String]) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Identity {
-    dev: u64,
-    ino: u64,
-    mtime: i64,
-    mtime_nsec: i64,
-}
-
 fn identity(path: &Path) -> Option<Identity> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(Identity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        mtime: metadata.mtime(),
-        mtime_nsec: metadata.mtime_nsec(),
-    })
+    platform::file_identity(path)
 }
 
 /// The file this process was started from.
@@ -409,7 +396,7 @@ mod tests {
         let executable = Executable {
             path: path.clone(),
             started: Identity {
-                mtime: 0,
+                modified: 0,
                 ..identity(&path).unwrap()
             },
         };

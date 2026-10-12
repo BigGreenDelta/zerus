@@ -9,6 +9,51 @@ class SessionFiltersTest {
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
     private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =
         Session(Target("same", name, "run", "conversation", connection, archive), "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, JSONObject(raw))
+    @Test fun filtersFollowSharedDesktopContract() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/session-filter-contract.json")).bufferedReader().use { it.readText() })
+        assertEquals(contract.getJSONArray("filters").let { array -> (0 until array.length()).map(array::getString) }, SessionFilter.entries.map { it.id })
+        contract.getJSONArray("cases").objects().forEach { example ->
+            val item = session(example.getJSONObject("raw").toString())
+            val matches = SessionFilter.entries.filter { SessionFilters.matches(item, it, example.getBoolean("online"), example.getBoolean("draft")) }.map { it.id }
+            val expected = example.getJSONArray("matches").let { array -> (0 until array.length()).map(array::getString) }
+            assertEquals(example.getString("name"), expected, matches)
+        }
+    }
+    @Test fun localDraftsJoinActiveOnceWithinMachineProjectAndSearchScope() {
+        val project = ProjectKey("a", "swarm", "project")
+        val idle = session("""{"activity":"idle"}""", name="codex/project/draft").copy(projectKey=project)
+        val working = session("""{"activity":"busy","phase":"input"}""", name="codex/project/overlap").copy(projectKey=project)
+        val offline = idle.copy(target=idle.target.copy(connectionId="b"))
+        val archive = idle.copy(target=idle.target.copy(archiveId="archive"))
+        val items = listOf(idle, working, offline, archive)
+        val local = listOf(Draft(idle.target, "unsent"), Draft(working.target, "unsent"),
+            Draft(offline.target, "", attachments=listOf(Attachment("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "notes.txt", "text/plain", 4, "a".repeat(64)))),
+            Draft(archive.target, "unsent"))
+        val drafts = SessionFilters.draftedSessions(items, local)
+        assertEquals(3, SessionFilters.counts(items, machines, drafts).getValue(SessionFilter.Active))
+        assertEquals(1, SessionFilters.counts(items, machines, drafts).getValue(SessionFilter.Attention))
+        assertTrue(SessionFilters.matches(offline, SessionFilter.Active, false, offline.target.key in drafts))
+        assertFalse(SessionFilters.matches(archive, SessionFilter.Active, true, true))
+        val scoped = SessionFilters.scoped(items, machines, setOf(MachineKey("a", "same")), "draft", project)
+        assertEquals(listOf(idle, archive), scoped)
+        assertEquals(1, SessionFilters.counts(scoped, machines, drafts).getValue(SessionFilter.Active))
+        assertEquals(1, SessionFilters.counts(items, machines).getValue(SessionFilter.Active))
+    }
+    @Test fun draftPresenceExcludesBlankAndDispatchedPayloadsAndKeepsRecoverableSessionDrafts() {
+        val item = session("""{"activity":"idle","subagents":{"child":{"state":"idle"}}}""")
+        val editing = Draft(item.target, "unsent")
+        listOf(editing.copy(text=" \n\t"), editing.copy(status="submitting"), editing.copy(status="submitted"),
+            editing.copy(status="recorded"), editing.copy(detachedId="detached"), editing.copy(questionId="question"),
+            editing.copy(target=item.target.copy(connectionId="b"))).forEach { excluded ->
+            assertTrue(SessionFilters.draftedSessions(listOf(item), listOf(excluded)).isEmpty())
+        }
+        assertEquals(setOf(item.target.key), SessionFilters.draftedSessions(listOf(item), listOf(editing.copy(target=item.target.copy(run="old-run", conversation="old-conversation")))))
+        val child = editing.copy(target=item.target.copy(conversation="child-conversation", agentId="child", parentConversation=item.target.conversation))
+        assertEquals(setOf(item.target.key), SessionFilters.draftedSessions(listOf(item), listOf(child)))
+        assertTrue(SessionFilters.draftedSessions(listOf(item), listOf(child.copy(target=child.target.copy(parentConversation="older-parent")))).isEmpty())
+        val profile = item.copy(raw=JSONObject(item.raw.toString()).put("subagent_source", "hook_profiles"))
+        assertTrue(SessionFilters.draftedSessions(listOf(profile), listOf(child)).isEmpty())
+    }
     @Test fun identitySearchFindsSavedArchiveAndChildIdsWithinTheMachineScope() {
         val item = session("""{"state":"paused","subagents":{"agent-one":{"conversation_id":"child-conversation"}}}""", archive="archive-one")
         listOf("CONVERSATION", "versat", "run", "archive-one", "agent-one", "child-conversation").forEach { query ->

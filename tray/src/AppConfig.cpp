@@ -18,12 +18,16 @@ QString AppConfig::configPath()
     // Тот же каталог, что у самого hgs (~/.config/hgs), не XDG_CONFIG_HOME и не
     // QStandardPaths — hgs сам не смотрит ни на то, ни на другое (см. hgs:
     // HGS_CONFIG_DIR="$HOME/.config/hgs"), так что путь трея должен совпасть буквально.
-    return QDir::homePath() + QStringLiteral("/.config/hgs/tray.conf");
+    // On Windows QDir::homePath() is the profile directory and ignores HOME, while
+    // hgs.exe prefers HOME; elsewhere both rules are the same.
+    const QString home = qEnvironmentVariable("HOME");
+    return (home.isEmpty() ? QDir::homePath() : QDir::fromNativeSeparators(home))
+           + QStringLiteral("/.config/hgs/tray.conf");
 }
 
 QStringList AppConfig::hgsInstallDirs(const QString &home)
 {
-    // Same order in which hgs extends PATH for its children (src/platform.rs).
+    // Same order in which hgs extends PATH for its children (src/platform/unix.rs).
     return {home + QStringLiteral("/.local/bin"), QStringLiteral("/opt/homebrew/bin"),
             QStringLiteral("/usr/local/bin")};
 }
@@ -36,9 +40,39 @@ QString AppConfig::fallbackHgsPath(const QString &pathEnv, const QStringList &in
     return QStandardPaths::findExecutable(QStringLiteral("hgs"), installDirs);
 }
 
+QString AppConfig::bundledHgsPath(const QString &executable, Platform p)
+{
+    if (p != Platform::Mac || executable.isEmpty())
+        return {};
+    const QDir macos = QFileInfo(executable).absoluteDir();
+    QDir bundle = macos;
+    if (macos.dirName() != QLatin1String("MacOS") || !bundle.cdUp()
+        || bundle.dirName() != QLatin1String("Contents") || !bundle.cdUp()
+        || !bundle.dirName().endsWith(QLatin1String(".app")))
+        return {};
+    const QFileInfo hgs(macos.filePath(QStringLiteral("hgs")));
+    return hgs.isFile() && hgs.isExecutable() ? hgs.absoluteFilePath() : QString();
+}
+
 void AppConfig::setConfigPathOverrideForTests(const QString &path)
 {
     g_configPathOverride = path;
+}
+
+QString AppConfig::resolveHgsPath(const QString &configured, const QString &applicationDir)
+{
+    if (!configured.isEmpty()) {
+        if (configured.contains(QLatin1Char('/')) || configured.contains(QLatin1Char('\\'))
+            || QFileInfo(configured).isAbsolute())
+            return QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(configured).absoluteFilePath()));
+        const QString found = QStandardPaths::findExecutable(configured);
+        return found.isEmpty() ? configured : found;
+    }
+    const QFileInfo bundled(QDir(applicationDir).filePath(QStringLiteral("hgs.exe")));
+    if (bundled.isFile())
+        return bundled.absoluteFilePath();
+    const QString found = QStandardPaths::findExecutable(QStringLiteral("hgs"));
+    return found.isEmpty() ? QStringLiteral("hgs") : found;
 }
 
 AppConfig::Platform AppConfig::currentPlatform()
@@ -48,6 +82,8 @@ AppConfig::Platform AppConfig::currentPlatform()
     // юникс", где собирается тот же konsole-совместимый набор.
 #ifdef Q_OS_MACOS
     return Platform::Mac;
+#elif defined(Q_OS_WIN)
+    return Platform::Windows;
 #else
     return Platform::Linux;
 #endif
@@ -64,6 +100,11 @@ QStringList AppConfig::openModes(Platform p)
     // подменю «Open in» показывает Terminal.app и буфер обмена, и оба работают.
     if (p == Platform::Mac)
         return {QStringLiteral("terminal"), QStringLiteral("clipboard")};
+    // Windows: auto|tab -- a Windows Terminal tab, window -- a new Windows Terminal
+    // window, console -- a classic console window (also the fallback without wt.exe).
+    if (p == Platform::Windows)
+        return {QStringLiteral("auto"), QStringLiteral("tab"), QStringLiteral("window"),
+                QStringLiteral("console"), QStringLiteral("clipboard")};
     return {QStringLiteral("auto"), QStringLiteral("tab"), QStringLiteral("window"),
             QStringLiteral("clipboard")};
 }
@@ -82,13 +123,35 @@ bool AppConfig::isValidOpenMode(const QString &v, Platform p)
 
 namespace {
 
+// Windows looks next to hgs-tray.exe first (resolveHgsPath); the Unix fallback
+// directories do not exist there.
+QString hgsHelp(AppConfig::Platform p)
+{
+    return p == AppConfig::Platform::Windows
+        ? QStringLiteral("  --hgs <path>          path to hgs.exe; found next to hgs-tray.exe by\n"
+                         "                        default, then in PATH\n")
+        : QStringLiteral("  --hgs <path>          path to the hgs binary; found in PATH by default,\n"
+                         "                        then in ~/.local/bin, /opt/homebrew/bin and\n"
+                         "                        /usr/local/bin\n");
+}
+
 // Описание --open-mode для usage(): режимы у платформ разные, и печатать пользователю
 // про Konsole на маке (или про Terminal.app на Linux) значит объяснять ему то, чего у
 // него нет. Общий у обоих текстов только хвост -- clipboard и правила "флаг против меню".
 QString openModeHelp(AppConfig::Platform p)
 {
     const QString head =
-        p == AppConfig::Platform::Mac
+        p == AppConfig::Platform::Windows
+            ? QStringLiteral(
+                  "  --open-mode <mode>    what a click on a session does:\n"
+                  "                        auto|tab|window|console|clipboard [auto].\n"
+                  "                        auto -- a Windows Terminal tab, or a console\n"
+                  "                        window when Windows Terminal (wt.exe) is not\n"
+                  "                        installed. tab -- the same, but the fallback is\n"
+                  "                        reported. window -- a new Windows Terminal\n"
+                  "                        window. console -- a classic console window that\n"
+                  "                        stays open when hgs reports an error.\n")
+        : p == AppConfig::Platform::Mac
             ? QStringLiteral(
                   "  --open-mode <mode>    what a click on a session does:\n"
                   "                        terminal|clipboard [terminal]. terminal --\n"
@@ -137,9 +200,7 @@ QString AppConfig::usage()
                "\n"
                "Usage: hgs-tray [options]\n"
                "\n"
-               "  --hgs <path>          path to the hgs binary; found in PATH by default,\n"
-               "                        then in ~/.local/bin, /opt/homebrew/bin and\n"
-               "                        /usr/local/bin\n"
+               "%4"
                "  --local-poll <ms>     how often this box is polled  [default %1]\n"
                "  --peer-poll <ms>      how often peers are polled    [default %2]\n"
                "  --terminal <tmpl>     terminal launch template, {cmd} becomes the command\n"
@@ -166,20 +227,31 @@ QString AppConfig::usage()
                "beats the file.\n")
         .arg(d.localPollMs)
         .arg(d.peerPollMs)
-        .arg(openModeHelp(currentPlatform()));
+        .arg(openModeHelp(currentPlatform()))
+        .arg(hgsHelp(currentPlatform()));
 }
 
 namespace {
 
 // Вторая платформа -- нужна ровно для того, чтобы отличить "значение с другой машины"
 // от опечатки: сообщение в этих двух случаях разное, а обходятся они одинаково.
-AppConfig::Platform otherPlatform(AppConfig::Platform p)
+// The first other platform on which the value is a mode; false when none is.
+bool foreignPlatform(const QString &value, AppConfig::Platform p, AppConfig::Platform *found)
 {
-    return p == AppConfig::Platform::Mac ? AppConfig::Platform::Linux : AppConfig::Platform::Mac;
+    for (const auto other : {AppConfig::Platform::Linux, AppConfig::Platform::Mac,
+                             AppConfig::Platform::Windows}) {
+        if (other != p && AppConfig::isValidOpenMode(value, other)) {
+            *found = other;
+            return true;
+        }
+    }
+    return false;
 }
 
 QString platformName(AppConfig::Platform p)
 {
+    if (p == AppConfig::Platform::Windows)
+        return QStringLiteral("Windows");
     return p == AppConfig::Platform::Mac ? QStringLiteral("macOS") : QStringLiteral("Linux");
 }
 
@@ -261,9 +333,10 @@ void applyConfigFile(AppConfig *out, bool haveHgs, bool haveLocalPoll, bool have
             if (!haveOpenMode) {
                 const AppConfig::Platform p = AppConfig::currentPlatform();
                 const QString known = AppConfig::openModes(p).join(QLatin1Char('|'));
+                AppConfig::Platform other = p;
                 if (AppConfig::isValidOpenMode(value, p)) {
                     out->openMode = value;
-                } else if (AppConfig::isValidOpenMode(value, otherPlatform(p))) {
+                } else if (foreignPlatform(value, p, &other)) {
                     // tray.conf, приехавший с другой машины (общий dotfiles-репозиторий,
                     // rsync домашнего каталога, перенос настроек руками), -- не опечатка
                     // и тем более не повод трею не запуститься: режим просто не
@@ -275,7 +348,7 @@ void applyConfigFile(AppConfig *out, bool haveHgs, bool haveLocalPoll, bool have
                                               "mode, and this tray is built for %5; took the "
                                               "default mode '%6' (here it can be: %7)\n")
                                   .arg(path).arg(lineNo)
-                                  .arg(value, platformName(otherPlatform(p)), platformName(p),
+                                  .arg(value, platformName(other), platformName(p),
                                        AppConfig::defaultOpenMode(p), known);
                 } else {
                     out->openMode = AppConfig::defaultOpenMode(p);
@@ -293,6 +366,24 @@ void applyConfigFile(AppConfig *out, bool haveHgs, bool haveLocalPoll, bool have
 }
 
 } // namespace
+
+QStringList AppConfig::restartArguments(const QStringList &args)
+{
+    // The same walk as load(): a value is never mistaken for an option.
+    static const QStringList withValue{QStringLiteral("--hgs"), QStringLiteral("--local-poll"),
+                                       QStringLiteral("--peer-poll"), QStringLiteral("--terminal"),
+                                       QStringLiteral("--icon-color"), QStringLiteral("--open-mode")};
+    QStringList kept;
+    for (int i = 1; i < args.size(); ++i) {
+        if (withValue.contains(args.at(i))) {
+            kept << args.mid(i, 2);
+            ++i;
+        } else if (args.at(i) != QLatin1String("--sessions")) {
+            kept << args.at(i);
+        }
+    }
+    return kept;
+}
 
 bool AppConfig::load(const QStringList &args, AppConfig *out, QString *error)
 {
@@ -354,9 +445,10 @@ bool AppConfig::load(const QStringList &args, AppConfig *out, QString *error)
             if (!isValidOpenMode(v, p)) {
                 *error = QStringLiteral("--open-mode expects one of: %1, got '%2'")
                              .arg(openModes(p).join(QStringLiteral(", ")), v);
-                if (isValidOpenMode(v, otherPlatform(p)))
+                Platform other = p;
+                if (foreignPlatform(v, p, &other))
                     *error += QStringLiteral(" ('%1' is a %2 mode, this build is %3)")
-                                  .arg(v, platformName(otherPlatform(p)), platformName(p));
+                                  .arg(v, platformName(other), platformName(p));
                 return false;
             }
             out->openMode = v;

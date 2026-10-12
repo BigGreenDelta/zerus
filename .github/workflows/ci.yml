@@ -24,6 +24,10 @@ on:
         description: Run macOS CLI and desktop builds/tests
         type: boolean
         default: true
+      run_windows:
+        description: Run Windows client and desktop tests and build the portable zip
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       ref:
@@ -39,6 +43,9 @@ on:
       run_macos:
         type: boolean
         default: false
+      run_windows:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,7 +55,9 @@ cache-mode: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
-  cancel-in-progress: true
+  # Finish a qualifying Dev build while the newest main revision waits. GitHub
+  # coalesces pending runs; PR/manual and pre-rollout behavior stays cancellable.
+  cancel-in-progress: ${{ !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') }}
 
 jobs:
   automatic:
@@ -62,6 +71,7 @@ jobs:
       run_linux: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
+      run_windows: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
   review:
     name: PR and manual checks
     if: >-
@@ -73,6 +83,7 @@ jobs:
       run_linux: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
+      run_windows: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
   gate:
     name: CI gate
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
@@ -91,3 +102,20 @@ jobs:
           if conclusions != ['skipped', 'success']:
               raise SystemExit(f'Exactly one selected check workflow must succeed: {conclusions}')
           PY
+  dev:
+    name: Verified main dev candidates
+    needs: [gate, automatic]
+    # The PR/manual branch is intentionally skipped on main. An explicit status
+    # check avoids inheriting success() over that transitive skipped dependency.
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dev.yml
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}

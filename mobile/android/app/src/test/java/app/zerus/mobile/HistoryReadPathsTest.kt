@@ -43,6 +43,32 @@ class HistoryReadPathsTest {
         } catch(error:IOException) { assertSame(original,error) }
         assertEquals(1,attempts)
     }
+    @Test fun resetIndexReopensVerifiedHeadInsteadOfReplayingOldEpoch() = runBlocking {
+        val head = HistoryPage(target,"new epoch",emptyList(),null,null,false,false,null,null,true,false,false,JSONObject())
+        val stale = HistoryReadPaths.saved(target) { saved() }!!
+        var probes = 0
+        val failed = HistoryReadPaths.reopening("epoch",{ throw IOException("native command failed") }) { probes++;head }
+        assertTrue(failed.head);assertTrue(failed.result.verified);assertSame(head,failed.result.page)
+        val cached = HistoryReadPaths.reopening("epoch",{ HistoryReadPaths.Result(stale,false) }) { probes++;head }
+        assertTrue(cached.head);assertSame(head,cached.result.page)
+        assertEquals(2,probes)
+    }
+    @Test fun sameEpochOfflineOrVerifiedReadsKeepTheirOriginalOutcome() = runBlocking {
+        val stale = HistoryReadPaths.saved(target) { saved() }!!
+        val original = IOException("fixture offline")
+        var probes = 0
+        val verified = HistoryReadPaths.reopening("epoch",{ HistoryReadPaths.Result(stale,true) }) { probes++;stale }
+        assertFalse(verified.head);assertEquals(0,probes)
+        val cached = HistoryReadPaths.reopening("epoch",{ HistoryReadPaths.Result(stale,false) }) { stale }
+        assertFalse(cached.head);assertFalse(cached.result.verified)
+        for(head in listOf<suspend ()->HistoryPage>({ stale },{ throw IOException("head offline") })) {
+            try { HistoryReadPaths.reopening("epoch",{ throw original },head);fail("Original failure must remain") }
+            catch(error:IOException) { assertSame(original,error) }
+        }
+        try { HistoryReadPaths.reopening(null,{ throw original }) { probes++;stale };fail("A head read has no cursor epoch") }
+        catch(error:IOException) { assertSame(original,error) }
+        assertEquals(0,probes)
+    }
     @Test fun cacheCancellationPropagatesInsteadOfBeingTreatedAsAMiss() = runBlocking {
         val cancellation = CancellationException("navigation changed")
         try {

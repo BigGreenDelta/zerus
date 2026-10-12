@@ -235,18 +235,16 @@ fn read_receipts(path: &Path) -> Result<Receipts> {
     Ok(receipts)
 }
 fn write_receipts(path: &Path, receipts: &Receipts) -> Result<()> {
-    use std::{io::Write, os::unix::fs::PermissionsExt};
+    use std::io::Write;
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid launch receipt path"))?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary
-        .as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    crate::platform::make_private(temporary.as_file())?;
     temporary.write_all(&serde_json::to_vec(receipts)?)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path)?;
-    std::fs::File::open(parent)?.sync_all()?;
+    crate::platform::persist(temporary, path)?;
+    crate::platform::sync_dir(parent)?;
     Ok(())
 }
 fn recorded(receipts: &Receipts, request: &Request) -> Result<Option<Value>> {
@@ -421,6 +419,8 @@ mod tests {
         (dir, store, request, record)
     }
 
+    // Shared folder paths are POSIX paths of a machine that runs sessions.
+    #[cfg(unix)]
     #[test]
     fn durable_duplicate_returns_original_after_manual_move_even_at_capacity() {
         let (dir, mut store, request, _record) = fixture();
@@ -545,6 +545,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn saved_symlink_folder_is_reused_without_rewriting_its_path() {
         let (dir, mut store, mut request, _record) = fixture();
@@ -573,6 +574,8 @@ mod tests {
         assert!(assign(&mut store, &request, "").is_err());
     }
 
+    // Shared folder paths are POSIX paths of a machine that runs sessions.
+    #[cfg(unix)]
     #[test]
     fn related_worktree_keeps_anchor_and_rejects_nested_repository() {
         let (dir, mut store, mut request, _) = fixture();
@@ -666,6 +669,8 @@ mod tests {
         assert!(request.check_binding(&record).is_err());
     }
 
+    // Shared folder paths are POSIX paths of a machine that runs sessions.
+    #[cfg(unix)]
     #[test]
     fn exact_binding_and_explicit_folder_addition() {
         let (_dir, mut store, request, record) = fixture();
@@ -718,6 +723,8 @@ mod tests {
         assert!(assign(&mut store, &wrong, "").is_err());
         assert_eq!(serde_json::to_value(&store).unwrap(), before);
     }
+    // Shared folder paths are POSIX paths of a machine that runs sessions.
+    #[cfg(unix)]
     #[test]
     fn selected_folder_must_belong_to_exact_local_project_path() {
         let (_dir, mut store, mut request, _record) = fixture();

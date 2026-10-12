@@ -98,5 +98,56 @@ if command.startswith('bash -s -- '):
         self.assertFalse((self.root / 'transport.log').exists())
 
 
+class TrayInstallCache(unittest.TestCase):
+    """The macOS desktop build, stopped after configuring with fake tools."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='zerus-tray-install-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.tray = self.root / 'tray'
+        self.build = self.tray / 'build'
+        (self.build / 'CMakeFiles').mkdir(parents=True)
+        (self.tray / 'install.sh').write_text((REPO / 'tray/install.sh').read_text())
+        tools = self.root / 'bin'
+        tools.mkdir()
+        log = self.root / 'cmake.log'
+        for name, text in {
+            'uname': '#!/bin/sh\necho Darwin\n',
+            'brew': '#!/bin/sh\necho /opt/fixture/qt\n',
+            # Record whether configuration starts from the old cache, then stop
+            # the installer before it touches any application or LaunchAgent.
+            'cmake': f'#!/bin/sh\nif [ "$1" = --build ]; then exit 3; fi\n'
+                     f'if [ -e "{self.build}/CMakeCache.txt" ]; then echo kept >> "{log}"; '
+                     f'else echo fresh >> "{log}"; fi\n',
+        }.items():
+            (tools / name).write_text(text)
+            (tools / name).chmod(0o755)
+        self.log = log
+        self.env = dict(os.environ, HOME=str(self.root / 'home'),
+                        PATH=str(tools) + os.pathsep + os.environ['PATH'])
+
+    def configure(self, sdk):
+        (self.build / 'CMakeCache.txt').write_text(
+            f'CMAKE_OSX_SYSROOT:PATH={sdk}\nCUPS_LIBRARIES:FILEPATH={sdk}/usr/lib/libcups.tbd\n'
+            f'FIND_PACKAGE_MESSAGE_DETAILS_Cups:INTERNAL=[{sdk}/usr/lib/libcups.tbd][{sdk}/usr/include][v2.3]\n')
+        result = subprocess.run(['bash', str(self.tray / 'install.sh')], env=self.env, text=True,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        return self.log.read_text().split()[-1], result.stdout
+
+    def test_cache_for_a_removed_sdk_is_reconfigured_from_scratch(self):
+        state, output = self.configure(self.root / 'Xcode.app/SDKs/MacOSX26.0.sdk')
+        self.assertEqual(state, 'fresh')
+        self.assertIn('reconfiguring', output)
+        self.assertFalse((self.build / 'CMakeFiles').exists())
+
+    def test_cache_for_an_installed_sdk_is_kept(self):
+        sdk = self.root / 'Xcode.app/SDKs/MacOSX27.0.sdk'
+        sdk.mkdir(parents=True)
+        self.assertEqual(self.configure(sdk)[0], 'kept')
+        self.assertTrue((self.build / 'CMakeFiles').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -145,22 +145,7 @@ protected:
     void paintEvent(QPaintEvent *event) override
     {
         QTextBrowser::paintEvent(event);
-        // The selections as QTextEdit paints them: found text, then the reader's.
-        QList<QAbstractTextDocumentLayout::Selection> selections;
-        for (const auto &extra : extraSelections()) selections.append({extra.cursor, extra.format});
-        if (textCursor().hasSelection()) {
-            const auto group = hasFocus() ? QPalette::Active : QPalette::Inactive;
-            QTextCharFormat format;
-            format.setBackground(palette().brush(group, QPalette::Highlight));
-            format.setForeground(palette().brush(group, QPalette::HighlightedText));
-            QStyleOption option; option.initFrom(this);
-            if (style()->styleHint(QStyle::SH_RichText_FullWidthSelection, &option, this)) format.setProperty(QTextFormat::FullWidthSelection, true);
-            selections.append({textCursor(), format});
-        }
-        QPainter painter(viewport());
-        const QPoint scroll(horizontalScrollBar()->value(), verticalScrollBar()->value());
-        painter.translate(-scroll);
-        MarkdownObjects::paintChips(&painter, document(), QRectF(event->rect().translated(scroll)), viewport()->palette(), selections);
+        MarkdownObjects::paintChips(this, event->rect());
     }
     void contextMenuEvent(QContextMenuEvent *event) override
     {

@@ -420,6 +420,23 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// The remote upstream of the local branch a new worktree starts from, as Git's
+/// `--track=inherit` would copy it, so the new branch's publication can be
+/// verified. Commits, tags, detached HEAD and local upstreams have none. Under
+/// push.default=upstream or tracking a bare `git push` from the new branch
+/// would update the base branch, so it keeps no upstream there either.
+fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> Option<(String, String)> {
+    let full = read(&["rev-parse", "--verify", "--symbolic-full-name", "--end-of-options", base]).ok()?;
+    let name = full.strip_prefix("refs/heads/")?;
+    let remote = read(&["config", "--get", &format!("branch.{name}.remote")]).ok()?;
+    let merge = read(&["config", "--get", &format!("branch.{name}.merge")]).ok()?;
+    let push = read(&["config", "--get", "push.default"]).unwrap_or_default();
+    if remote.is_empty() || remote == "." || !merge.starts_with("refs/heads/") || ["upstream", "tracking"].contains(&push.as_str()) {
+        return None;
+    }
+    Some((remote, merge))
+}
+
 fn create(args: &[String]) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
     let _signals = mobile.then(MobileSignals::install);
@@ -511,6 +528,7 @@ fn create(args: &[String]) -> Result<Value> {
         &format!("{base}^{{commit}}"),
     ])
     .map_err(|e| format!("Cannot resolve starting revision '{base}': {e}"))?;
+    let upstream = inherited_upstream(&read, base);
     let cache = cache_file("repo", &common.to_string_lossy());
     fs::create_dir_all(cache.parent().unwrap()).map_err(|e| e.to_string())?;
     let guard = OpenOptions::new()
@@ -570,9 +588,22 @@ fn create(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
+    // Best effort: the checkout exists either way, and a missing upstream only
+    // leaves publication unverified. Never keep half of the tracking pair.
+    let upstream = upstream.filter(|(remote, merge)| {
+        let set = |key: &str, value: &str| {
+            git(&destination, &["config", &format!("branch.{branch}.{key}"), value], deadline).is_ok()
+        };
+        let complete = set("remote", remote) && set("merge", merge);
+        if !complete {
+            let _ = git(&destination, &["config", "--unset", &format!("branch.{branch}.remote")], deadline);
+        }
+        complete
+    });
+    let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
     Ok(
         json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
-        "common_dir":common, "request_id":options.get("--request-id"),
+        "upstream":upstream, "common_dir":common, "request_id":options.get("--request-id"),
         "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}),
     )
 }

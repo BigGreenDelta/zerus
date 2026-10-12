@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "hgs"
-version = "1.49.0"
+version = "1.51.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -282,6 +282,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

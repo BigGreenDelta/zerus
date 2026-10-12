@@ -15,6 +15,10 @@ on:
         description: Also run macOS CLI and desktop checks
         type: boolean
         default: true
+      macos_cask:
+        description: Build, sign and notarize the Homebrew cask once MACOS_CASKS_ENABLED is set (needs macOS checks)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -34,23 +38,39 @@ jobs:
       - name: Check requested release version
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
+          MACOS_CASK: ${{ inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true' }}
+          RUN_MACOS: ${{ inputs.run_macos }}
         run: |
           python3 - <<'PY'
           import os, pathlib, re
           version = os.environ['REQUESTED_VERSION']
           assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Use a stable semantic version.'
           assert version == pathlib.Path('VERSION').read_text().strip(), 'Update VERSION first.'
+          assert os.environ['MACOS_CASK'] != 'true' or os.environ['RUN_MACOS'] == 'true', 'The macOS cask needs macOS checks.'
           PY
   verify:
     needs: version
-    uses: ./.github/workflows/ci.yml
+    cache-mode: read
+    uses: ./.github/workflows/checks.yml
     with:
       ref: ${{ github.sha }}
       run_linux: true
       run_arch: true
       run_macos: ${{ inputs.run_macos }}
-  assemble:
+  macos:
+    # Homebrew casks start once the macos-signing environment is provisioned; see
+    # docs/macos-distribution.md. macos_cask=false skips the cask for one release.
+    if: inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
     needs: verify
+    uses: ./.github/workflows/macos-cask.yml
+    with:
+      channel: stable
+  assemble:
+    needs: [verify, macos]
+    # A skipped cask is acceptable only when it was not wanted for this release.
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && !(inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true')))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
@@ -66,6 +86,11 @@ jobs:
         with:
           name: arch-x86_64-${{ github.sha }}
           path: artifacts/arch
+      - if: needs.macos.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
       - name: Arch release dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python namcap desktop-file-utils
@@ -74,12 +99,15 @@ jobs:
       - name: Assemble exact verified candidate
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          MACOS_CASK: ${{ needs.macos.result == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           packages=(artifacts/arch/*.pkg.tar.zst)
           test "${#packages[@]}" = 1
-          runuser -u user -- python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --package "${packages[0]}" --output dist
+          macos=()
+          if [ "$MACOS_CASK" = true ]; then macos=(--macos artifacts/macos-signed); fi
+          runuser -u user -- python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --package "${packages[0]}" --output dist "${macos[@]}"
           runuser -u user -- bash scripts/check-release-packages.sh dist
       - name: Retain release packaging logs
         if: always()
@@ -95,7 +123,9 @@ jobs:
           retention-days: 14
           include-hidden-files: true # .SRCINFO is required AUR metadata.
   draft:
-    if: inputs.create_draft
+    # An explicit status check keeps a skipped optional cask from skipping the draft.
+    if: >-
+      !cancelled() && needs.assemble.result == 'success' && inputs.create_draft
     needs: assemble
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -116,7 +146,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
           gh release create "v$RELEASE_VERSION" --draft --target "$RELEASE_COMMIT" \
             --title "Zerus $RELEASE_VERSION" \
-            --notes "Arch Linux x86_64 release candidate. Verify the artifacts and publication checklist before publishing." \
-            dist/*.tar.gz dist/*.pkg.tar.zst dist/SHA256SUMS dist/release-info.json
+            --notes "Release candidate. Verify the artifacts and publication checklist before publishing." \
+            dist/*.tar.gz dist/*.pkg.tar.zst dist/*.zip dist/SHA256SUMS dist/release-info.json

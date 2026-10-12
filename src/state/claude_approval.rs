@@ -216,6 +216,10 @@ fn bottom_choice(screen:&str)->Option<(String,String,Vec<(String,String)>)> {
         options.into_iter().map(|(label,description,_)|(label,description)).collect()))
 }
 
+/// Any chooser Claude draws for the user now: a tool approval or another
+/// numbered panel at the bottom of its screen.
+pub(super) fn chooser_visible(screen:&str)->bool {visible(screen)||bottom_choice(screen).is_some()}
+
 // Every option of one question is on screen as its numbered row; a long label
 // may wrap, so the row shows its beginning.
 fn shows(screen:&str,items:&Value)->bool {
@@ -460,6 +464,11 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
         assert!(terminal_choice(&waiting,IDLE).is_none());
         assert!(terminal_choice(&waiting,&PAUSED.replace("  ❯ 1.","    1.")).is_none());
         waiting["phase"]=json!("working");assert!(terminal_choice(&waiting,PAUSED).is_none());
+    }
+
+    #[test] fn any_bottom_chooser_counts_as_visible_for_dismissal() {
+        for screen in [MODEL_SWITCH,PAUSED,BASH,OUTSIDE] {assert!(chooser_visible(screen),"{screen}");}
+        for screen in [IDLE,DENIED,""] {assert!(!chooser_visible(screen),"{screen}");}
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {

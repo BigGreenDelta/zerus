@@ -8,8 +8,8 @@
 #include <QJsonObject>
 #include <QThread>
 #include <atomic>
-#include <csignal>
 #include <memory>
+#include "FakeCli.h"
 #include "HgsClient.h"
 #include "ProcessRunner.h"
 #include "SessionPresentation.h"
@@ -24,6 +24,7 @@ private slots:
     void parsesSavedSessions();
     void parsesActivityMetadata();
     void providerFailuresRequireAttentionAndPreserveSpecificStatus();
+    void scheduledAgentsShowTheirNextRunInsteadOfReady();
     void questionReplyPreviews_data();
     void questionReplyPreviews();
     void unrecognizedQuestionPreviewsStayLiteral();
@@ -33,6 +34,7 @@ private slots:
     void forkCommandsPinSourceIdentity();
     void preservesArgumentBytes();
     void parsesOfflineBox();
+    void parsesControlOnlyComputer();
     void parsesFleetArray();
     void rejectsGarbage();
     void tagAndProjectMayBeNull();
@@ -71,11 +73,10 @@ void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()
 {
     QTemporaryDir fixture;QVERIFY(fixture.isValid());
     const auto program=fixture.filePath("custom-hgs");
-    HgsClient client(program);QSignalSpy ready(&client,&HgsClient::versionReady);
+    HgsClient client(FakeCli::program(program));QSignalSpy ready(&client,&HgsClient::versionReady);
     client.requestVersion();QTRY_COMPARE(ready.size(),1);QVERIFY(ready[0][0].toString().isEmpty());
-    QFile script(program);QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 7\necho call >> \"$0.calls\"\ncat \"$0.version\"\n");script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport sys\nif sys.argv[1:]!=['--version']:sys.exit(7)\n"
+        "open(__file__+'.calls','a').write('call\\n')\nsys.stdout.write(open(__file__+'.version').read())\n"));
     auto reported=[&](const QByteArray &value){QFile file(program+".version");QVERIFY(file.open(QIODevice::WriteOnly));file.write(value);};
     reported("hgs 9.8.7\n");client.requestVersion();client.requestVersion();QTRY_COMPARE(ready.size(),2);
     QCOMPARE(ready[1][0].toString(),QString("9.8.7"));
@@ -89,12 +90,11 @@ void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()
 void TestHgsClient::pollsLaunchOffTheGuiThreadAndReportOnIt()
 {
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
-    const auto program = fixture.filePath("hgs"); QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
-    file.write("#!/bin/sh\necho '{\"host\":\"arch\",\"ok\":true,\"sessions\":[]}'\n"); file.close();
-    QVERIFY(file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, "#!/usr/bin/env python3\nprint('{\"host\":\"arch\",\"ok\":true,\"sessions\":[]}')\n"));
     std::atomic<QThread *> launchThread{nullptr};
     ProcessRunner::setLaunchObserver([&launchThread] { launchThread = QThread::currentThread(); });
-    HgsClient client(program); QThread *readyThread = nullptr; int ready = 0;
+    HgsClient client(FakeCli::program(program)); QThread *readyThread = nullptr; int ready = 0;
     connect(&client, &HgsClient::localReady, this, [&](const BoxState &box) { readyThread = QThread::currentThread(); ready += box.host == "arch"; });
     client.requestLocal();
     QTRY_COMPARE(ready, 1);
@@ -106,10 +106,11 @@ void TestHgsClient::pollsLaunchOffTheGuiThreadAndReportOnIt()
 void TestHgsClient::destroyedClientKillsItsPolls()
 {
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
-    const auto program = fixture.filePath("hgs"); QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
-    file.write("#!/bin/sh\necho $$ > \"$0.pid\"\nexec sleep 30\n"); file.close();
-    QVERIFY(file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    auto client = std::make_unique<HgsClient>(program); int reports = 0;
+    const auto program = fixture.filePath("hgs");
+    // The pid of the started program: the script itself on Unix, the shim on Windows.
+    QVERIFY(FakeCli::install(program, "#!/usr/bin/env python3\nimport os,time\n"
+        "open(__file__+'.pid','w').write(os.environ.get('ZERUS_FAKE_PID',str(os.getpid()))+'\\n')\ntime.sleep(30)\n"));
+    auto client = std::make_unique<HgsClient>(FakeCli::program(program)); int reports = 0;
     connect(client.get(), &HgsClient::peerReady, this, [&reports] { ++reports; });
     connect(client.get(), &HgsClient::stateReadFailed, this, [&reports] { ++reports; });
     client->requestPeer("arch");
@@ -119,7 +120,7 @@ void TestHgsClient::destroyedClientKillsItsPolls()
     // The old destructor killed and reaped child QProcesses; owners of worker
     // launches keep that guarantee and receive no late report.
     client.reset();
-    QVERIFY(::kill(pid_t(pid), 0) != 0);
+    QVERIFY(!FakeCli::processAlive(pid));
     QTest::qWait(100);
     QCOMPARE(reports, 0);
 }
@@ -127,10 +128,10 @@ void TestHgsClient::destroyedClientKillsItsPolls()
 void TestHgsClient::gitStatusReadsAreSharedAndScopedToMachineAndFolder()
 {
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
-    const auto program = fixture.filePath("hgs"); QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
-    file.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\nsleep 0.1\nprintf '%s\\n' '{\"state\":\"ok\",\"root\":\"/repo\",\"branch\":\"main\",\"changed_files\":4,\"ahead\":2,\"behind\":0,\"remote_state\":\"verified\",\"remote_age_seconds\":0}'\n");
-    file.close(); QVERIFY(file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(program); QSignalSpy changed(&client, &HgsClient::gitStatusChanged);
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, "#!/usr/bin/env python3\nimport sys,time\nopen(__file__+'.calls','a').write(' '.join(sys.argv[1:])+'\\n')\n"
+        "time.sleep(0.1)\nprint('{\"state\":\"ok\",\"root\":\"/repo\",\"branch\":\"main\",\"changed_files\":4,\"ahead\":2,\"behind\":0,\"remote_state\":\"verified\",\"remote_age_seconds\":0}')\n"));
+    HgsClient client(FakeCli::program(program)); QSignalSpy changed(&client, &HgsClient::gitStatusChanged);
     client.requestGitStatus({}, "/repo"); client.requestGitStatus({}, "/repo");
     client.requestGitStatus("peer", "/repo"); client.requestGitStatus("peer", "/repo");
     QVERIFY(client.gitStatusSnapshot({}, "/repo").isEmpty());
@@ -201,6 +202,35 @@ void TestHgsClient::unrecognizedQuestionPreviewsStayLiteral()
     }
 }
 
+void TestHgsClient::scheduledAgentsShowTheirNextRunInsteadOfReady()
+{
+    const auto next = QDateTime::currentDateTime().addSecs(600);
+    QString error;
+    auto box=HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","local"},{"sessions",QJsonArray{QJsonObject{
+        {"name","kimi/project/watch"},{"tracked",true},{"activity","idle"},{"phase","idle"},{"process_state","running"},
+        {"schedules",QJsonObject{{"count",2},{"recurring",1},{"next_at",double(next.toSecsSinceEpoch())}}}}}}}).toJson(),&error);
+    QVERIFY(error.isEmpty());
+    auto session=box.sessions.first();
+    QCOMPARE((QList<int>{session.scheduledJobs,session.recurringSchedules}),(QList<int>{2,1}));
+    const auto time=SessionPresentation::nextScheduledRun(session);
+    QVERIFY(!time.isEmpty());
+    QCOMPARE(SessionPresentation::status(session),"Scheduled · "+time);
+    QCOMPARE(SessionPresentation::currentAction(session),"Next run at "+time);
+    QVERIFY(SessionPresentation::scheduled(session)); QVERIFY(SessionPresentation::active(session));
+    QVERIFY(!SessionPresentation::working(session)); QVERIFY(!SessionPresentation::needsAttention(session));
+    QVERIFY(!SessionPresentation::scheduled(session,false)); QCOMPARE(SessionPresentation::status(session,false),QString("Offline"));
+    session.nextScheduledAt=QDateTime::currentSecsSinceEpoch()-5;
+    QCOMPARE(SessionPresentation::status(session),QString("Scheduled · due"));
+    QCOMPARE(SessionPresentation::currentAction(session),QString("Next run due"));
+    session.nextScheduledAt=0;
+    QCOMPARE(SessionPresentation::status(session),QString("Scheduled"));
+    // A question or work outranks the schedule; no jobs or an unknown journal is Ready.
+    session.phase="input"; QCOMPARE(SessionPresentation::status(session),QString("Needs input")); session.phase="idle";
+    session.activity="busy"; QCOMPARE(SessionPresentation::status(session),QString("Working")); session.activity="idle";
+    session.scheduledJobs=0; QCOMPARE(SessionPresentation::status(session),QString("Ready"));
+    session.scheduledJobs=-1; QCOMPARE(SessionPresentation::status(session),QString("Ready")); QVERIFY(!SessionPresentation::active(session));
+}
+
 void TestHgsClient::providerFailuresRequireAttentionAndPreserveSpecificStatus()
 {
     QString error;
@@ -252,8 +282,8 @@ receipt={'status':'submitted','request_id':p['request_id'],'name':sys.argv[-2],
 mode=p['answers'][0].get('text','')
 if mode in receipt:receipt[mode]='unrelated'
 print(json.dumps(receipt))
-)");script.close();QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());QSignalSpy submitted(&client,&HgsClient::questionAnswerSubmitted),
+)");script.close();QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));QSignalSpy submitted(&client,&HgsClient::questionAnswerSubmitted),
         answered(&client,&HgsClient::questionAnswered),failed(&client,&HgsClient::questionAnswerFailed);
     const QJsonObject question{{"question_id","pending-question"},{"question_hash","exact-content"},
         {"run_id","run-one"},{"conversation_id","conversation-one"},{"can_answer",true},
@@ -284,8 +314,8 @@ args=sys.argv[1:]
 pathlib.Path(__file__).with_name('attachment.json').write_text(json.dumps(args))
 r=args[args.index('--request')+1]
 print(json.dumps({'request_id':r if r!='wrong' else 'other','index':0,'name':'notes.txt','mime':'text/plain','data_base64':'bad!' if r=='bad' else 'aGVsbG8='}))
-)");script.close();QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());QSignalSpy ready(&client,&HgsClient::attachmentReady),failed(&client,&HgsClient::attachmentFailed);
+)");script.close();QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));QSignalSpy ready(&client,&HgsClient::attachmentReady),failed(&client,&HgsClient::attachmentFailed);
     const QString name="kimi/project '$HOME' `literal`";
     const auto id=client.requestAttachment("mac",name,{{"request_id","one"},{"index",0}},"conversation","archive","child");
     QTRY_COMPARE(ready.size(),1);QCOMPARE(ready[0][0].toULongLong(),id);QCOMPARE(ready[0][2].toByteArray(),QByteArray("hello"));
@@ -298,9 +328,9 @@ print(json.dumps({'request_id':r if r!='wrong' else 'other','index':0,'name':'no
 void TestHgsClient::terminationPinsRun()
 {
     QTemporaryDir directory;QFile script(directory.filePath("hgs"));QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >&2\n");script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());QSignalSpy result(&client,&HgsClient::writeDone);
+    script.write("#!/usr/bin/env python3\nimport sys\nfor a in sys.argv[1:]:print(a,file=sys.stderr)\n");script.close();
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));QSignalSpy result(&client,&HgsClient::writeDone);
     client.terminateSession("mac","codex/project/one","exact-run");QTRY_COMPARE(result.size(),1);QVERIFY(result[0][1].toBool());
     QCOMPARE(result[0][2].toString(),QString("@mac\nterminate\ncodex/project/one\n--expected-run-id\nexact-run"));
 }
@@ -315,8 +345,8 @@ if 'fail' in sys.argv:
  print('Official DeepSeek host failed to start',file=sys.stderr);sys.exit(1)
 print('DeepSeek session ready')
 )");
-    script.close();QVERIFY(script.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());QSignalSpy result(&client,&HgsClient::nativeSessionLaunched);
+    script.close();QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));QSignalSpy result(&client,&HgsClient::nativeSessionLaunched);
     const QString folder=QString::fromUtf8("/work/проект '$HOME' `literal`");
     client.launchNativeSession("mac",folder,"test","native-dsh","launch-one");
     QTRY_COMPARE(result.size(),1);QCOMPARE(result[0][0].toString(),QString("launch-one"));QVERIFY(result[0][1].toBool());
@@ -343,8 +373,8 @@ print(json.dumps({'status':'scheduled','request_id':p['request_id'],'name':sys.a
  'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],
  'effort':p['effort'],'model':'gpt-6-astra','scope':'session'}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy finished(&client, &HgsClient::settingsFinished), refreshed(&client, &HgsClient::sessionWriteDone);
     const QString name = QString::fromUtf8("codex/проект/Новый '$HOME' `literal`");
     const quint64 request = client.requestSettings("mac", name, "gpt-6-astra", "high", "run-identity", "conversation-identity", "pending-original");
@@ -398,8 +428,8 @@ r={'status':'scheduled','request_id':p['request_id'],'name':sys.argv[-2],
 r[mode]='different-value'
 print(json.dumps(r))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy finished(&client, &HgsClient::settingsFinished), refreshed(&client, &HgsClient::sessionWriteDone);
     const auto request = client.requestSettings({}, "codex/project/" + mode, "gpt-6-astra", "high", "run", "conversation");
     QTRY_COMPARE(finished.size(), 1); QCOMPARE(finished[0][0].toULongLong(), request);
@@ -424,8 +454,8 @@ print(json.dumps({'status':'confirmed','request_id':p['request_id'],'name':sys.a
  'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],
  'effort':p['effort'],'model':'gpt-6-astra','scope':'session'}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy finished(&client, &HgsClient::effortFinished), refreshed(&client, &HgsClient::sessionWriteDone);
     const QString name = QString::fromUtf8("codex/проект/Новый '$HOME' `literal`");
     const quint64 request = client.requestEffort("mac", name, "high", "run-identity", "conversation-identity");
@@ -477,8 +507,8 @@ r={'status':'confirmed','request_id':p['request_id'],'name':sys.argv[-2],
 r[mode]='different-value'
 print(json.dumps(r))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy finished(&client, &HgsClient::effortFinished), refreshed(&client, &HgsClient::sessionWriteDone);
     const auto request = client.requestEffort({}, "codex/project/" + mode, "high", "run", "conversation");
     QTRY_COMPARE(finished.size(), 1); QCOMPARE(finished[0][0].toULongLong(), request);
@@ -503,8 +533,8 @@ print(json.dumps({'status':'confirmed','request_id':p['request_id'],'name':sys.a
  'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],
  'effort':p['effort'],'scope':'session'}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy finished(&client, &HgsClient::effortFinished), refreshed(&client, &HgsClient::sessionWriteDone);
     const auto slow = client.requestEffort({}, "codex/project/slow", "low", "run-old", "conversation-old");
     const auto fast = client.requestEffort("mac", "kimi/project/fast", "max", "run-new", "conversation-new");
@@ -541,8 +571,8 @@ print(json.dumps({'status':'answered','request_id':p['request_id'],'name':sys.ar
  'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],
  'question_id':p['question_id'],'question_hash':p['expected_question_hash']}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy sent(&client, &HgsClient::questionAnswered), failed(&client, &HgsClient::questionAnswerFailed);
     const QJsonObject question{{"question_id", "pending-question"}, {"question_hash", "exact-content"},
         {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"can_answer", true}};
@@ -586,9 +616,9 @@ void TestHgsClient::unconfirmedQuestionCannotStartTransport()
 {
     QTemporaryDir directory; QFile program(directory.filePath("hgs"));
     QVERIFY(program.open(QIODevice::WriteOnly));
-    program.write("#!/bin/sh\nprintf 'called\\n' >> \"$0.calls\"\n"); program.close();
-    QVERIFY(program.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(program.fileName());
+    program.write("#!/usr/bin/env python3\nopen(__file__+'.calls','a').write('called\\n')\n"); program.close();
+    QVERIFY(FakeCli::makeRunnable(program.fileName()));
+    HgsClient client(FakeCli::program(program.fileName()));
     QSignalSpy sent(&client, &HgsClient::questionAnswered), failed(&client, &HgsClient::questionAnswerFailed);
     const QString hash(64, QChar('a'));
     const QList<QStringList> requests{{"kimi", "kimi-trust:", "kimi_folder_trust", "kimi_tui"},
@@ -646,8 +676,8 @@ if mode=='startup-missing-conversation': del r['conversation_id']
 else: r[mode]='another-identity'
 print(json.dumps(r))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy sent(&client, &HgsClient::questionAnswered), failed(&client, &HgsClient::questionAnswerFailed);
     QJsonObject question{{"question_id", "pending"}, {"question_hash", "hash"},
         {"run_id", "run"}, {"conversation_id", "conversation"}, {"can_answer", true}};
@@ -675,8 +705,8 @@ print(json.dumps({'status':'submitted','request_id':request['request_id'],'name'
  'run_id':request['expected_run_id'],'conversation_id':request['expected_conversation_id'],
  'submitted_text':request['text'],'submitted_at':123.5}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy sent(&client, &HgsClient::messageSent), failed(&client, &HgsClient::messageFailed);
     QSignalSpy refreshed(&client, &HgsClient::sessionWriteDone);
     const QString name = QString::fromUtf8("codex/проект/Новый");
@@ -719,8 +749,8 @@ if request['text']=='exit127':
  print('program exited after input',file=sys.stderr);sys.exit(127)
 print('{}')
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy sent(&client, &HgsClient::messageSent), failed(&client, &HgsClient::messageFailed);
     client.requestSendMessage({}, "codex/p", "refused", {}, "run");
     QTRY_COMPARE(failed.size(), 1); QVERIFY(!failed[0][4].toBool());
@@ -768,8 +798,8 @@ with pathlib.Path(__file__).with_name('fork.jsonl').open('a') as f:f.write(json.
 if 'rejected' in sys.argv:
  print('source conversation changed',file=sys.stderr);sys.exit(7)
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy writes(&client, &HgsClient::writeDone), refresh(&client, &HgsClient::sessionWriteDone);
     const QString name = QString::fromUtf8("codex/проект/Исток"), tag = QString::fromUtf8("Новая '$HOME' `literal`");
     client.forkSession({}, name, tag, {}, "source-run", "source-conversation");
@@ -794,9 +824,9 @@ if 'rejected' in sys.argv:
 void TestHgsClient::renameCommands()
 {
     QTemporaryDir dir; QFile script(dir.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >&2\ncase \"$*\" in *rejected*) exit 7;; esac\n"); script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy writes(&client, &HgsClient::writeDone);
+    script.write("#!/usr/bin/env python3\nimport sys\nfor a in sys.argv[1:]:print(a,file=sys.stderr)\nif 'rejected' in ' '.join(sys.argv[1:]):sys.exit(7)\n"); script.close();
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy writes(&client, &HgsClient::writeDone);
     QSignalSpy refresh(&client, &HgsClient::sessionWriteDone);
     client.renameSession({}, "codex/p/old", "codex/p/Новый план"); QTRY_COMPARE(writes.size(), 1);
     QVERIFY(writes[0][1].toBool()); QCOMPARE(writes[0][2].toString(), QString("rename\ncodex/p/old\ncodex/p/Новый план"));
@@ -812,12 +842,14 @@ void TestHgsClient::preservesArgumentBytes()
     QTemporaryDir dir; QFile script(dir.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
     // Hex is ASCII on every platform and proves actual child argv bytes rather
     // than comparing text after a normalization step in the test fixture.
-    script.write("#!/bin/sh\n"
-                 "env | sed -n '/^_HGS_ZERUS_ARG_/p' >&2\n"
-                 "for arg do printf '%s' \"$arg\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; done >&2\n"
-                 "if [ \"$1\" = inspect ]; then printf '{\"events\":[],\"cursor\":0}\\n'; exit 7; fi\n");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy writes(&client, &HgsClient::writeDone);
+    script.write("#!/usr/bin/env python3\n"
+                 "import os,sys\n"
+                 "for k,v in sorted(os.environ.items()):\n"
+                 " if k.startswith('_HGS_ZERUS_ARG_'):print(k+'='+v,file=sys.stderr)\n"
+                 "for a in sys.argv[1:]:print(os.fsencode(a).hex(),file=sys.stderr)\n"
+                 "if sys.argv[1:2]==['inspect']:print('{\"events\":[],\"cursor\":0}');sys.exit(7)\n");
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy writes(&client, &HgsClient::writeDone);
     QSignalSpy failed(&client, &HgsClient::inspectionFailed);
     const QString nfc = QString::fromUtf8("codex/проект/Новый");
     const QString nfd = nfc.normalized(QString::NormalizationForm_D);
@@ -871,6 +903,20 @@ void TestHgsClient::parsesOfflineBox()
     QVERIFY(!box.ok);
     QCOMPARE(box.error, QStringLiteral("offline"));
     QVERIFY(box.sessions.isEmpty());
+}
+
+void TestHgsClient::parsesControlOnlyComputer()
+{
+    // hgs.exe on Windows hosts no sessions; the key is present only when false.
+    QString err;
+    const auto windows = HgsClient::parseBox(R"({"host":"windows-pc","ok":true,"projects":{},"sessions":[],
+        "peers":["mac"],"metrics":{"platform":"windows"},"local_sessions":false})", &err);
+    QVERIFY(err.isEmpty()); QVERIFY(windows.ok); QVERIFY(!windows.localSessions);
+    QCOMPARE(windows.peers, QStringList{"mac"});
+    const auto posix = HgsClient::parseBox(R"({"host":"arch","ok":true,"sessions":[]})", &err);
+    QVERIFY(posix.localSessions);
+    const auto fleet = HgsClient::parseFleet(R"([{"host":"windows-pc","ok":true,"local_sessions":false},{"host":"mac","ok":true}])", &err);
+    QCOMPARE(fleet.size(), 2); QVERIFY(!fleet[0].localSessions); QVERIFY(fleet[1].localSessions);
 }
 
 void TestHgsClient::parsesSavedSessions()
@@ -990,13 +1036,11 @@ void TestHgsClient::missingBinaryEmitsFailed()
 void TestHgsClient::localPollingReportsStartAndRecoversFromFailure()
 {
     QTemporaryDir dir; const auto path = dir.filePath("hgs");
-    HgsClient client(path); QSignalSpy started(&client, &HgsClient::stateReadStarted);
+    HgsClient client(FakeCli::program(path)); QSignalSpy started(&client, &HgsClient::stateReadStarted);
     QSignalSpy failed(&client, &HgsClient::stateReadFailed), ready(&client, &HgsClient::localReady);
     client.requestLocal(); client.requestLocal(); QCOMPARE(started.size(), 1);
     QTRY_COMPARE(failed.size(), 1); QVERIFY(failed[0][0].toString().isEmpty());
-    QFile script(path); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\necho '{\"host\":\"arch\",\"ok\":true,\"sessions\":[]}'\n"); script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    QVERIFY(FakeCli::install(path, "#!/usr/bin/env python3\nprint('{\"host\":\"arch\",\"ok\":true,\"sessions\":[]}')\n"));
     client.requestLocal(); client.requestLocal(); QCOMPARE(started.size(), 2);
     QTRY_COMPARE(ready.size(), 1);
     QString error;
@@ -1012,17 +1056,10 @@ void TestHgsClient::duplicatePeerRequestIsIgnoredWhileInFlight()
     const QString logPath = dir.filePath(QStringLiteral("calls.log"));
     const QString scriptPath = dir.filePath(QStringLiteral("hgs"));
 
-    QFile script(scriptPath);
-    QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Text));
-    QTextStream(&script)
-        << "#!/bin/sh\n"
-           "echo call >> '" << logPath << "'\n"
-           "echo '{\"host\":\"mac\",\"ok\":true,\"projects\":{},\"sessions\":[]}'\n";
-    script.close();
-    QVERIFY(QFile::setPermissions(scriptPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                                                   | QFileDevice::ExeOwner));
+    QVERIFY(FakeCli::install(scriptPath, "#!/usr/bin/env python3\nopen(" + FakeCli::pythonString(logPath) + ",'a').write('call\\n')\n"
+        "print('{\"host\":\"mac\",\"ok\":true,\"projects\":{},\"sessions\":[]}')\n"));
 
-    HgsClient client(scriptPath);
+    HgsClient client(FakeCli::program(scriptPath));
     QSignalSpy readySpy(&client, &HgsClient::peerReady);
     QSignalSpy startedSpy(&client, &HgsClient::stateReadStarted);
 
@@ -1062,13 +1099,8 @@ void TestHgsClient::sessionCommands()
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString scriptPath = dir.filePath(QStringLiteral("hgs"));
-    QFile script(scriptPath);
-    QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >&2\nexit 1\n");
-    script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                                  | QFileDevice::ExeOwner));
-    HgsClient client(scriptPath);
+    QVERIFY(FakeCli::install(scriptPath, "#!/usr/bin/env python3\nimport sys\nfor a in sys.argv[1:]:print(a,file=sys.stderr)\nsys.exit(1)\n"));
+    HgsClient client(FakeCli::program(scriptPath));
     QSignalSpy done(&client, &HgsClient::writeDone);
     QSignalSpy refresh(&client, &HgsClient::sessionWriteDone);
     client.pauseAll(QStringLiteral("mac"), 3);
@@ -1098,13 +1130,12 @@ void TestHgsClient::inspectionCursorAndFailures()
     QTemporaryDir dir;
     QFile script(dir.filePath("hgs"));
     QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\n"
-                 "[ \"$1\" = '@mac' ] && [ \"$2\" = inspect ] && [ \"$3\" = 'codex/p/a b' ] && "
-                 "[ \"$4\" = --after ] && [ \"$5\" = 42 ] || { echo invalid >&2; exit 1; }\n"
-                 "echo '{\"tracked\":true,\"cursor\":43,\"events\":[{\"seq\":43,\"type\":\"Stop\"}]}'\n");
+    script.write("#!/usr/bin/env python3\nimport sys\n"
+                 "if sys.argv[1:6]!=['@mac','inspect','codex/p/a b','--after','42']:print('invalid',file=sys.stderr);sys.exit(1)\n"
+                 "print('{\"tracked\":true,\"cursor\":43,\"events\":[{\"seq\":43,\"type\":\"Stop\"}]}')\n");
     script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName());
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
     QSignalSpy ready(&client, &HgsClient::inspectionReady);
     QSignalSpy failed(&client, &HgsClient::inspectionFailed);
     QSignalSpy stateFailed(&client, &HgsClient::stateReadFailed);
@@ -1137,9 +1168,9 @@ void TestHgsClient::archiveIdentityAndCommands()
     QCOMPARE(box.sessions[1].archivedAt, 1790928000.0);
     QVERIFY(box.sessions[0].archiveId.isEmpty());
     QTemporaryDir dir; QFile script(dir.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >&2\nexit 0\n"); script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy writes(&client, &HgsClient::writeDone);
+    script.write("#!/usr/bin/env python3\nimport sys\nfor a in sys.argv[1:]:print(a,file=sys.stderr)\n"); script.close();
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy writes(&client, &HgsClient::writeDone);
     QSignalSpy refresh(&client, &HgsClient::sessionWriteDone);
     client.restoreArchive("mac", "codex/p", "old-one"); QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][2].toString(), QString("@mac\nresume\ncodex/p\n--archive\nold-one\n-d"));
@@ -1157,12 +1188,12 @@ void TestHgsClient::archiveIdentityAndCommands()
 void TestHgsClient::archiveInspectionKeepsDistinctIdentities()
 {
     QTemporaryDir dir; QFile script(dir.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\n[ \"$1\" = '@mac' ] || exit 1\n[ \"$2\" = inspect ] || exit 1\n"
-                 "[ \"$3\" = 'codex/p' ] && [ \"$4\" = --after ] && [ \"$5\" = 0 ] || exit 1\n"
-                 "if [ \"$#\" = 7 ]; then [ \"$6\" = --archive ] || exit 1; fi\n"
-                 "echo '{\"tracked\":true,\"cursor\":1,\"events\":[]}'\n"); script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy ready(&client, &HgsClient::inspectionReady);
+    script.write("#!/usr/bin/env python3\nimport sys\na=sys.argv[1:]\n"
+                 "if a[0:5]!=['@mac','inspect','codex/p','--after','0']:sys.exit(1)\n"
+                 "if len(a)==7 and a[5]!='--archive':sys.exit(1)\n"
+                 "print('{\"tracked\":true,\"cursor\":1,\"events\":[]}')\n"); script.close();
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy ready(&client, &HgsClient::inspectionReady);
     client.requestInspection("mac", "codex/p");
     client.requestInspection("mac", "codex/p", 0, "old-one");
     client.requestInspection("mac", "codex/p", 0, "old-two");
@@ -1195,9 +1226,9 @@ void TestHgsClient::parsesProjects()
 void TestHgsClient::remoteFoldersAndProjects()
 {
     QTemporaryDir dir; QFile script(dir.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >&2\nexit 1\n"); script.close();
-    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy writes(&client, &HgsClient::writeDone);
+    script.write("#!/usr/bin/env python3\nimport sys\nfor a in sys.argv[1:]:print(a,file=sys.stderr)\nsys.exit(1)\n"); script.close();
+    QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy writes(&client, &HgsClient::writeDone);
     client.projectSet("project", "/remote/path with ' quotes", "mac"); QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][2].toString(), QStringLiteral("@mac\nproject\nset\nproject\n/remote/path with ' quotes"));
     client.projectRemove("project", "mac"); QTRY_COMPARE(writes.size(), 2);
@@ -1255,8 +1286,8 @@ if mode=='garbage': print('not json');sys.exit(0)
 read={'conversation_id':'other' if mode=='wrong' else p['conversation_id'],'reply_id':p['reply_id'],'attention_signature':None,'at':1.0}
 print(json.dumps({'ok':True,'applied':{'reply_id':True,'attention_signature':False},'read':read}))
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(script.fileName()); QSignalSpy done(&client, &HgsClient::readFinished);
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName())); QSignalSpy done(&client, &HgsClient::readFinished);
     const auto payload = [](const QString &reply) {
         return QJsonObject{{"run_id", "run-1"}, {"conversation_id", "conversation-1"}, {"reply_id", reply}, {"attention_signature", QJsonValue()}};
     };
@@ -1293,8 +1324,8 @@ time.sleep(0.2)
 if (root / 'fail').exists(): print('presence unavailable', file=sys.stderr); sys.exit(1)
 print('{"ok":true}')
 )");
-    script.close(); QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    HgsClient client(path); QSignalSpy finished(&client, &HgsClient::presenceFinished);
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(path)); QSignalSpy finished(&client, &HgsClient::presenceFinished);
     client.setPresence(1, false); client.setPresence(2, false); client.setPresence(-3, true);
     QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
     QFile calls(dir.filePath("calls")); QVERIFY(calls.open(QIODevice::ReadOnly));

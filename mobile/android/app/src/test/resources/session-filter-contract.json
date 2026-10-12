@@ -1,0 +1,26 @@
+{
+  "filters": ["all", "attention", "active", "paused", "archived"],
+  "cases": [
+    {"name":"working", "raw":{"activity":"busy","phase":"tool"}, "online":true, "draft":false, "matches":["all","active"]},
+    {"name":"idle", "raw":{"activity":"idle"}, "online":true, "draft":false, "matches":["all"]},
+    {"name":"draft", "raw":{"activity":"idle"}, "online":true, "draft":true, "matches":["all","active"]},
+    {"name":"offline-draft", "raw":{"state":"paused","activity":"busy"}, "online":false, "draft":true, "matches":["all","active","paused"]},
+    {"name":"overlap", "raw":{"activity":"busy","phase":"input"}, "online":true, "draft":true, "matches":["all","attention","active"]},
+    {"name":"stale-work", "raw":{"activity":"busy","phase":"input"}, "online":false, "draft":false, "matches":["all"]},
+    {"name":"archived-draft", "raw":{"state":"archived","activity":"busy","phase":"input","review_later":true}, "online":true, "draft":true, "matches":["archived"]},
+    {"name":"stopped", "raw":{"state":"stopped","activity":"busy"}, "online":true, "draft":false, "matches":["all","paused"]},
+    {"name":"exited-draft", "raw":{"process_state":"exited","activity":"busy"}, "online":true, "draft":true, "matches":["all","active"]},
+    {"name":"reminder", "raw":{"state":"paused","review_later":true}, "online":false, "draft":false, "matches":["all","attention","active","paused"]},
+    {"name":"acknowledged", "raw":{"phase":"approval","attention_acknowledged":true}, "online":true, "draft":false, "matches":["all"]},
+    {"name":"retrying", "raw":{"phase":"error","recovery":{"state":"retrying"}}, "online":true, "draft":false, "matches":["all"]},
+    {"name":"quota", "raw":{"phase":"error","provider_error":{"error_kind":"quota"},"recovery":{"state":"waiting"}}, "online":true, "draft":false, "matches":["all","attention","active"]},
+    {"name":"provider-policy", "raw":{"phase":"error","provider_error":{"error_kind":"provider_policy"},"recovery":{"state":"retrying"}}, "online":true, "draft":false, "matches":["all","attention","active"]},
+    {"name":"child-input", "raw":{"activity":"idle","subagent_source":"hooks","subagent_previews":[{"state":"input"}]}, "online":true, "draft":false, "matches":["all","attention","active"]},
+    {"name":"hook-profile", "raw":{"activity":"idle","subagent_source":"hook_profiles","subagents":{"child":{"state":"input"}}}, "online":true, "draft":false, "matches":["all"]},
+    {"name":"scheduled", "raw":{"activity":"idle","phase":"idle","schedules":{"count":1,"recurring":1,"next_at":1791744000}}, "online":true, "draft":false, "matches":["all","active"]},
+    {"name":"scheduled-offline", "raw":{"activity":"idle","phase":"idle","schedules":{"count":1,"recurring":1,"next_at":1791744000}}, "online":false, "draft":false, "matches":["all"]},
+    {"name":"scheduled-unknown", "raw":{"activity":"idle","phase":"idle","schedules":null}, "online":true, "draft":false, "matches":["all"]},
+    {"name":"scheduled-paused", "raw":{"state":"paused","activity":"idle","phase":"idle","schedules":{"count":1,"recurring":0,"next_at":null}}, "online":true, "draft":false, "matches":["all","paused"]},
+    {"name":"scheduled-input", "raw":{"activity":"idle","phase":"input","schedules":{"count":2,"recurring":1,"next_at":1791744000}}, "online":true, "draft":false, "matches":["all","attention","active"]}
+  ]
+}

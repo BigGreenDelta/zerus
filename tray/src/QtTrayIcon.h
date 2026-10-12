@@ -18,9 +18,13 @@ public:
     void setContextMenu(QMenu *menu) override;
     void showMessage(const QString &title, const QString &body,
                      QSystemTrayIcon::MessageIcon icon, int msecs) override;
+    void showClickableMessage(const QString &title, const QString &body,
+                              QSystemTrayIcon::MessageIcon icon, int msecs,
+                              std::function<void()> clicked) override;
     void show() override;
 
 private:
     QSystemTrayIcon m_tray;
     QPointer<QMenu> m_menu;
+    std::function<void()> m_messageClicked;   // of the latest message, see TrayIcon.h
 };

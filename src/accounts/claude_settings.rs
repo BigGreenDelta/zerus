@@ -2,7 +2,6 @@
 //! launch/UI preferences. A three-way merge preserves later profile overrides.
 use super::*;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 
 const KEYS: &[&str] = &[
     "permissions", "model", "effortLevel", "modelSettings", "alwaysThinkingEnabled",
@@ -57,12 +56,13 @@ fn merge(previous: Option<&Value>, current: Option<&Value>, base: Option<&Value>
     }
     current.cloned()
 }
+#[cfg(unix)]
 fn write(path: &Path, value: &Value) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    file.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    platform::make_private(file.as_file())?;
     file.write_all(&serde_json::to_vec_pretty(value).map_err(|e|Error::new(1,e.to_string()))?)?;
     file.write_all(b"\n")?;file.as_file().sync_all()?;
-    file.persist(path).map_err(|e|Error::new(1,e.to_string()))?;
+    platform::persist(file, path).map_err(|e|Error::new(1,e.to_string()))?;
     Ok(())
 }
 
@@ -77,6 +77,7 @@ pub(super) fn preview(native: &Path, profile: &Path) -> Result<Value> {
     Ok(merge(Some(&old),Some(&current),Some(&base)).unwrap_or_else(||json!({})))
 }
 
+#[cfg(unix)]
 pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     let path = profile.join("settings.json");
     let source = native.join("settings.json");
@@ -85,7 +86,7 @@ pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
         return Err(Error::new(1,"Managed Claude settings are a symlink; use a profile settings file to inherit preferences."));
     }
     let lock_path = profile.join("settings.json.hgs.lock");
-    let guard = fs::OpenOptions::new().create(true).read(true).write(true).mode(0o600).open(lock_path)?;
+    let guard = platform::private_open(fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)).open(lock_path)?;
     guard.lock_exclusive()?;
     let base = preferences(&read_object(&source)?);
     let metadata = profile.join(".hgs-user-settings.json");
@@ -103,9 +104,10 @@ pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn inheritance_updates_without_replacing_profile_overrides_or_identity() {
         let tmp=tempfile::tempdir().unwrap(); let native=tmp.path().join("native");let profile=tmp.path().join("managed");

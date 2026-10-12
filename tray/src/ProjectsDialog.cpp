@@ -282,7 +282,8 @@ void ProjectsDialog::setFleet(const FleetState &fleet)
         if (!online || machine.isEmpty() || m_projects->hasImported(machine) || m_importing.contains(host)) return;
         m_importing.insert(host);m_client->requestProjects(host);
     };
-    request({},fleet.local().host,fleet.local().ok);
+    // A control-only computer (hgs.exe on Windows) has no project folders of its own.
+    if (fleet.local().localSessions) request({},fleet.local().host,fleet.local().ok);
     for (const auto &host:fleet.peerNames()) request(host,host,fleet.peer(host)->ok);
 }
 void ProjectsDialog::importLegacy(const QString &host,const QList<ProjectInfo> &projects)
@@ -332,7 +333,7 @@ void ProjectsDialog::editFolder(const QString &id, const QString &projectId)
     auto *layout=new QVBoxLayout(&dialog);auto *form=new QFormLayout;
     auto *machine=new QComboBox;machine->setObjectName("projectFolderMachine");
     const auto local=m_fleet.local().host;
-    if(!local.isEmpty())machine->addItem(local+tr(" (this computer)"),QString());
+    if(!local.isEmpty()&&m_fleet.local().localSessions)machine->addItem(local+tr(" (this computer)"),QString());
     for(const auto &peer:m_fleet.peerNames())machine->addItem(peer,peer);
     const auto initialHost=existing.id.isEmpty()?m_host:existing.machine==local?QString():existing.machine;
     if(!initialHost.isEmpty()&&machine->findData(initialHost)<0)machine->addItem(initialHost,initialHost);

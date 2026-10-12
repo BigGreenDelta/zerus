@@ -95,6 +95,22 @@ finally: termios.tcsetattr(fd,termios.TCSANOW,original)
 '''
 
 
+def terminal_only(test, title):
+    """An unrecognized startup chooser stays visible and read-only."""
+    state=test.inspect()
+    test.assertEqual(len(state['pending_questions']),1,state['pending_questions'])
+    card=state['pending_questions'][0]
+    test.assertEqual((card['source'],card['can_answer'],card['questions'][0]['question']),
+                     ('startup_terminal_choice',False,title))
+    test.assertEqual((state['attention_id'],state['phase']),(card['question_id'],'input'))
+    test.assertIn('waiting for a choice in Terminal',state['status_detail'])
+    payload=test.payload(question_id=card['question_id'],expected_question_hash=card['question_hash'])
+    before=test.received()
+    test.assertIn('refresh before answering',test.answer(payload,success=False))
+    test.assertEqual(test.received(),before)
+    return card
+
+
 class Questions(unittest.TestCase):
     script=fixtures.InputTransport.script
     tmux=fixtures.InputTransport.tmux

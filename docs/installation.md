@@ -3,8 +3,10 @@
 [Product overview](../README.md) | [Detailed reference](reference.md#installation)
 
 Zerus runs on Linux and macOS. Arch Linux x86_64 users can install the complete
-CLI and desktop bundle from AUR. Other installations build from source. The CLI
-keeps the name `hgs`; the desktop executable is `hgs-tray`.
+CLI and desktop bundle from AUR; Apple Silicon Macs can use the Homebrew cask.
+Other installations build from source. The CLI keeps the name `hgs`; the desktop
+executable is `hgs-tray`. Windows has a portable [control console](#windows) for
+remote Linux and macOS machines.
 
 ## Requirements
 
@@ -67,11 +69,11 @@ Choose one package; all include the CLI and desktop and conflict with one anothe
 | [zerus-ade-bin](https://aur.archlinux.org/packages/zerus-ade-bin) | `yay -S zerus-ade-bin` | Stable prebuilt Arch x86_64 bundle |
 | [zerus](https://aur.archlinux.org/packages/zerus) | `yay -S zerus` | Stable release compiled locally |
 | [zerus-git](https://aur.archlinux.org/packages/zerus-git) | `yay -S zerus-git` | Current upstream main compiled locally |
-| [zerus-ade-nightly-bin](https://aur.archlinux.org/packages/zerus-ade-nightly-bin) | `yay -S zerus-ade-nightly-bin` | Prebuilt nightly after full Linux/Arch/macOS checks |
+| [zerus-ade-nightly-bin](https://aur.archlinux.org/packages/zerus-ade-nightly-bin) | `yay -S zerus-ade-nightly-bin` | Prebuilt nightly after full Linux/Arch/macOS/Windows checks |
 
 Keep Arch fully updated before installing. Binary library version requirements
 come from the verified release builder; source packages compile against your
-installed libraries. The [0.40.0 release](https://github.com/ufna/zerus/releases/tag/v0.40.0)
+installed libraries. The [0.42.0 release](https://github.com/ufna/zerus/releases/tag/v0.42.0)
 includes immutable source/binary archives, checked pacman packages, AUR recipes
 and SHA-256 checksums. Native agents are installed separately.
 
@@ -94,6 +96,176 @@ Services and autostart are opt-in. Inspect old user unit files before enabling
 packaged services; local definitions can shadow the system package. Package
 installation and upgrades do not restart native agents, tmux or the GUI.
 [Service setup and migration](ci-and-aur.md#package-contents-and-compatibility).
+
+## macOS (Homebrew)
+
+Apple Silicon Macs running macOS 14 or later can install the signed and notarized
+application and CLI from the Zerus tap. The casks appear in the tap with the first
+signed builds.
+
+```sh
+brew install --cask ufna/zerus/zerus
+zerus-setup
+```
+
+The tap has two channels. `zerus` follows stable releases; `zerus@nightly` follows
+the daily build from main that passed the full CI, published at the same time as
+the AUR nightly. Both install the same `Zerus.app`, so only one can be installed.
+Settings, agents and conversations are shared. To switch channels:
+
+```sh
+brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly
+brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus
+```
+
+A Zerus installed from `zerus@nightly` checks the nightly update channel unless you
+choose another one in **Settings > Updates**. The Dev channel, built from every main
+push, has no cask; use `zerus@nightly` for prebuilt builds from main.
+
+The cask installs `/Applications/Zerus.app`, links `hgs` and `zerus-setup` into
+Homebrew's `bin` directory and installs `tmux` as a dependency. It starts nothing
+and does not write to your home directory. Run `zerus-setup` once as your normal
+user, **without sudo**. It links `~/.local/bin/hgs` for SSH protocols and installs
+the on-demand session bridge that lets agents started over SSH use your login
+Keychain. Options:
+
+```sh
+zerus-setup --autostart   # start Zerus at login
+zerus-setup --workers     # recovery and swarm background workers
+```
+
+`brew upgrade --cask zerus` (or `zerus@nightly`) replaces the application but never
+quits it, unloads its LaunchAgents or stops tmux and native agents. When the
+installed bundle is another build than the running GUI, Zerus shows **Restart to
+finish update**; drafts are kept. Background workers keep the previous binary until
+you restart them:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-recovery"
+launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-swarm"
+```
+
+To uninstall, remove the per-user integration first:
+
+```sh
+zerus-setup --remove
+brew uninstall --cask zerus
+```
+
+`brew uninstall --zap --cask zerus` (or `zerus@nightly`) additionally removes the Zerus LaunchAgents,
+including ones created by a source installation, the logs and saved window state.
+`~/.config/hgs`, agent state and conversations are never removed.
+
+### Migrating from a source installation
+
+`zerus-setup` changes nothing while it finds a source installation:
+`~/Applications/hgs-tray.app`, a regular file at `~/.local/bin/hgs`, or Zerus
+LaunchAgents that run a program outside `/Applications/Zerus.app`. Keep your
+configuration and agent state, then migrate deliberately:
+
+1. Quit Zerus from its menu bar icon. Native agents and tmux keep running.
+2. Unload the old agents, ignoring ones you never installed:
+
+   ```sh
+   for label in com.hgdev.hgs-tray com.hgdev.hgs-recovery com.hgdev.hgs-swarm com.hgdev.hgs.user-session; do
+     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+   done
+   ```
+
+3. Move `~/Applications/hgs-tray.app`, `~/.local/bin/hgs`, `~/.local/bin/hgs_state.py`
+   and the matching `~/Library/LaunchAgents/com.hgdev.hgs*.plist` files into a
+   backup folder.
+4. Run `zerus-setup` with the options you used before.
+
+To return to the source installation, run `zerus-setup --remove` and restore the
+backup.
+
+<a id="windows"></a>
+
+## Windows control console
+
+Nightly releases include a portable Windows x86_64 zip with the desktop app
+(`hgs-tray.exe`) and the CLI (`hgs.exe`). They manage agent sessions on your Linux
+and macOS machines through the Windows OpenSSH client. Agents do not run on the
+Windows computer itself: this is the first phase of the
+[Windows plan](superpowers/specs/2026-10-10-windows-support-design.md).
+
+Requirements:
+
+- Windows 10 version 1903 or later, or Windows 11, on x86_64.
+- The OpenSSH client. `ssh -V` in PowerShell shows whether it is installed;
+  otherwise add **OpenSSH Client** in Settings → Optional features.
+- At least one Linux or macOS machine with `hgs` installed at `~/.local/bin/hgs`
+  (see [local installation](#local-installation)) and key-based SSH access from
+  Windows. Status polls run SSH in batch mode, so the key must work without a
+  passphrase prompt, for example through the Windows `ssh-agent` service (disabled
+  by default; enabling it needs an administrator). Host aliases from
+  `%USERPROFILE%\.ssh\config` work as usual.
+
+Install and start:
+
+1. From a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
+   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`.
+2. Check the zip in PowerShell. Both commands must show the same hash
+   (`Get-FileHash` prints it in upper case):
+
+   ```powershell
+   Get-FileHash .\zerus-<version>-windows-x86_64.zip -Algorithm SHA256
+   Select-String -Path .\SHA256SUMS -Pattern windows-x86_64.zip
+   ```
+
+3. Extract the whole zip and run `zerus-windows-x86_64\hgs-tray.exe`. Keep the
+   files together: the app uses the `hgs.exe` next to it. The executables are not
+   code-signed, so SmartScreen may show **Windows protected your PC** on the first
+   start; choose **More info → Run anyway** only for a zip whose hash matched.
+4. Add your machines in **Machines**. Accept a new host key once with
+   **Open SSH terminal**, then use **Test connection**. **Install / update HGS…**
+   builds `hgs` on the remote machine from a Zerus source checkout on this computer;
+   the remote machine needs the [CLI requirements](#requirements). A checkout whose
+   `install.sh` or `hgs_state.py` has CRLF line endings is refused.
+
+In PowerShell, run the CLI from the folder with `.\hgs.exe` and quote a machine
+argument, because `@` is special there: `.\hgs.exe '@build-01' ls`. Commands
+copied from the desktop are quoted for PowerShell the same way. From Git Bash, set
+`MSYS_NO_PATHCONV=1` before passing remote paths such as `/workspace/orbit`;
+otherwise Git Bash rewrites them into Windows paths.
+
+Configuration and state use the same layout as on Linux and macOS under
+`%USERPROFILE%`, or under `HOME` when it is set: `.config\hgs` holds `config`,
+`machines.local.json` and `tray.conf`, and `.local\state\hgs` holds the CLI state.
+`HGS_CONFIG_DIR` and `HGS_STATE_DIR` move only the CLI's configuration and state;
+the desktop app always reads `tray.conf` from `.config\hgs` under `HOME`, or
+else under the account's profile folder, whatever `USERPROFILE` says. Desktop
+settings are in `%APPDATA%\hgdev\hgs-tray.ini`, and drafts in the
+`hgs-tray.ini.drafts` folder next to it. The computer's name in the fleet is
+`HGS_SELF` when set, otherwise its lowercase `COMPUTERNAME`.
+
+Limitations of the control console:
+
+- No local sessions, local agent accounts or hooks: `hgs.exe` exits with code 2 for
+  local session commands. Commands for another machine (`hgs.exe '@build-01' …`)
+  work as on Linux.
+- No DeepSeek Native UI from Windows: it needs SSH connection sharing, which
+  Windows OpenSSH lacks, so a DeepSeek session cannot be opened externally
+  either. Its Activity still works; DeepSeek sessions have no Terminal tab on any
+  platform.
+- No mobile gateway: pair your phone with a Linux or macOS machine. Settings →
+  Mobile connection is hidden, and activity on the Windows computer does not
+  delay phone alerts.
+- Other machines cannot connect to the Windows computer as a peer.
+- No installer, code signing, autostart or self-update, and only nightly
+  releases carry the zip. **Settings → Updates** reports nightlies with a newer
+  product version; Stable and Dev have no Windows build, so on those channels it
+  says so and reports no update. To update, quit Zerus from the tray menu and
+  replace the folder with the new one; configuration and state stay in your
+  profile. To start Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the
+  Startup folder (`shell:startup`).
+- Without SSH connection sharing, every poll of every machine is a full SSH
+  handshake: about 150 ms per machine on a LAN. The app lists this computer at
+  most once every 15 seconds.
+
+[Windows details in the reference](reference.md#windows) |
+[Building on Windows](../CONTRIBUTING.md#windows)
 
 ## Checking for updates
 

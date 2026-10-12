@@ -8,6 +8,34 @@ use std::sync::OnceLock;
 /// them from the journal once the provider transcript window has moved on.
 pub(super) const REPLY_LIMIT: usize = 32_000;
 
+/// Claude records text pasted into its prompt as
+/// `<pasted_content id="…">\n…\n</pasted_content id="…">`. The person sent only
+/// the inner text, which is also what HGS delivery receipts recorded.
+pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "<pasted_content id=\"";
+    if !text.contains(OPEN) {
+        return text.into();
+    }
+    let (mut result, mut rest) = (String::with_capacity(text.len()), text);
+    while let Some(start) = rest.find(OPEN) {
+        let Some((id, body)) = rest[start + OPEN.len()..].split_once("\">") else { break };
+        if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+            break;
+        }
+        let close = format!("</pasted_content id=\"{id}\">");
+        let Some(end) = body.find(&close) else { break };
+        let inner = body[..end].strip_prefix('\n').unwrap_or(&body[..end]);
+        result.push_str(&rest[..start]);
+        result.push_str(inner.strip_suffix('\n').unwrap_or(inner));
+        rest = &body[end + close.len()..];
+    }
+    if rest.len() == text.len() {
+        return text.into();
+    }
+    result.push_str(rest);
+    result.into()
+}
+
 pub(super) fn clipped(value: &Value, limit: usize) -> String {
     let Some(value) = value.as_str() else {
         return String::new();
@@ -194,6 +222,16 @@ pub(super) fn event_db() -> Result<Connection> {
     Ok(db)
 }
 
+// Kimi names what opened a turn: the person, a scheduled job, a task...
+fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
+    let origin = string(event, "origin_kind");
+    (string(record, "agent") == "kimi"
+        && string(event, "hook_event_name") == "TurnStarted"
+        && (1..=40).contains(&origin.len())
+        && origin.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    .then_some(origin)
+}
+
 pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     if string(event, "hook_event_name") == "SessionHeartbeat" {
         return Ok(());
@@ -211,6 +249,9 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
         && !["SubagentStart", "SubagentStop"].contains(&string(event, "hook_event_name"))
     {
         data["agent_id"] = json!("");
+    }
+    if let Some(origin) = turn_origin(record, event) {
+        data["turn_origin"] = json!(origin);
     }
     if let Some(question) = questions::from_hook(record, event) {
         data["question_request"] = question;
@@ -268,12 +309,20 @@ pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
 // A durable Stop event identifies a response, even if busy/idle transitions were
 // missed between polls. Child stops and initial SessionStart are not replies.
 // Reading the retained journal also covers sessions created before this feature.
-fn latest_reply(record: &Value) -> Result<Value> {
+fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
     let conversation = string(record, "conversation_id");
     if conversation.is_empty() {
         return Ok(json!({}));
     }
     let db = event_db()?;
+    let reply = |seq: i64, at: Value, scheduled: bool| {
+        json!({"reply_id":format!("{}:{}", seq, at), "reply_at":at, "reply_scheduled":scheduled})
+    };
+    if string(record, "agent") == "kimi" {
+        let skip = recurring_schedules.is_some_and(|count| count > 0);
+        return Ok(kimi_reply(&db, record, skip)?
+            .map_or(json!({}), |(seq, at, scheduled)| reply(seq, at, scheduled)));
+    }
     let result: Option<(i64, String)> = db
         .query_row(
             "SELECT seq, payload FROM events WHERE name = ? AND conversation = ?
@@ -288,7 +337,50 @@ fn latest_reply(record: &Value) -> Result<Value> {
         return Ok(json!({}));
     };
     let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    Ok(json!({"reply_id":format!("{}:{}", seq, event["at"]), "reply_at":event["at"]}))
+    Ok(reply(seq, event["at"].clone(), false))
+}
+
+// A scheduled job opens its turn without a prompt from the person; the latest
+// opening before a Stop decides, so a prompt queued meanwhile is the person's.
+// While a recurring job remains, its routine ticks are not replies: they would
+// mark the conversation unread every few minutes. Returns (seq, at, scheduled).
+fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<Option<(i64, Value, bool)>> {
+    let mut statement = db
+        .prepare(
+            "SELECT seq, json_extract(payload, '$.type'), json_extract(payload, '$.turn_origin'), payload FROM events
+         WHERE name = ? AND conversation = ?
+           AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
+           AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
+         ORDER BY seq DESC LIMIT 4000",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(
+            params![journal_name(record), string(record, "conversation_id")],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stop: Option<(i64, Value)> = None;
+    for row in rows {
+        let (seq, kind, origin, payload) = row.map_err(|e| e.to_string())?;
+        match (kind.as_deref(), stop.take()) {
+            (Some("AgentMessage"), pending) => stop = pending,
+            (Some("Stop"), None) => {
+                let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                stop = Some((seq, event["at"].clone()));
+            }
+            (Some("TurnStarted"), Some((seq, at))) => {
+                let scheduled = matches!(origin.as_deref(), Some("cron_job" | "cron_missed"));
+                if !scheduled || !skip_scheduled {
+                    return Ok(Some((seq, at, scheduled)));
+                }
+            }
+            (_, Some((seq, at))) => return Ok(Some((seq, at, false))),
+            (_, None) => {}
+        }
+    }
+    Ok(stop.map(|(seq, at)| (seq, at, false)))
 }
 
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
@@ -298,7 +390,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         .as_object_mut()
         .unwrap()
         .extend(goals::summary(record).as_object().unwrap().clone());
-    if let Ok(reply) = latest_reply(record) {
+    if let Ok(reply) = latest_reply(record, output["schedules"]["recurring"].as_u64()) {
         output
             .as_object_mut()
             .unwrap()
@@ -365,53 +457,35 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     resume_input::enrich(record, &mut output, live_pane);
     provider_errors::enrich(record, &mut output, live_pane);
     if live_pane {
-        if let Some(question) = claude_resume::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for your conversation resume choice");
+        // Native startup choosers have no hook. A later recognized panel wins;
+        // an unrecognized chooser before a conversation stays visible read-only.
+        type Current = fn(&Value) -> Option<Value>;
+        let choosers: [(Current, &str, &str); 8] = [
+            (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
+            (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
+            (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
+            (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
+            (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
+            (codex_update::current, "input", "Codex is waiting for an update choice"),
+            (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
+            (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
+        ];
+        let mut recognized = false;
+        for (current, phase, detail) in choosers {
+            if let Some(question) = current(record) {
+                recognized = true;
+                output["activity"] = json!("busy");
+                output["phase"] = json!(phase);
+                output["attention_id"] = question["question_id"].clone();
+                output["status_detail"] = json!(detail);
+            }
         }
-        if let Some(question) = claude_permission::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for your default permission mode choice");
-        }
-        if let Some(question) = claude_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Claude is waiting for folder trust approval");
-        }
-        if let Some(question) = codex_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for folder trust approval");
-        }
-        if let Some(question) = codex_hooks_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for hook trust review");
-        }
-        if let Some(question) = codex_update::current(record) {
+        let fallback = if recognized { None } else { startup_choice::current(record) };
+        if let Some(question) = fallback {
             output["activity"] = json!("busy");
             output["phase"] = json!("input");
             output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Codex is waiting for an update choice");
-        }
-        if let Some(question) = kimi_trust::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("approval");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Kimi is waiting for folder trust approval");
-        }
-        if let Some(question) = kimi_cache_hint::current(record) {
-            output["activity"] = json!("busy");
-            output["phase"] = json!("input");
-            output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!("Kimi is waiting for your context choice");
+            output["status_detail"] = json!(startup_choice::detail(record));
         }
     }
     recovery::enrich(record, &mut output);
@@ -568,6 +642,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
     output["compact_context_request"] = record["compact_context_request"].clone();
     output["clear_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
+    output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
+        && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
     cache_hint::enrich(&record,&mut output,archive_id.is_none()&&panes.is_some());
     match provider_messages::read(&record) {
@@ -1050,6 +1126,18 @@ pub(super) fn repair_kimi_main(record: &mut Value) {
 #[cfg(test)]
 mod attention_regressions {
     use super::*;
+
+    #[test]
+    fn claude_pasted_content_keeps_only_the_text_the_person_sent() {
+        let sent = "Activity misses replies\n\nInspect the attached image at \"/private/one.png\"";
+        assert_eq!(pasted_text(&format!("<pasted_content id=\"1b93\">\n{sent}\n</pasted_content id=\"1b93\">")), sent);
+        assert_eq!(pasted_text("See <pasted_content id=\"a\">\none\n</pasted_content id=\"a\"> and <pasted_content id=\"b\">two</pasted_content id=\"b\">."),
+            "See one and two.");
+        for unchanged in ["plain text", "<pasted_content id=\"a\">\nopen only", "<pasted_content id=\"a\">x</pasted_content id=\"b\">",
+            "<pasted_content id=\"a b\">x</pasted_content id=\"a b\">"] {
+            assert!(matches!(pasted_text(unchanged), std::borrow::Cow::Borrowed(text) if text == unchanged));
+        }
+    }
     fn message_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY,name TEXT,conversation TEXT,payload TEXT);
@@ -1094,6 +1182,52 @@ mod attention_regressions {
         let (messages, _) = message_events(&db, "example", Some("conversation"), r#"["other"]"#).unwrap();
         assert_eq!(messages.iter().map(|m| m["detail"].as_str().unwrap()).collect::<Vec<_>>(),
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
+    }
+    #[test]
+    fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
+        let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});
+        let started = |origin: Value| json!({"hook_event_name":"TurnStarted","agent_id":"main","origin_kind":origin});
+        assert_eq!(turn_origin(&kimi, &started(json!("cron_job"))), Some("cron_job"));
+        assert_eq!(turn_origin(&kimi, &started(json!("user"))), Some("user"));
+        for origin in [json!(""), json!("Cron"), json!(7), json!("x".repeat(41))] {
+            assert_eq!(turn_origin(&kimi, &started(origin)), None);
+        }
+        assert_eq!(turn_origin(&json!({"agent":"claude"}), &started(json!("cron_job"))), None);
+
+        let db = message_db();
+        let main = |event: Value| insert_message(&db, "example", Some("conversation"), event);
+        let reply = |skip: bool| kimi_reply(&db, &kimi, skip).unwrap().map(|(seq, _, scheduled)| (seq, scheduled));
+        assert_eq!(reply(true), None);
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":"Check the backup every 15 minutes"}));
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"user"}));
+        let prompted = main(json!({"type":"Stop","agent_id":"","at":1.5}));
+        assert_eq!(reply(false), Some((prompted, false)));
+        assert_eq!(kimi_reply(&db, &kimi, false).unwrap().unwrap().1, json!(1.5));
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_job"}));
+        main(json!({"type":"PreToolUse","agent_id":"","tool":"Bash"}));
+        main(json!({"type":"TurnStarted","agent_id":"child","turn_origin":"user"}));
+        main(json!({"type":"AgentMessage","agent_id":""}));
+        insert_message(&db, "example", Some("other"), json!({"type":"UserPromptSubmit","agent_id":""}));
+        insert_message(&db, "other", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":""}));
+        main(json!({"type":"Stop","agent_id":""}));
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_missed"}));
+        let missed = main(json!({"type":"Stop","agent_id":""}));
+        // Ticks are replies once no recurring job remains; until then the
+        // person's last reply stays current.
+        assert_eq!(reply(false), Some((missed, true)));
+        assert_eq!(reply(true), Some((prompted, false)));
+        // A prompt steered into a scheduled turn makes the reply the person's.
+        main(json!({"type":"TurnStarted","agent_id":"","turn_origin":"cron_job"}));
+        main(json!({"type":"UserPromptQueued","agent_id":"","detail":"Also check free space"}));
+        let steered = main(json!({"type":"Stop","agent_id":""}));
+        assert_eq!(reply(true), Some((steered, false)));
+        // Rows journaled before origins were recorded, or a Stop without its
+        // opening in the journal, are not scheduled.
+        main(json!({"type":"TurnStarted","agent_id":""}));
+        let unknown = main(json!({"type":"Stop","agent_id":""}));
+        assert_eq!(reply(true), Some((unknown, false)));
+        let orphan = main(json!({"type":"Stop","agent_id":""}));
+        assert_eq!(reply(true), Some((orphan, false)));
     }
     #[test]
     fn message_window_limits_rows_and_actual_utf8_bytes_with_disclosure() {

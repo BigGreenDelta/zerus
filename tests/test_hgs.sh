@@ -178,6 +178,8 @@ check "rename requires source and destination" 1 "." rename
 check "rename requires destination" 1 "." rename claude/p/one
 check "rename rejects extra positional arguments" 1 "." rename claude/p/one claude/p/review unexpected
 check "rename requires archive identity after selector" 1 "." rename claude/p/one claude/p/review --archive
+check "@peer history -> noninteractive ssh" 0 "^ssh -o BatchMode=yes -o ConnectTimeout=3 nowhere ~/.local/bin/hgs history claude/p/one --json --dry-run\$" --dry-run @nowhere history claude/p/one --json
+check_not "@peer history never decorates calling terminal" "^tab " --dry-run @nowhere history claude/p/one --json
 check "@peer archived inspect forwards identity and cursor" 0 "^ssh -o BatchMode=yes -o ConnectTimeout=3 nowhere ~/.local/bin/hgs inspect claude/p/one --archive 11111111-2222-4333-8444-555555555555 --after 42 --dry-run\$" --dry-run @nowhere inspect claude/p/one --archive 11111111-2222-4333-8444-555555555555 --after 42
 check "@peer archived forget forwards archive identity" 0 "^ssh -o BatchMode=yes -o ConnectTimeout=3 nowhere ~/.local/bin/hgs kill claude/p/one --archive 11111111-2222-4333-8444-555555555555 --dry-run\$" --dry-run @nowhere kill claude/p/one --archive 11111111-2222-4333-8444-555555555555
 check "@peer archived resume preserves detached mode" 0 "^ssh -o BatchMode=yes nowhere ~/.local/bin/hgs --client testhost resume claude/p/one --archive 11111111-2222-4333-8444-555555555555 -d --dry-run\$" --dry-run @nowhere resume claude/p/one --archive 11111111-2222-4333-8444-555555555555 -d

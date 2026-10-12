@@ -25,6 +25,7 @@ class MessageComposer : public QWidget {
     Q_OBJECT
 public:
     explicit MessageComposer(QWidget *parent = nullptr);
+    ~MessageComposer() override;
     void setSessionKey(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
@@ -82,7 +83,7 @@ protected:
 
 private:
     using Draft = ComposerDraft;
-    bool saveDraft(const QString &key);
+    bool saveDraft(const QString &key, bool asynchronous = false);
     void send();
     void restoreDraft();
     void notifyDraft(const QString &key);
@@ -107,7 +108,11 @@ private:
     QHash<QString, Draft> m_preservedDrafts;
     QHash<QString, QString> m_waitingSends;
     QSet<QString> m_unsent;   // keys whose last reported hasDraft() was true
+    mutable QSet<QString> m_storedDrafts;
+    mutable bool m_draftsIndexed = false;
     ComposerDraftStore m_draftStore;
+    QHash<QString, quint64> m_saveRevision;
+    QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
     bool m_available = false, m_loading = false, m_dark = true;

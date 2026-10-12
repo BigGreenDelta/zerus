@@ -1,12 +1,16 @@
 //! Browser handoff for the native harness. Remote loopback stays behind SSH;
 //! launch tokens never enter the session catalog or application logs.
+#[cfg(unix)]
+use crate::platform;
 use crate::{
     cli::{Error, Result},
     config::Config,
-    platform,
 };
+#[cfg(unix)]
 use serde_json::{json, Value};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::{
     fs,
     net::TcpListener,
@@ -14,8 +18,23 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// The tunnels rely on OpenSSH connection sharing (ControlMaster), which the
+/// Windows OpenSSH client does not provide.
+#[cfg(not(unix))]
+const UNSUPPORTED: &str =
+    "The native DeepSeek UI is not available from Windows yet; open it on that machine.";
+#[cfg(not(unix))]
+pub fn address(_: &Config, _: &str, _: &str) -> Result<String> {
+    Err(Error::new(2, UNSUPPORTED))
+}
+#[cfg(not(unix))]
+pub fn open(_: &Config, _: &str, _: &str, _: bool) -> Result<i32> {
+    Err(Error::new(2, UNSUPPORTED))
+}
+
 // Shared by the embedded view and external browser. The returned launch URL
 // is private; callers must never put it in ordinary session state or logs.
+#[cfg(unix)]
 pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
     let remote = !target.is_empty() && !config.is_self(target);
     let mut url = if remote {
@@ -23,7 +42,7 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
             return Err(Error::new(1, "Invalid SSH target"));
         }
         let command = format!("~/.local/bin/hgs __dsh-ui-url {}", platform::quote(name));
-        let out = Command::new("ssh")
+        let out = platform::ssh()
             .args(crate::machines::ssh_options(config, target))
             .args([
                 "-o",
@@ -66,7 +85,7 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
         );
         let control = dir.join(format!("{}.sock", &key[..16]));
         let port_file = dir.join(format!("{}.json", &key[..16]));
-        let alive = Command::new("ssh")
+        let alive = platform::ssh()
             .arg("-S")
             .arg(&control)
             .args(["-O", "check", target])
@@ -85,7 +104,7 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let local = listener.local_addr()?.port();
             drop(listener);
-            let status = Command::new("ssh")
+            let status = platform::ssh()
                 .args(crate::machines::ssh_options(config, target))
                 .args(["-M", "-S"])
                 .arg(&control)
@@ -115,6 +134,7 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
     Ok(url)
 }
 
+#[cfg(unix)]
 pub fn open(config: &Config, target: &str, name: &str, dry: bool) -> Result<i32> {
     if dry {
         println!("Open official DeepSeek UI for {name}");

@@ -15,4 +15,7 @@ object UpdateInstallGuard {
     fun ownsCallback(sessionId:Int,nonce:String,resultSessionId:Int,resultNonce:String?) =
         sessionId>=0 && nonce.isNotBlank() && sessionId==resultSessionId && nonce==resultNonce
     fun canStart(sessionId:Int,downloaded:AndroidUpdate?,selected:AndroidUpdate) = sessionId<0 && downloaded==selected
+    /** Install already expresses consent to Android's prompt, but only for the session that this tap committed. */
+    fun opensConfirmation(requestedSessionId:Int,sessionId:Int,status:String,intentAvailable:Boolean) =
+        requestedSessionId>=0 && requestedSessionId==sessionId && status=="confirmation" && intentAvailable
 }

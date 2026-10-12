@@ -65,15 +65,17 @@ pub(super) fn summary(record: &Value) -> Value {
 }
 
 fn native_summary(record: &Value) -> Value {
+    let mut kimi_wire = None;
     let result = (|| -> Result<(Value, &'static str)> {
         let (path, source) = match string(record, "agent") {
-            "kimi" => (
-                questions::wire_paths(record)?
+            "kimi" => {
+                let path = questions::wire_paths(record)?
                     .into_iter()
                     .next()
-                    .ok_or("No Kimi wire")?,
-                "kimi_goal_v1",
-            ),
+                    .ok_or("No Kimi wire")?;
+                kimi_wire = Some(path.clone());
+                (path, "kimi_goal_v1")
+            }
             "claude" => {
                 let id = string(record, "conversation_id");
                 if uuid::Uuid::parse_str(id).is_err() {
@@ -90,10 +92,18 @@ fn native_summary(record: &Value) -> Value {
         let state = replay_goal(&path, source)?;
         Ok((state, source))
     })();
-    match result {
+    let mut summary = match result {
         Ok((goal, source)) => json!({"goal":goal,"goal_source":source,"goal_observed_at":now()}),
         Err(_) => json!({"goal":null,"goal_source":"unavailable"}),
+    };
+    if string(record, "agent") == "kimi" {
+        // Jobs the agent scheduled open future turns without the person; null
+        // while the journal cannot be read.
+        summary["schedules"] = kimi_wire
+            .and_then(|path| replay_goal(&path, "kimi_cron_v2").ok())
+            .map_or(Value::Null, |jobs| schedules::summary(&jobs));
     }
+    summary
 }
 
 // Persist only reduced goal state and a cursor; do not copy native history.
@@ -164,17 +174,19 @@ fn replay_goal_at(path: &Path, source: &str, cache_path: &Path) -> Result<Value>
             skipping = false;
             continue;
         }
-        let relevant = if source == "kimi_goal_v1" {
-            line.windows(5).any(|v| v == b"goal.") || line.windows(6).any(|v| v == b"forked")
-        } else {
-            line.windows(11).any(|v| v == b"goal_status")
+        let relevant = match source {
+            "kimi_goal_v1" => {
+                line.windows(5).any(|v| v == b"goal.") || line.windows(6).any(|v| v == b"forked")
+            }
+            "kimi_cron_v2" => line.windows(6).any(|v| v == b"\"cron."),
+            _ => line.windows(11).any(|v| v == b"goal_status"),
         };
         if relevant {
             if let Ok(event) = serde_json::from_slice::<Value>(&line) {
-                if source == "kimi_goal_v1" {
-                    reduce_kimi(&mut goal, &event);
-                } else {
-                    reduce_claude(&mut goal, &event);
+                match source {
+                    "kimi_goal_v1" => reduce_kimi(&mut goal, &event),
+                    "kimi_cron_v2" => schedules::reduce_kimi(&mut goal, &event),
+                    _ => reduce_claude(&mut goal, &event),
                 }
             }
         }
@@ -320,6 +332,30 @@ mod tests {
             replay_goal_at(&path, "kimi_goal_v1", &cache).unwrap()["id"],
             "two"
         );
+    }
+
+    #[test]
+    fn kimi_schedules_replay_incrementally_from_the_durable_cron_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.jsonl");
+        let cache = temp.path().join("cache.json");
+        let add = |id: &str, recurring: Value| {
+            let mut task = json!({"id":id,"cron":"*/15 * * * *","prompt":"Check the backup","createdAt":1});
+            if !recurring.is_null() { task["recurring"] = recurring; }
+            json!({"type":"cron.add","task":task}).to_string() + "\n"
+        };
+        let count = || schedules::summary(&replay_goal_at(&path, "kimi_cron_v2", &cache).unwrap())["recurring"].as_u64().unwrap();
+        fs::write(&path, add("watch", Value::Null) + &add("once", json!(false))
+            + &json!({"type":"cron.add","task":{"id":"invalid","cron":"* * * * *"}}).to_string() + "\n"
+            + &json!({"type":"context.append_message","text":"\"cron.add\" in a message"}).to_string() + "\n").unwrap();
+        assert_eq!(count(), 1);
+        use std::io::Write;
+        let mut append = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        append.write_all((json!({"type":"cron.cursor","id":"watch","lastFiredAt":2}).to_string() + "\n"
+            + &add("hourly", json!(true))).as_bytes()).unwrap();
+        assert_eq!(count(), 2);
+        append.write_all((json!({"type":"cron.delete","ids":["watch","hourly"]}).to_string() + "\n").as_bytes()).unwrap();
+        assert_eq!(count(), 0);
     }
 
     #[test]

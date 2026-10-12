@@ -26,8 +26,15 @@
 #ifdef Q_OS_MACOS
 #include "MacBackend.h"
 #endif
+#ifdef Q_OS_WIN
+#include "SwarmWorkerSupervisor.h"
+#include "WindowsTerminalBackend.h"
+#endif
 
 namespace {
+
+// Local poll interval of a control-only computer (see onLocalReady).
+constexpr int kControlOnlyPollMs = 15000;
 
 // Иконка трея -- по платформе сборки, без настройки: на Linux KStatusNotifierItem (ради
 // ЛКМ, см. SniTrayIcon.h), везде остальное QSystemTrayIcon. Не по cfg: выбирать тут
@@ -98,6 +105,8 @@ std::unique_ptr<TerminalBackend> makeTerminal(const AppConfig &cfg)
     // AppConfig::openModes(Mac) когда-нибудь снова появится второй терминал, ветка должна
     // вернуться сюда вместе с ним -- иначе новый пункт меню молча откроет Terminal.app.
     return std::make_unique<MacBackend>();
+#elif defined(Q_OS_WIN)
+    return std::make_unique<WindowsTerminalBackend>(WindowsTerminalBackend::modeFromString(cfg.openMode));
 #else
     // Ни бэкенда, ни шаблона -- open() честно скажет, что писать в tray.conf.
     return std::make_unique<CommandBackend>(QString());
@@ -128,7 +137,11 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_menu(AppConfig::openModes(AppConfig::currentPlatform()), cfg.openMode,
              /*terminalTemplateSet=*/!cfg.terminalTemplate.isEmpty())
     , m_tray(makeTrayIcon())
+#ifdef Q_OS_WIN
+    , m_notifier(makeAttentionNotifier(*m_tray))
+#else
     , m_notifier(makeAttentionNotifier())
+#endif
     , m_badge(makeApplicationBadge())
     , m_attention(QJsonDocument::fromJson(QSettings().value("attention/observed").toByteArray()).object())
     , m_localTimer(this)
@@ -231,8 +244,10 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     m_localTimer.start();
     m_client.requestLocal();
 
+#ifndef Q_OS_WIN
     // Phone alerts wait while the owner uses any Zerus desktop. This runs with
     // the window closed; failures are logged once per distinct message.
+    // Windows is no mobile gateway in Phase 1 and records no presence.
     m_presence = std::make_unique<DesktopPresence>(makePresenceSource(),
         [this](double idleSeconds, bool locked) { m_client.setPresence(idleSeconds, locked); });
     connect(&m_client, &HgsClient::presenceFinished, this, [this](const QString &error) {
@@ -241,6 +256,11 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         if (!error.isEmpty()) qWarning().noquote() << "hgs zerus: desktop presence:" << error;
     });
     m_presence->start();
+#else
+    // No user service manager runs the project catalog worker on Windows.
+    m_swarmWorker = std::make_unique<SwarmWorkerSupervisor>(cfg.hgsPath);
+    m_swarmWorker->start();
+#endif
 
     // Пиров локальный ответ не содержит; список известен только из полного `hgs ls
     // --json`, который сам по себе стоит времени самого медленного ssh во флоте.
@@ -348,6 +368,10 @@ void TrayAgent::onLocalReady(const BoxState &box)
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
     if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
+    // A control-only computer reports no sessions; its answer only carries the
+    // machine list and metrics, and every poll is a process start on Windows.
+    const int localPoll = box.localSessions ? m_cfg.localPollMs : std::max(m_cfg.localPollMs, kControlOnlyPollMs);
+    if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
     observeAttention({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_pollingHosts); }
     refreshIcon();
@@ -510,7 +534,8 @@ void TrayAgent::activateSessionWith(TerminalBackend &backend, const QString &pee
     // Строка для оболочки собирается ЗДЕСЬ, в момент клика, а не в меню в момент
     // отрисовки: меню отдаёт только "какая сессия на каком боксе", про синтаксис hgs и
     // про cfg.hgsPath оно не знает вовсе (см. TrayMenu.h).
-    const QString command = SessionCommands::open(m_cfg.hgsPath, peer, session);
+    const QStringList arguments = SessionCommands::openArguments(peer, session);
+    const QString command = SessionCommands::command(m_cfg.hgsPath, arguments);
 
     QString error;
     // Приаттаченная сессия: сначала пробуем показать уже открытое окно. Второй клиент
@@ -520,7 +545,7 @@ void TrayAgent::activateSessionWith(TerminalBackend &backend, const QString &pee
         return;
 
     error.clear();
-    if (backend.open(command, &error)) {
+    if (backend.openProgram(m_cfg.hgsPath, arguments, &error)) {
         reportAdvisory(backend);
         return;
     }
@@ -553,7 +578,7 @@ void TrayAgent::launchSession(const QString &host, const QString &cmd, const QSt
         ? makeLaunchTerminal(m_cfg) : nullptr;
     TerminalBackend &terminal = launchTerminal ? *launchTerminal : *m_terminal;
     QString error;
-    if (!terminal.open(command, &error)) {
+    if (!terminal.openProgram(m_cfg.hgsPath, args, &error)) {
         if (m_sessionsWindow) m_sessionsWindow->newSessionLaunchFailed(launchId, error);
         notify(tr("Zerus: the terminal did not open"), error + QStringLiteral("\n\n") + command,
                QSystemTrayIcon::Warning, 8000);
@@ -588,7 +613,9 @@ void TrayAgent::showSessions()
             const auto command = SessionCommands::folderShell(m_cfg.hgsPath, host, directory);
             if (command.isEmpty()) return;
             auto backend = makeLaunchTerminal(m_cfg); QString error;
-            if (!backend->open(command, &error)) notify(tr("Could not open folder shell"), error, QSystemTrayIcon::Warning, 8000);
+            const bool opened = host.isEmpty() ? backend->open(command, &error)
+                : backend->openProgram(m_cfg.hgsPath, {"machine", "ssh", host, "--directory", directory}, &error);
+            if (!opened) notify(tr("Could not open folder shell"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);
         });
         connect(m_sessionsWindow, &SessionsWindow::copySessionCommandRequested, this,
@@ -601,21 +628,19 @@ void TrayAgent::showSessions()
             auto backend = makeLaunchTerminal(m_cfg); QString error; QStringList args;
             if (!host.isEmpty()) args << QLatin1Char('@') + host;
             args << "account" << "login" << id;
-            const auto command = SessionCommands::command(m_cfg.hgsPath, args);
-            if (!backend->open(command, &error)) notify(tr("Could not open agent sign-in"), error, QSystemTrayIcon::Warning, 8000);
+            if (!backend->openProgram(m_cfg.hgsPath, args, &error)) notify(tr("Could not open agent sign-in"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);
         });
         connect(m_sessionsWindow, &SessionsWindow::machineSshRequested, this, [this](const QString &alias) {
             auto backend = makeLaunchTerminal(m_cfg); QString error;
-            const auto command = SessionCommands::command(m_cfg.hgsPath, {"machine", "ssh", alias});
-            if (!backend->open(command, &error)) notify(tr("Could not open SSH terminal"), error, QSystemTrayIcon::Warning, 8000);
+            if (!backend->openProgram(m_cfg.hgsPath, {"machine", "ssh", alias}, &error)) notify(tr("Could not open SSH terminal"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);
         });
         connect(m_sessionsWindow, &SessionsWindow::accountInstallRequested, this, [this](const QString &host, const QString &provider) {
             auto backend = makeLaunchTerminal(m_cfg); QString error; QStringList args;
             if (!host.isEmpty()) args << QLatin1Char('@') + host;
             args << "account" << "install" << provider;
-            if (!backend->open(SessionCommands::command(m_cfg.hgsPath, args), &error))
+            if (!backend->openProgram(m_cfg.hgsPath, args, &error))
                 notify(tr("Could not open agent installer"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);
         });

@@ -18,6 +18,7 @@ class AttentionTracker {
 public:
     explicit AttentionTracker(QJsonObject saved = {}) : m_hosts(std::move(saved)) {}
     AttentionChanges observe(const QString &host, const BoxState &box, qint64 now = QDateTime::currentSecsSinceEpoch());
+    AttentionChanges observe(const QString &host, const BoxState &box, qint64 now, bool applicationFocused);
     void deliveryFailed(const QString &token, qint64 now = QDateTime::currentSecsSinceEpoch());
     QJsonObject state() const { return m_hosts; }
     static QJsonObject target(const QString &token);

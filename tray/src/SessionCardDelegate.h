@@ -90,7 +90,7 @@ public:
         return w ? QRect(end - w, card.y() + (compact ? 25 : 29), w, 18) : QRect();
     }
     // Priority: attention or error, work, an unsent draft (not for the open session,
-    // which shows it in place), a new reply (then an extra badge), a pause, Ready.
+    // which shows it in place), a new reply (then an extra badge), a schedule, a pause, Ready.
     static CardStatus statusOf(const QModelIndex &index, bool selected) {
         CardStatus s;
         s.attention = index.data(SessionRoles::Attention).toBool();
@@ -103,6 +103,7 @@ public:
         s.emphasis = s.attention ? (error ? IdentityBadges::Error : IdentityBadges::Attention) : s.unread ? IdentityBadges::Unread : IdentityBadges::Normal;
         s.kind = s.attention ? (error ? SessionStatusBadge::Error : SessionStatusBadge::Attention)
             : s.working ? SessionStatusBadge::Working : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
+            : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
             : s.paused ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
         s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
@@ -403,7 +404,8 @@ private:
             const QString state = status.working && since > 0 ? SessionElapsed::text(since) : status.caption;
             const QColor tone = status.kind == SessionStatusBadge::Working ? QColor(dark ? "#55e39a" : "#12834e")
                 : status.kind == SessionStatusBadge::Error ? QColor(dark ? "#ffabb6" : "#a32238")
-                : status.kind == SessionStatusBadge::Attention || status.kind == SessionStatusBadge::Unread ? QColor(dark ? "#f0c77b" : "#885400") : muted;
+                : status.kind == SessionStatusBadge::Attention || status.kind == SessionStatusBadge::Unread ? QColor(dark ? "#f0c77b" : "#885400")
+                : status.kind == SessionStatusBadge::Scheduled ? QColor(dark ? "#8fd3e6" : "#1f6b7d") : muted;
             QFont font = option.font; font.setPixelSize(10); font.setWeight(QFont::Medium); p->setFont(font); p->setPen(tone);
             CachedText::draw(p, QRect(r.x() + inset, y + 5, textWidth, 13), Qt::AlignCenter, CachedText::elided(font, state, Qt::ElideRight, textWidth));
         }

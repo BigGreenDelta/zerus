@@ -43,8 +43,17 @@ public:
         return QString::compare(x.at(1).toString(),y.at(1).toString(),Qt::CaseSensitive);
     }
     void setPeers(QStringList peers){peers.removeAll(QString());peers.removeDuplicates();if(peers==machines)return;machines=peers;refresh();}
+    // A control-only computer (hgs.exe on Windows) keeps no recovery policy of its
+    // own: only the remote machines are read, and a save goes to one of them.
+    void setLocalSessions(bool enabled){if(enabled==local)return;local=enabled;copies.remove({});errors.remove({});refresh();}
     QJsonObject envelope()const{return best;}
+    // Machines that keep a recovery policy: none on a control-only computer
+    // without remote machines.
+    bool hasMachines()const{return !hosts().isEmpty();}
+    // A save has a machine to go to: this one, or a reachable remote machine.
+    bool canSave()const{return !busy()&&!best.isEmpty()&&(local||!saveTarget().isEmpty());}
     QString status()const {
+        if(!hasMachines())return tr("Add a remote machine in Machines to configure automatic recovery; this computer runs no agents.");
         QStringList missing;for(const auto &host:hosts())if(errors.contains(host)||!copies.contains(host))missing<<label(host);
         if(!pending.isEmpty())return tr("Synchronizing recovery settings…");
         if(!missing.isEmpty())return tr("Waiting for %1. Changes will sync when connected; those machines keep their last settings.").arg(missing.join(", "));
@@ -56,11 +65,15 @@ public:
     void save(QJsonObject policy,const QJsonObject &base){
         if(busy()){saveError=tr("Wait for synchronization to finish before saving.");if(changed)changed();return;}
         if(best.isEmpty()||compare(base,best)!=0){saveError=tr("Settings changed in another Zerus. Reload before saving.");if(changed)changed();return;}
-        saveError.clear();send({},"set",policy);if(changed)changed();
+        // Any reachable machine accepts the change; reconcile() copies it to the rest.
+        const QString target=local?QString():saveTarget();
+        if(!local&&target.isEmpty()){saveError=tr("Connect a remote machine to save recovery settings.");if(changed)changed();return;}
+        saveError.clear();send(target,"set",policy);if(changed)changed();
     }
 private:
     struct Request{QString host,op;};
-    QStringList hosts()const{QStringList result{QString()};result.append(machines);return result;}
+    QString saveTarget()const{for(const auto &host:machines)if(!errors.contains(host)&&copies.contains(host))return host;return {};}
+    QStringList hosts()const{QStringList result;if(local)result<<QString();result.append(machines);return result;}
     QString label(const QString &host)const{return host.isEmpty()?tr("this machine"):host;}
     void send(const QString &host,const QString &op,const QJsonObject &data={}){pending.insert(client.requestRecovery(host,op,data),{host,op});}
     void persist(){QSettings().setValue("recovery/sharedPolicy",QJsonDocument(best).toJson(QJsonDocument::Compact));}
@@ -69,7 +82,7 @@ private:
         for(const auto &host:hosts())if(!errors.contains(host)&&copies.contains(host)&&compare(copies[host],best)<0)
             send(host,"sync",best.value("policy").toObject());
     }
-    HgsClient client;QTimer timer;QStringList machines;QJsonObject best;
+    HgsClient client;QTimer timer;QStringList machines;QJsonObject best;bool local=true;
     QMap<QString,QJsonObject> copies;QMap<QString,QString> errors;QMap<quint64,Request> pending;QString saveError;
 };
 
@@ -122,7 +135,12 @@ public:
         for(auto i=schedules.begin();i!=schedules.end();++i){const bool session=i.key()=="session_limit";choices[i.key()]->setChecked(policy.value(i.key()).toBool(session));const auto patterns=policy.value("schedules").toObject();auto sequence=patterns.contains(i.key())?patterns.value(i.key()).toArray():session?QJsonArray{300,0}:policy.value("delays").toArray();if(!sequence.isEmpty()&&sequence.last().toInt()>0)sequence.append(-1);QStringList text;for(const auto &v:sequence)text<<QString::number(v.toInt());i.value()->setText(text.join(", "));}dirty=false;
     }
 private:
-    void refreshControls(){enable->setEnabled(!base.isEmpty());for(auto i=choices.begin();i!=choices.end();++i){i.value()->setEnabled(enable->isChecked());schedules[i.key()]->setEnabled(enable->isChecked()&&i.value()->isChecked()&&(i.key()!="session_limit"||sessionMode->currentData()=="interval"));}sessionMode->setEnabled(enable->isChecked()&&choices["session_limit"]->isChecked());save->setEnabled(!base.isEmpty()&&!m_sync->busy());}
+    void refreshControls(){
+        // Without a machine (a control-only computer alone) nothing can be edited.
+        const bool usable=!base.isEmpty()&&m_sync->hasMachines(),on=usable&&enable->isChecked();
+        enable->setEnabled(usable);for(auto i=choices.begin();i!=choices.end();++i){i.value()->setEnabled(on);schedules[i.key()]->setEnabled(on&&i.value()->isChecked()&&(i.key()!="session_limit"||sessionMode->currentData()=="interval"));}
+        sessionMode->setEnabled(on&&choices["session_limit"]->isChecked());save->setEnabled(usable&&m_sync->canSave());
+    }
     QComboBox *sessionMode=nullptr;
     RecoverySync *m_sync;QJsonObject base;bool dirty=false,saving=false;QCheckBox *enable;QMap<QString,QCheckBox *> choices;QMap<QString,QLineEdit *> schedules;QLabel *state,*message;QPushButton *save;
 };

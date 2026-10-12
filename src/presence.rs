@@ -100,7 +100,7 @@ fn write(root: &Path, input: &Input, at: f64) -> Result<Record> {
     let mut file = tempfile::NamedTempFile::new_in(root)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
     file.as_file().sync_all()?;
-    file.persist(&path).map_err(|e| e.error)?;
+    crate::platform::persist(file, &path).map_err(|e| e.error)?;
     Ok(record)
 }
 

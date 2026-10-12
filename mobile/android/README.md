@@ -137,8 +137,12 @@ An unavailable gateway leaves the connection intact.
 
 Sessions is the initial view. Its compact filters use the desktop glyphs and
 native semantics: All sessions, Needs attention, Active, Saved sessions, and
-Archive. Active combines working sessions and sessions needing attention,
-counting each session once. Work requires a reachable computer and a current running agent;
+Archive. Active combines working sessions, sessions needing attention, and sessions
+with local unsent text or attachment drafts, counting each session once. Drafts
+(including visible subagent drafts) stay active offline and update the count as
+they are edited, cleared or sent; archived sessions remain exclusive to Archive.
+Drafts stay on their device; desktop and Android share the filter rules and IDs.
+Work requires a reachable computer and a current running agent;
 input, approval, non-recovering errors, and blocked recovery require attention.
 Optional native questions and explicit child requests also count as attention.
 Routine child failures and legacy hook-profile observations do not. Saved
@@ -299,6 +303,9 @@ Installation saves private drafts first and waits for active deliveries or
 commands. Android's install-source permission and confirmation remain required;
 the updater explicitly requests user action through
 [PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
+Install is the consent to that prompt: it opens directly for the session the tap
+committed while Updates stays open in the foreground. Continue Android
+confirmation remains only when the prompt could not open then.
 An installer session is recorded before commit and never recommitted after
 interruption. A lost confirmation screen requires explicit cancellation before
 another attempt. Success is shown only after the installed package version is

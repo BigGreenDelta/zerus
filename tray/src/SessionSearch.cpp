@@ -127,10 +127,10 @@ void SessionSearch::setQuery(const QString &query)
     m_query = query.trimmed(); m_selectedHit.clear(); m_replies.clear(); m_errors.clear(); m_debounce.stop();
     rebuild(); if (m_query.size() >= 2) m_debounce.start();
 }
-void SessionSearch::setScope(const FleetState &fleet, const QString &filter, const QString &host) {
-    setHostsScope(fleet,filter,host.isEmpty()?QSet<QString>():QSet<QString>{host});
+void SessionSearch::setScope(const FleetState &fleet, const QString &filter, const QString &host, const QSet<QString> &drafts) {
+    setHostsScope(fleet,filter,host.isEmpty()?QSet<QString>():QSet<QString>{host},drafts);
 }
-void SessionSearch::setHostsScope(const FleetState &fleet, const QString &filter, const QSet<QString> &selectedHosts)
+void SessionSearch::setHostsScope(const FleetState &fleet, const QString &filter, const QSet<QString> &selectedHosts, const QSet<QString> &drafts)
 {
     bool changed = m_filter != filter || m_hosts != selectedHosts;
     QStringList hosts{QString()}; hosts.append(fleet.peerNames());
@@ -141,7 +141,7 @@ void SessionSearch::setHostsScope(const FleetState &fleet, const QString &filter
             m_errors.remove(alias); m_replies.remove(alias); changed = true;
         }
     }
-    m_fleet = fleet; m_filter = filter; m_hosts = selectedHosts;
+    m_fleet = fleet; m_filter = filter; m_hosts = selectedHosts; m_drafts = drafts;
     if (active()) { rebuild(); if (changed) m_debounce.start(); }
 }
 void SessionSearch::setFolderScope(const QString &host,const QString &path,bool checkout)
@@ -163,15 +163,15 @@ bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool onli
     // Global text search includes saved and archived conversations. Other state
     // filters still narrow it explicitly, with archive labels on every hit.
     if (m_filter == "attention") return SessionPresentation::needsAttention(s, online);
-    if (m_filter == "active") return s.state != "archived" &&
-        (SessionPresentation::needsAttention(s, online) || SessionPresentation::working(s, online));
+    if (m_filter == "active") return SessionPresentation::active(s, online, m_drafts.contains(host + '\n' + s.name));
     if (m_filter == "paused") return s.state == "paused" || s.state == "stopped";
     return true;
 }
 void SessionSearch::request()
 {
     if (m_query.size() < 2) return;
-    QStringList hosts{QString()}; hosts.append(m_fleet.peerNames());
+    // A control-only computer (hgs.exe on Windows) has no conversations to search.
+    QStringList hosts; if (m_fleet.local().localSessions) hosts << QString(); hosts.append(m_fleet.peerNames());
     for (const auto &host : hosts) {
         if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) continue;
         if (m_pending.contains(host) || m_replies.contains(host) || m_errors.contains(host)) continue;
@@ -246,7 +246,8 @@ void SessionSearch::rebuild()
             if (shown) ++sessions;
         }
     };
-    append({}, m_fleet.local()); for (const auto &host : m_fleet.peerNames()) if (const auto *box = m_fleet.peer(host)) append(host, *box);
+    if (m_fleet.local().localSessions) append({}, m_fleet.local());
+    for (const auto &host : m_fleet.peerNames()) if (const auto *box = m_fleet.peer(host)) append(host, *box);
     m_list->verticalScrollBar()->setValue(scroll);
     int pending = 0; QStringList errors;
     for (const auto &host : visibleHosts) {

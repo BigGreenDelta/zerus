@@ -54,13 +54,17 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class GitHub:
+    def asset_origin(self, url):
+        return https(url, {'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'})
+
     def __init__(self,token=None):
         self.token=token
         self.opener=urllib.request.build_opener(NoRedirect)
 
-    def stream(self,url,limit,*,api=False,accept='application/vnd.github+json'):
+    def stream(self,url,limit,*,api=False,accept='application/vnd.github+json',download=False):
         allowed={'api.github.com'} if api else {'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'}
-        https(url,allowed)
+        if api:https(url,allowed)
+        else:self.asset_origin(url)
         for redirect in range(6):
             headers={'User-Agent':'zerus-update-mirror/1','Accept':accept}
             # Create every redirected request afresh: API credentials must never
@@ -76,9 +80,10 @@ class GitHub:
                 require(location,'Missing download redirect')
                 url=urllib.parse.urljoin(url,location)
                 # No authentication survives an asset redirect, even if it points
-                # back to the API. JSON API responses do not redirect at all.
-                require(accept=='application/octet-stream','Unexpected API redirect')
-                api=False;https(url,{'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'})
+                # back to the API. Actions archive requests use the JSON media
+                # type but explicitly allow downloads; metadata never redirects.
+                require(download or accept=='application/octet-stream','Unexpected API redirect')
+                api=False;self.asset_origin(url);accept='application/octet-stream'
                 continue
             except (OSError,urllib.error.URLError):raise ValueError('GitHub transport unavailable') from None
             with response:
@@ -151,6 +156,10 @@ def release_assets(release):
     return rows
 
 
+def windows_portable(version):
+    return f'zerus-{version}-windows-x86_64.zip'
+
+
 def checksums(raw):
     require(len(raw)<=256*1024,'Checksum list exceeds bounds')
     result={}
@@ -189,7 +198,7 @@ def aur_versions(path):
 
 
 def build_feed(release,info,files,sums,package_versions,commit):
-    tag=safe_name(release['tag_name']);require(info.get('schema')==1 and type(info.get('schema')) is int,'Unsupported release metadata schema')
+    tag=safe_name(release['tag_name']);require(info.get('schema') in (1,2) and type(info.get('schema')) is int and (info['schema']==1)==('macos' not in info),'Unsupported release metadata schema')
     require(info.get('source_commit')==commit and HEX40.fullmatch(commit),'Release tag/source commit mismatch')
     platform=info.get('platform','desktop');channel=info.get('channel','stable')
     require(platform in {'android','desktop'} and channel in {'dev','stable','nightly'},'Unknown release platform/channel')
@@ -214,6 +223,17 @@ def build_feed(release,info,files,sums,package_versions,commit):
             require(actual.rsplit('-',1)[0]==version,'Package/product version mismatch')
             expected.add(f'{package}-{actual}-x86_64.pkg.tar.zst')
         if channel=='stable':expected.add(f'zerus-{version}-source.tar.gz')
+        portable=info.get('windows_portable')
+        if channel=='nightly' and portable is not None:
+            # Linked from GitHub only; deployed GUIs reject unknown feed artifact kinds.
+            require(portable==windows_portable(version),'Unexpected Windows portable asset');expected.add(portable)
+        macos=info.get('macos')
+        if macos is not None:
+            # Schema 2 adds the notarized Apple Silicon bundle of the channel's Homebrew cask.
+            # Homebrew updates it, so the catalog keeps listing only artifacts existing clients know.
+            cask={'stable':'zerus','nightly':'zerus@nightly'}.get(channel)
+            require(cask is not None and info.get('schema')==2 and info.get('homebrew_casks')==[cask] and isinstance(macos,dict) and macos.get('asset')==f'zerus-{version}-macos-arm64.zip','Unexpected macOS release metadata')
+            expected.add(macos['asset'])
         require(set(sums)==expected,'Unexpected desktop asset family')
     artifacts=[]
     declared=info.get('artifacts') if platform=='android' else None
@@ -289,8 +309,20 @@ def validate_and_fetch(client,release,directory,expected_platform,expected_chann
     require(isinstance(info,dict),'Invalid sealed release metadata')
     if info.get('platform','desktop')!=expected_platform or info.get('channel','stable')!=expected_channel:
         raise ChannelMismatch('Selected release belongs to another channel')
+    portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel=='nightly' else None
+    macos=info.get('macos') if expected_platform=='desktop' else None
+    cask=macos.get('asset') if isinstance(macos,dict) else None
     for name,digest in sums.items():
-        if name not in files:fetch(name,digest)
+        if name in files:continue
+        if (isinstance(portable,str) and name==portable and name.endswith('-windows-x86_64.zip')) or \
+                (isinstance(cask,str) and name==cask and name.endswith('-macos-arm64.zip')):
+            # Not mirrored (the mirror never deletes and has a fixed disk budget)
+            # and not a feed artifact; build_feed checks its sealed name. Homebrew
+            # downloads the macOS zip from GitHub.
+            declared=assets[name].get('digest')
+            require(declared is None or declared=='sha256:'+digest,'GitHub asset digest mismatch')
+            continue
+        fetch(name,digest)
     packages={}
     if expected_platform=='desktop':
         aur=[path for name,path in files.items() if name.endswith('-aur.tar.gz')];require(len(aur)==1,'Expected sealed AUR metadata archive');packages=aur_versions(aur[0])

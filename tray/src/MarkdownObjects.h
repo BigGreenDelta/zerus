@@ -11,8 +11,10 @@
 
 class QPainter;
 class QPalette;
+class QRect;
 class QTextCursor;
 class QTextDocument;
+class QTextEdit;
 
 // Pieces of GitHub Markdown that HTML cannot express in Qt rich text.
 namespace MarkdownObjects {
@@ -32,6 +34,9 @@ bool isInlineCode(const QTextFormat &format);
 // the view painted them (they stay on top of the chips).
 void paintChips(QPainter *painter, QTextDocument *document, const QRectF &exposed, const QPalette &palette,
                 const QList<QAbstractTextDocumentLayout::Selection> &selections);
+// The same for a view, after QTextEdit::paintEvent(): its found text, then the
+// reader's selection. exposed is in viewport coordinates.
+void paintChips(QTextEdit *view, const QRect &exposed);
 // The selection as a reader sees it: list markers "• ", "1. ", "[x] ";
 // code-block corners and rule fillers give nothing.
 QString plainText(const QTextCursor &selection);

@@ -1,0 +1,109 @@
+"""Developer ID signing must cover nested code inside-out and never release unnotarized bytes."""
+import importlib.util
+import os
+from pathlib import Path
+import plistlib
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("sign_macos", ROOT / "scripts/sign-macos.py")
+sign = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sign)
+MACH_O = b"\xcf\xfa\xed\xfe" + b"\0" * 28
+
+
+class Signing(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="zerus-sign-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.app = Path(self.temporary.name) / "Zerus.app"
+        self.write("Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": "hgs-tray"}))
+        self.write("Contents/MacOS/hgs-tray", MACH_O)
+        self.write("Contents/MacOS/hgs", MACH_O)
+        self.write("Contents/PlugIns/platforms/libqcocoa.dylib", MACH_O)
+        self.write("Contents/Resources/setup/install-swarm-service.py", b"#!/usr/bin/env python3\n")
+        for name in ("QtCore", "QtWebEngineCore"):
+            framework = f"Contents/Frameworks/{name}.framework"
+            self.write(f"{framework}/Versions/A/{name}", MACH_O)
+            os.symlink("A", self.app / framework / "Versions/Current")
+            os.symlink(f"Versions/Current/{name}", self.app / framework / name)
+        helper = "Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app"
+        self.write(f"{helper}/Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": "QtWebEngineProcess"}))
+        self.write(f"{helper}/Contents/MacOS/QtWebEngineProcess", MACH_O)
+
+    def write(self, name, payload):
+        path = self.app / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def relative(self, paths):
+        return [str(path.relative_to(self.app.parent)) for path in paths]
+
+    def test_signing_order_is_inside_out_and_complete(self):
+        order = self.relative(sign.signing_order(self.app))
+        helper = "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app"
+        engine = "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A"
+        self.assertEqual(len(order), len(set(order)))
+        self.assertEqual(order[-1], "Zerus.app")
+        self.assertEqual(set(order), {
+            "Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs", helper,
+            engine, "Zerus.app/Contents/Frameworks/QtCore.framework/Versions/A", "Zerus.app"})
+        self.assertLess(order.index(helper), order.index(engine))
+        for standalone in ("Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs"):
+            self.assertLess(order.index(standalone), order.index(engine))
+
+    def test_only_the_web_helper_and_application_get_entitlements(self):
+        entitlements = {self.relative([path])[0]: value for path in sign.signing_order(self.app)
+                        if (value := sign.entitlements_for(path, self.app))}
+        self.assertEqual(set(entitlements), {
+            "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app",
+            "Zerus.app"})
+        web = plistlib.loads(Path(entitlements[next(key for key in entitlements if "QtWebEngineProcess" in key)]).read_bytes())
+        self.assertEqual(web, {"com.apple.security.cs.allow-jit": True})
+        application = plistlib.loads(Path(entitlements["Zerus.app"]).read_bytes())
+        self.assertEqual(application, {"com.apple.security.automation.apple-events": True})
+
+    def test_codesign_command_uses_hardened_runtime_and_timestamps(self):
+        command = sign.codesign_command(self.app, "Developer ID Application: Example (ABCDE12345)", None)
+        self.assertIn("--options", command)
+        self.assertEqual(command[command.index("--options") + 1], "runtime")
+        self.assertIn("--timestamp", command)
+        adhoc = sign.codesign_command(self.app, "-", None)
+        self.assertIn("--timestamp=none", adhoc)
+
+    def test_release_archive_requires_notarization(self):
+        output = Path(self.temporary.name) / "release"
+        with self.assertRaisesRegex(ValueError, "notariz"):
+            sign.release_archive(self.app, output, "0.38.0", None, "6.11.2", "ABCDE12345")
+        self.assertFalse(output.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "ditto archives exist only on macOS")
+    def test_release_archive_is_named_after_the_channel_release(self):
+        output = Path(self.temporary.name) / "release"
+        nightly = "0.38.0.r812.gabcdef0.n41"
+        asset = sign.release_archive(self.app, output, nightly, "0123abcd-4567-89ef-0123-456789abcdef",
+                                     "6.11.2", "ABCDE12345")
+        self.assertEqual(asset.name, f"zerus-{nightly}-macos-arm64.zip")
+        self.assertEqual(sorted(path.name for path in output.iterdir()), sorted([asset.name, "macos-info.json"]))
+
+    def test_release_versions_are_stable_or_nightly(self):
+        for value in ("0.38.0", "0.38.0.r812.gabcdef0.n41"):
+            self.assertTrue(sign.RELEASE.fullmatch(value), value)
+        for value in ("0.38", "0.38.0-rc1", "0.38.0.r812.gABCDEF0.n41", "../0.38.0"):
+            self.assertFalse(sign.RELEASE.fullmatch(value), value)
+
+    def test_notarization_accepts_team_and_individual_api_keys(self):
+        key = Path("/keys/AuthKey.p8")
+        self.assertEqual(sign.notary_credentials(key, "ABC123DEF4", "0123abcd-4567-89ef-0123-456789abcdef"),
+                         ["--key", str(key), "--key-id", "ABC123DEF4",
+                          "--issuer", "0123abcd-4567-89ef-0123-456789abcdef"])
+        self.assertEqual(sign.notary_credentials(key, "ABC123DEF4", None),
+                         ["--key", str(key), "--key-id", "ABC123DEF4"])
+        self.assertEqual(sign.notary_credentials(key, "ABC123DEF4", ""),
+                         ["--key", str(key), "--key-id", "ABC123DEF4"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -66,6 +67,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -107,6 +109,7 @@ private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, sec
 class MainActivity : ComponentActivity() {
     private val model: ZerusViewModel by viewModels()
     private var invitation by mutableStateOf<PairingInvite?>(null)
+    private var updateRequest by mutableIntStateOf(0)
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) SessionNotifications.initialize(this)
     }
@@ -127,7 +130,7 @@ class MainActivity : ComponentActivity() {
         readIntent(intent)
         model.pickerId.takeIf { it.isNotBlank() }?.let { fileLauncher(it) }
         setContent { MaterialTheme(colorScheme = Scheme) {
-            ZerusApp(model, invitation, onInvitationUsed = { invitation = null }, onNotifications = {
+            ZerusApp(model, invitation, updateRequest, onInvitationUsed = { invitation = null }, onNotifications = {
                 if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             }, onLive = { enabled ->
                 val service = Intent(this, LiveConnectionService::class.java)
@@ -148,9 +151,11 @@ class MainActivity : ComponentActivity() {
         // Analytics lifecycle must never see pairing URIs or campaign/referrer extras.
         val retained = Bundle()
         listOf("session", "computer", "connection").forEach { key -> intent.getStringExtra(key)?.let { retained.putString(key, it) } }
+        if(intent.getBooleanExtra("open_updates", false)) retained.putBoolean("open_updates", true)
         intent.replaceExtras(retained)
     }
     private fun readIntent(intent: Intent) {
+        if(intent.getBooleanExtra("open_updates", false)) { updateRequest++;intent.removeExtra("open_updates") }
         intent.data?.toString()?.let { PairingInvite.parse(it) }?.let { invitation = it;intent.data = null }
         val session = intent.getStringExtra("session")
         val computer = intent.getStringExtra("computer")
@@ -158,17 +163,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun ZerusApp(model: ZerusViewModel, invitation: PairingInvite?, onInvitationUsed: () -> Unit,
+@Composable private fun ZerusApp(model: ZerusViewModel, invitation: PairingInvite?, updateRequest: Int, onInvitationUsed: () -> Unit,
     onNotifications: () -> Unit, onLive: (Boolean) -> Unit, onAttach: (Target) -> Unit) {
     val obscuration = remember { ConversationObscuration() }
     CompositionLocalProvider(LocalConversationObscuration provides obscuration) {
-        ZerusAppContent(model,invitation,onInvitationUsed,onNotifications,onLive,onAttach)
+        ZerusAppContent(model,invitation,updateRequest,onInvitationUsed,onNotifications,onLive,onAttach)
         AttachmentViewerHost(model.attachments)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun ZerusAppContent(model: ZerusViewModel, invitation: PairingInvite?, onInvitationUsed: () -> Unit,
+@Composable private fun ZerusAppContent(model: ZerusViewModel, invitation: PairingInvite?, updateRequest: Int, onInvitationUsed: () -> Unit,
     onNotifications: () -> Unit, onLive: (Boolean) -> Unit, onAttach: (Target) -> Unit) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var handledReturnSequence by remember(model) { mutableLongStateOf(model.returnToSessionsSequence) }
@@ -178,6 +183,7 @@ class MainActivity : ComponentActivity() {
         handledReturnSequence = sequence
     }
     var settings by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(updateRequest) { if(updateRequest > 0) settings = true }
     val updater: AndroidUpdateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val updateState by updater.state.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
@@ -353,6 +359,7 @@ class MainActivity : ComponentActivity() {
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Neutral -> Unit
                 }
                 Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall)
@@ -521,12 +528,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }; return
     }
     val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
-    val counts = SessionFilters.counts(scoped, model.machines)
-    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines)) }
+    val drafts = SessionFilters.draftedSessions(scoped, model.drafts)
+    val counts = SessionFilters.counts(scoped, model.machines, drafts)
+    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
     val groups = SessionFilters.grouped(visible, model.projects)
     val readAllTargets = scoped.filterNot(SessionFilters::archived).map { it.target }
     val canReadAll = !model.demo && readAllTargets.any(model::canReadAll)
-    var readAllNotice by remember(project?.key, model.sessionQuery, model.selectedMachines) { mutableStateOf("") }
+    val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
     val scrollReset = model.sessionScrollReset
@@ -544,7 +552,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 TextButton(onClick = {
                     val capturedTargets = readAllTargets.toList()
                     val result = model.markAllRead(capturedTargets)
-                    readAllNotice = ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial)
+                    Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_LONG).show()
                 }, enabled = canReadAll, modifier = Modifier.semantics {
                     contentDescription = if (canReadAll) "Read all conversations in the current project, machine and search scope on this phone"
                         else if (model.demo) "Read all unavailable in preview"
@@ -552,7 +560,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         else "Read all unavailable. The current scope needs verified history or loaded replies on this phone"
                 }) { Text("Read all") }
             }
-            ReadAllNotice(readAllNotice) { readAllNotice = "" }
         } }
         item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("Search sessions and IDs") },
             leadingIcon = { Icon(Icons.Default.Search, "Search sessions") }, shape = RoundedCornerShape(14.dp)) }
@@ -686,7 +693,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo)
     val conversationLoading = !model.demo && (model.detailBusy || model.olderLoading)
     val canReadAll = !archived && !model.demo && model.canReadAll(target)
-    var readAllNotice by remember(target.key) { mutableStateOf("") }
+    val context = LocalContext.current
     val keys = buildList {
         add("history:earlier")
         add("history:status")
@@ -851,7 +858,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }) { Text("Questions ($offeredQuestionCount)") }
             TextButton(onClick = {
                 val result = model.markAllRead(listOf(target))
-                readAllNotice = ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial)
+                Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_SHORT).show()
             }, enabled = canReadAll, modifier = Modifier.semantics {
                 contentDescription = if (canReadAll) "Read all replies in this conversation on this phone"
                     else if (model.demo) "Read all unavailable in preview"
@@ -860,7 +867,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
             }) { Text("Read all") }
         }
-        ReadAllNotice(readAllNotice, Modifier.padding(horizontal = 16.dp)) { readAllNotice = "" }
         if(searchNotice.isNotBlank()) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),verticalAlignment = Alignment.CenterVertically) {
             Text(searchNotice,Modifier.weight(1f),color = Amber,style = MaterialTheme.typography.bodySmall)
             IconButton(onClick = { searchNotice = "" }) { Icon(Icons.Default.Close,"Dismiss search notice") }
@@ -948,15 +954,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     ExpandedQuestionHost(model, target, questions, online && model.activityVerified && !model.contextBlocked(target),
         questionDisplay, ::updateQuestionDisplay, onReview)
-}
-
-@Composable private fun ReadAllNotice(notice: String, modifier: Modifier = Modifier, onDismiss: () -> Unit) {
-    if (notice.isBlank()) return
-    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(notice, Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
-            color = Muted, style = MaterialTheme.typography.bodySmall)
-        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Dismiss Read all result") }
-    }
 }
 
 @Composable private fun ConversationMessage(event: Event, agent: String, outgoing: OutgoingMessage?,

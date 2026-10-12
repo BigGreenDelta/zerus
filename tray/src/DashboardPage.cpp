@@ -153,7 +153,7 @@ public:
         m_model.appendRow(new QStandardItem);
     }
     void setTheme(bool dark) { if (property("hgsDark") != QVariant(dark)) { setProperty("hgsDark", dark); QWidget::update(); } }
-    void update(const SessionInfo &session, const QString &alias, bool includeCompleted, bool online)
+    void update(const SessionInfo &session, const QString &alias, bool includeCompleted, bool online, bool draft)
     {
         using namespace SessionPresentation;
         auto *item = m_model.item(0); bool changed = false;
@@ -175,7 +175,9 @@ public:
         set(SessionRoles::ReviewLater, session.reviewLater);
         set(SessionRoles::Unread, session.unreadReply);
         set(SessionRoles::Working, working(session, online));
+        set(SessionRoles::Draft, draft);
         set(SessionRoles::WorkingSince, session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
+        set(SessionRoles::Scheduled, scheduled(session, online));
         set(SessionRoles::Children, childCount(session, false, online, includeCompleted));
         // Overview cards navigate to a session; the roster opens in its list.
         set(SessionRoles::HasChildren, false);
@@ -283,11 +285,11 @@ DashboardPage::DashboardPage(QWidget *parent) : QWidget(parent)
     connect(allAccounts,&QPushButton::clicked,this,&DashboardPage::accountsRequested);
     m_accountGrid=new QGridLayout;m_accountGrid->setSpacing(12);layout->addLayout(m_accountGrid);
     m_accountsEmpty=label(tr("Loading accounts…"),"dashboardMuted");layout->addWidget(m_accountsEmpty);
-    auto *sessionsHeading = new QHBoxLayout; sessionsHeading->addWidget(label(tr("Attention & in progress"), "dashboardSection")); sessionsHeading->addStretch();
+    auto *sessionsHeading = new QHBoxLayout; sessionsHeading->addWidget(label(tr("Active sessions"), "dashboardSection")); sessionsHeading->addStretch();
     auto *allSessions = new QPushButton(tr("All sessions →")); allSessions->setObjectName("dashboardAllSessions"); sessionsHeading->addWidget(allSessions);
     connect(allSessions, &QPushButton::clicked, this, [this] { emit filterRequested("@all", "all"); }); layout->addLayout(sessionsHeading);
     m_sessionGrid = new QGridLayout; m_sessionGrid->setSpacing(12); layout->addLayout(m_sessionGrid);
-    m_empty = label(tr("No sessions need attention or are working right now."), "dashboardEmpty"); m_empty->setWordWrap(true); layout->addWidget(m_empty);
+    m_empty = label(tr("No sessions are working, need attention or have drafts."), "dashboardEmpty"); m_empty->setWordWrap(true); layout->addWidget(m_empty);
     m_inactive = label({}, "dashboardMuted"); m_inactive->setWordWrap(true); layout->addWidget(m_inactive); layout->addStretch();
     content->installEventFilter(this);
     auto *timer = new QTimer(this); timer->setInterval(15000); connect(timer, &QTimer::timeout, this, [this] { if (isVisible()) render(); }); timer->start();
@@ -297,7 +299,7 @@ DashboardPage::DashboardPage(QWidget *parent) : QWidget(parent)
     }); elapsed->start();
     setTheme(true);
 }
-void DashboardPage::setFleet(const FleetState &fleet) { m_fleet = fleet; render(); }
+void DashboardPage::setFleet(const FleetState &fleet, const QSet<QString> &drafts) { m_fleet = fleet; m_drafts = drafts; render(); }
 void DashboardPage::resizeEvent(QResizeEvent *event) { QWidget::resizeEvent(event); arrangeMachines(); arrangeSessions();arrangeAccounts(); }
 bool DashboardPage::eventFilter(QObject *watched, QEvent *event)
 {
@@ -371,7 +373,9 @@ void DashboardPage::render()
     struct Machine { QString key, alias, host; BoxState box; bool fresh; };
     QList<Machine> machines;
     const auto local = m_fleet.local();
-    machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
+    // A control-only computer runs no agents; the overview covers remote machines.
+    if (local.localSessions)
+        machines.append({"@local", local.host.isEmpty() ? tr("This machine") : local.host, {}, local, local.ok});
     for (const auto &host : m_fleet.peerNames()) {
         const auto *box = m_fleet.peer(host); if (!box) continue;
         machines.append({host, host, host, *box, box->ok && now - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs});
@@ -389,7 +393,7 @@ void DashboardPage::render()
             if (!machine.fresh) ++offlineSessions;
             const bool needsAttention = SessionPresentation::needsAttention(session, machine.fresh);
             if (needsAttention) ++attentionCount;
-            if (!needsAttention && !SessionPresentation::working(session, machine.fresh)) continue;
+            if (!SessionPresentation::active(session, machine.fresh, m_drafts.contains(machine.host + '\n' + session.name))) continue;
             active.append({machine.key + QChar(0x1f) + session.name, machine.host, machine.alias, session, machine.fresh});
         }
         auto *card = m_machineCards.value(machine.key);
@@ -426,7 +430,7 @@ void DashboardPage::render()
             row = new DashboardSessionRow(this); m_rows.insert(item.key, row);
             connect(row, &QPushButton::clicked, this, [this, host = item.host, name = item.session.name] { emit sessionRequested(host, name); });
         }
-        row->setTheme(m_dark); row->update(item.session, item.alias, includeCompleted, item.online);
+        row->setTheme(m_dark); row->update(item.session, item.alias, includeCompleted, item.online, m_drafts.contains(item.host + '\n' + item.session.name));
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {
         if (!rowKeys.contains(it.key())) { delete it.value(); it = m_rows.erase(it); } else ++it;

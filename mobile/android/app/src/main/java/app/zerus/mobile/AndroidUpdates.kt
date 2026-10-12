@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
 
 data class UpdateState(val status: String = "loading", val available: AndroidUpdate? = null,
     val downloaded: AndroidUpdate? = null, val lastCheck: Long = 0, val sessionId: Int = -1,
-    val nonce: String = "", val error: String = "", val bytes: Long = 0)
+    val nonce: String = "", val error: String = "", val bytes: Long = 0, val channel: String = "dev")
 
 class AndroidUpdates private constructor(private val context: Context) {
     companion object {
@@ -45,7 +45,7 @@ class AndroidUpdates private constructor(private val context: Context) {
         check(directory.isDirectory || directory.mkdirs()) { "Update storage is unavailable." }
         val raw = JSONObject().put("status",next.status).put("lastCheck",next.lastCheck).put("sessionId",next.sessionId)
             .put("nonce",next.nonce).put("error",next.error).put("available",next.available?.raw ?: JSONObject.NULL)
-            .put("downloaded",next.downloaded?.raw ?: JSONObject.NULL)
+            .put("downloaded",next.downloaded?.raw ?: JSONObject.NULL).put("channel",next.channel)
         val stream = record.startWrite()
         try { stream.write(raw.toString().toByteArray());record.finishWrite(stream) }
         catch(e:Throwable) { record.failWrite(stream);throw e }
@@ -62,9 +62,13 @@ class AndroidUpdates private constructor(private val context: Context) {
                     output.toByteArray()
                 }
                 val value = JSONObject(bytes.toString(Charsets.UTF_8))
-                UpdateState(value.getString("status"), (value.opt("available") as? String)?.let(UpdatePolicy::parse),
-                    (value.opt("downloaded") as? String)?.let(UpdatePolicy::parse), value.optLong("lastCheck"),
-                    value.optInt("sessionId",-1),value.optString("nonce"),value.optString("error"))
+                val channel = value.optString("channel", "dev")
+                require(channel in setOf("stable", "dev"))
+                UpdateState(value.getString("status"), (value.opt("available") as? String)?.let(UpdatePolicy::parseSaved),
+                    (value.opt("downloaded") as? String)?.let(UpdatePolicy::parseSaved), value.optLong("lastCheck"),
+                    value.optInt("sessionId",-1),value.optString("nonce"),value.optString("error"),channel=channel).also {
+                    require(it.available?.channel in setOf(null, channel) && it.downloaded?.channel in setOf(null, channel))
+                }
             }
         } catch(_:Exception) { UpdateState("idle",error="Saved update details could not be read. Check again.") }
         partial.delete()
@@ -88,22 +92,36 @@ class AndroidUpdates private constructor(private val context: Context) {
     } }
     suspend fun check(manual: Boolean = false) = withContext(Dispatchers.IO) { mutex.withLock {
         load();val old=state.value
-        if(old.sessionId >= 0 || (!manual && !UpdatePolicy.shouldCheck(old.lastCheck,System.currentTimeMillis()))) return@withLock
+        if(old.sessionId >= 0 || (!manual && !UpdatePolicy.shouldCheck(old.lastCheck,System.currentTimeMillis(),old.channel))) return@withLock
         save(old.copy(status="checking",lastCheck=System.currentTimeMillis(),error=""))
         try {
-            val update=UpdatePolicy.parse(network.feed())
+            val update=UpdatePolicy.parse(network.feed(old.channel),old.channel)
             currentCoroutineContext().ensureActive()
             val current=installed()
             require(update.signingCert in current.signers) { "This channel uses a different signing key." }
             require(update.minSdk <= Build.VERSION.SDK_INT) { "This update requires a newer Android version." }
             save(state.value.copy(available=update.takeIf { it.versionCode > current.versionCode },
-                status=if(old.downloaded != null) "downloaded" else if(update.versionCode > current.versionCode) "available" else "current"))
+                status=if(old.downloaded != null) "downloaded" else if(update.versionCode > current.versionCode) "available" else if(update.versionCode < current.versionCode) "ahead" else "current"))
+            if(update.versionCode > current.versionCode) try { UpdateNotifications.available(context, update) } catch(_:Exception) { }
+            else UpdateNotifications.clear(context)
         } catch(e:Exception) {
             save(state.value.copy(status=if(old.downloaded != null) "downloaded" else if(old.available != null) "available" else "idle",
                 error="Update check failed. Your installed app and downloaded update are unchanged."))
             if(e is CancellationException) throw e
         }
     } }
+    suspend fun setChannel(channel: String) {
+        withContext(Dispatchers.IO) { mutex.withLock {
+            load();require(channel in setOf("stable", "dev"))
+            val old=state.value
+            require(old.sessionId < 0) { "Finish or cancel the existing installation before changing channels." }
+            if(channel == old.channel) return@withLock
+            save(UpdateState(status="idle",channel=channel))
+            UpdateNotifications.clear(context)
+            apk.delete();partial.delete();confirmation=null
+        } }
+        check(manual=true)
+    }
     suspend fun download(update: AndroidUpdate) = withContext(Dispatchers.IO) { mutex.withLock {
         load();require(state.value.sessionId < 0 && state.value.available == update) { "Update selection changed." }
         save(state.value.copy(status="downloading",error="",bytes=0))
@@ -157,6 +175,7 @@ class AndroidUpdates private constructor(private val context: Context) {
             if(recorded) save(state.value.copy(error="Installation status is unknown. Check or cancel the existing Android session."))
             throw e
         }
+        id
     } }
     suspend fun cancelInstall() = withContext(Dispatchers.IO) { mutex.withLock {
         load();val old=state.value
@@ -205,7 +224,7 @@ class UpdateDiscoveryWorker(context: Context,params: WorkerParameters): Coroutin
     }
     companion object {
         fun schedule(context: Context) = WorkManager.getInstance(context).enqueueUniquePeriodicWork("zerus-update-discovery",
-            ExistingPeriodicWorkPolicy.KEEP,PeriodicWorkRequestBuilder<UpdateDiscoveryWorker>(6,TimeUnit.HOURS)
+            ExistingPeriodicWorkPolicy.UPDATE,PeriodicWorkRequestBuilder<UpdateDiscoveryWorker>(15,TimeUnit.MINUTES)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build())
     }
 }

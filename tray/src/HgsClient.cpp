@@ -19,11 +19,23 @@
 #include <QCryptographicHash>
 #include <QUuid>
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <utility>
 
 namespace {
+
+// The executable a start would use: a path as given, otherwise a PATH lookup
+// (which honors PATHEXT on Windows, where C:\Zerus\hgs.exe is a path as well).
+QString resolvedProgram(const QString &program)
+{
+    bool path = program.contains(QLatin1Char('/'));
+#ifdef Q_OS_WIN
+    path = path || program.contains(QLatin1Char('\\')) || QFileInfo(program).isAbsolute();
+#endif
+    return path ? program : QStandardPaths::findExecutable(program);
+}
 
 ProcessRunner::Request processRequest(const QString &program, const QStringList &arguments)
 {
@@ -82,6 +94,11 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.created = static_cast<qint64>(obj.value(QStringLiteral("created")).toDouble());
     s.conversationId = obj.value("conversation_id").toString();
     s.replyId = obj.value("reply_id").toString(); s.replyAt = obj.value("reply_at").toDouble();
+    s.replyScheduled = obj.value("reply_scheduled").toBool();
+    const auto schedules = obj.value("schedules").toObject();
+    s.scheduledJobs = schedules.value("count").toInt(-1);
+    s.recurringSchedules = schedules.value("recurring").toInt(-1);
+    s.nextScheduledAt = schedules.value("next_at").toDouble();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
@@ -146,6 +163,7 @@ BoxState boxFromObject(const QJsonObject &obj)
     box.error = obj.value(QStringLiteral("error")).toString();
     const auto errorDetail = obj.value(QStringLiteral("error_detail")).toString();
     if (!errorDetail.isEmpty()) box.error = errorDetail;
+    box.localSessions = obj.value(QStringLiteral("local_sessions")).toBool(true);
     box.peersKnown = obj.value("peers").isArray();
     for (const auto &peer : obj.value("peers").toArray()) if (peer.isString()) box.peers.append(peer.toString());
 
@@ -1047,7 +1065,7 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
         || (conversationId.isEmpty() && !startupTrust && !startupPermission && !startupHooks && !startupUpdate) || answers.isEmpty() || (!question.value("can_answer").toBool() && !canSkip)) {
         reject(tr("This request is not ready to answer. Wait for an updated request or open Terminal.")); return request;
     }
-    const QString program = m_hgs.contains(QLatin1Char('/')) ? m_hgs : QStandardPaths::findExecutable(m_hgs);
+    const QString program = resolvedProgram(m_hgs);
     const QFileInfo executable(program);
     if (program.isEmpty() || !executable.isFile() || !executable.isExecutable()) {
         reject(tr("Cannot start hgs: executable not found or not executable: %1").arg(m_hgs)); return request;
@@ -1146,8 +1164,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
     // A missing CLI would otherwise look like a delivery-uncertain exit127.
     // Detect definite startup failures before passing any message bytes; an
     // actual executable exiting127 must still remain uncertain.
-    const QString program = m_hgs.contains(QLatin1Char('/'))
-        ? m_hgs : QStandardPaths::findExecutable(m_hgs);
+    const QString program = resolvedProgram(m_hgs);
     const QFileInfo executable(program);
     if (program.isEmpty() || !executable.isFile() || !executable.isExecutable()) {
         reject(tr("Cannot start hgs: executable not found or not executable: %1").arg(m_hgs));
@@ -1289,9 +1306,11 @@ quint64 HgsClient::requestCompactContext(const QString &host, const QString &nam
     return runSessionAction(host,name,"compact-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
 }
 
-quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation)
+quint64 HgsClient::requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt)
 {
-    return runSessionAction(host,name,"clear-context",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
+    QJsonObject data{{"expected_run_id",run},{"expected_conversation_id",conversation}};
+    if (dismissPrompt) data["dismiss_prompt"] = true; // Older hgs rejects the unknown field.
+    return runSessionAction(host,name,"clear-context",data);
 }
 
 quint64 HgsClient::requestInterrupt(const QString &host, const QString &name, const QString &run,

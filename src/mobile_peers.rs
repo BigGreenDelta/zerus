@@ -779,7 +779,7 @@ fn supervise() -> Result<i32> {
 }
 
 fn ssh(config: &Config, via: &str, helper: &str) -> Command {
-    let mut command = Command::new("ssh");
+    let mut command = crate::platform::ssh();
     command.args([
         "-T",
         "-o",

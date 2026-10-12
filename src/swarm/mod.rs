@@ -14,7 +14,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
 
+#[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
+#[cfg(unix)]
 pub(crate) use store::replace;
 
 /// Machine UUIDs this computer itself obtained through each configured SSH
@@ -23,6 +25,7 @@ pub(crate) use store::replace;
 /// redirects and the `machines` listing, comes from other members and is not
 /// identity evidence. Lock-free like `preferences`; a damaged or foreign store
 /// reports none.
+#[cfg(unix)]
 pub(crate) fn verified_bindings(
     config: &Config,
     local: &str,

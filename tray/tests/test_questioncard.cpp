@@ -1,9 +1,12 @@
 #include "QuestionCard.h"
+#include "MarkdownObjects.h"
+#include "MarkdownText.h"
 #include "MonospaceFont.h"
 
 #include <QAbstractButton>
 #include <QDir>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QFontInfo>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,15 +18,19 @@
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QTest>
+#include <QtTest/qtestspontaneevent.h>
 #include <QTemporaryDir>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 namespace {
 QJsonObject request(const QString &id = "tool-question", const QString &hash = "hash-one")
 {
     return {{"question_id", id}, {"question_hash", hash}, {"run_id", "run"}, {"conversation_id", "conversation"},
-        {"can_answer", true}, {"questions", QJsonArray{
+        {"source", "hook"}, {"can_answer", true}, {"questions", QJsonArray{
             QJsonObject{{"id", "q_0"}, {"header", "Approach"}, {"question", "Which approach should I use?"}, {"allow_other", true},
                 {"options", QJsonArray{
                     QJsonObject{{"id", "opt_0_0"}, {"label", "Keep it focused"}, {"description", "Implement the requested change with minimal dependencies."}},
@@ -52,6 +59,44 @@ QLineEdit *text(QuestionCard &card, const QString &id)
     return nullptr;
 }
 QPushButton *submit(QuestionCard &card) { return card.findChild<QPushButton *>("submitQuestionAnswer"); }
+
+// Stands in for the desktop browser: QDesktopServices hands web links here.
+class UrlRecorder final : public QObject {
+    Q_OBJECT
+public:
+    UrlRecorder() { for (const auto *scheme : {"https", "http"}) QDesktopServices::setUrlHandler(scheme, this, "record"); }
+    ~UrlRecorder() override { for (const auto *scheme : {"https", "http"}) QDesktopServices::unsetUrlHandler(scheme); }
+    QList<QUrl> urls;
+public slots:
+    void record(const QUrl &url) { urls << url; }
+};
+
+QStringList anchors(const MarkdownText *view)
+{
+    QStringList result;
+    for (auto block = view->document()->begin(); block.isValid(); block = block.next())
+        for (auto it = block.begin(); !it.atEnd(); ++it)
+            if (it.fragment().charFormat().isAnchor()) result << it.fragment().charFormat().anchorHref();
+    result.removeDuplicates();
+    return result;
+}
+
+QTextCharFormat formatOf(const MarkdownText *view, const QString &text)
+{
+    const auto found = view->document()->find(text);
+    QTextCursor inside(view->document()); inside.setPosition(found.selectionStart() + 1);
+    return inside.charFormat();
+}
+
+// Clicks the middle of the first occurrence of text, as a reader would.
+bool clickText(MarkdownText *view, const QString &text)
+{
+    const auto found = view->document()->find(text);
+    if (found.isNull()) return false;
+    QTextCursor middle(view->document()); middle.setPosition((found.selectionStart() + found.selectionEnd()) / 2);
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, view->cursorRect(middle).center());
+    return true;
+}
 void complete(QuestionCard &card) { option(card, "opt_0_0")->click(); option(card, "opt_1_0")->click(); }
 }
 
@@ -78,6 +123,8 @@ private slots:
     void replacementHashAndBackgroundReplyAreIsolated();
     void capabilityOfflineAndErrorStates();
     void freeformLimitsAndPlainText();
+    void markdownLinksOpenOnlyOnClick();
+    void approvalAndTrustDisclosuresStayLiteral();
     void longProviderTextKeepsCompactWidth();
     void contentHeightPreservesActivityAndPinsFreeformAnswer();
     void currentQuestionAndOtherAnswerResizeTheForm();
@@ -106,9 +153,15 @@ void TestQuestionCard::contentScaleEnlargesQuestionTextOnly()
     QMap<QString, int> before; for (const auto &name : scaled) before.insert(name, pixels(name));
     const int submitFont = QFontInfo(submit(*card)->font()).pixelSize();
     QCOMPARE(before.value("questionPrompt"), 13);
+    // The prompt's Markdown is drawn at the card's sizes, semibold like before.
+    auto *prompt = card->findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
+    auto *description = card->findChild<MarkdownText *>("questionChoiceDescription"); QVERIFY(description);
+    QCOMPARE(formatOf(prompt, "approach").font().pixelSize(), 13); QCOMPARE(formatOf(description, "requested").font().pixelSize(), 11);
+    QVERIFY(prompt->document()->defaultFont().weight() >= QFont::DemiBold);
     option(*card, "opt_0_1")->click(); text(*card, "q_0")->setText("custom");
     card->setContentScale(2.0); QTest::qWait(10);
     for (const auto &name : scaled) QCOMPARE(pixels(name), 2 * before.value(name));
+    QCOMPARE(formatOf(prompt, "approach").font().pixelSize(), 26); QCOMPARE(formatOf(description, "requested").font().pixelSize(), 22);
     QCOMPARE(QFontInfo(submit(*card)->font()).pixelSize(), submitFont);
     QVERIFY(option(*card, "opt_0_1")->isChecked()); QCOMPARE(text(*card, "q_0")->text(), QString("custom"));
     card->setContentScale(1.0); QTest::qWait(10);
@@ -562,8 +615,11 @@ void TestQuestionCard::freeformLimitsAndPlainText()
     QuestionCard card; auto data = request();
     data["questions"] = QJsonArray{QJsonObject{{"id", "free"}, {"question", "<img src='file:///private'>"}, {"allow_other", true}, {"options", QJsonArray{}}}};
     card.setQuestion("arch/session", data);
-    const auto *prompt = card.findChild<QLabel *>("questionPrompt");
-    QCOMPARE(prompt->textFormat(), Qt::PlainText); QVERIFY(prompt->text().contains("<img"));
+    // Raw HTML in the agent's Markdown stays text: nothing is loaded or drawn.
+    const auto *prompt = card.findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
+    QCOMPARE(prompt->toPlainText(), QString("<img src='file:///private'>"));
+    for (auto block = prompt->document()->begin(); block.isValid(); block = block.next())
+        for (auto it = block.begin(); !it.atEnd(); ++it) QVERIFY(!it.fragment().charFormat().isImageFormat());
     QVERIFY(!submit(card)->isEnabled());
     text(card, "free")->setText(QString(2048, QChar(0x044f))); QVERIFY(submit(card)->isEnabled());
     text(card, "free")->setText(QString(2049, QChar(0x044f))); QVERIFY(!submit(card)->isEnabled());
@@ -574,6 +630,83 @@ void TestQuestionCard::freeformLimitsAndPlainText()
     text(card, "free")->setText(QStringLiteral("before") + QChar(1) + "after"); QVERIFY(!submit(card)->isEnabled());
     QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("control characters"));
     text(card, "free")->setText("single line"); QVERIFY(submit(card)->isEnabled());
+}
+
+void TestQuestionCard::markdownLinksOpenOnlyOnClick()
+{
+    UrlRecorder browser;
+    const QString token = "https://github.com/settings/personal-access-tokens/new?name=Zerus+mirror&target_name=example";
+    auto data = request(); data["optional"] = true; data["can_skip"] = true;
+    data["questions"] = QJsonArray{QJsonObject{{"id", "token"}, {"header", "Token"},
+        {"question", "Open [token settings](" + token + ") and run `python3 save-token.py`. Never paste the **token** here."},
+        {"body", "See [the notes](docs/token.md:12), [mail](mailto:owner@example.com) and [script](javascript:alert(1)).\n\n"
+                 "1. Choose **Only select repositories**\n2. Generate the token\n\n```sh\npython3 save-token.py\n```"},
+        {"allow_other", true}, {"options", QJsonArray{
+            QJsonObject{{"id", "saved"}, {"label", "Saved"}, {"description", "Stored with `save-token.py`, see [docs](https://example.com/docs)."}},
+            QJsonObject{{"id", "later"}, {"label", "Later"}}}}}};
+    QuestionCard card; card.resize(640, 520); card.setQuestion("arch/session", data); card.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&card));
+    QSignalSpy external(&card, &QuestionCard::externalLinkActivated), files(&card, &QuestionCard::fileReferenceActivated);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    auto *prompt = card.findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
+    QCOMPARE(prompt->toPlainText(), QString("Open token settings and run python3 save-token.py. Never paste the token here."));
+    QCOMPARE(anchors(prompt), QStringList{token});
+    QVERIFY(MarkdownObjects::isInlineCode(formatOf(prompt, "save-token")));
+    QVERIFY(formatOf(prompt, "token here").font().bold() || formatOf(prompt, "token here").fontWeight() >= QFont::DemiBold);
+    // Text outside links stays selectable and opens nothing.
+    QVERIFY(clickText(prompt, "Never paste")); QCOMPARE(external.size(), 0);
+    QVERIFY(clickText(prompt, "token settings"));
+    QCOMPARE(external.size(), 1); QCOMPARE(browser.urls, QList<QUrl>{QUrl(token)});
+    // Only web links and file references become links; other schemes stay text.
+    auto *body = card.findChild<MarkdownText *>("questionBody"); QVERIFY(body);
+    QCOMPARE(anchors(body).size(), 1); QVERIFY(anchors(body).first().startsWith("hgs-file:"));
+    QVERIFY(body->toPlainText().contains("mail and script")); QVERIFY(body->toPlainText().contains("Only select repositories"));
+    // Lists and code blocks are laid out in full: the view is exactly as tall as its text.
+    for (auto *view : card.findChildren<MarkdownText *>())
+        QCOMPARE(view->height(), qCeil(view->document()->size().height()));
+    QVERIFY(clickText(body, "the notes"));
+    QCOMPARE(files.size(), 1); QCOMPARE(files.first().first().toString(), QString("docs/token.md:12"));
+    QCOMPARE(external.size(), 1);
+    // A link in an option's description opens without choosing the option;
+    // the rest of the description selects it like the row around it.
+    auto *description = card.findChild<MarkdownText *>("questionChoiceDescription"); QVERIFY(description);
+    QCOMPARE(description->viewport()->palette().color(QPalette::Base), QColor("#192228"));
+    QVERIFY(clickText(description, "docs"));
+    QCOMPARE(browser.urls.size(), 2); QCOMPARE(browser.urls.last(), QUrl("https://example.com/docs"));
+    QVERIFY(!option(card, "saved")->isChecked());
+    QVERIFY(clickText(description, "Stored with"));
+    QVERIFY(option(card, "saved")->isChecked());
+    // Inline code chips are drawn on the row's own background.
+    QCOMPARE(description->viewport()->palette().color(QPalette::Base), QColor("#293d35"));
+    QCOMPARE(sent.size(), 0);
+    // Theme changes redraw the Markdown in place.
+    card.setTheme(false);
+    QCOMPARE(card.findChild<MarkdownText *>("questionPrompt"), prompt); QCOMPARE(anchors(prompt), QStringList{token});
+    QCOMPARE(formatOf(prompt, "Never").foreground().color(), QColor("#1a2733"));
+    QCOMPARE(description->viewport()->palette().color(QPalette::Base), QColor("#e4f3ec"));
+    const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (!directory.isEmpty()) {
+        QTest::qWait(20); QVERIFY(card.grab().save(directory + "/question-markdown-light.png"));
+        card.setTheme(true); QTest::qWait(20); QVERIFY(card.grab().save(directory + "/question-markdown-dark.png"));
+    }
+}
+
+void TestQuestionCard::approvalAndTrustDisclosuresStayLiteral()
+{
+    auto trust = request(); trust["trust_request"] = true;
+    const QString prompt = "Trust **/work/[example](https://example.com)**?", body = "Folder `/work/example`\n\n- [x] tools";
+    trust["questions"] = QJsonArray{QJsonObject{{"id", "trust"}, {"question", prompt}, {"body", body}, {"allow_other", false},
+        {"options", QJsonArray{QJsonObject{{"id", "yes"}, {"label", "Yes"}, {"description", "Trust [it](https://example.com)"}}}}}};
+    auto approval = trust; approval.remove("trust_request"); approval["approval"] = true; approval["approval_choices"] = true;
+    // A folder trust panel read from Claude's terminal carries no trust flag.
+    auto panel = trust; panel.remove("trust_request"); panel["source"] = "claude_folder_trust";
+    for (const auto &data : {trust, approval, panel}) {
+        QuestionCard card; card.setQuestion("arch/session", data);
+        QVERIFY(!card.findChild<MarkdownText *>());
+        QCOMPARE(card.findChild<QLabel *>("questionPrompt")->text(), prompt);
+        QCOMPARE(card.findChild<QLabel *>("questionBody")->text(), body);
+        QCOMPARE(card.findChild<QLabel *>("questionChoiceDescription")->text(), QString("Trust [it](https://example.com)"));
+    }
 }
 
 void TestQuestionCard::longProviderTextKeepsCompactWidth()
@@ -588,6 +721,8 @@ void TestQuestionCard::longProviderTextKeepsCompactWidth()
     QVERIFY(scroll->widget()->width() <= scroll->viewport()->width());
     for (const auto *label : card.findChildren<QLabel *>())
         if (label->isVisible()) QVERIFY(label->width() < card.width());
+    for (const auto *view : card.findChildren<MarkdownText *>())
+        if (view->isVisible()) QVERIFY(view->width() < card.width());
     card.setError("arch/session", "tool-question", token); QTest::qWait(25);
     QCOMPARE(card.width(), 480);
     QVERIFY(card.findChild<QLabel *>("questionStatus")->width() < card.width());
@@ -615,6 +750,15 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     QTRY_VERIFY(scroll->verticalScrollBar()->maximum() > 0);
     QTRY_COMPARE(card->height(), activity.height() * 60 / 100);
     QTRY_VERIFY(history->height() >= activity.height() * 40 / 100);
+    // The prompt never scrolls by itself: the wheel over it scrolls the card.
+    auto *prompt = card->findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
+    QCOMPARE(scroll->verticalScrollBar()->value(), 0);
+    QWheelEvent wheel(QPointF(20, 20), prompt->viewport()->mapToGlobal(QPointF(20, 20)), QPoint(), QPoint(0, -120),
+                      Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    // Only spontaneous wheel events propagate to parents, as from a real mouse.
+    QSpontaneKeyEvent::setSpontaneous(&wheel); qApp->notify(prompt->viewport(), &wheel);
+    QVERIFY(scroll->verticalScrollBar()->value() > 0);
+    scroll->verticalScrollBar()->setValue(0);
     QVERIFY(editor->isVisible()); QVERIFY(!scroll->isAncestorOf(editor));
     QCOMPARE(editor->text(), QString("Keep this draft"));
     QVERIFY(card->rect().contains(submit(*card)->geometry()));

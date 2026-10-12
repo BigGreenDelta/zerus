@@ -7,7 +7,7 @@ if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VER
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(hgs-tray VERSION 0.40.0 LANGUAGES CXX)
+project(hgs-tray VERSION 0.42.0 LANGUAGES CXX)
 set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -18,6 +18,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+if(MSVC)
+    # UTF-8 sources and literals also in targets without Qt (Qt adds -utf-8 only to
+    # its users), large translation units (SessionsWindow and its test), and
+    # <windows.h> without min/max macros next to std::min/std::max.
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+    add_compile_definitions(NOMINMAX)
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets)
@@ -46,6 +54,20 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_GIT_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=normal
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE ZERUS_SOURCE_CHANGES RESULT_VARIABLE ZERUS_GIT_STATUS ERROR_QUIET)
+get_filename_component(ZERUS_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
+string(LENGTH "${ZERUS_SOURCE_COMMIT}" ZERUS_SOURCE_COMMIT_LENGTH)
+if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUAL 40
+   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0
+   AND ZERUS_SOURCE_CHANGES STREQUAL "")
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+endif()
 
 add_executable(hgs-tray
     resources.qrc
@@ -122,6 +144,20 @@ if(LINUX)
 else()
     target_sources(hgs-tray PRIVATE src/QtTrayIcon.cpp)
 endif()
+if(WIN32)
+    # Windows Terminal and console windows (hgs-tray.exe --console-run hosts the
+    # latter), tray-icon notifications, the taskbar badge and the swarm worker the
+    # tray runs itself (Windows has no user service manager). The resource script
+    # carries the icon and version information; the manifest sets UTF-8 as the
+    # ANSI code page and long-path support.
+    set(HGS_TRAY_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/hgs-zerus.ico")
+    configure_file(packaging/windows/hgs-tray.rc.in "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" @ONLY)
+    target_sources(hgs-tray PRIVATE src/WindowsTerminalBackend.cpp src/ConsoleHost.cpp src/WindowsAttentionNotifier.cpp
+        src/WindowsApplicationBadge.cpp src/SwarmWorkerSupervisor.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" packaging/windows/hgs-tray.manifest)
+    # A GUI program: no console window opens with it (see attachParentConsole in main.cpp).
+    set_target_properties(hgs-tray PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
 if(APPLE)
     # Тот же принцип, что и для Konsole: osascript и Terminal.app существуют только на маке.
     enable_language(OBJCXX)
@@ -150,6 +186,8 @@ include(CTest)
 if(BUILD_TESTING)
     hgs_add_terminal_tests()
     add_subdirectory(tests)
+    # test_terminalview is registered in this directory.
+    zerus_test_environment()
 endif()
 
 include(GNUInstallDirs)

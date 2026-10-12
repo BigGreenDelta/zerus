@@ -37,7 +37,7 @@ def main():
         path = ROOT / name
         if not path.is_file():
             continue
-        if path.suffix == ".py" or name == "packaging/linux/zerus-setup":
+        if path.suffix == ".py" or name in {"packaging/linux/zerus-setup", "packaging/macos/zerus-setup"}:
             ast.parse(path.read_text(), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             subprocess.run(["bash", "-n", str(path)], check=True)

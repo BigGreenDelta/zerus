@@ -8,7 +8,9 @@
 #include <QWidget>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QUrl>
 
+class MarkdownText;
 class QAbstractButton;
 class QLabel;
 class QLineEdit;
@@ -16,6 +18,7 @@ class QPushButton;
 class QStackedWidget;
 class QTabBar;
 class QToolButton;
+struct MarkdownLink;
 
 // A native form for a specific provider question request. The owner supplies
 // identity-checked transport; this widget never sends terminal keystrokes.
@@ -23,6 +26,7 @@ class QuestionCard : public QWidget {
     Q_OBJECT
 public:
     explicit QuestionCard(QWidget *parent = nullptr);
+    ~QuestionCard() override;
     void setQuestion(const QString &sessionKey, const QJsonObject &question, int pendingQuestions = 0);
     void setQueueNavigation(int index, int count);
     void setAvailability(bool available, const QString &reason = {});
@@ -42,6 +46,9 @@ signals:
     void answerRequested(const QString &sessionKey, const QString &questionId, const QJsonArray &answers);
     void openTerminalRequested();
     void queueNavigationRequested(int direction);
+    // Links in the question's Markdown, after an explicit click.
+    void externalLinkActivated(const QUrl &url);
+    void fileReferenceActivated(const QString &href);
 
 protected:
     bool event(QEvent *event) override;
@@ -65,7 +72,7 @@ private:
     };
     void rebuild();
     void capture();
-    bool saveDraft(const QString &key);
+    bool saveDraft(const QString &key, bool asynchronous = false);
     Draft loadDraft(const QString &key) const;
     void ensureDraft(const QString &key, const QString &sessionKey);
     void updateControls();
@@ -79,11 +86,17 @@ private:
     static QString identity(const QString &sessionKey, const QString &questionId, const QString &hash = {});
     static QString draftIdentity(const QString &sessionKey, const QJsonObject &question);
     bool restoreSubmittedAnswer(const QString &key, const QJsonObject &question);
+    MarkdownText *markdownText(const QString &name, const QString &source);
+    void renderMarkdown(MarkdownText *text, const QString &source);
+    MarkdownLink link(const QString &href);
+    void activateLink(const QUrl &url);
 
     QHash<QString, Draft> m_drafts;
     ComposerDraftStore m_draftStore;
+    QHash<QString, quint64> m_saveRevision;
     QSet<QString> m_failedSaves;
     QHash<QString, QString> m_latestKeys, m_sendingKeys;
+    QHash<QString, QString> m_fileLinks;   // hgs-file: key -> the agent's reference
     QString m_session, m_id, m_key, m_unavailableReason;
     QJsonObject m_question;
     QList<Form> m_forms;
