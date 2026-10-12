@@ -575,6 +575,26 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
     return true;
 }
 
+quint64 HgsClient::downloadFile(const QString &host, const QString &path, const QString &destination)
+{
+    const auto id = ++m_fileDownloadRequest;
+    runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
+        [this, id, host, path, destination](const QByteArray &out) {
+            if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
+            const auto object = QJsonDocument::fromJson(out).object();
+            const QFileInfo saved(destination);
+            if (object.value("host").toString() != host || object.value("path").toString() != path
+                || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
+                || !saved.isFile() || object.value("bytes").toDouble() != saved.size()) {
+                emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
+            }
+            emit fileDownloaded(id, destination);
+        }, [this, id](const QString &, const QString &error) {
+            emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
+        });
+    return id;
+}
+
 quint64 HgsClient::requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                                      const QString &conversation, const QString &archive, const QString &agent)
 {

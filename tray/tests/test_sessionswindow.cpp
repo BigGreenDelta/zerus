@@ -15,6 +15,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileDialog>
+#include <QProgressBar>
 #include <QSaveFile>
 #include <QSemaphore>
 #include <atomic>
@@ -216,6 +218,8 @@ private slots:
     void fileReferencesKeepMachineAndWorkspace();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
+    void remoteFileDownloads_data();
+    void remoteFileDownloads();
     void buttonFocusFollowsKeyboardAndNotClicks();
     void separatesConversationProcessAndTerminal();
     void activityEscapingAndActions();
@@ -4143,6 +4147,97 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     activity->fileReferenceActivated("docs/README.md");
     QCOMPARE(copied.size(), 1); QCOMPARE(copied.takeFirst().at(0).toString(), QString("/Users/remote/project/docs/README.md"));
     QCOMPARE(ssh.size(), 1); QCOMPARE(ssh.takeFirst().at(0).toString(), QString("mac"));
+}
+
+void TestSessionsWindow::remoteFileDownloads_data()
+{
+    QTest::addColumn<int>("mode");
+    QTest::newRow("download-and-open-local-copy") << 0;
+    QTest::newRow("download-and-open-directly") << 1;
+    QTest::newRow("failure-keeps-dialog-and-existing-copy") << 2;
+    QTest::newRow("cancel-save-does-not-download") << 3;
+    QTest::newRow("closing-dialog-keeps-requested-download-and-open") << 4;
+}
+
+void TestSessionsWindow::remoteFileDownloads()
+{
+    QFETCH(int, mode);
+    const auto nativeDialogs = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto destination = directory.filePath("local résumé's copy.png");
+    if (mode == 2) { QFile file(destination); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("previous copy"); }
+    const auto fixture = m_dir->filePath("file-download-hgs");
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer = R"PY(elif c=='download':
+ import pathlib,time
+ open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\n')
+ time.sleep(.1)
+ if pathlib.Path(__file__+'.fail').exists():
+  print('Permission denied (publickey).',file=sys.stderr);sys.exit(1)
+ target=a[a.index('--output')+1];path=a[a.index('--path')+1]
+ pathlib.Path(target).write_bytes(b'synthetic image')
+ print(json.dumps(dict(host=sys.argv[1][1:],path=path,local_path=target,bytes=15)))
+)PY";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    QFile::remove(fixture + ".calls"); QFile::remove(fixture + ".fail");
+    if (mode == 2) { QFile fail(fixture + ".fail"); QVERIFY(fail.open(QIODevice::WriteOnly)); }
+    FolderUrlRecorder opened;
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
+    window.showSession("mac", "claude/infra/review");
+    auto *client = window.findChild<HgsClient *>();
+    QSignalSpy downloaded(client, &HgsClient::fileDownloaded), failed(client, &HgsClient::fileDownloadFailed);
+    const QString path = "/remote/project/résumé ' $(literal).png";
+    QPointer<QDialog> dialog;
+    QTimer::singleShot(0, &window, [&] {
+        dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([&] { if (dialog) dialog->reject(); });
+        QVERIFY(opened.urls.isEmpty()); QVERIFY(!QFile::exists(fixture + ".calls"));
+        if (mode == 0 && qEnvironmentVariableIsSet("HGS_TEST_FILE_DIALOG_PREVIEW"))
+            QVERIFY(dialog->grab().save(qEnvironmentVariable("HGS_TEST_FILE_DIALOG_PREVIEW")));
+        auto *download = dialog->findChild<QPushButton *>(mode == 1 || mode == 4 ? "downloadOpenSessionFile" : "downloadSessionFile");
+        QVERIFY(download); QVERIFY(download->isEnabled());
+        QTimer::singleShot(0, &window, [&] {
+            auto *save = window.findChild<QFileDialog *>("sessionFileSaveDialog"); QVERIFY(save);
+            if (mode == 3) { save->reject(); return; }
+            save->setOption(QFileDialog::DontConfirmOverwrite); save->selectFile(destination);
+            QMetaObject::invokeMethod(save, "accept", Qt::DirectConnection);
+        });
+        download->click();
+        if (mode == 3) {
+            QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
+            QVERIFY(!QFile::exists(fixture + ".calls")); QVERIFY(!QFile::exists(destination)); return;
+        }
+        QVERIFY(!download->isEnabled()); QVERIFY(dialog->findChild<QProgressBar *>("sessionFileProgress")->isVisible());
+        if (mode == 4) { dialog->reject(); return; }
+        // Navigation cannot rebind the file transfer to a different machine.
+        window.showSession({}, "codex/hgs/dashboard");
+        QTRY_COMPARE(downloaded.size() + failed.size(), 1);
+        QVERIFY(opened.urls.isEmpty());
+        if (mode == 2) {
+            QCOMPARE(failed.size(), 1); QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
+            QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains("Permission denied"));
+            QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("previous copy")); return;
+        }
+        QCOMPARE(downloaded.size(), 1);
+        QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("synthetic image"));
+        if (mode == 0) {
+            QVERIFY(dialog->isVisible());
+            QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains(destination));
+            dialog->findChild<QPushButton *>("openDownloadedSessionFile")->click();
+        }
+        QVERIFY(!dialog->isVisible());
+    });
+    window.findChild<ActivityView *>("mainActivity")->fileReferenceActivated(QString::fromUtf8(QUrl::toPercentEncoding(path, "/")));
+    QVERIFY(dialog.isNull());
+    if (mode == 0 || mode == 1 || mode == 4) {
+        QTRY_COMPARE(downloaded.size(), 1);
+        QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(destination));
+        QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+        const auto args = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
+        QCOMPARE(args, (QJsonArray{"@mac", "download", "--path", path, "--output", destination}));
+    } else { QVERIFY(opened.urls.isEmpty()); }
 }
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()
