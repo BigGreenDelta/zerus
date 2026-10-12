@@ -480,6 +480,24 @@ class OvermindConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(GATEWAY_OPERATIONS & set(snapshot["mobile_capabilities"]["operations"]))
         self.assertNotIn("mobile_overmind", snapshot)
 
+    async def test_capabilities_stay_while_the_help_probe_runs(self):
+        await self.connector.snapshot()
+        native, seen = self.connector.native, []
+
+        async def probing(argv, *args, **kwargs):
+            if argv == ["--help"]:
+                # A phone request served while the probe waits for hgs (up to 3 s).
+                seen.append((self.connector.overmind_supported, self.connector.attachment_read_supported,
+                             (await self.connector.execute(request()))["state"]))
+            return await native(argv, *args, **kwargs)
+        # The new answer adds a marker: the probe's result replaces the previous one only once it is known.
+        self.configure(help=HELP + "hgs attachment <session> --request ID --index N\n")
+        self.connector.capabilities_next_poll = 0
+        with patch.object(self.connector, "native", probing):
+            await self.connector.probe_capabilities()
+        self.assertEqual(seen, [(True, False, "completed")])
+        self.assertEqual((self.connector.overmind_supported, self.connector.attachment_read_supported), (True, True))
+
     async def test_digest_is_omitted_when_the_heartbeat_would_exceed_the_relay_limit(self):
         class Stop(Exception):
             pass

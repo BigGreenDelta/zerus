@@ -498,41 +498,31 @@ class Connector:
         if time.monotonic() < self.capabilities_next_poll:
             return
         self.capabilities_next_poll = time.monotonic() + 300
-        overmind_supported = self.overmind_supported
-        self.lifecycle_supported = False
-        self.terminal_supported = False
-        self.recovery_supported = False
-        self.history_supported = False
-        self.launch_supported = False
-        self.project_launch_supported = False
-        self.worktree_supported = False
-        self.read_supported = False
-        self.preference_supported = False
-        self.attachment_read_supported = False
-        self.overmind_supported = False
-        if getattr(self, "fleet", None):
-            self.fleet.supported = False
+        # The previous result stays in force while hgs answers (up to 3 s), so requests
+        # served meanwhile see no gap; the probe's result replaces it once known.
         try:
-            help_text = await self.native(["--help"], timeout=3, json_output=False)
-            self.lifecycle_supported = isinstance(help_text, str) and any(
-                "session-action <session> --json" in line for line in help_text.splitlines())
-            self.terminal_supported = isinstance(help_text, str) and "terminal <session> --json" in help_text
-            self.recovery_supported = isinstance(help_text,str) and "recovery action --scoped-json" in help_text
-            self.history_supported = isinstance(help_text,str) and "history <session> --json" in help_text
-            self.launch_supported = isinstance(help_text,str) and "--launch-id" in help_text
-            self.project_launch_supported = isinstance(help_text,str) and "swarm assign-launch --json" in help_text
-            self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
-            self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
-            self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
-            self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
-            self.overmind_supported = isinstance(help_text, str) and overmind.HELP_MARKER in help_text
-            if getattr(self, "fleet", None):
-                self.fleet.supported = isinstance(help_text, str) and all(
-                    marker in help_text for marker in ("mobile-peers --json", "mobile-peer --json"))
-        except (ConnectorError, UnicodeError):
-            # A failed probe says nothing about Overmind: withdrawing its operations would
-            # drop the decision alerts the relay holds. Only a probe without the marker does.
+            try:
+                help_text = await self.native(["--help"], timeout=3, json_output=False)
+                overmind_supported = isinstance(help_text, str) and overmind.HELP_MARKER in help_text
+            except (ConnectorError, UnicodeError):
+                # A failed probe withdraws the scoped ABIs but says nothing about Overmind:
+                # withdrawing its operations would drop the decision alerts the relay holds.
+                # Only a probe without the marker does.
+                help_text, overmind_supported = None, self.overmind_supported
+            text = help_text if isinstance(help_text, str) else ""
+            self.lifecycle_supported = any("session-action <session> --json" in line for line in text.splitlines())
+            self.terminal_supported = "terminal <session> --json" in text
+            self.recovery_supported = "recovery action --scoped-json" in text
+            self.history_supported = "history <session> --json" in text
+            self.launch_supported = "--launch-id" in text
+            self.project_launch_supported = "swarm assign-launch --json" in text
+            self.worktree_supported = "Mobile worktree ABI: worktrees-v1" in text
+            self.read_supported = "read <session> --json" in text
+            self.preference_supported = "swarm preference set mobile_delivery" in text
+            self.attachment_read_supported = attachment_reads.HELP_MARKER in text
             self.overmind_supported = overmind_supported
+            if getattr(self, "fleet", None):
+                self.fleet.supported = all(marker in text for marker in ("mobile-peers --json", "mobile-peer --json"))
         finally:
             if getattr(self, "fleet", None):
                 self.fleet.probe_complete = True
