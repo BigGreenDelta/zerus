@@ -220,10 +220,13 @@ class Contract(unittest.TestCase):
             self.fail(f"{FAKE_AGENT} is missing; run cargo build --locked --example fake_agent")
         self.root = Path(tempfile.mkdtemp(prefix="hgs-contract-")).resolve()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.bin = self.root / "bin"
+        # hgs puts $HOME/.local/bin first on PATH, ahead of Homebrew and /usr/local/bin,
+        # so the wrappers and agent stand-ins here win over any real tmux or claude.
+        self.bin = self.root / ".local" / "bin"
         self.project = self.root / "project"
-        for folder in (self.bin, self.project, self.root / "config"):
-            folder.mkdir()
+        for folder in (self.bin, self.project, self.root / "config", self.root / "tmux"):
+            folder.mkdir(parents=True)
+        (self.root / "tmux").chmod(0o700)
         self.record = self.root / "agents.jsonl"
         # Nothing from a surrounding session, agent account or fake agent configuration.
         self.env = {key: value for key, value in os.environ.items()
@@ -231,6 +234,8 @@ class Contract(unittest.TestCase):
         self.env.update(HOME=str(self.root), HGS_CONFIG_DIR=str(self.root / "config"),
                         HGS_STATE_DIR=str(self.root / "state"), HGS_SELF="test", HGS_PEERS="", HGS_TAB="0",
                         TERM="xterm-256color", PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+                        # A tmux found anywhere else still never reaches the user's server.
+                        TMUX_TMPDIR=str(self.root / "tmux"),
                         FAKE_AGENT_RECORD=str(self.record), FAKE_AGENT_READY=str(self.root / "ready.json"),
                         FAKE_AGENT_CONTROL=str(self.root / "control"),
                         FAKE_AGENT_TRANSCRIPT_DIR=str(self.root / "history"), FAKE_AGENT_PROMPT=PROMPT)
@@ -321,6 +326,10 @@ class Contract(unittest.TestCase):
             # Confirmed by the agent's own SessionStart hook.
             row = self.wait_for(lambda: (row := self.sessions().get(name)) and row.get("activity") == "idle"
                                 and row.get("conversation_id") == agent["session_id"] and row, f"{name} to be ready")
+            if self.env.get("FAKE_AGENT_RAW") != "0":
+                # The agent sets its modes before it is ready, but the backend may parse
+                # them later; input is refused until it reports bracketed paste.
+                self.screen(row, lambda frame, rows: frame["bracket_paste"], f"{name}'s input modes")
         else:
             row = self.sessions()[name]
         self.assertEqual(row["launch_id"], launch_id)

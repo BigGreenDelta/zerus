@@ -382,7 +382,11 @@ agent process. Signal expectations accept the Unix signal or the Windows console
 event the Phase 2 design names for each operation.
 
 `HGS_TEST_BACKEND` selects the backend: `tmux` (the default on Linux and macOS: a
-private server and state per test) or `host` (the default on Windows). Only the
+private server and state per test) or `host` (the default on Windows). hgs puts
+`$HOME/.local/bin` ahead of Homebrew and `/usr/local/bin` on its `PATH`, so the
+private `tmux` wrapper and the agent stand-ins live in the test home's
+`.local/bin`, and a private `TMUX_TMPDIR` keeps any other tmux off the user's
+server. Only the
 backend classes in the module differ: setup, teardown and `running()`. Until the
 session host exists (M3 to M5), `host` skips with that reason. It will need an
 isolated `HGS_STATE_DIR`, so the pipe name never reaches a live host, `hgs
