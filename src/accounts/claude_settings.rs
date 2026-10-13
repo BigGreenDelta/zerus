@@ -102,9 +102,10 @@ pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn inheritance_updates_without_replacing_profile_overrides_or_identity() {
@@ -125,6 +126,7 @@ mod tests {
         assert_eq!(next["permissions"],json!({"defaultMode":"default","allow":["Write"]}));
         assert_eq!(next["theme"],"light");assert!(next.get("model").is_none());assert_eq!(next["env"],json!({"PROFILE_ONLY":"keep"}));
         let bytes=fs::read(&dst).unwrap(); inherit(&native,&profile).unwrap();assert_eq!(fs::read(&dst).unwrap(),bytes);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&dst).unwrap().permissions().mode()&0o777,0o600);
     }
     #[test]

@@ -580,14 +580,11 @@ pub fn file_identity(path: &Path) -> Option<FileIdentity> {
     FileIdentity::of(&fs::File::open(path).ok()?).ok()
 }
 impl FileIdentity {
-    /// The identity and metadata of an open file. (Its callers in `state` are
-    /// Unix-only for now, as is `at`'s.)
-    #[allow(dead_code)]
+    /// The identity and metadata of an open file.
     pub fn with_metadata(file: &fs::File) -> io::Result<(Self, fs::Metadata)> {
         Ok((Self::of(file)?, file.metadata()?))
     }
     /// The identity and metadata of the file `path` names, following links.
-    #[allow(dead_code)]
     pub fn at(path: &Path) -> io::Result<(Self, fs::Metadata)> {
         Self::with_metadata(&fs::File::open(path)?)
     }

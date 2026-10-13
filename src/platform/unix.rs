@@ -680,9 +680,14 @@ impl PinnedProcess {
     }
 }
 
-/// Ask process `pid` to exit (SIGTERM). Nothing forces it to.
+/// Ask process `pid` to exit (SIGTERM). Nothing forces it to. IDs that
+/// `kill` reads as a process group or as every process are refused.
 pub fn request_exit(pid: u32) -> io::Result<()> {
-    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+    let pid = libc::pid_t::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -1530,6 +1535,10 @@ mod tests {
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
         let error = request_exit(u32::MAX >> 1).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        // 0 would signal this process group and u32::MAX (-1) every process.
+        for pid in [0, u32::MAX, 1 << 31] {
+            assert_eq!(request_exit(pid).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]
