@@ -12,7 +12,7 @@ import uuid
 from aiohttp.test_utils import TestClient, TestServer
 
 from zerus_mobile.connector import Connector, ConnectorError
-from zerus_mobile.context import OPERATIONS
+from zerus_mobile.context import OPERATIONS, validate_core
 from zerus_mobile.speech import OPERATIONS as SPEECH_OPERATIONS
 from zerus_mobile.speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS
 from zerus_mobile.voice import OPERATIONS as VOICE_OPERATIONS
@@ -39,6 +39,15 @@ def receipt(request):
 
 
 class ContextConnectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_model_settings_use_the_same_utf8_bound_as_native_launch(self):
+        for model in ('ollama/' + 'a' * 249, 'ollama/' + '界' * 83):
+            request = command('settings', model=model)
+            validate_core('settings', request['payload'], request['request_id'])
+        for model in ('ollama/' + 'a' * 250, 'ollama/' + '界' * 84):
+            request = command('settings', model=model)
+            with self.assertRaises(ValueError):
+                validate_core('settings', request['payload'], request['request_id'])
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.connector = Connector({"server_url": "https://relay.example.invalid", "node_token": "fixture-token", "state_dir": self.temp.name})

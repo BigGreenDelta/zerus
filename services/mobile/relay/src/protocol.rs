@@ -454,8 +454,8 @@ pub fn request(v: &Value) -> Result<()> {
                 if p.get("model").is_none() && p.get("effort").is_none() {
                     return Err(Error::BAD);
                 }
-                if p.get("model").is_some() {
-                    text(&p["model"], 120, false)?;
+                if p.get("model").is_some() && text(&p["model"], 256, false)?.len() > 256 {
+                    return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
                     if ![

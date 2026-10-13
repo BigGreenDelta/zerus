@@ -70,6 +70,26 @@ fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
 }
 
 #[test]
+fn model_settings_match_launch_utf8_byte_bound() {
+    let id = Uuid::new_v4().to_string();
+    let mut value = json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"settings","session":"opencode/orbit/local", "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"ses_native","model":"ollama/local"}});
+    for model in [
+        format!("ollama/{}", "a".repeat(249)),
+        format!("ollama/{}", "界".repeat(83)),
+    ] {
+        value["payload"]["model"] = json!(model);
+        protocol::request(&value).unwrap();
+    }
+    for model in [
+        format!("ollama/{}", "a".repeat(250)),
+        format!("ollama/{}", "界".repeat(84)),
+    ] {
+        value["payload"]["model"] = json!(model);
+        assert!(protocol::request(&value).is_err());
+    }
+}
+
+#[test]
 fn voice_wire_requires_bounded_audio_and_stable_machine_route() {
     let computer = Uuid::new_v4().to_string();
     for op in [
