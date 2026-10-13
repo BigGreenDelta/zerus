@@ -18,7 +18,15 @@ fi
 cd "$(dirname "$0")/../.."
 mkdir -p artifacts/test-results
 gui_build="${ZERUS_GUI_BUILD_DIR:-$PWD/.ci-build/gui}"
-cmake_args=(-S tray -B "$gui_build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON)
+# Every suite also writes per-function JUnit results here (qt-shard-seed.py),
+# unless the path has a comma, where QtTest's -o ends the file name.
+qt_results="$PWD/artifacts/test-results/qt-functions"
+if [ "$windows" = true ]; then
+    qt_results=$(cygpath -m "$qt_results")
+fi
+case "$qt_results" in *,*) qt_results= ;; esac
+cmake_args=(-S tray -B "$gui_build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+    "-DZERUS_QT_RESULTS_DIR=$qt_results")
 if [ "$(uname -s)" = Darwin ]; then
     cmake_args+=("-DCMAKE_PREFIX_PATH=$(brew --prefix qt)")
 fi
@@ -48,6 +56,8 @@ if [ "$phase" = build ]; then
 fi
 export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
 export QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
+rm -rf artifacts/test-results/qt-functions
+mkdir -p artifacts/test-results/qt-functions
 cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 jobs=${ZERUS_TEST_JOBS:-$(( cpus < 8 ? cpus : 8 ))}
 ctest --test-dir "$gui_build" --parallel "$jobs" --timeout 240 --output-on-failure \

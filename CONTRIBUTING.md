@@ -18,14 +18,21 @@ parallel fresh processes and builds a release binary. Classes larger than twelve
 tests run as several jobs unless they share a class fixture, slowest first by
 the previous local run, or else by `scripts/ci/python-durations.json`. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
-headlessly in parallel (`build` or `test` runs only that half);
-`test_sessionswindow` runs as ten shards of its test functions. Tray sources
-compile once, into the `hgs-tray-*` static libraries that the application and
-the suites link: a new suite links the lowest library that covers its code
-instead of listing `tray/src` files, which fails configuration.
+headlessly in parallel (`build` or `test` runs only that half). Each suite
+registered with `zerus_add_test` also writes per-function JUnit results to
+`artifacts/test-results/qt-functions/`. `test_sessionswindow` runs as ten
+shards of its test functions and of the data rows of its slowest functions,
+balanced by the durations in `tray/tests/qt-shard-durations.txt`; tests that
+file does not list go by a hash of their name, and every shard fails unless
+each function and row runs in exactly one shard. `scripts/ci/qt-shard-seed.py`
+rebuilds the file from the `qt-functions` results of the CI desktop jobs. Tray
+sources compile once, into the `hgs-tray-*` static libraries that the
+application and the suites link: a new suite links the lowest library that
+covers its code instead of listing `tray/src` files, which fails configuration.
 `ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16 Python and
-8 Qt jobs, never more than the CPU count; `1` runs them one after another). Test
-logs and Python job durations live in ignored `artifacts/test-results/`. Set
+8 Qt jobs, never more than the CPU count; `1` runs them one after another);
+`ZERUS_PYTHON_JOBS` overrides it for the Python classes. Test logs and Python
+job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 

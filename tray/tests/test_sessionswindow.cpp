@@ -326,8 +326,9 @@ private:
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
     QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}) const;
-    // Created by initTestCase(): listing the functions (-functions, as
-    // RunQtShard.cmake does) exits without destroying the test object.
+    // Created by initTestCase(): listing the data rows (-datatags, as
+    // RunQtShard.cmake does) exits without destroying the test object. That
+    // listing calls every *_data() function first, so none may use m_dir.
     std::unique_ptr<QTemporaryDir> m_dir;
 };
 

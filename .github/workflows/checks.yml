@@ -259,6 +259,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       HOMEBREW_NO_AUTO_UPDATE: 1
+      # Python integration jobs mostly wait on terminals and subprocesses: twice
+      # the 4 (Linux) or 3 (macOS) runner vCPUs.
+      ZERUS_PYTHON_JOBS: ${{ matrix.os == 'macos-15' && 6 || 8 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

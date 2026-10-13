@@ -2,8 +2,9 @@
 """Run integration test classes in parallel fresh processes; fixture globals stay local.
 
 Every terminal fixture owns a private socket and temporary directory, so test
-classes run concurrently. They mostly wait on terminals and timers, so
-ZERUS_TEST_JOBS defaults to min(CPU count, 16); 1 runs them one after another.
+classes run concurrently. They mostly wait on terminals and timers, so the job
+count defaults to min(CPU count, 16): ZERUS_PYTHON_JOBS, or else ZERUS_TEST_JOBS
+(which also sets the Qt jobs), overrides it; 1 runs them one after another.
 """
 import concurrent.futures
 import json
@@ -79,7 +80,8 @@ def run(job):
 def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
     modules = [path.stem for path in sorted(TESTS.glob("test_*.py"))]
-    workers = max(1, int(os.environ.get("ZERUS_TEST_JOBS") or min(os.cpu_count() or 1, 16)))
+    workers = max(1, int(os.environ.get("ZERUS_PYTHON_JOBS") or os.environ.get("ZERUS_TEST_JOBS")
+                         or min(os.cpu_count() or 1, 16)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         jobs = [job for listed in pool.map(jobs_for, modules) for job in listed]
     previous = {}

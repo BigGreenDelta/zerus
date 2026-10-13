@@ -266,6 +266,16 @@ model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.0-rc.2`
 for its keyless local-model contract fixture. Native agent CLIs are not included
 in the product package.
 
+The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
+6 on macOS): the Python test classes mostly wait on terminals and subprocesses.
+The desktop jobs keep per-function QtTest JUnit results in `qt-functions/` of
+their test-results artifacts. The `test_sessionswindow` shards are balanced by
+`tray/tests/qt-shard-durations.txt`, the largest duration of each function, or
+data row of its slowest functions, across the measured runs. After tests are
+added or become slower, download the Arch, macOS and Windows desktop artifacts
+of one main run and rebuild that file with `scripts/ci/qt-shard-seed.py`; its
+usage lists the commands. A test the file does not list still runs exactly once.
+
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API. Set
 `HGS_CLAUDE_TEST_BIN` to a reviewed executable to run it; it never reads a user's
