@@ -241,13 +241,12 @@ fn resolve_output(command: &mut Command) -> Result<Output> {
     const LIMIT: u64 = 128 * 1024;
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
-    let mut child = platform::own_process_group(
+    let mut child = platform::spawn_group(
         command
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
             .stderr(stderr.try_clone()?),
-    )
-    .spawn()?;
+    )?;
     let deadline = Instant::now() + Duration::from_secs(4);
     let status = loop {
         let error = if stdout.metadata()?.len() > LIMIT || stderr.metadata()?.len() > LIMIT {
@@ -444,21 +443,22 @@ printf 'Setup complete: '
         return Ok(0);
     }
     let bundle = tempfile::NamedTempFile::new()?;
-    let result = Command::new("tar")
-        .args(["czf", "-"])
-        .arg("-C")
-        .arg(&root)
-        .args([
-            "Cargo.toml",
-            "Cargo.lock",
-            "build.rs",
-            "src",
-            "scripts",
-            "install.sh",
-            "hgs_state.py",
-        ])
-        .stdout(bundle.reopen()?)
-        .status()?;
+    let result = platform::status(
+        Command::new("tar")
+            .args(["czf", "-"])
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "Cargo.toml",
+                "Cargo.lock",
+                "build.rs",
+                "src",
+                "scripts",
+                "install.sh",
+                "hgs_state.py",
+            ])
+            .stdout(bundle.reopen()?),
+    )?;
     if !result.success() {
         return Err(Error::new(1, "Could not package the HGS CLI sources."));
     }

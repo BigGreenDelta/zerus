@@ -3,9 +3,8 @@
 //! Each session gets a job nested inside that one, without kill-on-close and
 //! without breakaway, which its supervisor joins while still suspended.
 //!
-//! `platform::windows` keeps a private kill-on-close job for its bounded runner and
-//! for the CLI itself; both can move onto this type once the platform layer
-//! settles.
+//! `platform::windows` uses this type too: for the CLI's own job (`Limits::CLI`)
+//! and for the job of each child the CLI starts (`Limits::CHILD`).
 use super::spawn::Child;
 use std::{
     io, mem,
@@ -53,6 +52,23 @@ impl Limits {
     /// A session's job (D9), nested in the host's: ended on purpose, never left.
     pub(crate) const SESSION: Self = Self {
         kill_on_close: false,
+        breakaway_ok: false,
+        silent_breakaway_ok: false,
+    };
+    /// The CLI's own job (D4, `platform::prepare_environment`): what hgs.exe
+    /// leaves behind ends with it, and a session host started with
+    /// CREATE_BREAKAWAY_FROM_JOB leaves it.
+    pub(crate) const CLI: Self = Self {
+        kill_on_close: true,
+        breakaway_ok: true,
+        silent_breakaway_ok: false,
+    };
+    /// The job of one child the CLI starts (D4, `platform::spawn` and the
+    /// helpers built on it), nested in the CLI's: it ends with the call that
+    /// owns it, and since it forbids breakaway, nothing the child starts can
+    /// leave through the CLI's permission.
+    pub(crate) const CHILD: Self = Self {
+        kill_on_close: true,
         breakaway_ok: false,
         silent_breakaway_ok: false,
     };

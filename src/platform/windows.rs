@@ -4,7 +4,10 @@ use super::{
     capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
     RunError,
 };
-use crate::cli::{Error, Result};
+use crate::{
+    cli::{Error, Result},
+    host::job::{Job, Limits},
+};
 use std::{
     collections::BTreeMap,
     env,
@@ -14,7 +17,7 @@ use std::{
     os::windows::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
-        io::{AsRawHandle, FromRawHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, RawHandle},
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -62,11 +65,6 @@ use windows_sys::{
                 Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD,
                 THREADENTRY32,
             },
-            JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            },
             Pipes::{
                 CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
                 PIPE_WAIT,
@@ -92,26 +90,29 @@ use windows_sys::{
 /// the user's shell. Console children (ssh.exe, tar.exe) must not outlive hgs
 /// when the GUI stops it, so this process joins a job that terminates its
 /// remaining members when its last handle, held only here, closes.
+///
+/// That job allows breakaway (spec D4), so a session host started with
+/// CREATE_BREAKAWAY_FROM_JOB (`spawn_detached`) outlives this process. Nothing
+/// else uses that permission: every other child starts in a kill-on-close job of
+/// its own that forbids breakaway (`spawn` and the helpers built on it), because
+/// Git for Windows' MSYS runtime breaks away whenever its immediate job lets it.
 pub fn prepare_environment() {
-    unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return;
-        }
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    static PREPARED: std::sync::Once = std::sync::Once::new();
+    PREPARED.call_once(|| {
         // Best effort: an enclosing job that forbids nesting keeps the old behavior.
-        if SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        ) == 0
-            || AssignProcessToJobObject(job, GetCurrentProcess()) == 0
+        let Ok(job) = Job::new(Limits::CLI) else {
+            return;
+        };
+        // SAFETY: GetCurrentProcess returns the current-process pseudo-handle,
+        // which is always valid and which BorrowedHandle allows.
+        if job
+            .assign(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })
+            .is_ok()
         {
-            CloseHandle(job);
+            // Held until this process exits; closing it then ends what is left.
+            std::mem::forget(job);
         }
-    }
+    });
 }
 /// Whether this computer runs agent sessions. A Windows computer will once the
 /// user enables them (the `%USERPROFILE%\.config\hgs\local-sessions` marker) and
@@ -268,11 +269,140 @@ fn overlapped_pipe(child_reads: bool) -> io::Result<(fs::File, fs::File)> {
         Ok((ours, fs::File::from_raw_handle(theirs)))
     }
 }
+/// A child of this process in a kill-on-close job of its own that forbids
+/// breakaway (spec D4), nested in this process's job: nothing the child starts can
+/// leave it, and whatever is left in it ends when this is dropped. `Spawned`
+/// dereferences to the child; on Unix `spawn` returns the child itself.
+pub struct Spawned {
+    child: Child,
+    // Dropped after the child's handles.
+    job: ChildJob,
+}
+impl std::ops::Deref for Spawned {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+impl std::ops::DerefMut for Spawned {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+impl Spawned {
+    /// Split into the child and the job that must outlive its use.
+    fn into_parts(self) -> (Child, ChildJob) {
+        (self.child, self.job)
+    }
+    /// End the child and everything it started at once.
+    pub fn terminate(&self) {
+        self.job.terminate();
+    }
+    /// `Child::wait_with_output`; the job ends with the call.
+    pub fn wait_with_output(self) -> io::Result<Output> {
+        let (child, _job) = self.into_parts();
+        child.wait_with_output()
+    }
+}
+/// The job of a `Spawned` child. Closing it ends whatever is still in it.
+pub struct ChildJob(Job);
+impl ChildJob {
+    fn terminate(&self) {
+        let _ = self.0.terminate(1);
+    }
+}
+/// Start `command` suspended with `flags`, put it in a job of its own
+/// (`Limits::CHILD`) and only then let it run, so that everything it starts is
+/// in the job too. A child that cannot join is ended before it has run. The
+/// command keeps `flags` as its creation flags afterwards.
+fn spawn_contained(command: &mut Command, flags: u32) -> io::Result<Spawned> {
+    let job = Job::new(Limits::CHILD)?;
+    let spawned = command.creation_flags(CREATE_SUSPENDED | flags).spawn();
+    command.creation_flags(flags);
+    let mut child = spawned?;
+    if let Err(error) = job
+        .assign(child.as_handle())
+        .and_then(|()| resume(child.id()))
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(Spawned {
+        child,
+        job: ChildJob(job),
+    })
+}
+/// Resume the threads of a process created suspended (it has only its first).
+fn resume(pid: u32) -> io::Result<()> {
+    // SAFETY: plain call; a valid snapshot handle is closed by Owned below.
+    let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = process::Owned(handle);
+    // SAFETY: THREADENTRY32 is plain data; all zeroes is a valid value.
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+    let mut resumed = false;
+    // SAFETY: the snapshot is open and `entry` is writable with its size set.
+    let mut more = unsafe { Thread32First(handle.0, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            // SAFETY: plain call; a returned handle is closed by Owned below.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let thread = process::Owned(thread);
+            // SAFETY: `thread` is open with THREAD_SUSPEND_RESUME access.
+            if unsafe { ResumeThread(thread.0) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            resumed = true;
+        }
+        // SAFETY: as for Thread32First.
+        more = unsafe { Thread32Next(handle.0, &mut entry) } != 0;
+    }
+    if resumed {
+        Ok(())
+    } else {
+        Err(io::Error::other("the new process has no thread to resume"))
+    }
+}
+/// `Command::spawn` for a child that ends with this process and whose own
+/// children cannot leave (see `Spawned`). It shares this console's process
+/// group, so a console Ctrl+C reaches it.
+pub fn spawn(command: &mut Command) -> io::Result<Spawned> {
+    spawn_contained(command, 0)
+}
+/// `spawn` in a process group of its own: a console Ctrl+C for the caller does
+/// not reach it (`own_process_group`).
+pub fn spawn_group(command: &mut Command) -> io::Result<Spawned> {
+    spawn_contained(command, CREATE_NEW_PROCESS_GROUP)
+}
+/// `Command::status` through `spawn`.
+pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    spawn(command)?.wait()
+}
+/// `Command::output` through `spawn`, with the streams `Command::output` gives
+/// when none is set: no input, output and errors captured. Not for ssh.exe,
+/// which hangs on such pipes (`ssh_output`).
+pub fn output(command: &mut Command) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn(command)?.wait_with_output()
+}
+
 type Setter = fn(&mut Command, Stdio) -> &mut Command;
 const STREAMS: [Setter; 3] = [Command::stdin, Command::stdout, Command::stderr];
 /// Start an ssh client with the requested standard streams piped to this
 /// process. Unpiped input is a pipe that ends at once, whatever the caller set:
 /// the peer never sees the end of NUL (`Stdio::null()`) through Windows OpenSSH.
+/// The client runs in a process group and job of its own (`spawn_group`); the
+/// job lives as long as the returned `SshChild`.
 pub fn spawn_ssh(
     command: &mut Command,
     stdin: bool,
@@ -287,7 +417,7 @@ pub fn spawn_ssh(
             ours[index] = Some(mine);
         }
     }
-    let spawned = command.spawn();
+    let spawned = spawn_group(command);
     // Keep no copy of the child's ends, so reads end when the client exits.
     for (index, pipe) in ours.iter().enumerate() {
         if pipe.is_some() {
@@ -295,12 +425,14 @@ pub fn spawn_ssh(
         }
     }
     let [input, output, errors] = ours;
+    let (child, job) = spawned?.into_parts();
     Ok(super::SshChild {
-        child: spawned?,
+        child,
         // Unpiped input ends here, when its only writer closes.
         stdin: input.filter(|_| stdin).map(|pipe| Box::new(pipe) as _),
         stdout: output.map(|pipe| Box::new(pipe) as _),
         stderr: errors.map(|pipe| Box::new(pipe) as _),
+        _job: job,
     })
 }
 /// `Command::output` for an ssh client: stdin closed, stdout and stderr captured.
@@ -330,12 +462,17 @@ pub fn ssh_output(command: &mut Command) -> io::Result<Output> {
     })
 }
 /// `Command::status` for an ssh client that reads `input` and shares this
-/// process's stdout and stderr. This process's stdin is not passed on.
+/// process's stdout and stderr. This process's stdin is not passed on. The
+/// client runs in a job of its own (`spawn`), which ends once its output has
+/// been relayed.
 pub fn ssh_status(command: &mut Command, input: fs::File) -> io::Result<ExitStatus> {
     let relay = Relay::prepare(command, Some(input))?;
-    let spawned = command.spawn();
+    let spawned = spawn(command);
     let pumps = relay.start(command);
-    let status = spawned.and_then(|mut child| child.wait());
+    let (status, _job) = match spawned {
+        Ok(mut child) => (child.wait(), Some(child)),
+        Err(error) => (Err(error), None),
+    };
     pumps.finish();
     status
 }
@@ -541,7 +678,7 @@ pub fn sync_dir(_: &Path) -> io::Result<()> {
     Ok(())
 }
 /// A scanner, the indexer or a reader without delete sharing holds the file.
-pub(super) fn transient_replace_error(error: &io::Error) -> bool {
+pub(crate) fn transient_replace_error(error: &io::Error) -> bool {
     error.raw_os_error().is_some_and(|code| {
         [
             ERROR_ACCESS_DENIED,
@@ -716,6 +853,9 @@ unsafe extern "system" fn interrupted(event: u32) -> i32 {
 }
 /// Run an interactive child on the shared console and wait for it. An
 /// interrupted wait reports 130 like Unix SIGINT; otherwise the child's code.
+/// The child shares this console's process group, so Ctrl+C reaches it, and
+/// runs in a job of its own (`spawn`), which ends once its output has been
+/// relayed.
 pub fn wait_interactive(command: &mut Command) -> Result<i32> {
     struct Handler;
     impl Drop for Handler {
@@ -729,7 +869,7 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
     // Never SetConsoleCtrlHandler(NULL, TRUE): children would inherit ignoring Ctrl+C.
     let _handler = (unsafe { SetConsoleCtrlHandler(Some(interrupted), 1) } != 0).then_some(Handler);
     let relay = Relay::prepare(command, None)?;
-    let spawned = command.spawn();
+    let spawned = spawn(command);
     let pumps = relay.start(command);
     let mut child = spawned.map_err(|e| {
         Error::new(
@@ -975,7 +1115,7 @@ mod process {
     }
 
     /// A kernel handle this process owns, closed when dropped.
-    struct Owned(HANDLE);
+    pub(super) struct Owned(pub(super) HANDLE);
     impl Drop for Owned {
         fn drop(&mut self) {
             unsafe {
@@ -1418,99 +1558,12 @@ mod process {
 
     /// Start `command` outside this process's job, with a hidden console of its
     /// own (its console children never open a window) and its own process group.
-    /// Fails while an enclosing job forbids breakaway; `prepare_environment`'s job
-    /// does today.
+    /// `prepare_environment`'s job allows that (spec D4); an enclosing job that
+    /// forbids breakaway makes it fail.
     pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
         command
             .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             .spawn()
-    }
-
-    /// A job that ends its processes when its last handle, held only here, closes.
-    /// It never allows breakaway, so nothing in it (MSYS programs break away
-    /// whenever a job lets them) can leave it.
-    struct Job(Owned);
-    impl Job {
-        fn new() -> io::Result<Self> {
-            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-            if job.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let job = Self(Owned(job));
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if unsafe {
-                SetInformationJobObject(
-                    job.0 .0,
-                    JobObjectExtendedLimitInformation,
-                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(job)
-        }
-        fn terminate(&self) {
-            unsafe {
-                TerminateJobObject(self.0 .0, 1);
-            }
-        }
-    }
-    /// Start `command` suspended, put it in a job of its own and only then let it
-    /// run, so that everything it starts is in the job too. Its own process group
-    /// keeps a console Ctrl+C for the caller from reaching it.
-    fn spawn_in_job(command: &mut Command) -> io::Result<(Child, Job)> {
-        let job = Job::new()?;
-        let mut child = command
-            .creation_flags(CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP)
-            .spawn()?;
-        let started = if unsafe {
-            AssignProcessToJobObject(job.0 .0, child.as_raw_handle() as HANDLE)
-        } == 0
-        {
-            Err(io::Error::last_os_error())
-        } else {
-            resume(child.id())
-        };
-        if let Err(error) = started {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        Ok((child, job))
-    }
-    /// Resume the threads of a process created suspended (it has only its first).
-    fn resume(pid: u32) -> io::Result<()> {
-        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        let handle = Owned(handle);
-        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
-        let mut resumed = false;
-        let mut more = unsafe { Thread32First(handle.0, &mut entry) } != 0;
-        while more {
-            if entry.th32OwnerProcessID == pid {
-                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if thread.is_null() {
-                    return Err(io::Error::last_os_error());
-                }
-                let thread = Owned(thread);
-                if unsafe { ResumeThread(thread.0) } == u32::MAX {
-                    return Err(io::Error::last_os_error());
-                }
-                resumed = true;
-            }
-            more = unsafe { Thread32Next(handle.0, &mut entry) } != 0;
-        }
-        if resumed {
-            Ok(())
-        } else {
-            Err(io::Error::other("the new process has no thread to resume"))
-        }
     }
 
     type Reader = thread::JoinHandle<io::Result<Vec<u8>>>;
@@ -1523,7 +1576,7 @@ mod process {
                 .map(|_| bytes)
         }))
     }
-    /// Run `command` without input in a job of its own (see `spawn_in_job`),
+    /// Run `command` without input in a job of its own (see `spawn_group`),
     /// collecting at most `limits` bytes of standard output and errors, until it
     /// exits and both streams end. When the output is too large, `deadline`
     /// passes, `cancelled` says so or the child fails, the whole job ends at
@@ -1539,7 +1592,7 @@ mod process {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let (mut child, job) = spawn_in_job(command).map_err(RunError::Spawn)?;
+        let mut child = spawn_group(command).map_err(RunError::Spawn)?;
         let mut readers = [
             read_limited(child.stdout.take(), limits[0]),
             read_limited(child.stderr.take(), limits[1]),
@@ -1577,16 +1630,16 @@ mod process {
             thread::sleep(Duration::from_millis(3));
         };
         if !result.as_ref().is_ok_and(ExitStatus::success) {
-            job.terminate();
+            child.terminate();
         }
         let _ = child.kill();
         let _ = child.wait();
-        drop(job);
+        drop(child);
         let [out, err] = outputs;
         result.map(|status| (status, out.unwrap_or_default(), err.unwrap_or_default()))
     }
     /// `Command::output` with a time limit and closed input, in a job of its own
-    /// (see `spawn_in_job`). Output goes to regular files, so a child writing much
+    /// (see `spawn_group`). Output goes to regular files, so a child writing much
     /// before it exits never blocks on a pipe and no reader thread outlives the
     /// call. The job ends at the limit, and with the call.
     pub fn output_until(
@@ -1598,21 +1651,21 @@ mod process {
         command.stdout(Stdio::from(stdout.try_clone().map_err(RunError::Io)?));
         command.stderr(Stdio::from(stderr.try_clone().map_err(RunError::Io)?));
         command.stdin(Stdio::null());
-        let (mut child, job) = spawn_in_job(command).map_err(RunError::Spawn)?;
+        let mut child = spawn_group(command).map_err(RunError::Spawn)?;
         let deadline = Instant::now() + duration;
         let status = loop {
             if let Some(status) = child.try_wait().map_err(RunError::Io)? {
                 break status;
             }
             if Instant::now() >= deadline {
-                job.terminate();
+                child.terminate();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(RunError::Stopped);
             }
             thread::sleep(Duration::from_millis(25));
         };
-        drop(job);
+        drop(child);
         stdout.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
         stderr.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
         let mut output = Output {
@@ -2208,5 +2261,231 @@ mod tests {
                 ("SSH_ASKPASS", Some("")),
             ]
         );
+    }
+
+    /// Where a probe below reports, when its parent test runs it.
+    const PROBE_REPORT: &str = "HGS_TEST_JOB_PROBE_REPORT";
+
+    /// This test binary running the ignored test `name`, reporting to `report`.
+    fn probe_command(name: &str, report: &Path) -> Command {
+        let mut command = Command::new(env::current_exe().unwrap());
+        command
+            .args([name, "--exact", "--ignored", "--test-threads=1"])
+            .env(PROBE_REPORT, report)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// The lines of a probe's report once it is complete.
+    fn report_of(report: &Path) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let text = fs::read_to_string(report).unwrap_or_default();
+            if text.ends_with("done\n") {
+                return text.lines().map(str::to_owned).collect();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no report from the probe: {text:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The value after `key=` in a report.
+    fn value<'a>(lines: &'a [String], key: &str) -> &'a str {
+        lines
+            .iter()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("no {key} in {lines:?}"))
+    }
+
+    fn ping() -> Command {
+        let mut command = Command::new("ping");
+        command
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// A process to watch and, if needed, end.
+    fn open(pid: &str) -> std::os::windows::io::OwnedHandle {
+        use std::os::windows::io::OwnedHandle;
+        let pid: u32 = pid.parse().unwrap();
+        // SAFETY: plain call; a returned handle is owned below.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        assert!(!handle.is_null(), "{pid}: {}", io::Error::last_os_error());
+        // SAFETY: OpenProcess returned a handle that nothing else owns.
+        unsafe { OwnedHandle::from_raw_handle(handle) }
+    }
+
+    /// Whether the process has ended within `wait`.
+    fn ended(process: &std::os::windows::io::OwnedHandle, wait: Duration) -> bool {
+        let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
+        // SAFETY: the handle is open with SYNCHRONIZE access.
+        unsafe { WaitForSingleObject(process.as_raw_handle(), millis) == WAIT_OBJECT_0 }
+    }
+
+    /// Run in its own job by `a_bounded_child_dies_with_its_job_and_cannot_break_away`.
+    #[test]
+    #[ignore = "run by a_bounded_child_dies_with_its_job_and_cannot_break_away"]
+    // Its children run on past it on purpose; Windows keeps no zombies.
+    #[allow(clippy::zombie_processes)]
+    fn contained_child_probe() {
+        let Some(report) = env::var_os(PROBE_REPORT) else {
+            return;
+        };
+        let allows = crate::host::job::current_job_allows_breakaway().unwrap();
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/d", "/c", "exit", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let breakaway = match spawn_detached(&mut cmd) {
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                "denied".to_owned()
+            }
+            Err(error) => error.to_string(),
+            Ok(mut child) => {
+                let _ = child.wait();
+                "allowed".to_owned()
+            }
+        };
+        // Started the plain way: it lands in this process's job.
+        let helper = ping().spawn().unwrap();
+        fs::write(
+            report,
+            format!(
+                "allows={allows:?}\nbreakaway={breakaway}\nhelper={}\ndone\n",
+                helper.id()
+            ),
+        )
+        .unwrap();
+        // The parent ends this, and the helper with it.
+        thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_bounded_child_dies_with_its_job_and_cannot_break_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report");
+        let child = spawn(&mut probe_command(
+            "platform::windows::tests::contained_child_probe",
+            &report,
+        ))
+        .unwrap();
+        let lines = report_of(&report);
+        // Its immediate job forbids breakaway, so nothing it starts can leave.
+        assert_eq!(value(&lines, "allows"), "Some(false)");
+        assert_eq!(value(&lines, "breakaway"), "denied");
+        let probe = open(&child.id().to_string());
+        let helper = open(value(&lines, "helper"));
+        assert!(!ended(&probe, Duration::ZERO) && !ended(&helper, Duration::ZERO));
+        // Dropping the child closes its job: the child and its helper end.
+        drop(child);
+        assert!(ended(&probe, Duration::from_secs(10)));
+        assert!(ended(&helper, Duration::from_secs(10)));
+    }
+
+    /// Run inside a job that allows breakaway by
+    /// `the_cli_job_lets_only_a_detached_child_leave`, as hgs.exe runs.
+    #[test]
+    #[ignore = "run by the_cli_job_lets_only_a_detached_child_leave"]
+    // Its children run on past it on purpose; Windows keeps no zombies.
+    #[allow(clippy::zombie_processes)]
+    fn cli_job_probe() {
+        let Some(report) = env::var_os(PROBE_REPORT) else {
+            return;
+        };
+        let report = PathBuf::from(report);
+        prepare_environment();
+        let allows = crate::host::job::current_job_allows_breakaway().unwrap();
+        let detached = spawn_detached(&mut ping()).unwrap();
+        let contained = spawn(&mut ping()).unwrap();
+        fs::write(
+            &report,
+            format!(
+                "allows={allows:?}\ndetached={}\ncontained={}\ndone\n",
+                detached.id(),
+                contained.id()
+            ),
+        )
+        .unwrap();
+        // Exit once the parent has looked; the contained child's job closes then.
+        let go = report.with_extension("exit");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !go.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        std::mem::forget(contained);
+    }
+
+    #[test]
+    fn the_cli_job_lets_only_a_detached_child_leave() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report");
+        // Stands in for whatever runs hgs.exe (a console, the GUI, sshd); it lets
+        // a child break away and ends what is left in it when it closes.
+        let outer = Job::new(Limits::CLI).unwrap();
+        let mut command = probe_command("platform::windows::tests::cli_job_probe", &report);
+        let mut child = command.creation_flags(CREATE_SUSPENDED).spawn().unwrap();
+        outer.assign(child.as_handle()).unwrap();
+        resume(child.id()).unwrap();
+        let lines = report_of(&report);
+        assert_eq!(value(&lines, "allows"), "Some(true)");
+        let detached = open(value(&lines, "detached"));
+        let contained = open(value(&lines, "contained"));
+        assert!(!outer.contains(detached.as_handle()).unwrap());
+        assert!(outer.contains(contained.as_handle()).unwrap());
+
+        fs::write(report.with_extension("exit"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the probe did not exit");
+            thread::sleep(Duration::from_millis(20));
+        }
+        // The contained child ended with the probe's job for it; the detached
+        // one runs on after both jobs closed.
+        assert!(ended(&contained, Duration::from_secs(10)));
+        drop(outer);
+        assert!(!ended(&detached, Duration::from_millis(500)));
+        // SAFETY: the handle is open with PROCESS_TERMINATE access.
+        unsafe { TerminateProcess(detached.as_raw_handle(), 1) };
+        assert!(ended(&detached, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn contained_helpers_keep_the_std_contract() {
+        let output =
+            output(Command::new("cmd.exe").raw_arg("/d /c echo out& echo err 1>&2& exit 4"))
+                .unwrap();
+        assert_eq!(output.status.code(), Some(4));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err");
+        let status = status(
+            Command::new("cmd.exe")
+                .args(["/d", "/c", "exit", "3"])
+                .stdout(Stdio::null()),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert!(spawn(&mut Command::new("hgs-no-such-program")).is_err());
+        // A command can be started again after a contained start.
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/d", "/c", "exit", "0"])
+            .stdout(Stdio::null());
+        assert!(spawn_group(&mut command).unwrap().wait().unwrap().success());
+        assert!(command.status().unwrap().success());
     }
 }

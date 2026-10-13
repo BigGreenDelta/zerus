@@ -28,11 +28,7 @@ pub const LOCAL_SESSIONS_UNSUPPORTED: &str =
     "Local sessions are not supported on Windows yet; choose a remote machine.";
 
 pub fn capture(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program)
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let out = output(Command::new(program).args(args).stderr(Stdio::null())).ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -43,13 +39,14 @@ pub fn capture(program: &str, args: &[&str]) -> Option<String> {
 // and voice service starts) are Unix-only.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn silent(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    status(
+        Command::new(program)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map(|s| s.success())
+    .unwrap_or(false)
 }
 /// The executable `program` names: itself when it is a path, otherwise the first
 /// match on PATH (with each PATHEXT extension on Windows).
@@ -84,6 +81,10 @@ pub struct SshChild {
     pub stdin: Option<Box<dyn Write + Send>>,
     pub stdout: Option<Box<dyn Read + Send>>,
     pub stderr: Option<Box<dyn Read + Send>>,
+    /// The client's job (spec D4; see `spawn`), held for its drop: what is left
+    /// in it ends then, after the client has been used.
+    #[cfg(windows)]
+    pub(crate) _job: ChildJob,
 }
 /// The output of a successful ssh command, without its error text.
 pub fn ssh_capture(args: &[String]) -> Option<String> {
@@ -293,21 +294,19 @@ fn konsole_args(method: &str, args: &[&str]) -> Option<Vec<String>> {
 }
 fn konsole(method: &str, args: &[&str]) {
     if let Some(args) = konsole_args(method, args) {
-        let _ = Command::new("busctl")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = status(
+            Command::new("busctl")
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 fn konsole_get(mode: &str) -> String {
     let Some(args) = konsole_args("tabTitleFormat", &["i", mode]) else {
         return String::new();
     };
-    Command::new("busctl")
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
+    output(Command::new("busctl").args(args).stderr(Stdio::null()))
         .ok()
         .and_then(|out| {
             let text = String::from_utf8_lossy(&out.stdout);

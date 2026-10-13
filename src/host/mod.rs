@@ -15,7 +15,7 @@
 mod conpty;
 pub(crate) mod endpoint;
 #[cfg(windows)]
-mod job;
+pub(crate) mod job;
 #[cfg(windows)]
 pub(crate) mod pipe;
 pub(crate) mod protocol;

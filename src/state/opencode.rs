@@ -386,9 +386,7 @@ fn ensure_host(record: &Value) -> Result<()> {
             );
         }
     }
-    let version = Command::new("opencode")
-        .arg("--version")
-        .output()
+    let version = crate::platform::output(Command::new("opencode").arg("--version"))
         .map_err(|_| format!("Install OpenCode {VERSION} on this computer"))?;
     if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
         return Err(format!(

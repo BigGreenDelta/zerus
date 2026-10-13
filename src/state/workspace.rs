@@ -67,7 +67,7 @@ fn git(cwd: &str, args: &[&str], deadline: Instant) -> Option<(bool, String)> {
     ] {
         command.env_remove(key);
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = crate::platform::spawn(&mut command).ok()?;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
