@@ -278,8 +278,8 @@ usage lists the commands. A test the file does not list still runs exactly once.
 
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API; it never reads a
-user's account. Full Linux CI runs it with the other Claude native suites
-against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
+user's account. Full Linux and macOS CI run it with the other Claude native
+suites against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
 selects another executable for a manual run. Claude 2.1.296 coverage verifies
 literal trailing backslashes, multiline messages and durable request replay.
 Terminal submission alone is insufficient: the test waits for the unchanged user
@@ -523,14 +523,17 @@ accounts in private configuration.
 
 ### Native agent compatibility and upstream review
 
-Full Linux CLI CI also runs `python3 scripts/ci/agent-compatibility.py`. The
-reviewed Codex matrix in `scripts/ci/agent-compatibility.json` retains 0.160.1
-(a resident-session regression) and 0.162.0; the Claude Code matrix pins
-2.1.296. Each official Linux x86_64 package has an exact version and SHA-512
-integrity pin. Only its native executable is extracted into a disposable
-directory; agent binaries are neither committed nor bundled. The runner treats
-skipped or empty native suites as failures. `--agent claude` or `--agent codex`
-limits a local run to one matrix.
+Full Linux and macOS CLI CI also run `python3
+scripts/ci/agent-compatibility.py`. Each reviewed version in
+`scripts/ci/agent-compatibility.json` names the official npm package for one
+target, `linux-x64` or `darwin-arm64`, with an exact version and SHA-512
+integrity pin. The runner selects the pins for its host and refuses an agent
+that has none. The Codex matrix is Linux-only and retains 0.160.1 (a
+resident-session regression) and 0.162.0. The Claude Code matrix pins 2.1.296
+for both targets, so macOS runs Claude Code alone. Only the native executable is
+extracted into a disposable directory; agent binaries are neither committed nor
+bundled. The runner treats skipped or empty native suites as failures. `--agent
+claude` or `--agent codex` limits a local run to one matrix.
 
 Claude Code runs every `tests/test_claude_*_native.py` suite plus the Claude
 clear and compaction fixtures: exact input, questions, approvals, trust,
@@ -595,6 +598,8 @@ supported, requiring an adapter change, or requiring a separately reviewed
 integration; track implementation work in Beads. Add an isolated native contract
 for every adopted lifecycle/input change and retain versions still used by
 resident sessions until their compatibility boundary is deliberately reviewed.
+Pin a reviewed version for every target its agent supports; the runner's unit
+tests reject a version that is missing one.
 
 Zerus receives activity from structured hooks, conversation messages and usage
 from native history, and DeepSeek controls from its native API. Terminal checks

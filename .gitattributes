@@ -28,3 +28,4 @@ mobile/android/app/src/main/assets/licenses/camerax.txt -whitespace
 
 # Third-party license texts for the Windows zip stay byte-for-byte as published.
 packaging/windows/licenses/*.txt -whitespace
+tests/fixtures/screen-streams/*.bin binary

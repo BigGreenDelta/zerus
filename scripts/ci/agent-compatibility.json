@@ -2,11 +2,13 @@
   "codex": [
     {
       "version": "0.160.1",
+      "target": "linux-x64",
       "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.160.1-linux-x64.tgz",
       "integrity": "sha512-sIDhqV+bsZKKVaVFVY5iB+pAzyOz2XRm3H1KXCsSJwGj5p98qnrT0Fweo1Hfe7WnyTp8mfBNdbVzUeO+mHYugA=="
     },
     {
       "version": "0.162.0",
+      "target": "linux-x64",
       "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.162.0-linux-x64.tgz",
       "integrity": "sha512-qHWp6oKpf456PqjberGN8avs8zChv2oS+UuDiqVFYAuDOhq6vBc1drh8jEsnR7dBX+zcw03PN5VLtePGlMcC3w=="
     }
@@ -14,8 +16,15 @@
   "claude": [
     {
       "version": "2.1.296",
+      "target": "linux-x64",
       "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.296.tgz",
       "integrity": "sha512-+m01urgelnI+VJxPaKPEK0wixgq42uZ8PeCaUk5tX/8YoDBvSmC/REVQG2jQfJAr8dxunpjJ600FvLrcj1WWTw=="
+    },
+    {
+      "version": "2.1.296",
+      "target": "darwin-arm64",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.296.tgz",
+      "integrity": "sha512-vqtx3kS3r1hNLMk+N8JMG5J4kcLHIbI3t/NSIdcFQZrRVCFA6NtcxJyn/B+Sf3GxJaFJOCEfoBQXsFo10+Oj9A=="
     }
   ],
   "upstream": [

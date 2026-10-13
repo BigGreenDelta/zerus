@@ -542,12 +542,18 @@ fn focus_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<(
     Ok(())
 }
 fn clear_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<()> {
+    clear_other_within(io, card, index, Duration::from_secs(5))
+}
+/// `window` bounds the time without a verified reduction. The round cap and
+/// the strictly shrinking draft bound the whole clear, so a slow terminal that
+/// keeps confirming progress is not reported as an uncertain delivery.
+fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, window: Duration) -> Result<()> {
     focus_other(io, card, index)?;
     let count = card["questions"][index]["options"]
         .as_array()
         .unwrap()
         .len();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut deadline = Instant::now() + window;
     let mut right_without_progress = false;
     for _ in 0..128 {
         let panel = parse(&io.screen()?, card)?;
@@ -562,7 +568,7 @@ fn clear_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<(
             break;
         }
         // Native clearing operates on a visual line. Repeat only after a
-        // verified reduction, with one shared deadline for the whole clear.
+        // verified reduction; each one renews the shared deadline.
         io.key("C-e")?;
         let Panel::Question {
             index: current,
@@ -598,6 +604,7 @@ fn clear_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<(
             }
             if other.chars().count() < before.chars().count() {
                 right_without_progress = false;
+                deadline = Instant::now() + window;
                 break;
             }
             if Instant::now() >= progress_deadline {
@@ -1420,6 +1427,33 @@ mod tests {
             assert!(io.pastes.is_empty());
             assert!(!io.keys.iter().any(|key| key == "Enter"));
         }
+    }
+    struct SlowClearing {
+        remaining: usize,
+        keys: Vec<String>,
+    }
+    impl Transport for SlowClearing {
+        fn screen(&mut self) -> Result<String> {
+            Ok(if self.remaining == 0 { styled_empty() }
+               else { other_screen(&format!("{}\x1b[7m \x1b[0m", "x".repeat(self.remaining))) })
+        }
+        fn key(&mut self, key: &str) -> Result<()> {
+            self.keys.push(key.into());
+            if key == "C-u" {
+                std::thread::sleep(Duration::from_millis(150));
+                self.remaining -= 1;
+            }
+            Ok(())
+        }
+        fn paste(&mut self, _: &str) -> Result<()> { Err("unexpected paste".into()) }
+        fn resolved(&mut self) -> Result<Option<Value>> { Ok(None) }
+    }
+    #[test]
+    fn slow_verified_clearing_continues_past_the_idle_window() {
+        // Eight verified rounds take longer than the window between them.
+        let mut io = SlowClearing { remaining: 8, keys: Vec::new() };
+        clear_other_within(&mut io, &card(), 2, Duration::from_millis(600)).unwrap();
+        assert_eq!(io.keys, ["C-e", "C-u"].repeat(8));
     }
     #[test]
     fn newline_traversal_without_clear_progress_never_repeats_or_pastes() {

@@ -11,6 +11,7 @@ mod native_ui;
 mod session_reference;
 mod platform;
 mod presence;
+mod screen;
 mod speech;
 mod status;
 mod state;

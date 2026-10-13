@@ -163,10 +163,10 @@ class Questions(unittest.TestCase):
         result.update(updates)
         return result
 
-    def answer(self,payload=None,remote=False,success=True):
+    def answer(self,payload=None,remote=False,success=True,timeout=15):
         result=subprocess.run([str(HGS),*(['@remote'] if remote else []),'answer',self.name,'--json'],
                               input=json.dumps(payload or self.payload()),text=True,capture_output=True,
-                              env=self.env,timeout=15)
+                              env=self.env,timeout=timeout)
         if success:
             self.assertEqual(result.returncode,0,result.stderr)
             return json.loads(result.stdout)

@@ -31,16 +31,18 @@ class AgentCompatibility(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(payload))
         return stream.getvalue()
 
-    def package(self, payload, agent='codex'):
-        return {'url': compat.AGENTS[agent]['tarball'] + 'fixture.tgz',
+    def package(self, payload, agent='codex', target=None):
+        target = target or compat.AGENTS[agent]['targets'][0]
+        return {'version': '1.2.3', 'target': target,
+                'url': compat.AGENTS[agent]['tarball'].format(version='1.2.3', target=target),
                 'integrity': 'sha512-' + base64.b64encode(hashlib.sha512(payload).digest()).decode()}
 
     def test_verified_archive_extracts_only_the_expected_executable(self):
-        for agent, spec in compat.AGENTS.items():
-            payload = self.archive(name=spec['member'])
-            with self.subTest(agent), tempfile.TemporaryDirectory() as temporary, patch.object(
+        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() for target in spec['targets']]:
+            payload = self.archive(name=compat.AGENTS[agent]['member'])
+            with self.subTest(agent=agent, target=target), tempfile.TemporaryDirectory() as temporary, patch.object(
                     compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
-                native = compat.install_native(agent, self.package(payload, agent), Path(temporary))
+                native = compat.install_native(agent, self.package(payload, agent, target), Path(temporary))
                 self.assertEqual(native.name, agent)
                 self.assertEqual(native.read_bytes(), b'synthetic-native-executable')
                 self.assertEqual(native.stat().st_mode & 0o777, 0o755)
@@ -48,11 +50,16 @@ class AgentCompatibility(unittest.TestCase):
 
     def test_each_agent_accepts_only_its_own_official_distribution(self):
         payload = self.archive(name=compat.AGENTS['claude']['member'])
-        for agent, other in (('codex', 'claude'), ('claude', 'codex')):
-            with self.subTest(agent), tempfile.TemporaryDirectory() as temporary, patch.object(
+        darwin = self.package(payload, 'claude', 'darwin-arm64')
+        cases = [('codex', self.package(payload, 'claude')), ('claude', self.package(payload, 'codex')),
+                 # A target must match its URL, and Codex has no reviewed macOS package.
+                 ('claude', dict(darwin, target='linux-x64')), ('codex', dict(self.package(payload), target='darwin-arm64'))]
+        for agent, package in cases:
+            with self.subTest(agent=agent, url=package['url'], target=package['target']), \
+                    tempfile.TemporaryDirectory() as temporary, patch.object(
                     compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)) as fetch:
                 with self.assertRaisesRegex(ValueError, 'official ' + compat.AGENTS[agent]['name']):
-                    compat.install_native(agent, self.package(payload, other), Path(temporary))
+                    compat.install_native(agent, package, Path(temporary))
                 fetch.assert_not_called()
 
     def test_reviewed_releases_match_the_pinned_packages(self):
@@ -60,10 +67,14 @@ class AgentCompatibility(unittest.TestCase):
         reviewed = {row['name']: row['reviewed_versions'] for row in manifest['upstream']}
         for agent, spec in compat.AGENTS.items():
             pins = manifest[agent]
+            versions = list(dict.fromkeys(package['version'] for package in pins))
             self.assertTrue(pins, agent)
-            self.assertEqual(reviewed[spec['name']], [package['version'] for package in pins])
+            self.assertEqual(reviewed[spec['name']], versions)
+            # Every reviewed version is pinned exactly once for each supported target.
+            self.assertEqual(sorted((package['version'], package['target']) for package in pins),
+                             sorted((version, target) for version in versions for target in spec['targets']))
             for package in pins:
-                self.assertTrue(package['url'].startswith(spec['tarball'] + package['version']), package['url'])
+                self.assertEqual(package['url'], spec['tarball'].format(**package))
                 self.assertTrue(package['integrity'].startswith('sha512-'))
 
     def test_changed_package_bytes_fail_before_extraction(self):
@@ -107,12 +118,13 @@ class AgentCompatibility(unittest.TestCase):
 
     def test_latest_claude_canary_uses_the_official_platform_package(self):
         manifest = json.loads(compat.MANIFEST.read_text())
-        pinned = manifest['claude'][-1]['version']
+        pinned = next(package['version'] for package in reversed(manifest['claude']) if package['target'] == 'linux-x64')
         metadata = {'version': '9.8.7', 'dist': {
-            'tarball': compat.AGENTS['claude']['tarball'] + '9.8.7.tgz', 'integrity': 'sha512-fixture'}}
+            'tarball': compat.AGENTS['claude']['tarball'].format(version='9.8.7', target='linux-x64'),
+            'integrity': 'sha512-fixture'}}
         responses = {source['url']: {'version': '9.8.7'} if source['name'] == 'Claude Code' else OSError('fixture')
                      for source in manifest['upstream']}
-        responses[compat.AGENTS['claude']['metadata'].format('9.8.7')] = metadata
+        responses[compat.AGENTS['claude']['metadata'].format(version='9.8.7', target='linux-x64')] = metadata
 
         def fetch(url):
             if isinstance(responses[url], Exception):
@@ -123,12 +135,13 @@ class AgentCompatibility(unittest.TestCase):
             directory = results / agent / package['version']
             directory.mkdir(parents=True)
             (directory / 'cli-help.txt').write_text('fixture help ' + package['version'] + '\n')
-            return {'agent': agent, 'version': package['version'], 'status': 'passed',
+            return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed',
                     'cli_help_sha256': package['version'], 'url': package['url']}
 
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(compat, 'fetch_json', side_effect=fetch), \
                 patch.object(compat, 'qualify', side_effect=qualify), \
+                patch.object(compat, 'host_target', return_value='linux-x64'), \
                 patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--latest', '--agent', 'claude',
                                                   '--results', temporary]):
             failed = compat.main()
@@ -143,6 +156,33 @@ class AgentCompatibility(unittest.TestCase):
         self.assertEqual(report['cli_help_changed'], {'claude': True})
         self.assertIn('## Real Claude Code contracts', summary)
         self.assertNotIn('Codex contracts', summary)
+
+    def test_host_target_selects_its_pinned_agents_and_rejects_unreviewed_ones(self):
+        qualified = []
+
+        def qualify(agent, package, work, results, hgs):
+            qualified.append((agent, package['target']))
+            return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed'}
+
+        for target, arguments, expected in [
+                ('linux-x64', [], [('codex', 'linux-x64'), ('codex', 'linux-x64'), ('claude', 'linux-x64')]),
+                ('darwin-arm64', [], [('claude', 'darwin-arm64')]),
+                ('darwin-arm64', ['--agent', 'codex'], SystemExit),
+                (None, [], SystemExit)]:
+            qualified.clear()
+            with self.subTest(target=target, arguments=arguments), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat, 'qualify', side_effect=qualify), \
+                    patch.object(compat, 'host_target', return_value=target), \
+                    patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--results', temporary, *arguments]), \
+                    patch('sys.stderr', io.StringIO()):
+                if expected is SystemExit:
+                    with self.assertRaises(SystemExit):
+                        compat.main()
+                    self.assertEqual(qualified, [])
+                else:
+                    self.assertFalse(compat.main())
+                    self.assertEqual(qualified, expected)
+                    self.assertIn('(' + target + '): passed', (Path(temporary) / 'summary.md').read_text())
 
     def test_native_runner_rejects_an_empty_or_skipped_suite(self):
         # Execute the actual CI runner with an unavailable native executable:

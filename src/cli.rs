@@ -243,6 +243,10 @@ pub(crate) fn usage() -> &'static str {
 }
 
 pub fn dispatch(args: Vec<String>) -> Result<i32> {
+    // Private: the screen model behind the differential tmux capture test.
+    if args.first().is_some_and(|a| a == "__screen-capture") {
+        return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
+    }
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
     if args.first().is_some_and(|a| a == "__state") {
