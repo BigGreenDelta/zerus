@@ -79,6 +79,16 @@ class Tmux:
     def running(self):
         return self.socket.exists() and self.command("list-sessions").returncode == 0
 
+    def describe(self):
+        """The pane fields and terminal processes hgs checks before input, for failure messages."""
+        panes = self.command("list-panes", "-a", "-F", "#{session_name} #{pane_id} tty=#{pane_tty} "
+                             "in_mode=#{pane_in_mode} command=#{pane_current_command} dead=#{pane_dead} "
+                             "run=#{@hgs_run} paste=#{bracket_paste_flag}").stdout
+        ttys = {field[4:] for line in panes.splitlines() for field in line.split() if field.startswith("tty=")}
+        processes = [subprocess.run(["ps", "-o", "pid=,pgid=,tpgid=,tty=,stat=,comm=,args=", "-t", tty.removeprefix("/dev/")],
+                                    capture_output=True, text=True).stdout for tty in sorted(ttys)]
+        return "tmux panes:\n" + panes + "terminal processes:\n" + "".join(processes)
+
     def stop(self):
         # kill-server returns before panes exit. Wait for every agent and supervisor
         # of this test, so none writes into its folder after removal.
@@ -281,7 +291,8 @@ class Contract(unittest.TestCase):
         result = subprocess.run([str(HGS), *args], env=self.env, cwd=self.root, input=input, capture_output=True,
                                 stdin=subprocess.DEVNULL if input is None else None, text=True, timeout=30)
         if rc is not None:
-            self.assertEqual(result.returncode, rc, f"hgs {shlex.join(args)}\n{result.stdout}{result.stderr}")
+            self.assertEqual(result.returncode, rc, f"hgs {shlex.join(args)}\n{result.stdout}{result.stderr}"
+                             + (self.backend.describe() if self.launched else ""))
         return result
 
     def json(self, *args, input=None):
