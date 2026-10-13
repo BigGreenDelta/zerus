@@ -15,7 +15,8 @@ bash scripts/ci/gui.sh
 The CLI script clears inherited `HGS_*` session/account context, runs Rust unit
 tests and terminal smoke tests, then runs the Python integration test classes in
 parallel fresh processes and builds a release binary. Classes larger than twelve
-tests run as several jobs unless they share a class fixture, slowest first. The
+tests run as several jobs unless they share a class fixture, slowest first by
+the previous local run, or else by `scripts/ci/python-durations.json`. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
 headlessly in parallel (`build` or `test` runs only that half);
 `test_sessionswindow` runs as ten shards of its test functions. Tray sources

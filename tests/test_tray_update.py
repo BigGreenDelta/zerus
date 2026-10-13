@@ -233,9 +233,17 @@ class TrayUpdate(unittest.TestCase):
         running = leftover('.zerus-running', ['hgs-tray'])
         self.script(running / 'hgs-tray', '#!/bin/sh\nsleep 60\n')
         os.utime(running, (time.time() - 7200,) * 2)
-        process = subprocess.Popen([str(running / 'hgs-tray')], start_new_session=True)
-        self.addCleanup(process.wait)
-        self.addCleanup(process.kill)
+        # The shell keeps the folder in use; its sleep child must not hold the runner's pipes open.
+        process = subprocess.Popen([str(running / 'hgs-tray')], start_new_session=True, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def stop():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        self.addCleanup(stop)
         (folder / '.zerus-link').symlink_to(self.root)
         self.build('first', self.installed)
         result = self.update(self.build('second'))

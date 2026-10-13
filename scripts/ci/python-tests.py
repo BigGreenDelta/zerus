@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "tests"
 RESULTS = ROOT / "artifacts/test-results/python"
 DURATIONS = RESULTS / "durations.json"
+# Without local durations, those of a main run order the jobs: per job the larger
+# of its Linux and macOS cli-results durations.json, in whole seconds.
+SEED = Path(__file__).with_name("python-durations.json")
 TIMEOUT = 600
 # Larger classes run as several jobs of at most this many tests, unless they
 # share a class fixture.
@@ -79,10 +82,13 @@ def main():
     workers = max(1, int(os.environ.get("ZERUS_TEST_JOBS") or min(os.cpu_count() or 1, 16)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         jobs = [job for listed in pool.map(jobs_for, modules) for job in listed]
-    try:
-        previous = json.loads(DURATIONS.read_text())
-    except (OSError, ValueError):
-        previous = {}
+    previous = {}
+    for path in (DURATIONS, SEED):
+        try:
+            previous = json.loads(path.read_text())
+            break
+        except (OSError, ValueError):
+            pass
     # Longest first keeps the slowest classes off the end of the run.
     jobs.sort(key=lambda job: -previous.get(job[0], len(job[1]) if len(job[1]) > 1 else
                                             (TESTS / (job[0].split(".")[0] + ".py")).stat().st_size / 1000))
