@@ -383,7 +383,7 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         while (pieceStart < pieces.size() && pieces[pieceStart].block == each)
             area.addPath(pieces[pieceStart++].shape);
         const QRectF reach = area.boundingRect();
-        if (pieceStart - from <= 8 || painter->worldTransform().type() > QTransform::TxTranslate) {
+        if (pieceStart - from <= 8 || painter->combinedTransform().type() > QTransform::TxTranslate) {
             batches.append({each, area, reach}); continue;
         }
         const auto device = painter->deviceTransform();
@@ -410,7 +410,7 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     // Align the temporary tile to the destination's physical pixel grid.
     QImage background;
     QPointF backgroundOrigin;
-    const auto transform = painter->worldTransform();
+    const auto transform = painter->combinedTransform();
     const bool translated = transform.type() <= QTransform::TxTranslate;
     if (translated && painter->opacity() == 1 && painter->compositionMode() == QPainter::CompositionMode_SourceOver
         && palette.brush(QPalette::Base).isOpaque()) {
@@ -418,7 +418,7 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         for (const auto &batch : std::as_const(batches)) reach = reach.united(batch.clip);
         const qreal ratio = painter->device()->devicePixelRatioF();
         const QRect pixels = painter->deviceTransform().mapRect(reach).toAlignedRect();
-        backgroundOrigin = QPointF(pixels.left() / ratio - transform.dx(), pixels.top() / ratio - transform.dy());
+        backgroundOrigin = painter->deviceTransform().inverted().map(QPointF(pixels.topLeft()));
         background = QImage(pixels.size(), QImage::Format_ARGB32_Premultiplied);
         background.setDotsPerMeterX(qRound(painter->device()->logicalDpiX() / .0254));
         background.setDotsPerMeterY(qRound(painter->device()->logicalDpiY() / .0254));
@@ -432,20 +432,22 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         }
         background.setDevicePixelRatio(ratio);
     }
-    for (const auto &batch : std::as_const(batches)) {
+    if (background.isNull()) {
+        // Preserve the caller's compositing for transparent bases or unusual
+        // transforms. Restore once, rather than repainting all text per band.
+        QPainterPath area; area.setFillRule(Qt::WindingFill);
+        for (const auto &piece : std::as_const(pieces)) area.addPath(piece.shape);
+        painter->save(); painter->setClipPath(area, Qt::IntersectClip);
+        context.clip = area.boundingRect();
+        painter->fillRect(context.clip, palette.brush(QPalette::Base)); layout->draw(painter, context);
+        painter->restore();
+    } else for (const auto &batch : std::as_const(batches)) {
         painter->save();
         if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
         painter->setClipPath(batch.area, Qt::IntersectClip);
-        if (!background.isNull()) {
-            const qreal ratio = background.devicePixelRatio();
-            const QRectF pixels((batch.clip.topLeft() - backgroundOrigin) * ratio, batch.clip.size() * ratio);
-            painter->drawImage(batch.clip, background, pixels);
-        }
-        else {
-            painter->fillRect(batch.clip, palette.brush(QPalette::Base));
-            context.clip = batch.clip;
-            layout->draw(painter, context);
-        }
+        const qreal ratio = background.devicePixelRatio();
+        const QRectF pixels((batch.clip.topLeft() - backgroundOrigin) * ratio, batch.clip.size() * ratio);
+        painter->drawImage(batch.clip, background, pixels);
         painter->restore();
     }
     painter->save(); painter->setRenderHint(QPainter::Antialiasing);
@@ -463,11 +465,11 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         painter->setClipPath(batch.area, Qt::IntersectClip);
         painter->setPen(palette.color(QPalette::Text));
         QRectF textClip = batch.clip;
-        if (batch.sliced && !ranges.isEmpty()) {
+        if (batch.sliced) {
             qreal lineHeight = 0;
             for (int i = 0; i < each.layout()->lineCount(); ++i) lineHeight = qMax(lineHeight, each.layout()->lineAt(i).height());
-            // Keep Qt's selection regions whole at an external band boundary;
-            // clipping a selection midway through its line changes glyph edges.
+            // Retain neighboring lines: CoreText glyph ink can overhang line
+            // metrics, and slicing Qt's selection regions changes glyph edges.
             textClip.adjust(0, -lineHeight, 0, lineHeight);
         }
         each.layout()->draw(painter, layout->blockBoundingRect(each).topLeft() - each.layout()->position(), ranges, textClip);
