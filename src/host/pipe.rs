@@ -247,6 +247,9 @@ impl PipeStream {
         store_timeout(&self.0.read_timeout, timeout)
     }
 
+    /// How long a write waits for the peer to make room; None waits for ever. A
+    /// write that times out may have sent part of its bytes, so the connection
+    /// is out of step and must be closed.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         store_timeout(&self.0.write_timeout, timeout)
     }
@@ -258,10 +261,12 @@ impl PipeStream {
         self.0.closed.set();
     }
 
-    /// Check the client of this server end, after its first frame has been read
-    /// (impersonation fails with `ERROR_CANNOT_IMPERSONATE` before any data): it
-    /// must run as `host.user`, at `host.integrity` or above. The thread reverts to
-    /// itself before this returns, on every path.
+    /// Check the client of this server end once its hello has been read: it must
+    /// run as `host.user`, at `host.integrity` or above. A client that opened the
+    /// pipe with dynamic tracking (no `SECURITY_SQOS_PRESENT`) can be impersonated
+    /// only after a read (`ERROR_CANNOT_IMPERSONATE` before); `connect` asks for
+    /// static tracking, which fixes the identity when the pipe is opened. The
+    /// thread reverts to itself before this returns, on every path.
     pub fn authenticate(&self, host: &Identity) -> Result<Client, AuthError> {
         let token = {
             let _impersonation = Impersonation::begin(self.raw()).map_err(AuthError::Io)?;
@@ -1021,15 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn impersonation_needs_data_and_always_reverts() {
+    fn authentication_reverts_on_every_path() {
         let host = Identity::current().unwrap();
         let (server, client) = pair(&host);
-        // Nothing read yet: the client cannot be impersonated.
-        let error = server.authenticate(&host).unwrap_err();
-        assert!(
-            matches!(&error, AuthError::Io(e) if e.raw_os_error() == Some(ERROR_CANNOT_IMPERSONATE as i32)),
-            "{error:?}"
-        );
+        // Nothing read yet. With `connect`'s static tracking the pipe file system
+        // captured the client when it opened the pipe, so it may be identified
+        // already; with dynamic tracking it could not be before a read. The host
+        // reads the hello first either way, and the thread reverts on both paths.
+        match server.authenticate(&host) {
+            Ok(early) => assert_eq!(early.pid, std::process::id()),
+            Err(error) => assert!(
+                matches!(&error, AuthError::Io(e) if e.raw_os_error() == Some(ERROR_CANNOT_IMPERSONATE as i32)),
+                "{error:?}"
+            ),
+        }
         assert!(Token::of_thread().unwrap().is_none());
 
         write_json(&mut &client, Kind::Json, &Hello::new(Role::Cli)).unwrap();
