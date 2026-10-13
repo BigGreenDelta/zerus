@@ -4,6 +4,7 @@ use super::*;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -765,6 +766,14 @@ fn worker() -> Result<i32> {
         std::thread::sleep(Duration::from_secs(2));
     }
 }
+/// The session host supervises the worker on Windows (spec D14); until it does,
+/// nothing starts one. A worker detached from hgs.exe's job would outlive the
+/// GUI and keep the GUI's hgs.exe from being replaced.
+#[cfg(windows)]
+fn ensure_worker() -> Result<()> {
+    Ok(())
+}
+#[cfg(not(windows))]
 fn ensure_worker() -> Result<()> {
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.

@@ -185,13 +185,13 @@ fn command() -> Option<(&'static str, Vec<String>)> {
 
 /// Waits briefly; a hung service manager never holds up the command.
 fn run(program: &str, args: &[String]) {
-    let Ok(mut child) = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+    let Ok(mut child) = crate::platform::spawn(
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    ) else {
         return;
     };
     let started = Instant::now();

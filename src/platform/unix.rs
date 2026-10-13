@@ -185,13 +185,30 @@ pub fn never_block(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
-pub(super) fn transient_replace_error(_: &io::Error) -> bool {
+pub(crate) fn transient_replace_error(_: &io::Error) -> bool {
     false
 }
 /// Run `command` in a process group of its own: the terminal's job control does
 /// not reach it and `kill_process_group` stops everything it started.
 pub fn own_process_group(command: &mut Command) -> &mut Command {
     command.process_group(0)
+}
+/// `Command::spawn`. On Windows the child also gets a job of its own that ends
+/// with this process and that nothing it starts can leave (spec D4).
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    command.spawn()
+}
+/// `spawn` in a process group of its own (`own_process_group`).
+pub fn spawn_group(command: &mut Command) -> io::Result<Child> {
+    own_process_group(command).spawn()
+}
+/// `Command::status` through `spawn`.
+pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    command.status()
+}
+/// `Command::output` through `spawn`.
+pub fn output(command: &mut Command) -> io::Result<Output> {
+    command.output()
 }
 /// Stop a child started with `own_process_group` and every process in its group.
 /// Never signals the caller's own process group.

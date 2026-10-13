@@ -11,11 +11,16 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
     // Older Codex already runs in-process and rejects this newer flag. Probe
     // capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
-    let mut child = Command::new(executable).arg("--help")
-        .env_remove("HGS_RUN_ID").env_remove("HGS_SESSION")
-        .stdin(Stdio::null()).stderr(Stdio::null())
-        .stdout(output.try_clone().map_err(|e| e.to_string())?)
-        .spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::platform::spawn(
+        Command::new(executable)
+            .arg("--help")
+            .env_remove("HGS_RUN_ID")
+            .env_remove("HGS_SESSION")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(output.try_clone().map_err(|e| e.to_string())?),
+    )
+    .map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().map_err(|e|e.to_string())? {

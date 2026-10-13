@@ -237,17 +237,18 @@ pub(crate) fn native_ui_url(name: &str) -> Result<String> {
             Err(error) if error == "Unsupported HGS native request" => {
                 // Upgrade the UI of an active legacy host without restarting
                 // its agents. Tokens never appear in process arguments.
-                let mut child = Command::new("node")
-                    .args([
-                        "--input-type=module",
-                        "-e",
-                        include_str!("../dsh/ui-compat.mjs"),
-                    ])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| e.to_string())?;
+                let mut child = crate::platform::spawn(
+                    Command::new("node")
+                        .args([
+                            "--input-type=module",
+                            "-e",
+                            include_str!("../dsh/ui-compat.mjs"),
+                        ])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped()),
+                )
+                .map_err(|e| e.to_string())?;
                 child.stdin.take().ok_or("Could not prepare native UI")?
                     .write_all(json!({"url":url,"sessionId":record["conversation_id"],"cwd":record["cwd"]}).to_string().as_bytes())
                     .map_err(|e| e.to_string())?;
@@ -276,13 +277,22 @@ struct PermissionPlan {
 }
 
 fn legacy_permissions(record: &Value, url: &str, operation: &str) -> Result<Value> {
-    let mut child = Command::new("node")
-        .args([
-            "--input-type=module", "-e",
-            concat!(include_str!("../dsh/account-client.mjs"), "\n", include_str!("../dsh/permissions-compat.mjs")),
-        ])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::platform::spawn(
+        Command::new("node")
+            .args([
+                "--input-type=module",
+                "-e",
+                concat!(
+                    include_str!("../dsh/account-client.mjs"),
+                    "\n",
+                    include_str!("../dsh/permissions-compat.mjs")
+                ),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|e| e.to_string())?;
     child.stdin.take().ok_or("Could not prepare native permissions")?
         .write_all(json!({"url":url,"sessionId":record["conversation_id"],"operation":operation,
             "pending":record["permissions_pending"] == true}).to_string().as_bytes())

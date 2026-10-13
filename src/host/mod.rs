@@ -5,12 +5,14 @@
 //!
 //! Plain Rust that compiles and runs its tests on every platform: `protocol`
 //! (framing and the protocol 1 vocabulary), `endpoint` (pipe name, secret and
-//! host lock), the portable half of `spawn` (environment blocks and command
-//! lines), `keys` (tmux's key names and bytes), `sequences` (query and reply
-//! filtering), `link` (connections as frames), `session` (a session's screen
-//! model, pumps and attached clients), `registry` (sessions and requests),
-//! `channel` (the supervisor channel and input evidence), `server`'s
-//! connection protocol, `client`'s connection, `worker` (D14) and `log`.
+//! host lock), `staging` (explicit enablement and the staged CLI and host
+//! images, D2), the argument handling of `admin` (`hgs session-host`), the
+//! portable half of `spawn` (environment blocks and command lines), `keys`
+//! (tmux's key names and bytes), `sequences` (query and reply filtering), `link`
+//! (connections as frames), `session` (a session's screen model, pumps and
+//! attached clients), `registry` (sessions and requests), `channel` (the
+//! supervisor channel and input evidence), `server`'s connection protocol,
+//! `client`'s connection, `worker` (D14) and `log`.
 //! Windows only: `pipe`, `token`, `conpty`, `job`, `console` (sessions on
 //! ConPTY), `server::serve`, `client::{connect, connect_or_start}` and
 //! `command` (`hgs.exe __host`).
@@ -18,6 +20,7 @@
 // and attach client (M5) use more of it than the host process does today.
 #![cfg_attr(not(all(windows, test)), allow(dead_code))]
 
+pub(crate) mod admin;
 mod channel;
 mod client;
 #[cfg(windows)]
@@ -28,7 +31,7 @@ mod conpty;
 mod console;
 pub(crate) mod endpoint;
 #[cfg(windows)]
-mod job;
+pub(crate) mod job;
 pub(crate) mod keys;
 mod link;
 mod log;
@@ -40,6 +43,7 @@ pub(crate) mod sequences;
 mod server;
 mod session;
 pub(crate) mod spawn;
+pub(crate) mod staging;
 #[cfg(test)]
 mod tests;
 #[cfg(windows)]

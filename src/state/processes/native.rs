@@ -281,12 +281,12 @@ fn descendants(record: &Value) -> BTreeMap<u32, f64> {
     if root == 0 {
         return result;
     }
-    let Ok(p) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,lstart="])
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC")
-        .output()
-    else {
+    let Ok(p) = crate::platform::output(
+        std::process::Command::new("ps")
+            .args(["-axo", "pid=,ppid=,lstart="])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC"),
+    ) else {
         return result;
     };
     let parents: BTreeMap<u32, (u32, f64)> = String::from_utf8_lossy(&p.stdout)

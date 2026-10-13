@@ -121,9 +121,10 @@ pub fn secret(state_dir: &Path) -> Result<String, SecretError> {
     }
 }
 
-/// The secret of `state_dir`'s host when it exists, without creating one: a
-/// client that only connects never writes it, and a missing secret means that
-/// no host has run for the directory.
+/// The secret of `state_dir`'s host when one was created, without creating it:
+/// a host creates its secret before it listens, so without one no host runs
+/// there. For readers that must never start or prepare a host (a client that
+/// only connects, `session-host status`).
 pub fn existing_secret(state_dir: &Path) -> Result<Option<String>, SecretError> {
     match read_secret(&state_dir.join(SECRET_FILE)) {
         Ok(secret) => Ok(Some(secret)),
@@ -326,7 +327,12 @@ mod tests {
             .collect();
         assert_eq!(entries, [SECRET_FILE]);
 
+        assert_eq!(existing_secret(dir.path()).unwrap(), Some(first.clone()));
+
         let other = tempfile::tempdir().unwrap();
+        // A reader that must not prepare a host finds none and creates nothing.
+        assert_eq!(existing_secret(other.path()).unwrap(), None);
+        assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
         assert_ne!(secret(other.path()).unwrap(), first);
         assert_eq!(
             resolve(SID, dir.path()).unwrap(),
@@ -392,6 +398,10 @@ mod tests {
                 "{content:?}"
             );
             assert!(error.to_string().contains("remove the file"));
+            assert!(matches!(
+                existing_secret(dir.path()),
+                Err(SecretError::Malformed(_))
+            ));
             assert_eq!(fs::read_to_string(&path).unwrap(), content);
         }
         fs::write(&path, SECRET).unwrap();

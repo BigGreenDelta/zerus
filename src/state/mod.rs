@@ -655,10 +655,24 @@ mod control_console_tests {
     use super::*;
     use crate::platform::LOCAL_SESSIONS_UNSUPPORTED as UNSUPPORTED;
 
+    /// Set for the process `entry_points_answer_as_a_control_console` starts.
+    const PROBE: &str = "HGS_TEST_CONTROL_CONSOLE";
+
+    /// Run by `entry_points_answer_as_a_control_console` in a process whose
+    /// profile is a new temporary folder: whether local sessions are enabled is
+    /// the `local-sessions` marker in the profile (spec D2), and the user running
+    /// these tests may have enabled them.
     #[test]
-    fn entry_points_answer_as_a_control_console() {
+    #[ignore = "run by entry_points_answer_as_a_control_console"]
+    fn control_console_probe() {
+        if std::env::var_os(PROBE).is_none() {
+            return;
+        }
         assert_eq!(dispatch(&["list".into()]).unwrap_err(), UNSUPPORTED);
-        assert_eq!(merge_snapshot(json!({"sessions":[]})).unwrap_err(), UNSUPPORTED);
+        assert_eq!(
+            merge_snapshot(json!({"sessions":[]})).unwrap_err(),
+            UNSUPPORTED
+        );
         assert_eq!(account_context("claude/p").unwrap_err(), UNSUPPORTED);
         assert_eq!(startup_failure("claude/p").unwrap_err(), UNSUPPORTED);
         assert_eq!(recovery_worker_running(), None);
@@ -668,5 +682,42 @@ mod control_console_tests {
         );
         let error = with_launch_binding("claude/p", |_| Ok(())).unwrap_err();
         assert_eq!(error.to_string(), UNSUPPORTED);
+        // The marker alone opens the entry points.
+        let layout = crate::host::staging::Layout::current().unwrap();
+        assert!(crate::host::staging::enable(&layout.marker).unwrap());
+        assert_eq!(local_sessions(), Ok(()));
+    }
+
+    #[test]
+    fn entry_points_answer_as_a_control_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "state::control_console_tests::control_console_probe",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(PROBE, "1")
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("HGS_STATE_DIR", dir.path().join("state"))
+            .env_remove("HGS_CONFIG_DIR")
+            .env_remove("XDG_STATE_HOME")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The probe ran, rather than matching no test.
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }

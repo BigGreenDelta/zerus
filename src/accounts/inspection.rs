@@ -44,14 +44,13 @@ pub(super) fn capture_with_exit(
     seconds: u64,
     accepted_exit: Option<i32>,
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut child = platform::own_process_group(
+    let mut child = platform::spawn_group(
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),
     )
-    .spawn()
-        .map_err(|_| "Native account command is unavailable.".to_owned())?;
+    .map_err(|_| "Native account command is unavailable.".to_owned())?;
     let stdout = child.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -153,7 +152,7 @@ fn codex(home: &Path, native: bool) -> Value {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let Ok(mut child) = platform::own_process_group(&mut cmd).spawn() else {
+    let Ok(mut child) = platform::spawn_group(&mut cmd) else {
         return result;
     };
     let (tx, rx) = mpsc::channel();
