@@ -198,6 +198,7 @@ private slots:
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
+    void richReplyScrollingKeepsQueuedInputResponsive_data();
     void staleIdentityAndPresentationResultsAreRejected();
     void streamingSnapshotsMakeProgress();
     void destroyingViewDoesNotWaitForWorker();
@@ -357,13 +358,22 @@ void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()
     QVERIFY2(bestCpu < 200, qPrintable(QString("GUI CPU including first paint: %1 ms").arg(bestCpu)));
 }
 
+void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive_data()
+{
+    QTest::addColumn<bool>("paragraph");
+    QTest::newRow("bullets") << false;
+    QTest::newRow("dense-paragraph") << true;
+}
+
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
 {
+    QFETCH(bool, paragraph);
     ActivityView view; view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
     QString body = "## Configuration example\n\nReadable `tool settings` for the `current_session`.\n\n";
     for (int i = 0; i < 18; ++i)
         body += QString("- Preserve `option_%1` and `example/cache/model-catalog/long-catalog-file.json` beside longer prose "
                         "that wraps across lines. Selecting and scrolling this reply must keep the editor responsive.\n").arg(i);
+    if (paragraph) { body.replace("\n- ", " "); body.replace("\n", " "); }
     QJsonArray events;
     for (int i = 0; i < 50; ++i) events.append(journalEvent(i + 1, "Stop", QString("Reply %1\n\n").arg(i) + body));
     view.setActivity({}, events); settle(view);

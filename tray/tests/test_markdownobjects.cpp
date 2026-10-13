@@ -118,6 +118,8 @@ private slots:
     void richRepliesPaintWithinFrameBudget_data();
     void richRepliesPaintWithinFrameBudget();
     void chipIndexFollowsLayoutAndContentChanges();
+    void denseSelectedCodeKeepsEveryGlyph_data();
+    void denseSelectedCodeKeepsEveryGlyph();
     void codeLinesKeepTheParagraphPitch();
     void wrappedCodeKeepsRoundedEnds();
     void selectedCodeKeepsTheSelectionLook();
@@ -246,18 +248,22 @@ void TestMarkdownObjects::longJournalsConvertAndPaintQuickly()
 void TestMarkdownObjects::richRepliesPaintWithinFrameBudget_data()
 {
     QTest::addColumn<int>("replies");
-    QTest::newRow("one-rich-reply") << 1;
-    QTest::newRow("long-rich-history") << 200;
+    QTest::addColumn<bool>("paragraph");
+    QTest::newRow("one-rich-reply") << 1 << false;
+    QTest::newRow("long-rich-history") << 200 << false;
+    QTest::newRow("dense-paragraph") << 1 << true;
+    QTest::newRow("dense-paragraph-history") << 200 << true;
 }
 
 void TestMarkdownObjects::richRepliesPaintWithinFrameBudget()
 {
-    QFETCH(int, replies);
+    QFETCH(int, replies); QFETCH(bool, paragraph);
     const auto theme = MarkdownTheme::github(true, QColor("#1d252e"));
     QString body = "## Configuration example\n\nA readable response uses `tool settings` and `current_session`.\n\n";
     for (int i = 0; i < 18; ++i)
         body += QString("- This paragraph keeps `option_%1` and `example/cache/model-catalog/long-catalog-file.json` readable. "
                         "Longer prose spans multiple lines; selection and links must work without slowing scrolling.\n").arg(i);
+    if (paragraph) { body.replace("\n- ", " "); body.replace("\n", " "); }
     const QString card = "<table width='100%' cellpadding='12'><tr><td width='3' bgcolor='#82b4d6'></td><td bgcolor='#23303a'>"
         + MarkdownHtml::render(body, theme, {}) + "</td></tr></table>";
     QTextDocument doc; doc.setHtml(card.repeated(replies));
@@ -332,6 +338,45 @@ void TestMarkdownObjects::chipIndexFollowsLayoutAndContentChanges()
     QTextDocument replacementDoc; replacementDoc.setHtml(replacement);
     MarkdownObjects::convertChips(&replacementDoc, light()); replacementDoc.setTextWidth(180);
     QCOMPARE(rendered(cached.get()), rendered(&replacementDoc));
+}
+
+void TestMarkdownObjects::denseSelectedCodeKeepsEveryGlyph_data()
+{
+    QTest::addColumn<qreal>("ratio"); QTest::addColumn<qreal>("top");
+    for (const qreal ratio : {1.0, 1.25, 1.5, 2.0})
+        for (const qreal top : {0.0, 17.25})
+            QTest::newRow(qPrintable(QString("%1x-offset-%2").arg(ratio).arg(top))) << ratio << top;
+}
+
+void TestMarkdownObjects::denseSelectedCodeKeepsEveryGlyph()
+{
+    QFETCH(qreal, ratio); QFETCH(qreal, top);
+    const auto theme = MarkdownTheme::github(true, QColor("#1d252e"));
+    QString prose;
+    for (int i = 0; i < 40; ++i)
+        prose += QString("Item `option_%1` beside `example/cache/model-catalog/long-catalog-file.json` and prose. ").arg(i);
+    QTextDocument doc; doc.setHtml(MarkdownHtml::render(prose, theme, {}));
+    MarkdownObjects::convertChips(&doc, theme); doc.setTextWidth(260);
+    const QRectF exposed(0, top, 260, 700);
+    QTextCursor cursor(&doc); cursor.select(QTextCursor::Document);
+    QTextCharFormat selected; selected.setBackground(QColor("#315873")); selected.setForeground(Qt::white);
+    QPalette palette; palette.setColor(QPalette::Base, theme.canvas);
+    QAbstractTextDocumentLayout::PaintContext context; context.palette = palette; context.clip = exposed;
+    context.selections.append({cursor, selected});
+    QImage image(qCeil(260 * ratio), qCeil(700 * ratio), QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(ratio); image.fill(theme.canvas);
+    QPainter painter(&image); painter.translate(0, -top); doc.documentLayout()->draw(&painter, context);
+    const auto original = image.copy();
+    MarkdownObjects::paintChips(&painter, &doc, exposed, palette, context.selections); painter.end();
+    int ink = 0;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x) {
+            const auto pixel = original.pixelColor(x, y);
+            if (pixel.red() < 250 || pixel.green() < 250 || pixel.blue() < 250) continue;
+            ++ink;
+            QVERIFY2(close(image.pixelColor(x, y), pixel), qPrintable(QString("Selected glyph changed at %1,%2").arg(x).arg(y)));
+        }
+    QVERIFY(ink > 1000);
 }
 
 void TestMarkdownObjects::codeLinesKeepTheParagraphPitch()
