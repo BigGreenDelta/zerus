@@ -197,6 +197,7 @@ private slots:
     void hiddenSnapshotsDoNotBuildDocuments();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
+    void richReplyScrollingKeepsQueuedInputResponsive();
     void staleIdentityAndPresentationResultsAreRejected();
     void streamingSnapshotsMakeProgress();
     void destroyingViewDoesNotWaitForWorker();
@@ -354,6 +355,45 @@ void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()
     // Thread CPU excludes host scheduling stalls. The old GUI import/layout
     // consumes ~600 ms for this history; the commit and first paint are bounded.
     QVERIFY2(bestCpu < 200, qPrintable(QString("GUI CPU including first paint: %1 ms").arg(bestCpu)));
+}
+
+void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
+{
+    ActivityView view; view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
+    QString body = "## Configuration example\n\nReadable `tool settings` for the `current_session`.\n\n";
+    for (int i = 0; i < 18; ++i)
+        body += QString("- Preserve `option_%1` and `example/cache/model-catalog/long-catalog-file.json` beside longer prose "
+                        "that wraps across lines. Selecting and scrolling this reply must keep the editor responsive.\n").arg(i);
+    QJsonArray events;
+    for (int i = 0; i < 50; ++i) events.append(journalEvent(i + 1, "Stop", QString("Reply %1\n\n").arg(i) + body));
+    view.setActivity({}, events); settle(view);
+    auto *browser = view.browser(); auto *bar = browser->verticalScrollBar();
+    bar->setValue(bar->maximum() / 2); browser->viewport()->repaint();
+    auto cursor = browser->cursorForPosition(QPoint(80, 150));
+    cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
+    browser->setTextCursor(cursor);
+    const auto selected = browser->textCursor().selectedText(); QVERIFY(!selected.isEmpty());
+    const int scrollBefore = bar->value();
+    QLineEdit editor; editor.show();
+    qint64 bestCpu = std::numeric_limits<qint64>::max();
+    for (int run = 0; run < 3; ++run) {
+        const auto start = threadCpuMs();
+        for (int frame = 0; frame < 20; ++frame) {
+            bool inputDelivered = false;
+            QTimer::singleShot(0, &editor, [&] { QTest::keyClicks(&editor, "x"); inputDelivered = true; });
+            QWheelEvent wheel(QPointF(40, 200), browser->viewport()->mapToGlobal(QPoint(40, 200)), {}, QPoint(0, -120),
+                              Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, false);
+            QApplication::sendEvent(browser->viewport(), &wheel);
+            browser->viewport()->repaint();
+            QCoreApplication::processEvents();
+            QVERIFY(inputDelivered);
+        }
+        bestCpu = std::min(bestCpu, threadCpuMs() - start);
+    }
+    QVERIFY(bar->value() > scrollBefore);
+    QCOMPARE(editor.text(), QString(60, 'x'));
+    QCOMPARE(browser->textCursor().selectedText(), selected);
+    QVERIFY2(bestCpu < 1000, qPrintable(QString("%1 ms GUI CPU for 20 rich scroll/input frames").arg(bestCpu)));
 }
 
 void TestActivityView::staleIdentityAndPresentationResultsAreRejected()

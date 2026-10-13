@@ -29,6 +29,9 @@ QImage resource(const QUrl &url, qreal devicePixelRatio);
 // in it, and long runs wrap. paintChips() draws the chips.
 int convertChips(QTextDocument *document, const MarkdownTheme &theme);
 bool isInlineCode(const QTextFormat &format);
+// Index the final block layout before transferring a prepared Activity document
+// to the GUI thread. Other views prepare lazily and invalidate on layout changes.
+void prepareChips(QTextDocument *document);
 // Draws the rounded chips beneath the inline code once the document itself is drawn:
 // painter in document coordinates, palette's Base under the document, selections as
 // the view painted them (they stay on top of the chips).

@@ -115,6 +115,9 @@ private slots:
     void plainTextKeepsBlankLinesInsideMessages();
     void codeFollowsItsTextSizeAndColour();
     void longJournalsConvertAndPaintQuickly();
+    void richRepliesPaintWithinFrameBudget_data();
+    void richRepliesPaintWithinFrameBudget();
+    void chipIndexFollowsLayoutAndContentChanges();
     void codeLinesKeepTheParagraphPitch();
     void wrappedCodeKeepsRoundedEnds();
     void selectedCodeKeepsTheSelectionLook();
@@ -240,6 +243,97 @@ void TestMarkdownObjects::longJournalsConvertAndPaintQuickly()
     QVERIFY2(best < 200, qPrintable(QString::number(best) + " ms for 10 frames"));
 }
 
+void TestMarkdownObjects::richRepliesPaintWithinFrameBudget_data()
+{
+    QTest::addColumn<int>("replies");
+    QTest::newRow("one-rich-reply") << 1;
+    QTest::newRow("long-rich-history") << 200;
+}
+
+void TestMarkdownObjects::richRepliesPaintWithinFrameBudget()
+{
+    QFETCH(int, replies);
+    const auto theme = MarkdownTheme::github(true, QColor("#1d252e"));
+    QString body = "## Configuration example\n\nA readable response uses `tool settings` and `current_session`.\n\n";
+    for (int i = 0; i < 18; ++i)
+        body += QString("- This paragraph keeps `option_%1` and `example/cache/model-catalog/long-catalog-file.json` readable. "
+                        "Longer prose spans multiple lines; selection and links must work without slowing scrolling.\n").arg(i);
+    const QString card = "<table width='100%' cellpadding='12'><tr><td width='3' bgcolor='#82b4d6'></td><td bgcolor='#23303a'>"
+        + MarkdownHtml::render(body, theme, {}) + "</td></tr></table>";
+    QTextDocument doc; doc.setHtml(card.repeated(replies));
+    MarkdownObjects::convertChips(&doc, theme); doc.setTextWidth(850);
+    auto *layout = doc.documentLayout();
+    const qreal top = qMax(qreal(0), layout->documentSize().height() / 2 - 350);
+    MarkdownObjects::prepareChips(&doc);
+    QImage image(1700, 1400, QImage::Format_ARGB32_Premultiplied); image.setDevicePixelRatio(2);
+    QPalette palette; palette.setColor(QPalette::Base, theme.canvas);
+    QPainter painter(&image); painter.translate(0, -top);
+    QAbstractTextDocumentLayout::PaintContext context; context.palette = palette; context.clip = QRectF(0, top, 850, 700);
+    const auto frame = [&] {
+        layout->draw(&painter, context);
+        MarkdownObjects::paintChips(&painter, &doc, context.clip, palette, {});
+    };
+    frame();
+    qint64 best = std::numeric_limits<qint64>::max();
+    for (int run = 0; run < 3; ++run) {
+        const auto start = threadCpuMs();
+        for (int i = 0; i < 20; ++i) frame();
+        best = std::min(best, threadCpuMs() - start);
+    }
+    // The former document-wide rounded clip costs 150-225 ms per frame on
+    // this rich response. Allow ample platform margin above the ~15 ms fix.
+    QVERIFY2(best < 1000, qPrintable(QString("%1 ms CPU for 20 rich frames").arg(best)));
+}
+
+void TestMarkdownObjects::chipIndexFollowsLayoutAndContentChanges()
+{
+    // A tall left table cell overlaps many later blocks in the right cell.
+    // Document order and vertical order differ, so culling must retain both.
+    const QString html = "<table width='100%'><tr><td width='50%'>"
+        + MarkdownHtml::render("`long left code repeats words across many lines and keeps its final rounded edge`", light(), {})
+        + "</td><td>" + MarkdownHtml::render("First `right`\n\nSecond `right`\n\nThird `right`", light(), {}) + "</td></tr></table>";
+    const auto fresh = [&](int width, bool prefix = false, bool largerFont = false) {
+        auto doc = std::make_unique<QTextDocument>(); doc->setHtml(html);
+        MarkdownObjects::convertChips(doc.get(), light()); doc->setTextWidth(width);
+        if (prefix) {
+            QTextCursor cursor(doc.get()); cursor.setPosition(0);
+            cursor.insertText("New paragraph before the original table.\n");
+        }
+        if (largerFont) {
+            QFont font = doc->defaultFont(); font.setPixelSize(21); doc->setDefaultFont(font);
+        }
+        return doc;
+    };
+    auto cached = fresh(250);
+    const auto full = rendered(cached.get()); // Populate the index before subsequent mutations.
+    for (int top = 0; top < full.height(); top += 40) {
+        const QRect exposed(0, top, full.width(), qMin(60, full.height() - top));
+        QImage tile(exposed.size(), QImage::Format_ARGB32_Premultiplied); tile.fill(Qt::white);
+        QPalette palette; palette.setColor(QPalette::Base, Qt::white);
+        QAbstractTextDocumentLayout::PaintContext context; context.palette = palette; context.clip = exposed;
+        QPainter painter(&tile); painter.translate(0, -top);
+        cached->documentLayout()->draw(&painter, context);
+        MarkdownObjects::paintChips(&painter, cached.get(), exposed, palette, {});
+        painter.end();
+        QCOMPARE(tile, full.copy(exposed));
+    }
+    for (const int width : {170, 650, 230}) {
+        cached->setTextWidth(width);
+        QCOMPARE(rendered(cached.get()), rendered(fresh(width).get()));
+    }
+    QTextCursor cursor(cached.get()); cursor.setPosition(0);
+    cursor.insertText("New paragraph before the original table.\n");
+    QCOMPARE(rendered(cached.get()), rendered(fresh(230, true).get()));
+    QFont font = cached->defaultFont(); font.setPixelSize(21); cached->setDefaultFont(font);
+    QCOMPARE(rendered(cached.get()), rendered(fresh(230, true, true).get()));
+    // A fresh document has never indexed this content or width.
+    const QString replacement = MarkdownHtml::render("Changed `code`\n\nMore `new_code`.", light(), {});
+    cached->setHtml(replacement); MarkdownObjects::convertChips(cached.get(), light()); cached->setTextWidth(180);
+    QTextDocument replacementDoc; replacementDoc.setHtml(replacement);
+    MarkdownObjects::convertChips(&replacementDoc, light()); replacementDoc.setTextWidth(180);
+    QCOMPARE(rendered(cached.get()), rendered(&replacementDoc));
+}
+
 void TestMarkdownObjects::codeLinesKeepTheParagraphPitch()
 {
     // Code reaching further below the baseline than text must neither grow its
@@ -295,7 +389,9 @@ void TestMarkdownObjects::wrappedCodeKeepsRoundedEnds()
     QVERIFY(close(pixel(left + radius, g.top(first) + 1), fill));
     QVERIFY(close(pixel(left + padding / 2, (g.top(first) + g.bottom(first)) / 2), fill));
     QVERIFY(close(pixel(right - 1, g.bottom(last) - 1), Qt::white));
-    QVERIFY(close(pixel(right - padding / 2, (g.top(last) + g.bottom(last)) / 2), fill));
+    // Sample close to the end: CoreText's final glyph reaches further into
+    // the letter-spacing advance than the Linux rasterizer's glyph does.
+    QVERIFY(close(pixel(right - padding / 4, (g.top(last) + g.bottom(last)) / 2), fill));
     for (const QTextLine &line : {first, middle}) {
         const int broken = line.textStart() + line.textLength();
         QVERIFY(g.block.text().at(broken - 1).isSpace());

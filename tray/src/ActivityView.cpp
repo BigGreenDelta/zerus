@@ -1714,6 +1714,7 @@ void ActivityView::startRender()
         document->setDefaultFont(font);
         document->setDefaultTextOption(option);
         result->build();
+        MarkdownObjects::prepareChips(document);
         // Copy the text model without a second HTML import or layout.
         auto target = std::make_unique<JournalDocument>();
         target->setLayoutEnabled(false);
