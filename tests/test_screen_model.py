@@ -36,6 +36,10 @@ HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 TMUX = shutil.which("tmux")
 FIXTURES = REPO / "tests/fixtures"
 RECORDED = FIXTURES / "screen-streams"
+# U+110000, one past the last code point: glibc tmux keeps it as a character,
+# utf8proc tmux (macOS) replaces it.
+BEYOND_UNICODE = b"\xf4\x90\x80\x80"
+BEYOND_UNICODE_SEQUENCE = re.compile(rb"\xf4[\x90-\xbf][\x80-\xbf][\x80-\xbf]")
 
 INFO_FORMAT = (
     "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on} #{bracket_paste_flag} "
@@ -325,7 +329,8 @@ def corpus():
     add("csi-ignore", CSI + b"1<2mx" + CSI + b"1 =my")
 
     # Invalid UTF-8 and C1 controls.
-    add("utf8-invalid", b"a\x80b\xc3c\xe4\xb8d\xff\xfe" + b"e\xc0\xafg\xed\xa0\x80h\xf4\x90\x80\x80i\xe4\xc3\xa9j")
+    add("utf8-invalid", b"a\x80b\xc3c\xe4\xb8d\xff\xfe" + b"e\xc0\xafg\xed\xa0\x80hi\xe4\xc3\xa9j")
+    add("utf8-beyond-unicode", b"h" + BEYOND_UNICODE + b"i")
     add("utf8-c1", b"x\xc2\x85y\xc2\x9bz")
     add("utf8-split-by-escape", b"\xe4" + sgr(31) + b"\xb8\xad" + sgr(0) + b"!")
     add("utf8-truncated-end", b"ok\xe4\xb8")
@@ -663,8 +668,18 @@ class ScreenModelDifferential(unittest.TestCase):
         model = self.model(case)["plain"].split(b"\n")
         return {c for row, c in enumerate(chars) if actual[row] != model[row]}
 
+    def beyond_unicode_differs(self):
+        """Whether the installed tmux decodes a code point past U+10FFFF otherwise."""
+        case = Case("beyond-unicode", 1, 8, [b"h" + BEYOND_UNICODE + b"i"])
+        return self.run_in_tmux([case])[case.name]["plain"] != self.model(case)["plain"]
+
     def test_streams_and_repaints_match_tmux(self):
         cases = self.cases
+        if self.beyond_unicode_differs():
+            if sys.platform.startswith("linux"):
+                self.fail("tmux and the model decode code points past U+10FFFF differently")
+            cases = [case for case in cases if not BEYOND_UNICODE_SEQUENCE.search(case.stream())]
+            print("screen model: this tmux replaces code points past U+10FFFF; their streams are skipped")
         different = self.character_widths(cases)
         if different and sys.platform.startswith("linux"):
             self.fail("tmux and the model give these characters different widths: %r" % sorted(different))
