@@ -121,6 +121,17 @@ pub fn secret(state_dir: &Path) -> Result<String, SecretError> {
     }
 }
 
+/// The secret of `state_dir`'s host when it exists, without creating one: a
+/// client that only connects never writes it, and a missing secret means that
+/// no host has run for the directory.
+pub fn existing_secret(state_dir: &Path) -> Result<Option<String>, SecretError> {
+    match read_secret(&state_dir.join(SECRET_FILE)) {
+        Ok(secret) => Ok(Some(secret)),
+        Err(SecretError::Io(_, error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_secret(path: &Path) -> Result<String, SecretError> {
     let failed = |error| SecretError::Io(path.to_owned(), error);
     let file = platform::refuse_link(fs::OpenOptions::new().read(true))
@@ -321,6 +332,24 @@ mod tests {
             resolve(SID, dir.path()).unwrap(),
             pipe_name(SID, dir.path(), &first)
         );
+    }
+
+    #[test]
+    fn an_existing_secret_is_read_and_a_missing_one_left_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(existing_secret(dir.path()).unwrap(), None);
+        assert!(
+            fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "nothing written"
+        );
+        assert_eq!(existing_secret(&dir.path().join("missing")).unwrap(), None);
+        let created = secret(dir.path()).unwrap();
+        assert_eq!(existing_secret(dir.path()).unwrap(), Some(created));
+        fs::write(dir.path().join(SECRET_FILE), "bad").unwrap();
+        assert!(matches!(
+            existing_secret(dir.path()),
+            Err(SecretError::Malformed(_))
+        ));
     }
 
     #[test]

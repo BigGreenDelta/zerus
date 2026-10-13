@@ -458,7 +458,9 @@ pub struct CreateSession {
     pub cwd: String,
     /// The whole environment block of the session's supervisor as `KEY=VALUE`
     /// strings, in order: the creating client's environment with the session's
-    /// overrides (D8). The host never adds its own.
+    /// overrides (D8). The host never adds its own environment; it sets only
+    /// what it alone knows (`HGS_HOST_SESSION`, `HGS_HOST_PANE`) and the
+    /// terminal type (`TERM=xterm-256color`, without `COLORTERM`).
     pub env: Vec<String>,
     /// The supervisor's command line, program first.
     pub argv: Vec<String>,

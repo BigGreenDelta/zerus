@@ -292,6 +292,17 @@ impl PipeStream {
         })
     }
 
+    /// The ID of the process serving this client end (`connect` has checked
+    /// that it runs as this user).
+    pub fn server_pid(&self) -> io::Result<u32> {
+        let mut pid = 0;
+        // SAFETY: a client end of a connected pipe and an out pointer to a local.
+        if unsafe { GetNamedPipeServerProcessId(self.raw(), &mut pid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(pid)
+    }
+
     /// The server process's ID, once its token shows this process's user.
     fn verify_server(&self) -> Result<u32, ConnectError> {
         let unverified = |error: io::Error| {
@@ -906,6 +917,7 @@ mod tests {
         let host = Identity::current().unwrap();
         let (_server, client) = pair(&host);
         assert_eq!(client.verify_server().unwrap(), std::process::id());
+        assert_eq!(client.server_pid().unwrap(), std::process::id());
     }
 
     #[test]

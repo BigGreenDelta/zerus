@@ -83,6 +83,13 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use storage::*;
 
+/// The state directory the Windows session host serves (`HGS_STATE_DIR`, else
+/// the default below the home directory), not yet created or canonical.
+#[cfg(windows)]
+pub(crate) fn host_state_root() -> PathBuf {
+    storage::root()
+}
+
 pub(super) type Result<T> = std::result::Result<T, String>;
 pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi"];
 
