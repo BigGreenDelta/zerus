@@ -494,7 +494,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "clear-context" { return clear_context::dispatch(args); }
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
-    if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(&command,args); }
+    if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(&command, args);
     }

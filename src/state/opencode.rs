@@ -403,7 +403,6 @@ fn ensure_host(record: &Value) -> Result<()> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
-        .write(true)
         .mode(0o600)
         .open(dir.join("host.log"))
         .map_err(|e| e.to_string())?;
@@ -1340,10 +1339,8 @@ fn action(
             );
         }
         record["name"] = json!(new);
-    } else {
-        if let Some(scope) = scope {
-            scope.changing();
-        }
+    } else if let Some(scope) = scope {
+        scope.changing();
     }
     match action {
         "pause" => record["paused"] = json!(true),
