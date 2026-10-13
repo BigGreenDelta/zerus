@@ -613,6 +613,18 @@ around reads preserve server order, including messages with equal timestamps.
 An index being built or a missing source explicitly reports incomplete history;
 its partial oldest data must not replace the recent conversation already shown.
 
+Provider indexing normally shares a two MiB byte budget per call and reads at
+most 512 JSONL rows per provider file.
+When that byte window cannot finish one row, the reader may finish that row up
+to a 16 MiB cap, then exhausts the call's remaining byte budget. Large tool
+results are parsed and excluded from public history; large public messages keep
+an explicitly truncated display projection. Malformed rows and rows beyond the
+cap still prevent complete read evidence. Existing indexes blocked by the older
+two MiB row limit replay their provider source in bounded reads after checking
+its old identity and checkpoint. A private-only repair preserves existing public
+IDs, cursors and incoming sequences. Recovered incoming rows that change the
+canonical order use the normal epoch reset; rewritten sources also reset it.
+
 Stop hooks may contain only the first 1,200 Unicode characters of a reply plus
 an ellipsis. Cross-source reconciliation recognizes that native clipping shape
 while retaining time and one-to-one matching checks. Older derived indexes are

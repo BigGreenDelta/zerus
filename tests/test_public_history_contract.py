@@ -129,6 +129,149 @@ class PublicHistoryContract(unittest.TestCase):
             rows = page["events"] + rows
         self.fail("older paging failed to make progress")
 
+    @staticmethod
+    def large_tool_output(size=3 * 1024 * 1024):
+        return {"type": "response_item", "payload": {"type": "custom_tool_call_output",
+                "call_id": "synthetic-large-tool", "output": "PRIVATE TOOL RESULT " + "x" * size}}
+
+    def legacy_oversized_gap(self):
+        path = next((self.state / "public_history").glob("*.sqlite3"))
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('gap','oversized_source_line')")
+            db.execute("DELETE FROM meta WHERE key='source_reader_version'")
+
+    def test_large_private_tool_rows_do_not_block_latest_or_read_sequence(self):
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1)])
+        page = self.complete()
+        self.assertEqual([row["detail"] for row in page["events"]], ["literal public message 0", "literal public message 1"])
+        self.assertEqual([row["incoming_seq"] for row in page["events"]], [1, 2])
+        self.assertEqual(page["head"]["total_incoming"], 2)
+        self.assertNotIn("PRIVATE TOOL RESULT", json.dumps(page))
+        self.assertNotIn("gap", page["source_status"])
+
+    def test_legacy_oversized_gap_replays_without_resetting_public_identity(self):
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1)])
+        before = self.complete()
+        self.legacy_oversized_gap()
+        repairing = self.history()
+        self.assertFalse(repairing["head"]["complete"])
+        self.assertTrue(repairing["indexing"])
+        self.assertIsNone(repairing["head"]["total_incoming"])
+        after = self.complete()
+        self.assertEqual(after["history_epoch"], before["history_epoch"])
+        self.assertEqual([(row["history_id"], row["incoming_seq"]) for row in after["events"]],
+                         [(row["history_id"], row["incoming_seq"]) for row in before["events"]])
+        anchored = self.history(around=before["events"][0]["history_cursor"])
+        self.assertEqual(anchored["history_epoch"], before["history_epoch"])
+        unread = self.history(around_incoming_seq=1, history_epoch=before["history_epoch"])
+        self.assertEqual(unread["head"]["total_incoming"], 2)
+
+    def test_legacy_gap_repair_checks_old_source_before_rewinding(self):
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1)])
+        before = self.complete()
+        self.legacy_oversized_gap()
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1, text="changed public reply")])
+        reset = self.history()
+        self.assertEqual(reset["source_status"]["provider"], "source_reset")
+        self.assertNotEqual(reset["history_epoch"], before["history_epoch"])
+        after = self.complete()
+        self.assertEqual(after["events"][-1]["detail"], "changed public reply")
+
+    def test_legacy_mid_row_skip_repair_keeps_existing_identity(self):
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1)])
+        before = self.complete()
+        self.legacy_oversized_gap()
+        source = self.transcript.read_bytes()
+        offset = source.index(b'{"type": "response_item"') + 2 * 1024 * 1024
+        path = next((self.state / "public_history").glob("*.sqlite3"))
+        with closing(sqlite3.connect(path)) as db, db:
+            for key, value in [("offset:0", str(offset)), ("skip:0", "1"),
+                               ("boundary:0", hashlib.sha256(source[offset - 256:offset]).hexdigest())]:
+                db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
+        after = self.complete()
+        self.assertEqual(after["history_epoch"], before["history_epoch"])
+        self.assertEqual([(row["history_id"], row["incoming_seq"]) for row in after["events"]],
+                         [(row["history_id"], row["incoming_seq"]) for row in before["events"]])
+
+    def test_legacy_gap_repair_rejects_changed_checkpoint_in_an_appended_file(self):
+        self.write_source([self.message(0), self.large_tool_output(), self.message(1)])
+        before = self.complete()
+        self.legacy_oversized_gap()
+        source = self.transcript.read_bytes()
+        changed = source.replace(b"literal public message 1", b"altered public message 1")
+        self.assertEqual(len(changed), len(source))
+        self.transcript.write_bytes(changed)
+        self.append_source([self.message(2)])
+        reset = self.history()
+        self.assertEqual(reset["source_status"]["provider"], "source_reset")
+        self.assertNotEqual(reset["history_epoch"], before["history_epoch"])
+        self.assertEqual(self.complete()["head"]["total_incoming"], 3)
+
+    def test_large_public_row_is_retained_as_an_explicit_bounded_projection(self):
+        text = "Public reply " + "z" * (3 * 1024 * 1024)
+        self.write_source([self.message(0, text=text), self.message(1)])
+        page = self.complete()
+        self.assertEqual(page["head"]["total_incoming"], 2)
+        self.assertTrue(page["events"][0]["detail_truncated"])
+        self.assertLess(len(json.dumps(page).encode()), 1024 * 1024)
+        self.assertEqual(page["events"][1]["detail"], "literal public message 1")
+        self.assertIn(text, self.transcript.read_text())
+
+    def test_large_malformed_row_remains_a_blocking_gap(self):
+        self.write_source([self.message(0)])
+        with self.transcript.open("a") as stream:
+            stream.write(json.dumps(self.large_tool_output())[:-1] + "\n")
+        self.append_source([self.message(1)])
+        for _ in range(8):
+            page = self.history()
+        self.assertEqual(page["source_status"]["gap"], "malformed_source_line")
+        self.assertFalse(page["head"]["complete"])
+        self.assertFalse(page["indexing"])
+        self.assertIsNone(page["head"]["incoming_seq"])
+
+    def test_large_final_row_waits_for_newline_without_a_permanent_gap(self):
+        self.write_source([])
+        with self.transcript.open("a") as stream:
+            stream.write(json.dumps(self.message(0, text="Public reply " + "z" * (3 * 1024 * 1024))))
+        for _ in range(3):
+            pending = self.history()
+        self.assertFalse(pending["head"]["complete"])
+        self.assertNotIn("gap", pending["source_status"])
+        self.assertEqual(pending["source_status"]["provider"], "partial_final_line")
+        with self.transcript.open("a") as stream:
+            stream.write("\n")
+        complete = self.complete()
+        self.assertEqual(complete["head"]["total_incoming"], 1)
+
+    def test_exact_large_row_cap_completes_but_cap_plus_one_stays_blocked(self):
+        for extra in (0, 1):
+            with self.subTest(extra=extra):
+                row = self.large_tool_output(0)
+                prefix_size = len((json.dumps(row) + "\n").encode())
+                row["payload"]["output"] += "x" * (16 * 1024 * 1024 + extra - prefix_size)
+                self.write_source([self.message(0), row, self.message(1)])
+                if not extra:
+                    self.assertEqual(self.complete()["head"]["total_incoming"], 2)
+                else:
+                    for _ in range(8):
+                        page = self.history()
+                    self.assertEqual(page["source_status"]["gap"], "oversized_source_line")
+                    self.assertFalse(page["head"]["complete"])
+
+    def test_unsupported_large_row_legacy_repair_is_one_bounded_replay(self):
+        self.write_source([self.message(0), self.large_tool_output(17 * 1024 * 1024), self.message(1)])
+        for _ in range(12):
+            self.history()
+        self.legacy_oversized_gap()
+        for _ in range(12):
+            page = self.history()
+        self.assertEqual(page["source_status"]["gap"], "oversized_source_line")
+        self.assertFalse(page["head"]["complete"])
+        at_end = page["source_status"]["progress"]["source_bytes"]
+        self.assertEqual(at_end, page["source_status"]["progress"]["known_source_bytes"])
+        for _ in range(2):
+            self.assertEqual(self.history()["source_status"]["progress"]["source_bytes"], at_end)
+
     def test_long_public_history_behind_tool_noise_and_unread_watermark(self):
         source = []
         for index in range(1240):
