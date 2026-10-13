@@ -63,10 +63,16 @@ class NativeHarness(unittest.TestCase):
         ]
         overlay = cls.root / 'patch.json'
         overlay.write_text(json.dumps(patch))
+        # hgs ls and the recovery worker also list tmux sessions. An existing
+        # private TMUX_TMPDIR keeps them off the user's default server; a
+        # missing directory would silently fall back to it.
+        tmux = cls.root / 'tmux'
+        tmux.mkdir(mode=0o700)
         cls.env = {'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8', 'HOME': str(cls.root / 'user'),
                    'DSH_HOME': str(cls.home), 'DSH_TELEMETRY_DISABLED': '1',
                    'HGS_DSH_TEST_PACKAGE': str(package), 'HGS_STATE_DIR': str(cls.state),
-                   'HGS_CONFIG_DIR': str(cls.root / 'config'), 'HGS_SELF': 'test', 'HGS_PEERS': ''}
+                   'HGS_CONFIG_DIR': str(cls.root / 'config'), 'HGS_SELF': 'test', 'HGS_PEERS': '',
+                   'TMUX_TMPDIR': str(tmux)}
         Path(cls.env['HOME']).mkdir()
         cls.log = (cls.root / 'host.log').open('w')
         cls.proc = subprocess.Popen([DSH, '--profile', 'web', '--patch', str(overlay), '--no-open',

@@ -13,7 +13,7 @@ import test_input as fixtures
 from test_questions import Questions
 
 FAKE = r'''
-import os,pathlib,signal,sys,termios,tty
+import os,pathlib,select,signal,sys,termios,time,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=sys.stdin.fileno();original=termios.tcgetattr(fd);tty.setraw(fd)
 os.write(1,b'\x1b[?2004h');selected=0;buf=b''
 command="sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'"
@@ -45,6 +45,14 @@ try:
     if selected==0:
      os.write(1,('\x1b[2J\x1b[H\r\nUpdating Codex via `'+command+'`...\r\n').encode())
      if (root/'exit-after-update').exists():sys.exit(0)
+     # Like Codex: leave the TUI, run the installer for the given seconds, then exit.
+     # Keep recording input meanwhile, so a resent key stays visible to the test.
+     if (root/'installer').exists():
+      termios.tcsetattr(fd,termios.TCSANOW,original);end=time.monotonic()+float((root/'installer').read_text())
+      while (left:=end-time.monotonic())>0:
+       if select.select([fd],[],[],left)[0]:
+        with (root/'received').open('ab') as f:f.write(os.read(fd,65536))
+      sys.exit(0)
     else:
      # Codex keeps announcing the newer version in its main view after a skip.
      os.write(1,'\x1b[2J\x1b[H✨ Update available! 0.160.0 -> 0.160.1\r\nReady for your first message'.encode())
@@ -132,6 +140,22 @@ class CodexUpdate(unittest.TestCase):
         (self.root / 'exit-after-update').touch()
         self.card = self.inspect()['pending_questions'][0]
         self.assertEqual(self.answer(self.payload('update_now'))['status'], 'answered')
+
+    def test_update_now_accepts_exit_after_the_installer(self):
+        # The terminal stops being an input terminal before Codex exits.
+        (self.root / 'installer').write_text('0.3')
+        receipt = self.answer(self.payload('update_now'))
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertTrue(receipt['open_terminal'])
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_installer_outliving_acknowledgement_is_never_retried(self):
+        (self.root / 'installer').write_text('5')
+        request = self.payload('update_now')
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertEqual(self.received(), b'\r')
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertEqual(self.received(), b'\r')
 
     def test_changed_version_or_run_rejects_without_input(self):
         self.answer(self.payload(expected_run_id='other'), success=False)

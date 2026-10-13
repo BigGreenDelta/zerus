@@ -341,8 +341,8 @@ started inside a test's tmux server belong to the class that uses that socket.
 Calls without an hgs ancestor, the fixtures' own tmux and `ps` calls, are listed
 apart and compared only with `--include-direct`. `summarize` warns about tmux
 calls that reach the recording user's default server (no `-S`, `-L`, `TMUX` or
-existing `TMUX_TMPDIR`); on 61d051f, `test_dsh_native` makes 32 such read-only
-calls through `hgs ls` and `hgs recovery worker`.
+existing `TMUX_TMPDIR`): a test that makes one is not isolated and must give hgs
+a private socket or an existing `TMUX_TMPDIR`.
 
 `compare` exits 1 on any difference, and 2 when the two files come from different
 tool versions. It reports operations whose call sequences differ, what differs

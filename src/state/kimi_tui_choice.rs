@@ -136,18 +136,26 @@ fn navigate(
                     }
                     return Err("Agent exited before confirming the answer".into());
                 }
+                // An expected exit can restore the terminal, end the pane or
+                // even the tmux server between the liveness check above and
+                // the terminal checks below. Keep polling the pinned process.
+                let exiting = key == "Enter" && expect_exit && Instant::now() < deadline;
                 if let Err(error) = input::checked_terminal(&active, false) {
                     // Native startup can briefly leave input mode after Enter
                     // while replacing the trust dialog with its main screen.
                     // Wait without sending more keys; acknowledge only after
                     // the pinned process owns a verified input terminal again.
-                    if key == "Enter" && string(question, "source") == "claude_folder_trust"
-                        && Instant::now() < deadline {
+                    if exiting || (key == "Enter" && string(question, "source") == "claude_folder_trust"
+                        && Instant::now() < deadline) {
                         continue;
                     }
                     return Err(error);
                 }
-                let screen = capture(&active)?;
+                let screen = match capture(&active) {
+                    Ok(screen) => screen,
+                    Err(_) if exiting => continue,
+                    Err(error) => return Err(error),
+                };
                 let next = parse(&active, &screen);
                 if key == "Enter" {
                     // A clipped or partially redrawn chooser is not an acknowledgement.
