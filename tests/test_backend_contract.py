@@ -69,7 +69,12 @@ class Tmux:
         server = f"{shlex.quote(TMUX)} -S {shlex.quote(str(self.socket))} -f /dev/null"
         test.script("tmux", f'#!/bin/sh\nexec {server} "$@"\n')
         # Panes start agents through `$SHELL -lic`; a login profile could reorder PATH.
-        test.script("shell", '#!/bin/sh\nshift\nexec /bin/sh -c "$@"\n')
+        # tmux also runs the pane command through this wrapper as its default shell.
+        # Exec it, as bash does with one command and dash does not, so no shell stays
+        # the terminal's foreground process (hgs refuses input to a shell).
+        test.script("shell", '#!/bin/sh\nshift\ncommand=$1; shift\n'
+                    'case $command in exec\\ *) ;; *) command="exec $command" ;; esac\n'
+                    'exec /bin/sh -c "$command" "$@"\n')
         test.env["SHELL"] = str(test.bin / "shell")
 
     def command(self, *args):
