@@ -113,7 +113,8 @@ version of skew.
   failure (busy past the retry budget, a protocol mismatch, a refused server
   identity) is an error, never an empty snapshot, because an empty snapshot would
   show live sessions as resumable (`src/state/mod.rs:247-260`,
-  `src/state/lifecycle.rs:679-701`).
+  `src/state/lifecycle.rs:679-701`). The backend's `listing` and
+  `attached_counts` are fallible for this (M4.1); tmux keeps answering as before.
 - **One host per user and state directory.** The host holds an exclusive lock on
   `host.lock` in the state directory for its whole life; a second host exits at once.
 - The host exits after its last session ends and no client is attached, after a
@@ -265,16 +266,26 @@ login PATH applies and the supervisor becomes the pane's root process. On Window
 
 - the creating client sends its whole environment block plus the session overrides,
   and the host starts the stable CLI's `hgs.exe --run <argv>` with that block. A
-  long-lived host never hands out its own stale `PATH`;
-- **the host sets `HGS_EXECUTABLE` to the stable CLI**, and on Windows
+  long-lived host never hands out its own stale `PATH`. The client first removes the
+  variables of a session it may run in (`TMUX`, `HGS_HOST_*`, `HGS_SESSION`,
+  `HGS_RUN_ID` and the other launch identities, `HGS_TRACKING`, `HGS_CLIENT`): tmux
+  starts a pane from its server's environment, which never holds them. An override
+  with an empty value removes the variable. `--run` runs an untracked program as its
+  child, since Windows has no `exec`;
+- **the launching client sets `HGS_EXECUTABLE` to the stable CLI** (decided in M4.1:
+  the client already resolved the stable CLI as the supervisor's program, and the
+  protocol keeps the host from adding environment of its own), and on Windows
   `executable_path()` and `runner_executable()` (`src/cli.rs:190-200`,
-  `src/state/storage.rs:305-321`) fail closed if they would resolve to anything else.
+  `src/state/storage.rs:305-321`) fail closed if they would resolve to anything else:
+  they answer the stable CLI whichever hgs.exe runs, and refuse an `HGS_EXECUTABLE`
+  that names another file or a computer where it is not installed.
   Hooks, recipes and records therefore never embed the portable folder's path, which a
   GUI update replaces (`tray/src/AppConfig.cpp:71-73`). A test launches from a
-  portable copy and checks the stable path in the hooks;
+  portable copy and checks that the session runs the stable CLI;
 - the account environment that `run_script` applies on Unix after the login shell
   (`src/accounts.rs:919-944`: `HGS_ACCOUNT_ID`, `ANTHROPIC_CONFIG_DIR`, blanked
-  `AUTH_ENV` keys, agent home variables) is applied by the host;
+  `AUTH_ENV` keys, agent home variables) is among the session's own variables
+  (`accounts::run_environment`), after the others;
 - `--run` keeps its role: it is the supervisor, the pane's root process (`pane_pid`);
   it installs hooks, writes the record and starts the agent;
 - the supervisor is created suspended, assigned to the session job (D9), then resumed;
@@ -389,7 +400,10 @@ with the host prototype after M3.
 ### D12. Hooks on Windows
 
 Hook bytes, once written, are kept (`src/state/hooks.rs:152-162,211-221`), so the
-first Windows form must be final:
+first Windows form must be final. Until it is settled, Windows refuses tracked
+Claude Code, Codex and Kimi launches before anything is written
+(`state::tracking_available`); untracked sessions (`HGS_TRACKING=0`, any other
+program) run. The form:
 
 - the command names the stable CLI (D8) by its absolute path with forward slashes in
   double quotes, followed by `__state hook`, which Git Bash, `cmd.exe` and a direct
@@ -555,7 +569,10 @@ one.
 - **M2 Screen model** with the differential tests (D7).
 - **M3 Session host**: endpoint, protocol 1, ConPTY sessions, jobs, staging and the
   marker, breakaway start, the supervisor channel, `session-host` (D1-D6, D9).
-- **M4 Windows lifecycle**: host backend client, launch and accounts (D8), supervisor
+- **M4 Windows lifecycle** (M4.1, the host backend and the launch path, implemented
+  2026-10-14: untracked sessions, PowerShell, listings, rename, kill and the
+  backend's input and paste paths; tracked agents wait for D10-D12): host backend
+  client, launch and accounts (D8), supervisor
   and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
   (D14), Windows dialog fixtures and path-aware screen parsers
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
