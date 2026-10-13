@@ -7,7 +7,12 @@ target/debug/examples/fake_agent.exe (`cargo build --locked --example
 fake_agent`; HGS_TEST_FAKE_AGENT names another build).
 
 Every case has its own HGS_STATE_DIR, USERPROFILE and HOME, so it reaches only
-a host it started itself, and stops what it started: its sessions are killed,
+a host it started itself and stages nothing into the real profile. A host runs
+only once local sessions are enabled and only from the staged image (spec D2,
+src/host/gate.rs); the cases run the build under test instead, as an isolated
+test host: HGS_HOST_IMAGE names it and HGS_HOST_ALLOW_UNSTAGED=1 lets it serve.
+`Staged` drops both and enables local sessions in its temporary profile with
+`hgs session-host install`, as a user would. Every case stops what it started: its sessions are killed,
 the host is asked to stop, every host process the case saw is waited for (its
 pipe goes before the process does, and the process holds files in the state
 directory) and, as a last resort, ended through a handle opened while it was
@@ -77,8 +82,10 @@ class HostCase(unittest.TestCase):
         for path in (self.state, self.home, self.work):
             path.mkdir()
         self.env = {key: value for key, value in os.environ.items()
-                    if not key.upper().startswith(("HGS_", "FAKE_AGENT_", "TMUX"))}
-        self.env.update(HGS_STATE_DIR=str(self.state), USERPROFILE=str(self.home), HOME=str(self.home))
+                    if not key.upper().startswith(("HGS_", "FAKE_AGENT_", "TMUX", "XDG_"))}
+        self.env.update(HGS_STATE_DIR=str(self.state), USERPROFILE=str(self.home), HOME=str(self.home),
+                        # An isolated test host of the build under test (src/host/gate.rs).
+                        HGS_HOST_IMAGE=str(HGS), HGS_HOST_ALLOW_UNSTAGED="1")
         self.unique = f"hgs-host-{os.getpid()}-{time.monotonic_ns()}"
         self.launches = 0
         # Host processes this case saw running, by process ID.
@@ -162,11 +169,11 @@ class HostCase(unittest.TestCase):
 
     # Sessions.
 
-    def create(self, name, argv, launch_id=None, size=(100, 30), start=True):
+    def create_request(self, name, argv, launch_id=None, size=(100, 30)):
         if launch_id is None:
             self.launches += 1
             launch_id = f"{self.unique}-{self.launches}"
-        request = {
+        return {
             "op": "create_session",
             "launch_id": launch_id,
             "name": name,
@@ -175,13 +182,18 @@ class HostCase(unittest.TestCase):
             "argv": [str(word) for word in argv],
             "size": {"cols": size[0], "rows": size[1]},
         }
-        return self.ok(request, start=start)
+
+    def create(self, name, argv, launch_id=None, size=(100, 30), start=True):
+        return self.ok(self.create_request(name, argv, launch_id, size), start=start)
+
+    def cmd_argv(self, prompt):
+        comspec = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+        return [comspec, "/d", "/q", "/k", f"prompt {prompt}$G"]
 
     def cmd(self, name):
         """A cmd.exe session with a prompt of its own."""
         prompt = f"{self.unique}-{name}"
-        comspec = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
-        created = self.create(name, [comspec, "/d", "/q", "/k", f"prompt {prompt}$G"])
+        created = self.create(name, self.cmd_argv(prompt))
         self.wait_for("the prompt", lambda: prompt + ">" in self.capture(created["pane"]))
         return created, prompt
 
@@ -291,6 +303,127 @@ class Lifecycle(HostCase):
         details = self.info(pane)
         self.assertEqual((details["width"], details["height"]), (120, 40))
         self.assertEqual(self.ok({"op": "list_clients", "target": None})["clients"], [])
+
+
+class Staged(HostCase):
+    """`hgs session-host` and hosts started from the staged image (spec D2), in
+    the case's temporary profile, without the test host variables."""
+
+    def setUp(self):
+        super().setUp()
+        for key in ("HGS_HOST_IMAGE", "HGS_HOST_ALLOW_UNSTAGED"):
+            del self.env[key]
+        self.cli = self.home / ".local" / "bin" / "hgs.exe"
+        self.images = self.home / ".local" / "share" / "hgs" / "host"
+        self.marker = self.home / ".config" / "hgs" / "local-sessions"
+
+    def session_host(self, *args, hgs=HGS, env=None):
+        """The exit code, the printed JSON and the error output of one command."""
+        result = subprocess.run([str(hgs), "session-host", *args, "--json"], env=env or self.env,
+                                capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        report = json.loads(result.stdout) if result.stdout.strip() else None
+        return result.returncode, report, result.stderr
+
+    def host_state(self):
+        code, status, stderr = self.session_host("status")
+        self.assertEqual(code, 0, stderr)
+        return status["host"]["state"]
+
+    def test_install_starts_the_staged_image_until_uninstall(self):
+        # Not enabled: nothing starts a host, and no host runs.
+        code, status, stderr = self.session_host("status")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual((status["enabled"], status["host"]), (False, {"state": "not-installed"}))
+        code, response, stderr = self.call(self.create_request("cmd/early", self.cmd_argv("early")), start=True)
+        self.assertEqual((code, response), (4, None), stderr)
+        self.assertIn("not enabled", stderr)
+        self.assertEqual(self.status(), {"running": False})
+
+        code, installed, stderr = self.session_host("install")
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(installed["enabled"] and installed["marker_created"], installed)
+        self.assertTrue(self.marker.is_file() and self.cli.is_file())
+        image = Path(installed["image"]["path"])
+        self.assertTrue(os.path.samefile(image.parent, self.images), image)
+        self.assertEqual(image.name, installed["image"]["name"])
+        self.assertEqual((self.images / "current").read_text().strip(), image.name)
+
+        # Enabled and stopped, as the stable CLI reports it too.
+        code, status, stderr = self.session_host("status", hgs=self.cli)
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["host"], {"state": "stopped"})
+        self.assertEqual(status["image"]["name"], image.name)
+        self.assertEqual(status["cli"]["sha256"], installed["cli"]["sha256"])
+
+        # A start runs the staged image, not the build under test.
+        created, _ = self.cmd("cmd/staged")
+        hello = self.status()["host"]
+        self.assertTrue(os.path.samefile(hello["image"], image / "hgs.exe"), hello["image"])
+        self.assertEqual(hello["image_hash"], installed["image"]["sha256"])
+        code, status, stderr = self.session_host("status")
+        self.assertEqual(code, 0, stderr)
+        host = status["host"]
+        self.assertEqual((host["state"], host["pid"], host["sessions"], host["in_job"]),
+                         ("running", hello["pid"], 1, False))
+
+        # Neither stop nor uninstall ends a running session.
+        code, report, stderr = self.session_host("stop")
+        self.assertEqual((code, report), (1, None), stderr)
+        self.assertIn("sessions are running", stderr)
+        code, report, stderr = self.session_host("uninstall")
+        self.assertEqual((code, report), (1, None), stderr)
+        self.assertIn("1 session runs", stderr)
+        self.assertTrue(self.marker.is_file())
+        self.assertEqual(self.status()["host"]["pid"], hello["pid"])
+
+        # Once its session has ended, the host lingers and exits by itself.
+        self.ok({"op": "kill", "target": {"pane": created["pane"]}})
+        self.wait_for("the end", lambda: not self.ok({"op": "list"})["sessions"])
+        self.wait_for("the idle exit", lambda: self.host_state() == "stopped", timeout=IDLE_EXIT)
+        self.wait_for_hosts()
+
+        code, removed, stderr = self.session_host("uninstall")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual((removed["enabled"], removed["marker_removed"], removed["host"]), (False, True, "stopped"))
+        self.assertFalse(self.marker.exists())
+        # The staged files stay for a later install; the computer is not enabled.
+        self.assertTrue((image / "hgs.exe").is_file() and self.cli.is_file())
+        self.assertEqual(self.host_state(), "not-installed")
+        code, _, stderr = self.call(self.create_request("cmd/late", self.cmd_argv("late")), start=True)
+        self.assertEqual(code, 4, stderr)
+        self.assertIn("not enabled", stderr)
+        self.assertEqual(self.status(), {"running": False})
+
+    def test_serve_refuses_unless_enabled_and_staged_or_isolated(self):
+        # By hand from the build tree, with nothing enabled: it exits at once.
+        result = self.run_hgs("serve", timeout=LIMIT)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("not enabled", result.stderr)
+        self.assertFalse((self.state / "host.log").exists(), "a refused host writes nothing")
+
+        # The test variables count only for an isolated state directory. Every
+        # hgs process exports HGS_STATE_DIR, so naming the default one is not that.
+        default = dict(self.env, HGS_STATE_DIR=str(self.home / ".local" / "state" / "hgs" / "sessions"),
+                       HGS_HOST_ALLOW_UNSTAGED="1", HGS_HOST_IMAGE=str(HGS))
+        result = subprocess.run([str(HGS), "__host", "serve"], env=default, capture_output=True, text=True,
+                                timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        result = subprocess.run([str(HGS), "__host", "call", "--start", '{"op": "list"}'], env=default,
+                                capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("isolated", result.stderr)
+
+        code, _, stderr = self.session_host("install")
+        self.assertEqual(code, 0, stderr)
+        # Enabled, but this executable is not the staged image.
+        result = self.run_hgs("serve", timeout=LIMIT)
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertIn("is not a staged session host image", result.stderr)
+        result = subprocess.run([str(HGS), "__host", "serve"], env=default, capture_output=True, text=True,
+                                timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertEqual(self.status(), {"running": False})
 
 
 @unittest.skipUnless(FAKE_AGENT.is_file(), "build the fake agent: cargo build --locked --example fake_agent")

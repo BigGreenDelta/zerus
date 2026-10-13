@@ -1,6 +1,9 @@
 //! The session host process, `hgs.exe __host serve` (D1, D3-D6, D14).
 //!
-//! `serve` (Windows) takes the host lock of the canonical state directory (a
+//! `serve` (Windows) first checks that it may serve (`gate`, D2): local
+//! sessions are enabled and it runs from a staged image, or the test override
+//! applies to an isolated state directory; otherwise it exits before it writes
+//! anything. It then takes the host lock of the canonical state directory (a
 //! second host exits at once), notes whether it was started inside a job (the
 //! hello reports it, D4), joins its own kill-on-close job and fails closed if
 //! it cannot (D3), turns off system error boxes for itself and every child,
@@ -202,7 +205,7 @@ fn relay<L: Launcher>(
 }
 
 #[cfg(windows)]
-pub(crate) use self::windows::{serve, state_dir, PipeLink};
+pub(crate) use self::windows::{existing_state_dir, serve, state_dir, PipeLink};
 
 #[cfg(windows)]
 mod windows {
@@ -211,12 +214,13 @@ mod windows {
             conpty::Api,
             console::{self, ConPtyLauncher},
             endpoint::{self, LockError},
-            job,
+            gate, job,
             log::{self, note},
             pipe::{BindError, PipeListener, PipeStream},
             protocol::{Frame, FrameError, Kind, PROTOCOLS},
             registry::{Host, LINGER},
             session::lock,
+            staging::{self, Layout},
             token::{self, Identity},
             worker::{self, Worker},
         },
@@ -284,6 +288,53 @@ mod windows {
         platform::canonical(&root)
     }
 
+    /// The canonical state directory of this user; None when it does not
+    /// exist, as then no host runs for it.
+    pub(crate) fn existing_state_dir() -> io::Result<Option<PathBuf>> {
+        match platform::canonical(crate::state::host_state_root()) {
+            Ok(state) => Ok(Some(state)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// What `admission` found: this host's executable and its SHA-256, and
+    /// whether it runs under the test override.
+    struct Admitted {
+        image: PathBuf,
+        hash: String,
+        unstaged: bool,
+    }
+
+    /// Whether this process may serve (`gate`, D2). Writes nothing, except the
+    /// state directory that `HGS_STATE_DIR` names when the test override is
+    /// asked for, whose canonical form decides whether it is isolated.
+    fn admission() -> Result<Admitted, (i32, String)> {
+        let failed = |error: io::Error| (FAILED, format!("cannot check the session host: {error}"));
+        let image = std::env::current_exe().map_err(failed)?;
+        let hash = image_hash(&image).map_err(failed)?;
+        // The state directory is created only when the override is asked for.
+        let unstaged = gate::override_requested(std::env::var_os(gate::ALLOW_UNSTAGED).as_deref())
+            && gate::explicit_state_dir()
+            && gate::unstaged_allowed(&state_dir().map_err(failed)?);
+        let staged = Layout::current()
+            .and_then(|layout| platform::canonical(layout.images).ok())
+            .zip(platform::canonical(&image).ok())
+            .is_some_and(|(images, exe)| gate::staged(&exe, &images, &hash));
+        gate::admit(staging::enabled(), staged, unstaged, &image)
+            .map_err(|refusal| (refusal.exit_code(), refusal.to_string()))?;
+        Ok(Admitted {
+            image,
+            hash,
+            unstaged,
+        })
+    }
+
+    /// The enablement check of a host under the test override.
+    fn always() -> bool {
+        true
+    }
+
     fn image_hash(image: &Path) -> io::Result<String> {
         let mut hash = Sha256::new();
         io::copy(&mut File::open(image)?, &mut hash)?;
@@ -304,6 +355,15 @@ mod windows {
         unsafe {
             SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX)
         };
+        // Its launcher reports the exit code; the message is for a person who
+        // started it by hand.
+        let admitted = match admission() {
+            Ok(admitted) => admitted,
+            Err((code, message)) => {
+                eprintln!("hgs: {message}");
+                return code;
+            }
+        };
         let state = match state_dir() {
             Ok(state) => state,
             Err(error) => {
@@ -311,9 +371,13 @@ mod windows {
                 return FAILED;
             }
         };
-        let _ = log::open(&state);
+        // Appends: a host that finds another one holding the lock notes that.
+        let _ = log::open(&state, false);
         let _lock = match endpoint::lock(&state) {
-            Ok(lock) => lock,
+            Ok(lock) => {
+                let _ = log::open(&state, true);
+                lock
+            }
             Err(LockError::Held) => {
                 note("another session host holds the lock; exiting");
                 return EXIT_OTHER_HOST;
@@ -339,7 +403,7 @@ mod windows {
                 return FAILED;
             }
         };
-        match run(&state, in_job) {
+        match run(&state, in_job, admitted) {
             Ok(()) => {
                 note("exited");
                 0
@@ -351,7 +415,7 @@ mod windows {
         }
     }
 
-    fn run(state: &Path, in_job: bool) -> Result<(), (i32, String)> {
+    fn run(state: &Path, in_job: bool, admitted: Admitted) -> Result<(), (i32, String)> {
         let failed = |message: String| (FAILED, message);
         let api = Api::get().map_err(|e| failed(format!("no pseudoconsole API: {e}")))?;
         let identity = Identity::current().map_err(|e| failed(e.to_string()))?;
@@ -362,12 +426,11 @@ mod windows {
             BindError::Io(_) => failed(e.to_string()),
         })?);
         let pid = std::process::id();
-        let image = std::env::current_exe().map_err(|e| failed(e.to_string()))?;
         let reply = HelloReply {
             pid,
             created: platform::process_start_time(pid).unwrap_or_default(),
-            image: image.display().to_string(),
-            image_hash: image_hash(&image).map_err(|e| failed(e.to_string()))?,
+            image: admitted.image.display().to_string(),
+            image_hash: admitted.hash,
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOLS.max,
             capabilities: vec!["attach".into(), "supervisor-channel".into()],
@@ -376,14 +439,32 @@ mod windows {
             in_job,
         };
         note(format!(
-            "started: image {} conpty {}{} in_job {in_job}",
+            "started: image {} conpty {}{} in_job {in_job}{}",
             reply.image,
             api.source().name(),
             api.fallback()
                 .map(|why| format!(" ({why})"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if admitted.unstaged {
+                format!(" ({}: an isolated test host)", gate::ALLOW_UNSTAGED)
+            } else {
+                String::new()
+            }
         ));
-        let host = Host::new(ConPtyLauncher::new(api), pid, api.source().name(), argv_of);
+        // A test host needs no marker; any other host stops creating sessions
+        // once `hgs session-host uninstall` removed it.
+        let enabled: fn() -> bool = if admitted.unstaged {
+            always
+        } else {
+            staging::enabled
+        };
+        let host = Host::new(
+            ConPtyLauncher::new(api),
+            pid,
+            api.source().name(),
+            argv_of,
+            enabled,
+        );
         let worker = worker::recovery_from_environment().map(|image| {
             Worker::start("hgs-recovery-worker", move || {
                 console::spawn_hidden(&image, &["recovery".into(), "worker".into()])

@@ -281,7 +281,13 @@ mod tests {
         };
         let api = Api::get().unwrap();
         let pid = std::process::id();
-        let host = Host::new(ConPtyLauncher::new(api), pid, api.source().name(), |_| None);
+        let host = Host::new(
+            ConPtyLauncher::new(api),
+            pid,
+            api.source().name(),
+            |_| None,
+            || true,
+        );
         let identity = HelloReply {
             pid,
             created: String::new(),

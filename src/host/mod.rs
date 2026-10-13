@@ -6,7 +6,8 @@
 //! Plain Rust that compiles and runs its tests on every platform: `protocol`
 //! (framing and the protocol 1 vocabulary), `endpoint` (pipe name, secret and
 //! host lock), `staging` (explicit enablement and the staged CLI and host
-//! images, D2), the argument handling of `admin` (`hgs session-host`), the
+//! images, D2), `gate` (who may run a host, from which image, and the test
+//! override), the argument handling of `admin` (`hgs session-host`), the
 //! portable half of `spawn` (environment blocks and command lines), `keys`
 //! (tmux's key names and bytes), `sequences` (query and reply filtering), `link`
 //! (connections as frames), `session` (a session's screen model, pumps and
@@ -30,6 +31,7 @@ mod conpty;
 #[cfg(windows)]
 mod console;
 pub(crate) mod endpoint;
+mod gate;
 #[cfg(windows)]
 pub(crate) mod job;
 pub(crate) mod keys;

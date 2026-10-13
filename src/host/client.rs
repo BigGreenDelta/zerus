@@ -7,7 +7,8 @@
 //! host runs; `connect_or_start` starts a host when none runs, outside this
 //! process's job (D4), and retries while a host is starting or exiting (D3).
 //! Both verify that the host that answers the hello is the process serving the
-//! pipe; `connect_or_start` refuses a host that runs inside a job.
+//! pipe; `connect_or_start` refuses a host that runs inside a job. Which
+//! executable it starts is its caller's choice: the staged image (`gate`).
 use super::{
     link::{write_json, Link},
     protocol::{
@@ -239,20 +240,21 @@ pub(crate) use self::windows::{connect, connect_or_start};
 mod windows {
     use super::{
         super::{
-            endpoint,
+            endpoint, gate,
             log::LOG_FILE,
             pipe::{self, ConnectError},
             server::{PipeLink, EXIT_OTHER_HOST},
-            spawn::{spawn_detached, Child, Command, Environment, Flags},
+            spawn::{spawn_detached, Child, Command, Environment, Flags, LaunchError},
             token,
         },
         *,
     };
     use std::{
-        path::Path,
+        path::{Path, PathBuf},
         thread,
-        time::{Duration, Instant},
+        time::Instant,
     };
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
 
     /// How long one connect waits while every pipe instance is busy.
     const BUSY_WAIT: Duration = Duration::from_secs(5);
@@ -325,11 +327,20 @@ mod windows {
         }
     }
 
+    /// Why `start` started nothing.
+    enum StartError {
+        /// The image is gone: a later install retired it (D2).
+        Missing(ClientError),
+        Failed(ClientError),
+    }
+
     /// Start `image` as the host of `state_dir` (D4): outside this process's
     /// job, hidden, in its own process group, in the state directory.
-    fn start(state_dir: &Path, image: &Path) -> Result<Child, ClientError> {
+    fn start(state_dir: &Path, image: &Path) -> Result<Child, StartError> {
         let failed = |error: &dyn fmt::Display| {
-            ClientError::Start(format!("cannot start the session host: {error}"))
+            StartError::Failed(ClientError::Start(format!(
+                "cannot start the session host: {error}"
+            )))
         };
         let mut environment = Environment::current().map_err(|e| failed(&e))?;
         let state = state_dir
@@ -350,19 +361,36 @@ mod windows {
             directory: Some(state_dir),
             flags: Flags::default(),
         })
-        .map_err(|e| failed(&e))
+        .map_err(|error| match &error {
+            LaunchError::Spawn(io)
+                if [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
+                    .map(|code| Some(code as i32))
+                    .contains(&io.raw_os_error()) =>
+            {
+                StartError::Missing(ClientError::Start(format!(
+                    "cannot start the session host {}: {error}",
+                    image.display()
+                )))
+            }
+            _ => failed(&error),
+        })
     }
 
-    /// Connect to the host of the canonical `state_dir`, starting `image` as
-    /// the host when none runs. A host that is still starting, or one that is
-    /// exiting and holds the pipe or the lock, is waited for.
+    /// Connect to the host of the canonical `state_dir`, starting the
+    /// executable `image` gives as the host when none runs. `image` is asked
+    /// again before each start, so a launcher that read the pointer of an image
+    /// a later install retired starts the new one (D2). A host that is still
+    /// starting, or one that is exiting and holds the pipe or the lock, is
+    /// waited for. A host that refuses to serve (`gate`) is reported.
     pub(crate) fn connect_or_start(
         state_dir: &Path,
         role: Role,
-        image: &Path,
+        image: &dyn Fn() -> Result<PathBuf, ClientError>,
     ) -> Result<Connection, ClientError> {
         let deadline = Instant::now() + START_DEADLINE;
         let mut started: Option<Child> = None;
+        // The image whose start found it missing.
+        let mut missing: Option<PathBuf> = None;
         loop {
             let absent = match attempt(state_dir, role, deadline.min(Instant::now() + BUSY_WAIT)) {
                 Attempt::Connected(connection) if connection.host().in_job => {
@@ -389,6 +417,11 @@ mod windows {
             let running = match started.as_ref().map(|child| child.wait(Duration::ZERO)) {
                 Some(Ok(None)) => true,
                 Some(Ok(Some(code))) if code as i32 != EXIT_OTHER_HOST => {
+                    if let Some(refusal) = gate::launch_refusal(code as i32) {
+                        return Err(ClientError::Start(format!(
+                            "the session host refused to start: {refusal}"
+                        )));
+                    }
                     return Err(ClientError::Start(format!(
                         "the session host exited with {code:#x} while starting; see {} in {}",
                         LOG_FILE,
@@ -402,7 +435,18 @@ mod windows {
                 Some(Err(_)) | None => false,
             };
             if !running {
-                started = Some(start(state_dir, image)?);
+                let image = image()?;
+                match start(state_dir, &image) {
+                    Ok(child) => started = Some(child),
+                    // Read the pointer again, once per image that went missing.
+                    Err(StartError::Missing(_)) if missing.as_ref() != Some(&image) => {
+                        missing = Some(image);
+                        continue;
+                    }
+                    Err(StartError::Missing(error) | StartError::Failed(error)) => {
+                        return Err(error)
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(50));
         }

@@ -16,10 +16,12 @@ const LIMIT: u64 = 1 << 20;
 
 static LOG: Mutex<Option<File>> = Mutex::new(None);
 
-/// Note from now on into `host.log` in `state_dir`.
-pub(crate) fn open(state_dir: &Path) -> io::Result<()> {
+/// Note from now on into `host.log` in `state_dir`. Only `trim` (the host that
+/// holds the lock) starts a log longer than `LIMIT` afresh, so a second host
+/// that is about to exit never empties the running host's log.
+pub(crate) fn open(state_dir: &Path, trim: bool) -> io::Result<()> {
     let path = state_dir.join(LOG_FILE);
-    let long = fs::metadata(&path).is_ok_and(|metadata| metadata.len() > LIMIT);
+    let long = trim && fs::metadata(&path).is_ok_and(|metadata| metadata.len() > LIMIT);
     let mut options = OpenOptions::new();
     options.create(true);
     if long {

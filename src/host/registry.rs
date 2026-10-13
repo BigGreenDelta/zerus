@@ -8,6 +8,10 @@
 //! `supervisor_register`, which turn their connection into a stream, is
 //! answered here; the connection handling lives in `server.rs`.
 //!
+//! A session starts only while local sessions are enabled (`enabled`, the
+//! marker check of `gate`): a create that races `hgs session-host uninstall`
+//! is refused once the marker is gone, and starts nothing.
+//!
 //! The host exits like a tmux server: when its last session has ended, it
 //! lingers for `LINGER`, then decides to exit under the registry lock, so a
 //! `create_session` that comes later is refused as `busy`, a connection whose
@@ -126,6 +130,9 @@ pub(crate) struct Host<L: Launcher> {
     /// Reads another process's command line for input checks; None when it
     /// cannot.
     argv: fn(u32) -> Option<Vec<String>>,
+    /// Whether local sessions are enabled now (D2): checked before each new
+    /// session starts.
+    enabled: fn() -> bool,
     registry: Mutex<Registry>,
     changed: Condvar,
     /// Creates run one at a time, so names and launch IDs are checked once.
@@ -172,12 +179,14 @@ impl<L: Launcher> Host<L> {
         pid: u32,
         conpty: &str,
         argv: fn(u32) -> Option<Vec<String>>,
+        enabled: fn() -> bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             launcher,
             pid,
             conpty: conpty.into(),
             argv,
+            enabled,
             registry: Mutex::new(Registry {
                 sessions: BTreeMap::new(),
                 launches: HashMap::new(),
@@ -369,8 +378,8 @@ impl<L: Launcher> Host<L> {
         if request.size.cols == 0 || request.size.rows == 0 {
             return invalid("a session needs at least one column and one row");
         }
-        let (id, pane) = {
-            let mut registry = self.registry();
+        {
+            let registry = self.registry();
             match registry.launches.get(&request.launch_id) {
                 Some(Launch::Running(id)) => {
                     let session = &registry.sessions[id];
@@ -385,6 +394,17 @@ impl<L: Launcher> Host<L> {
                 Some(Launch::Ended(created)) => return Ok(created.clone()),
                 None => {}
             }
+        }
+        // Outside the registry lock, as it reads a file. Creates run one at a
+        // time, so no other create adds this launch ID meanwhile.
+        if !(self.enabled)() {
+            return Err(error(
+                ErrorCode::Refused,
+                "local sessions are not enabled on this computer; run hgs session-host install",
+            ));
+        }
+        let (id, pane) = {
+            let mut registry = self.registry();
             if registry.exiting {
                 return Err(error(
                     ErrorCode::Busy,

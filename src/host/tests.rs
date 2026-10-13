@@ -363,10 +363,14 @@ fn no_argv(_: u32) -> Option<Vec<String>> {
     None
 }
 
+fn enabled() -> bool {
+    true
+}
+
 fn new_host() -> (Arc<Host<FakeLauncher>>, FakeLauncher) {
     let launcher = FakeLauncher::default();
     (
-        Host::new(launcher.clone(), 77, "bundled", no_argv),
+        Host::new(launcher.clone(), 77, "bundled", no_argv, enabled),
         launcher,
     )
 }
@@ -518,6 +522,40 @@ fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
     );
 }
 
+/// Whether the host of `sessions_start_only_while_local_sessions_are_enabled`
+/// finds local sessions enabled.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[test]
+fn sessions_start_only_while_local_sessions_are_enabled() {
+    let launcher = FakeLauncher::default();
+    let host = Host::new(launcher.clone(), 77, "bundled", no_argv, || {
+        ENABLED.load(Ordering::SeqCst)
+    });
+    let mut client = connect(&host);
+    let created: Created = client.call(create("launch-a", "claude/p/a")).unwrap();
+    // `hgs session-host uninstall` removed the marker: nothing new starts.
+    ENABLED.store(false, Ordering::SeqCst);
+    let error = client
+        .call::<Created>(create("launch-b", "claude/p/b"))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Refused);
+    assert!(
+        error.message.contains("hgs session-host install"),
+        "{}",
+        error.message
+    );
+    assert_eq!(launcher.count(), 1);
+    // A retried create still finds what its first request started.
+    let again: Created = client.call(create("launch-a", "claude/p/a")).unwrap();
+    assert_eq!((again.session, again.existing), (created.session, true));
+    let listed: Listed = client.call(Op::List).unwrap();
+    assert_eq!(listed.sessions.len(), 1);
+    ENABLED.store(true, Ordering::SeqCst);
+    let second: Created = client.call(create("launch-b", "claude/p/b")).unwrap();
+    assert_eq!((second.session.as_str(), second.existing), ("$1", false));
+    assert_eq!(launcher.count(), 2);
+}
 #[test]
 fn creates_check_their_request_and_report_a_failed_start() {
     let (host, launcher) = new_host();

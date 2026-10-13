@@ -9,7 +9,10 @@
 //!   none runs), send one request (`{"op": "list"}`, the protocol's JSON
 //!   without `id`) and print the response as JSON. Exits 0 when it is `ok`,
 //!   1 when it is an `error`, 3 when no host runs and 4 when the host cannot
-//!   be reached or started.
+//!   be reached or started. `--start` starts the staged host image once local
+//!   sessions are enabled; for an isolated state directory, `HGS_HOST_IMAGE`
+//!   names another executable (tests name the build under test), which needs
+//!   `HGS_HOST_ALLOW_UNSTAGED=1` to serve (`gate`).
 //! - `status`: the running host's hello and `host_status`, or
 //!   `{"running": false}`; never starts a host.
 //! - `attach '<attach request>' '<steps>'`: a scripted attach client for tests.
@@ -17,14 +20,18 @@
 //!   "rows": N}}`, `{"wait_ms": N}` and `{"detach": true}`; it prints
 //!   `{"attached", "output_hex", "controls"}` once the stream has ended (or
 //!   a second after the last step).
+//!
+//! Only `call --start` and `serve` create the state directory.
 use super::{
     client::{connect, connect_or_start, AttachStream, ClientError, Connection, Event},
+    gate,
     protocol::{Attach, Op, Response, Role, Size},
-    server,
+    server, staging,
 };
 use serde_json::{json, Value};
 use std::{
-    path::PathBuf,
+    env,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -57,13 +64,16 @@ fn fail(error: &ClientError) -> i32 {
 }
 
 fn open(start: bool, role: Role) -> Result<Connection, ClientError> {
-    let state = server::state_dir().map_err(|e| ClientError::Connect(e.to_string()))?;
-    if start {
-        let image = host_image().map_err(|e| ClientError::Start(e.to_string()))?;
-        connect_or_start(&state, role, &image)
-    } else {
-        connect(&state, role)
+    let failed = |error: std::io::Error| ClientError::Connect(error.to_string());
+    if !start {
+        // Without the state directory no host runs.
+        return match server::existing_state_dir().map_err(failed)? {
+            Some(state) => connect(&state, role),
+            None => Err(ClientError::NoHost),
+        };
     }
+    let state = server::state_dir().map_err(failed)?;
+    connect_or_start(&state, role, &|| host_image(&state))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> Result<T, i32> {
@@ -241,7 +251,19 @@ fn attach(request: &str, steps: &str) -> i32 {
     0
 }
 
-/// The image a started host runs: until staging (D2) lands, this executable.
-pub(crate) fn host_image() -> std::io::Result<PathBuf> {
-    std::env::current_exe()
+/// The executable `call --start` starts as the host of the canonical `state`
+/// (D2): the staged image the pointer names once local sessions are enabled,
+/// or `HGS_HOST_IMAGE` for an isolated state directory (`gate`).
+fn host_image(state: &Path) -> Result<PathBuf, ClientError> {
+    let explicit = env::var_os(gate::IMAGE)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let isolated = explicit.is_some()
+        && gate::isolated(
+            gate::explicit_state_dir(),
+            state,
+            &gate::default_state_dirs(),
+        );
+    let current = staging::current_image().map(|folder| folder.join(staging::EXECUTABLE));
+    gate::call_image(explicit, isolated, staging::enabled(), current).map_err(ClientError::Start)
 }
