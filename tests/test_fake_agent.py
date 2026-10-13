@@ -67,7 +67,11 @@ class PipedAgent(Fixture):
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, cwd=self.root)
             os.close(reader)
             reader = None
-            os.write(writer, stdin)
+            if stdin:
+                try:
+                    os.write(writer, stdin)
+                except BrokenPipeError:
+                    pass  # The agent may exit before reading, as on bad options.
             if not keep_open:
                 os.close(writer)
                 writer = None
