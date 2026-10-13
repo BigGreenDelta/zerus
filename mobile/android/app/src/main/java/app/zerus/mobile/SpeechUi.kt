@@ -5,6 +5,11 @@ import android.content.res.Configuration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -16,6 +21,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -93,37 +117,134 @@ import androidx.compose.ui.unit.dp
 @Composable internal fun SpeechComposerButton(model: ZerusViewModel, target: Target, saveEditor: () -> Unit) {
     val speech = model.speech
     val context = LocalContext.current
-    var settings by remember { mutableStateOf(false) }
+    val navigation = model.speechNavigation
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val obscuration = LocalConversationObscuration.current
+    val saveCurrentEditor by rememberUpdatedState(saveEditor)
+    var settings by remember(target, navigation) { mutableStateOf(false) }
     var microphoneDenied by rememberSaveable { mutableStateOf(false) }
     var systemSettingsError by rememberSaveable { mutableStateOf(false) }
     var permissionTarget by remember { mutableStateOf<Pair<Target, Long>?>(null) }
+    var ownedCapture by remember(target, navigation) { mutableStateOf<Long?>(null) }
+    var dismissedFailure by remember(target, navigation) { mutableStateOf<Long?>(null) }
+    var focused by remember(target, navigation) { mutableStateOf(false) }
+    val activationKeys = remember(target, navigation) { VoiceActivationKeys() }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val captured = permissionTarget; permissionTarget = null
-        if (!granted) {
+        if (!granted && captured?.first == model.selected?.target && captured?.second == model.speechNavigation) {
             speech.permissionDenied(); settings = false; systemSettingsError = false; microphoneDenied = true
         }
-        else if (captured?.first == model.selected?.target && captured?.second == model.speechNavigation) speech.start(captured.first)
+        // Permission UI ends the original press. Granting access never revives it;
+        // the next explicit hold or accessible activation starts local capture.
     }
-    fun start() {
-        saveEditor()
-        if (speech.startReason(target).isNotBlank()) { settings = true; return }
+    fun start(gesture: Boolean): Long? {
+        saveCurrentEditor()
+        val current = model.draft(target)
+        if (current.text.isNotEmpty() || current.attachments.isNotEmpty() || model.pickerDraft?.target == target) return null
+        if (speech.startReason(target).isNotBlank()) { settings = true; return null }
         model.attachments.stopAudio()
-        if (SpeechMicrophoneAccess.granted(context)) speech.start(target)
-        else { permissionTarget = target to model.speechNavigation; permission.launch(Manifest.permission.RECORD_AUDIO) }
+        if (!SpeechMicrophoneAccess.granted(context)) {
+            permissionTarget = target to model.speechNavigation
+            permission.launch(Manifest.permission.RECORD_AUDIO)
+            return null
+        }
+        return (if (gesture) speech.startGesture(target) else speech.start(target)).also { ownedCapture = it }
     }
-    IconButton(onClick = { if (speech.recording) speech.stop() else start() }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing && target.agentId.isBlank() && target.archiveId.isBlank()) {
-        Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, if (speech.recording) "Stop recording" else "Voice input",
-            tint = if (speech.recording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    fun stopOwned() { ownedCapture?.let(speech::stopCapture) }
+    DisposableEffect(target, navigation, lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) { permissionTarget = null; activationKeys.clear(); stopOwned() }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer); permissionTarget = null; activationKeys.clear(); stopOwned() }
+    }
+    LaunchedEffect(obscuration?.obscured) {
+        if (obscuration?.obscured == true) { permissionTarget = null; stopOwned() }
+    }
+    val enabled = !model.demo && model.storageReady && !model.updateInstallPreparing &&
+        target.agentId.isBlank() && target.archiveId.isBlank() && !speech.savingRecording
+    val currentEnabled by rememberUpdatedState(enabled)
+    val currentStart by rememberUpdatedState<(Boolean) -> Long?>(::start)
+    fun activate(captureId: Long?): Boolean {
+        if (!currentEnabled) return false
+        if (captureId != null) speech.stopCapture(captureId) else currentStart(false)
+        return true
+    }
+    val currentActivate by rememberUpdatedState(::activate)
+    val cancelDistance = with(LocalDensity.current) { 80.dp.toPx() }
+    val gesture = remember(target, navigation, cancelDistance) { VoiceGesture(cancelDistance) }
+    val label = if (speech.recording) "Stop recording" else "Voice input"
+    val actionCapture = speech.activeCaptureId
+    Surface(shape = CircleShape,
+        border = if (focused) BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface) else null,
+        color = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary,
+        modifier = Modifier.size(48.dp).onFocusChanged {
+            focused = it.isFocused
+            if (!it.isFocused) activationKeys.clear()
+        }.onKeyEvent { event ->
+            val key = event.nativeKeyEvent
+            when (val result = activationKeys.handle(key.keyCode, key.deviceId, key.action, key.repeatCount,
+                key.isAltPressed || key.isCtrlPressed || key.isMetaPressed || key.isShiftPressed, key.isCanceled, speech.activeCaptureId)) {
+                VoiceActivationKeys.Result.Pass -> false
+                VoiceActivationKeys.Result.Consume -> true
+                is VoiceActivationKeys.Result.Activate -> { currentActivate(result.captureId); true }
+            }
+        }.focusable(enabled).semantics {
+            role = Role.Button; contentDescription = label
+            stateDescription = if (speech.recording) "Recording. Slide left to cancel." else "Hold to record. Release to review."
+            if (!enabled) disabled()
+            onClick(label = if (speech.recording) "Stop recording" else "Start recording") {
+                currentActivate(actionCapture)
+            }
+            if (actionCapture != null) customActions = listOf(CustomAccessibilityAction("Cancel recording") { speech.cancelCapture(actionCapture); true })
+        }.pointerInput(target, navigation, gesture) {
+            // These keys do not change when capture starts or the timer ticks.
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                down.consume()
+                if (!gesture.begin()) return@awaitEachGesture
+                try {
+                    if (currentEnabled) {
+                        if (speech.recording) speech.stop() else gesture.captured(currentStart(true))
+                    }
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pointer = event.changes.firstOrNull { it.id == down.id }
+                        if (pointer == null || event.changes.any { it.id != down.id && it.pressed }) break
+                        val decision = gesture.move(pointer.position.x - down.position.x)
+                        ownedCapture?.let { speech.moveGesture(it, gesture.progress) }
+                        decision?.let { speech.finishGesture(it.captureId, it.cancel) }
+                        pointer.consume()
+                        if (!pointer.pressed) {
+                            gesture.release()?.let { speech.finishGesture(it.captureId, it.cancel) }
+                            break
+                        }
+                    }
+                } finally {
+                    gesture.interrupt()?.let { speech.finishGesture(it.captureId, it.cancel) }
+                }
+            }
+        }) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, null,
+                Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
+        }
+    }
+    speech.captureFailure?.takeIf { it.first == ownedCapture && it.first != dismissedFailure }?.let { failed ->
+        ObscureConversation()
+        ZerusAlertDialog(onDismissRequest = { dismissedFailure = failed.first }, title = { Text("Recording not saved") },
+            text = { Text(failed.second) },
+            confirmButton = { TextButton(onClick = { dismissedFailure = failed.first }) { Text("Done") } })
     }
     if (microphoneDenied) {
         ObscureConversation()
         ZerusAlertDialog(onDismissRequest = { microphoneDenied = false }, title = { Text("Microphone access is off") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("In Android app settings, open Permissions, then Microphone, and allow access while using Zerus. Return here and tap Voice input to start recording.")
+                Text("In Android app settings, open Permissions, then Microphone, and allow access while using Zerus. Return here and hold Voice input to record, or activate it with accessibility controls.")
                 if (systemSettingsError) Text("Android could not open this page. Open Android Settings, then Apps, Zerus, Permissions and Microphone.", color = MaterialTheme.colorScheme.error)
             } },
             confirmButton = { TextButton(onClick = {
-                // Opening settings and returning never retains an intent to start recording.
                 permissionTarget = null
                 if (SpeechMicrophoneAccess.openSettings(context)) microphoneDenied = false else systemSettingsError = true
             }) { Text("Open app settings") } },
@@ -133,7 +254,7 @@ import androidx.compose.ui.unit.dp
         ObscureConversation()
         ZerusAlertDialog(onDismissRequest = { settings = false }, title = { Text("Voice input") },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) { SpeechSettingsContent(model) } },
-            confirmButton = { TextButton(onClick = { settings = false; start() }, enabled = speech.startReason(target).isBlank()) { Text("Start recording") } },
+            confirmButton = { TextButton(onClick = { settings = false; start(false) }, enabled = speech.startReason(target).isBlank()) { Text("Start recording") } },
             dismissButton = { TextButton(onClick = { settings = false }) { Text("Close") } })
     }
 }
@@ -148,13 +269,19 @@ import androidx.compose.ui.unit.dp
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
             speech.recording -> {
+                val recordingId = speech.activeCaptureId
                 Text("Recording ${speech.seconds / 60}:${(speech.seconds % 60).toString().padStart(2, '0')} (up to 2 minutes)", color = MaterialTheme.colorScheme.error)
+                if (speech.gestureCaptureId != null) {
+                    Text("← Slide left to cancel. Release to review.", color = if (speech.gestureCancelProgress > 0f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall)
+                    if (speech.gestureCancelProgress > 0f) LinearProgressIndicator(progress = { speech.gestureCancelProgress }, modifier = Modifier.fillMaxWidth())
+                }
                 val configuration = LocalConfiguration.current
                 if (configuration.keyboard != Configuration.KEYBOARD_NOKEYS && configuration.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO)
                     Text("Space or Esc stops recording. Your typed draft is kept.", style = MaterialTheme.typography.bodySmall)
                 Row {
-                    TextButton(onClick = { speech.stop() }) { Text("Stop recording") }
-                    TextButton(onClick = { speech.discardRecording() }) { Text("Cancel") }
+                    TextButton(onClick = { recordingId?.let(speech::stopCapture) }) { Text("Stop recording") }
+                    TextButton(onClick = { recordingId?.let(speech::cancelCapture) }) { Text("Cancel") }
                 }
             }
             speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }

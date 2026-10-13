@@ -295,11 +295,15 @@ sets the default while preserving a recording that is already saved. A retained 
 provider revision: if it changes, explicitly select the provider again before
 sending. See [provider configuration](../../docs/speech-providers.md).
 
-Tap the composer microphone, speak, then **Stop recording**. Local capture starts
-without waiting for provider discovery; discovery refreshes in the background.
-Capture lasts at most two minutes. Stopping, leaving the foreground and returning from system settings
-never send a message. The preview is an encrypted durable WAV file on this phone;
-it offers **Play**, **Discard** and **Send voice message**. A process killed before
+With an empty message and no attachments, the composer shows a microphone in the
+Send position. Hold it to record, release to keep a preview, or slide left to
+cancel the recording. Typing text or adding an attachment restores the Send
+button. During capture, the timer and **Slide left to cancel** hint explain the
+gesture; explicit Stop and Cancel controls remain available for accessibility.
+Local capture starts without waiting for provider discovery; discovery refreshes
+in the background. Capture lasts at most two minutes. Releasing the microphone,
+stopping or leaving the conversation never sends a message. The preview is an
+encrypted durable WAV file on this phone; it offers **Play**, **Discard** and **Send voice message**. A process killed before
 capture finishes can lose the unfinished recording. Completed previews survive
 restart and remain accessible in Drafts. Capture and bounded 48 kHz fallback
 conversion run off the main thread.
@@ -321,9 +325,9 @@ starts playback. Editing resumes when capture ends, subject to existing send loc
 
 Denied microphone access opens a focused explanation with **Open app settings**.
 This opens Zerus's Android settings; choose **Permissions → Microphone** and allow
-access while using the app. Return and tap the microphone again to record.
-Returning from system settings never starts recording automatically. If the
-settings page is unavailable, the explanation retains the manual navigation path.
+access while using the app. After granting permission or returning from settings,
+press the microphone again to record. Permission results never start recording
+automatically after the original press has ended. If the settings page is unavailable, the explanation retains the manual navigation path.
 
 **Send voice message** saves an immutable audio reference and request UUID before
 uploading mono 16 kHz signed little-endian PCM to the conversation computer through
@@ -388,6 +392,22 @@ denies microphone access twice, opens Android's app permission
 settings, grants access there and verifies recording requires a new explicit tap
 after returning.
 It does not measure recognition accuracy or replace a physical microphone test.
+
+The gesture smoke exercises the actual composer with injected pointer events on
+that same disposable emulator. Start with fresh app data and microphone permission
+unset; the runner opens Android's permission prompt itself:
+
+```sh
+./gradlew -PzerusInstrumentationRunner=app.zerus.mobile.VoiceGestureSmokeInstrumentation assembleDebug assembleDebugAndroidTest
+adb -s emulator-5580 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5580 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s emulator-5580 shell pm clear app.zerus.mobile
+adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VoiceGestureSmokeInstrumentation
+```
+
+It checks hold/release preview, left-swipe cancellation, interrupted pointers,
+background/navigation stop, permission results after release, preserved drafts
+and zero voice uploads before a separate Send.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater

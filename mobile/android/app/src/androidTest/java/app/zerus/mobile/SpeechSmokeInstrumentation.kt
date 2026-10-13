@@ -119,9 +119,21 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(editor.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) { "Recording draft exposes text replacement" }
         val replacement = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Must not replace the recording draft") }
         check(!editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
-        var send = node("Send message")
-        while (send.isEnabled && !send.isClickable) send = checkNotNull(send.parent)
-        check(!send.isEnabled) { "Ordinary Send stayed enabled during recording" }
+        fun findSend(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (root == null) return null
+            root.refresh()
+            if (root.contentDescription?.toString() == "Send message") return root
+            for (index in 0 until root.childCount) findSend(root.getChild(index))?.let { return it }
+            return null
+        }
+        // The trailing action becomes Stop while recording, including programmatic
+        // captures that retain typed text. An ordinary Send may be absent or disabled.
+        node("Stop recording")
+        findSend(uiAutomation.rootInActiveWindow)?.let { found ->
+            var send = found
+            while (send.isEnabled && !send.isClickable) send = checkNotNull(send.parent)
+            check(!send.isEnabled) { "Ordinary Send stayed enabled during recording" }
+        }
         runBlocking { main { model.sendMessage(target) }.join() }
         var pickerOpened = false
         main { model.beginAttachmentPick(target) { pickerOpened = true } }
@@ -203,7 +215,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         tap("Voice input")
         tap("Don't allow")
         node("Microphone access is off")
-        check(main { !model.speech.busy && model.draft(target).text == "Исходный текст." })
+        check(main { !model.speech.busy && model.draft(target).text.isEmpty() })
         tap("Open app settings")
         node("App info"); node("Zerus"); node("Permissions")
         back()
@@ -228,10 +240,9 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         node("Voice input")
         SystemClock.sleep(400)
         check(SpeechMicrophoneAccess.granted(targetContext))
-        check(main { !model.speech.busy && model.draft(target).text == "Исходный текст." }) {
+        check(main { !model.speech.busy && model.draft(target).text.isEmpty() }) {
             "Returning from microphone settings must preserve the draft and never start recording."
         }
-        tap("Voice input")
     }
     private fun runSmoke() {
         val submitted = AtomicInteger()
@@ -337,19 +348,23 @@ class SpeechSmokeInstrumentation : Instrumentation() {
             set(model, "setRelayOperations", mapOf(target.connectionId to capabilities))
             set(model, "setMachineOperations", mapOf(owner to capabilities))
             set(model, "setSelected", Session(target, "Fixture", "codex", "idle", "", "", 0, JSONObject()))
-            model.edit(target, "Исходный текст.")
             model.refreshActivity()
         }
         await("voice private store") { model.speech.ready }
         main { model.speech.refreshProfiles() }
         await("held voice discovery") { model.speech.loading && profileRequests.get() > 0 }
         await("fresh session") { model.activityVerified && model.voiceSendReason(target).isBlank() }
+        // Only an empty composer exposes the microphone. Permission recovery is
+        // independent of the retained text/attachment keyboard-lock fixture below.
+        permissionRecovery(model, target)
         val retainedAttachment = runBlocking { AttachmentStore(targetContext).importRecording(VoiceProtocol.wav(ByteArray(6_400))) }
         main {
+            model.edit(target, "Исходный текст.")
             model.javaClass.getDeclaredMethod("save", Draft::class.java).apply { isAccessible = true }
                 .invoke(model, model.draft(target).copy(attachments = listOf(retainedAttachment)))
         }
-        permissionRecovery(model, target)
+        await("retained typed editor") { model.speechComposer?.editor?.text.toString() == "Исходный текст." }
+        main { model.speech.start(target) }
         await("microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
         check(main { model.speech.loading && model.speech.selection == SpeechSelection() }) { "Recording waited for provider discovery" }
         keyboardStop(activity, model, target, KeyEvent.KEYCODE_SPACE)

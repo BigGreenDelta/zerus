@@ -23,6 +23,22 @@ before sending. Only an explicit **Send voice**, with a confirmed available
 provider for that conversation, authorizes submission. Refreshing providers
 alone never submits the recording.
 
+## Android recording gesture
+
+When the editor has no text or attachments, its trailing Send action becomes a
+microphone. Hold to record, release to retain a preview, or slide left to cancel.
+Release never uploads, transcribes or sends the recording. The saved preview
+provides playback, discard and a separate **Send voice message** action. Text or
+attachments restore the ordinary Send action.
+
+Recording keeps the text draft read-only and disables attachment changes. A timer
+and cancellation hint accompany the gesture; explicit Record, Stop and Cancel
+actions support accessibility, and Space or Escape on a hardware keyboard stops
+into the preview. A permission result requires a fresh recording action. Losing
+the pointer or leaving the composer must end capture without submission; a late
+release or permission callback must never start another recording or affect a
+newer one. Capture stays pinned to its original conversation and provider.
+
 ## Authority and processing
 
 The conversation computer owns each voice message. It retains its original WAV,

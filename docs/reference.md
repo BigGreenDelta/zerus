@@ -299,8 +299,8 @@ See [provider management](speech-providers.md) and
 Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
 download a model and never falls back to another provider.
 
-Use **Voice** in the message toolbar, allow microphone access, then stop recording
-to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+On desktop, use **Voice** in the message toolbar, allow microphone access, then
+stop recording to review the recording with **Play**, **Discard** or **Send voice**. Recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
@@ -315,6 +315,11 @@ nor discards it. Recording takes priority over Escape's agent-interruption
 action. Holding either key stops capture only once, and editing resumes after
 capture ends unless another delivery lock applies. Android supports the same
 controls with a hardware keyboard; its touch Stop control remains available.
+On Android, an empty editor with no attachments shows a microphone in the Send
+position. Hold to record, release to keep a preview, or slide left to cancel.
+Text or attachments restore the ordinary Send button. Releasing the microphone
+never sends the recording; review it and use **Send voice message** separately.
+After granting microphone permission, press again to start recording.
 The preview lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
 the pinned agent conversation. One history card retains the playable original,

@@ -20,6 +20,8 @@ internal class SpeechRecorder(private val context: Context) {
     fun stop() { stopped.set(true) }
 
     suspend fun capture(maxDurationMs: Int, progress: suspend (Int) -> Unit): ByteArray = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        if (stopped.get()) return@withContext byteArrayOf()
         check(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             "Allow microphone access to record your voice."
         }
@@ -27,6 +29,8 @@ internal class SpeechRecorder(private val context: Context) {
         var recorder: AudioRecord? = null
         var sampleRate = 16_000
         for (rate in candidates) {
+            currentCoroutineContext().ensureActive()
+            if (stopped.get()) return@withContext byteArrayOf()
             val minimum = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (minimum <= 0) continue
             val candidate = try { AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate,
@@ -37,6 +41,8 @@ internal class SpeechRecorder(private val context: Context) {
         }
         val active = checkNotNull(recorder) { "This device could not open a microphone." }
         try {
+            currentCoroutineContext().ensureActive()
+            if (stopped.get()) return@withContext byteArrayOf()
             active.startRecording()
             check(active.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "The microphone is unavailable. Check other recording apps." }
             val pcm = Pcm16Converter(sampleRate)

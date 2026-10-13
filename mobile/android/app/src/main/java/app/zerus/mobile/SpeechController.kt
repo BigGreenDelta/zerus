@@ -44,9 +44,14 @@ internal class SpeechController(private val context: Context, private val model:
     var activeRequests by mutableStateOf<Set<String>>(emptySet()); private set
     var legacyResult by mutableStateOf<SpeechAttempt?>(null); private set
     val busy get() = recording || savingRecording || activeRequests.isNotEmpty()
-    private var recorder: SpeechRecorder? = null
+    private class Capture(val id: Long, val recorder: SpeechRecorder) { var discarded = false }
+    private var capture: Capture? = null
+    private var captureSequence = 0L
+    val activeCaptureId get() = capture?.id.takeIf { recording }
+    var gestureCaptureId by mutableStateOf<Long?>(null); private set
+    var gestureCancelProgress by mutableStateOf(0f); private set
+    var captureFailure by mutableStateOf<Pair<Long, String>?>(null); private set
     val recordingKeys = RecordingKeys()
-    private var discardWhenStopped = false
     private var profileJob: Job? = null
     private var profileRevision = 0L
     private var profileTarget: Target? = null
@@ -170,21 +175,26 @@ internal class SpeechController(private val context: Context, private val model:
         else -> ""
     }
     fun permissionDenied() { notice = "Microphone access was denied. Allow microphone access in Android app settings to record." }
-    fun start(target: Target) {
+    fun start(target: Target): Long? = start(target, gesture = false)
+    fun startGesture(target: Target): Long? = start(target, gesture = true)
+    private fun start(target: Target, gesture: Boolean): Long? {
         val reason = startReason(target)
-        if (reason.isNotBlank()) { notice = reason; return }
+        if (reason.isNotBlank()) { notice = reason; return null }
         val machine = selection.host?.computerId.orEmpty()
         val profileId = selection.profileId
         val profileRevision = if (profileTarget == target && !loading && profile != null) profile?.profileRevision else selection.profileRevision
         model.attachments.stopAudio()
-        discardWhenStopped = false; seconds = 0; notice = ""; recording = true
-        val capture = SpeechRecorder(context); recorder = capture
+        seconds = 0; notice = ""; captureFailure = null; recording = true
+        val owned = Capture(++captureSequence, SpeechRecorder(context)); capture = owned
+        gestureCaptureId = owned.id.takeIf { gesture }; gestureCancelProgress = 0f
         scope.launch {
             var imported: Attachment? = null
             try {
-                val pcm = capture.capture(120_000) { seconds = it }
-                recording = false; recorder = null
-                if (discardWhenStopped) { notice = "Recording discarded."; return@launch }
+                val pcm = owned.recorder.capture(120_000) { if (capture === owned) seconds = it }
+                // Natural completion and the duration limit retire this touch press before saving.
+                retireGesture(owned.id)
+                recording = false
+                if (owned.discarded) { notice = "Recording discarded."; return@launch }
                 check(pcm.size >= 3_200) { "The recording was too short. Try again." }
                 savingRecording = true
                 imported = audioStore.importRecording(VoiceProtocol.wav(pcm))
@@ -193,9 +203,15 @@ internal class SpeechController(private val context: Context, private val model:
                 imported = null
                 notice = "Recording saved. Send it when ready."
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { notice = error.message ?: "Could not save the recording." }
+            catch (error: Exception) {
+                notice = if (owned.discarded) "Recording discarded." else error.message ?: "Could not save the recording."
+                if (!owned.discarded) captureFailure = owned.id to notice
+            }
             finally {
-                recording = false; savingRecording = false; recorder = null
+                if (capture === owned) {
+                    retireGesture(owned.id)
+                    recording = false; savingRecording = false; capture = null
+                }
                 // A committed preview remains recoverable if the Activity or coroutine stops.
                 imported?.takeIf { draft?.audio?.id != it.id }?.let { file ->
                     withContext(NonCancellable) { runCatching { audioStore.remove(file.id, protectedAudioIds()) } }
@@ -203,12 +219,30 @@ internal class SpeechController(private val context: Context, private val model:
             }
         }
         refreshProfiles(target)
+        return owned.id
     }
-    fun stop() { recorder?.stop() }
-    fun background() { recorder?.stop() }
+    private fun retireGesture(id: Long) {
+        if (gestureCaptureId == id) { gestureCaptureId = null; gestureCancelProgress = 0f }
+    }
+    fun moveGesture(id: Long, progress: Float) {
+        if (gestureCaptureId == id && capture?.id == id) gestureCancelProgress = progress.coerceIn(0f, 1f)
+    }
+    fun finishGesture(id: Long, cancel: Boolean): Boolean {
+        val owned = capture?.takeIf { it.id == id && gestureCaptureId == id } ?: return false
+        retireGesture(id)
+        if (cancel) owned.discarded = true
+        owned.recorder.stop()
+        return true
+    }
+    fun stopCapture(id: Long) { capture?.takeIf { it.id == id }?.let { retireGesture(it.id); it.recorder.stop() } }
+    fun cancelCapture(id: Long) {
+        capture?.takeIf { it.id == id && recording }?.let { it.discarded = true; stopCapture(id) }
+    }
+    fun stop() { capture?.let { stopCapture(it.id) } }
+    fun background() { stop() }
     fun protectedAudioIds() = (outgoing.mapNotNull { it.audio?.id } + listOfNotNull(draft?.audio?.id)).toSet()
     fun discardRecording() {
-        if (recording) { discardWhenStopped = true; recorder?.stop(); return }
+        if (recording) { activeCaptureId?.let(::cancelCapture); return }
         val captured = draft ?: return
         if (savingRecording) return
         savingRecording = true
