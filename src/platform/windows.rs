@@ -92,10 +92,14 @@ use windows_sys::{
 /// remaining members when its last handle, held only here, closes.
 ///
 /// That job allows breakaway (spec D4), so a session host started with
-/// CREATE_BREAKAWAY_FROM_JOB (`spawn_detached`) outlives this process. Nothing
-/// else uses that permission: every other child starts in a kill-on-close job of
-/// its own that forbids breakaway (`spawn` and the helpers built on it), because
-/// Git for Windows' MSYS runtime breaks away whenever its immediate job lets it.
+/// CREATE_BREAKAWAY_FROM_JOB outlives this process. Only detached starts use that
+/// permission (the session host; `spawn_detached` for the resident OpenCode host,
+/// which outlives hgs by design as on Unix): every other child starts in a
+/// kill-on-close job of its own that forbids breakaway (`spawn` and the helpers
+/// built on it), because Git for Windows' MSYS runtime breaks away whenever its
+/// immediate job lets it. The session host (`__host serve`) and a `--run`
+/// supervisor must not join this job: a host that starts in a job fails its
+/// placement check, and a supervisor belongs to its session's job (D9).
 pub fn prepare_environment() {
     static PREPARED: std::sync::Once = std::sync::Once::new();
     PREPARED.call_once(|| {
@@ -388,8 +392,10 @@ pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
     spawn(command)?.wait()
 }
 /// `Command::output` through `spawn`, with the streams `Command::output` gives
-/// when none is set: no input, output and errors captured. Not for ssh.exe,
-/// which hangs on such pipes (`ssh_output`).
+/// when none is set: no input, output and errors captured. Unlike on Unix,
+/// streams the caller set are replaced too (std cannot tell which were set): a
+/// discarded stderr is captured instead. Not for ssh.exe, which hangs on such
+/// pipes (`ssh_output`).
 pub fn output(command: &mut Command) -> io::Result<Output> {
     command
         .stdin(Stdio::null())
@@ -694,7 +700,8 @@ pub(crate) fn transient_replace_error(error: &io::Error) -> bool {
 pub fn own_process_group(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NEW_PROCESS_GROUP)
 }
-/// Stop a child. Its own children end with this process's job.
+/// Stop a child. Its own children end with its job (`Spawned`, `SshChild`) or,
+/// for a child started otherwise, with this process's job.
 pub fn kill_process_group(child: &mut Child) {
     let _ = child.kill();
 }
