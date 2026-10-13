@@ -927,12 +927,29 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 }
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
+#[cfg(unix)]
 pub fn run_script(account: &str, provider: &str, home: &str) -> String {
-    if account.is_empty() {
+    let environment = run_environment(account, provider, home);
+    if environment.is_empty() {
         return "exec \"$0\" --run \"$@\"".into();
     }
+    format!(
+        "exec env {} \"$0\" --run \"$@\"",
+        platform::join(&environment)
+    )
+}
+
+/// The account variables a resumed or forked session's supervisor starts with
+/// (`run_script` on Unix; a Windows session's own variables, spec D8): the
+/// agent's home, the account ID and, for a profile that is not the native
+/// login, a private Anthropic configuration and blank credentials. None without
+/// an account.
+pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String> {
+    if account.is_empty() {
+        return Vec::new();
+    }
     let Ok(key) = home_var(provider) else {
-        return "exec \"$0\" --run \"$@\"".into();
+        return Vec::new();
     };
     let mut environment = vec![format!("{key}={home}"), format!("HGS_ACCOUNT_ID={account}")];
     if !account.starts_with("native-") {
@@ -946,10 +963,7 @@ pub fn run_script(account: &str, provider: &str, home: &str) -> String {
             environment.push(format!("{key}="));
         }
     }
-    format!(
-        "exec env {} \"$0\" --run \"$@\"",
-        platform::join(&environment)
-    )
+    environment
 }
 
 #[cfg(test)]

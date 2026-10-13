@@ -7,13 +7,14 @@ fn required_env(name: &str) -> Result<String> {
 }
 
 fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     // Older Codex already runs in-process and rejects this newer flag. Probe
     // capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
+    let mut command = crate::platform::agent_command(&[executable.into(), "--help".into()])
+        .map_err(|error| format!("{executable}: {error}"))?;
     let mut child = crate::platform::spawn(
-        Command::new(executable)
-            .arg("--help")
+        command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
             .stdin(Stdio::null())
@@ -38,6 +39,8 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
 }
 
 pub(super) fn run(args: &[String]) -> Result<i32> {
+    // Before anything is written: hooks, settings or the record.
+    tracking_available()?;
     let first_count: usize = args
         .first()
         .ok_or("missing launch argument count")?
@@ -525,23 +528,7 @@ fn session_spec(
         ));
     }
     let executable = runner_executable()?;
-    let shell = if string(record, "shell").is_empty() {
-        "/bin/bash"
-    } else {
-        string(record, "shell")
-    };
-    let mut launch = vec![
-        shell.into(),
-        "-lic".into(),
-        crate::accounts::run_script(
-            string(record, "account_id"),
-            string(record, "agent"),
-            string(record, "agent_home"),
-        ),
-        executable.clone(),
-        "0".into(),
-    ];
-    launch.extend(argv);
+    let launch = supervisor_command(record, &executable, argv);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_AGENT", string(record, "agent").to_owned()),
@@ -575,6 +562,7 @@ fn session_spec(
         env: environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
+            .chain(account_variables(record))
             .collect(),
         command: launch,
         detached: true,

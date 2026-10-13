@@ -25,10 +25,11 @@
 //!   from any executable, and lets that host create sessions without the
 //!   marker. For any other state directory the variable is ignored, so one left
 //!   in an environment never opens the user's own sessions to an unstaged host.
-//! - `HGS_HOST_IMAGE=<absolute path of an hgs.exe>` makes `hgs __host call
-//!   --start` start that executable as the host instead of the staged image;
-//!   tests name the build under test, the one that runs. For any other state
-//!   directory it is an error. Nothing else reads it.
+//! - `HGS_HOST_IMAGE=<absolute path of an hgs.exe>` makes every launcher (`hgs
+//!   __host call --start` and the session starts of the terminal backend) start
+//!   that executable as the host instead of the staged image; tests name the
+//!   build under test, the one that runs. For any other state directory it is
+//!   an error. Nothing else reads it.
 //!
 //! The decisions are plain functions tested on every platform; reading the
 //! environment and the files they decide on is Windows-only.
@@ -186,13 +187,27 @@ pub(crate) fn call_image(
 }
 
 #[cfg(windows)]
-pub(crate) use self::windows::{default_state_dirs, explicit_state_dir, unstaged_allowed};
+pub(crate) use self::windows::{explicit_state_dir, host_image, unstaged_allowed};
 
 #[cfg(windows)]
 mod windows {
     use super::*;
     use crate::platform;
     use std::env;
+
+    /// The executable a launcher starts as the host of the canonical `state`
+    /// (D2): the staged image the pointer names once local sessions are
+    /// enabled, or `HGS_HOST_IMAGE` for an isolated state directory. Asked
+    /// again before each start (`client::connect_or_start`).
+    pub(crate) fn host_image(state: &Path) -> Result<PathBuf, String> {
+        let explicit = env::var_os(IMAGE)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let isolated = explicit.is_some()
+            && super::isolated(explicit_state_dir(), state, &default_state_dirs());
+        let current = staging::current_image().map(|folder| folder.join(EXECUTABLE));
+        call_image(explicit, isolated, staging::enabled(), current)
+    }
 
     /// Whether `HGS_STATE_DIR` names the state directory.
     pub(crate) fn explicit_state_dir() -> bool {

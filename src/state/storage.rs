@@ -250,6 +250,14 @@ pub(super) fn join_command(args: &[String]) -> String {
         .join(" ")
 }
 
+/// The hgs that a session's supervisor, hooks and recipes run: on Windows only
+/// the stable CLI, whichever hgs.exe runs now (spec D8).
+#[cfg(windows)]
+pub(super) fn runner_executable() -> Result<String> {
+    crate::platform::stable_executable().map(|path| path.display().to_string())
+}
+
+#[cfg(unix)]
 pub(super) fn runner_executable() -> Result<String> {
     if let Some(executable) = nonempty_env("HGS_EXECUTABLE") {
         let path = Path::new(&executable);
@@ -261,4 +269,57 @@ pub(super) fn runner_executable() -> Result<String> {
         .map_err(|error| error.to_string())?
         .to_string_lossy()
         .into_owned())
+}
+
+/// The pane command of a tracked session started from its saved `record`
+/// (resume, restore, fresh start, fork): `executable --run 0 ARGV`, through the
+/// record's login shell with the account's variables on Unix, directly on
+/// Windows, where the session's own variables carry the account
+/// (`account_variables`, spec D8).
+pub(super) fn supervisor_command(
+    record: &Value,
+    executable: &str,
+    argv: Vec<String>,
+) -> Vec<String> {
+    #[cfg(unix)]
+    let mut launch = {
+        let shell = if string(record, "shell").is_empty() {
+            "/bin/bash"
+        } else {
+            string(record, "shell")
+        };
+        vec![
+            shell.into(),
+            "-lic".into(),
+            crate::accounts::run_script(
+                string(record, "account_id"),
+                string(record, "agent"),
+                string(record, "agent_home"),
+            ),
+            executable.into(),
+            "0".into(),
+        ]
+    };
+    #[cfg(windows)]
+    let mut launch = {
+        let _ = record;
+        vec![executable.into(), "--run".into(), "0".into()]
+    };
+    launch.extend(argv);
+    launch
+}
+
+/// The account variables of a Windows session started from `record`, after its
+/// other variables so that they win; none on Unix, where `supervisor_command`
+/// applies them after the login shell.
+pub(super) fn account_variables(record: &Value) -> Vec<String> {
+    if cfg!(windows) {
+        crate::accounts::run_environment(
+            string(record, "account_id"),
+            string(record, "agent"),
+            string(record, "agent_home"),
+        )
+    } else {
+        Vec::new()
+    }
 }

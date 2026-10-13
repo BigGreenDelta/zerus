@@ -135,6 +135,15 @@ impl Environment {
         Ok(())
     }
 
+    /// Every variable as `NAME=VALUE`, in the order it was first given; `parse`
+    /// reads them back unchanged.
+    pub(crate) fn entries(&self) -> Vec<String> {
+        self.variables
+            .iter()
+            .map(|variable| format!("{}={}", variable.name, variable.value))
+            .collect()
+    }
+
     /// Remove `name` in whatever case it is spelled.
     pub(crate) fn remove(&mut self, name: &str) -> Result<(), EnvironmentError> {
         check(name, "")?;

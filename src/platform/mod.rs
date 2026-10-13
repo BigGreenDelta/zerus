@@ -13,6 +13,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
 };
 
+mod shim;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

@@ -1,16 +1,19 @@
-//! The terminal that hosts agent sessions: tmux on Unix. Each session holds one
-//! pane, addressed by its exact name, its immutable session ID (`$N`) or its pane
-//! ID (`%N`); records, rename transactions and question hashes keep those forms.
+//! The terminal that hosts agent sessions: tmux on Unix, the session host on a
+//! Windows computer with local sessions enabled (`host`, spec D2-D5, D8). Each
+//! session holds one pane, addressed by its exact name, its immutable session ID
+//! (`$N`) or its pane ID (`%N`); records, rename transactions and question hashes
+//! keep those forms.
 //!
 //! The tmux backend issues exactly the commands hgs always has, in the same order,
 //! with the same arguments, stdin and stdio. Answers keep the terminal's own text
 //! where callers validate it, so their checks and messages stay where they were.
-//! Operations a backend lacks report local sessions as unavailable; Windows builds
-//! have no backend yet (Phase 2 adds the native session host).
-// Only the tmux backend reads these types so far; Windows builds construct them
-// for a backend that refuses every action.
+//! Operations a backend lacks report local sessions as unavailable, as a Windows
+//! computer whose local sessions are not enabled does for all of them.
+// Only the tmux backend reads these types on Unix; the host backend is compiled
+// everywhere so that its mapping is tested on every platform.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+pub(crate) mod host;
 #[cfg(unix)]
 mod tmux;
 
@@ -164,7 +167,8 @@ pub(crate) struct InputState {
 }
 
 /// A new session. `env` holds `KEY=VALUE` overrides and `command` the words of
-/// the pane's command line, which the tmux backend runs through the shell.
+/// the pane's command line, which the tmux backend runs through the shell and
+/// the session host as the root process's argv (spec D8).
 pub(crate) struct LaunchSpec {
     pub name: String,
     pub cwd: String,
@@ -203,8 +207,10 @@ pub(crate) enum DryRun<'a> {
 }
 
 /// The session terminal. Without a server there are no sessions: listings come
-/// back empty. Methods returning a `CliResult` serve an interactive CLI command
-/// and leave the terminal's own messages on the user's terminal.
+/// back empty. A listing that fails for any other reason is an error, never an
+/// empty answer, which would show live sessions as stopped and resumable (spec
+/// D3). Methods returning a `CliResult` serve an interactive CLI command and
+/// leave the terminal's own messages on the user's terminal.
 pub(crate) trait TerminalBackend: Sync {
     /// Whether the terminal server runs.
     fn server_running(&self) -> bool {
@@ -223,15 +229,15 @@ pub(crate) trait TerminalBackend: Sync {
         Err(UNSUPPORTED.into())
     }
 
-    fn listing(&self) -> Listing {
-        Listing {
+    fn listing(&self) -> Result<Listing> {
+        Ok(Listing {
             clients: Vec::new(),
             sessions: Vec::new(),
-        }
+        })
     }
     /// `(name, attached clients)` for `hgs ls`; None without sessions.
-    fn attached_counts(&self) -> Option<Vec<(String, String)>> {
-        None
+    fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
+        Ok(None)
     }
     fn panes(&self) -> Result<Vec<PaneRow>> {
         Err(UNSUPPORTED.into())
@@ -334,8 +340,9 @@ pub(crate) trait TerminalBackend: Sync {
     }
 }
 
-/// A computer without a session terminal (Windows until its session host
-/// exists). No host runs, so it has no live sessions: listings are empty, which
+/// A computer without a session terminal: a Windows computer whose local
+/// sessions are not enabled (spec D2), a control console for remote machines.
+/// No host runs for it, so it has no live sessions: listings are empty, which
 /// leaves saved sessions stopped, and every action fails.
 #[cfg(not(unix))]
 struct Unavailable;
@@ -363,11 +370,18 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// This computer's session terminal.
+/// This computer's session terminal. On Windows it is the session host once
+/// local sessions are enabled, decided again on every call as
+/// `platform::local_sessions` is. Unit tests never reach a host: they get the
+/// unavailable backend or the fake they install.
 pub(crate) fn current() -> &'static dyn TerminalBackend {
     #[cfg(test)]
     if let Some(fake) = FAKE.with(std::cell::Cell::get) {
         return fake;
+    }
+    #[cfg(all(windows, not(test)))]
+    if crate::platform::local_sessions() {
+        return &host::HOST;
     }
     &BACKEND
 }
@@ -452,9 +466,9 @@ mod unavailable_tests {
     fn no_host_lists_no_live_sessions_and_refuses_every_action() {
         let terminal = current();
         assert!(!terminal.server_running() && !terminal.inside());
-        let listing = terminal.listing();
+        let listing = terminal.listing().unwrap();
         assert!(listing.clients.is_empty() && listing.sessions.is_empty());
-        assert!(terminal.attached_counts().is_none());
+        assert!(terminal.attached_counts().unwrap().is_none());
         assert!(storage::live().unwrap().is_empty());
         assert!(workspace::pane_cwds().is_empty());
         assert!(!terminal.session_exists("claude/p"));

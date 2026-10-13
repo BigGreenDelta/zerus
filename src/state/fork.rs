@@ -228,23 +228,7 @@ pub(super) fn start_scoped(
     };
     let argv = fork_argv(&record, new_id.as_deref())?;
     let executable = runner_executable()?;
-    let shell = if string(&record, "shell").is_empty() {
-        "/bin/bash"
-    } else {
-        string(&record, "shell")
-    };
-    let mut launch = vec![
-        shell.into(),
-        "-lic".into(),
-        crate::accounts::run_script(
-            string(&record, "account_id"),
-            agent,
-            string(&record, "agent_home"),
-        ),
-        executable.clone(),
-        "0".into(),
-    ];
-    launch.extend(argv);
+    let launch = supervisor_command(&record, &executable, argv);
     let new_run=uuid::Uuid::new_v4().to_string();
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
@@ -281,6 +265,7 @@ pub(super) fn start_scoped(
         env: environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
+            .chain(account_variables(&record))
             .collect(),
         command: launch,
         detached: true,

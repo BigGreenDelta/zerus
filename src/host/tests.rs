@@ -310,6 +310,9 @@ impl Launcher for FakeLauncher {
             "HGS_HOST_SESSION",
             "HGS_HOST_PANE",
             "Path",
+            "HGS_EXECUTABLE",
+            "HGS_SESSION",
+            "HGS_CLIENT",
         ];
         let program = Arc::new(Program {
             pid: 1000 + self.0.next_pid.fetch_add(1, Ordering::SeqCst),
@@ -1417,4 +1420,197 @@ fn an_exiting_host_admits_no_hello_and_answers_the_connections_it_had() {
     let started = Instant::now();
     draining.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// `state::backend::host`, the terminal backend hgs uses on Windows, over a
+/// real host: every backend operation is answered by the registry.
+mod terminal_backend {
+    use super::*;
+    use crate::{
+        host::spawn::Environment,
+        state::backend::{
+            self as terminal,
+            host::{Connector, Failure, HostBackend},
+            LaunchSpec, PaneField, StageErrors, TerminalBackend,
+        },
+    };
+    use serde_json::Value;
+
+    struct Direct {
+        host: Arc<Host<FakeLauncher>>,
+        creates: Arc<AtomicU32>,
+    }
+
+    impl Connector for Direct {
+        fn call(&self, op: Op) -> Result<Value, Failure> {
+            connect(&self.host).request(op).map_err(Failure::Host)
+        }
+        fn create(&self, op: Op) -> Result<Value, Failure> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            self.call(op)
+        }
+        fn environment(&self) -> Result<Environment, String> {
+            // A launch from inside another session.
+            Environment::parse([
+                "Path=/bin",
+                "HGS_SESSION=claude/outer/main",
+                "HGS_HOST_PANE=%9",
+            ])
+            .map_err(|error| error.to_string())
+        }
+        fn stable_cli(&self) -> Result<String, String> {
+            Ok(PROGRAM.into())
+        }
+        fn parent(&self, pid: u32) -> Option<u32> {
+            // The fake supervisor of the first session started agent 2000.
+            (pid == 2000).then_some(1000)
+        }
+        fn var(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    const LAUNCH_ID: &str = "0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10";
+
+    #[test]
+    fn the_terminal_backend_runs_sessions_through_the_host() {
+        let (host, launcher) = new_host();
+        let creates = Arc::new(AtomicU32::new(0));
+        let backend = HostBackend::new(Direct {
+            host: host.clone(),
+            creates: creates.clone(),
+        });
+        assert!(backend.listing().unwrap().sessions.is_empty());
+        assert!(!backend.session_exists("fake_agent/p/a"));
+        let spec = LaunchSpec {
+            name: "fake_agent/p/a".into(),
+            cwd: WORK.into(),
+            env: strings(&["HGS_CLIENT=laptop", &format!("HGS_LAUNCH_ID={LAUNCH_ID}")]),
+            command: strings(&[PROGRAM, "--run", "0", "fake_agent"]),
+            detached: true,
+        };
+        backend.start(&spec).unwrap();
+        assert_eq!(creates.load(Ordering::SeqCst), 1);
+        let program = launcher.program(0);
+        assert_eq!(program.argv, spec.command);
+        assert_eq!(program.cwd, WORK);
+        let variable = |name: &str| {
+            program
+                .environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, value)| value.clone())
+        };
+        assert_eq!(variable("HGS_EXECUTABLE").as_deref(), Some(PROGRAM));
+        assert_eq!(variable("HGS_CLIENT").as_deref(), Some("laptop"));
+        assert_eq!(variable("HGS_HOST_PANE").as_deref(), Some("%0"));
+        assert_eq!(variable("HGS_SESSION"), None);
+        assert_eq!(variable("Path").as_deref(), Some("/bin"));
+        // A retried start of the same launch starts nothing.
+        backend.start(&spec).unwrap();
+        assert_eq!(launcher.count(), 1);
+
+        let listing = backend.listing().unwrap();
+        assert_eq!(listing.sessions.len(), 1);
+        assert_eq!(
+            (
+                listing.sessions[0].name.as_str(),
+                listing.sessions[0].launch_id.as_str()
+            ),
+            ("fake_agent/p/a", LAUNCH_ID)
+        );
+        backend.set_run_marker("fake_agent/p/a", "run-1").unwrap();
+        let panes = backend.panes().unwrap();
+        assert_eq!(
+            (
+                panes[0].pane.as_str(),
+                panes[0].dead.as_str(),
+                panes[0].run_marker.as_str()
+            ),
+            ("%0", "0", "run-1")
+        );
+        let info = backend
+            .pane_info(
+                terminal::Target::Name("fake_agent/p/a"),
+                &[
+                    PaneField::SessionId,
+                    PaneField::PanePid,
+                    PaneField::Tty,
+                    PaneField::RunMarker,
+                ],
+            )
+            .unwrap();
+        assert_eq!(info.fields(), ["$0", "1000", "conpty:%0", "run-1"]);
+        // The viewing peer is the session variable that attaching sets; the
+        // launch's HGS_CLIENT is in the program's environment only.
+        assert_eq!(backend.viewer("fake_agent/p/a"), "");
+        backend.set_client(terminal::Target::Session("$0"), "laptop");
+        assert_eq!(backend.viewer("fake_agent/p/a"), "laptop");
+        assert!(backend.on_terminal("2000", "conpty:%0").unwrap());
+        assert!(!backend.on_terminal("2001", "conpty:%0").unwrap());
+
+        program.write(b"fake> ");
+        eventually("the prompt", || {
+            backend
+                .capture("%0", terminal::Capture::Plain)
+                .unwrap()
+                .starts_with(b"fake>\n")
+        });
+        backend
+            .send(
+                "%0",
+                &[terminal::Key::Literal("ls"), terminal::Key::Named("Enter")],
+            )
+            .unwrap();
+        assert_eq!(program.input_until(b"\r"), b"ls\r");
+        program.write(b"\x1b[?2004h");
+        eventually("bracketed paste", || {
+            backend
+                .pane_info(terminal::Target::Pane("%0"), &[PaneField::BracketedPaste])
+                .unwrap()
+                .value()
+                == "1"
+        });
+        assert!(backend
+            .stage("hgs-input-1", b"two\nlines", StageErrors::Read)
+            .unwrap());
+        backend
+            .paste("hgs-input-1", "%0", terminal::Paste::Composer)
+            .unwrap();
+        assert_eq!(
+            program.input_until(b"\x1b[201~"),
+            b"\x1b[200~two\nlines\x1b[201~"
+        );
+
+        // Input checks need the session's supervisor, which this one never registered.
+        let error = backend
+            .input_state(&terminal::InputClaim {
+                pane: "%0",
+                name: "fake_agent/p/a",
+                run_id: "run-1",
+                agent: "claude",
+                pid: Some(2000),
+            })
+            .err()
+            .unwrap();
+        assert!(error.contains("no supervisor"), "{error}");
+
+        assert_eq!(
+            backend.session_name("$0").unwrap().as_deref(),
+            Some("fake_agent/p/a")
+        );
+        backend.rename("$0", "fake_agent/p/b").unwrap();
+        assert!(
+            backend.session_exists("fake_agent/p/b") && !backend.session_exists("fake_agent/p/a")
+        );
+        assert_eq!(backend.session_name("$7").unwrap(), None);
+
+        // Without a supervisor, terminate ends the session as kill-session does.
+        backend
+            .kill_session(terminal::Target::Session("$0"))
+            .unwrap();
+        eventually("the end", || backend.listing().unwrap().sessions.is_empty());
+        assert!(!backend.session_exists("fake_agent/p/b"));
+        assert_eq!(backend.attached_counts().unwrap(), None);
+    }
 }

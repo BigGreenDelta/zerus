@@ -20,24 +20,35 @@
 //!   "rows": N}}`, `{"wait_ms": N}` and `{"detach": true}`; it prints
 //!   `{"attached", "output_hex", "controls"}` once the stream has ended (or
 //!   a second after the last step).
+//! - `backend '<operation>'`: one operation of the terminal backend hgs uses
+//!   for this computer's sessions (`state::backend::host`), for tests, as
+//!   `{"op": "listing"}`, `panes`, `pane_info` (`target`, `fields` named as
+//!   `PaneField`s in snake case), `capture` (`pane`, `styled`), `send` (`pane`,
+//!   `keys`), `paste` (`pane`, `text`, `mode`: `composer`, `terminal` or
+//!   `terminal_bracketed`; staged and pasted as message input does),
+//!   `set_run_marker` (`name`, `run_id`), `rename` (`id`, `name`),
+//!   `kill_session` (`target`), `kill_pane` (`pane`), `session_exists`
+//!   (`name`), `session_name` (`id`), `input_state` (`pane`, `name`, `run_id`,
+//!   `agent`, `pid`) and `on_terminal` (`pid`, `tty`). It prints `{"ok": ...}`
+//!   and exits 0, or `{"error": message}` and exits 1. Like a listing, only a
+//!   start ever starts a host, and none of these is one.
 //!
 //! Only `call --start` and `serve` create the state directory.
 use super::{
     client::{connect, connect_or_start, AttachStream, ClientError, Connection, Event},
     gate,
-    protocol::{Attach, Op, Response, Role, Size},
-    server, staging,
+    protocol::{Attach, Key, Op, Response, Role, Size, Target},
+    server,
 };
+use crate::state::backend::{self, host::HOST, PaneField, TerminalBackend};
 use serde_json::{json, Value};
 use std::{
-    env,
-    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
-const USAGE: &str = "usage: hgs __host serve | call [--start] '<request json>' | status | attach '<attach json>' '<steps json>'";
+const USAGE: &str = "usage: hgs __host serve | call [--start] '<request json>' | status | attach '<attach json>' '<steps json>' | backend '<operation json>'";
 
 /// Run `__host` with the words after it; the exit code.
 pub(crate) fn run(args: &[String]) -> i32 {
@@ -48,6 +59,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         ["call", request] => call(request, false),
         ["status"] => status(),
         ["attach", request, steps] => attach(request, steps),
+        ["backend", operation] => backend(operation),
         _ => {
             eprintln!("{USAGE}");
             2
@@ -73,7 +85,9 @@ fn open(start: bool, role: Role) -> Result<Connection, ClientError> {
         };
     }
     let state = server::state_dir().map_err(failed)?;
-    connect_or_start(&state, role, &|| host_image(&state))
+    connect_or_start(&state, role, &|| {
+        gate::host_image(&state).map_err(ClientError::Start)
+    })
 }
 
 fn parse<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> Result<T, i32> {
@@ -251,19 +265,203 @@ fn attach(request: &str, steps: &str) -> i32 {
     0
 }
 
-/// The executable `call --start` starts as the host of the canonical `state`
-/// (D2): the staged image the pointer names once local sessions are enabled,
-/// or `HGS_HOST_IMAGE` for an isolated state directory (`gate`).
-fn host_image(state: &Path) -> Result<PathBuf, ClientError> {
-    let explicit = env::var_os(gate::IMAGE)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let isolated = explicit.is_some()
-        && gate::isolated(
-            gate::explicit_state_dir(),
-            state,
-            &gate::default_state_dirs(),
-        );
-    let current = staging::current_image().map(|folder| folder.join(staging::EXECUTABLE));
-    gate::call_image(explicit, isolated, staging::enabled(), current).map_err(ClientError::Start)
+/// One `__host backend` operation.
+#[derive(serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum BackendOp {
+    Listing,
+    Panes,
+    PaneInfo {
+        target: Target,
+        fields: Vec<String>,
+    },
+    Capture {
+        pane: String,
+        #[serde(default)]
+        styled: bool,
+    },
+    Send {
+        pane: String,
+        keys: Vec<Key>,
+    },
+    Paste {
+        pane: String,
+        text: String,
+        mode: String,
+    },
+    SetRunMarker {
+        name: String,
+        run_id: String,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    KillSession {
+        target: Target,
+    },
+    KillPane {
+        pane: String,
+    },
+    SessionExists {
+        name: String,
+    },
+    SessionName {
+        id: String,
+    },
+    InputState {
+        pane: String,
+        name: String,
+        run_id: String,
+        agent: String,
+        #[serde(default)]
+        pid: Option<u64>,
+    },
+    OnTerminal {
+        pid: String,
+        tty: String,
+    },
+}
+
+fn pane_field(name: &str) -> Option<PaneField> {
+    use PaneField::*;
+    Some(match name {
+        "session_id" => SessionId,
+        "session_name" => SessionName,
+        "pane_id" => PaneId,
+        "server_pid" => ServerPid,
+        "pane_pid" => PanePid,
+        "width" => Width,
+        "height" => Height,
+        "cursor_x" => CursorX,
+        "cursor_y" => CursorY,
+        "in_mode" => InMode,
+        "current_command" => CurrentCommand,
+        "dead" => Dead,
+        "run_marker" => RunMarker,
+        "bracketed_paste" => BracketedPaste,
+        "tty" => Tty,
+        _ => return None,
+    })
+}
+
+fn backend_target(target: &Target) -> backend::Target<'_> {
+    match target {
+        Target::Name(name) => backend::Target::Name(name),
+        Target::Session(id) => backend::Target::Session(id),
+        Target::Pane(id) => backend::Target::Pane(id),
+    }
+}
+
+fn backend(operation: &str) -> i32 {
+    let operation: BackendOp = match parse(operation, "backend operation") {
+        Ok(operation) => operation,
+        Err(code) => return code,
+    };
+    let terminal: &dyn TerminalBackend = &HOST;
+    let result: Result<Value, String> = match operation {
+        BackendOp::Listing => terminal.listing().map(|listing| {
+            json!({
+                "clients": listing.clients.iter().map(|client| json!({
+                    "session": client.session, "terminal": client.terminal,
+                })).collect::<Vec<_>>(),
+                "sessions": listing.sessions.iter().map(|session| json!({
+                    "name": session.name, "attached": session.attached,
+                    "created": session.created, "launch_id": session.launch_id,
+                })).collect::<Vec<_>>(),
+            })
+        }),
+        BackendOp::Panes => terminal.panes().map(|panes| {
+            json!(panes
+                .iter()
+                .map(|pane| json!({
+                    "session": pane.session, "pane": pane.pane,
+                    "dead": pane.dead, "run_marker": pane.run_marker,
+                }))
+                .collect::<Vec<_>>())
+        }),
+        BackendOp::PaneInfo { target, fields } => fields
+            .iter()
+            .map(|name| pane_field(name).ok_or_else(|| format!("unknown pane field {name}")))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|fields| terminal.pane_info(backend_target(&target), &fields))
+            .map(|info| json!({"text": info.fields().join("\t")})),
+        BackendOp::Capture { pane, styled } => terminal
+            .capture(
+                &pane,
+                if styled {
+                    backend::Capture::Styled
+                } else {
+                    backend::Capture::Plain
+                },
+            )
+            .map(|bytes| json!({"text": String::from_utf8_lossy(&bytes)})),
+        BackendOp::Send { pane, keys } => {
+            let keys: Vec<_> = keys
+                .iter()
+                .map(|key| match key {
+                    Key::Named(name) => backend::Key::Named(name),
+                    Key::Literal(text) => backend::Key::Literal(text),
+                })
+                .collect();
+            terminal.send(&pane, &keys).map(|()| json!({}))
+        }
+        BackendOp::Paste { pane, text, mode } => {
+            let mode = match mode.as_str() {
+                "composer" => Ok(backend::Paste::Composer),
+                "terminal" => Ok(backend::Paste::Terminal { bracketed: false }),
+                "terminal_bracketed" => Ok(backend::Paste::Terminal { bracketed: true }),
+                other => Err(format!("unknown paste mode {other}")),
+            };
+            let buffer = format!("hgs-backend-{}", std::process::id());
+            mode.and_then(|mode| {
+                if !terminal.stage(&buffer, text.as_bytes(), backend::StageErrors::Read)? {
+                    return Err("the text was not staged".into());
+                }
+                let pasted = terminal.paste(&buffer, &pane, mode);
+                terminal.discard(&buffer);
+                pasted.map(|()| json!({}))
+            })
+        }
+        BackendOp::SetRunMarker { name, run_id } => {
+            terminal.set_run_marker(&name, &run_id).map(|()| json!({}))
+        }
+        BackendOp::Rename { id, name } => terminal.rename(&id, &name).map(|()| json!({})),
+        BackendOp::KillSession { target } => terminal
+            .kill_session(backend_target(&target))
+            .map(|()| json!({})),
+        BackendOp::KillPane { pane } => terminal.kill_pane(&pane).map(|()| json!({})),
+        BackendOp::SessionExists { name } => Ok(json!({"exists": terminal.session_exists(&name)})),
+        BackendOp::SessionName { id } => {
+            terminal.session_name(&id).map(|name| json!({"name": name}))
+        }
+        BackendOp::InputState {
+            pane,
+            name,
+            run_id,
+            agent,
+            pid,
+        } => terminal
+            .input_state(&backend::InputClaim {
+                pane: &pane,
+                name: &name,
+                run_id: &run_id,
+                agent: &agent,
+                pid,
+            })
+            .map(|state| json!({"cursor_x": state.cursor_x, "cursor_y": state.cursor_y})),
+        BackendOp::OnTerminal { pid, tty } => terminal
+            .on_terminal(&pid, &tty)
+            .map(|attached| json!({"attached": attached})),
+    };
+    match result {
+        Ok(value) => {
+            println!("{}", json!({"ok": value}));
+            0
+        }
+        Err(error) => {
+            println!("{}", json!({"error": error}));
+            1
+        }
+    }
 }

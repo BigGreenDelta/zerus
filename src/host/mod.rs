@@ -23,7 +23,7 @@
 
 pub(crate) mod admin;
 mod channel;
-mod client;
+pub(crate) mod client;
 #[cfg(windows)]
 mod command;
 #[cfg(windows)]
@@ -31,7 +31,7 @@ mod conpty;
 #[cfg(windows)]
 mod console;
 pub(crate) mod endpoint;
-mod gate;
+pub(crate) mod gate;
 #[cfg(windows)]
 pub(crate) mod job;
 pub(crate) mod keys;
@@ -42,7 +42,7 @@ pub(crate) mod pipe;
 pub(crate) mod protocol;
 mod registry;
 pub(crate) mod sequences;
-mod server;
+pub(crate) mod server;
 mod session;
 pub(crate) mod spawn;
 pub(crate) mod staging;
