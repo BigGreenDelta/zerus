@@ -1111,7 +1111,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if(target.agentId.isNotBlank()) model.childSendReason(target) else NativeParser.messageBlockReason(model.activity)
     }
         else "Refresh to verify the session before sending."
-    val canSend = (editor.text.isNotBlank() || draft.attachments.isNotEmpty()) && !model.sendingBlocked(target) && !model.contextBlocked(target) &&
+    val canSend = (editor.text.isNotBlank() || draft.attachments.isNotEmpty()) && (draft.attachments.isEmpty() || model.attachmentReason(target).isBlank()) && !model.sendingBlocked(target) && !model.contextBlocked(target) &&
         draft.status == "editing" && !model.demo && online && target.run.isNotBlank() && model.storageReady && blockReason.isBlank()
     val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.status in listOf("sending", "uncertain") }
     val sendReason = when {
@@ -1120,6 +1120,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         !model.storageReady -> "Private storage is not ready. Sending is unavailable."
         draft.status == "submitting" -> "Sending the saved draft. Wait for its result."
         draft.status != "editing" -> "Review the saved draft before sending again."
+        draft.attachments.isNotEmpty() && model.attachmentReason(target).isNotBlank() -> model.attachmentReason(target)
         blockReason.isNotBlank() -> blockReason
         !online || target.run.isBlank() -> "Refresh to verify the session before sending."
         previous?.status == "uncertain" -> "Delivery unknown. Check the previous message before sending again."
@@ -1173,7 +1174,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             focusRequester = focusRequester, onFocusChanged = { focused = it },
             leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !recording && !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", Modifier.size(24.dp).rotate(45f), tint = Muted)
                 }
             }, action = {

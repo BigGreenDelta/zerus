@@ -16,7 +16,7 @@ data class AccountCatalog(val key:MachineKey,val machineName:String,val supporte
 
 object AccountSnapshots {
     private val accountId=Regex("[A-Za-z0-9_][A-Za-z0-9_-]{0,79}")
-    private val providers=setOf("codex","claude","kimi","dsh")
+    private val providers=setOf("codex","claude","kimi","dsh","opencode")
     private val statuses=setOf("ok","loading","configured","offline","expired","signed_out","credentials_locked","desktop_session_unavailable","credentials_unavailable","unavailable","error","unknown")
     private fun str(raw:JSONObject,key:String,max:Int=256):String = (raw.opt(key) as? String)?.takeIf { it.length<=max && it.none { c -> c.isISOControl() && c!='\n' } }.orEmpty()
     private fun number(raw:JSONObject,key:String):Double?=(raw.opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && it>=0 && it<=9_007_199_254_740_991.0 }

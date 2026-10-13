@@ -116,6 +116,7 @@ bool setSendingReady(MessageComposer &composer, const QString &key, bool preserv
 class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
+    void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -180,6 +181,20 @@ private slots:
 private:
     QTemporaryDir m_settings;
 };
+
+void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval()
+{
+    MessageComposer composer;composer.setSessionKey("opencode/fixture");
+    QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.setAvailability(true);
+    QVERIFY(composer.addAttachment("file.txt","text/plain","fixture"));composer.editor()->setPlainText("Keep text");
+    composer.setAttachmentAvailability(false,"OpenCode files unavailable");
+    QVERIFY(!composer.canAttachFiles());QVERIFY(!composer.addAttachment("new.txt","text/plain","new"));
+    auto *send=composer.findChild<QPushButton *>("sendMessage");QVERIFY(send);QVERIFY(!send->isEnabled());
+    // A retained file can still be removed; an unavailable adapter must not trap a draft.
+    auto *remove=composer.findChild<QPushButton *>("removeAttachment");QVERIFY(remove);QVERIFY(remove->isEnabled());remove->click();
+    QTRY_VERIFY(send->isEnabled());QCOMPARE(composer.editor()->toPlainText(),QString("Keep text"));
+    composer.setRecording(true);QVERIFY(!send->isEnabled());composer.setRecording(false);QVERIFY(send->isEnabled());
+}
 
 void TestMessageComposer::initTestCase()
 {
@@ -1465,6 +1480,7 @@ void TestMessageComposer::voiceInsertionRequiresUnchangedDraftAndNavigation()
     QVERIFY(composer.setWaitingToSend(composer.sessionKey(), "Waiting"));
     QVERIFY(!composer.insertVoiceText(beforeLock, "locked words", [](bool) {}));
     QVERIFY(composer.setWaitingToSend(composer.sessionKey(), {}));
+    composer.setAttachmentAvailability(false,"Native file attachments unavailable");QVERIFY(!composer.canAttachFiles());
     composer.editor()->moveCursor(QTextCursor::End); bool finished = false, durable = false;
     QVERIFY(composer.insertVoiceText(composer.voiceTarget(), "spoken words", [&](bool saved) { finished = true; durable = saved; }));
     QTRY_VERIFY(finished); QVERIFY(durable); QCOMPARE(sent.count(), 0);

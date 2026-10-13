@@ -327,6 +327,9 @@ private slots:
     void terminationProgress();
     void remoteFolderLaunch();
     void launchNameFollowsRenameRules();
+    void openCodeModelLaunchUsesNativeAccountAndActivity();
+    void openCodeCapabilitiesPreserveDraftWithoutTerminal();
+    void machineBatchCountsExcludeNativeOpenCodeSessions();
     void nativeLaunchStaysInWorkspace_data();
     void nativeLaunchStaysInWorkspace();
     void nativeSignInPreservesDraftAndUnblocks();
@@ -6770,6 +6773,73 @@ void TestSessionsWindow::launchNameFollowsRenameRules()
     start->click();
     QTRY_COMPARE(launched.size(), 1);
     QCOMPARE(launched[0][3].toString(), QStringLiteral("my plan"));
+}
+
+void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
+{
+    QTemporaryDir fixture;const auto fake=fixture.filePath("hgs");
+    const QJsonObject accounts{{"profiles",QJsonArray{QJsonObject{{"id","native-opencode"},{"provider","opencode"},{"label","Native configuration"},{"installed",true},{"is_default",true},
+        {"model_options",QJsonArray{QJsonObject{{"value","ollama/qwen3:8b"},{"label","Qwen 3"}},QJsonObject{{"value","ollama/qwen3:14b"},{"label","Qwen 3 large"}}}}}}}};
+    QVERIFY(FakeCli::install(fake,"#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[0]=='account':print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(accounts).toJson(QJsonDocument::Compact)))+")\n"
+        "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
+        "elif a[0]=='worktrees':print('{\"state\":\"not_repo\"}')\n"));
+    QSettings().setValue("workspace/launchOpenTerminal",true);
+    NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
+    auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
+    auto *account=dialog.findChild<QComboBox *>("launchAccount"),*models=dialog.findChild<QComboBox *>("launchModel");
+    auto *terminal=dialog.findChild<QCheckBox *>("launchOpenTerminal");
+    QTRY_VERIFY(start->isEnabled());QTRY_COMPARE(models->count(),3);
+    QCOMPARE(account->currentData().toString(),QString("native-opencode"));QVERIFY(models->isVisible());QVERIFY(!terminal->isEnabled());
+    QVERIFY(terminal->toolTip().contains("Activity"));QVERIFY(none->isChecked());
+    QCOMPARE(models->currentData().toString(),QString());models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    auto *agent=dialog.findChild<QComboBox *>("launchAgent");agent->setCurrentText("codex");QVERIFY(!models->isVisible());
+    agent->setCurrentText("opencode");QTRY_COMPARE(models->count(),3);models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    QVERIFY(models->geometry().right()<dialog.width());QVERIFY(start->geometry().bottom()<dialog.height());
+    QSignalSpy launch(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launch.size(),1);
+    QCOMPARE(launch[0][1].toString(),QString("opencode"));QCOMPARE(launch[0][2].toString(),QString("/fixture/project"));
+    QCOMPARE(launch[0][4].toString(),QString("native-opencode"));QVERIFY(!launch[0][6].toBool());QCOMPARE(launch[0][8].toString(),QString("ollama/qwen3:8b"));
+    QSettings().remove("workspace/launchOpenTerminal");QSettings().remove("workspace/launchAgent");QSettings().remove("workspace/launchAccounts");
+}
+
+void TestSessionsWindow::machineBatchCountsExcludeNativeOpenCodeSessions()
+{
+    BoxState box;box.host="fixture";box.ok=true;
+    SessionInfo terminal;terminal.name="codex/project/terminal";terminal.cmd="codex";terminal.resumable=true;terminal.activity="idle";
+    auto api=terminal;api.name="opencode/project/api";api.cmd="opencode";api.activity="busy";
+    auto saved=api;saved.name="opencode/project/saved";saved.state="paused";saved.activity="idle";
+    box.sessions={terminal,api,saved};FleetState state;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);
+    auto *menu=window.findChild<QPushButton *>("batchActions")->menu();QMetaObject::invokeMethod(menu,"aboutToShow");
+    auto *machine=menu->actions().first()->menu();QVERIFY(machine);
+    const auto action=[&](const QString &text){for(auto *entry:machine->actions())if(entry->text()==text)return entry;return static_cast<QAction *>(nullptr);};
+    auto *pause=action("Pause all (1)"),*resume=action("Resume all in background (0)");QVERIFY(pause);QVERIFY(resume);
+    QVERIFY(pause->isEnabled());QVERIFY(!resume->isEnabled());QVERIFY(pause->toolTip().contains("OpenCode sessions are excluded"));
+    box.sessions={api,saved};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QMetaObject::invokeMethod(menu,"aboutToShow");
+    machine=menu->actions().first()->menu();pause=action("Pause all (0)");resume=action("Resume all in background (0)");
+    QVERIFY(pause);QVERIFY(resume);QVERIFY(!pause->isEnabled());QVERIFY(!resume->isEnabled());
+}
+
+void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()
+{
+    const QString name="opencode/project/local",run="open-run",conversation="open-session";
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"resumable",true},
+        {"terminal_supported",false},{"terminal_reason","OpenCode runs through its native API"},{"attachments_supported",false},
+        {"clear_context_supported",false},{"compact_context_supported",false},{"fork_supported",false},
+        {"allowed_actions",QJsonArray{"pause","rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("opencode-capabilities",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.resumable=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";
+    session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"pause","rename"};box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);setComposerText(composer,"Keep my local model draft");
+    auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);QVERIFY(!tabs->isTabVisible(1));QVERIFY(!tabs->isTabVisible(2));
+    QTRY_VERIFY2(composer->findChild<QPushButton *>("sendMessage")->isEnabled(),qPrintable(composer->findChild<QLabel *>("messageStatus")->text()+" key="+composer->sessionKey()+" draft="+composer->editor()->toPlainText()));QVERIFY(!composer->canAttachFiles());
+    QVERIFY(!composer->findChild<QPushButton *>("attachMessageFile")->isEnabled());
+    QVERIFY(!window.findChild<QAction *>("clearSessionAction")->isEnabled());QVERIFY(!window.findChild<QAction *>("forgetSessionAction")->isEnabled());
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep my local model draft"));QVERIFY(!composer->editor()->isReadOnly());
 }
 
 void TestSessionsWindow::nativeLaunchStaysInWorkspace_data()

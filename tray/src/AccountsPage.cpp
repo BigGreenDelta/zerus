@@ -477,9 +477,11 @@ void AccountsPage::selectionChanged()
 {
     const auto p = selected(); const bool has = !p.isEmpty(); const bool idle = m_requests.isEmpty();
     m_machineCard->setVisible(has);m_providerBadge->setVisible(has);
-    m_rename->setEnabled(has && idle);
-    m_permissions->setEnabled(has && idle && online(p["host"].toString()));
-    m_default->setVisible(has && p["provider"]!="dsh");
+    const bool nativeConfig=p["provider"]=="opencode";
+    m_rename->setToolTip({});m_remove->setToolTip({});m_install->setToolTip({});
+    m_rename->setEnabled(has && idle && !nativeConfig);
+    m_permissions->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
+    m_default->setVisible(has && p["provider"]!="dsh" && !nativeConfig);
     m_default->setEnabled(has && idle && online(p["host"].toString()) && !p["is_default"].toBool());
     m_default->setText((p["is_default"].toBool()?tr("Default on %1"):tr("Make default on %1")).arg(p["machine"].toString()));
     m_default->setToolTip(tr("Use this account for new %1 sessions on %2 when no account is specified. Existing sessions keep their account.").arg(providerName(p["provider"].toString()),p["machine"].toString()));
@@ -489,11 +491,11 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
-    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool()); m_remove->setEnabled(has && idle && online(p["host"].toString()));
+    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig); m_remove->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
     m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint());
     updateRefreshState();
-    m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()));
+    m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});
     renderMachines();
@@ -528,6 +530,11 @@ void AccountsPage::selectionChanged()
         : status == "expired" ? tr("Sign-in expired on %1.").arg(machine)
         : status == "loading" ? tr("Checking sign-in on %1…").arg(machine)
         : signedIn ? tr("Ready on %1.").arg(machine) : tr("Account status is unavailable on %1.").arg(machine));
+    if(nativeConfig) {
+        const auto setup=tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.").arg(machine);
+        m_detail->setText(setup);m_login->setToolTip(setup);m_permissions->setToolTip(setup);m_install->setToolTip(setup);
+        m_rename->setToolTip(setup);m_remove->setToolTip(setup);m_copy->setEnabled(false);
+    }
     m_detail->setToolTip(p["home"].toString());
     if(isVisible())inspectSelected();
 }

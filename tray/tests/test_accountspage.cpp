@@ -39,6 +39,7 @@ private slots:
     void initTestCase();
     void init();
     void nativeDefaultsAndMachineScopedActions();
+    void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void repliesFromRemovedMachineAreIgnored();
     void explicitMachineOutsidePollingSurvivesRefreshAndExpiresWithFilter();
     void launchCarriesAccountForSelectedMachine();
@@ -147,6 +148,25 @@ elif args[0]=='project': print(json.dumps([{'name':'sample','dir':'/tmp/sample',
 else: print('{}')
 )"); script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
+void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations()
+{
+    QFile original(m_script);QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto bytes=original.readAll().replace("for p in ['codex','claude','kimi']","for p in ['codex','claude','kimi','opencode']")
+        .replace("'installed':True,'portable':p!='claude'","'installed':p!='opencode','portable':p not in ('claude','opencode')");
+    original.close();QVERIFY(FakeCli::replace(m_script,bytes));QVERIFY(FakeCli::makeRunnable(m_script));
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.show();
+    auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),5);
+    page.showAccount({},"native-opencode");QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
+    QSignalSpy install(&page,&AccountsPage::installRequested),login(&page,&AccountsPage::loginRequested);
+    for(const auto *name:{"loginAccount","installAccountAgent","accountPermissions","renameAccount","removeAccount","copyAccount"}) {
+        auto *button=page.findChild<QPushButton *>(name);QVERIFY(button);QVERIFY(!button->isEnabled());button->click();
+    }
+    QVERIFY(install.isEmpty());QVERIFY(login.isEmpty());QVERIFY(!page.findChild<QPushButton *>("defaultAccount")->isVisible());
+    QVERIFY(page.findChild<QPushButton *>("installAccountAgent")->toolTip().contains("OpenCode"));
+    page.showAccount({},"native-codex");QTRY_VERIFY(page.findChild<QPushButton *>("renameAccount")->isEnabled());
+    QVERIFY(!page.findChild<QPushButton *>("renameAccount")->toolTip().contains("OpenCode"));
+}
+
 void TestAccountsPage::permissionBadgesReflectInheritedAndMixedModes()
 {
     QFile modes(m_dir.filePath("permission-modes")); QVERIFY(modes.open(QIODevice::WriteOnly)); modes.close();

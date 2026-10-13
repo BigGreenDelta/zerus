@@ -32,6 +32,9 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             for(int i=0;i<8;++i){p.save();p.translate(12,12);p.rotate(i*45);p.drawLine(QPointF(0,3),QPointF(0,9));p.restore();}
         } else if (name == "kimi") {
             p.drawLine(6,4,6,20);p.drawLine(6,12,18,4);p.drawLine(6,12,18,20);
+        } else if (name == "opencode") {
+            p.drawLine(8,5,3,12);p.drawLine(3,12,8,19);
+            p.drawLine(16,5,21,12);p.drawLine(21,12,16,19);p.drawLine(14,5,10,19);
         } else if (name == "dsh") {
             QPainterPath whale;whale.moveTo(3,10);whale.cubicTo(5,5,15,4,18,10);whale.lineTo(23,7);whale.lineTo(22,13);
             whale.lineTo(18,13);whale.cubicTo(15,22,3,19,3,10);p.drawPath(whale);p.drawPoint(8,10);

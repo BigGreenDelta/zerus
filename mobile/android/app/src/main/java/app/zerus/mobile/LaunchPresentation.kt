@@ -4,6 +4,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 
 data class LaunchAccount(val id: String,val provider: String,val label: String,val native: Boolean=false,val isDefault: Boolean=false,val installed:Boolean=true,val authStatus:String="unknown")
+data class LaunchModel(val value:String,val label:String)
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
 data class LaunchProject(val id:String,val name:String,val color:String,val folders:List<LaunchProjectFolder>)
@@ -49,7 +50,7 @@ object LaunchPresentation {
         else -> ""
     }
     fun agents(raw: JSONObject?): List<String> = raw?.optJSONArray("agents")?.let { array ->
-        (0 until array.length()).mapNotNull { array.opt(it) as? String }.filter { it in setOf("codex","claude","kimi","dsh") }.distinct()
+        (0 until array.length()).mapNotNull { array.opt(it) as? String }.filter { it in setOf("codex","claude","kimi","dsh","opencode") }.distinct()
     }.orEmpty()
     fun accounts(raw: JSONObject?,provider: String): List<LaunchAccount> = raw?.optJSONArray("accounts")?.objects().orEmpty().mapNotNull { row ->
         val id = row.opt("id") as? String
@@ -59,6 +60,17 @@ object LaunchPresentation {
             row.opt("native") == true,row.opt("is_default") == true,row.opt("installed") != false,
             (row.opt("auth_status") as? String)?.takeIf { it in setOf("signed_in","signed_out","expired","credentials_locked","desktop_session_unavailable","credentials_unavailable") } ?: "unknown")
     }.distinctBy { it.id }
+    fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
+    /** Only exact models offered by this computer's selected native OpenCode account. */
+    fun models(raw:JSONObject?,provider:String,accountId:String):List<LaunchModel> {
+        if(provider!="opencode") return emptyList()
+        val account=raw?.optJSONArray("accounts")?.objects().orEmpty().singleOrNull { it.string("provider")==provider && it.string("id")==accountId } ?: return emptyList()
+        return account.optJSONArray("model_options")?.objects().orEmpty().take(256).mapNotNull { option ->
+            val value=((option.opt("value") ?: option.opt("id")) as? String)?.takeIf(::validModel) ?: return@mapNotNull null
+            val label=(option.opt("label") as? String)?.takeIf { it.isNotBlank() && it.length<=160 && it.none(Char::isISOControl) } ?: value
+            LaunchModel(value,label)
+        }.distinctBy { it.value }
+    }
     fun defaultAccount(accounts:List<LaunchAccount>,selected:String=""):String = accounts.firstOrNull { it.id == selected }?.id
         ?: accounts.singleOrNull { it.isDefault }?.id ?: accounts.firstOrNull()?.id.orEmpty()
     fun accountTitle(account:LaunchAccount,accounts:List<LaunchAccount>):String {
@@ -99,6 +111,7 @@ object LaunchPresentation {
         result.put("accounts",JSONArray(agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
             JSONObject().put("id",account.id).put("provider",account.provider).put("label",account.label)
                 .put("native",account.native).put("is_default",account.isDefault).put("installed",account.installed).put("auth_status",account.authStatus)
+                .put("model_options",JSONArray(models(raw,account.provider,account.id).map { JSONObject().put("value",it.value).put("label",it.label) }))
         }))
         val supported=raw.opt("project_launch_supported")==true
         result.put("project_launch_supported",supported).put("worktree_supported",raw.opt("worktree_supported") == true)

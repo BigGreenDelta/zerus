@@ -28,7 +28,7 @@ object SessionDetailsPresentation {
         it.isFinite() && it >= 0 && it <= 9_007_199_254_740_991.0
     }?.toLong()
     private fun strings(raw: JSONArray?): List<String> = raw?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
-    fun settings(raw: JSONObject?) = NativeSettings(raw?.string("model").orEmpty(), raw?.string("effort").orEmpty(),
+    fun settings(raw: JSONObject?) = NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(),
         raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options"))) },
         strings(raw?.optJSONArray("effort_options")), raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,

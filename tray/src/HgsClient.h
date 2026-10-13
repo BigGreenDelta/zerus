@@ -44,6 +44,10 @@ struct SessionInfo {
     QString attentionSignature, readReplyId, readAttentionSignature;
     double archivedAt = 0;
     bool resumable = false;
+    bool terminalSupported = true, terminalReported = false, bulkLifecycleSupported = true, actionsReported = false;
+    QString terminalReason;
+    QSet<QString> allowedActions;
+    QJsonObject actionReasons;
     QString activity;
     bool tracked = false;
     QString phase, model, effort, prompt, currentTool, toolDetail;
@@ -131,7 +135,7 @@ public:
 
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId);
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     void requestPeer(const QString &peer);

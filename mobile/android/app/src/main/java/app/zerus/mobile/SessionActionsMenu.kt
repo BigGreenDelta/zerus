@@ -85,13 +85,19 @@ object SessionActionsMenu {
             else -> SessionMenuItem("mark_read",label,"Questions, approvals and errors clear when you open the session. Mark as read covers replies only.")
         }
     }
+    fun nativeTerminalReason(target:Target,row:JSONObject?):String = when {
+        row?.has("terminal_supported")==true && !row.optBoolean("terminal_supported") ->
+            row.string("terminal_reason").ifBlank { "This native adapter does not provide remote Terminal." }
+        row?.opt("terminal_supported")==true -> ""
+        target.session.substringBefore('/')=="opencode" -> "OpenCode runs through its native server. Use the conversation instead of Terminal."
+        else -> ""
+    }
     fun terminalReason(facts: SessionMenuFacts): String = when {
         facts.blocked.isNotBlank() -> facts.blocked
         facts.target.agentId.isNotBlank() || facts.archived || facts.target.archiveId.isNotBlank() -> "Terminal is available only for the live parent session."
         !facts.online -> "The machine is offline."
         "terminal_snapshot" !in facts.supported -> "This native adapter does not provide remote Terminal."
-        facts.row.has("terminal_supported") && !facts.row.optBoolean("terminal_supported") ->
-            facts.row.string("terminal_reason").ifBlank { "Terminal requires this exact live tracked tmux pane." }
+        nativeTerminalReason(facts.target,facts.row).isNotBlank() -> nativeTerminalReason(facts.target,facts.row)
         else -> ""
     }
     fun operationReason(facts: SessionMenuFacts, operation: String): String {

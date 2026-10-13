@@ -119,6 +119,13 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.archiveId = s.state == QLatin1String("archived") ? obj.value(QStringLiteral("archive_id")).toString() : QString();
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
     s.resumable = obj.value(QStringLiteral("resumable")).toBool();
+    s.terminalReported = obj.value("terminal_supported").isBool();
+    s.terminalSupported = obj.value("terminal_supported").toBool(s.cmd != "dsh" && s.cmd != "opencode");
+    s.bulkLifecycleSupported = obj.value("bulk_lifecycle_supported").toBool(s.cmd != "opencode");
+    s.terminalReason = obj.value("terminal_reason").toString();
+    s.actionsReported = obj.value("allowed_actions").isArray();
+    for (const auto &action : obj.value("allowed_actions").toArray()) if (action.isString()) s.allowedActions.insert(action.toString());
+    s.actionReasons = obj.value("action_reasons").toObject();
     s.activity = obj.value(QStringLiteral("activity")).toString();
     s.tracked = obj.value(QStringLiteral("tracked")).toBool();
     s.accountId = obj.value("account_id").toString(); s.accountHome = obj.value("account_home").toString();
@@ -626,11 +633,12 @@ void HgsClient::launchNativeSession(const QString &host, const QString &target, 
     launchDetachedSession(host,"dsh",target,name,account,launchId);
 }
 
-void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId)
+void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model)
 {
     QStringList args{agent, target, "--new", "-n", name, "--launch-id", launchId};
-    if (agent != "dsh") args << "-d";
+    if (agent != "dsh" && agent != "opencode") args << "-d";
     if (!account.isEmpty()) args << "--account" << account;
+    if (agent == "opencode" && !model.isEmpty()) args << "--model" << model;
     if (!host.isEmpty()) args.prepend('@' + host);
     runHgs(m_hgs, args, 90000, this,
         [this,launchId](const QByteArray &) { emit nativeSessionLaunched(launchId,true,{}); },

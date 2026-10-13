@@ -129,6 +129,7 @@ object DesktopIcons {
     private fun providerKey(agent: String) = when (agent.trim().lowercase(Locale.ROOT)) {
         "claude", "claude code", "claude-code" -> "claude"
         "codex" -> "codex"
+        "opencode", "open code", "open-code" -> "opencode"
         "kimi", "kimi code", "kimi-code" -> "kimi"
         "dsh", "deepseek", "deepseek harness", "deepseek-harness" -> "dsh"
         "sh", "shell", "terminal", "bash", "zsh" -> "sh"
@@ -138,6 +139,7 @@ object DesktopIcons {
     fun providerName(agent: String): String = when (providerKey(agent)) {
         "claude" -> "Claude"
         "codex" -> "Codex"
+        "opencode" -> "OpenCode"
         "kimi" -> "Kimi"
         "dsh" -> "DeepSeek"
         "sh" -> "Shell"
@@ -157,6 +159,10 @@ object DesktopIcons {
         moveTo(6f, 5f); lineTo(6f, 13f)
         moveTo(6f, 9f); lineTo(12f, 5f); moveTo(6f, 9f); lineTo(12f, 13f)
     }
+    private val OpenCodeBadge = stroke("DesktopOpenCodeBadge", 1.4f, 18f) {
+        moveTo(7f,6f); lineTo(4f,9f); lineTo(7f,12f)
+        moveTo(11f,6f); lineTo(14f,9f); lineTo(11f,12f)
+    }
     private val TerminalBadge = stroke("DesktopTerminalBadge", 1.4f, 18f) {
         moveTo(5f, 6f); lineTo(8f, 9f); lineTo(5f, 12f)
         moveTo(10f, 12f); lineTo(13f, 12f)
@@ -165,6 +171,7 @@ object DesktopIcons {
     fun providerIcon(agent: String): ImageVector = when (providerKey(agent)) {
         "claude" -> ClaudeBadge
         "kimi" -> KimiBadge
+        "opencode" -> OpenCodeBadge
         else -> TerminalBadge
     }
     fun providerColor(agent: String, dark: Boolean): Color = when (providerKey(agent)) {

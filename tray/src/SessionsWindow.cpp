@@ -1,3 +1,4 @@
+#include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
@@ -761,6 +762,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_recoveryChip->closePopover();
         const auto *entry=selected();if(!entry || !entry->online)return;
         if(entry->session.cmd=="dsh"){showNativeUi(*entry);return;}
+        if(!NativeSessionCapabilities::terminal(entry->session,m_details)){showNotice(NativeSessionCapabilities::terminalReason(entry->session,m_details),true);return;}
         m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();
     };
     m_recovery->refreshUsage = [this] { refreshAccountUsage();inspect();emit refreshRequested(); };
@@ -938,7 +940,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(const auto *entry=selected())renderQuestion(*entry,direction);
     });
     connect(m_question, &QuestionCard::openTerminalRequested, this, [this] {
-        if (const auto *entry=selected(); entry && entry->session.cmd=="dsh") {showNativeUi(*entry);return;}
+        const auto *entry=selected();if(!entry)return;
+        if(entry->session.cmd=="dsh") {showNativeUi(*entry);return;}
+        if(!NativeSessionCapabilities::terminal(entry->session,m_details)){showNotice(NativeSessionCapabilities::terminalReason(entry->session,m_details),true);return;}
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
@@ -2115,20 +2119,24 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
         if (machine.isEmpty()) return;
         auto *group = menu->addMenu(QString(machine).replace('&', "&&"));
         int live = 0, saved = 0;
-        bool allIdle = true;
+        bool allIdle = true, nativeControls = false;
         for (const auto &s : box.sessions) {
             if (s.state == "archived") continue;
+            if (s.cmd=="opencode" || !s.bulkLifecycleSupported) {nativeControls=true;continue;}
             if (s.state == "running") {
                 ++live; allIdle = allIdle && s.resumable && s.activity == "idle" && s.processState != "exited";
             } else if (s.resumable) ++saved;
         }
+        if(nativeControls) group->addAction(tr("OpenCode uses individual Pause / Resume controls"))->setEnabled(false);
         auto *pause = group->addAction(tr("Pause all (%1)").arg(live));
         pause->setEnabled(online && !m_pending && m_renameKey.isEmpty() && live > 0 && allIdle);
         if (live && !allIdle) {
             auto *reason = group->addAction(tr("Some sessions are busy or context is not tracked"));
             reason->setEnabled(false);
         }
+        if(nativeControls) pause->setToolTip(tr("OpenCode sessions are excluded; use their individual Pause / Resume controls."));
         auto *resume = group->addAction(tr("Resume all in background (%1)").arg(saved));
+        if(nativeControls) resume->setToolTip(pause->toolTip());
         resume->setEnabled(online && !m_pending && m_renameKey.isEmpty() && saved > 0);
         group->setEnabled(online);
         connect(pause, &QAction::triggered, this, [this, host, machine, live]() {
@@ -2171,7 +2179,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder) {
+        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
@@ -2185,9 +2193,9 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
             for (int delay : {750, 2000}) QTimer::singleShot(delay, this, [this, id] {
                 if (m_pendingLaunches.contains(id)) emit refreshRequested();
             });
-            if (!openTerminal || cmd=="dsh") {
+            if (!openTerminal || cmd=="dsh" || cmd=="opencode") {
                 showNotice(tr("Starting session…"));
-                m_client.launchDetachedSession(host,cmd,target,name,account,id);
+                m_client.launchDetachedSession(host,cmd,target,name,account,id,model);
             } else emit newSessionRequested(host, cmd, target, name, account, id);
         });
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
@@ -3000,20 +3008,24 @@ void SessionsWindow::renderDetails()
     if (m_pause->property("archiveRestore").toBool() != archived) {
         m_pause->setProperty("archiveRestore", archived); m_pause->style()->unpolish(m_pause); m_pause->style()->polish(m_pause);
     }
-    m_open->setVisible(!archived);
+    const bool terminalAvailable=NativeSessionCapabilities::terminal(s,m_details);
+    m_open->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
     const QString openCaption = s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
     m_open->setToolTip(openCaption); m_open->setAccessibleName(openCaption); m_open->setText({});
-    m_open->setIcon(workspaceIcon(s.cmd != "dsh" && m_clipboard ? "copy" : "external", QColor(m_muted))); m_open->setEnabled(entry->online && !updating && !archived);
+    m_open->setIcon(workspaceIcon(s.cmd != "dsh" && m_clipboard ? "copy" : "external", QColor(m_muted))); m_open->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable));
     const QString pauseCaption = updating ? tr("Updating…") : archived ? tr("Restore session") : s.state == "running" ? tr("Pause session") : tr("Resume session");
     m_pause->setAccessibleName(pauseCaption); m_pause->setText({});
     m_pause->setIcon(workspaceIcon(s.state == "running" ? "pause" : "play", QColor(archived ? m_accent : m_muted)));
     const bool canPause = s.state == "running" && s.resumable && (s.activity == "idle" || m_details.value("auth_required").toBool()) && s.processState != "exited"
         && m_details.value("expected_id").toString().isEmpty();
     m_pause->setEnabled(entry->online && !updating && (archived ? (s.resumable && !s.archiveId.isEmpty() && !occupied) :
-        (canPause || (s.state != "running" && s.resumable))));
+        ((canPause && NativeSessionCapabilities::action(s,"pause",m_details)) || (s.state != "running" && s.resumable && NativeSessionCapabilities::action(s,"resume",m_details)))));
     m_more->setEnabled(entry->online && !updating && (!archived || !s.archiveId.isEmpty()));
-    m_renameAction->setEnabled(entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
+    m_renameAction->setEnabled(NativeSessionCapabilities::action(s,"rename",m_details) && entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
     m_archiveAction->setVisible(s.cmd != "dsh" && (s.state == "paused" || s.state == "stopped"));
+    m_archiveAction->setEnabled(!updating && NativeSessionCapabilities::action(s,"archive",m_details));
+    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,s.state=="running"?"terminate":"forget",m_details));
+    m_forgetAction->setToolTip(s.cmd=="opencode" && s.state=="running" ? tr("Pause OpenCode before forgetting its saved session.") : QString());
     m_forgetAction->setText(archived ? tr("Forget archived session…") : s.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"));
     const auto questionError=m_details.value("pending_questions_error").toString();
     QString hint;
@@ -3054,7 +3066,7 @@ void SessionsWindow::renderDetails()
         setWorkspaceStyle(m_goal, QString("QPushButton { text-align:left; color:%1; background:transparent; border:0; border-left:3px solid %1; border-radius:0; padding:7px 10px; } QPushButton:hover { background:%2; }").arg(goalColor, m_dark ? "#29323d" : "#e9eef4"));
     }
     m_badge->setToolTip(sessionTooltip({hint, m_model->text()}, 380).html);
-    m_pause->setToolTip(sessionTooltip({pauseCaption, canPause
+    m_pause->setToolTip(sessionTooltip({pauseCaption, !NativeSessionCapabilities::action(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) ? NativeSessionCapabilities::actionReason(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) : canPause
         ? tr("Close the idle agent and save its conversation. Resume starts it again with the same history.") : hint}, 380).html);
     const bool contextVisible = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
         || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty()));
@@ -3069,6 +3081,8 @@ void SessionsWindow::renderDetails()
     activityDetails["queue_sending"] = m_queueSendRequest && m_queueSendKey == m_selectedKey;
     if (!entry->online || !m_inspectError.isEmpty()) { auto queue=activityDetails["input_queue"].toObject(); queue["can_send_now"]=false; activityDetails["input_queue"]=queue; }
     m_activityView->setTimeline(activityDetails, m_events, m_localMessages.value(m_selectedKey), s.prompt, s.tracked);
+    m_composer->setAttachmentAvailability(s.cmd!="opencode" && m_details.value("attachments_supported").toBool(true),
+        m_details.value("attachments_reason").toString(tr("This native adapter does not support file attachments. Your existing files remain saved; remove them to send text.")));
     const QString messageProblem = messageBlockReason(*entry);
     m_composer->setSessionStatus(contextVisible ? hint : QString(), contextError,
         contextError && !messageProblem.isEmpty());
@@ -3096,16 +3110,16 @@ void SessionsWindow::renderDetails()
     updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());
     m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
-    const bool terminalTab = s.cmd != "dsh" && m_subagentId.isEmpty();
+    const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.
     const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty() && NativeBrowserPlugin::factory();
     if (m_detailTabs->isTabVisible(1) != terminalTab) m_detailTabs->setTabVisible(1, terminalTab);
     if (m_detailTabs->isTabVisible(2) != nativeTab) m_detailTabs->setTabVisible(2, nativeTab);
-    if (s.cmd == "dsh" && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
+    if (!terminalTab && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
     if (!nativeTab && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
-    m_terminal->setAvailable(entry->online && s.state == "running" && s.cmd != "dsh",
+    m_terminal->setAvailable(entry->online && s.state == "running" && terminalAvailable,
         !entry->online ? tr("Machine unavailable. Reconnect when it is online.") :
-        tr("Resume this session before opening its terminal."));
+        !terminalAvailable ? NativeSessionCapabilities::terminalReason(s,m_details) : tr("Resume this session before opening its terminal."));
     // A compact roster keeps many agents visible at once. A finished child
     // turn is Ready, never proof that its overall task or process has ended.
     const QString source = m_details.value("subagent_source").toString(s.subagentSource);
@@ -3356,7 +3370,7 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
     if (!entry.online) return tr("Machine unavailable. Your draft stays here.");
     if (entry.session.state != "running") return tr("Resume the session to send a message.");
     if (m_pending || !m_renameKey.isEmpty()) return tr("Wait for the session update to finish.");
-    if (!QStringList{"codex", "claude", "kimi", "dsh"}.contains(entry.session.cmd)) return tr("Use the Terminal tab to type into this session.");
+    if (!QStringList{"codex", "claude", "kimi", "dsh", "opencode"}.contains(entry.session.cmd)) return tr("Use the Terminal tab to type into this session.");
     if (!m_inspectError.isEmpty()) return tr("Refresh the session before sending.");
     if (m_details.isEmpty()) return tr("Checking the session…");
     if (!m_details.value("tracked").toBool()) return tr("This session has no HGS tracking. Use Terminal to send a message.");
@@ -3365,7 +3379,7 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
         return tr("The agent is not running. Resume it before sending.");
     if (entry.session.cmd == "dsh" && m_details.value("auth_required").toBool())
         return tr("Sign in to DeepSeek above. Your draft stays here.");
-    if (!m_details.value("error").toString().isEmpty()) return tr("Check the agent in the Terminal tab before sending.");
+    if (!m_details.value("error").toString().isEmpty()) return entry.session.cmd=="opencode"?tr("Refresh the native session and check OpenCode configuration on this computer before sending."):tr("Check the agent in the Terminal tab before sending.");
     if (!m_details.value("expected_id").toString().isEmpty()) {
         if (m_details.value("resume_message_can_send").toBool()) return {};
         return m_details.value("resume_message_reason").toString(tr("Waiting for the restored conversation. Open Terminal to check startup."));
@@ -3377,7 +3391,7 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
         return m_details.value("first_message_reason").toString(tr("Finish login or setup in Terminal. Sending becomes available when the agent is ready."));
     }
     const QString phase = m_details.value("phase").toString();
-    if (phase == "approval" || phase == "input") return tr("Respond to the agent in the Terminal tab.");
+    if (phase == "approval" || phase == "input") return entry.session.cmd=="opencode"?tr("Answer the pending native request in Activity before sending."):tr("Respond to the agent in the Terminal tab.");
     if (phase == "interrupted") {
         if (m_details.value("interrupted_message_can_send").toBool()) return {};
         return m_details.value("interrupted_message_reason").toString(tr("Waiting for the agent's input prompt after interruption. Open Terminal to check."));
@@ -3403,7 +3417,8 @@ void SessionsWindow::messageAction(const QString &id,const QString &action)
         if(action=="delete"){messages.removeAt(i);renderDetails();return;}
         if(action=="inspect"){
             if(entry->session.cmd=="dsh")showNativeUi(*entry);
-            else {m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();}
+            else if(NativeSessionCapabilities::terminal(entry->session,m_details)){m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();}
+            else {inspect();showNotice(tr("Refreshing the native session. Check its provider configuration on %1 if the error remains.").arg(entry->machine));}
             return;
         }
         if(action!="retry" || message.value("uncertain").toBool() || m_composer->isSending(m_selectedKey))return;
@@ -3900,6 +3915,7 @@ void SessionsWindow::reconcileMessages()
 void SessionsWindow::renderQuestion(const Entry &entry, int navigation)
 {
     m_question->setNativeUi(entry.session.cmd=="dsh");
+    m_question->setTerminalAvailable(entry.session.cmd=="dsh"||NativeSessionCapabilities::terminal(entry.session,m_details),NativeSessionCapabilities::terminalReason(entry.session,m_details));
     QJsonObject question;
     QList<QJsonObject> optional;
     int pendingQuestions=0;QSet<QString> seen;
@@ -4180,7 +4196,8 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     };
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
-    if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available);
+    if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available && (target.cmd=="dsh"||NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())),
+        NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())||target.cmd=="dsh"?QString():NativeSessionCapabilities::terminalReason(target,selectedTarget?m_details:QJsonObject()));
     if (!archived && SessionPresentation::backgroundIdle(original.session))
         add(tr("Show running commands"), "contextOpenProcesses", SessionMenuAction::OpenProcesses, original.online && ProcessSettings::enabled(),
             ProcessSettings::enabled() ? tr("Follow this session's background work in Processes") : tr("Enable Settings > Processes to inspect running commands"));
@@ -4190,7 +4207,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
     add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell, original.online && directory.startsWith('/'));
     add(archived ? tr("Copy restore command") : tr("Copy connect command"), "contextCopyCommand", SessionMenuAction::CopyCommand,
-        !archived || !original.session.archiveId.isEmpty());
+        (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
         m_sessionMenu->addSeparator();
         if (entryNeedsAttention(original))
@@ -4201,11 +4218,11 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     }
     m_sessionMenu->addSeparator();
     add(archived ? tr("Restore session") : original.session.state == "running" ? tr("Pause session") : tr("Resume session"),
-        "contextChangeSession", SessionMenuAction::ChangeState, selectedTarget ? m_pause->isEnabled() : canChange);
+        "contextChangeSession", SessionMenuAction::ChangeState, selectedTarget ? m_pause->isEnabled() : canChange && NativeSessionCapabilities::action(target,archived?"restore":target.state=="running"?"pause":"resume"));
     if (target.state == "paused" || target.state == "stopped")
         add(tr("Start fresh…"), "contextStartFresh", SessionMenuAction::StartFresh, canStartStopped(original),
             tr("Start with a new conversation and the same folder, account and model"));
-    add(tr("Rename…"), "contextRenameSession", SessionMenuAction::Rename, available && !target.name.section('/', 1, 1).isEmpty() && (!archived || !target.archiveId.isEmpty()));
+    add(tr("Rename…"), "contextRenameSession", SessionMenuAction::Rename, available && NativeSessionCapabilities::action(target,"rename") && !target.name.section('/', 1, 1).isEmpty() && (!archived || !target.archiveId.isEmpty()));
     auto *fork = add(tr("Fork session…"), "contextForkSession", SessionMenuAction::Fork, selectedTarget && m_forkAction->isEnabled(), m_forkAction->toolTip());
     if (!selectedTarget && available) {
         fork->setToolTip(tr("Checking whether this session can be forked…"));
@@ -4219,7 +4236,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         m_client.requestInspection(original.host, target.name, 0, target.archiveId,false);
     }
     if (original.session.state == "paused" || original.session.state == "stopped")
-        add(tr("Move to archive"), "contextArchiveSession", SessionMenuAction::Archive, available);
+        add(tr("Move to archive"), "contextArchiveSession", SessionMenuAction::Archive, available && NativeSessionCapabilities::action(target,"archive"),NativeSessionCapabilities::actionReason(target,"archive"));
     auto *groups = m_sessionMenu->addMenu(tr("Move to project")); groups->setObjectName("moveSessionToGroup");
     for (const auto &group : m_organization.groups()) {
         auto *action = groups->addAction(QString(group.name).replace('&', "&&")); action->setCheckable(true);
@@ -4236,7 +4253,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     add(tr("Copy folder path"), "contextCopyFolder", SessionMenuAction::CopyFolder, !directory.isEmpty());
     m_sessionMenu->addSeparator();
     add(archived ? tr("Forget archived session…") : original.session.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"),
-        "contextTerminateSession", SessionMenuAction::Terminate, available && (!archived || !target.archiveId.isEmpty()));
+        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,target.state=="running"?"terminate":"forget") && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,target.state=="running"?"terminate":"forget"));
     m_sessionMenu->popup(position);
 }
 
@@ -4303,7 +4320,7 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { showNativeUi(*entry); return; }
-        if (entry->online && m_open->isEnabled() && entry->session.state != "archived")
+        if (entry->online && m_open->isEnabled() && entry->session.state != "archived" && NativeSessionCapabilities::terminal(entry->session,m_details))
             emit terminalOpenRequested(entry->host, entry->session.name,
                 entry->host.isEmpty() && entry->session.attached && !entry->session.clients.isEmpty() ? entry->session.clients.first() : QString());
         return;
@@ -4480,7 +4497,8 @@ void SessionsWindow::renameSession()
 
 void SessionsWindow::terminateSession()
 {
-    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty()) return;
+    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty()
+        || !NativeSessionCapabilities::action(e->session,e->session.state=="running"?"terminate":"forget",m_details)) return;
     const Entry original = *e;
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
     const bool live = e->session.state == "running", archived = e->session.state == "archived";

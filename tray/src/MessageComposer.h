@@ -32,6 +32,7 @@ public:
     void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
+    void setAttachmentAvailability(bool available, const QString &reason = {});
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
@@ -69,7 +70,8 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canEditAttachments() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canAttachFiles() const { return m_attachmentsAvailable && canEditAttachments(); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -140,7 +142,8 @@ private:
     QString m_key, m_unavailableReason;
     QString m_sessionStatus;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
-    bool m_available = false, m_loading = false, m_dark = true, m_recording = false;
+    bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
+    QString m_attachmentsReason;
     double m_scale = 1.0;
     QPlainTextEdit *m_editor;
     QLabel *m_status;

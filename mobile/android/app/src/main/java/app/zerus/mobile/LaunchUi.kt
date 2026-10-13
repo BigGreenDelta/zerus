@@ -84,6 +84,7 @@ private val Amber = Color(0xFFFFCB7D)
     ObscureConversation()
     var provider by rememberSaveable(form) { mutableStateOf("") }
     var account by rememberSaveable(form) { mutableStateOf("") }
+    var selectedModel by rememberSaveable(form) { mutableStateOf("") }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
     var folder by rememberSaveable(form) { mutableStateOf("") }
     var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
@@ -103,6 +104,8 @@ private val Amber = Color(0xFFFFCB7D)
     val catalog = model.launchCatalogState
     val providers = remember(catalog) { LaunchPresentation.agents(catalog) }
     val accounts = remember(catalog,provider) { LaunchPresentation.accounts(catalog,provider) }
+    val modelOptions = remember(catalog,provider,account) { LaunchPresentation.models(catalog,provider,account) }
+    LaunchedEffect(provider,account,modelOptions) { if(selectedModel.isNotBlank() && modelOptions.none { it.value==selectedModel }) selectedModel="" }
     val projects = remember(catalog) { LaunchPresentation.projects(catalog) }
     val projectSupported = catalog?.opt("project_launch_supported") == true
     val project = projects.find { it.id == projectId }
@@ -169,8 +172,8 @@ private val Amber = Color(0xFFFFCB7D)
     fun requestClose() { if(busy) return;if(dirty) discarding = true else model.closeLaunch() }
     fun create() {
         if(busy || reason.isNotBlank()) return
-        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId)
-        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement)
+        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel)
+        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel)
     }
     fun selectFolder(path: String) { folder = path;browsedFolder = "";edited = true;model.browseLaunchDirectory(machine,path) }
     val canChoose = !busy && !model.launchWorktreeLoading && WorktreePresentation.entries(evidence).isNotEmpty()
@@ -306,6 +309,13 @@ private val Amber = Color(0xFFFFCB7D)
                             leading = { Icon(Icons.Default.AccountCircle,null,tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                             choiceSupporting = { id -> accounts.find { it.id == id }?.let { LaunchPresentation.accountStatus(it) }.orEmpty() })
                     }
+                    if(provider=="opencode") LaunchSection("Model") {
+                        val chosen=modelOptions.find { it.value==selectedModel }
+                        LaunchMenuField("Model",chosen?.label ?: "Native default model",!busy,
+                            listOf("" to "Native default model") + modelOptions.map { it.value to it.label },selectedModel,
+                            { selectedModel=it;edited=true },supporting=chosen?.value,choiceSupporting={ it },choiceSupportingMaxLines=3)
+                        LaunchHint("Models configured on $computer. Native default uses OpenCode's configuration.")
+                    }
                     LaunchSection("Session name") {
                         OutlinedTextField(tag,{ tag = it },Modifier.fillMaxWidth(),singleLine = true,readOnly = busy,shape = RoundedCornerShape(12.dp),
                             isError = tag.isNotEmpty() && nameError.isNotBlank(),
@@ -401,7 +411,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
 
 @Composable private fun LaunchMenuField(label: String,value: String,enabled: Boolean,choices: List<Pair<String,String>>,selected: String,onChoose: (String) -> Unit,
     modifier: Modifier = Modifier,supporting: String? = null,leading: (@Composable () -> Unit)? = null,choiceLeading: (@Composable (String) -> Unit)? = null,
-    choiceSupporting: ((String) -> String)? = null,onEmpty: (() -> Unit)? = null) {
+    choiceSupporting: ((String) -> String)? = null,choiceSupportingMaxLines:Int = 1,onEmpty: (() -> Unit)? = null) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         LaunchField(label,value,enabled && (choices.isNotEmpty() || onEmpty != null),{ if(choices.isEmpty()) onEmpty?.invoke() else expanded = true },
@@ -410,7 +420,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
             choices.forEach { (id,title) -> DropdownMenuItem(text = {
                 Column {
                     Text(title,fontWeight = if(id == selected) FontWeight.SemiBold else FontWeight.Normal,maxLines = 1,overflow = TextOverflow.Ellipsis)
-                    choiceSupporting?.invoke(id)?.takeIf { it.isNotBlank() }?.let { Text(it,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = 1,overflow = TextOverflow.Ellipsis) }
+                    choiceSupporting?.invoke(id)?.takeIf { it.isNotBlank() }?.let { Text(it,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = choiceSupportingMaxLines,overflow = TextOverflow.Ellipsis) }
                 }
             },leadingIcon = choiceLeading?.let { icon -> { icon(id) } },
                 trailingIcon = if(id == selected) { { Icon(Icons.Default.Check,"Selected",tint = MaterialTheme.colorScheme.primary) } } else null,

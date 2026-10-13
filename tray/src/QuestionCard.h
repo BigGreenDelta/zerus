@@ -34,6 +34,7 @@ public:
     // Enlarges question text and answers; actions keep the workspace size.
     void setContentScale(double scale);
     void setNativeUi(bool native);
+    void setTerminalAvailable(bool available, const QString &reason = {});
     // Only a successful callback permits transport; receipts can supersede pending work.
     void prepareSendingAsync(const QString &sessionKey, const QString &questionId, std::function<void(bool)> done);
     bool isDraftLoading() const { return m_loadingKeys.contains(m_key); }

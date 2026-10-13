@@ -349,7 +349,7 @@ void MessageComposer::setSessionKey(const QString &key)
 bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
 {
     if (target.key.isEmpty() || target.key != m_key || target.revision != m_saveRevision.value(m_key)
-        || target.navigation != m_navigationRevision || !canAttachFiles() || isPreparingSending(m_key)
+        || target.navigation != m_navigationRevision || !canEditAttachments() || isPreparingSending(m_key)
         || !isInputVisible() || m_editor->isReadOnly() || text.isEmpty()) return false;
     // Dictation appends at the captured caret without replacing a selection.
     auto cursor = m_editor->textCursor(); cursor.clearSelection();
@@ -411,6 +411,11 @@ bool MessageComposer::offerDraft(const QString &key, const QString &text)
     draft.text = text; draft.position = draft.anchor = int(text.size()); draft.notice.clear();
     if (key == m_key) { m_loading = true; restoreDraft(); m_loading = false; }
     saveDraft(key); notifyDraft(key); updateControls(); return true;
+}
+
+void MessageComposer::setAttachmentAvailability(bool available, const QString &reason)
+{
+    m_attachmentsAvailable=available;m_attachmentsReason=reason;updateControls();
 }
 
 void MessageComposer::setAvailability(bool available, const QString &reason)
@@ -702,7 +707,7 @@ void MessageComposer::rebuildAttachments()
 
 void MessageComposer::removeAttachment(int index)
 {
-    auto &current = m_drafts[m_key]; if (!canAttachFiles() || index < 0 || index >= current.attachments.size()) return;
+    auto &current = m_drafts[m_key]; if (!canEditAttachments() || index < 0 || index >= current.attachments.size()) return;
     QWidget *focus = QApplication::focusWidget();
     const bool keepFocus = focus && focus->objectName() == "removeAttachment" && m_attachmentList->isAncestorOf(focus);
     const auto reference = current.attachments.takeAt(index).reference;
@@ -815,9 +820,10 @@ void MessageComposer::updateControls()
         :m_sessionStatusBlocksInput?m_sessionStatus:QString();
     m_editor->setToolTip(lockHint);
     m_editor->setAccessibleDescription(lockHint);
-    m_attach->setEnabled(!m_key.isEmpty() && !locked);
+    m_attach->setEnabled(!m_key.isEmpty() && !locked && m_attachmentsAvailable);
+    m_attach->setToolTip(m_attachmentsAvailable?tr("Attach files, paste an image, or drop files onto this session"):m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
-    m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && !tooLong && !locked && !draft.uncertain);
+    m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);
@@ -830,6 +836,7 @@ void MessageComposer::updateControls()
     QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key)
         : draft.error || draft.uncertain ? draft.notice : QString();
     const bool ownError = (!waiting && draft.error) || tooLong || !draft.storageError.isEmpty();
+    if (status.isEmpty() && !draft.attachments.isEmpty() && !m_attachmentsAvailable) status=m_attachmentsReason;
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
     const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
     m_status->setText(status); m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);

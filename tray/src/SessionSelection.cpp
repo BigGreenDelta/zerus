@@ -1,3 +1,4 @@
+#include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "SessionList.h"
 #include "MessageComposer.h"
@@ -73,6 +74,9 @@ bool SessionsWindow::selectionActionApplies(const Entry &entry, SelectionAction 
     if (action == SelectionAction::ReviewLater) return s.state != "archived" && !entryNeedsAttention(entry);
     if (!entry.online || isTerminating(entry) || m_composer->isSending(entry.key)
         || std::any_of(m_pendingAnswers.cbegin(), m_pendingAnswers.cend(), [&](const PendingAnswer &p) { return p.key == entry.key; })) return false;
+    const auto operation=action==SelectionAction::Pause?"pause":action==SelectionAction::Resume?(s.state=="archived"?"restore":"resume"):
+        action==SelectionAction::Archive?"archive":action==SelectionAction::Forget?"forget":"terminate";
+    if (!NativeSessionCapabilities::action(s,operation)) return false;
     switch (action) {
     case SelectionAction::Pause: return s.state == "running" && s.resumable && s.activity == "idle" && s.processState != "exited";
     case SelectionAction::Resume: return s.resumable && s.state != "running"

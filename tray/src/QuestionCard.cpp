@@ -436,7 +436,7 @@ void QuestionCard::rebuild()
     m_loading = true; m_forms.clear(); m_fileLinks.clear();
     // Questions the agent wrote are its Markdown. Approval and trust disclosures
     // and panels read from a terminal, such as a folder path, stay as reported.
-    static const QSet<QString> authored{"hook", "codex_async", "kimi_wire", "dsh_native", "claude_native_question"};
+    static const QSet<QString> authored{"hook", "codex_async", "kimi_wire", "dsh_native", "opencode_native", "claude_native_question"};
     const bool literal = m_question.value("approval").toBool() || m_question.value("trust_request").toBool()
         || !authored.contains(m_question.value("source").toString());
     while (m_pages->count()) { auto *page = m_pages->widget(0); m_pages->removeWidget(page); delete page; }
@@ -861,4 +861,9 @@ void QuestionCard::setTheme(bool dark)
     for (auto *text : findChildren<MarkdownText *>()) renderMarkdown(text, text->markdownSource());
     update();
     updateControls();
+}
+
+void QuestionCard::setTerminalAvailable(bool available, const QString &reason)
+{
+    m_terminal->setEnabled(available);m_terminal->setToolTip(available?QString():reason);
 }
