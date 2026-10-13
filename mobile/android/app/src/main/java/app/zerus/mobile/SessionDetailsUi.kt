@@ -47,6 +47,9 @@ import org.json.JSONObject
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
     }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
+    MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
+        Modifier.padding(start = 16.dp,end = 16.dp,top = 4.dp),
+        colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else details = true }, modifier = Modifier.weight(1f)) {
             Text(listOf(settings.model.ifBlank { "Model not reported" }, settings.effort).filter { it.isNotBlank() }.joinToString(" / "),

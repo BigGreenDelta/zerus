@@ -168,6 +168,10 @@ project groups; empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
+An open conversation keeps its owning computer visible above the model and
+session controls. This uses the same machine name and colour as its session card,
+including phone-local names, offline computers, archives and subagents.
+
 Session cards follow the desktop cards. A checkout line shows a small Git branch
 mark and `folder / branch` (or detached HEAD); a linked worktree names its main
 checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
