@@ -3509,16 +3509,20 @@ elif args[0]=='answer':
     SessionsWindow window(FakeCli::program(file.fileName()));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     auto *card=window.findChild<QuestionCard *>();auto *client=window.findChild<HgsClient *>();
     auto *list=window.findChild<QListWidget *>("sessionList");auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
-    QSignalSpy answered(client,&HgsClient::questionAnswered);
-    QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());const auto key=list->currentItem()->data(Qt::UserRole).toString();
+    QSignalSpy answered(client,&HgsClient::questionAnswered);const auto key=list->currentItem()->data(Qt::UserRole).toString();
+    // Answer only the exact question the card offers. An inspection that read the
+    // fixture before the question changed can still deliver the older one, and the
+    // window correctly refuses an answer to a question it does not offer.
+    const auto offers=[&](const QString &question){return card->isVisible() && !card->isDraftLoading() && !card->submissionSnapshot(key,question).isEmpty();};
     const QJsonArray answer{QJsonObject{{"question_id",item},{"selected_option_ids",QJsonArray{option}},{"text",""}}};
-    const QString id=prefix+QString(64,QChar('a'));
+    const QString id=prefix+QString(64,QChar('a')),secondId=prefix+QString(64,QChar('b'));
+    QTRY_VERIFY(offers(id));
     card->answerRequested(key,id,answer);QTRY_COMPARE(answered.size(),1);
     QCOMPARE(tabs->currentWidget()->objectName(),QString("terminalView"));
     // A delayed review acknowledgement must not steal another session's tab.
     QVERIFY(QFile::remove(directory.filePath("done")));QFile second(directory.filePath("second"));QVERIFY(second.open(QIODevice::WriteOnly));second.close();tabs->setCurrentIndex(0);
-    window.showSession({},"kimi/docs/research");window.showSession({},"codex/hgs/dashboard");QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
-    card->answerRequested(key,prefix+QString(64,QChar('b')),answer);window.showSession({},"kimi/docs/research");tabs->setCurrentIndex(0);
+    window.showSession({},"kimi/docs/research");window.showSession({},"codex/hgs/dashboard");QTRY_VERIFY(offers(secondId));
+    card->answerRequested(key,secondId,answer);window.showSession({},"kimi/docs/research");tabs->setCurrentIndex(0);
     QTRY_COMPARE(answered.size(),2);QVERIFY(tabs->currentWidget()->objectName()!="terminalView");
 }
 
