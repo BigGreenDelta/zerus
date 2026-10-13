@@ -114,12 +114,14 @@ pub fn prepare_environment() {
         }
     });
 }
-/// Whether this computer runs agent sessions. A Windows computer will once the
-/// user enables them (the `%USERPROFILE%\.config\hgs\local-sessions` marker) and
-/// its session host exists (Phase 2 milestone M3); until then it is a control
-/// console for remote machines whatever the marker says.
+/// Whether this computer runs agent sessions: once the user has enabled them
+/// (`hgs session-host install`, which writes the `local-sessions` marker in the
+/// configuration directory; spec D2). Until then it is a control console for
+/// remote machines. Whether a session host runs does not matter: saved sessions
+/// stay in the state directory, and a host crash must not turn the computer back
+/// into a control console.
 pub fn local_sessions() -> bool {
-    false
+    crate::host::staging::enabled()
 }
 /// Windows reports every exit as a code; crash statuses read as signals (see `exit_info`).
 pub fn code(status: ExitStatus) -> i32 {

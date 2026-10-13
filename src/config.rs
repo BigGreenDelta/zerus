@@ -36,9 +36,7 @@ impl Config {
                 },
             )
         })?;
-        let dir = PathBuf::from(
-            env::var("HGS_CONFIG_DIR").unwrap_or_else(|_| platform::below(&home, ".config/hgs")),
-        );
+        let dir = config_dir(&home);
         let raw_state = env::var("HGS_STATE_DIR").unwrap_or_else(|_| {
             platform::below(
                 &env::var("XDG_STATE_HOME")
@@ -226,6 +224,15 @@ impl Config {
         platform::sync_dir(&self.dir)?;
         Ok(())
     }
+}
+
+/// The configuration directory below `home`: `HGS_CONFIG_DIR` when set, else
+/// `~/.config/hgs`. Also used without a loaded `Config` (the Windows
+/// local-sessions marker), so both always name the same directory.
+pub fn config_dir(home: &str) -> PathBuf {
+    PathBuf::from(
+        env::var("HGS_CONFIG_DIR").unwrap_or_else(|_| platform::below(home, ".config/hgs")),
+    )
 }
 
 pub struct Project {
