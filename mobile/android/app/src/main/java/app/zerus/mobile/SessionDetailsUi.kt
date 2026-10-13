@@ -41,8 +41,7 @@ import org.json.JSONObject
     var search by remember(target.key) { mutableStateOf(false) }
     var readEvidence by remember(target.key) { mutableStateOf<ReadAttentionEvidence?>(null) }
     val clipboard = LocalClipboardManager.current
-    val nativeMachineName = model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.nativeName.orEmpty()
-    val sessionReference = remember(target,nativeMachineName) { SessionReference.create(target,nativeMachineName) }
+    val sessionReference = remember(target,model.machines) { SessionReference.resolve(target,model.machines) }
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
@@ -56,11 +55,8 @@ import org.json.JSONObject
         IconButton(onClick = { search = true }) { Icon(Icons.Default.Search,"Search loaded messages") }
         IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal") }
         IconButton(onClick = { details = true }) { Icon(Icons.Default.Info, "Session details") }
-        IconButton(onClick = { sessionReference?.let { clipboard.setText(AnnotatedString(it)) } },enabled = sessionReference != null) {
-            Icon(Icons.Default.ContentCopy,"Copy session reference")
-        }
-        if (target.agentId.isBlank()) Box {
-            IconButton(onClick = { readEvidence = model.captureReadAttention(target);menu = true }) { Icon(Icons.Default.MoreVert, "Session actions") }
+        Box {
+            IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
                 readEvidence?.let { evidence ->
                     val emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty()
@@ -70,23 +66,29 @@ import org.json.JSONObject
                     HorizontalDivider()
                 }
                 DropdownMenuItem(text = { Text("Copy session name") },onClick = { menu = false;clipboard.setText(AnnotatedString(target.session)) })
-                DropdownMenuItem(text = { Text("Copy session reference") },enabled = sessionReference != null,
-                    onClick = { menu = false;sessionReference?.let { clipboard.setText(AnnotatedString(it)) } })
+                DropdownMenuItem(text = { Column {
+                    Text("Copy session reference")
+                    if (sessionReference.reason.isNotBlank()) Text(sessionReference.reason,style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } },enabled = sessionReference.uri != null,
+                    onClick = { menu = false;sessionReference.uri?.let { clipboard.setText(AnnotatedString(it)) } })
                 val folder = model.activity?.string("cwd").orEmpty()
                 if(folder.isNotBlank()) DropdownMenuItem(text = { Text("Copy folder") },onClick = { menu = false;clipboard.setText(AnnotatedString(folder)) })
-                HorizontalDivider()
-                val operations = if (target.archiveId.isNotBlank()) listOf("restore","rename","fork","forget")
-                    else listOf("pause","resume","archive","rename","fork","terminate","forget")
-                operations.forEach { operation ->
-                    val reason = model.actionReason(target,operation).ifBlank { SessionControlPresentation.reason(target,operation,model.activity) }
-                    DropdownMenuItem(text = { Column {
-                        Text(actionLabel(operation,target))
-                        if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } }, onClick = {
-                        menu = false
-                        if (operation in listOf("rename","fork","terminate","forget")) request = operation
-                        else { model.flushDrafts(); model.sessionAction(target,operation) }
-                    }, enabled = reason.isBlank())
+                if (target.agentId.isBlank()) {
+                    HorizontalDivider()
+                    val operations = if (target.archiveId.isNotBlank()) listOf("restore","rename","fork","forget")
+                        else listOf("pause","resume","archive","rename","fork","terminate","forget")
+                    operations.forEach { operation ->
+                        val reason = model.actionReason(target,operation).ifBlank { SessionControlPresentation.reason(target,operation,model.activity) }
+                        DropdownMenuItem(text = { Column {
+                            Text(actionLabel(operation,target))
+                            if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } }, onClick = {
+                            menu = false
+                            if (operation in listOf("rename","fork","terminate","forget")) request = operation
+                            else { model.flushDrafts(); model.sessionAction(target,operation) }
+                        }, enabled = reason.isBlank())
+                    }
                 }
             }
         }

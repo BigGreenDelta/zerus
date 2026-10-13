@@ -25,7 +25,8 @@ object MachineCatalog {
             ?.takeIf { it.length <= 128 && versionFormat.matches(it) }.orEmpty(),
         mobileDelivery = MobileDelivery.parse(raw.optJSONObject("snapshot")),
         lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 },
-        machineId = canonicalUuid(raw.opt("machine_id")).orEmpty())
+        machineId = canonicalUuid(raw.opt("machine_id")).orEmpty(),
+        nativeHost = (raw.optJSONObject("snapshot")?.opt("host") as? String)?.takeIf { it.length <= 80 }.orEmpty())
 
     /** Relay availability only; an offline row is never a usable target. */
     fun status(machine: Machine): String = when {

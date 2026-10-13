@@ -15,7 +15,7 @@ data class Machine(val connectionId: String, val id: String, val name: String, v
     val nativeName: String = name, val serverAliases: Set<String> = emptySet(),
     val route: MachineRoute = MachineRoute.Unknown, val lastKnown: Boolean = false,
     val hgsVersion: String = "", val mobileDelivery: String = "", val lastSeenAt: Double? = null,
-    val machineId: String = "")
+    val machineId: String = "", val nativeHost: String = "")
 data class Target(val computerId: String, val session: String, val run: String, val conversation: String, val connectionId: String = "demo", val archiveId: String = "", val agentId: String = "", val parentConversation: String = "") {
     val key: String get() = JSONArray(listOf(connectionId, computerId, session, run, conversation) + (if (archiveId.isBlank()) emptyList() else listOf(archiveId)) + (if(agentId.isBlank()) emptyList() else listOf("agent",agentId,parentConversation))).toString()
     fun json(): JSONObject {

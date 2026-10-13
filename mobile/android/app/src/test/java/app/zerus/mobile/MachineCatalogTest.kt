@@ -19,6 +19,18 @@ class MachineCatalogTest {
     private fun direct(id: String = gatewayId, name: String = "Gateway") = parse(raw(id, name).put("via", JSONObject.NULL))
     private fun peer() = parse(raw().put("via", via()))
 
+    @Test fun nativeReferenceIdentityUsesReportedHostRatherThanDisplayLabel() {
+        val machine=parse(raw(name="Office label").put("machine_id",canonicalId).put("snapshot",JSONObject().put("host","native-host")))
+        assertEquals(canonicalId,machine.machineId);assertEquals("native-host",machine.nativeHost)
+        val renamed=MachineNames.apply(machine,listOf(MachineAlias(MachineKey("workspace",peerId),"Phone label")))
+        assertEquals("native-host",renamed.copy(online=false,lastKnown=true).nativeHost)
+        assertEquals("Office label",renamed.nativeName)
+        listOf(JSONObject.NULL,7,"x".repeat(81)).forEach { invalid ->
+            assertEquals("",parse(raw().put("snapshot",JSONObject().put("host",invalid))).nativeHost)
+        }
+        assertEquals("",parse(raw(name="display-is-not-host")).nativeHost)
+    }
+
     @Test fun cliVersionsRemainScopedToTheirComputerAndLegacyReportsStayUnknown() {
         val desktop = parse(raw(gatewayId, "Desktop").put("snapshot", JSONObject().put("hgs_version", "1.2.3")))
         val laptop = parse(raw(peerId, "Laptop").put("snapshot", JSONObject().put("hgs_version", "1.2.4-preview.1+fixture")))

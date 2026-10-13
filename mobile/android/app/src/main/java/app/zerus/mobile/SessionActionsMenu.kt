@@ -39,7 +39,7 @@ data class SessionMenuRead(val unavailable: String = "", val canMark: Boolean = 
 /** Exact row facts captured by the view model. [supported] is the gateway and computer operation intersection. */
 data class SessionMenuFacts(val target: Target, val row: JSONObject, val state: String, val archived: Boolean, val online: Boolean,
     val supported: Set<String>, val blocked: String = "", val busy: String = "", val needsAttention: Boolean = false,
-    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "")
+    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "", val referenceReason: String = "")
 /** A native action chosen in Sessions, consumed once by the conversation header it opened. */
 data class SessionMenuRequest(val target: Target, val operation: String, val navigation: Long)
 
@@ -64,7 +64,7 @@ object SessionActionsMenu {
             },
             listOf(SessionMenuItem("copy_name","Copy session name",if (facts.target.session.isBlank()) "The session name is not reported." else ""),
                 SessionMenuItem("copy_reference","Copy session reference",
-                    if (facts.reference == null) "A reference needs the machine's native name and the session's verified identity." else ""),
+                    if (facts.reference == null) facts.referenceReason.ifBlank { "A reference needs the computer's native identity and the session's identity." } else ""),
                 SessionMenuItem("copy_folder","Copy folder path",if (facts.folder.isBlank()) "The session folder is not reported." else "")),
             listOf(if (archived) native("forget","Forget archived version…") else if (running) native("terminate","Terminate session…")
                 else native("forget","Forget saved session…"))
@@ -147,8 +147,7 @@ internal fun Modifier.sessionCardGestures(shape: Shape, onOpen: () -> Unit, onAc
                         "clear_reminder" -> model.clearReviewLater(target)
                         "review_later" -> model.reviewLater(target,model.captureReadAttention(target))
                         "copy_name" -> clipboard.setText(AnnotatedString(target.session))
-                        "copy_reference" -> SessionReference.create(target,model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }
-                            ?.nativeName.orEmpty())?.let { clipboard.setText(AnnotatedString(it)) }
+                        "copy_reference" -> SessionReference.resolve(target,model.machines).uri?.let { clipboard.setText(AnnotatedString(it)) }
                         "copy_folder" -> current.raw.string("cwd").takeIf { it.isNotBlank() }?.let { clipboard.setText(AnnotatedString(it)) }
                         else -> model.openWithSessionAction(current,item.id)
                     }

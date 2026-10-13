@@ -1331,11 +1331,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             replies = ReadAllPolicies.unreadReplies(indexedReadRecord(target),loadedRows(target).orEmpty()) ||
                 session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"),
             reminder = reviewLater(target), checking = online && historyNetworkReason(target).isBlank())
-        val machine = machines.find { it.connectionId == target.connectionId && it.id == target.computerId }
+        val reference = SessionReference.resolve(target,machines)
         return SessionActionsMenu.items(SessionMenuFacts(target,session.raw,SessionFilters.state(session),SessionFilters.archived(session),online,
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
-            SessionReference.create(target,machine?.nativeName.orEmpty()),session.raw.string("cwd")))
+            reference.uri,session.raw.string("cwd"),reference.reason))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */

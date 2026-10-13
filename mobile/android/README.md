@@ -186,6 +186,14 @@ only by the catalog row: choosing one opens the session, where the existing
 confirmation stays disabled until a fresh inspection verifies its exact
 identity and eligibility.
 
+Copy session reference stays in the conversation's actions menu, including for
+child agents, without a duplicate toolbar button. Copying remains available
+while the agent works and when a known computer is offline. References use the
+computer's reported native machine UUID and snapshot host, not its relay ID or
+display label. An unambiguous advertised relay alias may locate that computer
+within the same workspace. Missing native identity is explained in the menu;
+it never falls back to an unrelated computer or a display name.
+
 Projects shows the canonical logical catalog, including empty projects, and its
 saved folders grouped by machine. Overview cards show each folder's name and
 selectable full wrapping path under one machine header, limited to two folders
