@@ -323,6 +323,24 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "version floors"):
             common.validate_candidate(directory, VERSION)
 
+    def test_binary_library_names_do_not_include_qt_backend_or_similar_packages(self):
+        text = "".join(f"installed = {name}-6.12.0-1-x86_64\n" for name in common.BINARY_LIBRARIES)
+        text += "installed = qt6-multimedia-ffmpeg-6.12.0-1-x86_64\n"
+        text += "installed = qt6-multimedia-gstreamer-6.12.0-1-x86_64\n"
+        text += "installed = qt6-base-debug-6.12.0-1-any\n"
+        self.assertEqual(common.binary_dependencies(text), {name: "6.12.0" for name in common.BINARY_LIBRARIES})
+        with self.assertRaisesRegex(ValueError, "Missing/ambiguous.*qt6-multimedia"):
+            common.binary_dependencies(text.replace("installed = qt6-multimedia-6.12.0-1-x86_64\n", ""))
+        with self.assertRaisesRegex(ValueError, "Missing/ambiguous.*qt6-multimedia"):
+            common.binary_dependencies(text + "installed = qt6-multimedia-6.11.2-1-x86_64\n")
+
+    def test_binary_library_versions_and_releases_still_fail_closed(self):
+        text = "".join(f"installed = {name}-1:6.12.0-2.1-any\n" for name in common.BINARY_LIBRARIES)
+        self.assertEqual(common.binary_dependencies(text), {name: "1:6.12.0" for name in common.BINARY_LIBRARIES})
+        for replacement in ["qt6-base-6.12.0-invalid-any", "qt6-base-invalid-1-x86_64"]:
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "Unexpected"):
+                common.binary_dependencies(text.replace("qt6-base-1:6.12.0-2.1-any", replacement))
+
     def test_only_successful_upstream_main_manual_candidate_is_accepted(self):
         run = {"path": ".github/workflows/release.yml", "event": "workflow_dispatch",
                "head_branch": "main", "head_repository": {"full_name": common.REPOSITORY},

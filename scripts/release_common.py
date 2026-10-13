@@ -51,14 +51,20 @@ def metadata(text):
 
 def binary_dependencies(buildinfo):
     installed = metadata(buildinfo).get("installed", [])
-    versions = {}
-    for package in BINARY_LIBRARIES:
-        matches = [value[len(package) + 1:] for value in installed if value.startswith(package + "-")]
-        require(len(matches) == 1, f"Missing/ambiguous binary build dependency: {package}")
-        identifier = matches[0]
+    records = []
+    for identifier in installed:
         if identifier.endswith(("-x86_64", "-any")):
             identifier = identifier.rsplit("-", 1)[0]
-        version, release = identifier.rsplit("-", 1)
+        # Package names contain hyphens; Arch versions and pkgrel do not.
+        # Match the whole name rather than including similarly named backends.
+        record = identifier.rsplit("-", 2)
+        if len(record) == 3:
+            records.append(record)
+    versions = {}
+    for package in BINARY_LIBRARIES:
+        matches = [(version, release) for name, version, release in records if name == package]
+        require(len(matches) == 1, f"Missing/ambiguous binary build dependency: {package}")
+        version, release = matches[0]
         require(re.fullmatch(r"\d+(?:\.\d+)*", release), "Unexpected dependency package release/architecture.")
         require(re.fullmatch(r"[0-9][0-9A-Za-z.+:~_-]*", version), "Unexpected binary library version.")
         versions[package] = version
