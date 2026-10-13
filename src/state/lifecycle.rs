@@ -99,6 +99,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
+    // The session host's channel for pauses and input checks (spec D10, D11).
+    #[cfg(windows)]
+    crate::host::supervisor::open();
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -362,9 +365,11 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
             .filter(|pid| *pid > 0)
             .ok_or("invalid tracked process ID")?;
         // Only signal the exact PID whose start identity was just checked.
-        // Never target a process group, terminal input or the tmux server.
+        // Never target a process group, terminal input or the tmux server. On
+        // Windows the pane's supervisor raises Ctrl+Break for the group it
+        // shares with this agent, as spec D11 decides.
         if let Some(scope)=scope {scope.changing();}
-        crate::platform::request_exit(pid as u32).map_err(|e| e.to_string())?;
+        backend::current().request_exit(string(&current, "pane"), pid as u32)?;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {

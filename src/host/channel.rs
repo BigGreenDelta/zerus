@@ -26,7 +26,8 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 /// The tmux backend's refusals, kept word for word.
@@ -66,6 +67,19 @@ impl SupervisorChannel {
     /// Whether requests may go out: registered, answered and not closed.
     pub(crate) fn is_open(&self) -> bool {
         self.ready.load(Ordering::SeqCst) && !self.is_closed()
+    }
+
+    /// Wait at most `timeout` while the registration's answer goes out;
+    /// whether the channel is open then.
+    pub(crate) fn wait_open(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !self.is_open() {
+            if self.is_closed() || Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     /// Read the supervisor's answers until the connection ends; runs on the
@@ -236,6 +250,7 @@ const EDITORS: &[&str] = &[
     "ne",
     "mcedit",
     "edit",
+    "notepad",
     "less",
     "more",
     "most",
@@ -447,6 +462,26 @@ mod tests {
         reader.join().unwrap();
     }
 
+    #[test]
+    fn a_channel_being_answered_is_waited_for_and_a_closed_one_is_not() {
+        let (host, _supervisor) = memory_pair();
+        let channel = SupervisorChannel::new(Arc::new(host));
+        assert!(!channel.wait_open(Duration::from_millis(20)));
+        let opening = {
+            let channel = channel.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                channel.open();
+            })
+        };
+        assert!(channel.wait_open(Duration::from_secs(5)));
+        opening.join().unwrap();
+        channel.close();
+        let started = std::time::Instant::now();
+        assert!(!channel.wait_open(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     fn claim(pid: Option<u32>) -> InputClaim {
         InputClaim {
             target: Target::Pane("%1".into()),
@@ -461,6 +496,7 @@ mod tests {
         ConsoleEvidence {
             line_input: false,
             echo_input: false,
+            processed_input: false,
             processes: processes
                 .iter()
                 .map(|(pid, name)| ConsoleProcess {
@@ -518,6 +554,13 @@ mod tests {
         let mut cooked = evidence(&attached);
         cooked.echo_input = true;
         assert_eq!(judge(&claim(Some(20)), root, &cooked, &argv), Err(NOT_RAW));
+        cooked = evidence(&attached);
+        cooked.line_input = true;
+        assert_eq!(judge(&claim(Some(20)), root, &cooked, &argv), Err(NOT_RAW));
+        // Processed input is reported, not judged (D10).
+        let mut processed = evidence(&attached);
+        processed.processed_input = true;
+        assert_eq!(judge(&claim(Some(20)), root, &processed, &argv), Ok(()));
         let mut crashed = evidence(&[(10, "hgs.exe")]);
         assert_eq!(
             judge(&claim(Some(20)), root, &crashed, &argv),
@@ -550,6 +593,9 @@ mod tests {
         for other in [
             (40, "vim.exe"),
             (41, "NVIM.EXE"),
+            (45, "notepad.exe"),
+            (46, "emacs.exe"),
+            (47, "nano"),
             (42, "less.exe"),
             (43, "more.com"),
             (32, "cmd.exe"),

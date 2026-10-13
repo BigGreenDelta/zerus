@@ -185,6 +185,63 @@ impl ExitInfo {
     }
 }
 
+/// NTSTATUS values that end a Windows process the way a signal ends a Unix one,
+/// with that signal's number: Ctrl+C, Ctrl+Break or a closed console, memory
+/// faults, illegal instructions, arithmetic faults, breakpoints, fail-fast
+/// aborts (which is how a Rust panic set to abort ends) and the exceptions that
+/// C++ and .NET programs leave unhandled.
+#[cfg_attr(unix, allow(dead_code))]
+const CRASH_SIGNALS: [(u32, i32); 20] = [
+    (0xC000_013A, 2),  // STATUS_CONTROL_C_EXIT: SIGINT
+    (0xC000_0005, 11), // STATUS_ACCESS_VIOLATION: SIGSEGV
+    (0xC000_0006, 11), // STATUS_IN_PAGE_ERROR
+    (0xC000_00FD, 11), // STATUS_STACK_OVERFLOW
+    (0xC000_008C, 11), // STATUS_ARRAY_BOUNDS_EXCEEDED
+    (0xC000_001D, 4),  // STATUS_ILLEGAL_INSTRUCTION: SIGILL
+    (0xC000_0096, 4),  // STATUS_PRIVILEGED_INSTRUCTION
+    (0xC000_008D, 8),  // STATUS_FLOAT_DENORMAL_OPERAND: SIGFPE
+    (0xC000_008E, 8),  // STATUS_FLOAT_DIVIDE_BY_ZERO
+    (0xC000_008F, 8),  // STATUS_FLOAT_INEXACT_RESULT
+    (0xC000_0090, 8),  // STATUS_FLOAT_INVALID_OPERATION
+    (0xC000_0091, 8),  // STATUS_FLOAT_OVERFLOW
+    (0xC000_0092, 8),  // STATUS_FLOAT_STACK_CHECK
+    (0xC000_0093, 8),  // STATUS_FLOAT_UNDERFLOW
+    (0xC000_0094, 8),  // STATUS_INTEGER_DIVIDE_BY_ZERO
+    (0xC000_0095, 8),  // STATUS_INTEGER_OVERFLOW
+    (0x8000_0003, 5),  // STATUS_BREAKPOINT: SIGTRAP
+    (0xC000_0409, 6),  // STATUS_STACK_BUFFER_OVERRUN (fail fast): SIGABRT
+    (0xE06D_7363, 6),  // an unhandled C++ exception (MSVC)
+    (0xE043_4352, 6),  // an unhandled .NET exception
+];
+
+/// How a Windows process that exited with `status` ended, in Unix terms (spec
+/// D9). A status of the table is its signal. Any other error status that
+/// Windows defines (severity "error" with the customer bit clear: an unhandled
+/// exception or a fatal system status such as a missing DLL) ends a process
+/// abnormally too and reads as SIGABRT, so a crash never looks like an
+/// ordinary failure: completion reasons and the `--run` resume fallback treat
+/// it as a crash. Every other value stays an exit code, `exit(-1)` and other
+/// negative codes included. Plain Rust, so its tests run on every platform.
+#[cfg_attr(unix, allow(dead_code))]
+pub(crate) fn ntstatus_exit(status: u32) -> ExitInfo {
+    const SIGABRT: i32 = 6;
+    let signal = CRASH_SIGNALS
+        .iter()
+        .find(|(crash, _)| *crash == status)
+        .map(|&(_, signal)| signal)
+        .or((status & 0xE000_0000 == 0xC000_0000).then_some(SIGABRT));
+    match signal {
+        Some(signal) => ExitInfo {
+            code: None,
+            signal: Some(signal),
+        },
+        None => ExitInfo {
+            code: Some(status as i32),
+            signal: None,
+        },
+    }
+}
+
 /// One row of the system process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessRow {
@@ -424,6 +481,38 @@ mod tests {
             join(&["inspect", "zerus://session?a=1&b=2", "--local"]),
             "inspect 'zerus://session?a=1&b=2' --local"
         );
+    }
+
+    #[test]
+    fn windows_crash_statuses_read_as_signals_and_other_codes_stay_codes() {
+        let exited = |code: i32| ExitInfo {
+            code: Some(code),
+            signal: None,
+        };
+        let signalled = |signal: i32| ExitInfo {
+            code: None,
+            signal: Some(signal),
+        };
+        assert_eq!(ntstatus_exit(0), exited(0));
+        assert_eq!(ntstatus_exit(3), exited(3));
+        // exit(-1) and other negative codes are ordinary failures.
+        assert_eq!(ntstatus_exit(u32::MAX), exited(-1));
+        assert_eq!(ntstatus_exit(0xFFFF_FFFE), exited(-2));
+        // Ctrl+C, Ctrl+Break and a closed console (spec D11, S5).
+        assert_eq!(ntstatus_exit(0xC000_013A), signalled(2));
+        assert_eq!(ntstatus_exit(0xC000_013A).exit_code(), 130);
+        assert_eq!(ntstatus_exit(0xC000_0005), signalled(11));
+        assert_eq!(ntstatus_exit(0xC000_0409).exit_code(), 134);
+        assert_eq!(ntstatus_exit(0xE06D_7363), signalled(6));
+        // Other error statuses Windows defines: a missing DLL, a failed DLL
+        // start, heap corruption.
+        for status in [0xC000_0135, 0xC000_0142, 0xC000_0374, 0xC06D_007E] {
+            assert_eq!(ntstatus_exit(status), signalled(6), "{status:#x}");
+        }
+        // Informational and warning statuses, and customer codes, stay codes.
+        assert_eq!(ntstatus_exit(0x4001_0004), exited(0x4001_0004));
+        assert_eq!(ntstatus_exit(0x8000_0005), exited(0x8000_0005_u32 as i32));
+        assert_eq!(ntstatus_exit(0xE000_0001), exited(0xE000_0001_u32 as i32));
     }
 
     #[test]

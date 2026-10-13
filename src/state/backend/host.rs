@@ -15,6 +15,7 @@
 //! | `rename` | `rename` |
 //! | `kill_session` | `signal` `terminate`; `kill` for a session without a supervisor |
 //! | `kill_pane`, `kill` | `kill` |
+//! | `request_exit` | `signal` `pause` |
 //! | `input_state` | `input_state` |
 //! | `capture` | `capture` |
 //! | `send`, `forward_key` | `send_keys` |
@@ -36,6 +37,15 @@
 //! `HGS_HOST_PANE`) and the terminal type. A launch's `HGS_LAUNCH_ID` is the
 //! host's launch ID, so a retried create never starts a second session; other
 //! starts get a launch ID that listings leave out, as tmux lists none for them.
+//!
+//! **Supervisor (D10, D11).** The `--run` supervisor opens its session's
+//! supervisor channel (`host::supervisor`), through which the host pauses the
+//! agent (`request_exit`, the pause half of `kill_session`) and reads the
+//! console evidence that `input_state` judges. A session whose supervisor has
+//! no channel refuses both.
+//!
+//! **Recovery worker (D14).** `supervise_recovery` asks the running host to
+//! supervise the recovery worker; without a host it does nothing.
 //!
 //! Attaching a terminal (`attach`, `launch` without `-d`) comes with the attach
 //! client (M5) and is refused until then.
@@ -182,6 +192,18 @@ impl<C: Connector> HostBackend<C> {
         self.call(Op::PaneInfo {
             target: target_of(target),
         })
+    }
+
+    /// D14: ask the running host to supervise the recovery worker. Nothing
+    /// happens without a host, as no session runs then, nor with a host that
+    /// supervises none (one of an older version): a later request reaches the
+    /// host that replaces it.
+    pub(crate) fn supervise_recovery(&self) -> Result<()> {
+        match self.call::<Done>(Op::RecoveryWorker) {
+            Ok(_) | Err(Failure::NoHost) => Ok(()),
+            Err(Failure::Host(error)) if error.code == ErrorCode::Unsupported => Ok(()),
+            Err(failure) => Err(failure.message()),
+        }
     }
 
     fn resolve(&self, target: protocol::Target) -> std::result::Result<Option<Resolved>, Failure> {
@@ -491,8 +513,8 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         })
     }
     /// D11: the agent is asked to stop and given time to record its exit
-    /// before the session ends. A session without a supervisor channel (an
-    /// untracked one) ends as tmux `kill-session` ends it.
+    /// before the session ends. A session without a supervisor channel (one
+    /// whose supervisor could not register) ends as tmux `kill-session` ends it.
     fn kill_session(&self, target: Target) -> Result<()> {
         let target = target_of(target);
         match self.call::<Done>(Op::Signal {
@@ -512,6 +534,17 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         })
     }
 
+    /// D11: the pane's supervisor raises Ctrl+Break for its process group: the
+    /// agent and the tools it started, which on Unix end with the agent. The
+    /// supervisor stays to record the exit; the session then ends. The caller
+    /// has checked `pid` against the record that pins it, and the supervisor
+    /// knows its agent.
+    fn request_exit(&self, pane: &str, _pid: u32) -> Result<()> {
+        self.act(Op::Signal {
+            target: protocol::Target::Pane(pane.into()),
+            signal: Signal::Pause,
+        })
+    }
     fn input_state(&self, claim: &InputClaim) -> Result<InputState> {
         let ready: InputReady = self
             .call(Op::InputState(protocol::InputClaim {
@@ -1296,6 +1329,59 @@ mod tests {
             "can't find session: $3"
         );
         assert_eq!(calls(&gone).len(), 1);
+    }
+
+    #[test]
+    fn a_pause_is_the_supervisor_pause_of_the_pane() {
+        let backend = HostBackend::new(Fake::done());
+        backend.request_exit("%4", 72).unwrap();
+        assert_eq!(
+            calls(&backend),
+            [Op::Signal {
+                target: protocol::Target::Pane("%4".into()),
+                signal: Signal::Pause
+            }]
+        );
+        // Without a supervisor nothing is stopped, and the caller learns why.
+        let untracked = HostBackend::new(Fake::new(|_| {
+            Err(host_error(
+                ErrorCode::Refused,
+                "session x has no supervisor connected to the session host",
+            ))
+        }));
+        assert_eq!(
+            untracked.request_exit("%4", 72).unwrap_err(),
+            "session x has no supervisor connected to the session host"
+        );
+        assert_eq!(calls(&untracked).len(), 1);
+    }
+
+    #[test]
+    fn the_recovery_worker_is_asked_of_a_running_host_only() {
+        let backend = HostBackend::new(Fake::done());
+        backend.supervise_recovery().unwrap();
+        assert_eq!(requests(&backend), [(false, Op::RecoveryWorker)]);
+        // No host, or one that supervises no worker (an older one): nothing to do.
+        for quiet in [
+            Failure::NoHost,
+            host_error(ErrorCode::Unsupported, "unsupported"),
+        ] {
+            let quiet = std::sync::Mutex::new(Some(quiet));
+            let backend = HostBackend::new(Fake::new(move |_| {
+                Err(quiet.lock().unwrap().take().unwrap())
+            }));
+            backend.supervise_recovery().unwrap();
+        }
+        let failing = HostBackend::new(Fake::new(|_| {
+            Err(host_error(
+                ErrorCode::Internal,
+                "cannot supervise the recovery worker: not installed",
+            ))
+        }));
+        assert_eq!(
+            failing.supervise_recovery().unwrap_err(),
+            "cannot supervise the recovery worker: not installed"
+        );
     }
 
     #[test]

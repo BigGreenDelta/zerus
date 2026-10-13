@@ -281,6 +281,14 @@ pub(crate) trait TerminalBackend: Sync {
         Err(UNSUPPORTED.into())
     }
 
+    /// Ask the tracked agent `pid` in `pane` to exit, as a pause does: SIGTERM to
+    /// that exact process on Unix; on Windows the pane's supervisor raises
+    /// Ctrl+Break for the process group it shares with its agent (spec D11).
+    /// Never a forced kill.
+    fn request_exit(&self, _pane: &str, pid: u32) -> Result<()> {
+        crate::platform::request_exit(pid).map_err(|error| error.to_string())
+    }
+
     /// Check that the claimed agent owns the pane's input now: the pane shows its
     /// run, is in normal mode with bracketed paste on, the terminal is raw and
     /// the agent, not a shell, is in the foreground.

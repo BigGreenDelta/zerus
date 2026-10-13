@@ -29,7 +29,8 @@
 //!   `set_run_marker` (`name`, `run_id`), `rename` (`id`, `name`),
 //!   `kill_session` (`target`), `kill_pane` (`pane`), `session_exists`
 //!   (`name`), `session_name` (`id`), `input_state` (`pane`, `name`, `run_id`,
-//!   `agent`, `pid`) and `on_terminal` (`pid`, `tty`). It prints `{"ok": ...}`
+//!   `agent`, `pid`), `request_exit` (`pane`, `pid`: the pause request of
+//!   `hgs pause`) and `on_terminal` (`pid`, `tty`). It prints `{"ok": ...}`
 //!   and exits 0, or `{"error": message}` and exits 1. Like a listing, only a
 //!   start ever starts a host, and none of these is one.
 //!
@@ -317,6 +318,10 @@ enum BackendOp {
         #[serde(default)]
         pid: Option<u64>,
     },
+    RequestExit {
+        pane: String,
+        pid: u32,
+    },
     OnTerminal {
         pid: String,
         tty: String,
@@ -450,6 +455,9 @@ fn backend(operation: &str) -> i32 {
                 pid,
             })
             .map(|state| json!({"cursor_x": state.cursor_x, "cursor_y": state.cursor_y})),
+        BackendOp::RequestExit { pane, pid } => {
+            terminal.request_exit(&pane, pid).map(|()| json!({}))
+        }
         BackendOp::OnTerminal { pid, tty } => terminal
             .on_terminal(&pid, &tty)
             .map(|attached| json!({"attached": attached})),

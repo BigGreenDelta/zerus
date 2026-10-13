@@ -61,7 +61,9 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     }
     // Supervisors and final hooks can now record the exit. On timeout the binding
     // stays in place: stopping a terminal must never silently forget its history.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A Windows session host first pauses the agent for up to 10 s, then closes
+    // its console, which leaves another 5 s (spec D11).
+    let deadline = Instant::now() + Duration::from_secs(if cfg!(windows) { 20 } else { 10 });
     while process_alive(&original) {
         if Instant::now() >= deadline {
             return Err(

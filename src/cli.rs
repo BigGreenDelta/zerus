@@ -488,8 +488,12 @@ fn run(args: &[String]) -> Result<i32> {
     let resume = &args[1..n + 1];
     let base = &args[n + 1..];
     // The agent gets Ctrl+C; a stop request or a closing console waits for it.
+    // The session host pauses the agent and reads its console through the
+    // supervisor channel (spec D10, D11).
     #[cfg(windows)]
     let _stops = platform::ShutdownGuard::install()?;
+    #[cfg(windows)]
+    crate::host::supervisor::open();
     if n != 0 {
         let start = Instant::now();
         let rc = run_resume(resume)?;
@@ -497,7 +501,12 @@ fn run(args: &[String]) -> Result<i32> {
             .unwrap_or_else(|_| "5".into())
             .parse()
             .map_err(|_| Error::new(1, "HGS_FALLBACK_SECS must be a nonnegative integer"))?;
-        if rc == 0 || start.elapsed().as_secs() >= seconds || rc >= 128 {
+        if resume_stands(
+            rc,
+            start.elapsed().as_secs(),
+            seconds,
+            platform::shutdown_signal() != 0,
+        ) {
             return Ok(rc);
         }
         eprintln!(
@@ -506,6 +515,17 @@ fn run(args: &[String]) -> Result<i32> {
         );
     }
     run_base(base)
+}
+
+/// Whether a resume attempt that exited with `rc` after `elapsed` seconds is
+/// final, rather than "nothing to resume" (a quick ordinary failure, after
+/// which the base command starts fresh): it succeeded, ran for at least
+/// `limit` seconds, crashed or was signalled (128 and above; Windows reads
+/// crash statuses as signals, `platform::ntstatus_exit`), or a stop request
+/// reached the supervisor (`stopped`, Windows only: there a paused agent may
+/// exit with any code).
+fn resume_stands(rc: i32, elapsed: u64, limit: u64, stopped: bool) -> bool {
+    rc == 0 || elapsed >= limit || rc >= 128 || stopped
 }
 
 #[cfg(unix)]
@@ -1961,4 +1981,33 @@ fn launch(
         eprintln!("hgs: session {session} ended immediately — command not found on this box? try --dry-run");
     }
     Ok(rc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crashes_and_stops_of_a_resume_are_final_and_quick_failures_start_fresh() {
+        // A quick ordinary failure means nothing to resume.
+        assert!(!resume_stands(1, 0, 5, false));
+        assert!(!resume_stands(127, 4, 5, false));
+        // Success, a run long enough to have resumed, a signal or crash.
+        assert!(resume_stands(0, 0, 5, false));
+        assert!(resume_stands(1, 5, 5, false));
+        assert!(resume_stands(130, 0, 5, false));
+        // Windows: Ctrl+Break or a closed console (STATUS_CONTROL_C_EXIT), an
+        // access violation, a missing DLL (spec D9) all read as signals.
+        for status in [0xC000_013A_u32, 0xC000_0005, 0xC000_0135] {
+            let rc = platform::ntstatus_exit(status).exit_code();
+            assert!(rc >= 128, "{status:#x}");
+            assert!(resume_stands(rc, 0, 5, false), "{status:#x}");
+        }
+        // exit(-1) stays an ordinary failure.
+        let rc = platform::ntstatus_exit(u32::MAX).exit_code();
+        assert_eq!(rc, -1);
+        assert!(!resume_stands(rc, 0, 5, false));
+        // A paused agent that exits with an ordinary failure was still stopped.
+        assert!(resume_stands(1, 0, 5, true));
+    }
 }

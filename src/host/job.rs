@@ -170,54 +170,7 @@ impl Job {
 
     /// The IDs of the job's running processes, nested jobs included.
     pub(crate) fn process_ids(&self) -> io::Result<Vec<u32>> {
-        let word = mem::size_of::<usize>();
-        // The header's two counts, then one ULONG_PTR per process.
-        let header = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / word;
-        // Small at first, so that the growing path runs whenever a job holds more
-        // than one process.
-        let mut capacity = 1usize;
-        for _ in 0..24 {
-            // usize elements keep the list aligned for its ULONG_PTR entries.
-            let mut buffer = vec![0usize; header + capacity];
-            let bytes = u32::try_from(buffer.len() * word)
-                .map_err(|_| io::Error::other("too many processes in a job"))?;
-            // SAFETY: the handle is an open job with query access, and `buffer` is
-            // writable for `bytes` bytes and aligned for the list.
-            let queried = unsafe {
-                QueryInformationJobObject(
-                    self.handle(),
-                    JobObjectBasicProcessIdList,
-                    buffer.as_mut_ptr().cast(),
-                    bytes,
-                    ptr::null_mut(),
-                )
-            } != 0;
-            if !queried {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
-                    return Err(error);
-                }
-            }
-            // SAFETY: the buffer is zeroed or holds the header the call filled in,
-            // and it is at least as large and as aligned as
-            // JOBOBJECT_BASIC_PROCESS_ID_LIST.
-            let list = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
-            let (assigned, listed) = (
-                list.NumberOfAssignedProcesses as usize,
-                list.NumberOfProcessIdsInList as usize,
-            );
-            // Too small, or more processes joined meanwhile: ask again with room
-            // for all of them.
-            if !queried || listed < assigned {
-                capacity = capacity.saturating_mul(2).max(assigned);
-                continue;
-            }
-            return Ok(buffer[header..header + listed.min(capacity)]
-                .iter()
-                .map(|&pid| pid as u32)
-                .collect());
-        }
-        Err(io::Error::other("the job's processes kept changing"))
+        process_ids(self.handle())
     }
 
     /// End every process in the job, nested jobs included, with `exit_code`.
@@ -249,6 +202,70 @@ impl Job {
     fn handle(&self) -> HANDLE {
         self.0.as_raw_handle()
     }
+}
+
+/// The IDs of the running processes of job `job`, nested jobs included; a
+/// null `job` names this process's immediate job.
+fn process_ids(job: HANDLE) -> io::Result<Vec<u32>> {
+    let word = mem::size_of::<usize>();
+    // The header's two counts, then one ULONG_PTR per process.
+    let header = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / word;
+    // Small at first, so that the growing path runs whenever a job holds more
+    // than one process.
+    let mut capacity = 1usize;
+    for _ in 0..24 {
+        // usize elements keep the list aligned for its ULONG_PTR entries.
+        let mut buffer = vec![0usize; header + capacity];
+        let bytes = u32::try_from(buffer.len() * word)
+            .map_err(|_| io::Error::other("too many processes in a job"))?;
+        // SAFETY: the handle is an open job with query access or null (this
+        // process's job), and `buffer` is writable for `bytes` bytes and
+        // aligned for the list.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicProcessIdList,
+                buffer.as_mut_ptr().cast(),
+                bytes,
+                ptr::null_mut(),
+            )
+        } != 0;
+        if !queried {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                return Err(error);
+            }
+        }
+        // SAFETY: the buffer is zeroed or holds the header the call filled in,
+        // and it is at least as large and as aligned as
+        // JOBOBJECT_BASIC_PROCESS_ID_LIST.
+        let list = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+        let (assigned, listed) = (
+            list.NumberOfAssignedProcesses as usize,
+            list.NumberOfProcessIdsInList as usize,
+        );
+        // Too small, or more processes joined meanwhile: ask again with room
+        // for all of them.
+        if !queried || listed < assigned {
+            capacity = capacity.saturating_mul(2).max(assigned);
+            continue;
+        }
+        return Ok(buffer[header..header + listed.min(capacity)]
+            .iter()
+            .map(|&pid| pid as u32)
+            .collect());
+    }
+    Err(io::Error::other("the job's processes kept changing"))
+}
+
+/// The IDs of the running processes of this process's immediate job, nested
+/// jobs included: for a supervisor, its session's job (D9, D10). None outside
+/// any job.
+pub(crate) fn own_job_process_ids() -> io::Result<Option<Vec<u32>>> {
+    if !in_any_job()? {
+        return Ok(None);
+    }
+    process_ids(ptr::null_mut()).map(Some)
 }
 
 /// Whether this process runs in any job (D4).

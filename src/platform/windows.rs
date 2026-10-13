@@ -18,14 +18,14 @@ use std::{
     os::windows::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
-        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
         process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, PoisonError,
     },
     thread,
     time::{Duration, Instant},
@@ -185,48 +185,13 @@ pub fn local_sessions() -> bool {
 pub fn code(status: ExitStatus) -> i32 {
     ExitInfo::of(status).exit_code()
 }
-/// NTSTATUS values that end a process the way a signal ends a Unix one, with
-/// that signal's number: Ctrl+C or a closed console, memory faults, illegal
-/// instructions, arithmetic faults, breakpoints and fail-fast aborts (which is
-/// how a Rust panic set to abort ends).
-const CRASH_SIGNALS: [(u32, i32); 18] = [
-    (0xC000_013A, 2),  // STATUS_CONTROL_C_EXIT: SIGINT
-    (0xC000_0005, 11), // STATUS_ACCESS_VIOLATION: SIGSEGV
-    (0xC000_0006, 11), // STATUS_IN_PAGE_ERROR
-    (0xC000_00FD, 11), // STATUS_STACK_OVERFLOW
-    (0xC000_008C, 11), // STATUS_ARRAY_BOUNDS_EXCEEDED
-    (0xC000_001D, 4),  // STATUS_ILLEGAL_INSTRUCTION: SIGILL
-    (0xC000_0096, 4),  // STATUS_PRIVILEGED_INSTRUCTION
-    (0xC000_008D, 8),  // STATUS_FLOAT_DENORMAL_OPERAND: SIGFPE
-    (0xC000_008E, 8),  // STATUS_FLOAT_DIVIDE_BY_ZERO
-    (0xC000_008F, 8),  // STATUS_FLOAT_INEXACT_RESULT
-    (0xC000_0090, 8),  // STATUS_FLOAT_INVALID_OPERATION
-    (0xC000_0091, 8),  // STATUS_FLOAT_OVERFLOW
-    (0xC000_0092, 8),  // STATUS_FLOAT_STACK_CHECK
-    (0xC000_0093, 8),  // STATUS_FLOAT_UNDERFLOW
-    (0xC000_0094, 8),  // STATUS_INTEGER_DIVIDE_BY_ZERO
-    (0xC000_0095, 8),  // STATUS_INTEGER_OVERFLOW
-    (0x8000_0003, 5),  // STATUS_BREAKPOINT: SIGTRAP
-    (0xC000_0409, 6),  // STATUS_STACK_BUFFER_OVERRUN (fail fast): SIGABRT
-];
-/// Other codes, including large ones such as `exit(-1)`, stay exit codes.
+/// Crash statuses read as signals of the same meaning (`super::ntstatus_exit`,
+/// spec D9); other codes, `exit(-1)` included, stay exit codes.
 pub(super) fn exit_info(status: ExitStatus) -> ExitInfo {
-    let Some(code) = status.code() else {
-        return ExitInfo {
-            code: None,
-            signal: None,
-        };
-    };
-    match CRASH_SIGNALS
-        .iter()
-        .find(|(status, _)| *status == code as u32)
-    {
-        Some(&(_, signal)) => ExitInfo {
-            code: None,
-            signal: Some(signal),
-        },
+    match status.code() {
+        Some(code) => super::ntstatus_exit(code as u32),
         None => ExitInfo {
-            code: Some(code),
+            code: None,
             signal: None,
         },
     }
@@ -1432,6 +1397,14 @@ mod process {
         }
         Ok(rows)
     }
+    /// The image file name (`node.exe`) of every process that runs now, by ID.
+    /// Toolhelp names processes of every user and integrity level.
+    pub fn process_names() -> io::Result<BTreeMap<u32, String>> {
+        Ok(snapshot()?
+            .into_iter()
+            .map(|(pid, _, name)| (pid, name))
+            .collect())
+    }
     /// Toolhelp keeps a parent's ID after the parent exits, and Windows soon gives
     /// that ID to another process: a parent link counts only while a process with
     /// that ID exists and was created no later than the child. Otherwise 0.
@@ -1770,17 +1743,48 @@ mod process {
     pub fn shutdown_signal() -> i32 {
         SHUTDOWN_SIGNAL.load(Ordering::SeqCst)
     }
-    /// The console delivers later requests to `child` itself. One that arrived
-    /// before it started never reached it: raise Ctrl+Break again on this console.
-    pub fn forward_shutdown(_: &Child) {
+    /// The agent the supervisor started last: its process ID and a handle that
+    /// keeps the ID from being reused, for the supervisor channel's evidence
+    /// (`host::supervisor`, spec D10).
+    static AGENT: Mutex<Option<(u32, OwnedHandle)>> = Mutex::new(None);
+    /// `child` is the supervisor's agent from now on (`supervised_agent`). The
+    /// console delivers later requests to it itself, as it shares this process
+    /// group. One that arrived before it started never reached it: raise
+    /// Ctrl+Break again for the group.
+    pub fn forward_shutdown(child: &Child) {
+        let pinned = child.as_handle().try_clone_to_owned().ok();
+        *AGENT.lock().unwrap_or_else(PoisonError::into_inner) =
+            pinned.map(|handle| (child.id(), handle));
         if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
-            unsafe {
-                GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
-            }
+            let _ = break_process_group();
         }
     }
-    /// Nothing is passed on (see `forward_shutdown`), so nothing stops.
+    /// Nothing is passed on (see `forward_shutdown`), so nothing stops. The
+    /// agent stays the supervisor's until the next one starts: its evidence then
+    /// shows it gone.
     pub fn shutdown_child_exited() {}
+    /// The agent `forward_shutdown` named last: its process ID and whether it
+    /// still runs.
+    pub fn supervised_agent() -> Option<(u32, bool)> {
+        AGENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(pid, handle)| (*pid, !exited(handle.as_raw_handle())))
+    }
+    /// D11's pause: Ctrl+Break for this process's group, which a supervisor the
+    /// session host started leads (CREATE_NEW_PROCESS_GROUP) and its agent
+    /// shares with every tool it started, as a Unix pane's group does. The
+    /// supervisor's own handler records it and keeps running. A process that
+    /// leads no group reaches no process this way.
+    pub fn break_process_group() -> io::Result<()> {
+        // SAFETY: plain call; the event goes to the processes on this
+        // process's console whose group ID is this process's ID.
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, std::process::id()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 
     /// Start `command` outside this process's job, with a hidden console of its
     /// own (its console children never open a window) and its own process group.
