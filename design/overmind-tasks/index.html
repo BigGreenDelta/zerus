@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overmind Tasks · варианты</title>
+<style>
+:root {
+  --font: "Ubuntu Sans", "Ubuntu", "Noto Sans", "Cantarell", system-ui, sans-serif;
+  --mono: "Ubuntu Sans Mono", "Ubuntu Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+  --dur: 200ms; --ease: cubic-bezier(.2, .7, .2, 1);
+}
+.window, body {
+  --bg: #161b21; --surface: #1c2229; --raised: #222a33; --border: #333c47; --fg: #e8edf4; --muted: #a2adbc; --faint: #6f7b8a;
+  --accent: #8bdfc0; --accent-bg: #1f3a30; --accent-line: #3d6b5b; --hover: #2b3540; --selected: #233d35;
+  --amber: #ffda76; --amber-bg: #3a3320; --amber-line: #6b5a24; --red: #f4ab9b; --red-bg: #3b2424; --blue: #9cc3ff;
+  --chip: #2b3540; --chip-fg: #c4ccd6; --shadow: 0 18px 44px rgba(0,0,0,.55);
+}
+.window.light {
+  --bg: #ffffff; --surface: #f4f6f8; --raised: #ffffff; --border: #d5dbe2; --fg: #1c2229; --muted: #627082; --faint: #8b96a3;
+  --accent: #167357; --accent-bg: #e7f3ed; --accent-line: #a5c8b8; --hover: #eef2f5; --selected: #e7f3ed;
+  --amber: #8a5a00; --amber-bg: #fff5d6; --amber-line: #e6c56a; --red: #a13224; --red-bg: #fbe9e6; --blue: #2d5fb0;
+  --chip: #eef1f4; --chip-fg: #4a5563; --shadow: 0 18px 44px rgba(20,30,40,.18);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #0f1317; color: var(--fg); font: 13px/1.35 var(--font); }
+body { padding: 26px 24px 60px; }
+button, input, select { font: inherit; color: inherit; }
+
+/* Page chrome */
+.intro, .notes { max-width: 1600px; margin: 0 auto; }
+h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
+.intro p { color: var(--muted); margin: 0 0 14px; max-width: 980px; line-height: 1.55; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin-bottom: 14px; }
+.ctl { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { background: transparent; color: var(--muted); border: 0; padding: 8px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--selected); color: var(--accent); }
+.seg button:hover:not([aria-pressed="true"]) { background: #1c2229; color: var(--fg); }
+.log { color: var(--muted); font-size: 12px; min-height: 18px; margin: 0 auto 12px; max-width: 1600px; }
+.log b { color: var(--fg); font-weight: 600; }
+.frame { overflow-x: auto; padding-bottom: 8px; }
+
+/* Window */
+.window { margin: 0 auto; height: 820px; display: flex; overflow: hidden; position: relative; background: var(--bg); color: var(--fg);
+  border: 1px solid #2a323b; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.45); transition: width var(--dur) var(--ease); }
+.rail { width: 56px; flex: none; background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; padding: 10px 7px; gap: 8px; }
+.rb { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); }
+.rb.on { background: var(--selected); color: var(--accent); }
+.rb svg { width: 21px; height: 21px; }
+.rail .grow { flex: 1; }
+.side { width: 288px; flex: none; border-right: 1px solid var(--border); padding: 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.side h2 { font-size: 17px; margin: 2px 4px 4px; font-weight: 650; }
+.search { border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; color: var(--faint); background: var(--surface); }
+.grp { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; font-weight: 600; font-size: 12.5px; }
+.grp.alpha { background: #3a2226; color: #f19aa5; }
+.grp.beta { background: #1f3a2b; color: #7fd6a4; }
+.window.light .grp.alpha { background: #fbe6e8; color: #a3303d; }
+.window.light .grp.beta { background: #e3f4ea; color: #1d7a46; }
+.grp .n { margin-left: auto; font-size: 11px; opacity: .85; }
+.srow { padding: 7px 10px 8px; border-radius: 8px; border: 1px solid transparent; cursor: default; }
+.srow.sel { background: var(--hover); border-color: var(--border); }
+.srow .t { display: flex; align-items: center; gap: 8px; font-weight: 650; }
+.srow .d { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 5px; background: var(--chip); color: var(--chip-fg); }
+.st.work { background: var(--accent-bg); color: var(--accent); }
+.st.ask { background: var(--amber-bg); color: var(--amber); }
+.qb { margin-left: auto; font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 9px; background: var(--chip); color: var(--chip-fg); }
+.qb.call { background: var(--amber-bg); color: var(--amber); }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 12px 14px 10px; gap: 8px; }
+.mhead { display: flex; align-items: center; gap: 10px; }
+.mhead h2 { font-size: 17px; margin: 0; font-weight: 650; }
+.mhead .grow { flex: 1; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
+.tabs span { padding: 6px 10px 8px; color: var(--muted); }
+.tabs span.on { color: var(--fg); border-bottom: 2px solid var(--accent); }
+.tasks { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; position: relative; }
+
+/* Shared task pieces */
+.bar { display: flex; gap: 8px; align-items: center; }
+.sel-proj, .filter { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 6px 10px; }
+.sel-proj { display: inline-flex; align-items: center; gap: 8px; min-width: 150px; }
+.sel-proj .dot { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; }
+.filter { flex: 1; max-width: 260px; outline: none; }
+.filter:focus { border-color: var(--accent-line); }
+.strip { display: flex; align-items: center; gap: 8px; border-radius: 8px; padding: 5px 10px; min-height: 32px; flex-wrap: wrap; }
+.strip.call { background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber); }
+.strip.queue { background: var(--accent-bg); border: 1px solid var(--accent-line); color: var(--accent); }
+.strip b { font-weight: 650; }
+.strip .link { cursor: pointer; font-weight: 600; }
+.strip .link:hover { text-decoration: underline; }
+.pick { border: 1px solid var(--amber-line); border-radius: 6px; padding: 2px 8px; cursor: pointer; color: var(--fg); background: transparent; }
+.pick:hover { background: rgba(255,218,118,.08); }
+.ref { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.chip { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; background: var(--chip); color: var(--chip-fg); white-space: nowrap; }
+.chip.blocked { color: var(--amber); }
+.prio { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; }
+.prio.P0 { background: var(--red-bg); color: var(--red); }
+.prio.P1 { background: var(--amber-bg); color: var(--amber); }
+.prio.P2 { background: var(--chip); color: var(--chip-fg); }
+.mk { font-size: 11px; width: 14px; text-align: center; }
+.mk.working { color: var(--accent); } .mk.reviewed { color: var(--accent); } .mk.rework { color: var(--red); } .mk.conflict { color: var(--amber); }
+.sess { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess::before { content: "●"; margin-right: 4px; font-size: 9px; color: var(--faint); }
+.sess.mine { color: var(--accent); }
+.sess.mine::before { color: var(--accent); }
+.empty { color: var(--faint); font-size: 12px; padding: 10px 12px; }
+.toast { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); background: var(--raised); border: 1px solid var(--amber-line);
+  color: var(--amber); padding: 7px 12px; border-radius: 8px; box-shadow: var(--shadow); z-index: 20; font-size: 12px; }
+
+/* Detail panel (shared) */
+.detail { width: 380px; flex: none; background: var(--raised); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.detail.overlay { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; box-shadow: var(--shadow); }
+.dscroll { overflow: auto; padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.dhead { display: flex; align-items: center; gap: 8px; }
+.dhead .x { margin-left: auto; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; }
+.pill { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.detail h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.dact { display: flex; gap: 6px; flex-wrap: wrap; }
+.dbtn { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+.dbtn:hover { background: var(--hover); }
+.dbtn.primary { border-color: var(--accent-line); color: var(--accent); }
+.kv { display: grid; grid-template-columns: 78px 1fr; gap: 6px 10px; align-items: center; font-size: 12.5px; }
+.kv .k { color: var(--muted); }
+.sect { color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+.prompt { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); line-height: 1.5; }
+.question { border: 1px solid var(--amber-line); background: var(--amber-bg); color: var(--fg); border-radius: 8px; padding: 8px 10px; }
+.journal { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.journal li { color: var(--muted); }
+.journal li b { color: var(--fg); font-weight: 600; }
+
+/* "Now": fixed 244 px columns with sideways scroll */
+.now-board { flex: 1; min-height: 0; display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; }
+.now-col { width: 244px; flex: none; border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; min-height: 0; }
+.now-col.collapsed { width: 44px; }
+.now-col .h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-weight: 650; cursor: pointer; }
+.now-col.collapsed .h { writing-mode: vertical-rl; padding: 12px 10px; }
+.now-col .list { overflow: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 8px; }
+.now-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
+.now-card.mine { border-left: 3px solid var(--accent); }
+.now-card.open { border-color: var(--accent-line); }
+.now-card .t { line-height: 1.35; }
+.now-card .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* A: one list with a section per stage */
+.a-wrap { flex: 1; min-height: 0; display: flex; gap: 10px; }
+.a-list { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 10px; container-type: inline-size; }
+.a-sec + .a-sec { border-top: 1px solid var(--border); }
+.a-head { display: flex; align-items: center; gap: 8px; padding: 7px 12px; cursor: pointer; position: sticky; top: 0; background: var(--bg); z-index: 1;
+  font-weight: 650; font-size: 12.5px; }
+.a-head:hover { background: var(--hover); }
+.a-head .chev { width: 12px; color: var(--muted); transition: transform var(--dur); }
+.a-sec.collapsed .chev { transform: rotate(-90deg); }
+.a-head .cnt { color: var(--muted); font-weight: 500; }
+.a-head .role { margin-left: auto; color: var(--faint); font-weight: 400; font-size: 11px; }
+.a-sec.drop .a-head, .a-sec.drop { background: var(--selected); }
+.a-row { display: grid; grid-template-columns: 14px 74px minmax(0, 1fr) auto auto; gap: 8px; align-items: center;
+  padding: 0 12px; height: 32px; cursor: pointer; border-left: 3px solid transparent; }
+.a-row:hover { background: var(--hover); }
+.a-row.mine { border-left-color: var(--accent); }
+.a-row.open { background: var(--selected); }
+.a-row .ti { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.a-row .tags { display: flex; gap: 4px; align-items: center; }
+.a-row .who { max-width: 170px; }
+@container (max-width: 560px) { .a-row .tags .chip { display: none; } .a-row .who { max-width: 110px; } }
+@container (max-width: 430px) { .a-row .who { display: none; } }
+.a-sec.collapsed .a-rows { display: none; }
+
+/* B: compact columns that fit the width */
+.b-board { flex: 1; min-width: 0; min-height: 0; display: flex; gap: 6px; overflow-x: auto; }
+.b-col { flex: 1 1 0; width: 0; min-width: 118px; max-width: 280px; overflow: hidden; border: 1px solid var(--border); border-radius: 9px; display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+.b-col.slim { flex: 0 0 30px; min-width: 30px; cursor: pointer; align-items: center; padding: 8px 0; gap: 8px; }
+.b-col.slim:hover { background: var(--hover); }
+.b-col.slim .v { writing-mode: vertical-rl; font-weight: 600; font-size: 12px; color: var(--muted); }
+.b-col.slim .c { font-size: 11px; color: var(--faint); }
+.b-col.drop { background: var(--selected); }
+.b-col .h { display: flex; align-items: center; gap: 6px; padding: 7px 9px; font-weight: 650; font-size: 12.5px; cursor: pointer; }
+.b-col .h .c { color: var(--muted); font-weight: 500; }
+.b-col .h .fold { margin-left: auto; color: var(--faint); font-size: 11px; }
+.b-col .list { overflow: auto; padding: 0 5px 6px; display: flex; flex-direction: column; gap: 5px; }
+.b-card { border: 1px solid var(--border); border-radius: 7px; padding: 5px 7px; background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 3px; }
+.b-card:hover { border-color: var(--accent-line); }
+.b-card.mine { border-left: 3px solid var(--accent); }
+.b-card.open { background: var(--selected); border-color: var(--accent-line); }
+.b-card .top { display: flex; align-items: center; gap: 5px; }
+.b-card .top .mk { margin-left: auto; }
+.b-card .t { font-size: 12.5px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.b-card .bot { display: flex; gap: 4px; align-items: center; min-width: 0; overflow: hidden; }
+.b-card .bot .sess { flex: 1 1 auto; width: 0; min-width: 0; }
+
+/* C: pipeline of stages over one list, card docked on the right */
+.c-pipe { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.c-step { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 16px; padding: 4px 11px; cursor: pointer; background: var(--surface); }
+.c-step:hover { background: var(--hover); }
+.c-step .c { font-size: 11px; color: var(--muted); font-weight: 600; }
+.c-step.on { background: var(--selected); border-color: var(--accent-line); color: var(--accent); }
+.c-step.on .c { color: var(--accent); }
+.c-step.call { border-color: var(--amber-line); color: var(--amber); background: var(--amber-bg); }
+.c-step.dim { opacity: .65; }
+.c-step.drop { outline: 2px solid var(--accent); }
+.c-arrow { color: var(--faint); font-size: 12px; }
+.c-gap { width: 10px; }
+.c-wrap { flex: 1; min-height: 0; display: flex; gap: 10px; }
+.c-list { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 10px; container-type: inline-size; }
+.c-sub { padding: 6px 12px 4px; color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.c-row { display: grid; grid-template-columns: 14px 74px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 12px;
+  cursor: pointer; border-left: 3px solid transparent; }
+.c-row:hover { background: var(--hover); }
+.c-row.mine { border-left-color: var(--accent); }
+.c-row.open { background: var(--selected); }
+.c-row .ti { line-height: 1.3; }
+.c-row .meta { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+.c-row .side-r { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+@container (max-width: 470px) { .c-row .meta .chip { display: none; } }
+
+/* Notes under the window */
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 22px; }
+.note { border: 1px solid #333c47; border-radius: 10px; padding: 12px 14px; background: #161b21; color: #e8edf4; }
+.note.on { border-color: #3d6b5b; box-shadow: 0 0 0 1px #3d6b5b inset; }
+.note h3 { margin: 0 0 6px; font-size: 14px; }
+.note p { margin: 0 0 6px; color: #a2adbc; line-height: 1.5; }
+.note ul { margin: 0; padding-left: 18px; color: #c4ccd6; line-height: 1.5; }
+.note .plus { color: #8bdfc0; } .note .minus { color: #f4ab9b; }
+</style>
+</head>
+<body>
+<div class="intro">
+  <h1>Вкладка Tasks: три варианта компоновки</h1>
+  <p>Одни и те же задачи проекта Alpha в окне Zerus. Выбрана сессия <b>codex/hgs/dashboard</b>: её задачи отмечены зелёной полосой слева.
+  Кликайте задачи, чтобы открыть карточку, сворачивайте стадии, перетаскивайте задачи между стадиями, фильтруйте по тексту.
+  Ширина окна меняет место под доской: у узкого окна на задачи остаётся около 680 px.</p>
+  <div class="controls">
+    <span class="ctl">Вариант <span class="seg" id="variant">
+      <button data-v="now">Сейчас</button><button data-v="a" aria-pressed="true">A · Список по стадиям</button>
+      <button data-v="b">B · Компактный канбан</button><button data-v="c">C · Конвейер + список</button></span></span>
+    <span class="ctl">Окно <span class="seg" id="width">
+      <button data-w="1100">1100 px</button><button data-w="1280" aria-pressed="true">1280 px</button><button data-w="1600">1600 px</button></span></span>
+    <span class="ctl">Тема <span class="seg" id="theme">
+      <button data-t="dark" aria-pressed="true">Тёмная</button><button data-t="light">Светлая</button></span></span>
+  </div>
+</div>
+<div class="log" id="log">Готово. Откройте задачу кликом.</div>
+<div class="frame">
+  <div class="window" id="win">
+    <nav class="rail">
+      <div class="rb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8 12h8M12 8v8"/></svg></div>
+      <div class="rb on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="5" rx="1.5"/><rect x="4" y="14" width="16" height="5" rx="1.5"/></svg></div>
+      <div class="rb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h7l2 2h9v10H3z"/></svg></div>
+      <div class="rb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg></div>
+      <div class="grow"></div>
+      <div class="rb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></div>
+    </nav>
+    <aside class="side">
+      <h2>Sessions</h2>
+      <div class="search">Search sessions, IDs and messages…</div>
+      <div class="grp alpha">▾ Alpha <span class="n">6</span></div>
+      <div class="srow sel"><div class="t">dashboard <span class="st work">Working</span><span class="qb call">2 · !</span></div><div class="d">Bash: ctest --test-dir tray/build</div></div>
+      <div class="srow"><div class="t">navigation <span class="st">Paused</span></div><div class="d">Resume to continue</div></div>
+      <div class="srow"><div class="t">relay <span class="st">Ready</span><span class="qb">1</span></div><div class="d">Waiting for the next task</div></div>
+      <div class="srow"><div class="t">review <span class="st ask">Needs approval</span></div><div class="d">terraform plan</div></div>
+      <div class="grp beta">▾ Beta <span class="n">1</span></div>
+      <div class="srow"><div class="t">research <span class="st">Ready</span></div><div class="d">Compare the session lifecycle across our CLI…</div></div>
+    </aside>
+    <section class="main">
+      <div class="mhead"><h2>Alpha / dashboard</h2><span class="st work">Using a tool</span><span class="grow"></span><span class="ref">gpt-6.1-sol · high</span></div>
+      <div class="tabs"><span>Activity</span><span>Terminal</span><span class="on">Tasks</span><span>Processes</span></div>
+      <div class="tasks" id="tasks"></div>
+    </section>
+  </div>
+</div>
+<div class="notes" id="notes">
+  <div class="note" data-v="now"><h3>Сейчас</h3><p>Колонки по 244 px, карточка накрывает доску справа.</p>
+    <ul><li class="minus">В окно 1280 px помещаются две-три колонки, остальное — горизонтальная прокрутка.</li>
+    <li class="minus">Открытая карточка закрывает ещё половину доски.</li></ul></div>
+  <div class="note" data-v="a"><h3>A · Список по стадиям</h3><p>Одна колонка: секция на стадию, задача — строка высотой 32 px. Карточка встаёт справа, список сужается.</p>
+    <ul><li class="plus">Ширина нужна только под заголовок; на узком окне прячутся метки, потом сессия.</li>
+    <li class="plus">Видно 15–20 задач без прокрутки; Done и Icebox свёрнуты.</li>
+    <li class="minus">Нет картины потока «слева направо», как у канбана.</li></ul></div>
+  <div class="note" data-v="b"><h3>B · Компактный канбан</h3><p>Колонки делят доступную ширину (118–280 px), пустые стадии и Done/Icebox — полоски по 30 px. Карточка — выезжающая панель поверх доски.</p>
+    <ul><li class="plus">Остаётся канбан: поток и перетаскивание между колонками.</li>
+    <li class="plus">Пять рабочих стадий помещаются в 680 px без прокрутки.</li>
+    <li class="minus">Узкие колонки: заголовок в две строки, метки обрезаются.</li></ul></div>
+  <div class="note" data-v="c"><h3>C · Конвейер + список</h3><p>Сверху конвейер стадий со счётчиками, под ним список выбранной стадии (или всех активных). Карточка закреплена справа.</p>
+    <ul><li class="plus">Одна строка на весь workflow; счётчики видны всегда.</li>
+    <li class="plus">Строка задачи в две линии: полный заголовок, метки и сессия.</li>
+    <li class="minus">Задачи разных стадий видны вместе только в режиме «All active».</li></ul></div>
+</div>
+
+<script>
+const STAGES = [
+  {name: 'Backlog', role: 'backlog'}, {name: 'Queue', role: 'ready'}, {name: 'Design', role: 'active'}, {name: 'Build', role: 'active'},
+  {name: 'Review', role: 'review'}, {name: 'Your Call', role: 'needs_human'}, {name: 'Done', role: 'done'}, {name: 'Icebox', role: 'parked'},
+];
+const ME = 'codex/hgs/dashboard';
+const T = (ref, stage, title, o = {}) => ({ref, stage, title, labels: [], prio: '', who: '', mine: false, marker: '', ...o});
+let tasks = [
+  T('om-s8g4z', 'Backlog', 'Sketch the phone layout for the task board', {labels: ['mobile', 'blocked']}),
+  T('om-o6d5f', 'Backlog', 'Drop the old migration from the state store', {prio: 'P0', marker: 'conflict'}),
+  T('om-h2v7q', 'Backlog', 'Explain recovery workers in the reference', {labels: ['docs']}),
+  T('om-c9w3e', 'Backlog', 'Cache board pages between relay polls', {labels: ['perf', 'mobile'], prio: 'P2'}),
+  T('om-n4b8r', 'Backlog', 'Group decision notifications by project', {labels: ['desktop']}),
+  T('om-k3f9x', 'Queue', 'Stream logs to the Activity tab without blocking the composer', {labels: ['perf'], prio: 'P1', who: ME, mine: true}),
+  T('om-m2q8a', 'Queue', 'Measure inspection latency', {labels: ['perf'], prio: 'P1', who: ME, mine: true}),
+  T('om-t5y1u', 'Queue', 'Retry relay uploads with the original identity', {labels: ['mobile'], who: 'codex/mobile/relay'}),
+  T('om-d7k2p', 'Design', 'Plan the Windows console layout', {labels: ['windows'], who: 'claude/infra/review', marker: 'working'}),
+  T('om-b3x9m', 'Build', 'Add a pause action to Send next', {labels: ['desktop'], who: ME, mine: true, marker: 'working'}),
+  T('om-w8e4t', 'Build', 'Page board reads on the phone', {labels: ['mobile'], prio: 'P1', who: 'codex/mobile/app', marker: 'working'}),
+  T('om-r4t6b', 'Review', 'Keep drafts when a session is renamed', {labels: ['desktop'], who: 'claude/infra/review', marker: 'reviewed'}),
+  T('om-v1j8n', 'Review', 'Recover a stalled delivery after a relay restart', {labels: ['cli'], prio: 'P1', who: 'codex/mobile/relay', marker: 'rework'}),
+  T('om-p7c1d', 'Your Call', 'Pick a store for drafts', {labels: ['desktop'], who: ME, mine: true, question: 'SQLite, or one JSON file per draft? SQLite keeps writes atomic but adds a dependency to the tray.'}),
+  T('om-a1q2w', 'Done', 'Show queue badges on session rows', {labels: ['desktop']}),
+  T('om-e3r4t', 'Done', 'Add as task from the composer', {labels: ['desktop']}),
+  T('om-y5u6i', 'Done', 'Replicate the event log between machines', {labels: ['cli']}),
+  T('om-o7p8a', 'Done', 'Attach the MCP server at launch', {labels: ['cli']}),
+  T('om-s9d0f', 'Done', 'Decision alerts on the phone', {labels: ['mobile']}),
+  T('om-g1h2j', 'Done', 'Templates for dispatch and review', {labels: ['cli']}),
+  T('om-k3l4z', 'Icebox', 'Swimlanes per session', {labels: ['desktop']}),
+  T('om-x5c6v', 'Icebox', 'Voice-created tasks', {labels: ['mobile']}),
+];
+const MARK = {working: ['▶', 'working'], reviewed: ['✓', 'reviewed'], rework: ['✗', 'needs work'], conflict: ['⚠', 'conflict']};
+const state = {variant: 'a', width: 1280, theme: 'dark', filter: '', open: '', collapsedA: {Done: true, Icebox: true},
+  slimB: {Done: true, Icebox: true}, nowCollapsed: {Done: true, Icebox: true}, stageC: 'active', drag: ''};
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const visible = t => !state.filter || (t.title + ' ' + t.ref + ' ' + t.labels.join(' ') + ' ' + t.who).toLowerCase().includes(state.filter.toLowerCase());
+const of = stage => tasks.filter(t => t.stage === stage && visible(t));
+const log = html => { $('#log').innerHTML = html; };
+
+const marker = t => t.marker ? `<span class="mk ${t.marker}" title="${MARK[t.marker][1]}">${MARK[t.marker][0]}</span>` : '<span class="mk"></span>';
+const prio = t => t.prio ? `<span class="prio ${t.prio}">${t.prio}</span>` : '';
+const chips = (t, n = 9) => t.labels.slice(0, n).map(l => `<span class="chip ${l === 'blocked' ? 'blocked' : ''}">${esc(l)}</span>`).join('');
+const who = t => t.who ? `<span class="sess who ${t.mine ? 'mine' : ''}">${esc(t.who)}</span>` : '';
+
+function bar() {
+  return `<div class="bar"><span class="sel-proj"><span class="dot"></span>Alpha<span style="margin-left:auto;color:var(--muted)">▾</span></span>
+    <input class="filter" id="filter" placeholder="Filter tasks" value="${esc(state.filter)}"></div>`;
+}
+function strips(compact) {
+  const calls = tasks.filter(t => t.stage === 'Your Call');
+  const queue = tasks.filter(t => t.stage === 'Queue' && t.mine).length;
+  const call = calls.length ? `<div class="strip call"><b>Your Call (${calls.length})</b>${calls.map(t => `<button class="pick" data-open="${t.ref}">${t.ref} · ${esc(t.title)}</button>`).join('')}</div>` : '';
+  const q = `<div class="strip queue"><b>This session's queue: ${queue}</b> · <span class="link" data-send>Send next</span></div>`;
+  if (!compact) return call + q;
+  // One line for both strips.
+  return `<div class="bar" style="flex-wrap:wrap">${call.replace('class="strip call"', 'class="strip call" style="flex:1"')}${q}</div>`;
+}
+function detail(overlay) {
+  const t = tasks.find(x => x.ref === state.open);
+  if (!t) return '';
+  const q = t.question ? `<div class="sect">Question</div><div class="question">${esc(t.question)}</div>
+    <div class="dact"><button class="dbtn primary">SQLite</button><button class="dbtn">JSON files</button><button class="dbtn">Answer…</button></div>` : '';
+  return `<aside class="detail ${overlay ? 'overlay' : ''}"><div class="dscroll">
+    <div class="dhead"><span class="ref">${t.ref}</span><span class="pill">${t.stage}</span>${prio(t)}<button class="x" data-close>✕</button></div>
+    <h3>${esc(t.title)}</h3>
+    <div class="dact"><button class="dbtn primary">Send to session ▾</button><button class="dbtn">Move to ▾</button><button class="dbtn">Done</button></div>
+    ${q}
+    <div class="kv"><span class="k">Session</span><span>${t.who ? who(t) : '<span class="sess">not assigned</span>'}</span>
+      <span class="k">Priority</span><span>${t.prio || '—'}</span>
+      <span class="k">Labels</span><span style="display:flex;gap:4px;flex-wrap:wrap">${chips(t) || '—'}</span>
+      <span class="k">Pin</span><span>${t.mine ? 'Pinned to dashboard' : 'Not pinned'}</span></div>
+    <div class="sect">Prompt</div>
+    <div class="prompt">${esc(t.title)}. Keep the change small, cover it with a test, and record the measurement in the journal before review.</div>
+    <div class="sect">Journal</div>
+    <ul class="journal"><li><b>you</b> created it in Backlog · 2 d</li><li><b>manager</b> moved it to ${t.stage} · 3 h</li>
+      ${t.marker === 'working' ? `<li><b>${esc(t.who)}</b> started working · 12 min</li>` : ''}
+      ${t.marker === 'rework' ? '<li><b>review</b> asked for changes: the retry must keep the request ID · 40 min</li>' : ''}</ul>
+  </div></aside>`;
+}
+
+// Now: the current board.
+function renderNow() {
+  const cols = STAGES.filter(s => s.role !== 'needs_human').map(s => {
+    const list = of(s.name);
+    if (state.nowCollapsed[s.name]) return `<div class="now-col collapsed" data-stage="${s.name}"><div class="h" data-toggle-now="${s.name}">${s.name} <span class="ref">${list.length}</span></div></div>`;
+    return `<div class="now-col" data-stage="${s.name}"><div class="h" data-toggle-now="${s.name}">${s.name} <span class="ref">${list.length}</span></div>
+      <div class="list">${list.map(t => `<div class="now-card ${t.mine ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">
+        <div class="row"><span class="ref">${t.ref}</span>${prio(t)}${marker(t)}</div><div class="t">${esc(t.title)}</div>
+        <div class="row">${chips(t)}${t.who ? who(t) : ''}</div></div>`).join('') || '<div class="empty">No tasks</div>'}</div></div>`;
+  }).join('');
+  return bar() + strips(false) + `<div style="position:relative;flex:1;min-height:0;display:flex"><div class="now-board">${cols}</div>${detail(true)}</div>`;
+}
+
+// A: sections in one list.
+function renderA() {
+  const secs = STAGES.filter(s => s.role !== 'needs_human').map(s => {
+    const list = of(s.name);
+    const rows = list.map(t => `<div class="a-row ${t.mine ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">
+      ${marker(t)}<span class="ref">${t.ref}</span><span class="ti" title="${esc(t.title)}">${esc(t.title)}</span>
+      <span class="tags">${prio(t)}${chips(t, 2)}</span>${who(t) || '<span></span>'}</div>`).join('') || '<div class="empty">No tasks</div>';
+    return `<div class="a-sec ${state.collapsedA[s.name] ? 'collapsed' : ''}" data-stage="${s.name}">
+      <div class="a-head" data-toggle-a="${s.name}"><span class="chev">▾</span>${s.name}<span class="cnt">${list.length}</span><span class="role">${s.role}</span></div>
+      <div class="a-rows">${rows}</div></div>`;
+  }).join('');
+  return bar() + strips(true) + `<div class="a-wrap"><div class="a-list">${secs}</div>${detail(false)}</div>`;
+}
+
+// B: compact columns that share the width.
+function renderB() {
+  const cols = STAGES.filter(s => s.role !== 'needs_human').map(s => {
+    const list = of(s.name);
+    const slim = state.slimB[s.name] ?? list.length === 0;
+    if (slim) return `<div class="b-col slim" data-stage="${s.name}" data-unslim="${s.name}" title="${s.name}: ${list.length}"><span class="c">${list.length}</span><span class="v">${s.name}</span></div>`;
+    return `<div class="b-col" data-stage="${s.name}"><div class="h" data-slim="${s.name}" title="Collapse">${s.name}<span class="c">${list.length}</span><span class="fold">⟨</span></div>
+      <div class="list">${list.map(t => `<div class="b-card ${t.mine ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">
+        <div class="top"><span class="ref">${t.ref}</span>${prio(t)}${marker(t)}</div><div class="t" title="${esc(t.title)}">${esc(t.title)}</div>
+        ${t.who || t.labels.length ? `<div class="bot">${chips(t, 1)}${who(t)}</div>` : ''}</div>`).join('')}</div></div>`;
+  }).join('');
+  return bar() + strips(true) + `<div style="position:relative;flex:1;min-height:0;display:flex"><div class="b-board">${cols}</div>${detail(true)}</div>`;
+}
+
+// C: pipeline over one list.
+function renderC() {
+  const active = STAGES.filter(s => ['backlog', 'ready', 'active', 'review'].includes(s.role));
+  const count = n => of(n).length;
+  const step = (key, label, n, cls = '') => `<span class="c-step ${state.stageC === key ? 'on' : ''} ${cls}" data-stage-c="${key}" ${key !== 'active' ? `data-stage="${key}"` : ''}>${label}<span class="c">${n}</span></span>`;
+  const pipe = `<div class="c-pipe">${step('active', 'All active', active.reduce((a, s) => a + count(s.name), 0))}<span class="c-gap"></span>
+    ${active.map((s, i) => (i ? '<span class="c-arrow">›</span>' : '') + step(s.name, s.name, count(s.name))).join('')}<span class="c-gap"></span>
+    ${step('Your Call', 'Your Call', count('Your Call'), 'call')}${step('Done', 'Done', count('Done'), 'dim')}${step('Icebox', 'Icebox', count('Icebox'), 'dim')}</div>`;
+  const row = t => `<div class="c-row ${t.mine ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">${marker(t)}<span class="ref">${t.ref}</span>
+    <div><div class="ti">${esc(t.title)}</div><div class="meta">${chips(t)}</div></div><div class="side-r">${prio(t)}${who(t)}</div></div>`;
+  const groups = state.stageC === 'active' ? active.map(s => s.name) : [state.stageC];
+  const list = groups.map(g => {
+    const items = of(g);
+    if (!items.length && state.stageC === 'active') return '';
+    return (state.stageC === 'active' ? `<div class="c-sub">${g} · ${items.length}</div>` : '') + (items.map(row).join('') || '<div class="empty">No tasks</div>');
+  }).join('');
+  const queue = tasks.filter(t => t.stage === 'Queue' && t.mine).length;
+  const head = `<div class="bar">${bar().replace('<div class="bar">', '').replace(/<\/div>$/, '')}<span class="strip queue" style="margin-left:auto"><b>Queue: ${queue}</b> · <span class="link" data-send>Send next</span></span></div>`;
+  return head + pipe + `<div class="c-wrap"><div class="c-list">${list}</div>${detail(false)}</div>`;
+}
+
+function render() {
+  const win = $('#win');
+  win.style.width = state.width + 'px';
+  win.classList.toggle('light', state.theme === 'light');
+  const html = {now: renderNow, a: renderA, b: renderB, c: renderC}[state.variant]();
+  const box = $('#tasks');
+  const focused = document.activeElement && document.activeElement.id === 'filter';
+  const caret = focused ? document.activeElement.selectionStart : 0;
+  box.innerHTML = html;
+  if (focused) { const f = $('#filter'); f.focus(); f.setSelectionRange(caret, caret); }
+  for (const [id, key, attr] of [['#variant', 'variant', 'v'], ['#width', 'width', 'w'], ['#theme', 'theme', 't']])
+    for (const b of document.querySelectorAll(id + ' button')) b.setAttribute('aria-pressed', String(String(state[key]) === b.dataset[attr]));
+  for (const n of document.querySelectorAll('.note')) n.classList.toggle('on', n.dataset.v === state.variant);
+}
+function toast(text) {
+  const el = document.createElement('div'); el.className = 'toast'; el.textContent = text;
+  $('#tasks').appendChild(el); setTimeout(() => el.remove(), 2200);
+}
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-v],[data-w],[data-t],[data-open],[data-ref],[data-close],[data-toggle-a],[data-toggle-now],[data-slim],[data-unslim],[data-stage-c],[data-send]');
+  if (!t) return;
+  const d = t.dataset;
+  if (d.v) { state.variant = d.v; log(`Вариант <b>${t.textContent}</b>.`); }
+  else if (d.w) state.width = +d.w;
+  else if (d.t) state.theme = d.t;
+  else if (d.close !== undefined) state.open = '';
+  else if (d.open || d.ref) { state.open = d.open || d.ref; log(`Открыта <b>${state.open}</b>.`); }
+  else if (d.toggleA) state.collapsedA[d.toggleA] = !state.collapsedA[d.toggleA];
+  else if (d.toggleNow) state.nowCollapsed[d.toggleNow] = !state.nowCollapsed[d.toggleNow];
+  else if (d.slim) state.slimB[d.slim] = true;
+  else if (d.unslim) state.slimB[d.unslim] = false;
+  else if (d.stageC) state.stageC = d.stageC;
+  else if (d.send !== undefined) {
+    const next = tasks.find(x => x.stage === 'Queue' && x.mine);
+    if (!next) { toast('The queue of this session is empty.'); return; }
+    next.stage = 'Build'; next.marker = 'working'; log(`Send next: <b>${next.ref}</b> ушла в dashboard.`);
+  }
+  render();
+});
+document.addEventListener('input', e => { if (e.target.id === 'filter') { state.filter = e.target.value; render(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.open) { state.open = ''; render(); } });
+
+// Drag a task to another stage (section, column or pipeline step).
+document.addEventListener('dragstart', e => { const r = e.target.closest('[data-ref]'); if (r) { state.drag = r.dataset.ref; e.dataTransfer.effectAllowed = 'move'; } });
+document.addEventListener('dragover', e => {
+  const z = e.target.closest('[data-stage]'); if (!z || !state.drag) return;
+  e.preventDefault();
+  for (const el of document.querySelectorAll('.drop')) if (el !== z) el.classList.remove('drop');
+  z.classList.add('drop');
+});
+document.addEventListener('dragleave', e => { const z = e.target.closest('[data-stage]'); if (z && !z.contains(e.relatedTarget)) z.classList.remove('drop'); });
+document.addEventListener('drop', e => {
+  const z = e.target.closest('[data-stage]'); if (!z || !state.drag) return;
+  e.preventDefault();
+  const t = tasks.find(x => x.ref === state.drag); state.drag = '';
+  const to = z.dataset.stage;
+  if (to === 'Your Call') { toast('Only an agent puts a task into Your Call.'); render(); return; }
+  if (t && t.stage !== to) { t.stage = to; if (to !== 'Build' && to !== 'Design') t.marker = t.marker === 'working' ? '' : t.marker; log(`<b>${t.ref}</b> → ${to}.`); }
+  render();
+});
+document.addEventListener('dragend', () => { state.drag = ''; for (const el of document.querySelectorAll('.drop')) el.classList.remove('drop'); });
+// #v=b&w=1100&t=light&open=om-k3f9x opens a given state (links and screenshots).
+const hash = new URLSearchParams(location.hash.slice(1));
+if (['now', 'a', 'b', 'c'].includes(hash.get('v'))) state.variant = hash.get('v');
+if (['1100', '1280', '1600'].includes(hash.get('w'))) state.width = +hash.get('w');
+if (['dark', 'light'].includes(hash.get('t'))) state.theme = hash.get('t');
+if (tasks.some(t => t.ref === hash.get('open'))) state.open = hash.get('open');
+render();
+</script>
+</body>
+</html>
