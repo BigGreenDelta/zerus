@@ -45,6 +45,9 @@ public:
     bool hasSubmittedAnswer(const QString &sessionKey, const QJsonObject &question);
     // Read-only, untrimmed editor state for consent across a nested event loop.
     QJsonObject submissionSnapshot(const QString &sessionKey, const QString &questionId) const;
+    // Tests only: the review delay before an approval can be granted (3 s), so
+    // suites need not wait it out. The application keeps the default.
+    void setReviewDelayForTests(int ms) { m_reviewMs = ms; }
 
 signals:
     void answerRequested(const QString &sessionKey, const QString &questionId, const QJsonArray &answers);
@@ -115,7 +118,9 @@ private:
     QPushButton *m_approve, *m_deny;
     QTimer m_reviewTimer;
     QElapsedTimer m_reviewClock;
-    int m_reviewSeconds = 3;
+    int m_reviewMs = 3000, m_reviewSeconds = 3;
+    // Whole seconds of review left, as the countdown shows them.
+    int reviewSecondsLeft(qint64 elapsed) const { return int((qMax<qint64>(0, m_reviewMs - elapsed) + 999) / 1000); }
     int m_queueIndex = -1, m_queueCount = 0;
     bool m_available = true, m_loading = false, m_dark = true, m_sizingPending = false;
     double m_scale = 1.0;

@@ -1,8 +1,12 @@
 #include "FakeCli.h"
 #include "ProcessView.h"
+#include "ProcessRunner.h"
+#include "ProcessSettings.h"
 #include "HgsClient.h"
 #include "BusyIndicator.h"
+#include <atomic>
 #include <QJsonDocument>
+#include <QScopeGuard>
 #include <QTest>
 #include <QSettings>
 #include <QFile>
@@ -28,14 +32,20 @@ private slots:
 void TestProcessView::disabledDoesNotReadOrContinuePolling(){
     QTemporaryDir dir;QFile file(dir.filePath("hgs"));QVERIFY(file.open(QIODevice::WriteOnly));
     file.write("#!/usr/bin/env python3\nimport os\nopen(os.path.join(os.path.dirname(__file__),'calls'),'a').write('called\\n')\nprint('{}',end='')\n");file.close();QVERIFY(FakeCli::makeRunnable(file.fileName()));
-    QSettings().setValue("processes/enabled",false);QSettings().setValue("processes/activeSeconds",1);
+    // Polls every 0.2 s, below the production minimum of 1 s.
+    ProcessSettings::setPollFloorForTests(0.2);const auto restoreFloor=qScopeGuard([]{ProcessSettings::setPollFloorForTests(0);});
+    std::atomic<int> launches=0;ProcessRunner::setLaunchObserver([&launches]{++launches;});
+    const auto observer=qScopeGuard([]{ProcessRunner::setLaunchObserver({});});
+    const auto calls=[&]{QFile log(dir.filePath("calls"));return log.open(QIODevice::ReadOnly)?int(log.readAll().count('\n')):0;};
+    QSettings().setValue("processes/enabled",false);QSettings().setValue("processes/activeSeconds",0.2);
     HgsClient client(FakeCli::program(file.fileName()));ProcessView view(&client);view.show();
     QJsonObject job{{"id","shell"},{"command","sleep 300"},{"status","running"},{"capabilities",QJsonObject{{"output",true},{"stop",true}}}};
     view.setSession({},"session",{},QJsonObject{{"run_id","run"},{"conversation_id","conversation"},{"processes",QJsonObject{{"items",QJsonArray{job}}}}},true,true);
-    QTest::qWait(1200);QVERIFY(!QFile::exists(dir.filePath("calls")));QVERIFY(!view.findChild<QPushButton *>("stopProcess")->isEnabled());
+    QTest::qWait(600);QVERIFY(!QFile::exists(dir.filePath("calls")));QVERIFY(!view.findChild<QPushButton *>("stopProcess")->isEnabled());
     QSettings().setValue("processes/enabled",true);view.applyPreferences();QTRY_VERIFY(QFile::exists(dir.filePath("calls")));
-    QSettings().setValue("processes/enabled",false);view.applyPreferences();QTest::qWait(200);const auto size=QFileInfo(dir.filePath("calls")).size();
-    QTest::qWait(1200);QCOMPARE(QFileInfo(dir.filePath("calls")).size(),size);
+    // A request launched just before disabling may still be starting: count it first.
+    QSettings().setValue("processes/enabled",false);view.applyPreferences();QTest::qWait(200);QTRY_COMPARE(calls(),int(launches));const auto size=calls();
+    QTest::qWait(600);QCOMPARE(calls(),size);
 }
 void TestProcessView::identitySelectionOutputAndOffline(){
     QTemporaryDir dir;QFile script(dir.filePath("hgs"));QVERIFY(script.open(QIODevice::WriteOnly));
@@ -133,15 +143,18 @@ void TestProcessView::sessionChangeCancelsRemainingStops(){
     QVERIFY(view.findChild<QLabel*>("processStopNotice")->isHidden());
 }
 void TestProcessView::delayedLoadingAndQuietCompletedOutput(){
+    // Polls every 0.3 s instead of 2.5 s; the loading indicator keeps its 0.5 s delay.
+    ProcessSettings::setPollFloorForTests(0.3);const auto restoreFloor=qScopeGuard([]{ProcessSettings::setPollFloorForTests(0);});
+    QSettings().setValue("processes/activeSeconds",0.3);constexpr int pollMs=300;
     QTemporaryDir dir;QVERIFY(fixture(dir.filePath("hgs")));HgsClient client(FakeCli::program(dir.filePath("hgs")));ProcessView view(&client);view.resize(900,620);view.show();
     auto done=job("fast",false,"completed");auto data=inspection({done,job("slow",false,"completed")});view.setSession("arch","dsh/project","",data,true,true);
     auto *busy=view.findChild<QWidget*>("processBusy");auto *output=view.findChild<QPlainTextEdit*>("processOutput");
     QVERIFY(busy->isHidden());QTRY_COMPARE(output->toPlainText(),QString("fast output"));QVERIFY(busy->isHidden());
     done["updated_at"]=99;data=inspection({done,job("slow",false,"completed")});view.setSession("arch","dsh/project","",data,true,true);
-    QTest::qWait(2700);QCOMPARE(requests(dir.filePath("hgs.log"),false).size(),1);QVERIFY(busy->isHidden());
+    QTest::qWait(3*pollMs);QCOMPARE(requests(dir.filePath("hgs.log"),false).size(),1);QVERIFY(busy->isHidden());
     view.selectProcess("slow");QTest::qWait(250);QVERIFY(busy->isHidden());QTRY_VERIFY(busy->isVisible());
     QTRY_COMPARE(output->toPlainText(),QString("slow output"));QVERIFY(busy->isHidden());
-    view.hide();const auto count=requests(dir.filePath("hgs.log"),false).size();QTest::qWait(2700);QCOMPARE(requests(dir.filePath("hgs.log"),false).size(),count);
+    view.hide();const auto count=requests(dir.filePath("hgs.log"),false).size();QTest::qWait(3*pollMs);QCOMPARE(requests(dir.filePath("hgs.log"),false).size(),count);
 }
 QTEST_MAIN(TestProcessView)
 #include "test_processview.moc"

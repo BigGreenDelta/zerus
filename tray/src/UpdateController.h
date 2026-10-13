@@ -57,6 +57,9 @@ public:
     // True when the application bundle on disk now holds another release than the one this
     // process started from, for example after `brew upgrade --cask zerus`.
     static bool bundleReplaced(const QString &executable,const QString &startedRelease);
+    // Tests only: the deadline of package-manager commands (5 s; 0 restores it), so
+    // suites need not wait it out. The application keeps the default.
+    static void setCommandTimeoutForTests(int ms);
     QString channel() const;
     void setChannel(const QString &value);
     void check();

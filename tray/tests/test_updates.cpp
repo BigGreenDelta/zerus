@@ -361,7 +361,9 @@ private slots:
     }
     void subprocessTimeoutLeavesEventLoopResponsive(){
 #ifdef Q_OS_LINUX
-        QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport time\ntime.sleep(20)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());bool tick=false;QTimer::singleShot(30,[&]{tick=true;});QTRY_VERIFY_WITH_TIMEOUT(tick,1000);QTRY_COMPARE_WITH_TIMEOUT(controller.installation().kind,QString("unknown"),6500);qputenv("PATH",oldPath);
+        // A 1.5 s deadline instead of 5 s still outlasts the 1 s wait for the tick.
+        UpdateController::setCommandTimeoutForTests(1500);const auto restoreTimeout=qScopeGuard([]{UpdateController::setCommandTimeoutForTests(0);});
+        QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport time\ntime.sleep(20)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());bool tick=false;QTimer::singleShot(30,[&]{tick=true;});QTRY_VERIFY_WITH_TIMEOUT(tick,1000);QTRY_COMPARE_WITH_TIMEOUT(controller.installation().kind,QString("unknown"),3000);qputenv("PATH",oldPath);
 #endif
     }
 private:

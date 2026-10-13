@@ -68,6 +68,12 @@ public:
     void setConnectionError(const QString &error);
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
+    // Tests only, so suites need not wait out fixed delays: information notices
+    // (5 s), compaction polls (2.5 s), and the details poll tick (500 ms) with
+    // its Activity interval (2.5 s). The application keeps the defaults.
+    void setNoticeDurationForTests(int ms) { m_noticeMs = ms; }
+    void setCompactPollIntervalForTests(int ms) { m_compactTimer.setInterval(ms); }
+    void setDetailsPollForTests(int tickMs, int activityMs) { m_timer.setInterval(tickMs); m_activityPollMs = activityMs; }
 
 signals:
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
@@ -292,7 +298,7 @@ private:
     QHash<QString, quint64> m_waitingPreparations;
     quint64 m_waitingPreparationSerial = 0;
     bool m_draftRefreshPending = false;
-    int m_tick = 0;
+    int m_tick = 0, m_activityPollMs = 2500, m_noticeMs = 5000;
     QTimer m_timer;
     QTimer m_sessionLoadingTimer;
     struct SessionRead { QString host, name, archive, agent; QElapsedTimer age; };
