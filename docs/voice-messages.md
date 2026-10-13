@@ -31,13 +31,29 @@ Release never uploads, transcribes or sends the recording. The saved preview
 provides playback, discard and a separate **Send voice message** action. Text or
 attachments restore the ordinary Send action.
 
-Recording keeps the text draft read-only and disables attachment changes. A timer
-and cancellation hint accompany the gesture; explicit Record, Stop and Cancel
-actions support accessibility, and Space or Escape on a hardware keyboard stops
-into the preview. A permission result requires a fresh recording action. Losing
+Recording keeps the text draft read-only and disables attachment changes. During
+a hold, the empty editor displays a single recording row: a red indicator, a
+captured-audio timer with tenths, and a left chevron with **Slide to cancel**. The
+hint follows the left drag and fades; the underlying editor and the trailing
+48 dp pointer/focus/semantics node remain mounted. Explicit Record, Stop and
+Cancel actions support accessibility, and Space or Escape on a hardware keyboard
+stops into the preview. A permission result requires a fresh recording action. Losing
 the pointer or leaving the composer must end capture without submission; a late
 release or permission callback must never start another recording or affect a
 newer one. Capture stays pinned to its original conversation and provider.
+
+Haptic feedback is scoped to one capture. A confirmed microphone start and an
+explicit stop or cancellation each request a short `KEYBOARD_TAP`; duplicate and
+late callbacks cannot replay it. The terminal pulse waits until the microphone
+has stopped and released. Permission prompts and a failed start are
+silent. Feedback uses the Android view API without flags that override user
+settings and cannot prevent audio capture or persistence if unavailable.
+
+The interaction was checked against Telegram Android's
+[recording row](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L9742-L9766)
+and [recording feedback](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java#L4706-L5005).
+Zerus implements these interactions in its existing Compose components and keeps
+its separate preview/Send contract.
 
 ## Authority and processing
 

@@ -39,15 +39,17 @@ internal class SpeechController(private val context: Context, private val model:
     var recording by mutableStateOf(false); private set
     var savingRecording by mutableStateOf(false); private set
     var seconds by mutableStateOf(0); private set
+    var elapsedMs by mutableStateOf(0); private set
     var notice by mutableStateOf(""); private set
     var statistics by mutableStateOf(""); private set
     var activeRequests by mutableStateOf<Set<String>>(emptySet()); private set
     var legacyResult by mutableStateOf<SpeechAttempt?>(null); private set
     val busy get() = recording || savingRecording || activeRequests.isNotEmpty()
-    private class Capture(val id: Long, val recorder: SpeechRecorder) { var discarded = false }
+    private class Capture(val id: Long, val recorder: SpeechRecorder, val feedback: VoiceCaptureFeedback, val gesture: Boolean) { var discarded = false }
     private var capture: Capture? = null
     private var captureSequence = 0L
     val activeCaptureId get() = capture?.id.takeIf { recording }
+    val touchRecording get() = recording && capture?.gesture == true
     var gestureCaptureId by mutableStateOf<Long?>(null); private set
     var gestureCancelProgress by mutableStateOf(0f); private set
     var captureFailure by mutableStateOf<Pair<Long, String>?>(null); private set
@@ -175,23 +177,26 @@ internal class SpeechController(private val context: Context, private val model:
         else -> ""
     }
     fun permissionDenied() { notice = "Microphone access was denied. Allow microphone access in Android app settings to record." }
-    fun start(target: Target): Long? = start(target, gesture = false)
-    fun startGesture(target: Target): Long? = start(target, gesture = true)
-    private fun start(target: Target, gesture: Boolean): Long? {
+    fun start(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = false, feedback)
+    fun startGesture(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = true, feedback)
+    private fun start(target: Target, gesture: Boolean, feedback: (VoiceCaptureFeedback.Event) -> Unit): Long? {
         val reason = startReason(target)
         if (reason.isNotBlank()) { notice = reason; return null }
         val machine = selection.host?.computerId.orEmpty()
         val profileId = selection.profileId
         val profileRevision = if (profileTarget == target && !loading && profile != null) profile?.profileRevision else selection.profileRevision
         model.attachments.stopAudio()
-        seconds = 0; notice = ""; captureFailure = null; recording = true
-        val owned = Capture(++captureSequence, SpeechRecorder(context)); capture = owned
+        seconds = 0; elapsedMs = 0; notice = ""; captureFailure = null; recording = true
+        val owned = Capture(++captureSequence, SpeechRecorder(context), VoiceCaptureFeedback(feedback), gesture); capture = owned
         gestureCaptureId = owned.id.takeIf { gesture }; gestureCancelProgress = 0f
         scope.launch {
             var imported: Attachment? = null
             try {
-                val pcm = owned.recorder.capture(120_000) { if (capture === owned) seconds = it }
+                val pcm = owned.recorder.capture(120_000, started = {
+                    if (capture === owned && recording) owned.feedback.started()
+                }) { if (capture === owned) { elapsedMs = it; seconds = it / 1_000 } }
                 // Natural completion and the duration limit retire this touch press before saving.
+                owned.feedback.stopped()
                 retireGesture(owned.id)
                 recording = false
                 if (owned.discarded) { notice = "Recording discarded."; return@launch }
@@ -202,14 +207,16 @@ internal class SpeechController(private val context: Context, private val model:
                 persist()
                 imported = null
                 notice = "Recording saved. Send it when ready."
-            } catch (cancelled: CancellationException) { throw cancelled }
+            } catch (cancelled: CancellationException) { owned.feedback.finish(userInitiated = false); throw cancelled }
             catch (error: Exception) {
                 notice = if (owned.discarded) "Recording discarded." else error.message ?: "Could not save the recording."
                 if (!owned.discarded) captureFailure = owned.id to notice
             }
             finally {
+                owned.feedback.stopped()
                 if (capture === owned) {
                     retireGesture(owned.id)
+                    gestureCancelProgress = 0f
                     recording = false; savingRecording = false; capture = null
                 }
                 // A committed preview remains recoverable if the Activity or coroutine stops.
@@ -222,24 +229,31 @@ internal class SpeechController(private val context: Context, private val model:
         return owned.id
     }
     private fun retireGesture(id: Long) {
-        if (gestureCaptureId == id) { gestureCaptureId = null; gestureCancelProgress = 0f }
+        if (gestureCaptureId == id) gestureCaptureId = null
     }
     fun moveGesture(id: Long, progress: Float) {
         if (gestureCaptureId == id && capture?.id == id) gestureCancelProgress = progress.coerceIn(0f, 1f)
     }
-    fun finishGesture(id: Long, cancel: Boolean): Boolean {
+    fun finishGesture(id: Long, cancel: Boolean, userInitiated: Boolean = true): Boolean {
         val owned = capture?.takeIf { it.id == id && gestureCaptureId == id } ?: return false
         retireGesture(id)
         if (cancel) owned.discarded = true
+        owned.feedback.finish(userInitiated, cancelled = cancel)
         owned.recorder.stop()
         return true
     }
-    fun stopCapture(id: Long) { capture?.takeIf { it.id == id }?.let { retireGesture(it.id); it.recorder.stop() } }
+    fun stopCapture(id: Long, userInitiated: Boolean = true) {
+        capture?.takeIf { it.id == id }?.let {
+            retireGesture(it.id)
+            it.feedback.finish(userInitiated, cancelled = it.discarded)
+            it.recorder.stop()
+        }
+    }
     fun cancelCapture(id: Long) {
         capture?.takeIf { it.id == id && recording }?.let { it.discarded = true; stopCapture(id) }
     }
     fun stop() { capture?.let { stopCapture(it.id) } }
-    fun background() { stop() }
+    fun background() { capture?.let { stopCapture(it.id, userInitiated = false) } }
     fun protectedAudioIds() = (outgoing.mapNotNull { it.audio?.id } + listOfNotNull(draft?.audio?.id)).toSet()
     fun discardRecording() {
         if (recording) { activeCaptureId?.let(::cancelCapture); return }

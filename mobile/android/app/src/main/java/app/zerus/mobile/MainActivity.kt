@@ -1098,7 +1098,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Measure the editor and its controls first. A voice preview uses only the
         // remaining height, with its controls reachable by scrolling.
-        if (model.speech.recording || model.speech.savingRecording || model.speech.draft != null) {
+        if (model.speech.recording && !model.speech.touchRecording || model.speech.savingRecording || model.speech.draft != null) {
             Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
                 .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
         }
@@ -1129,8 +1129,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
         else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
         CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
-            readOnly = recording || draft.status != "editing" || model.demo,
-            // Reject IME/paste/drop edits even before the read-only recomposition lands.
+            recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
+            // Keep an already-open IME session in place during capture. The hidden
+            // editor remains locked by the synchronous text-and-selection filter.
+            readOnly = draft.status != "editing" || model.demo,
+            // Reject IME/paste/drop edits even before the recording overlay recomposes.
             inputTransformation = InputTransformation { if (model.speech.recording) revertAllChanges() },
             focusRequester = focusRequester, onFocusChanged = { focused = it },
             leading = {

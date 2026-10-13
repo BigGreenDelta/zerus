@@ -308,7 +308,7 @@ available for playback; refresh providers in the preview before sending.
 An unavailable selected provider stays selected until you explicitly change it.
 A retained recording also pins a versioned provider's configuration revision;
 editing that profile requires explicit reselection before sending the recording.
-During capture, the typed draft stays visible and read-only, and ordinary message
+During capture, the typed draft is preserved and read-only, and ordinary message
 submission and attachment changes are blocked. History remains readable.
 **Space** or **Escape** stops recording into the retained preview; neither sends
 nor discards it. Recording takes priority over Escape's agent-interruption
@@ -317,6 +317,9 @@ capture ends unless another delivery lock applies. Android supports the same
 controls with a hardware keyboard; its touch Stop control remains available.
 On Android, an empty editor with no attachments shows a microphone in the Send
 position. Hold to record, release to keep a preview, or slide left to cancel.
+The recording row overlays the retained editor and shows a red indicator, elapsed time and **Slide to cancel**;
+the hint moves and fades as you slide left. Short haptic feedback accompanies
+confirmed capture start and explicit stop/cancel, respecting Android settings.
 Text or attachments restore the ordinary Send button. Releasing the microphone
 never sends the recording; review it and use **Send voice message** separately.
 After granting microphone permission, press again to start recording.

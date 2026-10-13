@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -16,11 +17,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
@@ -28,6 +31,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -117,6 +121,7 @@ import androidx.compose.ui.unit.dp
 @Composable internal fun SpeechComposerButton(model: ZerusViewModel, target: Target, saveEditor: () -> Unit) {
     val speech = model.speech
     val context = LocalContext.current
+    val view = LocalView.current
     val navigation = model.speechNavigation
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val obscuration = LocalConversationObscuration.current
@@ -148,9 +153,13 @@ import androidx.compose.ui.unit.dp
             permission.launch(Manifest.permission.RECORD_AUDIO)
             return null
         }
-        return (if (gesture) speech.startGesture(target) else speech.start(target)).also { ownedCapture = it }
+        val feedback: (VoiceCaptureFeedback.Event) -> Unit = {
+            if (model.selected?.target == target && model.speechNavigation == navigation && obscuration?.obscured != true &&
+                lifecycle.currentState == Lifecycle.State.RESUMED && view.isAttachedToWindow) VoiceHaptics.perform(view, it)
+        }
+        return (if (gesture) speech.startGesture(target, feedback) else speech.start(target, feedback)).also { ownedCapture = it }
     }
-    fun stopOwned() { ownedCapture?.let(speech::stopCapture) }
+    fun stopOwned() { ownedCapture?.let { speech.stopCapture(it, userInitiated = false) } }
     DisposableEffect(target, navigation, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) { permissionTarget = null; activationKeys.clear(); stopOwned() }
@@ -222,7 +231,7 @@ import androidx.compose.ui.unit.dp
                         }
                     }
                 } finally {
-                    gesture.interrupt()?.let { speech.finishGesture(it.captureId, it.cancel) }
+                    gesture.interrupt()?.let { speech.finishGesture(it.captureId, it.cancel, userInitiated = false) }
                 }
             }
         }) {
@@ -261,6 +270,29 @@ import androidx.compose.ui.unit.dp
     }
 }
 
+/** Occupies the existing editor area; the microphone keeps its original pointer node. */
+@Composable internal fun SpeechRecordingRow(speech: SpeechController) {
+    val progress = speech.gestureCancelProgress
+    val style = MaterialTheme.typography.bodyMedium
+    val elapsed = voiceRecordingTime(speech.elapsedMs)
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.error, CircleShape))
+        Text(elapsed, modifier = Modifier.semantics { contentDescription = "Recording $elapsed" }, maxLines = 1,
+            style = style.copy(fontFeatureSettings = "tnum"), color = MaterialTheme.colorScheme.onSurface)
+        Box(Modifier.weight(1f).clipToBounds(), contentAlignment = Alignment.Center) {
+            if (speech.touchRecording) Row(
+                Modifier.graphicsLayer { translationX = -32.dp.toPx() * progress; alpha = 1f - progress },
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.ChevronLeft, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Slide to cancel", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else Text("Recording", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 @Composable internal fun SpeechComposerStatus(model: ZerusViewModel) {
     val speech = model.speech
     val draft = speech.draft
@@ -268,16 +300,11 @@ import androidx.compose.ui.unit.dp
     var confirmDiscard by remember { mutableStateOf<VoiceDraft?>(null) }
     var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
     if (!speech.recording && !speech.savingRecording && draft == null) return
+    if (speech.touchRecording) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
             speech.recording -> {
                 val recordingId = speech.activeCaptureId
-                Text("Recording ${speech.seconds / 60}:${(speech.seconds % 60).toString().padStart(2, '0')} (up to 2 minutes)", color = MaterialTheme.colorScheme.error)
-                if (speech.gestureCaptureId != null) {
-                    Text("← Slide left to cancel. Release to review.", color = if (speech.gestureCancelProgress > 0f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall)
-                    if (speech.gestureCancelProgress > 0f) LinearProgressIndicator(progress = { speech.gestureCancelProgress }, modifier = Modifier.fillMaxWidth())
-                }
                 val configuration = LocalConfiguration.current
                 if (configuration.keyboard != Configuration.KEYBOARD_NOKEYS && configuration.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO)
                     Text("Space or Esc stops recording. Your typed draft is kept.", style = MaterialTheme.typography.bodySmall)

@@ -19,7 +19,7 @@ internal class SpeechRecorder(private val context: Context) {
     private val stopped = AtomicBoolean(false)
     fun stop() { stopped.set(true) }
 
-    suspend fun capture(maxDurationMs: Int, progress: suspend (Int) -> Unit): ByteArray = withContext(Dispatchers.IO) {
+    suspend fun capture(maxDurationMs: Int, started: suspend () -> Unit = {}, progress: suspend (Int) -> Unit): ByteArray = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
         if (stopped.get()) return@withContext byteArrayOf()
         check(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
@@ -45,17 +45,19 @@ internal class SpeechRecorder(private val context: Context) {
             if (stopped.get()) return@withContext byteArrayOf()
             active.startRecording()
             check(active.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "The microphone is unavailable. Check other recording apps." }
+            withContext(Dispatchers.Main) { started() }
             val pcm = Pcm16Converter(sampleRate)
             val maxBytes = minOf(SpeechProtocol.maxBytes, maxDurationMs.coerceIn(1_000, 120_000) * 32)
             val samples = ShortArray(sampleRate / 20)
-            var lastSecond = -1
+            var lastTenth = -1
             while (!stopped.get() && pcm.size < maxBytes) {
                 currentCoroutineContext().ensureActive()
                 val count = active.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
                 check(count > 0) { "The microphone stopped responding." }
                 pcm.add(samples, count, maxBytes)
-                val seconds = pcm.size / 32_000
-                if (seconds != lastSecond) { lastSecond = seconds; withContext(Dispatchers.Main) { progress(seconds) } }
+                val elapsedMs = pcm.size / 32
+                val tenth = elapsedMs / 100
+                if (tenth != lastTenth) { lastTenth = tenth; withContext(Dispatchers.Main) { progress(elapsedMs) } }
             }
             pcm.bytes()
         } finally {

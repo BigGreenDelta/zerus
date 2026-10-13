@@ -1,6 +1,8 @@
 package app.zerus.mobile
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -25,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,7 +35,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,6 +56,7 @@ import androidx.compose.ui.unit.dp
     focusRequester: FocusRequester,
     onFocusChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    recordingContent: (@Composable () -> Unit)? = null,
     leading: @Composable () -> Unit,
     action: @Composable () -> Unit,
 ) {
@@ -56,11 +64,14 @@ import androidx.compose.ui.unit.dp
     var visualLines by remember(state) { mutableIntStateOf(1) }
     val style = messageInputTextStyle().copy(color = MaterialTheme.colorScheme.onSurface)
     val controls = MaterialTheme.colorScheme.onSurfaceVariant
+    val recording = recordingContent != null
+    val recordingVisible by rememberUpdatedState(recording)
+    val concealed = if (recording) Modifier.graphicsLayer { alpha = 0f }.clearAndSetSemantics { } else Modifier
     Surface(modifier = modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
         Layout(content = {
-            Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.BottomCenter) { leading() }
-            BasicTextField(state = state, modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+            Box(Modifier.heightIn(min = 48.dp).then(concealed), contentAlignment = Alignment.BottomCenter) { leading() }
+            BasicTextField(state = state, modifier = Modifier.then(concealed).padding(horizontal = 4.dp, vertical = 8.dp)
                 .heightIn(max = if (expanded) 280.dp else 148.dp).focusRequester(focusRequester)
                 .onFocusChanged { onFocusChanged(it.isFocused) },
                 readOnly = readOnly, inputTransformation = inputTransformation, textStyle = style,
@@ -75,7 +86,20 @@ import androidx.compose.ui.unit.dp
                     inner()
                 } })
             Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.BottomCenter) { action() }
-            if (visualLines > 3 || expanded) IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(48.dp)) {
+            // A fresh tap on the concealed input must not focus it or open an IME.
+            // This sibling never covers or replaces the microphone's pointer node.
+            Box(Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (!recordingVisible) return@awaitEachGesture
+                    down.consume()
+                    do {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        event.changes.forEach { it.consume() }
+                    } while (event.changes.any { it.pressed })
+                }
+            }) { recordingContent?.invoke() }
+            if (!recording && (visualLines > 3 || expanded)) IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(48.dp)) {
                 Icon(if (expanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
                     if (expanded) "Collapse message" else "Expand message", tint = controls, modifier = Modifier.size(18.dp))
             }
@@ -89,13 +113,16 @@ import androidx.compose.ui.unit.dp
             val editor = children[1].measure(Constraints(minWidth = editorWidth, maxWidth = editorWidth,
                 maxHeight = constraints.maxHeight))
             val send = children[2].measure(controlConstraints)
-            val expand = children.getOrNull(3)?.measure(controlConstraints)
-            val height = constraints.constrainHeight(maxOf(attachment.height, editor.height, send.height,
+            val recordingRow = children[3].measure(Constraints(minWidth = (width - controlWidth).coerceAtLeast(0),
+                maxWidth = (width - controlWidth).coerceAtLeast(0), maxHeight = constraints.maxHeight))
+            val expand = children.getOrNull(4)?.measure(controlConstraints)
+            val height = constraints.constrainHeight(if (recording) maxOf(send.height, recordingRow.height) else maxOf(attachment.height, editor.height, send.height,
                 if (expand == null) 0 else expand.height + send.height))
             layout(width, height) {
                 attachment.placeRelative(0, height - attachment.height)
                 editor.placeRelative(controlWidth, (height - editor.height) / 2)
                 send.placeRelative(width - controlWidth, height - send.height)
+                if (recording) recordingRow.placeRelative(0, (height - recordingRow.height) / 2)
                 expand?.placeRelative(width - controlWidth, 0)
             }
         }

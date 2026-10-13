@@ -300,8 +300,18 @@ sending. See [provider configuration](../../docs/speech-providers.md).
 With an empty message and no attachments, the composer shows a microphone in the
 Send position. Hold it to record, release to keep a preview, or slide left to
 cancel the recording. Typing text or adding an attachment restores the Send
-button. During capture, the timer and **Slide left to cancel** hint explain the
-gesture; explicit Stop and Cancel controls remain available for accessibility.
+button. While holding, a compact recording row replaces the empty editor: a red
+indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
+left chevron. Sliding moves and fades the hint. The text editor and its state stay
+mounted underneath and reject input; stopping restores them. The microphone keeps
+its 48 dp interaction target and inset 40 dp visual face. Explicit Stop and Cancel
+actions remain available through accessibility and keyboard controls.
+
+A short system haptic confirms microphone capture has started and accompanies
+explicit stop or cancellation. Feedback belongs to that capture: permission
+prompts, rejected starts and late gesture events do not produce extra pulses.
+Android's vibration settings are respected. Haptic availability never blocks
+recording or saving its preview.
 Local capture starts without waiting for provider discovery; discovery refreshes
 in the background. Capture lasts at most two minutes. Releasing the microphone,
 stopping or leaving the conversation never sends a message. The preview is an
@@ -320,8 +330,8 @@ identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
 
-While recording, the typed draft stays visible and read-only, and ordinary message
-sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
+While recording, the typed draft and selection remain saved beneath the recording
+row, and ordinary message sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
 into the saved preview; holding or releasing that key never sends, discards or
 starts playback. Editing resumes when capture ends, subject to existing send locks.
 
@@ -409,7 +419,11 @@ adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobi
 
 It checks hold/release preview, left-swipe cancellation, interrupted pointers,
 background/navigation stop, permission results after release, preserved drafts
-and zero voice uploads before a separate Send.
+and zero voice uploads before a separate Send. It also checks inline feedback
+bounds, keyboard retention and input rejection under the overlay, restored editor
+selection/expansion, and capture-scoped calls to the Android haptic API. The emulator
+verifies dispatch and timing; physical vibration still depends on the device and
+its settings.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater
