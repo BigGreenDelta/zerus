@@ -80,8 +80,9 @@ jobs:
         env:
           DEV_RUN_NUMBER: ${{ github.run_number }}
         run: |
+          version_code="$(python3 ../../scripts/android_version_code.py --dev-build-number "$DEV_RUN_NUMBER")"
           ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease \
-            -PzerusFirebase=true -PzerusVersionCode="$((10000 + DEV_RUN_NUMBER))" \
+            -PzerusFirebase=true -PzerusVersionCode="$version_code" \
             -PzerusDevBuildNumber="$DEV_RUN_NUMBER"
       - name: Seal the signed APK and exact source
         env:

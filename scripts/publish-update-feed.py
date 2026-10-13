@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Pull verified GitHub assets; dry-run unless --execute is supplied."""
 import argparse
-import fcntl
 import importlib.util
 import json
 import os
@@ -10,8 +9,8 @@ import sys
 import tempfile
 import zipfile
 
-from update_feed import (ChannelMismatch, GitHub, candidates, check_previous,
-                         private_root, publish, require, validate_and_fetch)
+from update_feed import (ChannelMismatch, GitHub, candidates, check_android_sequence, check_previous,
+                         mirror_lock, publish, require, validate_and_fetch)
 
 CHANNELS={'android/dev','android/stable','android/nightly','desktop/stable','desktop/nightly'}
 
@@ -49,7 +48,9 @@ def synchronize(client,root,channels,execute=False,max_bytes=20*1024**3):
                     # Only channel mismatch permits selecting another Android
                     # release. Corruption of the selected release always fails.
                     require(platform=='android','Desktop release metadata has wrong channel');continue
-                check_previous(root/'updates'/'v1'/platform/(channel+'.json'),feed)
+                current_path=root/'updates'/'v1'/platform/(channel+'.json')
+                check_previous(current_path,feed)
+                check_android_sequence(root,feed,current_path)
                 target=root/'downloads'/release['tag_name']
                 additional=sum(path.stat().st_size for name,path in files.items() if not (target/name).exists())
                 require(mirror_bytes(root)+additional+256*1024<=max_bytes,'Retained mirror disk budget exceeded')
@@ -92,13 +93,8 @@ def main():
         credential=token()
         channels=list(dict.fromkeys(args.channel))
         dev_platforms=list(dict.fromkeys(args.dev_platform))
-        if args.execute:
-            root=private_root(args.root)
-            lock=root/'.mirror.lock';require(not lock.is_symlink(),'Symlinked mirror lock')
-            with lock.open('a') as handle:
-                fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                reports=synchronize_channels(root,channels,dev_platforms,True,args.max_mirror_bytes,credential)
-        else:reports=synchronize_channels(args.root,channels,dev_platforms,False,args.max_mirror_bytes,credential)
+        with mirror_lock(args.root,args.execute) as root:
+            reports=synchronize_channels(root,channels,dev_platforms,args.execute,args.max_mirror_bytes,credential)
         print(json.dumps({'results':reports},sort_keys=True));return 0
     except BlockingIOError:
         print('Mirror already running',file=sys.stderr);return 1

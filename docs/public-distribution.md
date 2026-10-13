@@ -85,13 +85,25 @@ claiming that it is older. Android still checks package, signer, SDK, advertised
 APK identity, byte size/hash and a strictly newer `versionCode` before installation.
 
 The same signing configuration builds stable and dev APKs; no dev-specific
-application ID or generated replacement signer is used. `-PzerusVersionCode=N`
-sets the shared Android version sequence; CI dev uses `10000 + CI run_number`.
-All subsequent stable APKs must use a code larger than already distributed dev
-APKs, and subsequent dev APKs must exceed that stable code as well. The current
-fixed dev offset does not coordinate this later Stable-to-Dev transition; track
-the shared publication sequence in `zerus-osef.3` before publishing a stable APK
-above distributed dev codes. `-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
+application ID or generated replacement signer is used. `mobile/android/VERSION_CODE`
+commits the stable code, and `-PzerusVersionCode=N` can select a reviewed build code.
+Main CI derives Dev codes from that exact source as
+`max(10000, committed stable code) + CI run_number`; retries keep their original
+code. The helper reads neither live feeds nor a newer main revision, and rejects
+invalid inputs or overflow before Gradle. Dev must exceed the committed stable code.
+
+Both mirror publishers observe the highest code across v1 Android Stable,
+legacy Dev and Nightly and v2 Dev under the existing shared `.mirror.lock`.
+A new candidate must exceed every published channel; malformed or symlinked
+catalogs fail closed. The exact current seal remains valid after another channel
+advances, provided its metadata and retained bytes still verify. Late obsolete
+candidates cannot lower the sequence or replace an existing artifact.
+
+Before stable promotion, pause automatic Dev publication and commit a stable code
+above every distributed APK. Keep Dev paused until the stable catalog and its
+assets are publicly verified, then restore it. The next main CI candidate uses
+the new committed floor without resetting the workflow sequence.
+`-PzerusDevBuildNumber=N` adds a dev display suffix only. Switching to a
 channel with an older version leaves the current app/data installed until a newer
 compatible APK is published. Do not reset the version-code sequence when changing
 workflow names or channels.

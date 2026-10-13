@@ -1,6 +1,8 @@
 """Validated public release mirror. GitHub is the authenticated provenance origin."""
 from __future__ import annotations
+from contextlib import contextmanager
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -382,9 +384,63 @@ def fsync_directory(path):
     finally:os.close(handle)
 
 
+def check_android_sequence(root, feed, current_path):
+    """Observe all Android channels under the publisher's shared mirror lock."""
+    if feed.get('platform') != 'android':
+        return
+    require(not root.is_symlink() and (not root.exists() or root.is_dir()), 'Invalid Android mirror root')
+    code = feed.get('versionCode')
+    require(type(code) is int and 0 < code <= 2_100_000_000, 'Invalid Android publication code')
+    highest = 0
+    unchanged = False
+    for schema, channel in ((1, 'stable'), (1, 'dev'), (1, 'nightly'), (2, 'dev')):
+        path = root
+        parts = ('updates', f'v{schema}', 'android', channel + '.json')
+        for index, part in enumerate(parts):
+            path = path / part
+            require(not path.is_symlink(), 'Symlinked Android publication catalog')
+            if path.exists():
+                require(path.is_file() if index == len(parts)-1 else path.is_dir(),
+                        'Invalid Android publication catalog path')
+        if not path.exists():
+            continue
+        require(path.stat().st_size <= 256*1024, 'Android publication catalog exceeds bounds')
+        old = json.loads(path.read_text())
+        require(isinstance(old, dict) and old.get('schemaVersion') == schema
+                and type(old.get('schemaVersion')) is int and old.get('platform') == 'android'
+                and old.get('channel') == channel, 'Android publication catalog scope mismatch')
+        previous = old.get('versionCode')
+        require(type(previous) is int and 0 < previous <= 2_100_000_000,
+                'Invalid published Android code')
+        highest = max(highest, previous)
+        if path == current_path and old == feed:
+            unchanged = True
+    # Full seal/byte verification precedes this check. Retaining the exact
+    # current catalog is not a new APK publication after another channel advances.
+    require(unchanged or code > highest, 'Android code must exceed every published channel')
+
+
+@contextmanager
+def mirror_lock(root, execute):
+    """Serialize publication and inspect existing catalogs under the same lock."""
+    require(root.is_absolute() and not root.is_symlink(), 'Dedicated absolute mirror root required')
+    if not execute and not root.exists():
+        # An absent mirror has no published floor. A dry run creates no root.
+        yield root
+        return
+    root = private_root(root) if execute else root
+    require(root.is_dir(), 'Invalid mirror root')
+    lock = root / '.mirror.lock'
+    require(not lock.is_symlink(), 'Symlinked mirror lock')
+    with lock.open('a') as handle:
+        fcntl.flock(handle, (fcntl.LOCK_EX if execute else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        yield root
+
+
 def publish(root,feed,files):
     path=directory(root,'updates','v1',feed['platform'])/(feed['channel']+'.json')
     check_previous(path,feed)
+    check_android_sequence(root,feed,path)
     target=directory(root,'downloads',safe_name(feed['releaseUrl'].rsplit('/',1)[1]))
     for name,source in files.items():
         destination=target/safe_name(name)

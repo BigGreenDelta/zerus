@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Mirror verified dev CI artifacts; dry-run unless --execute is supplied."""
 import argparse
-import fcntl
 import importlib.util
 import json
 from pathlib import Path
@@ -9,7 +8,7 @@ import tempfile
 import zipfile
 
 from dev_updates import DevGitHub, check_previous, collect, identity, publish, scoped_path, validate
-from update_feed import private_root, require
+from update_feed import check_android_sequence, mirror_lock, require
 
 spec = importlib.util.spec_from_file_location('release_mirror', Path(__file__).with_name('publish-update-feed.py'))
 mirror = importlib.util.module_from_spec(spec)
@@ -41,6 +40,7 @@ def synchronize(client, root, platforms, execute=False, max_bytes=20*1024**3):
                 require(marker.is_file() and marker.stat().st_size <= 256*1024
                         and json.loads(marker.read_text()) == cached, 'Stored dev seal differs from catalog')
                 validate(cached, target, run)
+                check_android_sequence(root, cached, feed)
                 reports.append({'platform': platform, 'buildId': run['id'], 'version': cached['versionName'],
                                 'mode': 'unchanged' if execute else 'dry-run'})
                 continue
@@ -51,6 +51,7 @@ def synchronize(client, root, platforms, execute=False, max_bytes=20*1024**3):
             info = validate(json.loads((staging/'dev-info.json').read_text()), staging, run)
             require(info['platform'] == platform, 'Wrong dev platform')
             check_previous(feed, info)
+            check_android_sequence(root, info, feed)
             additional = sum(p.stat().st_size for p in staging.iterdir() if not (target/p.name).exists())
             require(mirror.mirror_bytes(root) + additional + 256*1024 <= max_bytes, 'Dev mirror disk budget exceeded')
             if execute:
@@ -72,15 +73,8 @@ def main():
         require(args.root.is_absolute() and not args.root.is_symlink(), 'Dedicated absolute root required')
         require(args.max_mirror_bytes > 0, 'Invalid mirror budget')
         client = DevGitHub(mirror.token())
-        if args.execute:
-            root = private_root(args.root)
-            lock = root/'.mirror.lock'
-            require(not lock.is_symlink(), 'Symlinked mirror lock')
-            with lock.open('a') as handle:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                result = synchronize(client, root, list(dict.fromkeys(args.platform)), True, args.max_mirror_bytes)
-        else:
-            result = synchronize(client, args.root, list(dict.fromkeys(args.platform)), False, args.max_mirror_bytes)
+        with mirror_lock(args.root, args.execute) as root:
+            result = synchronize(client, root, list(dict.fromkeys(args.platform)), args.execute, args.max_mirror_bytes)
         print(json.dumps({'results': result}, sort_keys=True))
         return 0
     except (ValueError, OSError, KeyError, TypeError, UnicodeError, zipfile.BadZipFile):

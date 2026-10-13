@@ -15,7 +15,10 @@ val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
 val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
     require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
 }
-val stableVersionName = "0.1.30"
+val stableVersionName = "0.1.31"
+val stableVersionCode = rootProject.file("VERSION_CODE").readText().trim().toInt().also {
+    require(it in 1..2_100_000_000) { "Invalid committed Android version code." }
+}
 val devBuildNumber = providers.gradleProperty("zerusDevBuildNumber").orNull?.toInt()?.also { require(it > 0) }
 val updateVersionCode = providers.gradleProperty("zerusVersionCode").orNull?.toInt()?.also { require(it in 1..2_100_000_000) }
 val devBaseVersion = rootProject.file("DEV_VERSION").readText().trim().also {
@@ -23,7 +26,9 @@ val devBaseVersion = rootProject.file("DEV_VERSION").readText().trim().also {
     val firstChange = it.split('.').map(String::toInt).zip(stableVersionName.split('.').map(String::toInt)).firstOrNull { pair -> pair.first != pair.second }
     require(firstChange != null && firstChange.first > firstChange.second) { "DEV_VERSION must be newer than stable." }
 }
-require(devBuildNumber == null || updateVersionCode != null) { "A Dev build needs an explicit increasing versionCode." }
+require(devBuildNumber == null || (updateVersionCode ?: 0) > stableVersionCode) {
+    "A Dev build needs a versionCode newer than the committed Stable code."
+}
 if (firebaseEnabled) {
     require(file("google-services.json").isFile) { "Optional Firebase builds require a private app/google-services.json." }
     apply(plugin = "com.google.gms.google-services")
@@ -36,7 +41,7 @@ android {
         applicationId = "app.zerus.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = updateVersionCode ?: 31
+        versionCode = updateVersionCode ?: stableVersionCode
         versionName = previewVersionName ?: (devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName)
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"

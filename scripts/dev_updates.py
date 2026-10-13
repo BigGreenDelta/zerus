@@ -14,7 +14,7 @@ import zipfile
 import urllib.parse
 
 from update_feed import (GitHub, HEX40, HEX64, ORIGIN, REPOSITORY, directory,
-                         file_hash, fsync_directory, require, safe_name, timestamp)
+                         check_android_sequence, file_hash, fsync_directory, require, safe_name, timestamp)
 
 WORKFLOW = '.github/workflows/ci.yml'
 MAX_BYTES = 2 * 1024**3
@@ -278,6 +278,7 @@ def atomic_json(path, value):
 def publish(root, info, staging):
     feed = directory(root, 'updates', 'v2', info['platform']) / 'dev.json'
     check_previous(feed, info)
+    check_android_sequence(root, info, feed)
     downloads = directory(root, 'downloads')
     target = downloads / f'dev-{info["platform"]}-{info["buildId"]}'
     require(not target.is_symlink(), 'Symlinked dev build')
