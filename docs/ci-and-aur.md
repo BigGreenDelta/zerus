@@ -384,7 +384,15 @@ in the job: `scripts/ci/aqt-requirements.txt` locks aqtinstall, py7zr and their
 whole dependency closure to the SHA-256 of each CPython 3.13 `win_amd64` wheel.
 The job installs it with `pip install --require-hashes --only-binary :all:` into a
 virtual environment under `RUNNER_TEMP` that no later step uses; aqtinstall checks
-the Qt archives against the checksums of the Qt repository. The header of the lock
+the Qt archives against the checksums of the Qt repository. `scripts/ci/aqt-settings.ini`
+sets one aqtinstall worker, so the archives are downloaded and extracted in turn;
+the installed tree is the same, so the cache key leaves the file out. Parallel
+workers share the output tree, and on Windows py7zr 1.1.3 then rejects a valid
+member as "Specified path is bad" when another archive creates its parent
+directory during the check: CPython's `realpath` keeps the `\\?\` prefix when a
+missing parent appears between its lookups, and the prefixed path no longer lies
+under the extraction directory. py7zr 1.1.4 strips that prefix; the setting can go
+once a reviewed lock includes such a release. The header of the lock
 records how to regenerate it; review a new lock like the other pins. The Qt
 directory is cached with `actions/cache` under a key that covers the Qt release,
 its modules and the lock. Like every cache, only trusted main checks save it; PR,
