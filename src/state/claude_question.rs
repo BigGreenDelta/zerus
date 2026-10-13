@@ -1,5 +1,7 @@
 //! Claude AskUserQuestion: verify each native panel before a small input, then
 //! acknowledge only the exact tool result in the pinned conversation transcript.
+//! Colours compare as xterm-256 indices: on Windows Claude writes truecolour,
+//! mapped with chalk's own rule, and ConPTY leaves the hint's spaces uncoloured.
 use super::question_terminal::{Native, Transport};
 use super::*;
 use std::collections::BTreeSet;
@@ -55,6 +57,23 @@ struct OtherStyle {
     inverse: bool,
     color: Option<u16>,
 }
+/// The xterm-256 index chalk (ansi-styles `rgbToAnsi256`) writes for a
+/// truecolour value. Claude on Windows writes truecolour (spike S1/S3): this
+/// rule turns it into the indices it writes under tmux on Linux, which tmux's
+/// nearest-colour match does not (`#999999` is 246 here and 247 there). No
+/// value is a rounding tie, so the floating-point rounding is exact.
+fn ansi256(red: u16, green: u16, blue: u16) -> u16 {
+    let round = |value: f64| value.round() as u16;
+    if red == green && green == blue {
+        return match red {
+            0..8 => 16,
+            249.. => 231,
+            _ => round(f64::from(red - 8) / 247. * 24.) + 232,
+        };
+    }
+    let level = |value: u16| round(f64::from(value) / 255. * 5.);
+    16 + 36 * level(red) + 6 * level(green) + level(blue)
+}
 fn styled_rows(screen: &str) -> Result<Vec<Vec<(char, OtherStyle)>>> {
     let mut rows = vec![Vec::new()];
     let mut style = OtherStyle::default();
@@ -96,11 +115,11 @@ fn styled_rows(screen: &str) -> Result<Vec<Vec<(char, OtherStyle)>>> {
                                 return Err("Incomplete Claude question color".into());
                             }
                             if codes[i] == 38 {
-                                style.color = if length == 2 {
-                                    Some(codes[i + 2])
+                                style.color = Some(if length == 2 {
+                                    codes[i + 2]
                                 } else {
-                                    None
-                                };
+                                    ansi256(codes[i + 2], codes[i + 3], codes[i + 4])
+                                });
                             }
                             i += length;
                         }
@@ -132,6 +151,8 @@ fn styled_rows(screen: &str) -> Result<Vec<Vec<(char, OtherStyle)>>> {
         .map_or(first, |i| i + 1);
     Ok(rows[first..last].to_vec())
 }
+// Other green text, such as Claude's Edit diff, also maps to 114: only the
+// check glyph in that colour is the commit mark.
 fn committed_other(row: &[(char, OtherStyle)]) -> bool {
     row.len() >= 2
         && row[row.len() - 2].0 == ' '
@@ -150,10 +171,12 @@ fn empty_hint(rows: &[Vec<(char, OtherStyle)>]) -> bool {
     } else {
         row.as_slice()
     };
+    // ConPTY moves the cursor over blank cells instead of writing them, so
+    // the hint's spaces carry no colour on Windows. Only its letters must.
     ["Type something", "Type something."]
         .contains(&row.iter().map(|(ch, _)| ch).collect::<String>().as_str())
-        && row.iter().enumerate().all(|(i, (_, style))| {
-            style.dim || style.color == Some(246) || (i == 0 && style.inverse)
+        && row.iter().enumerate().all(|(i, (ch, style))| {
+            ch.is_whitespace() || style.dim || style.color == Some(246) || (i == 0 && style.inverse)
         })
 }
 // This checks only text we have just pasted into a proven empty editor. It
@@ -1285,6 +1308,121 @@ mod tests {
             )
             .is_err());
         }
+    }
+    #[test]
+    fn truecolour_maps_to_the_indices_chalk_writes() {
+        // Windows truecolour -> Linux tmux index for every colour of spike S3
+        // where chalk's rule reproduces Linux (Claude and Kimi palettes).
+        for (rgb, index) in [
+            ((153, 153, 153), 246),
+            ((136, 136, 136), 244),
+            ((55, 55, 55), 237),
+            ((80, 80, 80), 239),
+            ((0, 0, 0), 16),
+            ((255, 255, 255), 231),
+            ((248, 248, 242), 231),
+            ((78, 186, 101), 114),
+            ((177, 185, 249), 153),
+            ((215, 119, 87), 174),
+            ((255, 193, 7), 220),
+            ((72, 150, 140), 73),
+            ((255, 107, 128), 211),
+            ((2, 40, 0), 22),
+            ((61, 1, 0), 52),
+            ((79, 168, 255), 111),
+            ((78, 200, 126), 114),
+            ((107, 107, 107), 242),
+            ((224, 224, 224), 253),
+            ((232, 168, 56), 215),
+            ((232, 84, 84), 210),
+            ((245, 245, 245), 255),
+            ((255, 203, 107), 222),
+            ((91, 192, 190), 116),
+            ((90, 90, 90), 240),
+        ] {
+            assert_eq!(ansi256(rgb.0, rgb.1, rgb.2), index, "{rgb:?}");
+        }
+        // Grey boundaries of chalk's 24-step ramp.
+        for (grey, index) in [(7, 16), (8, 232), (248, 255), (249, 231)] {
+            assert_eq!(ansi256(grey, grey, grey), index, "{grey}");
+        }
+    }
+    // Claude Code 2.1.296 under bundled ConPTY (spike S3), `capture-pane -p -e`
+    // form in the normal-screen layout: truecolour, and hint spaces skipped by
+    // cursor moves are uncoloured.
+    const WINDOWS_SINGLE: &str =
+        include_str!("../../tests/fixtures/claude-question-single-windows.txt");
+    #[test]
+    fn recognizes_windows_panels_like_their_linux_captures() {
+        let card = card();
+        let question = |screen: &str| parse(screen, &card).unwrap();
+        let empty = |index, focused, checked: &[usize], other: &str| Panel::Question {
+            index,
+            focused,
+            checked: checked.iter().copied().collect(),
+            other: other.into(),
+            empty_other: true,
+        };
+        assert_eq!(
+            question(WINDOWS_SINGLE),
+            empty(0, 0, &[], "Type something.")
+        );
+        assert_eq!(
+            question(include_str!(
+                "../../tests/fixtures/claude-question-multi-windows.txt"
+            )),
+            empty(1, 0, &[], "Type something")
+        );
+        assert_eq!(
+            question(include_str!(
+                "../../tests/fixtures/claude-question-multi-selected-windows.txt"
+            )),
+            empty(1, 0, &[0, 2], "Type something")
+        );
+        assert_eq!(
+            question(include_str!(
+                "../../tests/fixtures/claude-question-other-windows.txt"
+            )),
+            empty(2, 2, &[], "Type something.")
+        );
+        // The committed answer's truecolour check is decoration, not answer text.
+        assert_eq!(
+            question(include_str!(
+                "../../tests/fixtures/claude-question-revisit-committed-windows.txt"
+            )),
+            Panel::Question {
+                index: 2,
+                focused: 0,
+                checked: BTreeSet::from([2]),
+                other: "Привет from Zerus".into(),
+                empty_other: false
+            }
+        );
+    }
+    #[test]
+    fn windows_hint_needs_its_letters_styled() {
+        let card = card();
+        let hint = "\x1b[38;2;153;153;153mType\x1b[39m \x1b[38;2;153;153;153msomething.\x1b[39m";
+        assert!(WINDOWS_SINGLE.contains(hint));
+        for literal in [
+            "Type something.",
+            "Type\x1b[38;2;153;153;153m \x1b[39msomething.",
+            "\x1b[38;2;153;153;153mType\x1b[39m something.",
+            "\x1b[38;2;153;153;154mType\x1b[39m \x1b[38;2;153;153;154msomething.\x1b[39m",
+            "\x1b[38;2;153;153;153mType\x1b[39m \x1b[38;2;153;153;153msomething.\x1b[39m \x1b[38;2;80;200;80m+\x1b[39m",
+        ] {
+            assert!(
+                matches!(parse(&WINDOWS_SINGLE.replace(hint, literal), &card).unwrap(),
+                    Panel::Question { empty_other: false, .. }),
+                "{literal:?}"
+            );
+        }
+        // Green text other than the check mark stays part of the answer.
+        let answer = "Привет from Zerus \x1b[38;2;78;186;101m+\x1b[39m";
+        assert!(
+            matches!(parse(&WINDOWS_SINGLE.replace(hint, answer), &card).unwrap(),
+            Panel::Question { other, checked, .. } if other == "Привет from Zerus +" && checked.is_empty())
+        );
     }
     #[test]
     fn other_identity_preserves_visible_spaces_and_wrapped_rows() {

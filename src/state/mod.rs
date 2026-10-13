@@ -58,6 +58,7 @@ mod tasks;
 mod telemetry;
 mod terminate;
 mod session_action;
+mod shown_path;
 mod startup_choice;
 mod terminal;
 mod conversation_history;

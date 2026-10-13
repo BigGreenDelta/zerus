@@ -2,6 +2,8 @@
 //! Only a complete panel in a supervised startup run can be answered. Its path
 //! and full MCP disclosure are part of the identity, never an implicit approval.
 //! The frame must match; the disclosure is shown verbatim, so new wording stays visible.
+//! On Windows Kimi prints the full drive path (`C:\Users\…`, never `~\…`),
+//! compared with the launch directory without case (`shown_path`).
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -35,7 +37,7 @@ fn parse(screen: &str) -> Option<Panel> {
         || rows[1] != TITLE
         || rows[2] != HINT
         || !rows[3].is_empty()
-        || !rows[4].starts_with('/')
+        || !shown_path::absolute(rows[4])
         || !rows[5].is_empty()
     {
         return None;
@@ -88,7 +90,7 @@ fn eligible(record: &Value) -> bool {
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
-    if !eligible(record) || panel.folder != string(record, "launch_dir") {
+    if !eligible(record) || !shown_path::same(&panel.folder, string(record, "launch_dir")) {
         return None;
     }
     let hash = format!(
@@ -223,6 +225,43 @@ mod tests {
             assert_ne!(question["question_hash"], original["question_hash"]);
         }
         assert!(parse(&SCREEN.replace("command=uvx", "command=uv…")).is_none());
+    }
+    #[test]
+    fn windows_drive_folder_names_the_launch_directory_in_any_case() {
+        // Kimi Code 2.1.1 under bundled ConPTY (spike S3), a folder without
+        // project MCP targets; the account folder is the synthetic user01.
+        const WINDOWS: &str =
+            include_str!("../../tests/fixtures/kimi-folder-trust-plain-windows.txt");
+        const FOLDER: &str = r"C:\Users\user01\zerus-dev\p2\s3\homes\kimi-trust\work";
+        let record = |folder: &str| {
+            json!({"agent":"kimi","run_id":"run","run_identity_version":1,
+            "supervisor":{},"launch_dir":folder})
+        };
+        let panel = parse(WINDOWS).unwrap();
+        assert_eq!((panel.selected, panel.folder.as_str()), (0, FOLDER));
+        assert!(!panel.disclosure.contains("Project MCP targets"));
+        let question = card(&record(FOLDER), &panel).unwrap();
+        assert_eq!(
+            question["questions"][0]["body"],
+            format!("{FOLDER}\n\n{}", panel.disclosure)
+        );
+        let other_case = card(&record(&FOLDER.to_lowercase()), &panel).unwrap();
+        assert_eq!(other_case["question_hash"], question["question_hash"]);
+        for folder in [
+            r"C:\Users\user01\zerus-dev\p2\s3\homes\kimi-trust",
+            "/work/example",
+            r"D:\work",
+        ] {
+            assert!(card(&record(folder), &panel).is_none(), "{folder}");
+        }
+        for shown in [
+            r"~\zerus-dev\p2\s3\homes\kimi-trust\work",
+            r"\\server\share\work",
+        ] {
+            assert!(parse(&WINDOWS.replace(FOLDER, shown)).is_none(), "{shown}");
+        }
+        // A Unix folder still needs its exact letters.
+        assert!(card(&record("/Work/Example"), &parse(SCREEN).unwrap()).is_none());
     }
     #[test]
     fn trust_identity_includes_folder_and_disclosure_but_not_selection() {

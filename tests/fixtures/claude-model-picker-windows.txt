@@ -1,0 +1,31 @@
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~\zerus-dev\p2\s3\homes\claude-commands\work
+
+
+❯ Say hello
+
+● Spike reply (56) to: Say hello
+
+✻ Cooked for 0s · done 22:53
+
+❯ /effort
+  ⎿  Cancelled
+
+❯ /model
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Select model
+  Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,
+  specify with --model.
+
+  ❯ 1. Default (recommended) ✔  Use the default model (currently Opus 5.5) · $4/$20 per Mtok
+    2. Opus                     Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok
+    3. Fable                    Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok
+    4. Sonnet                   Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok
+    5. Haiku                    Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for prompts
+                                over 100k)
+
+  ◐ Medium effort (default) ←/→ to adjust
+
+  Enter to set as default · s to use this session only · Esc to cancel

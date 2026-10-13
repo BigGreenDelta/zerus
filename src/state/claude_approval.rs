@@ -631,6 +631,15 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
         assert!(parse(&OUTSIDE.replace("\n\n Esc to cancel · Tab to amend","\n Esc to cancel · Tab to\n amend")).is_none());
     }
 
+    #[test] fn windows_normal_screen_picker_is_a_bottom_chooser() {
+        // Claude Code 2.1.296 under bundled ConPTY (spike S3) keeps the
+        // normal-screen layout: the /model picker below a full-width rule.
+        let screen=include_str!("../../tests/fixtures/claude-model-picker-windows.txt");
+        let (title,_,options)=bottom_choice(screen).unwrap();
+        assert_eq!((title.as_str(),options.len()),("Select model",5));
+        assert!(chooser_visible(screen)&&parse(screen).is_none());
+    }
+
     #[test] fn any_bottom_chooser_counts_as_visible_for_dismissal() {
         for screen in [MODEL_SWITCH,PAUSED,BASH,OUTSIDE] {assert!(chooser_visible(screen),"{screen}");}
         for screen in [IDLE,DENIED,""] {assert!(!chooser_visible(screen),"{screen}");}

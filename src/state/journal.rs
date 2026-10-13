@@ -488,7 +488,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
             output["activity"] = json!("busy");
             output["phase"] = json!("input");
             output["attention_id"] = question["question_id"].clone();
-            output["status_detail"] = json!(startup_choice::detail(record));
+            output["status_detail"] = json!(startup_choice::detail(record, &question));
         }
     }
     recovery::enrich(record, &mut output);

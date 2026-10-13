@@ -3,6 +3,9 @@
 //! and full permission disclosure are part of the identity, never an implicit approval.
 //! The frame (title, folder, exact choices and hint) must match; the disclosure
 //! between them is shown verbatim, so a new native note cannot hide the request.
+//! On Windows the folder is a drive path compared without case (`shown_path`),
+//! and Codex 0.162 adds its Git root note with the root lower-cased even when
+//! the folder is that root: there a note naming the folder names no other root.
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -30,7 +33,7 @@ fn words(text: &str) -> String {
 fn parse(screen: &str) -> Option<Panel> {
     let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
     let filled: Vec<_> = (0..rows.len()).filter(|&i| !rows[i].is_empty()).collect();
-    if filled.len()<6 || rows[0]!=TITLE || !rows[1].starts_with('/') || *rows.last()?!=HINT {
+    if filled.len()<6 || rows[0]!=TITLE || !shown_path::absolute(rows[1]) || *rows.last()?!=HINT {
         return None;
     }
     let options=filled.len()-3;
@@ -46,13 +49,17 @@ fn parse(screen: &str) -> Option<Panel> {
     let paragraphs: Vec<_> = rows[2..filled[options]].split(|r| r.is_empty()).filter(|p| !p.is_empty()).collect();
     if paragraphs.is_empty() || paragraphs.concat().iter().any(|r| r.contains('…')) {return None;}
     let note=|p: &[&str]| match p {
-        [text @ .., path] if path.starts_with('/') && words(&text.join(" "))==GIT_ROOT => Some(path.to_string()),
+        [text @ .., path] if shown_path::absolute(path) && words(&text.join(" "))==GIT_ROOT => Some(path.to_string()),
         _ => None,
     };
-    let (mut root, mut explained, mut known)=(None, false, true);
+    let (mut root, mut noted, mut explained, mut known)=(None, false, false, true);
     for p in &paragraphs {
         if !explained && words(&p.join(" "))==EXPLANATION {explained=true;}
-        else if let Some(path)=note(p).filter(|_| root.is_none()) {root=Some(path);}
+        else if let Some(path)=note(p).filter(|_| !noted) {
+            noted=true;
+            // Only Windows Codex names the folder itself (lower-cased) as root.
+            if !(shown_path::drive(rows[1]) && shown_path::same(&path, rows[1])) {root=Some(path);}
+        }
         else {known=false;}
     }
     let disclosure=paragraphs.iter().map(|p| p.join(" ")).collect::<Vec<_>>().join("\n\n");
@@ -85,7 +92,7 @@ fn eligible(record: &Value) -> bool {
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
-    if !eligible(record) || panel.folder != string(record, "launch_dir") {
+    if !eligible(record) || !shown_path::same(&panel.folder, string(record, "launch_dir")) {
         return None;
     }
     let (question, descriptions) = wording(panel);
@@ -211,6 +218,58 @@ mod tests {
         }
         let panel=parse(&SCREEN.replace("\n  Trust this folder?","\n  Note: A newer Codex explains\n  something else.\n\n  Trust this folder?")).unwrap();
         assert!(panel.disclosure.starts_with("Note: A newer Codex explains something else.\n\nTrust this folder?"));
+    }
+    // Codex 0.162.0 under bundled ConPTY (spike S3); the account folder is the
+    // synthetic user01. Codex adds its Git root note, lower-cased, even when
+    // the folder is the repository root.
+    const WINDOWS: &str = include_str!("../../tests/fixtures/codex-folder-trust-windows.txt");
+    const WINDOWS_GIT_ROOT: &str = include_str!("../../tests/fixtures/codex-folder-trust-git-root-windows.txt");
+    const WINDOWS_DIR: &str = r"C:\Users\user01\zerus-dev\p2\s3\homes\codex-trust\work";
+    fn windows_record(folder: &str) -> Value {
+        let mut record = record();
+        record["launch_dir"] = json!(folder);
+        record
+    }
+    #[test]
+    fn windows_root_note_naming_the_folder_itself_names_no_other_root() {
+        let panel = parse(WINDOWS).unwrap();
+        assert_eq!((panel.folder.as_str(), panel.root.as_deref(), panel.known), (WINDOWS_DIR, None, true));
+        let question = card(&windows_record(WINDOWS_DIR), &panel).unwrap();
+        let native = &question["questions"][0];
+        assert_eq!(native["question"], "Trust this folder?");
+        assert_eq!(native["options"][0]["description"], DESCRIPTIONS[0]);
+        // The native note stays visible verbatim in the body.
+        assert!(native["body"].as_str().unwrap().starts_with(&format!(
+            "{WINDOWS_DIR}\n\nNote: You’re in a subdirectory of a Git project. Trusting will apply to the repository root: {}\n\nTrust this folder?",
+            WINDOWS_DIR.to_lowercase())));
+        // Windows names ignore case; Unix and other folders do not match.
+        assert!(card(&windows_record(&WINDOWS_DIR.to_uppercase()), &panel).is_some());
+        for folder in [r"C:\Users\user01\zerus-dev\p2\s3\homes\codex-trust", "/work/example", r"D:\work"] {
+            assert!(card(&windows_record(folder), &panel).is_none(), "{folder}");
+        }
+        // Only one note is reviewed: a second one makes the text unfamiliar.
+        let second = WINDOWS.replace("\n\n  Trust this folder?",
+            "\n\n  Note: You’re in a subdirectory of a Git project. Trusting will apply to the repository root:\n  c:\\users\\user01\n\n  Trust this folder?");
+        let panel = parse(&second).unwrap();
+        assert_eq!((panel.root.as_deref(), panel.known), (None, false));
+        assert_eq!(card(&windows_record(WINDOWS_DIR), &panel).unwrap()["questions"][0]["question"], "Allow Codex folder access?");
+        // Unix notes read as before, even one naming the folder itself.
+        for root in ["/WORK/example", "/work/example"] {
+            assert_eq!(parse(&GIT_ROOT_SCREEN.replace("/work/repository", root)).unwrap().root.as_deref(), Some(root));
+        }
+    }
+    #[test]
+    fn windows_git_root_note_names_the_lower_cased_repository_root() {
+        let folder = r"C:\Users\user01\zerus-dev\p2\s3\homes\codex-trust-gitroot\repo\sub";
+        let root = r"c:\users\user01\zerus-dev\p2\s3\homes\codex-trust-gitroot\repo";
+        let panel = parse(WINDOWS_GIT_ROOT).unwrap();
+        assert_eq!((panel.folder.as_str(), panel.root.as_deref(), panel.known), (folder, Some(root), true));
+        let question = card(&windows_record(folder), &panel).unwrap();
+        assert_eq!(question["questions"][0]["question"], "Trust this Git repository?");
+        assert_eq!(question["questions"][0]["options"][0]["description"],
+            format!("Trust the repository root {root} and remember the decision."));
+        assert!(card(&windows_record(&root.replace(r"\repo", r"\Repo")), &panel).is_none());
+        assert!(parse(&WINDOWS_GIT_ROOT.replace(&format!("  {root}\n"), "  \\\\server\\share\\repo\n")).is_some_and(|panel| !panel.known));
     }
     #[test]
     fn startup_identity_pins_folder_and_run_but_not_highlight() {
