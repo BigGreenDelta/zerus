@@ -82,6 +82,7 @@
 #include "AccountsPage.h"
 #include "FakeCli.h"
 #include "ProcessRunner.h"
+#include "ProcessSettings.h"
 
 class FolderUrlRecorder : public QObject {
     Q_OBJECT
@@ -143,7 +144,9 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
-    void init() { ComposerDraftStore::flushWrites(); QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    // Shards run functions and data rows in any order, so every test starts without
+    // the settings an earlier one saved, window geometry included.
+    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
@@ -324,8 +327,9 @@ private:
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
     QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}) const;
-    // Created by initTestCase(): listing the functions (-functions, as
-    // RunQtShard.cmake does) exits without destroying the test object.
+    // Created by initTestCase(): listing the data rows (-datatags, as
+    // RunQtShard.cmake does) exits without destroying the test object. That
+    // listing calls every *_data() function first, so none may use m_dir.
     std::unique_ptr<QTemporaryDir> m_dir;
 };
 
@@ -1916,10 +1920,15 @@ if a[:1]!=['a']:
     // Windows): settle() waits until every launched request has logged, so only
     // requests launched afterwards count.
     std::atomic<int> launches=0;ProcessRunner::setLaunchObserver([&launches]{++launches;});
-    const auto observer=qScopeGuard([]{ProcessRunner::setLaunchObserver({});});
+    const auto observer=qScopeGuard([]{ProcessRunner::setLaunchObserver({});ProcessSettings::setPollFloorForTests(0);});
     const auto done=[&]{QFile file(temp.filePath("done"));return file.open(QIODevice::ReadOnly)?int(file.readAll().count('\n')):0;};
     const auto settle=[&]{QTest::qWait(200);const int launched=launches;QTRY_VERIFY_WITH_TIMEOUT(done()>=launched,10000);};
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
+    // Shorter polls in the production order, on a 100 ms tick: Processes every 0.2 s
+    // (set below), Activity every 1 s, Terminal every 5 s. A wait for a poll that must
+    // not happen covers an Activity interval and process start-up; polls that must
+    // happen are awaited without a tight limit, however slowly processes start.
+    constexpr int activityMs=1000;window.setDetailsPollForTests(100,activityMs);
     auto log=[&]{QList<QJsonArray> result;QFile file(temp.filePath("inspections.jsonl"));if(file.open(QIODevice::ReadOnly))while(!file.atEnd())result<<QJsonDocument::fromJson(file.readLine()).array();return result;};
     auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);
     QTRY_VERIFY(!log().isEmpty());QTest::qWait(200);
@@ -1928,18 +1937,26 @@ if a[:1]!=['a']:
     settings->findChild<QDoubleSpinBox *>("activeSeconds")->setValue(1);
     settings->findChild<QDoubleSpinBox *>("backgroundSeconds")->setValue(5);
     QCOMPARE(QSettings().value("processes/activeSeconds").toDouble(),1.);
-    const auto before=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>before,3500);
+    ProcessSettings::setPollFloorForTests(0.2);QSettings().setValue("processes/activeSeconds",0.2);
+    const auto before=log().size();QTRY_VERIFY(log().size()>before);
     QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(3),QString("Processes"));
     auto *enabled=settings->findChild<QCheckBox *>("processesEnabled");QVERIFY(enabled);enabled->setChecked(true);QVERIFY(tabs->isTabVisible(3));
+    // Only the Processes interval can poll the open tab again within 3 s: Activity
+    // now waits a minute and Terminal 5 s.
+    window.setDetailsPollForTests(100,60000);
     tabs->setCurrentIndex(3);QTRY_VERIFY(!log().last().contains("--skip-processes"));
-    const auto active=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>active,1800);QVERIFY(!log().last().contains("--skip-processes"));
-    tabs->setCurrentIndex(1);settle();const auto terminal=log().size();QTest::qWait(2800);QCOMPARE(log().size(),terminal);
+    const auto active=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>active,3000);QVERIFY(!log().last().contains("--skip-processes"));
+    window.setDetailsPollForTests(100,activityMs);
+    tabs->setCurrentIndex(1);settle();const auto terminal=log().size();QTest::qWait(activityMs+400);QCOMPARE(log().size(),terminal);
     for(const auto &call:log())QCOMPARE(call[1].toString(),QString("codex/hgs/dashboard"));
     tabs->setCurrentIndex(0);QTRY_VERIFY(log().size()>terminal); // Activity refreshes immediately on return.
+    // Every Activity poll after settle() is at least the background interval, here
+    // 0.2 s, after the last Processes poll: it would include processes if enabled.
+    QSettings().setValue("processes/backgroundSeconds",0.2);
     tabs->setCurrentIndex(3);QTest::qWait(200);enabled->setChecked(false);QVERIFY(!tabs->isTabVisible(3));QCOMPARE(tabs->currentIndex(),0);
-    settle();const auto disabled=log().size();QTest::qWait(5600);
-    QVERIFY(log().size()>disabled);for(const auto &call:log().sliced(disabled))QVERIFY(call.contains("--skip-processes"));
-    window.hide();settle();const auto hidden=log().size();QTest::qWait(2800);QCOMPARE(log().size(),hidden);
+    settle();const auto disabled=log().size();QTRY_VERIFY(log().size()>disabled);
+    for(const auto &call:log().sliced(disabled))QVERIFY(call.contains("--skip-processes"));
+    window.hide();settle();const auto hidden=log().size();QTest::qWait(activityMs+400);QCOMPARE(log().size(),hidden);
 }
 
 void TestSessionsWindow::stoppedSessionStartsFreshOrSendsAfterStart()
@@ -2085,6 +2102,9 @@ else:print('{}')
         {"runtime_state","live"},{"process_state","running"},{"compact_context_supported",true},{"cache_hint",QJsonObject{{"status","cold"},{"tokens",756000}}}};
     {QFile initial(temp.filePath("details.json"));QVERIFY(initial.open(QIODevice::WriteOnly));initial.write(QJsonDocument(details).toJson());}
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession("mac","claude/infra/review");QTest::qWait(100);
+    // A completion that arrives while the held send is still being prepared is
+    // picked up by the next compaction poll, which reads details.json: poll often.
+    constexpr int compactPollMs = 200; window.setCompactPollIntervalForTests(compactPollMs);
     auto *client=window.findChild<HgsClient *>();
     const auto apply=[&]{QFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());data.close();client->inspectionReady("mac","claude/infra/review",details);};apply();
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep until compacted");
@@ -2107,7 +2127,9 @@ else:print('{}')
     if(outcome=="draft") { window.findChild<QPushButton *>("cancelCompactSend")->click(); setComposerText(composer, "Edited draft"); }
     if(outcome=="identity")details["conversation_id"]="another";
     const bool navigated = outcome.startsWith("navigation") || outcome == "hidden";
+    const QString compactKey = composer->sessionKey();
     if (navigated) {
+        // Only the background compaction poll can now continue the send.
         window.showSession({},"codex/hgs/dashboard");
         QVERIFY(!window.findChild<QPushButton *>("cancelCompactSend")->isVisible());
         setComposerText(composer, "Unrelated session draft");
@@ -2144,7 +2166,9 @@ else:print('{}')
         QFile targets(temp.filePath("send-targets.txt")); QVERIFY(targets.open(QIODevice::ReadOnly));
         QCOMPARE(targets.readAll(),QByteArray("claude/infra/review\n"));
     } else if (navigated) {
-        QTest::qWait(2800); QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
+        // A poll resolves the changed identity; a cancelled send stops polling.
+        if (outcome == "navigation-identity") QTRY_VERIFY(!composer->isWaitingToSend(compactKey));
+        QTest::qWait(3 * compactPollMs); QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
         QCOMPARE(composer->editor()->toPlainText(),QString("Unrelated session draft"));
         window.showSession("mac","claude/infra/review"); apply();
         QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));
@@ -2358,7 +2382,7 @@ else:print('{}')
 
 void TestSessionsWindow::connectionStatusSurvivesNoticesAndRetries()
 {
-    SessionsWindow window(program()); window.setFleet(fleet()); window.show();
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.setNoticeDurationForTests(250);
     auto *status = window.findChild<QLabel *>("workspaceConnectionStatus");
     auto *retry = window.findChild<QPushButton *>("connectionRetry");
     QVERIFY(status); QVERIFY(retry); QVERIFY(status->text().isEmpty()); QVERIFY(retry->isHidden());
@@ -2369,7 +2393,7 @@ void TestSessionsWindow::connectionStatusSurvivesNoticesAndRetries()
     window.setPollingHosts({QString()});
     QVERIFY(status->text().contains("retrying…")); QVERIFY(status->text().contains("timed out")); QVERIFY(!retry->isEnabled());
     window.showNotificationNotice("Path copied");
-    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QLabel *>("notice")->text().isEmpty(), 6000);
+    QTRY_VERIFY(window.findChild<QLabel *>("notice")->text().isEmpty());
     QVERIFY(status->text().contains("timed out"));
     auto state = fleet(); BoxState unavailable; unavailable.host = "mac"; unavailable.error = "ssh: Could not resolve hostname <mac>";
     state.setPeer(unavailable, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
@@ -3018,10 +3042,10 @@ else: print('{}')
         {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "input"}, {"activity", "busy"},
         {"pending_questions", QJsonArray{question}}, {"cache_hint", QJsonObject{{"status", "cold"}, {"tokens", 12000}}},
         {"compact_context_supported", true}, {"clear_context_supported", true}};
+    const qint64 expiry = QDateTime::currentSecsSinceEpoch() + (change == "ttl" ? 1 : 600);
     if (change == "warm" || change == "ttl") {
         details.remove("cache_hint");
-        details["session_usage"] = QJsonObject{{"prompt_cache", QJsonObject{{"status", "warm"},
-            {"expires_at", QDateTime::currentSecsSinceEpoch() + (change == "ttl" ? 1 : 600)}}}};
+        details["session_usage"] = QJsonObject{{"prompt_cache", QJsonObject{{"status", "warm"}, {"expires_at", expiry}}}};
     }
     const auto writeDetails = [&] { QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson())); };
     writeDetails();
@@ -3041,7 +3065,7 @@ else: print('{}')
             if (button->property("optionId") == "deny") button->click();
     }
     auto *action = card->findChild<QPushButton *>(change == "skip" ? "skipQuestion" : change == "approval" ? "denyToolRequest" : "submitQuestionAnswer");
-    if (change == "broader-approval") { window.activateWindow(); QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 5000); }
+    if (change == "broader-approval") { card->setReviewDelayForTests(200); window.activateWindow(); QTRY_VERIFY(action->isEnabled()); }
     QVERIFY(action->isEnabled());
     const auto before = card->submissionSnapshot(key, "interaction-cold");
     QJsonArray requested;
@@ -3091,7 +3115,8 @@ else: print('{}')
         }
         for (auto *button : box->buttons()) if (box->buttonRole(button) == QMessageBox::AcceptRole) button->click();
     });
-    if (change == "ttl") QTest::qWait(1100); // No inspection is needed for click-time TTL expiry.
+    // No inspection is needed for click-time TTL expiry (whole seconds, as CacheStatus compares).
+    if (change == "ttl") QTRY_VERIFY(QDateTime::currentSecsSinceEpoch() >= expiry);
     modal.start();
     if (change == "broader-approval") { action->click(); QVERIFY(!shown); QVERIFY(!QFileInfo::exists(capture)); QCOMPARE(action->text(), QString("Confirm")); }
     action->click();
@@ -6681,6 +6706,7 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/workspace/infra");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program());auto state=fleet();window.setFleet(state);window.show();
+    constexpr int noticeMs=250;window.setNoticeDurationForTests(noticeMs);
     QSignalSpy terminal(&window,&SessionsWindow::newSessionRequested);
     auto *client=window.findChild<HgsClient *>();QSignalSpy launched(client,&HgsClient::nativeSessionLaunched);
     QTimer::singleShot(0,&window,[&] {
@@ -6709,10 +6735,10 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     client->nativeSessionLaunched("failed-launch",false,"Cannot find official dsh");
     QLabel *notice=nullptr;
     for(auto *label:window.findChildren<QLabel *>()) if(label->text().contains("Cannot find official dsh")) notice=label;
-    QVERIFY(notice);QVERIFY(notice->isVisible());QTest::qWait(5100);QVERIFY(notice->isVisible());
+    QVERIFY(notice);QVERIFY(notice->isVisible());QTest::qWait(3*noticeMs);QVERIFY(notice->isVisible());
     QCOMPARE(bounds(), originalBounds);
     window.showNotificationNotice("Session updated.");
-    QTRY_VERIFY_WITH_TIMEOUT(notice->text().isEmpty(), 6500);
+    QTRY_VERIFY(notice->text().isEmpty());
     QVERIFY(statusBar->isVisible()); QCOMPARE(bounds(), originalBounds);
 }
 

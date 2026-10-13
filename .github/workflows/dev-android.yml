@@ -21,12 +21,13 @@ cache-mode: none
 
 jobs:
   # Builds and signs in parallel with the checks of the same run. The sealed
-  # candidate is uploaded only after that run's CI gate succeeds.
+  # candidate is uploaded only after that run's CI gate succeeds; the gate
+  # requires the credential-free Android unit tests and release lint in checks.yml.
   android:
     if: >-
       !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
-    # The build takes about 10 minutes; the wait covers the slowest checks
+    # The build takes about 5 minutes; the wait covers the slowest checks
     # (quick checks 20 plus Windows 90) and queued runners.
     timeout-minutes: 180
     environment: release
@@ -73,7 +74,7 @@ jobs:
       - name: Android platform and build tools
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
-      - name: Test and build the dev APK with the shared signer
+      - name: Build the dev APK with the shared signer
         working-directory: mobile/android
         # The job timeout is sized for the gate wait, not for a hung build.
         timeout-minutes: 30
@@ -81,7 +82,7 @@ jobs:
           DEV_RUN_NUMBER: ${{ github.run_number }}
         run: |
           version_code="$(python3 ../../scripts/android_version_code.py --dev-build-number "$DEV_RUN_NUMBER")"
-          ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease \
+          ./gradlew --no-daemon assembleRelease \
             -PzerusFirebase=true -PzerusVersionCode="$version_code" \
             -PzerusDevBuildNumber="$DEV_RUN_NUMBER"
       - name: Seal the signed APK and exact source

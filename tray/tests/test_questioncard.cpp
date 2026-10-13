@@ -406,9 +406,10 @@ void TestQuestionCard::reviewCountdownAndNextNavigation()
     QVERIFY(!allow->isEnabled());QVERIFY(deny->isEnabled());QVERIFY(allow->text().contains("(3)"));
     QTest::qWait(1100);setQuestionReady(card, "session",approval);QVERIFY(!allow->isEnabled());
     card.hide();QTest::qWait(150);card.show();card.activateWindow();QApplication::setActiveWindow(&card);QVERIFY(!allow->isEnabled());
+    // The real 3 s review delay, end to end; a short one for the next question.
     QTRY_VERIFY_WITH_TIMEOUT(allow->isEnabled(),4000);QCOMPARE(sent.size(),0);
     approval["question_hash"]="command-two";setQuestionReady(card, "session",approval);QVERIFY(!allow->isEnabled());
-    QTRY_VERIFY_WITH_TIMEOUT(allow->isEnabled(),4000);allow->click();QCOMPARE(sent.size(),1);
+    card.setReviewDelayForTests(200);QTRY_VERIFY(allow->isEnabled());allow->click();QCOMPARE(sent.size(),1);
     QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"allow"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/approval.png"));}
 }
@@ -431,7 +432,8 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     QVERIFY(option(card,"4")->accessibleDescription().isEmpty());
     QSignalSpy sent(&card,&QuestionCard::answerRequested);
     option(card,"1")->click();QVERIFY(!submit(card)->isEnabled());QVERIFY(submit(card)->text().contains("(3)"));
-    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(),4000);
+    // reviewCountdownAndNextNavigation waits out the real review delay.
+    card.setReviewDelayForTests(200);QTRY_VERIFY(submit(card)->isEnabled());
     // A broader option needs a second click; changing the choice resets it.
     submit(card)->click();QCOMPARE(sent.size(),0);QCOMPARE(submit(card)->text(),QString("Confirm"));
     QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("beyond this request"));
@@ -439,7 +441,7 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     option(card,"1")->click();submit(card)->click();QCOMPARE(sent.size(),0);submit(card)->click();QCOMPARE(sent.size(),1);
     QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"1"});
     approval["question_hash"]="read-two";setQuestionReady(card, "session",approval);QVERIFY(!submit(card)->isEnabled());
-    option(card,"4")->click();QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(),4000);submit(card)->click();QCOMPARE(sent.size(),2);
+    option(card,"4")->click();QTRY_VERIFY(submit(card)->isEnabled());submit(card)->click();QCOMPARE(sent.size(),2);
     QCOMPARE(sent.last()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"4"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/claude-approval.png"));}
 }

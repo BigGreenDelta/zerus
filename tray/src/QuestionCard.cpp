@@ -192,10 +192,10 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_reviewTimer.setInterval(100);connect(&m_reviewTimer,&QTimer::timeout,this,[this]{
         if(!m_question.value("approval").toBool())return;
         if(!isVisible()||!window()->isActiveWindow()||visibleRegion().isEmpty()||!m_available) {
-            m_reviewClock.invalidate();m_reviewSeconds=3;
+            m_reviewClock.invalidate();m_reviewSeconds=reviewSecondsLeft(0);
         } else {
             if(!m_reviewClock.isValid())m_reviewClock.start();
-            m_reviewSeconds=qMax(0,3-int(m_reviewClock.elapsed()/1000));
+            m_reviewSeconds=reviewSecondsLeft(m_reviewClock.elapsed());
         }
         updateControls();
     });m_reviewTimer.start();
@@ -338,7 +338,7 @@ void QuestionCard::setQuestion(const QString &sessionKey, const QJsonObject &que
     const int count=qMax(pendingQuestions,question.value("questions").toArray().size());
     m_pendingCount->setText(tr("%1 pending").arg(count));m_pendingCount->setVisible(count>0);
     if (!key.isEmpty()) m_latestKeys.insert(identity(sessionKey, id), key);
-    if (changed) {m_queueIndex=-1;m_queueCount=0;m_reviewClock.invalidate();m_reviewSeconds=3;rebuild();}
+    if (changed) {m_queueIndex=-1;m_queueCount=0;m_reviewClock.invalidate();m_reviewSeconds=reviewSecondsLeft(0);rebuild();}
     updateControls(); setVisible(!m_key.isEmpty());
 }
 

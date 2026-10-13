@@ -1428,7 +1428,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_timer.setInterval(500); connect(&m_timer, &QTimer::timeout, this, [this]() {
         const bool background=m_detailTabs->currentWidget()==m_terminal || m_detailTabs->currentWidget()==m_nativeUi;
-        const int interval=background?ProcessSettings::backgroundMs():m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():2500;
+        const int interval=background?ProcessSettings::backgroundMs():m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():m_activityPollMs;
         if(!m_inspectionAge.isValid() || m_inspectionAge.elapsed()>=interval)inspect();
         if (++m_tick % 10 == 0) {
             emit refreshRequested();
@@ -4091,7 +4091,7 @@ void SessionsWindow::showNotice(const QString &message, bool error)
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
     updateSessionFeedback();
-    if (!error) QTimer::singleShot(5000, this, [this,revision] {
+    if (!error) QTimer::singleShot(m_noticeMs, this, [this,revision] {
         if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
 }

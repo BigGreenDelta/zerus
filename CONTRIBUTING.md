@@ -18,14 +18,21 @@ parallel fresh processes and builds a release binary. Classes larger than twelve
 tests run as several jobs unless they share a class fixture, slowest first by
 the previous local run, or else by `scripts/ci/python-durations.json`. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
-headlessly in parallel (`build` or `test` runs only that half);
-`test_sessionswindow` runs as ten shards of its test functions. Tray sources
-compile once, into the `hgs-tray-*` static libraries that the application and
-the suites link: a new suite links the lowest library that covers its code
-instead of listing `tray/src` files, which fails configuration.
+headlessly in parallel (`build` or `test` runs only that half). Each suite
+registered with `zerus_add_test` also writes per-function JUnit results to
+`artifacts/test-results/qt-functions/`. `test_sessionswindow` runs as ten
+shards of its test functions and of the data rows of its slowest functions,
+balanced by the durations in `tray/tests/qt-shard-durations.txt`; tests that
+file does not list go by a hash of their name, and every shard fails unless
+each function and row runs in exactly one shard. `scripts/ci/qt-shard-seed.py`
+rebuilds the file from the `qt-functions` results of the CI desktop jobs. Tray
+sources compile once, into the `hgs-tray-*` static libraries that the
+application and the suites link: a new suite links the lowest library that
+covers its code instead of listing `tray/src` files, which fails configuration.
 `ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16 Python and
-8 Qt jobs, never more than the CPU count; `1` runs them one after another). Test
-logs and Python job durations live in ignored `artifacts/test-results/`. Set
+8 Qt jobs, never more than the CPU count; `1` runs them one after another);
+`ZERUS_PYTHON_JOBS` overrides it for the Python classes. Test logs and Python
+job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 
@@ -68,7 +75,9 @@ binary. For the connector and reference compatibility fixtures, install
 virtual environment and run `python -m unittest discover -s services/mobile/tests -v`.
 These tests use synthetic subprocesses and isolated databases, without live native
 agents. For Android, run `./gradlew testDebugUnitTest lintDebug assembleDebug` from
-`mobile/android` with JDK 17 or 21 and Android SDK 36. Follow
+`mobile/android` with JDK 17 or 21 and Android SDK 36. Every CI run, PRs included,
+also runs `testDebugUnitTest lintRelease` with `-PzerusFirebase=true` and a
+synthetic `google-services.json`. Follow
 [mobile setup](docs/mobile-deployment.md) for device and notification checks.
 
 Beads issues, history and memories must contain only information suitable for public
@@ -129,6 +138,10 @@ it never uses your SSH configuration and skips itself on other systems. On Windo
 (`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs
 every Qt suite offscreen. The Qt fixtures are Python scripts that a small native
 shim (`zerus-test-helper`) starts, because Windows cannot run scripts directly.
+Outside a console, the shim hands each call to a worker of the test program's pool
+(`tray/tests/support/fixture-worker.py`), which keeps one warm interpreter and ends
+a fixture whose shim is killed; `ZERUS_FIXTURE_POOL=0` starts a Python process per
+call instead.
 `package-windows.py` finds the app-local Visual C++ runtime with `vswhere`, and
 `check-windows-portable.py --run --selftest` starts both executables from an
 extracted copy with a minimal environment. Never start the packaged app with

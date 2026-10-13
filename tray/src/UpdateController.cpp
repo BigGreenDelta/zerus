@@ -22,6 +22,7 @@
 namespace {
 const QStringList packages={"zerus","zerus-git","zerus-ade-bin","zerus-ade-nightly-bin"};
 const QStringList casks={"zerus","zerus@nightly"};
+int g_testCommandTimeoutMs=0; // 0: the 5 s deadline
 const char *stableVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z";
 const char *nightlyVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\.r[0-9]+\\.g[a-f0-9]{7}\\.n([0-9]{1,15})\\z";
 bool matches(const QString &s,const char *pattern){return QRegularExpression(QString::fromLatin1(pattern)).match(s).hasMatch();}
@@ -321,8 +322,9 @@ void UpdateController::run(const QString &program,const QStringList &arguments,s
     connect(process,&QProcess::finished,this,[finish,deadline](int code,QProcess::ExitStatus status){deadline->stop();finish(code==0&&status==QProcess::NormalExit);});
     connect(process,&QProcess::errorOccurred,this,[finish](QProcess::ProcessError error){if(error==QProcess::FailedToStart)finish(false);});
     connect(deadline,&QTimer::timeout,this,[process,failed]{*failed=true;process->kill();});
-    process->setProgram(program);process->setArguments(arguments);process->start();deadline->start(5000);
+    process->setProgram(program);process->setArguments(arguments);process->start();deadline->start(g_testCommandTimeoutMs>0?g_testCommandTimeoutMs:5000);
 }
+void UpdateController::setCommandTimeoutForTests(int ms){g_testCommandTimeoutMs=ms;}
 void UpdateController::sourceInstallation(const QString &executable){
     m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
 #ifdef Q_OS_WIN

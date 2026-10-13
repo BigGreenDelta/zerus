@@ -6,7 +6,10 @@
 // so the fixture sees exactly the argv QProcess or a pseudoconsole produced, as
 // hgs.exe would. Python is told to use UTF-8 and LF line ends, like the Unix
 // fixtures. Shim and child run in a kill-on-close job: killing the shim, as
-// QProcess::kill() does, ends the fixture as well.
+// QProcess::kill() does, ends the fixture as well. Outside a console, the shim
+// first offers the call to a worker of the test program's pool
+// (support/fixture-worker.py), which runs fixtures in a warm interpreter and
+// ends a fixture whose shim dies in the same way.
 //
 // Subcommands: run under its own name, the helper replaces /bin/sh in the
 // ProcessRunner and pseudoconsole tests. Arguments are steps run in order, for
@@ -30,6 +33,9 @@
 
 #ifndef ZERUS_TEST_PYTHON
 #error "ZERUS_TEST_PYTHON must name the Python interpreter for fixtures"
+#endif
+#ifndef ZERUS_FIXTURE_WORKER
+#error "ZERUS_FIXTURE_WORKER must name support/fixture-worker.py"
 #endif
 
 namespace {
@@ -112,7 +118,163 @@ bool endsWithInsensitive(const std::wstring &value, const std::wstring &suffix)
         && _wcsicmp(value.c_str() + value.size() - suffix.size(), suffix.c_str()) == 0;
 }
 
-int runFixture(const std::wstring &program)
+std::string jsonString(const std::wstring &value)
+{
+    std::string result = "\"";
+    for (const char c : narrow(value)) {
+        if (c == '"' || c == '\\') {
+            result += '\\';
+            result += c;
+        } else if (static_cast<unsigned char>(c) < 0x20) {
+            char escaped[8];
+            std::snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<unsigned char>(c));
+            result += escaped;
+        } else {
+            result += c;
+        }
+    }
+    return result + "\"";
+}
+
+// The pool pipe is opened for overlapped I/O, so the input thread can write to it
+// while the main thread reads: synchronous I/O on one handle would serialize them.
+bool pipeTransfer(HANDLE pipe, char *data, DWORD size, bool write)
+{
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    bool ok = overlapped.hEvent != nullptr;
+    while (ok && size > 0) {
+        DWORD done = 0;
+        ResetEvent(overlapped.hEvent);
+        const BOOL started = write ? WriteFile(pipe, data, size, nullptr, &overlapped)
+                                   : ReadFile(pipe, data, size, nullptr, &overlapped);
+        ok = (started || GetLastError() == ERROR_IO_PENDING) && GetOverlappedResult(pipe, &overlapped, &done, TRUE)
+            && done > 0;
+        data += done; size -= done;
+    }
+    if (overlapped.hEvent) CloseHandle(overlapped.hEvent);
+    return ok;
+}
+
+// A frame is a type byte, a little-endian 32-bit length and the data.
+bool sendFrame(HANDLE pipe, char kind, const char *data, DWORD size)
+{
+    std::string frame{kind, char(size), char(size >> 8), char(size >> 16), char(size >> 24)};
+    frame.append(data, size);
+    return pipeTransfer(pipe, frame.data(), DWORD(frame.size()), true);
+}
+
+bool receiveFrame(HANDLE pipe, char &kind, std::string &data)
+{
+    unsigned char header[5];
+    if (!pipeTransfer(pipe, reinterpret_cast<char *>(header), 5, false)) return false;
+    kind = char(header[0]);
+    data.resize(size_t(header[1]) | size_t(header[2]) << 8 | size_t(header[3]) << 16 | size_t(header[4]) << 24);
+    return data.empty() || pipeTransfer(pipe, data.data(), DWORD(data.size()), false);
+}
+
+DWORD WINAPI forwardInput(void *pipe)
+{
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    std::vector<char> buffer(65536);
+    DWORD count = 0;
+    while (input && input != INVALID_HANDLE_VALUE && ReadFile(input, buffer.data(), DWORD(buffer.size()), &count, nullptr)
+           && count > 0) {
+        if (!sendFrame(pipe, 1, buffer.data(), count)) return 0;
+    }
+    sendFrame(pipe, 2, nullptr, 0);
+    return 0;
+}
+
+std::wstring workerPython() { return widen(ZERUS_TEST_PYTHON); }
+
+// Detached, without inherited handles: a worker never holds a test's pipes open.
+void startWorker(const std::wstring &pool)
+{
+    const std::wstring worker = widen(ZERUS_FIXTURE_WORKER);
+    const std::wstring directory = worker.substr(0, worker.find_last_of(L"\\/"));
+    std::wstring commandLine = quote(workerPython()) + L" -I -X utf8 -B " + quote(worker) + L" " + pool;
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION info{};
+    if (CreateProcessW(workerPython().c_str(), commandLine.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr,
+                       directory.c_str(), &startup, &info)) {
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+    }
+}
+
+bool console(DWORD which)
+{
+    DWORD mode = 0;
+    const HANDLE handle = GetStdHandle(which);
+    return handle && handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode);
+}
+
+// Runs the call on a pool worker, or returns false when none can take it, before
+// the fixture has started.
+bool runPooled(const std::wstring &script, int argc, wchar_t **argv, int &exitCode)
+{
+    wchar_t pool[32];
+    const DWORD length = GetEnvironmentVariableW(L"ZERUS_FIXTURE_POOL", pool, 32);
+    if (length == 0 || length >= 32 || std::wcscmp(pool, L"0") == 0 || console(STD_INPUT_HANDLE)
+        || console(STD_OUTPUT_HANDLE) || console(STD_ERROR_HANDLE))
+        return false;
+    const std::wstring name = std::wstring(L"\\\\.\\pipe\\zerus-fixture-") + pool;
+    const HANDLE pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                    FILE_FLAG_OVERLAPPED, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND) startWorker(pool);
+        return false;
+    }
+    char kind = 0;
+    std::string data;
+    HANDLE worker = nullptr;
+    if (receiveFrame(pipe, kind, data) && kind == 4)
+        worker = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, DWORD(std::strtoul(data.c_str(), nullptr, 10)));
+    std::string call = "{\"pid\":" + std::to_string(GetCurrentProcessId()) + ",\"script\":" + jsonString(script);
+    std::wstring directory(32768, L'\0');
+    directory.resize(GetCurrentDirectoryW(DWORD(directory.size()), directory.data()));
+    call += ",\"directory\":" + jsonString(directory) + ",\"arguments\":[";
+    for (int i = 1; i < argc; ++i) call += (i > 1 ? "," : "") + jsonString(argv[i]);
+    call += "],\"environment\":{";
+    bool first = true;
+    if (wchar_t *block = GetEnvironmentStringsW()) {
+        for (const wchar_t *entry = block; *entry; entry += std::wcslen(entry) + 1) {
+            const std::wstring text = entry;
+            const size_t equals = text.find(L'=', 1);
+            if (text[0] == L'=' || equals == std::wstring::npos) continue;
+            call += (first ? "" : ",") + jsonString(text.substr(0, equals)) + ":" + jsonString(text.substr(equals + 1));
+            first = false;
+        }
+        FreeEnvironmentStringsW(block);
+    }
+    call += "}}";
+    if (!worker || !sendFrame(pipe, 0, call.data(), DWORD(call.size()))) {
+        if (worker) CloseHandle(worker);
+        CloseHandle(pipe);
+        return false;
+    }
+    if (HANDLE thread = CreateThread(nullptr, 0, forwardInput, pipe, 0, nullptr)) CloseHandle(thread);
+    while (receiveFrame(pipe, kind, data)) {
+        if (kind == 1 || kind == 2) {
+            writeAll(kind == 1 ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE, data.data(), data.size());
+        } else if (kind == 3 && data.size() == 4) {
+            exitCode = int(unsigned(static_cast<unsigned char>(data[0])) | unsigned(static_cast<unsigned char>(data[1])) << 8
+                | unsigned(static_cast<unsigned char>(data[2])) << 16 | unsigned(static_cast<unsigned char>(data[3])) << 24);
+            CloseHandle(worker);
+            return true;
+        }
+    }
+    // The worker ended during the call (a fixture may call os._exit).
+    DWORD code = 1;
+    if (WaitForSingleObject(worker, 5000) != WAIT_OBJECT_0 || !GetExitCodeProcess(worker, &code)) code = 1;
+    CloseHandle(worker);
+    exitCode = int(code);
+    return true;
+}
+
+int runFixture(const std::wstring &program, int argc, wchar_t **argv)
 {
     std::wstring script = program;
     if (endsWithInsensitive(script, L".exe")) script.resize(script.size() - 4);
@@ -155,6 +317,8 @@ int runFixture(const std::wstring &program)
 
     SetEnvironmentVariableW(L"ZERUS_FAKE_PID", std::to_wstring(GetCurrentProcessId()).c_str());
     SetEnvironmentVariableW(L"ZERUS_FAKE_PROGRAM", program.c_str());
+    int pooledCode = 0;
+    if (runPooled(script, argc, argv, pooledCode)) return pooledCode;
 
     // The shim joins the job before it starts Python, so Python is in it from the
     // start: a kill between starting Python and assigning it would leave a
@@ -279,5 +443,5 @@ int wmain(int argc, wchar_t **argv)
 {
     const std::wstring program = modulePath();
     if (_wcsicmp(baseName(program).c_str(), L"zerus-test-helper.exe") == 0) return runSteps(argc, argv);
-    return runFixture(program);
+    return runFixture(program, argc, argv);
 }
