@@ -138,6 +138,10 @@ it never uses your SSH configuration and skips itself on other systems. On Windo
 (`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs
 every Qt suite offscreen. The Qt fixtures are Python scripts that a small native
 shim (`zerus-test-helper`) starts, because Windows cannot run scripts directly.
+Outside a console, the shim hands each call to a worker of the test program's pool
+(`tray/tests/support/fixture-worker.py`), which keeps one warm interpreter and ends
+a fixture whose shim is killed; `ZERUS_FIXTURE_POOL=0` starts a Python process per
+call instead.
 `package-windows.py` finds the app-local Visual C++ runtime with `vswhere`, and
 `check-windows-portable.py --run --selftest` starts both executables from an
 extracted copy with a minimal environment. Never start the packaged app with

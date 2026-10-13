@@ -10,7 +10,8 @@ if(WIN32)
     add_executable(zerus-test-helper support/TestHelper.cpp)
     # A static runtime: copies of the helper run from temporary directories.
     set_target_properties(zerus-test-helper PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
-    target_compile_definitions(zerus-test-helper PRIVATE ZERUS_TEST_PYTHON="${Python3_EXECUTABLE}")
+    target_compile_definitions(zerus-test-helper PRIVATE ZERUS_TEST_PYTHON="${Python3_EXECUTABLE}"
+        ZERUS_FIXTURE_WORKER="${ZERUS_TEST_SUPPORT}/fixture-worker.py")
     # Isolated INI settings (TestIsolation.cpp), the Windows part of FakeCli.h and
     # the Windows UI font (TestFonts.cpp), compiled once instead of per program.
     # OBJECT, never STATIC: nothing references their startup functions, so an
