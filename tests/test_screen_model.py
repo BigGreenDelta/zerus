@@ -538,6 +538,8 @@ class ScreenModelDifferential(unittest.TestCase):
         cls.compat = "3.7" if version == (3, 7) else "3.8"
         if not HGS.exists():
             raise unittest.SkipTest("build hgs first (cargo build)")
+        # Before the server starts: a misnamed recording must not leave it running.
+        cls.cases = corpus()
         cls.temp = tempfile.TemporaryDirectory(prefix="hgs-screen-")
         cls.root = Path(cls.temp.name)
         cls.socket = cls.root / "socket"
@@ -548,7 +550,6 @@ class ScreenModelDifferential(unittest.TestCase):
         cls.tmux("new-session", "-d", "-s", "keeper", "-x", "20", "-y", "5", "sleep 100000")
         cls.tmux("set-option", "-g", "status", "off")
         cls.serial = 0
-        cls.cases = corpus()
 
     @classmethod
     def tearDownClass(cls):
