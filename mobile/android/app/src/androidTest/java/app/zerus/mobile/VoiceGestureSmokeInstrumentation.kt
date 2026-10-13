@@ -202,6 +202,34 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             SystemClock.sleep(25)
         }
     }
+    private fun closedKeyboardEditorBounds(activity: Activity): Rect {
+        // Confirmation dialogs restore editor focus asynchronously. A single
+        // isVisible=false sample during that transition is not a closed viewport.
+        await("conversation window focus after dialog") { activity.hasWindowFocus() }
+        waitForIdleSync()
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        var previous = Rect()
+        var stableSince = SystemClock.elapsedRealtime()
+        var lastHide = 0L
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
+            val (focused, visible, bottom) = main {
+                val insets = activity.window.decorView.rootWindowInsets
+                Triple(activity.hasWindowFocus(), insets?.isVisible(WindowInsets.Type.ime()),
+                    insets?.getInsets(WindowInsets.Type.ime())?.bottom)
+            }
+            if (focused && (lastHide == 0L || visible != false || bottom != 0) && now - lastHide >= 250) {
+                main { activity.window.insetsController?.hide(WindowInsets.Type.ime()) }
+                lastHide = now
+            }
+            val bounds = Rect().also { editor().getBoundsInScreen(it) }
+            val closed = focused && visible == false && bottom == 0
+            if (!closed || bounds != previous) { previous = bounds; stableSince = now }
+            if (closed && !bounds.isEmpty && now - stableSince >= 500) return bounds
+            check(now < deadline) { "Keyboard/editor did not settle closed: focus=$focused visible=$visible inset=$bottom editor=$bounds" }
+            SystemClock.sleep(25)
+        }
+    }
     private fun screenshot(name: String) {
         waitForIdleSync()
         val bitmap = checkNotNull(uiAutomation.takeScreenshot())
@@ -696,9 +724,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             await("fixture selection") { expandedEditor.selection.start == 3 && expandedEditor.selection.end == 14 }
             val expandedSelection = main { expandedEditor.selection }
             check(named("Voice input") == null)
-            main { activity.window.insetsController?.hide(WindowInsets.Type.ime()) }
-            await("closed keyboard for expanded baseline") { activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) != true }
-            val expandedBounds = settledEditorBounds()
+            val expandedBounds = closedKeyboardEditorBounds(activity)
             val clipboard = targetContext.getSystemService(ClipboardManager::class.java)
             val originalClip = main { clipboard.primaryClip }
             main { clipboard.setPrimaryClip(ClipData.newPlainText("Voice input fixture", "Blocked paste")) }
@@ -757,15 +783,15 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                     // Compare restored dimensions with the same viewport as the
                     // baseline. When the IME leaves no preview viewport, closing it
                     // is an explicit fixture action, reported above rather than hidden.
-                    main { activity.window.insetsController?.hide(WindowInsets.Type.ime()) }
-                    await("closed keyboard for expanded restoration") { activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) != true }
-                    settledEditorBounds()
+                    closedKeyboardEditorBounds(activity)
                     if (!cancel && main { model.speech.draft != null }) discard()
+                    // Discard's dialog can reopen the editor IME as window focus
+                    // returns. Close it after that transition before comparing.
+                    val restoredBounds = closedKeyboardEditorBounds(activity)
                     node("Collapse message")
                     check(main { model.speechComposer?.editor === expandedEditor && expandedEditor.text.toString() == expandedText && expandedEditor.selection == expandedSelection }) {
                         "Recording reset the expanded editor or its selection"
                     }
-                    val restoredBounds = settledEditorBounds()
                     check(kotlin.math.abs(restoredBounds.width() - expandedBounds.width()) <= positionTolerance &&
                         kotlin.math.abs(restoredBounds.height() - expandedBounds.height()) <= positionTolerance) {
                         "Recording reset the expanded editor size: $expandedBounds -> $restoredBounds"
