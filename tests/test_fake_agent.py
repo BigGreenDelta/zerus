@@ -318,7 +318,8 @@ class TerminalAgent(Fixture):
         pid = self.start("--on-signal", "TERM=default")["pid"]
         os.kill(pid, signal.SIGTERM)
         self.wait_for(lambda: self.pane("#{pane_dead}") == "1")
-        self.assertEqual(self.pane("#{pane_dead_signal}"), str(int(signal.SIGTERM)))
+        # tmux prints the signal name where libc has sys_signame (macOS), else the number.
+        self.assertIn(self.pane("#{pane_dead_signal}"), {str(int(signal.SIGTERM)), "term"})
         self.assertFalse(self.events("signal") or self.events("exit"))
 
     def test_named_like_an_agent_it_runs_that_agents_hooks(self):

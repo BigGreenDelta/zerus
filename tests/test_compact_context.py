@@ -23,7 +23,8 @@ class CompactContext(unittest.TestCase):
     # Each provider uses a fresh terminal; never inject into an old draft.
     self.record['agent']=agent;self.write_record();(self.root/'provider').write_text(agent);os.kill(self.record['pid'],signal.SIGUSR1);time.sleep(.12)
     result=self.compact();self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout)['status'],'submitted')
-    self.assertEqual(self.received(),b'/compact\r')
+    # submitted means Enter was sent; the fixture may not have read it yet.
+    self.wait_for(lambda:self.received()!=b'/compact');self.assertEqual(self.received(),b'/compact\r')
     self.tearDown();self.setUp()
  def test_busy_draft_stale_and_uncertain_never_submit(self):
   self.record.update(activity='busy',phase='working');self.write_record();self.assertNotEqual(self.compact().returncode,0);self.assertEqual(self.received(),b'')
