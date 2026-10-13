@@ -537,22 +537,21 @@ set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offs
 # On Windows, long tests start first in a fresh build directory. CTest never
 # replaces a COST with its measured times, so a directory where ctest has run (it
 # then has Testing/Temporary/CTestCostData.txt) keeps the measured order from its
-# next configuration on. Seconds on the Windows runner, the slowest (main runs
-# 38299237683 and 38313090634; activityview and an equal share of the 576 s of the
-# sessionswindow shards: main run 38374705257). Elsewhere the default order stays:
-# on the 3-vCPU macOS runner, starting every sessionswindow shard at once saved
-# 18 s but made timing-sensitive suites fail (zerus-niu8).
+# next configuration on. Seconds on the Windows runner with the fixture pool (PR
+# run 38395640294; each shard an equal share of their 485 s). Elsewhere the
+# default order stays: on the 3-vCPU macOS runner, starting every sessionswindow
+# shard at once saved 18 s but made timing-sensitive suites fail (zerus-niu8).
 if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
     foreach(shard RANGE 9)
-        set_tests_properties(sessionswindow-${shard} PROPERTIES COST 58)
+        set_tests_properties(sessionswindow-${shard} PROPERTIES COST 48)
     endforeach()
-    set_tests_properties(activityview PROPERTIES COST 68)
-    set_tests_properties(speech PROPERTIES COST 32)
-    set_tests_properties(accountspage PROPERTIES COST 30)
-    set_tests_properties(hgsclient paintcache questioncard PROPERTIES COST 20)
-    set_tests_properties(processview PROPERTIES COST 13)
-    set_tests_properties(messagecomposer windowsdesktop PROPERTIES COST 10)
-    set_tests_properties(sessionsearch PROPERTIES COST 9)
+    set_tests_properties(activityview PROPERTIES COST 54)
+    set_tests_properties(speech PROPERTIES COST 25)
+    set_tests_properties(paintcache PROPERTIES COST 15)
+    set_tests_properties(hgsclient accountspage PROPERTIES COST 14)
+    set_tests_properties(messagecomposer questioncard PROPERTIES COST 12)
+    set_tests_properties(windowsdesktop PROPERTIES COST 10)
+    set_tests_properties(sessionsearch processview PROPERTIES COST 7)
 endif()
 
 get_property(zerus_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
