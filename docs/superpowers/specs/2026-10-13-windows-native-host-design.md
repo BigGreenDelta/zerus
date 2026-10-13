@@ -7,8 +7,8 @@ is described in [Windows support](2026-10-10-windows-support-design.md).
 The owner asked on 2026-10-13 to plan and implement Phase 2 and delegated the
 design choices. This document records those choices, the evidence behind them,
 the spikes that must confirm the riskiest assumptions on a real Windows PC, and the
-order of work. Facts were checked against `885eb7d` with file:line evidence held in
-the research notes summarized below.
+order of work. Facts were checked against `885eb7d`. Two adversarial reviews
+(Windows systems; Unix compatibility and migration) were folded in on 2026-10-13.
 
 ## Goal
 
@@ -18,8 +18,8 @@ GUI restarts, GUI updates, terminal disconnects and the end of the SSH connectio
 that started it; it can be listed, inspected, sent to, attached, paused, resumed,
 forked, renamed and terminated with the same CLI and GUI operations.
 
-Unix behaviour stays byte-for-byte compatible: the same tmux argv, the same dry-run
-strings, the same JSON, the same files.
+Unix behaviour stays byte-for-byte compatible: the same tmux argv in the same order,
+the same stdin bytes, the same dry-run strings, the same JSON, the same files.
 
 ## Non-goals for Phase 2
 
@@ -27,10 +27,12 @@ These stay out and get their own work later (Phase 3 and beyond):
 
 - Windows as an SSH *target* of other peers (remote shell detection, per-shell
   invocation, Windows paths in the shared swarm catalog, `machine setup` for
-  Windows peers).
+  Windows peers). `zerus://` references to Windows sessions resolve on that computer
+  only.
 - Windows as a mobile gateway (connector journal, `mobile_peers`, relay settings,
   desktop presence for phone alerts).
-- DeepSeek (`dsh`) and its Native UI, voice-message workers.
+- DeepSeek (`dsh`) and its Native UI, voice-message workers and voice sends to local
+  Windows sessions (the GUI disables them with an explanation).
 - Installer, code signing, autostart at logon, winget, WSL as a target.
 
 ## Decisions
@@ -41,120 +43,175 @@ The host is `hgs.exe __host serve`, the same executable as the CLI, in the style
 `--macos-session-service` (`src/main.rs:26-28`). A separate binary would duplicate
 the protocol, configuration and identity code.
 
-### D2. Explicit enablement and staged images
+### D2. Explicit enablement, a stable CLI and staged host images
 
 Local sessions on Windows are off until the user enables them, from the GUI
 ("Enable local sessions" on the Machines page for this computer) or with
 `hgs session-host install`. This keeps home-directory writes explicit, as for
-`zerus-setup` on Linux and macOS. Enabling stages two things:
+`zerus-setup` on Linux and macOS. Enabling:
 
-1. **The stable CLI** `%USERPROFILE%\.local\bin\hgs.exe`, the Windows form of the
-   Unix `~/.local/bin/hgs` contract. Agent hooks and session recipes embed this
-   path (`src/state/hooks.rs:136-137`, `src/state/lifecycle.rs:540,565`), so it must
-   not live in the portable folder that a GUI update replaces. An update of the
-   stable CLI renames the old file aside and moves the new one in; a running image is
-   never overwritten.
-2. **A content-addressed host image** `%USERPROFILE%\.local\share\hgs\host\<sha256-16>\`
-   holding `hgs.exe` and, when bundled, `conpty.dll` and `OpenConsole.exe` (D6). A
-   running host is never touched by an update. Unused images are removed by the next
-   install when no host runs from them.
+1. **Stages the stable CLI** `%USERPROFILE%\.local\bin\hgs.exe`, the Windows form of
+   the Unix `~/.local/bin/hgs` contract. Hooks, session recipes, supervisors and the
+   recovery worker use only this path (D8). An update renames the running file aside
+   under a unique name (`hgs.exe.old-<timestamp>-<random>`) and moves the new one in;
+   a running image is never overwritten, and aside files are deleted by a later
+   install once no process uses them. A hook that starts in the few milliseconds
+   between the two renames fails and is reported like any failed hook.
+2. **Stages a content-addressed host image**
+   `%USERPROFILE%\.local\share\hgs\host\<sha256-16>\` holding `hgs.exe` and, when
+   bundled, `conpty.dll` and `OpenConsole.exe` (D6), then writes the pointer file
+   `host\current` last. The next host start uses the image `current` names; there is
+   no "newest by version" rule, so a rollback is a re-install of the older build.
+   Unused images are removed by a later install when no host runs from them.
+3. **Writes the durable marker** `%USERPROFILE%\.config\hgs\local-sessions`. This
+   marker, not the presence of staged files, decides that the computer is enabled.
 
-`hgs session-host status` reports the staged versions and the running host;
-`hgs session-host stop` stops an idle host and refuses while sessions run. The
-command name avoids `host`, which today launches the `host` program as a command.
+`hgs session-host status` reports the marker, the staged versions and the running
+host; `hgs session-host stop` stops an idle host and refuses while sessions run;
+`hgs session-host uninstall` refuses while sessions run, removes the marker and
+leaves staged files for a later cleanup. The `session-host` command exists only in
+Windows builds (on Unix that word still launches a program of that name, as today),
+is allowed before enablement (`src/cli.rs:355`), and is never forwarded to remote
+machines in Phase 2.
 
-`local_sessions` in `hgs ls --json` means "this computer is enabled for local
-sessions", never "the host is running": saved sessions live in the state
-directory, and a host crash must not turn the computer back into a control console.
-On Windows the local box also carries `local_host` with `state` (`not-installed`,
-`stopped`, `running`), `pid`, `protocol` and `conpty` (`bundled` or `inbox`). Unix
-output is unchanged.
+The compile-time `platform::LOCAL_SESSIONS` (`src/platform/mod.rs:27`) becomes a
+run-time check: always true on Unix; on Windows true when the marker exists. Its
+consumers (`src/cli.rs:695,742,766`, `src/accounts.rs:456,883`) call the function.
+
+`local_sessions` in `hgs ls --json` means "this computer is enabled", never "the host
+is running": saved sessions live in the state directory, and a host crash must not
+turn the computer back into a control console. On Windows the local box also carries
+`local_host` with `state` (`not-installed`, `stopped`, `running`, `unavailable`),
+`pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity` and `windows_session`.
+Unix output is unchanged.
+
+**One CLI over the state directory.** Once enabled, the GUI runs the stable CLI, not
+the `hgs.exe` in its own folder. When the GUI's bundled `hgs.exe` is newer than the
+staged one, the GUI refreshes the staged CLI and host image (the user consented to
+staging when enabling). State formats stay readable in both directions across one
+version of skew.
 
 ### D3. Host lifetime: like the tmux server
 
 - The host starts on demand from a launch, resume or fork, never from a listing or an
   attach. A listing with no host reports no live sessions, as tmux does with no
-  server.
+  server. "No host" means only `ERROR_FILE_NOT_FOUND` on the pipe; every other
+  failure (busy past the retry budget, a protocol mismatch, a refused server
+  identity) is an error, never an empty snapshot, because an empty snapshot would
+  show live sessions as resumable (`src/state/mod.rs:247-260`,
+  `src/state/lifecycle.rs:679-701`).
+- **One host per user and state directory.** The host holds an exclusive lock on
+  `host.lock` in the state directory for its whole life; a second host exits at once.
 - The host exits after its last session ends and no client is attached, after a
-  short linger. The next launch starts the newest staged image. This is how upgrades
-  reach the host without ever restarting live agents.
+  short linger. It closes its listening pipe instances *before* deciding to exit; a
+  client that loses that race gets `ERROR_FILE_NOT_FOUND` or a broken pipe before the
+  hello completes, and retries the start. A launcher that cannot create the first
+  instance because an exiting host still holds it retries until that host's process
+  is gone.
+- `create` is idempotent by launch ID, so a retried request never starts a session
+  twice.
 - The host owns its sessions: a host crash ends them, exactly as a tmux server crash
-  does. The host joins its own kill-on-close job before the first session so its
-  death never orphans agents (Orca does the same).
+  does. The host joins its own kill-on-close job before the first session and fails
+  closed if it cannot, so its death never orphans agents (Orca does the same).
 - The host has a hidden console (`CREATE_NO_WINDOW`), so console children it starts
-  outside a pseudoconsole (`git`, probes) never flash a window, and a hidden
-  top-level window receives `WM_QUERYENDSESSION`/`WM_ENDSESSION` to record a clean
-  shutdown at logoff.
+  outside a pseudoconsole (`git`, probes) never flash a window. A hidden top-level
+  window receives `WM_QUERYENDSESSION`/`WM_ENDSESSION` to record a clean shutdown;
+  the host and supervisors ignore `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT`,
+  which do not say which user is logging off.
 
 ### D4. Breaking away from the launcher's job
 
-The launcher (`hgs.exe` started by the GUI, a terminal or sshd) starts the host with
-`CreateProcessW`, `CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW |
-CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT`, no inherited handles (an
-explicit empty handle list), then checks with `IsProcessInJob` that the host is not
-in the launcher's job and fails closed with a clear message otherwise.
-
+- **Spawning** uses raw `CreateProcessW` with `STARTUPINFOEXW`, because stable Rust
+  std (MSRV 1.85) cannot attach a pseudoconsole, limit handle inheritance or resume a
+  suspended child, and always inherits handles. hgs builds environment blocks itself:
+  overrides merge case-insensitively (`Path` against `PATH`), the block is sorted
+  case-insensitively, and the `=C:` drive entries are kept (precedent:
+  `tray/src/PtyProcess_win.cpp:79-91`).
+- **The launcher** starts the host with `CREATE_BREAKAWAY_FROM_JOB |
+  CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT` and
+  `bInheritHandles = FALSE`.
+- **The host verifies its own placement.** Breakaway moves a child up the job
+  hierarchy until it reaches a job that forbids breakaway, and `CreateProcess` still
+  succeeds, so a check in the launcher cannot see that failure. The host checks
+  `IsProcessInJob(GetCurrentProcess(), NULL) == FALSE` before it joins its own job and
+  reports the result in the hello; the launcher fails closed with a clear message
+  when the host is in any job.
 - `hgs.exe`'s own kill-on-close job (`src/platform/windows.rs:63-83`) gains
-  `JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Its `ssh.exe` and `tar.exe` children never ask
-  for breakaway, so they still die with it.
-- There is no WMI fallback. Orca, which the Phase 1 spec cited for one, removed it:
-  WMI process creation is refused to a standard user's network logon
-  (`stablyai/orca@5e9489c0`, `src/shared/windows-breakaway-launcher.ts:1-8`).
+  `JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Because the MSYS runtime of Git for Windows breaks
+  away whenever it may, every bounded child (`git`, `ssh.exe`, `tar.exe`, probes)
+  runs in its own per-call kill-on-close job *without* `BREAKAWAY_OK` through the
+  bounded runner (M1.3); the immediate job then forbids escape.
+- There is no WMI fallback. Orca removed its own: WMI process creation is refused to a
+  standard user's network logon (`stablyai/orca@5e9489c0`,
+  `src/shared/windows-breakaway-launcher.ts:1-8`).
 - Win32-OpenSSH places a session's processes in a job that allows breakaway, so a
-  host started over SSH survives the end of the SSH session (spike S4 confirms).
+  host started over SSH survives the end of the SSH session (spike S4 confirms, with
+  the tray's attach and swarm-worker jobs in the test matrix).
 
 ### D5. Endpoint and protocol
 
-**Name.** `\\.\pipe\hgs-host-<hex>` where `<hex>` is the first 24 hex digits of
-SHA-256 over the user SID, the token elevation type and the case-folded canonical
-state directory. Isolated tests (`HGS_STATE_DIR`) therefore never reach a live host,
-an elevated SSH session and the desktop never share a host by accident, and `HOME`
-versus `USERPROFILE` spellings of one directory map to one host. The name carries no
-protocol version: there is one host per user and state directory, and versions are
-negotiated (below).
+**Name.** `\\.\pipe\hgs-host-<hex>` where `<hex>` is the first 32 hex digits of
+SHA-256 over the user SID, the case-folded canonical state directory and a random
+secret read from the private file `host.secret` in the state directory (created on
+first use). Isolated tests (`HGS_STATE_DIR`) never reach a live host; `HOME` and
+`USERPROFILE` spellings of one directory map to one host; another local user cannot
+compute the name to squat it. The name carries no protocol version.
 
-**Security.** The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`
-and `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to the
-user SID (`D:P(A;;GA;;;<user>)`). The client checks the server before sending
-anything: `GetNamedPipeServerProcessId`, then the process token user must equal its
-own SID. The host checks each client the same way with
-`GetNamedPipeClientProcessId`. A name squatted by another user is refused, never
-used.
+**Integrity.** The host runs with the token of the launcher that started it. A
+high-integrity host labels its pipe `S:(ML;;NWNR;;;HI)`. The host authenticates each
+client with `ImpersonateNamedPipeClient` and `OpenThreadToken`: same user SID, and an
+integrity level at least the host's; a lower-integrity client is refused with a clear
+message ("the session host on this computer runs elevated"). The host reports its
+integrity level and Windows session ID in the hello and in `local_host`, and the GUI
+warns before launching into a host that runs in another Windows session (for example
+one started over SSH). Elevated SSH testing uses an isolated `HGS_STATE_DIR`.
+
+**Security.** The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and
+`PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to the user SID.
+The client checks the server before sending anything: `GetNamedPipeServerProcessId`,
+then the server process token user must equal its own SID.
 
 **Framing.** Byte-mode pipe, frames of `u32` little-endian length (at most 1 MiB),
 one kind byte and a payload: `0` JSON request or response, `1` stream bytes, `2`
 stream control JSON (resize, detach, exit, notice).
 
 **Versions.** The hello carries the client's protocol range; the reply carries the
-host identity (`pid`, creation time, image path, image hash, protocol, capability
-list). Protocol 1 is the first. Changes are additive within a major version, and a
-CLI keeps speaking every major version a running host may still use. This mirrors
-how a newer hgs keeps working with an older running tmux server.
+host identity (`pid`, creation time, image path and hash, protocol, capability list,
+integrity, Windows session, job placement). Protocol 1 is the first. Changes are
+additive within a major version. A host accepts every protocol major a released CLI
+may send, and a CLI speaks every major a running host may still use, in both
+directions (a rolled-back CLI against a newer host included).
 
 **Requests** cover the tmux vocabulary used today (62 call sites, about 70
-invocations, `src/state/**`, `src/cli.rs`, `src/platform/unix.rs`): create session,
-list sessions and panes with all fields in one answer, resolve a target, pane info,
-capture (plain or styled), send keys, paste (bracketed or not), set and read the run
-marker and session environment, rename, kill, signal, attach, list clients, and host
-status. `list` is a single round trip, because hooks call `live()` on every event
-(`src/state/hooks.rs:283`) and every `ls --json` reads the screen of each session
-with a pending question.
+invocations): create session, list sessions and panes, resolve a target, pane info,
+capture (plain or styled), send keys, paste (bracketed or not), run marker and
+session environment, rename, kill, signal, input state, attach, list clients, host
+status. On Windows, `list` is one round trip, because hooks call `live()` on every
+event (`src/state/hooks.rs:283`).
 
 ### D6. ConPTY: bundled pair first, inbox as degraded fallback
 
 - The host loads `conpty.dll` by absolute path from its image folder with
-  `LoadLibraryExW` and uses `ConptyCreatePseudoConsole`; `conpty.dll` finds the
-  matched `OpenConsole.exe` next to itself. The pair comes from the pinned NuGet
-  package `Microsoft.Windows.Console.ConPTY` (MIT), verified by SHA-256 in the
-  packaging script, and ships in the portable zip with its license text.
-- Without the pair the host falls back to the inbox `CreatePseudoConsole` and reports
-  `conpty: inbox`. Inbox ConPTY on Windows 10 is the older snapshot renderer, and its
-  forwarding of mode changes such as bracketed paste is unverified; features gated
-  on that evidence then fail closed, as they do on Unix without it.
-- Never pass `PSEUDOCONSOLE_INHERIT_CURSOR` (it deadlocks unless the caller answers
-  a cursor query). `ClosePseudoConsole` runs off the reader thread; use
-  `ReleasePseudoConsole` when exported.
-- Spike S1 decides whether the bundled pair is required or optional.
+  `LoadLibraryExW(LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)` and
+  resolves `ConptyCreatePseudoConsole` and friends with `GetProcAddress`;
+  `conpty.dll` finds the matched `OpenConsole.exe` next to itself. The pair comes from
+  the pinned NuGet package `Microsoft.Windows.Console.ConPTY` (MIT), verified by
+  SHA-256 in the packaging script, and ships in the portable zip with its license.
+- Without the pair the host falls back to the inbox `CreatePseudoConsole`, looked up
+  with `GetProcAddress` like `ReleasePseudoConsole` (a static import would stop
+  `hgs.exe` loading before 24H2), and reports `conpty: inbox`. Features gated on mode
+  evidence then fail closed, as they do on Unix without it.
+- Never pass `PSEUDOCONSOLE_INHERIT_CURSOR`. `ClosePseudoConsole` runs off the reader
+  thread. The end of a session is detected by waiting on the supervisor's process
+  handle, because without `ReleasePseudoConsole` the inbox output pipe never reaches
+  end of file.
+- **The host is the only responder to terminal queries.** tmux answers device and
+  cursor queries itself and never relays them. The host answers forwarded `CSI 6n`,
+  `CSI c`, `CSI > c` and OSC 10/11 from its screen model, removes them from the
+  stream sent to attached clients, and drops replies coming from clients, so a query
+  gets exactly one answer whether zero or several clients are attached.
+- Spike S1 records which queries and mode changes inbox and bundled ConPTY forward
+  and decides whether the bundled pair is required.
 
 ### D7. Screen model and capture
 
@@ -172,26 +229,31 @@ serializer that answers what `tmux capture-pane -p` and `-p -e` answer today:
 
 `vt100`'s own `rows_formatted` is not used: it emits erase and cursor sequences that
 the parsers reject (`src/state/question_terminal.rs:38-80`). A differential test on
-Linux feeds the same recorded byte streams to tmux 3.7 and to the model and compares
-both capture forms byte for byte; it runs in the existing Linux CLI job. The screen
-model is platform-independent code, so its tests also run on Linux and macOS.
-
-On attach the host repaints the client from the model (`vt100` state and mode
-formatting is suitable here) and then streams live output.
+Linux feeds the same byte streams to tmux 3.7 and to the model and compares both
+capture forms byte for byte; it runs in the existing Linux CLI job. The corpus
+includes raw ConPTY streams recorded on Windows in spike S1, so the model is proven on
+the bytes it will actually see. On attach the host repaints the client from the model.
 
 ### D8. Launch without a login shell
 
 On Unix the pane runs `$SHELL -lic 'exec env … "$0" --run "$@"' hgs 0 argv` so the
 login PATH applies and the supervisor becomes the pane's root process. On Windows:
 
-- the creating client (the `hgs.exe` that asks for a session) sends its whole
-  environment block plus the session overrides (`HGS_*`, account homes, `TERM`), and
-  the host starts `hgs.exe --run <argv>` from the staged stable CLI with exactly that
-  block. A long-lived host never hands out its own stale `PATH`;
-- `--run` keeps its role: it is the supervisor, the pane's root process
-  (`pane_pid`), it installs hooks, writes the record and starts the agent;
-- the supervisor is created suspended, assigned to the session job (D9), then
-  resumed;
+- the creating client sends its whole environment block plus the session overrides,
+  and the host starts the stable CLI's `hgs.exe --run <argv>` with that block. A
+  long-lived host never hands out its own stale `PATH`;
+- **the host sets `HGS_EXECUTABLE` to the stable CLI**, and on Windows
+  `executable_path()` and `runner_executable()` (`src/cli.rs:190-200`,
+  `src/state/storage.rs:305-321`) fail closed if they would resolve to anything else.
+  Hooks, recipes and records therefore never embed the portable folder's path, which a
+  GUI update replaces (`tray/src/AppConfig.cpp:71-73`). A test launches from a
+  portable copy and checks the stable path in the hooks;
+- the account environment that `run_script` applies on Unix after the login shell
+  (`src/accounts.rs:919-944`: `HGS_ACCOUNT_ID`, `ANTHROPIC_CONFIG_DIR`, blanked
+  `AUTH_ENV` keys, agent home variables) is applied by the host;
+- `--run` keeps its role: it is the supervisor, the pane's root process (`pane_pid`);
+  it installs hooks, writes the record and starts the agent;
+- the supervisor is created suspended, assigned to the session job (D9), then resumed;
 - the environment adds `TERM=xterm-256color` and removes `COLORTERM`, and sets
   `FORCE_COLOR=2` for Node agents only if spike S1 shows they otherwise emit
   truecolour: the question parsers match exact 256-colour indices
@@ -202,25 +264,31 @@ login PATH applies and the supervisor becomes the pane's root process. On Window
 
 **Agent resolution.** `PATHEXT` lookup (`platform::which`) finds the program. An npm
 shim (`.cmd`) is resolved to `node.exe <script>` only when it matches the exact npm
-shim shape, all or nothing, because a long `cmd.exe /c` line carrying a prompt is
-scored as obfuscation by Defender for Endpoint (Orca's evidence) and breaks
-multi-line arguments. Native executables (`claude.exe`, Kimi's single binary,
-Codex's vendor `codex.exe` reached through `codex.js`) run directly. Windows PATH
-preparation adds `%USERPROFILE%\.local\bin` and `%APPDATA%\npm` when present, the
-counterpart of `platform/unix.rs:22-43`. The `sh` command means PowerShell
-(`pwsh.exe`, else `powershell.exe -NoLogo`) and stays untracked.
+shim shape, all or nothing: a long `cmd.exe /c` line carrying a prompt is scored as
+obfuscation by Defender for Endpoint (Orca's evidence) and breaks multi-line
+arguments. Native executables run directly. Windows PATH preparation adds
+`%USERPROFILE%\.local\bin` and `%APPDATA%\npm` when present, the counterpart of
+`platform/unix.rs:22-43`. The `sh` command means PowerShell (`pwsh.exe`, else
+`powershell.exe -NoLogo`) and stays untracked. Process-name checks compare file stems
+case-insensitively (`node.exe` is `node`; `src/state/external_agents.rs:15`,
+`src/state/input.rs:568`, `src/state/processes/control.rs:267-281`).
+
+**Accounts.** The local account catalog, login, inspection and permission modes work
+on Windows; every direct `HOME` read (`src/accounts.rs:379,390`,
+`src/accounts/claude.rs:31`) uses `platform::home()`.
 
 ### D9. Process ownership and identity
 
 - **Jobs.** Each session has its own job, without `KILL_ON_JOB_CLOSE` and without
-  `BREAKAWAY_OK` (Git Bash children would otherwise escape it). The host's own
-  kill-on-close job (D3) contains all session jobs. A supervisor started by the host
-  does not create its own kill-on-close job.
+  `BREAKAWAY_OK`. The host's own kill-on-close job (D3) contains all session jobs. A
+  supervisor started by the host does not create its own job; a reused job must never
+  receive a process that already sits in its own job (verified on 2026-10-11: such an
+  assignment makes later assignments fail with `ERROR_ACCESS_DENIED`).
 - **Identity.** `process_start` on Windows is the creation time as decimal 100 ns
   ticks, compared for equality like the Unix `lstart` text; records are per machine.
   A pinned process is an open handle (`SYNCHRONIZE | PROCESS_TERMINATE |
-  PROCESS_QUERY_LIMITED_INFORMATION`), which also blocks PID reuse. Parent links
-  from Toolhelp32 are trusted only when the parent was created before the child.
+  PROCESS_QUERY_LIMITED_INFORMATION`), which also blocks PID reuse. Parent links from
+  Toolhelp32 are trusted only when the parent was created before the child.
 - **IDs.** Sessions and panes keep the textual forms `$N` and `%N` with host-unique
   counters, because records, rename transactions and question hashes store them and
   validate their shape. The terminal binding hashes the host PID and creation time,
@@ -229,33 +297,48 @@ counterpart of `platform/unix.rs:22-43`. The `sh` command means PowerShell
   completion reason without changing Unix values; the `--run` fallback test
   (`src/cli.rs:445`) treats them as a crash, not as "nothing to resume".
 
-### D10. Input evidence without termios
+### D10. The supervisor channel and input evidence
+
+The supervisor is the only process that is both hgs code and attached to the session
+console, so it is the host's agent inside the session. At start it connects to the
+host and keeps a **supervisor channel** open; the host forwards stop requests and
+input-state queries over it.
 
 On Unix, sends require the pane's tty to have `ICANON` and `ECHO` off, the agent to be
 the foreground process group and not a shell (`src/state/input.rs:541-574`), plus
-bracketed paste on. Windows evidence for "the agent owns raw input":
+bracketed paste on. On Windows the supervisor answers `input_state` with:
 
-- the screen model reports bracketed paste on (TUI agents enable it only while their
-  editor is active);
-- the session's tracked agent process is alive and belongs to the session job;
-- the existing agent-specific composer checks pass unchanged.
+- the console input mode from `GetConsoleMode(CONIN$)`: `ENABLE_LINE_INPUT` and
+  `ENABLE_ECHO_INPUT` must be off (the counterparts of `ICANON` and `ECHO`);
+- `GetConsoleProcessList`: no attached process may be a known interactive program
+  other than the agent (editors such as `vim`, `nvim`, `nano`, `emacs`; pagers;
+  interactive shells `cmd`, `powershell`, `pwsh`, `bash` started without a command),
+  which replaces the foreground-group check that rejects an editor the agent opened;
+- the tracked agent process alive and inside the session job.
 
-The backend returns these as one `input_state` answer. Spike S2 checks for false
-positives (an agent's shell escape, a crashed agent leaving a shell).
+The host adds bracketed paste from its screen model, and the existing agent-specific
+composer checks run unchanged. This evidence is provisional until spike S2 (which
+includes the editor and crashed-agent cases) confirms it.
 
 ### D11. Stopping, pausing and terminating
 
-- **Pause** (Unix: `SIGTERM` to the exact agent PID, never a forced kill) sends
-  `CTRL_BREAK_EVENT` to the agent's process group. The supervisor starts the agent
-  with `CREATE_NEW_PROCESS_GROUP` for this; agents read Ctrl+C as input in raw mode,
-  so typing is unaffected. The host delivers the event through a short-lived helper,
-  `hgs.exe __console-signal <pid> break`, that attaches to the session console. Pause
-  never force-kills on Windows either.
-- **Terminate** (Unix: `kill-session`, the hangup reaches the agent) closes the
-  pseudoconsole, which sends `CTRL_CLOSE_EVENT` to every process on it, waits up to
-  10 s as `src/state/terminate.rs:63` does, then terminates the session job.
-- **Supervisor** handles console control events instead of signals: it ignores
-  Ctrl+C and Ctrl+Break, and treats close, logoff and shutdown as hangup.
+- **Process groups.** The host starts the supervisor with `CREATE_NEW_PROCESS_GROUP`.
+  The supervisor calls `SetConsoleCtrlHandler(NULL, FALSE)` so its children process
+  Ctrl+C normally, installs a handler that ignores Ctrl+C and Ctrl+Break for itself,
+  and starts the agent in its own group, as on Unix, where they share the pane's
+  process group.
+- **Pause** (Unix: `SIGTERM` to the exact agent PID, never a forced kill): the host
+  asks the supervisor over its channel; the supervisor raises `CTRL_BREAK_EVENT` for
+  its group (it is already on the console, so no helper process is needed). The
+  event reaches every process of the group, including tool and MCP processes; those
+  end with the agent on Unix as well. If spike S5 shows an agent ignores Ctrl+Break,
+  pause sends that agent's own exit command instead. Pause never force-kills.
+- **Terminate** (Unix: `kill-session`, then a wait of up to 10 s,
+  `src/state/terminate.rs:66-75`): the host first runs the pause path and waits up to
+  10 s for the supervisor to write its completion record; then it closes the
+  pseudoconsole (`CTRL_CLOSE_EVENT` with its 5 s system limit), then terminates the
+  session job. The supervisor's close handler blocks for at most about 4 s until its
+  completion record is written.
 - Spike S5 records how each agent reacts and that resume works afterwards.
 
 ### D12. Hooks on Windows
@@ -263,7 +346,7 @@ positives (an agent's shell escape, a crashed agent leaving a shell).
 Hook bytes, once written, are kept (`src/state/hooks.rs:152-162,211-221`), so the
 first Windows form must be final:
 
-- the command names the stable CLI by its absolute path with forward slashes in
+- the command names the stable CLI (D8) by its absolute path with forward slashes in
   double quotes, followed by `__state hook`, which Git Bash, `cmd.exe` and a direct
   `CreateProcess` all parse the same way;
 - Claude Code uses its exec form (command plus `args`, no shell) when the installed
@@ -274,14 +357,22 @@ first Windows form must be final:
 - never `cmd.exe /c` with a prompt, never `powershell -WindowStyle Hidden
   -EncodedCommand` (Kaspersky blocks it at process creation, Orca issue 16003).
 
-Spike S6 fixes the exact form per agent version.
+Spikes never write hooks into real agent configuration: every spike uses private
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`. Spike S6 fixes the exact form
+per agent version.
 
 ### D13. Attach
 
-- `hgs.exe a <session>` connects to the host, switches its console to virtual
-  terminal input and output, receives a repaint and then relays bytes both ways.
-  Console size changes are forwarded. `Ctrl+B d` and `Ctrl+B Ctrl+D` detach, as with
-  the default tmux prefix and the suggested `tmux.conf`.
+- `hgs.exe a <session>` connects to the host and sets its console modes: input clears
+  `ENABLE_PROCESSED_INPUT` (so Ctrl+C arrives as `\x03`), `ENABLE_LINE_INPUT` and
+  `ENABLE_ECHO_INPUT` and sets `ENABLE_VIRTUAL_TERMINAL_INPUT`; output sets
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and `DISABLE_NEWLINE_AUTO_RETURN`. It writes
+  with `WriteConsoleW`, buffering UTF-8 sequences split across reads, instead of
+  changing the code page (`src/platform/windows.rs:58-62`), reads size changes as
+  `WINDOW_BUFFER_SIZE_EVENT`, and restores every mode on detach and on host death.
+- It receives a repaint and then relays bytes both ways. `Ctrl+B d` and
+  `Ctrl+B Ctrl+D` detach, and `Ctrl+B Ctrl+B` sends a literal Ctrl+B (tmux's
+  `send-prefix`; Claude Code binds Ctrl+B).
 - Multiple clients may attach. The size follows the most recent client, as with
   `window-size latest`; with no client the last size stays.
 - `--existing --run-id` never creates or restores a session and refuses a changed
@@ -289,102 +380,144 @@ Spike S6 fixes the exact form per agent version.
 - Host death during an attach restores the terminal modes and prints the message the
   tmux path prints when the server dies.
 - The GUI's embedded terminal keeps running `hgs.exe a NAME --existing --run-id`
-  inside its own pseudoconsole. This doubles the ConPTY layer, but needs no GUI
-  protocol change; a direct pipe transport is a later optimization if rendering
-  suffers.
+  inside its own pseudoconsole. This doubles the ConPTY layer but needs no GUI
+  protocol change; the host-as-sole-responder rule (D6) keeps queries answered once.
 - `clients` in `ls --json` lists opaque client IDs on Windows (no tty paths).
 
 ### D14. Workers
 
 The host supervises the recovery worker (`hgs.exe recovery worker`, from the stable
 CLI) with a delay that doubles from 1 s to 5 min, because recovery belongs to the
-session lifecycle and Windows has no user service manager. The swarm worker stays
-tray-supervised as in Phase 1. The voice worker is out of scope; voice sends to a
-local Windows session are refused with a clear message.
+session lifecycle and Windows has no user service manager. On Windows,
+`recovery::ensure_worker` (`src/state/recovery.rs:1080-1106`) asks the host instead of
+detaching a process inside `hgs.exe`'s job, and does nothing when no host runs. The
+swarm worker stays tray-supervised as in Phase 1.
 
 ### D15. Paths and files
 
 - `platform::canonical` returns canonical paths without the `\\?\` prefix; every
-  stored or compared path uses it (38 `canonicalize` sites in `src/state`).
+  stored or compared path uses it (38 `canonicalize` sites in `src/state`, including
+  `cwd_canonical` at `src/state/workspace.rs:185`).
 - Comparisons of local paths on Windows are case-insensitive; session names derive
   from the canonical (on-disk) casing of the folder.
 - `hgs.exe` gets an application manifest (UTF-8 code page, `longPathAware`), as
-  `hgs-tray.exe` already has; today only the GUI has one.
+  `hgs-tray.exe` already has; today only the GUI has one (`build.rs:1-11`).
 - `.gitattributes` keeps `tests/fixtures/*.txt` and `src/state/data/*.txt`
   byte-exact (`-text`), so CRLF checkouts never change the fixtures that
   `include_str!` embeds.
-- Windows local folders stay in the local project store. They are never published
-  to the shared swarm catalog, which accepts only `/` paths on every current peer
-  (`src/swarm/catalog.rs:78`); a catalog kind for Windows paths is Phase 3.
+- Git runs with Windows forms of its non-interactive settings (an askpass that fails,
+  `NUL` instead of `/dev/null`) and an `ssh` that never receives synchronous pipes
+  (`src/state/worktrees.rs:67-72`).
+- **Local Windows folders stay local.** The GUI pushes the whole organization to the
+  swarm (`tray/src/SessionsWindow.cpp:1819-1821`), `flatten` publishes every folder
+  (`src/swarm/model.rs:52-66`), the catalog rejects non-`/` paths
+  (`src/swarm/catalog.rs:77-78`), and `organizationReady` replaces the local
+  organization (`SessionsWindow.cpp:1190-1193`). Phase 2 adds a local folder list
+  keyed by machine ID: `flatten` leaves non-POSIX local folders out, and the GUI
+  merges the local list back after each `organizationReady`. A test checks that a
+  Unix peer's sync never drops them. A shared catalog kind for Windows paths is
+  Phase 3.
 
 ### D16. GUI
 
-- Machines page: "Enable local sessions" for this computer when `local_host.state`
-  is `not-installed`, running `hgs.exe session-host install`; status of the host.
-- Path model per machine from `metrics.platform`: drive and UNC roots accepted for
-  the local Windows machine wherever `startsWith('/')` gates folders today
+- Machines page: "Enable local sessions" for this computer when the marker is absent,
+  running `hgs.exe session-host install`; host status, integrity and Windows session.
+- Once enabled, the GUI runs the stable CLI and refreshes it when its bundled build is
+  newer (D2).
+- Path model per machine from `metrics.platform`: drive and UNC roots accepted for the
+  local Windows machine wherever `startsWith('/')` gates folders today
   (`SessionOrganization.cpp:24,176,187`, `ProjectsDialog.cpp:351`,
   `NewSessionDialog.cpp:27,122,462`, `SessionsWindow.cpp:2229,2954,4132,4184,4274`,
-  `SessionCommands.h:109-113`). Stored organization JSON stays readable by Unix GUIs.
+  `SessionCommands.h:109-113`), with the local-only list from D15.
 - Terminal file drops quote for the target platform; the local folder shell opens
-  PowerShell in that folder through Windows Terminal.
-- New session lists only agents the machine supports (no `dsh` on Windows).
+  PowerShell in that folder through Windows Terminal; file references accept
+  `C:\…` and `C:/…` with line suffixes.
+- New session lists only agents the machine supports (no `dsh` on Windows); voice
+  sends to local Windows sessions are disabled with an explanation.
 - Mobile connection settings stay hidden on Windows independently of
   `local_sessions` (today they are coupled in `SettingsPage::setLocalSessions`).
 - Status text no longer names tmux ("the session continues on <machine>").
 - Local polling keeps a platform minimum interval on Windows until the host can push
   changes.
 
-## Spikes before the dependent milestones
+## Unix compatibility rules for the refactor
 
-Run on the Windows development PC with disposable state and isolated endpoints,
-never touching live sessions. Each spike records its results in Beads and adjusts
-this document.
+- The tmux backend builds every answer, including the batched `list` and
+  `input_state`, from today's exact calls in today's order: `ls --json` keeps
+  `list-clients`, `list-sessions` and both `list-panes` runs; the input check keeps
+  `display-message`, then `tcgetattr`, then `ps`.
+- It spawns plain `tmux` by name on every call, inheriting `TMUX` and
+  `TMUX_TMPDIR`, so the PATH shim in `tests/test_input.py:73` and the `TMUX_TMPDIR`
+  guard in `tests/test_hgs.sh:6-11` keep working.
+- Dry-run rendering becomes a backend method; the Unix strings stay exactly as
+  `tests/test_hgs.sh:84-186` pins them, and the Windows form is defined separately.
+- The golden census (M1.1) records, for the whole Python and shell suites, every tmux
+  invocation's argv shape, its order within each operation, its stdin bytes, the
+  inherited `TMUX`/`TMUX_TMPDIR`, the `ps` argv and the error strings that reach JSON
+  (`src/state/storage.rs:206-219`), before and after the refactor.
 
-| Spike | Question | Blocks |
-|---|---|---|
-| S1 | With inbox and bundled ConPTY, real Claude, Codex and Kimi: are `?2004h`, `?1049h` and cursor visible to the host? Are cursor and device queries answered with no client attached? Which colours and glyphs do the agents use with `TERM=xterm-256color`, with and without `FORCE_COLOR`? | D6, D7, D8 |
-| S2 | Bracketed paste markers, a lone ESC followed by text, Ctrl+C, Ctrl+S and Enter 180 ms after a paste reach each agent intact through the host. Input evidence (D10) has no false positive with an agent's shell escape or an exited agent. | D10, M5 |
-| S3 | Record Windows screens of every dialog the parsers read (trust, permission, approval, questions, effort and model pickers, update, resume, clear) for the parser fixtures. | M5 |
-| S4 | Breakaway works from `hgs.exe` started by the GUI, by a console and by sshd; the host and its agents survive GUI exit, GUI update and SSH logout; credentials of agents started by a host that sshd started (DPAPI, Credential Manager). | D4, M4 |
-| S5 | Each agent's reaction to `CTRL_BREAK_EVENT` and `CTRL_CLOSE_EVENT`; resume after both. | D11 |
-| S6 | Hook forms per agent version: Claude exec form and Git Bash form, Codex Windows command, Kimi command shell. Measure hook latency with Defender on. | D12 |
-| S7 | Startup cost of `hgs.exe` and hooks under real-time scanning; whether SQLite journal writes stay within the 5 s hook timeout. | M5 |
+## Spikes
+
+Run on the Windows development PC by the orchestrating session only (never by
+subagents), in a dedicated folder, with disposable state, isolated endpoints and
+private agent homes, never touching live sessions or real agent configuration. Each
+spike records its results in Beads and adjusts this document.
+
+| Spike | When | Question | Gates |
+|---|---|---|---|
+| S1 | M0 | With inbox and bundled ConPTY, real Claude and Codex (Kimi if available): are `?2004h`, `?1049h`, cursor keys and mouse modes visible to the host? Which queries reach the host and are they answered by ConPTY itself? Which colours and glyphs do the agents use with `TERM=xterm-256color`, with and without `FORCE_COLOR`? Record raw byte streams for the M2 corpus. | D6, D7, D8 |
+| S3 | M0, then M4 | Record raw streams and rendered screens of every dialog the parsers read (trust, permission, approval, questions, effort and model pickers, update, resume, clear). | M4 parsers |
+| S2 | probe now, confirmed after M3 | Bracketed paste, a lone ESC followed by text, Ctrl+C, Ctrl+S and Enter 180 ms after a paste reach each agent intact. Input evidence (D10) rejects an editor the agent opened and a crashed agent. | D10 |
+| S4 | probe now, confirmed after M3 | Breakaway works from `hgs.exe` started by the GUI, a console and sshd, and inside the tray's attach and swarm-worker jobs; host and agents survive GUI exit, GUI update, SSH logout and a desktop logoff while an SSH-started host runs; pipe DACL, integrity label and server/client identity checks; rename-aside of a running image; agent credentials (DPAPI, Credential Manager) under an SSH-started host. | D3, D4, D5 |
+| S5 | probe now, confirmed after M3 | Each agent's reaction to `CTRL_BREAK_EVENT` and `CTRL_CLOSE_EVENT`; resume after both. | D11 |
+| S6 | after M3 | Hook forms per agent version: Claude exec form and Git Bash form, Codex Windows command, Kimi command shell; hook latency with real-time scanning. | D12 |
+| S7 | after M3 | Start cost of `hgs.exe` and hooks under real-time scanning; SQLite journal writes within the 5 s hook timeout. | D12, M4 |
+
+D10, D11 and D12 are provisional until their spikes are confirmed.
 
 ## Milestones
 
 Each milestone lands with its tests; Unix stays byte-for-byte compatible after every
 one.
 
-- **M0 Spikes** S1-S7 (above).
+- **M0 Spikes** S1 and S3 (raw streams and dialogs), plus early probes for S2, S4
+  and S5.
 - **M1 Unix-safe groundwork.**
-  1. Guardrails: a Linux type-check of the Windows MSVC target
-     (`scripts/ci/check-windows-target.sh`, a fake C compiler for build scripts) and
-     a golden suite that records every tmux argv the CLI and state emit.
+  1. Guardrails: `scripts/ci/check-windows-target.sh` (a Linux type-check and clippy
+     of the Windows MSVC target with a stand-in C compiler for build scripts) and the
+     golden census described above.
   2. Shared-helper runtime traps fixed with no Unix change: directory sync, rename
-     retry, lock contention, `home()`, `canonical`, executable check, append-mode
-     lock files.
+     retry, lock contention, `home()` (including direct `HOME` reads in accounts),
+     `canonical`, executable check, write-mode lock files.
   3. Platform abstractions: process (presence, start time, table, describe, current
-     directories, pinned handles), file identity and private files, control (exit
-     info, shutdown guard, detached spawn, bounded runner), directories.
-  4. `TerminalBackend` trait with the tmux implementation; every call site moves
-     behind it; tty and `ps` checks become `input_state`.
+     directories that fail closed when unreadable, open-file holders, pinned handles),
+     file identity and private files, control (exit info, shutdown guard, detached
+     spawn, bounded runner with per-call jobs), directories, Git settings. The
+     fail-open `worktree_cleanup` fallback becomes fail-closed.
+  4. `TerminalBackend` trait with the tmux implementation under the rules above;
+     every call site moves behind it; tty and `ps` checks become `input_state`.
   5. `state` compiles on Windows with an unavailable backend; `state_windows.rs` is
-     removed; the 265 `state` unit tests run in the Windows CI job.
+     removed; the `state` unit tests that do not need Unix symlinks, `/bin/sh` or
+     Phase 2 non-goals (`dsh`, `voice`) run in Windows CI, and the rest stay
+     `cfg(unix)` by name.
 - **M2 Screen model** with the differential tests (D7).
-- **M3 Session host**: endpoint, protocol 1, ConPTY sessions, jobs, staging,
-  breakaway start, `session-host` command (D1-D6, D9).
-- **M4 Windows lifecycle**: host backend client, launch (D8), supervisor and
-  signals (D11), identity, input evidence (D10), hooks (D12), recovery worker (D14).
-- **M5 Attach client and listings** (D13, D2's `local_host`).
-- **M6 GUI** (D16).
+- **M3 Session host**: endpoint, protocol 1, ConPTY sessions, jobs, staging and the
+  marker, breakaway start, the supervisor channel, `session-host` (D1-D6, D9).
+- **M4 Windows lifecycle**: host backend client, launch and accounts (D8), supervisor
+  and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
+  (D14), Windows dialog fixtures and path-aware screen parsers
+  (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
+  `clear_context.rs:90-93`), open-file holders for Codex resume input.
+- **M5 Attach client and listings** (D13, `local_host`).
+- **M6 GUI** (D15 local folders, D16).
 - **M7 Tests, CI, packaging and docs**: a native `examples/fake_agent.rs` (raw input
-  recorder, fixture renderer, mode toggles, hook emitter); one backend contract
-  suite run against tmux on Unix and against the host on Windows; host survival
-  tests (start inside a kill-on-close job emulating sshd's); real-agent Windows
-  suites (keyless Claude against the local fake API, pinned win32 Codex); the
-  ConPTY pair in the zip and its checker; installation, reference, CI and
-  CONTRIBUTING updates.
+  recorder, fixture renderer, mode toggles, hook emitter); one backend contract suite
+  run against tmux on Unix and against the host on Windows; host survival tests
+  (start inside a kill-on-close job emulating sshd's); real-agent Windows suites
+  (keyless Claude against the local fake API, pinned win32 Codex) in a separate gated
+  `windows-host` CI job, so failures point at the host and the `windows-desktop` job
+  keeps its margin; the ConPTY pair in the zip and its checker; installation,
+  reference, CI and CONTRIBUTING updates.
 
 Local sessions on Windows are labelled a preview in the GUI and documentation until
 the real-agent Windows suites pass in CI. A skipped native suite is not
@@ -393,8 +526,8 @@ compatibility evidence.
 ## Risks
 
 - **Screen fidelity.** Parsers fail closed if serialization, glyphs or colours
-  differ. The differential test and recorded Windows fixtures come before parsers
-  are trusted on Windows.
+  differ. The differential test, the S1 streams and the S3 fixtures come before
+  parsers are trusted on Windows.
 - **Input through ConPTY.** Bracketed paste, ESC timing and control keys are
   unverified; S2 gates sending on Windows.
 - **Antivirus and enterprise policy.** Unsigned executables staged in the user
@@ -402,10 +535,9 @@ compatibility evidence.
   `hgs.exe`. The host reports blocked starts clearly; signing is a later decision.
 - **Logoff.** Windows ends a user's processes at logoff, so sessions end there, as
   user tmux servers do without lingering.
-- **Elevation.** An administrator's SSH session is elevated. Its host is separate
-  (D5) and runs agents elevated; the documentation says so.
-- **Call volume.** Each hook and listing becomes a pipe round trip instead of tmux
-  process launches; the host answers listings in one request.
-- **Upgrade compatibility.** A newer CLI must keep talking to an older running host
-  until its sessions end; protocol majors are retired only after no released host
-  uses them.
+- **Elevation and Windows sessions.** An administrator's SSH session is elevated and
+  runs in another Windows session. One host per state directory, integrity checks and
+  GUI warnings keep the two from mixing silently.
+- **Version skew.** The GUI's bundled CLI, the stable CLI and a running host can
+  differ by one version; protocol and state formats stay compatible in both
+  directions across that skew.
