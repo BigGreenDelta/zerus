@@ -53,7 +53,7 @@ private:
     QString account() const;
     void updateForm();
     void start();
-    void launch(const QString &target,const QString &addFolder,const QString &model);
+    void launch(const QString &target,const QString &addFolder);
     QString host() const;
     HgsClient m_client;
     AccountUsageStore *m_usageStore;

@@ -6778,8 +6778,18 @@ void TestSessionsWindow::launchNameFollowsRenameRules()
 void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
 {
     QTemporaryDir fixture;const auto fake=fixture.filePath("hgs");
-    const QJsonObject accounts{{"profiles",QJsonArray{QJsonObject{{"id","native-opencode"},{"provider","opencode"},{"label","Native configuration"},{"installed",true},{"is_default",true},
-        {"model_options",QJsonArray{QJsonObject{{"value","ollama/qwen3:8b"},{"label","Qwen 3"}},QJsonObject{{"value","ollama/qwen3:14b"},{"label","Qwen 3 large"}}}}}}}};
+    const QString longId = "ollama/" + QString(249, 'x');
+    const QString unicodeId = "ollama/" + QString(124, QChar(0x00e9)) + "x";
+    const QString id121 = "ollama/" + QString(114, 'x');
+    QCOMPARE(longId.toUtf8().size(), 256); QCOMPARE(unicodeId.toUtf8().size(), 256);
+    const QJsonArray modelsOffered{
+        QJsonObject{{"value","ollama/qwen3:8b"},{"label","Qwen 3"}},
+        QJsonObject{{"value","ollama/qwen3:14b"},{"label","Qwen 3 large"}},
+        QJsonObject{{"value",id121}},QJsonObject{{"value",longId}},QJsonObject{{"value",unicodeId}},
+        QJsonObject{{"value",longId+"x"}},QJsonObject{{"value","ollama/"+QString(125,QChar(0x00e9))}}};
+    const QJsonObject accounts{{"profiles",QJsonArray{
+        QJsonObject{{"id","native-opencode"},{"provider","opencode"},{"label","Native configuration"},{"installed",true},{"is_default",true},{"model_options",modelsOffered}},
+        QJsonObject{{"id","native-codex"},{"provider","codex"},{"label","Native account"},{"installed",true}}}}};
     QVERIFY(FakeCli::install(fake,"#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
         "if a[0]=='account':print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(accounts).toJson(QJsonDocument::Compact)))+")\n"
         "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
@@ -6787,14 +6797,18 @@ void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
     QSettings().setValue("workspace/launchOpenTerminal",true);
     NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
     auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
-    auto *account=dialog.findChild<QComboBox *>("launchAccount"),*models=dialog.findChild<QComboBox *>("launchModel");
+    auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
+    QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
     auto *terminal=dialog.findChild<QCheckBox *>("launchOpenTerminal");
-    QTRY_VERIFY(start->isEnabled());QTRY_COMPARE(models->count(),3);
-    QCOMPARE(account->currentData().toString(),QString("native-opencode"));QVERIFY(models->isVisible());QVERIFY(!terminal->isEnabled());
+    QTRY_VERIFY(start->isEnabled());QTRY_COMPARE(models->count(),6);
+    QCOMPARE(account->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));QVERIFY(models->isVisible());QVERIFY(!terminal->isEnabled());
     QVERIFY(terminal->toolTip().contains("Activity"));QVERIFY(none->isChecked());
     QCOMPARE(models->currentData().toString(),QString());models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
-    auto *agent=dialog.findChild<QComboBox *>("launchAgent");agent->setCurrentText("codex");QVERIFY(!models->isVisible());
-    agent->setCurrentText("opencode");QTRY_COMPARE(models->count(),3);models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    QVERIFY(models->findData(id121)>=0);QVERIFY(models->findData(longId)>=0);QVERIFY(models->findData(unicodeId)>=0);
+    QCOMPARE(models->findData(longId+"x"),-1);QCOMPARE(models->findData("ollama/"+QString(125,QChar(0x00e9))),-1);
+    const auto selectAccount=[&](const QString &id){for(int i=0;i<account->count();++i)if(account->item(i)->data(Qt::UserRole).toString()==id){account->setCurrentRow(i);return true;}return false;};
+    QVERIFY(selectAccount("native-codex"));QVERIFY(!models->isVisible());QCOMPARE(models->currentData().toString(),QString());
+    QVERIFY(selectAccount("native-opencode"));QTRY_COMPARE(models->count(),6);models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
     QVERIFY(models->geometry().right()<dialog.width());QVERIFY(start->geometry().bottom()<dialog.height());
     QSignalSpy launch(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launch.size(),1);
     QCOMPARE(launch[0][1].toString(),QString("opencode"));QCOMPARE(launch[0][2].toString(),QString("/fixture/project"));

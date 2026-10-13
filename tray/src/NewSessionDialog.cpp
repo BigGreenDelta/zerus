@@ -662,7 +662,7 @@ void NewSessionDialog::updateModels()
         for(int index=0;index<qMin(256,options.size());++index){
             const auto entry=options[index];
             const auto option=entry.toObject();const auto id=option["value"].toString(option["id"].toString());
-            if(id.isEmpty()||id.size()>120||!id.contains('/')||std::any_of(id.cbegin(),id.cend(),[](QChar c){return c.category()==QChar::Other_Control;})||m_model->findData(id)>=0)continue;
+            if(id.isEmpty()||id.toUtf8().size()>256||!id.contains('/')||std::any_of(id.cbegin(),id.cend(),[](QChar c){return c.category()==QChar::Other_Control;})||m_model->findData(id)>=0)continue;
             auto label=option["label"].toString();if(label.size()>160||std::any_of(label.cbegin(),label.cend(),[](QChar c){return c.category()==QChar::Other_Control;}))label={};
             m_model->addItem(label.isEmpty()||label==id?id:label+" ("+id+")",id);
         }
