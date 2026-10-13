@@ -173,6 +173,10 @@ pub fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
 pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.custom_flags(libc::O_NOFOLLOW)
 }
+/// Never block on a FIFO.
+pub fn never_block(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    options.custom_flags(libc::O_NONBLOCK)
+}
 /// Make a completed rename in `dir` durable.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
@@ -1678,6 +1682,20 @@ mod tests {
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o750)).unwrap();
         assert!(!verify_private(&folder, Private::Directory).unwrap());
         assert!(verify_private(&folder.join("missing"), Private::File).is_err());
+    }
+
+    #[test]
+    fn opening_a_fifo_without_a_writer_never_blocks() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // Without O_NONBLOCK this open would wait for a writer forever.
+        let file = never_block(fs::OpenOptions::new().read(true))
+            .open(&fifo)
+            .unwrap();
+        assert!(file.metadata().unwrap().file_type().is_fifo());
     }
 
     #[test]

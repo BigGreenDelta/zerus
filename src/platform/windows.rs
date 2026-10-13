@@ -745,7 +745,8 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
 #[allow(unused_imports)]
 pub use self::process::*;
 /// Process, file and control primitives for `state`, which does not compile on
-/// Windows yet; until it does, nothing here calls them.
+/// Windows yet; until it does, only `canonical` has callers here (the CLI's
+/// logical working directory and the account transfer).
 #[allow(dead_code)]
 mod process {
     use super::*;
@@ -805,13 +806,17 @@ mod process {
         }
         PathBuf::from(plain)
     }
+    /// Extensions of process images and of the command shims npm installs. Not
+    /// PATHEXT: it differs between computers and by default also lists scripts
+    /// such as `.js`, so `codex.js` would read as `codex` on one and not another.
+    const PROGRAM_EXTENSIONS: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
     /// The name a program goes by in process names and command lines: the file
-    /// name without an extension that makes it runnable (`node.exe` is `node`),
+    /// name without an extension that makes it a program (`node.exe` is `node`),
     /// lowercase because Windows names are case-insensitive.
     pub fn program_name(path: &Path) -> Option<String> {
         let name = path.file_name()?.to_str()?.to_lowercase();
         match name.rfind('.') {
-            Some(dot) if dot > 0 && extensions().contains(&name[dot..].to_owned()) => {
+            Some(dot) if dot > 0 && PROGRAM_EXTENSIONS.contains(&&name[dot..]) => {
                 Some(name[..dot].to_owned())
             }
             _ => Some(name),
@@ -824,6 +829,10 @@ mod process {
     /// Open a reparse point (a symbolic link) itself; it is then not a regular file.
     pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+    }
+    /// A file path names no FIFO here, so opening one never waits for a writer.
+    pub fn never_block(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+        options
     }
     /// Whether `path` itself (a link or junction is a reparse point and never
     /// counts) is the expected kind of entry, owned by this user, with no access
@@ -1332,7 +1341,6 @@ mod process {
     const SIGHUP: i32 = 1;
     const SIGTERM: i32 = 15;
     static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
-    static SHUTDOWN_CHILD: AtomicU32 = AtomicU32::new(0);
     static SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
     pub(super) unsafe extern "system" fn shutdown_event(event: u32) -> i32 {
         match event {
@@ -1378,7 +1386,6 @@ mod process {
     }
     impl Drop for ShutdownGuard {
         fn drop(&mut self) {
-            SHUTDOWN_CHILD.store(0, Ordering::SeqCst);
             SHUTDOWN_DONE.store(true, Ordering::SeqCst);
             unsafe {
                 SetConsoleCtrlHandler(Some(shutdown_event), 0);
@@ -1388,19 +1395,17 @@ mod process {
     pub fn shutdown_signal() -> i32 {
         SHUTDOWN_SIGNAL.load(Ordering::SeqCst)
     }
-    /// A request that arrived before `child` started never reached it: raise
-    /// Ctrl+Break again on this console.
-    pub fn forward_shutdown(child: &Child) {
-        SHUTDOWN_CHILD.store(child.id(), Ordering::SeqCst);
+    /// The console delivers later requests to `child` itself. One that arrived
+    /// before it started never reached it: raise Ctrl+Break again on this console.
+    pub fn forward_shutdown(_: &Child) {
         if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
             unsafe {
                 GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
             }
         }
     }
-    pub fn shutdown_child_exited() {
-        SHUTDOWN_CHILD.store(0, Ordering::SeqCst);
-    }
+    /// Nothing is passed on (see `forward_shutdown`), so nothing stops.
+    pub fn shutdown_child_exited() {}
 
     /// Start `command` outside this process's job, with a hidden console of its
     /// own (its console children never open a window) and its own process group.
@@ -1899,7 +1904,9 @@ mod tests {
             Some("node")
         );
         assert_eq!(name("C:/npm/Codex.CMD").as_deref(), Some("codex"));
+        // The default PATHEXT lists `.js` and `.vbs`; scripts keep their names.
         assert_eq!(name("codex.js").as_deref(), Some("codex.js"));
+        assert_eq!(name("Setup.VBS").as_deref(), Some("setup.vbs"));
         assert_eq!(name("python3.12.exe").as_deref(), Some("python3.12"));
         assert_eq!(name(".exe").as_deref(), Some(".exe"));
     }

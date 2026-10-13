@@ -428,10 +428,7 @@ fn read_tail(path: &Path) -> Result<(String, bool)> {
     Ok((String::from_utf8_lossy(&bytes).into_owned(), offset > 0))
 }
 fn open_regular(path: &Path) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+    let f = crate::platform::never_block(std::fs::OpenOptions::new().read(true))
         .open(path)
         .map_err(|e| e.to_string())?;
     if !f.metadata().map_err(|e| e.to_string())?.is_file() {
