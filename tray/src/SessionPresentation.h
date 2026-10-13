@@ -50,9 +50,7 @@ inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
         && details.value("run_id").toString() == s.runId && details.value("conversation_id").toString() == s.conversationId
         && work.value("sampled_at").toDouble() > s.backgroundObservedAt) {
         s.backgroundProcesses = work.value("count").toInt(-1);
-        s.backgroundStarted = work.value("started_at").toDouble();
         s.backgroundObservedAt = work.value("sampled_at").toDouble();
-        s.backgroundCommand = work.value("command").toString();
     }
     // A selected-session inspection can discover failure before the fleet poll.
     // Never apply another run/conversation or older hook evidence to its row.
@@ -94,9 +92,11 @@ inline bool scheduledIdle(const SessionInfo &s)
 {
     return s.activity == "idle" && s.phase == "idle" && s.scheduledJobs > 0;
 }
-inline bool backgroundIdle(const SessionInfo &s)
+// Commands the agent left running (stands, dev servers that never exit) are no
+// work: they offer the session's Processes but never make it Working.
+inline bool runningCommands(const SessionInfo &s)
 {
-    return s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses > 0;
+    return s.backgroundProcesses > 0;
 }
 // The next run as a time of day, "due" once it has passed, or empty if unknown.
 inline QString nextScheduledRun(const SessionInfo &s, const QDateTime &now = QDateTime::currentDateTime())
@@ -132,7 +132,6 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "starting") return QObject::tr("Starting");
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
-    if (backgroundIdle(s)) return QObject::tr("Background");
     if (scheduledIdle(s)) {
         const auto next = nextScheduledRun(s);
         return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
@@ -218,12 +217,12 @@ inline bool currentActivity(const SessionInfo &s, bool online = true)
 
 inline bool working(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && (s.activity == "busy" || backgroundIdle(s)) && !s.needsAction();
+    return currentActivity(s, online) && s.activity == "busy" && !s.needsAction();
 }
 
 inline bool scheduled(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && !s.needsAction() && !backgroundIdle(s) && scheduledIdle(s);
+    return currentActivity(s, online) && !s.needsAction() && scheduledIdle(s);
 }
 
 inline bool needsAttention(const SessionInfo &s, bool online = true)
@@ -279,8 +278,6 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
     }
     if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);
     if (!currentActivity(s, online)) return status(s, online);
-    if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 running command") : QObject::tr("%1 running commands").arg(s.backgroundProcesses))
-        + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);
     if (scheduled(s, online)) {
         const auto now = QDateTime::currentDateTime();
         if (s.nextScheduledAt <= 0) return QObject::tr("Waiting for its next scheduled run");

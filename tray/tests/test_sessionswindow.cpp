@@ -181,7 +181,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
-    void backgroundShellRowKeepsActiveAndOpensItsProcesses();
+    void backgroundShellRowIsReadyAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void backgroundPollKeepsActivityAndComposerStable();
@@ -2379,27 +2379,24 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
 }
 
-void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
+void TestSessionsWindow::backgroundShellRowIsReadyAndOpensItsProcesses()
 {
+    // Stands and dev servers the agent left running never keep a finished
+    // session working or hide its reply; Processes still shows them.
     QSettings().setValue("processes/enabled", true);
     auto state = fleet(); auto box = state.local(); auto &s = box.sessions[1];
-    s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1;
-    s.backgroundStarted = QDateTime::currentSecsSinceEpoch() - 90;
-    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
-    s.conversationId = "background-conversation"; s.replyId = "progress-reply"; s.sharedRead = true;
+    s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 2;
+    s.conversationId = "background-conversation"; s.replyId = "final-reply"; s.sharedRead = true;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(script()); window.setFleet(state); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     QListWidgetItem *row = nullptr;
     for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) row=list->item(i);
     QVERIFY(row);
-    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background"));
-    QVERIFY(row->data(SessionRoles::Working).toBool());
-    QVERIFY(!row->data(SessionRoles::Unread).toBool());
-    QVERIFY(state.local().sessions[1].unreadReply);
-    QVERIFY(!row->data(SessionRoles::Scheduled).toBool());
-    QCOMPARE(row->data(SessionRoles::WorkingSince).toDouble(),s.backgroundStarted);
-    QVERIFY(row->data(SessionRoles::Detail).toString().contains("build --wait"));
+    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Ready"));
+    QVERIFY(!row->data(SessionRoles::Working).toBool());
+    QVERIFY(row->data(SessionRoles::Unread).toBool());
+    QVERIFY(!row->data(SessionRoles::Detail).toString().contains("running command"));
     list->setCurrentItem(row);
     QSignalSpy terminated(&window,&SessionsWindow::sessionActivated);
     QContextMenuEvent event(QContextMenuEvent::Mouse,list->visualItemRect(row).center(),list->viewport()->mapToGlobal(list->visualItemRect(row).center()));

@@ -25,18 +25,23 @@ private slots:
     void foregroundRepliesStayUnreadWithoutReplay();
     void actualApplicationFocusSuppressesBanners();
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
-    void replyWaitsForLiveBackgroundShellToFinish();
+    void replyNotifiesWhileBackgroundCommandsRun();
 };
 
-void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
+// A finished turn is finished: commands the agent left running (stands, dev
+// servers) never postpone its reply notice. A working subagent still does.
+void TestAttention::replyNotifiesWhileBackgroundCommandsRun()
 {
     SessionInfo s; s.name="codex/project/session"; s.runId="run"; s.conversationId="conversation";
-    s.phase="idle"; s.activity="idle"; s.replyId="reply"; s.unreadReply=true; s.backgroundProcesses=1;
+    s.phase="idle"; s.activity="idle"; s.replyId="reply"; s.unreadReply=true; s.backgroundProcesses=2;
     BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
-    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
-    box.sessions[0].backgroundProcesses=0;
-    QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
+    QCOMPARE(tracker.observe({},box,1000,false).raised.size(),1);
+    QVERIFY(tracker.observe({},box,1001,false).raised.isEmpty());
+    s.name="codex/project/parent"; s.conversationId="parent-conversation"; s.subagentActiveCount=1;
+    box.sessions={s};
     QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
+    box.sessions[0].subagentActiveCount=0;
+    QCOMPARE(tracker.observe({},box,1003,false).raised.size(),1);
 }
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()
