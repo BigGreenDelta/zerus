@@ -542,13 +542,16 @@ The host resolves a pin that missed a rename of the session before the
 ### Tasks tab
 
 - A main tab **Tasks** after Activity, Terminal and Processes.
-- The tab belongs to a project, not to the session. A project selector inside
-  the tab chooses it; the choice persists. Switching sessions never changes the
-  board, its scroll position, filters or open card.
-- On first use the tab opens the selected session's project.
+- The tab shows one project's board and follows the selected session: selecting
+  a session of another project shows that project, with the card it had open.
+  A session of the same project, or without one, keeps the board, its scroll
+  position, filters and open card. A project selector inside the tab chooses
+  another project, which stays until a session of another project is selected.
+  The project shown persists across restarts until a session is selected.
 - When the selected session belongs to the shown project, its tasks are
   highlighted and a strip shows "This session's queue: N · Send next". A session
-  from another project highlights nothing.
+  from another project (with another project chosen in the tab) highlights
+  nothing.
 - Columns follow the project workflow. Done and Icebox start collapsed. Your Call
   is a warning strip above the board.
 - Cards show `ref`, title, labels, session tag and markers: ▶ working,
@@ -570,9 +573,8 @@ Call), **Move to…**, **Done**, **Delete** (with confirmation).
   session, pinned to it. Arrow menu: project pool, Backlog. Success clears the
   composer and flashes the chip; failure keeps the draft.
 - A composer toolbar chip **Tasks N** (this session's queue; Danger when a Your
-  Call exists). Clicking it switches the board, which only it and a Your Call
-  notification do: it opens the Tasks tab on that session's project with its
-  tasks highlighted.
+  Call exists). Clicking it opens the Tasks tab on that session's project with
+  its tasks highlighted, also after another project was chosen in the tab.
 - Session rows show a queue badge.
 - Your Call raises the usual attention notification, from the tray agent with or
   without the window (a Windows console, which reads another machine, only once

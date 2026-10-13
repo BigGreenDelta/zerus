@@ -40,11 +40,13 @@ enum {
 };
 }
 
-// The Tasks tab: the Overmind board of one logical project. The tab belongs to
-// the project, not to the selected session: switching sessions only changes
-// which cards are highlighted, never the project, the scroll positions, the
-// filter or the open card. The project is chosen in the tab and kept in
-// workspace/tasksProject; on first use it is the selected session's project.
+// The Tasks tab: the Overmind board of one logical project. It follows the
+// selected session: selecting a session of another project shows that
+// project's board, with the card that project had open. A session of the same
+// project, or one without a project, only changes which cards are highlighted,
+// never the project, the scroll positions, the filter or the open card, so a
+// project chosen in the tab stays until a session of another project is
+// selected. The project shown is kept in workspace/tasksProject.
 //
 // Columns follow the project workflow. The needs_human stages are not columns
 // but the Your Call strip above the board. A card can be dragged only to
@@ -202,6 +204,7 @@ private:
     QList<SessionOrganization::Group> m_groups;   // accessible ones
     Selection m_selection;
     QString m_project, m_openTask;
+    QString m_follow;                             // the newly selected session's project, shown once offered
     QHash<QString, QString> m_openTasks;          // the open card of each project
     QHash<QString, bool> m_collapsed;             // project + '\n' + stage, as chosen by a click
     QList<OvermindModel::Stage> m_stages;         // the columns shown (needs_human excluded)

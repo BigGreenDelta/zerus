@@ -1871,10 +1871,13 @@ that does not know the session.
 <a id="overmind-desktop"></a>
 
 **On the desktop.** A session's **Tasks** tab, after Activity, Terminal and
-Processes, shows the board of one project, chosen in the tab's project
-selector. The choice is kept; on first use the tab opens the selected
-session's project. Switching sessions never changes the board, its scroll
-position, its filter or the open card. When the selected session belongs to
+Processes, shows the board of one project. It follows the selected session:
+selecting a session of another project shows that project's board, with the
+card it had open. Selecting a session of the same project, or one without a
+project, keeps the board, its scroll position, its filter and the open card, so
+a project chosen in the tab's project selector stays until a session of
+another project is selected. The project shown is kept across restarts until a
+session is selected. When the selected session belongs to
 the shown project, its tasks are highlighted and a strip reads "This session's
 queue: N · Send next"; **Send next** sends the first task of that queue, or else
 the first unpinned ready task that is not an epic. Columns follow the workflow.

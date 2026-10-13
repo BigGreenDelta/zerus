@@ -818,13 +818,17 @@ void TasksView::setSession(const Selection &selection)
     // Send next's Send anyway repeats a send to the session it was refused for,
     // never to another one. The panel's name their task and session.
     if (!m_retry.isEmpty() && !m_retry.sessionKey.isEmpty() && selection.key != m_retry.sessionKey) clearMessage();
+    // A session of another project brings its board; a session of the same
+    // project, or without one, keeps the board and a project chosen here.
+    if (selection.project != m_selection.project) m_follow = selection.project;
     m_selection = selection;
     ensureProject();
     applyHighlights();
 }
 
-// The project shown: the current one while it is offered; else the stored
-// choice; else, once the tab is first opened, the selected session's project.
+// The project shown: the newly selected session's project once it is offered;
+// else the current one while it is offered; else the stored choice; else, once
+// the tab is first opened, the selected session's project.
 void TasksView::ensureProject()
 {
     const auto offered = [this](const QString &id) {
@@ -832,6 +836,11 @@ void TasksView::ensureProject()
         for (const auto &group : std::as_const(m_groups)) if (group.id == id) return true;
         return false;
     };
+    if (offered(m_follow)) {
+        const QString project = m_follow;   // setProject clears m_follow
+        setProject(project, true);
+        return;
+    }
     const QString stored = QSettings().value(ProjectSetting).toString();
     if (offered(m_project) && !(m_fallback && offered(stored))) return;
     if (offered(stored)) {
@@ -857,6 +866,8 @@ void TasksView::setProject(const QString &project, bool persist)
     if (persist && !project.isEmpty()) {
         QSettings().setValue(ProjectSetting, project);
         m_fallback = false;
+        // A project chosen here, by the chip or by a selected session settles it.
+        m_follow.clear();
     }
     if (project == m_project) {
         const QSignalBlocker block(m_projects);

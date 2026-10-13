@@ -827,7 +827,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_markRead=new ToolbarChip;m_markRead->setObjectName("activityMarkRead");
     m_markRead->setLabels(tr("Mark as read"));m_markRead->setIconName("read-all");m_markRead->setTone(ChipTone::Accent);
     toolbar->add(ComposerToolbar::Slot::MarkRead,m_markRead);
-    // This session's Overmind queue; clicking it is the one action that switches the Tasks board.
+    // This session's Overmind queue; clicking it opens the Tasks board on the session's project.
     m_tasksChip=new ToolbarChip;m_tasksChip->setObjectName("tasksChip");m_tasksChip->setIconName("tasks");m_tasksChip->setTone(ChipTone::Quiet);
     toolbar->add(ComposerToolbar::Slot::Tasks,m_tasksChip);
     connect(m_tasksChip,&QPushButton::clicked,this,&SessionsWindow::openSessionTasks);

@@ -227,7 +227,7 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
-    void tasksTabKeepsItsProjectAcrossSessions();
+    void tasksTabFollowsTheSessionsProject();
     void composerAddsTasksAndShowsQueues();
     void decisionNotificationOpensItsCard();
     void detailsPollingPreservesReadingPosition();
@@ -4215,10 +4215,11 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     QVERIFY(!reopened.findChild<QTextBrowser *>("subagents")->toPlainText().contains("Implement right panel"));
 }
 
-// The Tasks tab belongs to a project: selecting another session keeps the
-// board, its scroll position, filter and open card; only highlights change.
+// The Tasks tab follows the selected session's project: a session of another
+// project brings its board; one of the same project keeps the board, its
+// scroll position, filter and open card, and only highlights change.
 // HGS_TASKS_WINDOW_PREVIEW=<directory> saves the tab in both themes.
-void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
+void TestSessionsWindow::tasksTabFollowsTheSessionsProject()
 {
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
     const auto hgs = fixture.filePath("hgs");
@@ -4331,28 +4332,42 @@ void TestSessionsWindow::tasksTabKeepsItsProjectAcrossSessions()
         QCOMPARE(dashboardEntry, QString("codex/hgs/dashboard · Using a tool"));
         // A peer whose Overmind machine is not known yet cannot be chosen.
         QCOMPARE(disabled, QStringList{"mac\nclaude/infra/review"});
-        // Open a card, filter and scroll; then select a session of another project.
+        // Open a card, filter and scroll; then select another session of the
+        // same project (the default project holds the mac session).
         auto *filter = view->findChild<QLineEdit *>("tasksFilter"); filter->setText("o");
         view->openTask("r4t6b");
         auto *board = view->findChild<QScrollArea *>("tasksBoard");
         window.resize(900, 760); QTRY_VERIFY(board->horizontalScrollBar()->maximum() > 0);
         board->horizontalScrollBar()->setValue(board->horizontalScrollBar()->maximum());
         const int scroll = board->horizontalScrollBar()->value();
-        window.showSession({}, "kimi/docs/research"); QTest::qWait(60);
+        window.showSession("mac", "claude/infra/review"); QTest::qWait(60);
         QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
         QCOMPARE(view->project(), QString("alpha"));
         QVERIFY(highlighted(view).isEmpty());
-        QVERIFY(!window.findChild<QFrame *>("tasksSessionStrip")->isVisible());
         QCOMPARE(view->openedTask(), QString("r4t6b"));
         QCOMPARE(filter->text(), QString("o"));
         QCOMPARE(board->horizontalScrollBar()->value(), scroll);
         window.showSession({}, "codex/hgs/dashboard");
         QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
         QCOMPARE(board->horizontalScrollBar()->value(), scroll);
+        // A session of another project brings its board; coming back restores
+        // the card this project had open, and the filter stays.
+        window.showSession({}, "kimi/docs/research"); QTest::qWait(60);
+        QCOMPARE(tabs->currentWidget(), static_cast<QWidget *>(view));
+        QCOMPARE(view->project(), QString("beta"));
+        QCOMPARE(projects->currentData().toString(), QString("beta"));
+        QVERIFY(view->openedTask().isEmpty());
+        window.showSession({}, "codex/hgs/dashboard");
+        QCOMPARE(view->project(), QString("alpha"));
+        QCOMPARE(view->openedTask(), QString("r4t6b"));
+        QCOMPARE(filter->text(), QString("o"));
+        QTRY_COMPARE(highlighted(view), (QStringList{"k3f9x", "r4t6b"}));
     }
-    // The chosen project survives a restart, whatever session is selected.
+    // After a restart the selected session's project is shown.
     SessionsWindow reopened(FakeCli::program(hgs));
     reopened.resize(1240, 760); reopened.setFleet(fleet()); reopened.show(); reopened.showSession({}, "kimi/docs/research");
+    QCOMPARE(reopened.findChild<TasksView *>("tasksView")->project(), QString("beta"));
+    reopened.showSession({}, "codex/hgs/dashboard");
     QCOMPARE(reopened.findChild<TasksView *>("tasksView")->project(), QString("alpha"));
 
     const auto directory = qEnvironmentVariable("HGS_TASKS_WINDOW_PREVIEW");
@@ -4736,8 +4751,9 @@ void TestSessionsWindow::composerAddsTasksAndShowsQueues()
     QVERIFY(more->isEnabled()); QVERIFY(!chip->isVisible());
     editor->clear();
 
-    // The chip is the one action that switches the board: the Tasks tab opens on
-    // the session's project with its tasks highlighted and its decision open.
+    // The chip brings back the session's project after another one was chosen in
+    // the tab: the Tasks tab opens on it with its tasks highlighted and its
+    // decision open.
     window.showSession({}, "codex/hgs/dashboard"); QTRY_VERIFY(chip->isVisible());
     auto *projects = view->findChild<QComboBox *>("tasksProject");
     projects->setCurrentIndex(projects->findData("beta")); QCOMPARE(view->project(), QString("beta"));

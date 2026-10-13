@@ -628,11 +628,16 @@ void TestTasksView::highlightsTheSelectedSession()
     QCOMPARE(view.findChild<QLabel *>("tasksSessionQueue")->text(), QString("This session's queue: 2"));
     QCOMPARE(highlighted(view), (QStringList{"t2", "t4", "t5"}));
 
-    // A session of another project highlights nothing and has no strip.
+    // A session of another project brings its board. With another project
+    // chosen in the tab, it highlights nothing and has no strip.
     view.setSession(selection("other", "m1", "codex/other/one"));
+    QCOMPARE(view.project(), QString("other"));
+    auto *projects = view.findChild<QComboBox *>("tasksProject");
+    projects->setCurrentIndex(projects->findData("demo"));
+    QCOMPARE(view.project(), QString("demo"));
+    QTRY_VERIFY(card(view, "t2"));
     QVERIFY(highlighted(view).isEmpty());
     QVERIFY(!strip->isVisible());
-    QCOMPARE(view.project(), QString("demo"));
 }
 
 void TestTasksView::refusedDropShowsTheReason()
@@ -909,11 +914,10 @@ void TestTasksView::projectPersistsAcrossSessions()
         QCOMPARE(projects->itemData(0).toString(), QString("demo"));
         QCOMPARE(projects->itemText(1), QString("Other"));
         QVERIFY(!projects->itemIcon(0).isNull());
-        // First use opens the selected session's project.
+        // Selecting a session opens its project.
         view.setSession(selection("other", "m1", "codex/other/one"));
-        QVERIFY(view.project().isEmpty());
-        view.show();
         QCOMPARE(view.project(), QString("other"));
+        view.show();
         QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("other"));
         QCOMPARE(projects->currentData().toString(), QString("other"));
         // Choosing a project persists it.
@@ -921,7 +925,8 @@ void TestTasksView::projectPersistsAcrossSessions()
         QCOMPARE(view.project(), QString("demo"));
         QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
         QTRY_VERIFY(card(view, "t1"));
-        // Filter, open card and scroll position survive session changes.
+        // Filter, open card and scroll position survive selecting a session of
+        // the shown project, or one without a project.
         auto *filter = view.findChild<QLineEdit *>("tasksFilter");
         filter->setText("queue");
         QVERIFY(list(view, "Inbox")->item(0)->isHidden());
@@ -932,8 +937,8 @@ void TestTasksView::projectPersistsAcrossSessions()
         auto *board = view.findChild<QScrollArea *>("tasksBoard");
         QVERIFY(board->horizontalScrollBar()->maximum() > 0);
         board->horizontalScrollBar()->setValue(120);
-        view.setSession(selection("other", "m1", "codex/other/two"));
         view.setSession(selection("demo", "m1", "codex/demo/one"));
+        view.setSession(selection("demo", "m2", "codex/demo/two"));
         view.setSession({});
         QCOMPARE(view.project(), QString("demo"));
         QCOMPARE(filter->text(), QString("queue"));
@@ -955,14 +960,26 @@ void TestTasksView::projectPersistsAcrossSessions()
         board->horizontalScrollBar()->setValue(0);
         view.openTask("t6");
         QVERIFY(board->horizontalScrollBar()->value() > 0);
+        // A session of another project brings its board; coming back restores
+        // the card this project had open, and the filter stays.
+        filter->setText("queue");
+        view.setSession(selection("other", "m1", "codex/other/two"));
+        QCOMPARE(view.project(), QString("other"));
+        QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("other"));
+        QCOMPARE(projects->currentData().toString(), QString("other"));
+        view.setSession(selection("demo", "m1", "codex/demo/one"));
+        QCOMPARE(view.project(), QString("demo"));
+        QCOMPARE(view.openedTask(), QString("t6"));
+        QCOMPARE(filter->text(), QString("queue"));
+        QTRY_VERIFY(card(view, "t6"));
+        QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
     }
-    // A restart opens the chosen project, whatever session is selected.
+    // A restart opens the stored project until a session is selected.
     TasksView reopened(f.model.get());
     reopened.setProjects(organization().groups());
-    reopened.setSession(selection("other", "m1", "codex/other/one"));
     reopened.show();
     QCOMPARE(reopened.project(), QString("demo"));
-    // A project that became inaccessible falls back to the selected session's one.
+    // A project that became inaccessible falls back to an offered one.
     auto groups = organization().groups();
     groups[0].accessible = false;
     reopened.setProjects(groups);
@@ -984,6 +1001,26 @@ void TestTasksView::projectPersistsAcrossSessions()
     reopened.showProject("demo", "m1\ncodex/demo/one");
     QCOMPARE(reopened.project(), QString("demo"));
     QCOMPARE(shown.size(), 1);
+    QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
+
+    // The board follows the selected session to another project. A project
+    // chosen in the tab stays while sessions of the same project, or without
+    // one, are selected.
+    reopened.setSession(selection("other", "m1", "codex/other/one"));
+    QCOMPARE(reopened.project(), QString("other"));
+    projects->setCurrentIndex(projects->findData("demo"));
+    reopened.setSession(selection("other", "m1", "codex/other/two"));
+    QCOMPARE(reopened.project(), QString("demo"));
+    reopened.setSession(selection("", "m1", "codex/loose/one"));
+    QCOMPARE(reopened.project(), QString("demo"));
+    reopened.setSession(selection("other", "m1", "codex/other/one"));
+    QCOMPARE(reopened.project(), QString("other"));
+    // A session whose project is not offered yet brings it once it is.
+    reopened.setProjects(groups);
+    reopened.setSession(selection("demo", "m1", "codex/demo/one"));
+    QCOMPARE(reopened.project(), QString("other"));
+    reopened.setProjects(organization().groups());
+    QCOMPARE(reopened.project(), QString("demo"));
     QCOMPARE(QSettings().value("workspace/tasksProject").toString(), QString("demo"));
 }
 
