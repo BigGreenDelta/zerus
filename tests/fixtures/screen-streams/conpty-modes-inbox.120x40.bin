@@ -1,0 +1,97 @@
+[?9001h[?1004h[?25l[2J[m[HZERUS-MODES-BEGIN pid=32108 in_mode=0x1f7->0x3e0 out_mode=0x7->0xf set_in=true set_out=true
+]0;C:\Users\user01\zerus-dev\p2\probe.exe[?25h[?2004h[?1049h[?1h[?1000h[?1006h[?25l[H[K
+MODES-SET 2004 1049 1 1000 1006[K
+COLOR256 [38;5;114mfg114 [38;5;246mfg246 [39m[48;5;236mbg236[m [38;5;1mfg1 [38;5;9mfg9[K[m
+TRUECOLOR [38;2;215;119;87mfg(215,119,87) [39m[48;2;30;30;46mbg(30,30,46)[m[K
+ATTRS [1mbold[22m [2mdim[22m [3mitalic[23m [4munderline[24m [7mreverse[27m [9mstrike[29m[K
+GLYPHS ❯ › ─ ✔ | ● ⎿ ✻ ⏺ │ ╭ ╮ ╰ ╯ … ↵ ⏵ 日本[K
+REPLIES after_ms=1 n=37 hex=1b5b373b31521b5b3f36313b363b373b32313b32323b32333b32343b32383b33323b343263[K
+ECHO seconds=15 (type now)[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[9;1H[?25hIN t=338 n=6 hex=1b5b3230307e
+IN t=338 n=42 hex=666972737420706173746564206c696e650a7365636f6e6420706173746564206c696e651b5b3230317e
+IN t=518 n=1 hex=0d
+IN t=1119 n=6 hex=1b5b3230307e
+IN t=1119 n=42 hex=746869726420706173746564206c696e650d666f7572746820706173746564206c696e651b5b3230317e
+IN t=1299 n=1 hex=0d
+IN t=1900 n=1 hex=1b
+IN t=2150 n=13 hex=6573632d7468656e2d74657874
+IN t=2751 n=1 hex=03
+IN t=3351 n=1 hex=13
+IN t=3652 n=12 hex=61667465722d6374726c2d73
+IN t=4252 n=3 hex=1b5b41
+IN t=4552 n=3 hex=1b4f41
+IN t=4853 n=5 hex=c3a9e29daf
+IN t=5454 n=10 hex=1b5b3c303b31303b354d
+IN t=5454 n=10 hex=1b5b3c303b31303b356d
+IN t=5754 n=2 hex=1b78
+[?1006l[?1000l[?1l[?2004l[?1049l[?25l[HZERUS-MODES-BEGIN pid=32108 in_mode=0x1f7->0x3e0 out_mode=0x7->0xf set_in=true set_out=true[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[2;1H[?25h[?9001l[?1004lZERUS-MODES-END
