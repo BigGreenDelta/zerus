@@ -733,6 +733,7 @@ pub(super) fn journal_name(record: &Value) -> &str {
 
 pub(super) fn update_activity(record: &mut Value, event: &Value) {
     repair_kimi_main(record);
+    repair_claude_internal(record);
     let was_busy = record["activity"] == "busy";
     let kind = string(event, "hook_event_name");
     let timestamp = now();
@@ -742,6 +743,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     if ["SubagentStart", "SubagentStop"].contains(&kind)
         || (!root_agent && !string(event, "agent_id").is_empty())
     {
+        if claude_internal(record, event, kind) {
+            return;
+        }
         let mut child = clipped(&event["agent_id"], 160);
         if root_agent {
             child.clear();
@@ -765,6 +769,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             .or_insert_with(|| json!({"name": name, "started": timestamp}));
         if has_label {
             info["name"] = json!(name);
+        }
+        if kind == "SubagentStart" {
+            info["announced"] = json!(true);
         }
         // Claude names a subagent by its Agent call's description. Keep it only
         // when one unclaimed Agent call can have started this subagent.
@@ -1132,6 +1139,53 @@ pub(super) fn repair_kimi_main(record: &mut Value) {
     }
 }
 
+// Claude's internal agents (progress summaries, the suggested next message)
+// report hook events under their own agent ID, but never SubagentStart or an
+// agent type. They are no subagents of the conversation: a lone tool call from
+// one would otherwise stay working, since no SubagentStop ever follows it.
+fn claude_internal(record: &Value, event: &Value, kind: &str) -> bool {
+    string(record, "agent") == "claude"
+        && kind != "SubagentStart"
+        && !string(event, "agent_id").is_empty()
+        && string(event, "agent_type").is_empty()
+        && string(event, "agent_name").is_empty()
+        && record["subagents"]
+            .get(clipped(&event["agent_id"], 160))
+            .is_none()
+}
+
+// Older hooks recorded those internal agents as subagents named by their own
+// ID, and a lone tool call left the session working after its turn ended.
+// A started subagent is announced, carries its agent type, or is external.
+pub(super) fn repair_claude_internal(record: &mut Value) {
+    if string(record, "agent") != "claude" {
+        return;
+    }
+    let Some(children) = record["subagents"].as_object_mut() else {
+        return;
+    };
+    let before = children.len();
+    children.retain(|id, child| {
+        child["external"] == true || child["announced"] == true || string(child, "name") != id
+    });
+    if children.len() != before
+        && record["main_done"] == true
+        && record["phase"] == "working"
+        && record["active_tools"]
+            .as_object()
+            .is_none_or(|tools| tools.is_empty())
+        && record["subagents"].as_object().is_none_or(|children| {
+            !children
+                .values()
+                .any(|child| string(child, "state") == "working")
+        })
+        && telemetry::grouped_active(record) == 0
+    {
+        record["activity"] = json!("idle");
+        record["phase"] = json!("idle");
+    }
+}
+
 #[cfg(test)]
 mod attention_regressions {
     use super::*;
@@ -1350,6 +1404,74 @@ mod attention_regressions {
             update_activity(&mut record, &json!({"hook_event_name":"SessionStart"}));
             assert!(record["provider_error"].is_null());
         }
+    }
+    #[test]
+    fn claude_internal_agents_are_no_working_children() {
+        // Claude's internal agents (progress summaries, the suggested next
+        // message) report under their own agent ID, without SubagentStart or an
+        // agent type. A lone tool call from one never keeps the session working.
+        let mut record = json!({"agent":"claude","run_id":"run","main_done":false,"activity":"idle","phase":"idle",
+            "active_tools":{},"subagents":{}});
+        update_activity(&mut record, &json!({"hook_event_name":"UserPromptSubmit","prompt":"Go"}));
+        update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","agent_id":"a807","tool_name":"SubagentHandback"}));
+        update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","agent_id":"a174","tool_name":"ToolSearch"}));
+        update_activity(&mut record, &json!({"hook_event_name":"Stop","last_assistant_message":"Done"}));
+        assert_eq!((record["activity"].clone(), record["phase"].clone()), (json!("idle"), json!("idle")));
+        update_activity(&mut record, &json!({"hook_event_name":"SubagentStop","agent_id":"aba1","last_assistant_message":"Recap"}));
+        assert_eq!(record["subagents"], json!({}));
+        assert_eq!(record["phase"], "idle");
+
+        // A started subagent still keeps the session working until it stops,
+        // and so does a typed one whose start was missed.
+        update_activity(&mut record, &json!({"hook_event_name":"UserPromptSubmit","prompt":"Again"}));
+        update_activity(&mut record, &json!({"hook_event_name":"SubagentStart","agent_id":"a15","agent_type":"general-purpose"}));
+        update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","agent_id":"a15","tool_name":"Bash"}));
+        update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","agent_id":"a16","agent_type":"Explore","tool_name":"Read"}));
+        update_activity(&mut record, &json!({"hook_event_name":"Stop","last_assistant_message":"Waiting"}));
+        assert_eq!(record["phase"], "working");
+        assert_eq!(record["subagents"]["a15"]["current_tool"], "Bash");
+        update_activity(&mut record, &json!({"hook_event_name":"SubagentStop","agent_id":"a15","agent_type":"general-purpose"}));
+        update_activity(&mut record, &json!({"hook_event_name":"SubagentStop","agent_id":"a16","agent_type":"Explore"}));
+        assert_eq!(record["phase"], "idle");
+
+        // Other providers name their children only by agent ID.
+        let mut codex = json!({"agent":"codex","run_id":"run","main_done":false,"activity":"busy","phase":"working",
+            "active_tools":{},"subagents":{}});
+        update_activity(&mut codex, &json!({"hook_event_name":"PreToolUse","agent_id":"c1","tool_name":"Bash"}));
+        assert_eq!(codex["subagents"]["c1"]["state"], "working");
+    }
+    #[test]
+    fn claude_internal_agents_left_working_are_repaired() {
+        // Records written before internal agents were recognised: the lone tool
+        // call left a working child named by its own ID, and the session busy.
+        let stale = json!({"name":"a807","state":"working","current_tool":"SubagentHandback","started":1.0,"updated":1.0});
+        let mut record = json!({"agent":"claude","main_done":true,"activity":"busy","phase":"working","active_tools":{},
+            "subagents":{"a807":stale,"aba1":{"name":"aba1","state":"finished","detail":"Recap"},
+                "a15":{"name":"general-purpose","state":"finished","started":1.0}}});
+        repair_claude_internal(&mut record);
+        assert_eq!((record["activity"].clone(), record["phase"].clone()), (json!("idle"), json!("idle")));
+        assert_eq!(record["subagents"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["a15"]);
+
+        // A started subagent that still works keeps the session working, and a
+        // turn in progress is left alone.
+        let mut working = json!({"agent":"claude","main_done":true,"activity":"busy","phase":"working","active_tools":{},
+            "subagents":{"a807":stale,"a15":{"name":"general-purpose","state":"working"}}});
+        repair_claude_internal(&mut working);
+        assert_eq!(working["phase"], "working");
+        assert!(working["subagents"].get("a807").is_none());
+        let mut turn = json!({"agent":"claude","main_done":false,"activity":"busy","phase":"working","active_tools":{},
+            "subagents":{"a807":stale}});
+        repair_claude_internal(&mut turn);
+        assert_eq!(turn["phase"], "working");
+        // Other providers and external children keep theirs.
+        let mut kimi = json!({"agent":"codex","main_done":true,"activity":"busy","phase":"working","active_tools":{},
+            "subagents":{"c1":{"name":"c1","state":"working"}}});
+        repair_claude_internal(&mut kimi);
+        assert_eq!(kimi["phase"], "working");
+        let mut external = json!({"agent":"claude","main_done":true,"activity":"busy","phase":"working","active_tools":{},
+            "subagents":{"external:codex:s1":{"name":"external:codex:s1","external":true,"state":"working"}}});
+        repair_claude_internal(&mut external);
+        assert_eq!(external["phase"], "working");
     }
     #[test]
     fn kimi_root_is_not_a_busy_child() {

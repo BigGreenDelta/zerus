@@ -123,6 +123,7 @@ pub(super) fn read(name: &str) -> Result<Value> {
         return Err(format!("{name}: invalid saved binding"));
     }
     journal::repair_kimi_main(&mut record);
+    journal::repair_claude_internal(&mut record);
     Ok(record)
 }
 
