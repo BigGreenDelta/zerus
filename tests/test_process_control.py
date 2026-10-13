@@ -57,6 +57,8 @@ class ProcessControl(unittest.TestCase):
                 self.assertTrue(all(j['capabilities']['stop'] for j in jobs))
         chosen=next(j for j in jobs if j['os_pid']==self.children[0])
         self.assertGreaterEqual(chosen['child_count'],1)
+        # The shell records the sleep's PID after starting it; wait for the content.
+        self.wait_for(lambda:(self.root/'first-child').exists() and (self.root/'first-child').read_text().strip())
         grandchild=int((self.root/'first-child').read_text())
         self.cli('processes',self.name,'--stop',chosen['id'],'--run','other','--conversation',self.conversation_id,ok=False)
         self.assertEqual(len(self.jobs()),2)
