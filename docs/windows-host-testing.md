@@ -130,8 +130,37 @@ rm -rf "$root"
 `hgs __host backend '<operation>'` runs one operation of the terminal backend
 (`listing`, `panes`, `pane_info`, `capture`, `send`, `paste`, `set_run_marker`,
 `rename`, `kill_session`, `kill_pane`, `session_exists`, `session_name`,
-`input_state`, `on_terminal`; see `src/host/command.rs`) and prints `{"ok": ...}`
-or `{"error": ...}`. It reaches only a running host.
+`input_state`, `request_exit`, `on_terminal`; see `src/host/command.rs`) and prints
+`{"ok": ...}` or `{"error": ...}`. It reaches only a running host.
+
+## The supervisor channel
+
+Every session's `hgs.exe --run` registers a channel with its host before it starts
+its program (spec D10, D11; `src/host/supervisor.rs`). Through it the host reads
+the console evidence that input checks judge (the input mode, the attached
+processes and whether the supervisor's agent runs inside the session job) and asks
+for a pause: Ctrl+Break for the supervisor's process group, which its agent
+shares. Terminate pauses first and closes the console after 10 s. `host.log` notes
+each session's end with its supervisor's exit code (130 after a pause that ended
+the agent with `STATUS_CONTROL_C_EXIT`). In a window prepared as above, before its
+`rm -rf`:
+
+```sh
+ready="$(cygpath -w "$root/ready.json")"
+"$hgs" fake_agent "$project" --new -n three -d -- --ready "$ready" --prompt 'fake> '
+until [ -s "$root/ready.json" ]; do sleep 0.2; done
+pid=$(python -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$ready")
+pane=$("$hgs" __host call '{"op":"resolve_target","target":{"name":"fake_agent/project/three"}}' |
+    python -c 'import json, sys; print(json.load(sys.stdin)["ok"]["pane"])')
+"$hgs" __host backend '{"op":"set_run_marker","name":"fake_agent/project/three","run_id":"run-1"}'
+"$hgs" __host backend '{"op":"input_state","pane":"'"$pane"'","name":"fake_agent/project/three","run_id":"run-1","agent":"fake_agent","pid":'"$pid"'}'
+"$hgs" __host backend '{"op":"request_exit","pane":"'"$pane"'","pid":'"$pid"'}'  # the pause
+tail -1 "$root/state/host.log"  # session $N ended: exit 130 (0x00000082)
+```
+
+With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running host
+to supervise the stable CLI's `hgs.exe recovery worker` (D14); without a host
+nothing starts one.
 
 ## Running the tests
 
@@ -144,6 +173,9 @@ python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
 ```
 
+The Rust filter `host::supervisor` includes
+`a_supervisor_reports_its_console_and_pauses_its_group`, which runs the test binary
+as a supervisor on a pseudoconsole of an in-process host and its raw-input agent.
 `tests/test_windows_host.py` and `tests/test_windows_lifecycle.py` take the build
 from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
 `HGS_TEST_FAKE_AGENT` (default `target/debug/examples/fake_agent.exe`); their fake

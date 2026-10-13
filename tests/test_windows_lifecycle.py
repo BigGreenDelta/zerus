@@ -14,6 +14,13 @@ Tracked agents (Claude Code, Codex, Kimi) are refused on Windows until their hoo
 form is settled (spec D12), and attaching a terminal waits for the attach client
 (M5); both refusals are checked here.
 
+`Supervisor` covers the supervisor channel (spec D10, D11, D14) with untracked
+sessions: input checks of the console the supervisor reports (a pager the agent
+starts, cooked input, an agent that is gone while its supervisor runs on), the
+resume fallback after a quick failure and after crashes, a pause and a resume of
+`kimi` (a renamed fake agent), terminate's pause before its hang-up, and the
+recovery worker that a running host supervises.
+
 HGS_TEST_BIN names the hgs.exe under test (default target/debug/hgs.exe), the
 "portable" copy that every case launches from; HGS_TEST_FAKE_AGENT names the fake
 agent (default target/debug/examples/fake_agent.exe, `cargo build --locked
@@ -40,6 +47,7 @@ if os.name == "nt":
     KERNEL32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                     ctypes.POINTER(wintypes.DWORD))
     KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    KERNEL32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
     KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     WAIT_OBJECT_0 = 0
@@ -67,6 +75,12 @@ def read_json(path):
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
+
+
+def read_events(path, kind=None):
+    """The complete records a fake agent appended to `path`, of `kind` when given."""
+    lines = path.read_text(errors="replace").split("\n")[:-1] if path.exists() else []
+    return [event for event in map(json.loads, lines) if kind is None or event["kind"] == kind]
 
 
 @unittest.skipUnless(os.name == "nt", "local sessions on Windows run on Windows only")
@@ -115,8 +129,7 @@ class LifecycleCase(HostCase):
         return answer["ok"] if ok else answer["error"]
 
     def events(self, kind=None):
-        lines = self.record.read_text(errors="replace").split("\n")[:-1] if self.record.exists() else []
-        return [event for event in map(json.loads, lines) if kind is None or event["kind"] == kind]
+        return read_events(self.record, kind)
 
     def launch(self, tag="one", *extra, launch_id=None, env=None):
         """Start the fake agent in a session of its own; its name and ready record."""
@@ -319,17 +332,232 @@ class Sessions(LifecycleCase):
         self.assertEqual(self.backend({"op": "panes"})[0]["run_marker"], "run-1")
         session_id = info[0]
         self.assertEqual(self.backend({"op": "session_name", "id": session_id}), {"name": name})
-        # Input checks need the session's supervisor channel, which an untracked
-        # session never opens (D10): they fail closed.
-        error = self.backend({"op": "input_state", "pane": pane, "name": name, "run_id": "run-1",
-                              "agent": "claude", "pid": ready["pid"]}, ok=False)
-        self.assertIn("no supervisor", error)
-        # Terminate asks the supervisor first; without one it ends the session
-        # as tmux kill-session does.
+        # The supervisor's channel answers input checks for its agent (D10).
+        state = self.backend({"op": "input_state", "pane": pane, "name": name, "run_id": "run-1",
+                              "agent": "claude", "pid": ready["pid"]})
+        self.assertEqual(set(state), {"cursor_x", "cursor_y"})
+        # Terminate asks the supervisor to pause the agent first (D11).
         self.backend({"op": "kill_session", "target": {"session": session_id}})
         self.wait_for_exit(ready)
         self.wait_for("the end", lambda: not self.backend({"op": "listing"})["sessions"])
         self.assertEqual(self.backend({"op": "session_name", "id": session_id}), {"name": None})
+        self.assertEqual([event["signal"] for event in self.events("signal")], ["CTRL_BREAK"])
+
+
+class Supervisor(LifecycleCase):
+    """The `hgs.exe --run` supervisor's channel to the host (spec D10, D11): input
+    checks judge the console it reports, a pause is its Ctrl+Break for the process
+    group it shares with its agent, and terminate pauses before it hangs up."""
+
+    def setUp(self):
+        super().setUp()
+        # A pager and Kimi stand-ins: renamed fake agents, configured by variables.
+        for name in ("less.exe", "kimi.exe"):
+            shutil.copy2(FAKE_AGENT, self.bin / name)
+
+    def claim(self, name, pane, pid, run_id="run-1"):
+        return {"op": "input_state", "pane": pane, "name": name, "run_id": run_id, "agent": "fake_agent",
+                "pid": pid}
+
+    def ready_for_input(self, name, pane):
+        """The run marker a tracked launch sets, and the agent's bracketed paste."""
+        self.backend({"op": "set_run_marker", "name": name, "run_id": "run-1"})
+        self.wait_for("bracketed paste", lambda: self.backend(
+            {"op": "pane_info", "target": {"pane": pane}, "fields": ["bracketed_paste"]})["text"] == "1")
+
+    def refusal(self, claim):
+        """The error of an input check, or None when it is accepted."""
+        result = self.run_hgs("backend", json.dumps(claim))
+        answer = json.loads(result.stdout)
+        return answer.get("error")
+
+    def kimi_env(self, tag):
+        """A launch of `kimi` untracked, whose resume attempt has a minute to count
+        as a resume; its records, ready file and control file are its own."""
+        paths = {kind: self.root / f"{tag}.{kind}" for kind in ("jsonl", "ready", "control")}
+        env = dict(self.env, HGS_TRACKING="0", HGS_FALLBACK_SECS="60", FAKE_AGENT_RECORD=str(paths["jsonl"]),
+                   FAKE_AGENT_READY=str(paths["ready"]), FAKE_AGENT_CONTROL=str(paths["control"]),
+                   FAKE_AGENT_PROMPT=f"{tag}> ")
+        return env, paths["jsonl"], paths["ready"]
+
+    def launch_kimi(self, tag, env, ready, previous=None):
+        """`hgs kimi PROJECT -n TAG -d -c`: `--run 2 kimi -c kimi`. Its session and
+        the ready record of an agent other than `previous`."""
+        name = f"kimi/project/{tag}"
+        result = self.hgs("kimi", str(self.project), "-n", tag, "-d", "-c", env=env)
+        self.assertEqual(result.stdout, f"hgs: started {name}\n")
+        started = self.wait_for("the agent", lambda: self.started(ready, previous))
+        self.status()
+        return name, started
+
+    def started(self, ready, previous=None):
+        record = read_json(ready)
+        return record if record and (previous is None or record["pid"] != previous["pid"]) else None
+
+    def end_process(self, ready, code):
+        """End the agent of `ready` as a crash or a kill does, with exit `code`."""
+        handle = open_host(ready["pid"], ready["process_start"])
+        self.assertTrue(handle, "the agent runs")
+        try:
+            self.assertTrue(KERNEL32.TerminateProcess(handle, code))
+            self.assertEqual(KERNEL32.WaitForSingleObject(handle, LIMIT * 1000), WAIT_OBJECT_0)
+        finally:
+            KERNEL32.CloseHandle(handle)
+
+    def host_log(self):
+        path = self.state / "host.log"
+        return path.read_text(errors="replace") if path.exists() else ""
+
+    def test_input_checks_judge_the_console_its_supervisor_reports(self):
+        less = f'"{self.bin / "less.exe"}"'
+        env = dict(self.env, FAKE_AGENT_ON_EOF="ignore")
+        name, ready = self.launch("one", "--hook-command", less, "--hook-events", "submit", "--hook-timeout",
+                                  "8000", env=env)
+        pane = self.pane(name)["pane"]
+        self.ready_for_input(name, pane)
+        # An idle agent: raw input, alive in the session's job, nothing else attached.
+        state = self.backend(self.claim(name, pane, ready["pid"]))
+        self.assertEqual(set(state), {"cursor_x", "cursor_y"})
+        self.assertIn("not attached", self.refusal(self.claim(name, pane, ready["pid"] + 4)))
+        self.assertIn("expected agent input mode", self.refusal(self.claim(name, pane, ready["pid"], "run-2")))
+
+        # A pager the agent started takes over the console while it runs.
+        staged = self.root / "control.tmp"
+        staged.write_text("hook submit look\n")
+        os.replace(staged, self.control)
+        refused = self.wait_for("the pager", lambda: self.refusal(self.claim(name, pane, ready["pid"])))
+        self.assertIn("expected agent input mode", refused)
+        hook, = self.wait_for("the pager's end", lambda: self.events("hook"))
+        self.assertTrue(hook["timeout"], hook)
+        self.assertIsNone(self.refusal(self.claim(name, pane, ready["pid"])))
+        self.hgs("kill", name)
+        self.wait_for("the end", lambda: not self.sessions())
+
+    def test_cooked_input_is_refused(self):
+        name, ready = self.launch("cooked", "--raw", "0")
+        pane = self.pane(name)["pane"]
+        self.ready_for_input(name, pane)
+        self.assertIn("does not own an interactive input terminal",
+                      self.refusal(self.claim(name, pane, ready["pid"])))
+
+    def test_a_quick_failed_resume_starts_fresh_and_its_agent_is_refused(self):
+        env, record, ready = self.kimi_env("quick")
+        name, first = self.launch_kimi("quick", env, ready)
+        self.assertEqual(first["argv"], ["-c"])
+        pane = self.pane(name)
+        self.ready_for_input(name, pane["pane"])
+        self.assertIsNone(self.refusal(self.claim(name, pane["pane"], first["pid"])))
+
+        # The resume attempt fails at once: nothing to resume, so the supervisor
+        # stays and starts the agent afresh. The ended agent's raw console stays.
+        self.end_process(first, 1)
+        fresh = self.wait_for("the fresh start", lambda: self.started(ready, first))
+        self.assertEqual(fresh["argv"], [])
+        self.assertEqual(self.pane(name)["pid"], pane["pid"])
+        self.assertIn("not attached", self.refusal(self.claim(name, pane["pane"], first["pid"])))
+        self.wait_for("the fresh agent's input", lambda: self.refusal(
+            self.claim(name, pane["pane"], fresh["pid"])) is None)
+        self.assertIn("nothing to resume", self.backend({"op": "capture", "pane": pane["pane"]})["text"])
+        self.hgs("kill", name)
+        self.wait_for("the end", lambda: not self.sessions())
+
+    def test_a_crashed_resume_ends_the_session_without_a_fresh_start(self):
+        # An access violation and a missing DLL read as signals (spec D9), not as
+        # "nothing to resume".
+        for tag, status in (("segv", 0xC0000005), ("dll", 0xC0000135)):
+            env, record, ready = self.kimi_env(tag)
+            name, first = self.launch_kimi(tag, env, ready)
+            session = self.pane(name)["session_id"]
+            logged = len(self.host_log())
+            self.end_process(first, status)
+            self.wait_for("the end", lambda: name not in self.sessions())
+            self.assertEqual(len(read_events(record, "start")), 1, tag)
+            self.assertIn(f"session {session} ended: exit {134 if tag == 'dll' else 139} ",
+                          self.host_log()[logged:])
+
+    def test_a_pause_ends_the_agent_and_a_resume_relaunches_it(self):
+        env, record, ready = self.kimi_env("paused")
+        name, first = self.launch_kimi("paused", env, ready)
+        pane = self.pane(name)
+        logged = len(self.host_log())
+        # `hgs pause` asks the backend to stop the agent; the supervisor raises
+        # Ctrl+Break for its group (D11), and the agent ends as Codex and Kimi do.
+        started = time.monotonic()
+        self.backend({"op": "request_exit", "pane": pane["pane"], "pid": first["pid"]})
+        self.wait_for_exit(first)
+        self.wait_for("the end", lambda: name not in self.sessions())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual([event["signal"] for event in read_events(record, "signal")], ["CTRL_BREAK"])
+        self.assertEqual(read_events(record, "exit")[-1]["cause"], "signal:CTRL_BREAK")
+        # A paused resume is final: the supervisor recorded the stop and ended
+        # with STATUS_CONTROL_C_EXIT read as SIGINT, without a fresh start.
+        self.assertEqual(len(read_events(record, "start")), 1)
+        self.assertIn(f"session {pane['session_id']} ended: exit 130 (0x00000082)", self.host_log()[logged:])
+
+        # A resume starts it again, with its resume arguments.
+        name, again = self.launch_kimi("paused", env, ready, previous=first)
+        self.assertEqual(again["argv"], ["-c"])
+        self.assertEqual(len(read_events(record, "start")), 2)
+        self.hgs("kill", name)
+        self.wait_for("the end", lambda: not self.sessions())
+
+    def test_a_paused_resume_is_final_whatever_its_exit_code(self):
+        # An agent that exits with an ordinary failure on Ctrl+Break: only the
+        # stop request the supervisor recorded keeps it from starting fresh.
+        env, record, ready = self.kimi_env("ordinary")
+        env["FAKE_AGENT_ON_SIGNAL"] = "CTRL_BREAK=exit:1"
+        name, first = self.launch_kimi("ordinary", env, ready)
+        pane = self.pane(name)
+        logged = len(self.host_log())
+        self.backend({"op": "request_exit", "pane": pane["pane"], "pid": first["pid"]})
+        self.wait_for("the end", lambda: name not in self.sessions())
+        self.assertEqual(read_events(record, "exit")[-1]["code"], 1)
+        self.assertEqual(len(read_events(record, "start")), 1)
+        self.assertIn(f"session {pane['session_id']} ended: exit 1 (0x00000001)", self.host_log()[logged:])
+
+    def test_terminate_pauses_first_and_hangs_up_an_agent_that_stays(self):
+        name, ready = self.launch("stays", "--on-signal", "CTRL_BREAK=ignore")
+        started = time.monotonic()
+        self.backend({"op": "kill_session", "target": {"name": name}})
+        self.wait_for_exit(ready)
+        elapsed = time.monotonic() - started
+        self.wait_for("the end", lambda: not self.sessions())
+        # The pause, the 10 s grace for the supervisor, then the closed console,
+        # which ends the input and sends CTRL_CLOSE in either order.
+        self.assertGreaterEqual(elapsed, 9, elapsed)
+        self.assertLess(elapsed, 25, elapsed)
+        signals = [event["signal"] for event in self.events("signal")]
+        self.assertEqual(signals[0], "CTRL_BREAK", signals)
+        self.assertLessEqual(set(signals), {"CTRL_BREAK", "CTRL_CLOSE"}, signals)
+        self.assertIn(self.events("exit")[-1]["cause"], ("eof", "signal:CTRL_CLOSE"))
+
+    def test_the_host_supervises_the_recovery_worker_while_it_runs(self):
+        heartbeat = self.state / "recovery" / "heartbeat.json"
+
+        def recovery(*args, payload=None):
+            result = subprocess.run([str(HGS), "recovery", *args], env=self.env, cwd=self.work, input=payload,
+                                    capture_output=True, text=True, timeout=LIMIT * 2, creationflags=HIDDEN)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads(result.stdout)
+
+        # Enabled without a host: nothing starts a worker, and no host starts.
+        self.assertTrue(recovery("set", payload=json.dumps({"enabled": True}))["policy"]["enabled"])
+        self.assertEqual(self.status(), {"running": False})
+        self.assertFalse(heartbeat.exists())
+
+        # With a host, the next request has it run the stable CLI's worker (D14).
+        name, _ = self.launch("one")
+        recovery("get")
+        beat = self.wait_for("the worker", lambda: read_json(heartbeat))
+        self.assertTrue(beat["enabled"], beat)
+
+        # The worker ends with the host.
+        self.hgs("kill", name)
+        self.wait_for("the idle exit", lambda: not self.status()["running"], timeout=LIMIT + 10)
+        self.wait_for_hosts()
+        written = heartbeat.stat().st_mtime_ns
+        time.sleep(8)
+        self.assertEqual(heartbeat.stat().st_mtime_ns, written, "no worker runs without a host")
 
 
 if __name__ == "__main__":
