@@ -121,14 +121,15 @@ without the local session host and `hgs-tray.exe` for remote machines. You need:
 - Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
   DeepSeek Native UI is an optional Linux plugin).
   CI installs it with `scripts/ci/aqt-requirements.txt` (aqtinstall 3.3.0 cannot
-  install Qt 6.11 or later for Windows yet); the same works locally:
+  install Qt 6.11 or later for Windows yet) and one worker from
+  `scripts/ci/aqt-settings.ini`; the same works locally:
 
 ```sh
 python -m venv ~/aqt
 ~/aqt/Scripts/python -m pip install --require-hashes --only-binary :all: \
     -r scripts/ci/aqt-requirements.txt
-~/aqt/Scripts/python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
-    -m qtmultimedia --outputdir ~/Qt
+~/aqt/Scripts/python -m aqt -c scripts/ci/aqt-settings.ini \
+    install-qt windows desktop 6.10.3 win64_msvc2022_64 -m qtmultimedia --outputdir ~/Qt
 ```
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and
