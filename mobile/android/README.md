@@ -302,7 +302,9 @@ Send position. Hold it to record, release to keep a preview, or slide left to
 cancel the recording. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
-left chevron. Sliding moves and fades the hint. The text editor and its state stay
+left chevron. When the full instruction cannot fit at the current font size, the
+visual cue shortens to **Cancel**; accessibility retains the full swipe instruction.
+Sliding moves and fades the hint. The text editor and its state stay
 mounted underneath and reject input; stopping restores them. The microphone keeps
 its 48 dp interaction target and inset 40 dp visual face. Explicit Stop and Cancel
 actions remain available through accessibility and keyboard controls.

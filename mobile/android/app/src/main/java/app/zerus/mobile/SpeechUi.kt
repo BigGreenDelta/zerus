@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.onClick
@@ -48,6 +49,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -275,17 +277,23 @@ import androidx.compose.ui.unit.dp
     val progress = speech.gestureCancelProgress
     val style = MaterialTheme.typography.bodyMedium
     val elapsed = voiceRecordingTime(speech.elapsedMs)
+    val textMeasurer = rememberTextMeasurer()
+    val fullCueWidth = textMeasurer.measure("Slide to cancel", style, softWrap = false, maxLines = 1).size.width +
+        with(LocalDensity.current) { 16.dp.roundToPx() }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.error, CircleShape))
         Text(elapsed, modifier = Modifier.semantics { contentDescription = "Recording $elapsed" }, maxLines = 1,
             style = style.copy(fontFeatureSettings = "tnum"), color = MaterialTheme.colorScheme.onSurface)
-        Box(Modifier.weight(1f).clipToBounds(), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.weight(1f).clipToBounds(), contentAlignment = Alignment.Center) {
+            val cueText = if (constraints.maxWidth >= fullCueWidth) "Slide to cancel" else "Cancel"
             if (speech.touchRecording) Row(
                 Modifier.graphicsLayer { translationX = -32.dp.toPx() * progress; alpha = 1f - progress },
                 verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.ChevronLeft, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Slide to cancel", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                Text(cueText,
+                    modifier = Modifier.clearAndSetSemantics { contentDescription = "Slide to cancel" },
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else Text("Recording", maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -293,6 +301,7 @@ import androidx.compose.ui.unit.dp
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun SpeechComposerStatus(model: ZerusViewModel) {
     val speech = model.speech
     val draft = speech.draft
@@ -308,7 +317,7 @@ import androidx.compose.ui.unit.dp
                 val configuration = LocalConfiguration.current
                 if (configuration.keyboard != Configuration.KEYBOARD_NOKEYS && configuration.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO)
                     Text("Space or Esc stops recording. Your typed draft is kept.", style = MaterialTheme.typography.bodySmall)
-                Row {
+                FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = { recordingId?.let(speech::stopCapture) }) { Text("Stop recording") }
                     TextButton(onClick = { recordingId?.let(speech::cancelCapture) }) { Text("Cancel") }
                 }
@@ -321,7 +330,7 @@ import androidx.compose.ui.unit.dp
                     else "Transcription: ${computer?.name ?: draft.machineId} / ${computer?.profiles?.find { it.id == draft.profileId }?.name ?: draft.profileId}", style = MaterialTheme.typography.bodySmall)
                 VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs)
                 val reason = speech.sendReason()
-                Row {
+                FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = {
                         model.attachments.stopAudio()
                         if (model.voiceColdCache()) confirmCold = draft else speech.submit()

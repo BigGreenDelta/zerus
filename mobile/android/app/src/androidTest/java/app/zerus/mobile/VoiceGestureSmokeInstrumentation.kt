@@ -140,7 +140,11 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
     }
     private fun inlineRecordingBounds(atRest: Boolean = true): Pair<Rect, Rect> {
         val timer = uiNode("inline recording timer") { it.contentDescription?.toString()?.matches(Regex("Recording [0-9]+:[0-9]{2}(\\.[0-9])?")) == true }
-        val hint = node("Slide to cancel")
+        // The visible cue adapts to "Cancel" at large fonts, while its complete
+        // instruction stays accessible. Screenshots qualify both visual variants.
+        val hint = uiNode("complete slide cancellation instruction") {
+            it.isVisibleToUser && it.contentDescription?.toString() == "Slide to cancel"
+        }
         val timerBounds = Rect().also(timer::getBoundsInScreen)
         val hintBounds = Rect().also(hint::getBoundsInScreen)
         val actionBounds = Rect().also { node("Stop recording").getBoundsInScreen(it) }
@@ -276,7 +280,30 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                 noDelivery()
                 return draft
             }
+            fun revealPreviewDiscard(allowEmptyViewport: Boolean = false): Boolean {
+                waitForIdleSync()
+                fun discardVisible() = named("Discard")?.let { node ->
+                    node.isVisibleToUser && !Rect().also(node::getBoundsInScreen).isEmpty
+                } == true
+                if (discardVisible()) return true
+                var scrollOwner: AccessibilityNodeInfo? = named("Voice message for ${target.session}")
+                    ?: named("Discard") ?: named("Transcription provider")
+                while (scrollOwner != null && !scrollOwner.isScrollable) scrollOwner = scrollOwner.parent?.also { it.refresh() }
+                val viewport = Rect().also { scrollOwner?.getBoundsInScreen(it) }
+                if (viewport.isEmpty && allowEmptyViewport) return false
+                check(!viewport.isEmpty) { "Preview did not expose a scroll viewport to reach Discard" }
+                val scroller = checkNotNull(scrollOwner)
+                var attempts = 0
+                while (!discardVisible() && attempts++ < 32) {
+                    if (!scroller.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) break
+                    waitForIdleSync(); SystemClock.sleep(50)
+                    scroller.refresh()
+                }
+                check(discardVisible()) { "Preview has viewport $viewport but Discard was unreachable after $attempts scroll attempts" }
+                return true
+            }
             fun discard() {
+                check(revealPreviewDiscard())
                 tap("Discard"); tap("Discard recording")
                 await("explicit preview discard") { !model.speech.busy && model.speech.draft == null }
                 check(PrivateStore(targetContext).voiceState().draft == null)
@@ -721,23 +748,9 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                     if (!cancel) {
                         settledEditorBounds()
                         screenshot("voice-gesture-expanded-preview-ime.png")
-                        var discardVisible = named("Discard")?.isVisibleToUser == true
-                        var scrollOwner: AccessibilityNodeInfo? = named("Voice message for ${target.session}")
-                        while (scrollOwner != null && !scrollOwner.isScrollable) scrollOwner = scrollOwner.parent?.also { it.refresh() }
-                        val previewViewport = Rect().also { scrollOwner?.getBoundsInScreen(it) }
-                        var attempts = 0
-                        while (!discardVisible && scrollOwner != null && !previewViewport.isEmpty && attempts++ < 32) {
-                            if (!scrollOwner.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) break
-                            waitForIdleSync(); SystemClock.sleep(50)
-                            scrollOwner.refresh()
-                            discardVisible = named("Discard")?.isVisibleToUser == true
-                        }
-                        if (discardVisible) discard()
+                        if (revealPreviewDiscard(allowEmptyViewport = true)) discard()
                         else {
                             screenshot("voice-gesture-expanded-preview-clipped.png")
-                            check(previewViewport.isEmpty) {
-                                "Expanded preview has viewport $previewViewport but Discard was unreachable after $attempts scroll attempts"
-                            }
                             viewportNotes += "Expanded editor with IME: preview controls had no exposed scroll viewport; explicitly closed the fixture keyboard to reach Discard (screenshot retained)."
                         }
                     }

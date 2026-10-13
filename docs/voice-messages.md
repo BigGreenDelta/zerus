@@ -33,7 +33,9 @@ attachments restore the ordinary Send action.
 
 Recording keeps the text draft read-only and disables attachment changes. During
 a hold, the empty editor displays a single recording row: a red indicator, a
-captured-audio timer with tenths, and a left chevron with **Slide to cancel**. The
+captured-audio timer with tenths, and a left chevron with **Slide to cancel**. Narrow
+layouts use **Cancel** when the full phrase cannot fit at the current font size,
+while accessibility retains the complete swipe instruction. The
 hint follows the left drag and fades; the underlying editor and the trailing
 48 dp pointer/focus/semantics node remain mounted. Explicit Record, Stop and
 Cancel actions support accessibility, and Space or Escape on a hardware keyboard
