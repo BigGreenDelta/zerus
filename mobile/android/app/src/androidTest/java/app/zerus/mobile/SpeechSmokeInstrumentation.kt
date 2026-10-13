@@ -113,12 +113,24 @@ class SpeechSmokeInstrumentation : Instrumentation() {
     }
     private fun keyboardStop(activity: MainActivity, model: ZerusViewModel, target: Target, code: Int) {
         val original = main { model.draft(target) }
+        val editorState = main { checkNotNull(model.speechComposer).editor }
+        val editorSelection = main { editorState.selection }
         waitForIdleSync()
-        val editor = node(original.text)
-        // Compose keeps EditableText semantics for selection/copy even when read-only.
-        check(editor.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) { "Recording draft exposes text replacement" }
-        val replacement = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Must not replace the recording draft") }
-        check(!editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+        fun findWritable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (root == null) return null
+            root.refresh()
+            if (root.isVisibleToUser && root.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return root
+            for (index in 0 until root.childCount) findWritable(root.getChild(index))?.let { return it }
+            return null
+        }
+        // Inline recording feedback may hide the input's semantics, but must keep
+        // the exact editor/draft mounted and reject ordinary keyboard entry.
+        check(findWritable(uiAutomation.rootInActiveWindow) == null) { "Recording exposes a writable field" }
+        main {
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_A))
+            check(model.speechComposer?.editor === editorState && editorState.text.toString() == original.text && editorState.selection == editorSelection)
+        }
         fun findSend(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if (root == null) return null
             root.refresh()
@@ -158,6 +170,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(main { model.speech.recording && model.draft(target) == original })
         check(key(KeyEvent.ACTION_DOWN)) { "Recording did not own the stop key" }
         await("hardware stop durable preview") { !model.speech.busy && model.speech.draft != null }
+        check(main { model.speechComposer?.editor === editorState && editorState.text.toString() == original.text && editorState.selection == editorSelection })
         val preview = main { model.speech.draft }
         node("Play").performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         check(key(KeyEvent.ACTION_DOWN, repeat = 1))
