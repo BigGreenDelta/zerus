@@ -450,6 +450,12 @@
     "repository": "https://github.com/dtolnay/unicode-ident"
   },
   {
+    "name": "unicode-width",
+    "version": "0.2.2",
+    "license": "MIT OR Apache-2.0",
+    "repository": "https://github.com/unicode-rs/unicode-width"
+  },
+  {
     "name": "uuid",
     "version": "1.26.1",
     "license": "Apache-2.0 OR MIT",

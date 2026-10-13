@@ -11,6 +11,7 @@ mod native_ui;
 mod session_reference;
 mod platform;
 mod presence;
+mod screen;
 mod speech;
 mod status;
 // The local session host (tmux, hooks, agent state) runs on Unix. Windows builds
