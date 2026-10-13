@@ -79,6 +79,7 @@ class ComposerLayoutSmokeInstrumentation : Instrumentation() {
         runOnMainSync {
             activity.setContent {
                 MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF67E8CB), background = Color(0xFF101517),
+                    onPrimary = Color(0xFF101517),
                     surfaceContainer = Color(0xFF1A2225), onSurface = Color(0xFFE9F0F2), onSurfaceVariant = Color(0xFF9AACB2), outline = Color(0xFF354449))) {
                     val original = LocalDensity.current; density.set(original.density)
                     CompositionLocalProvider(LocalDensity provides Density(original.density, if (scene.intValue == 1) 1.8f else 1f)) {
@@ -97,7 +98,11 @@ class ComposerLayoutSmokeInstrumentation : Instrumentation() {
                                 modifier = Modifier.width(if (scene.intValue == 1) 280.dp else 360.dp).onGloballyPositioned {
                                     val b = it.boundsInWindow(); surface.set(Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt()))
                                 }, leading = { IconButton(onClick = {}) { Icon(Icons.Default.AttachFile, "Attach files") } },
-                                action = { FilledIconButton(onClick = {}, modifier = Modifier.size(48.dp)) { Icon(Icons.AutoMirrored.Filled.Send, "Send message") } }) }
+                                action = { ComposerActionButton(onClick = {}, enabled = true,
+                                    containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
+                                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant, disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
+                                    Icon(Icons.AutoMirrored.Filled.Send, "Send message")
+                                } }) }
                         }
                     }
                 }
@@ -117,7 +122,27 @@ class ComposerLayoutSmokeInstrumentation : Instrumentation() {
             checkNotNull(editable); val text = Rect(); editable.getBoundsInScreen(text)
             check(text.width() >= outer.width() * .60) { "Too little width left for message text: $text / $outer" }
         }
-        geometry(); screenshot("composer-compact.png")
+        fun insetCircle() {
+            val target = bounds("Send message")
+            val bitmap = checkNotNull(uiAutomation.takeScreenshot())
+            var left = target.right; var right = target.left; var top = target.bottom; var bottom = target.top
+            for (y in target.top until target.bottom) for (x in target.left until target.right) {
+                val color = bitmap.getPixel(x, y)
+                if (kotlin.math.abs(android.graphics.Color.red(color) - 103) < 6 &&
+                    kotlin.math.abs(android.graphics.Color.green(color) - 232) < 6 &&
+                    kotlin.math.abs(android.graphics.Color.blue(color) - 203) < 6) {
+                    left = minOf(left, x); right = maxOf(right, x); top = minOf(top, y); bottom = maxOf(bottom, y)
+                }
+            }
+            bitmap.recycle()
+            val margin = density.get() * 3
+            check(right > left && bottom > top) { "The action circle was not drawn" }
+            check(left - target.left >= margin && top - target.top >= margin &&
+                target.right - right >= margin && target.bottom - bottom >= margin) {
+                "The visible circle touches its full-size target: $target / [$left,$top,$right,$bottom]"
+            }
+        }
+        geometry(); insetCircle(); screenshot("composer-compact.png")
         val collapsed = surface.get().height()
         runOnMainSync { editor.edit { selection = TextRange(9, 16) } }
         check(node("Expand message").performAction(AccessibilityNodeInfo.ACTION_CLICK))
@@ -128,7 +153,7 @@ class ComposerLayoutSmokeInstrumentation : Instrumentation() {
 
         runOnMainSync { scene.intValue = 1 }
         await { surface.get().width() <= density.get() * 281 }
-        uiAutomation.waitForIdle(100, 3_000); geometry(); screenshot("composer-large-text.png")
+        uiAutomation.waitForIdle(100, 3_000); geometry(); insetCircle(); screenshot("composer-large-text.png")
         runOnMainSync { scene.intValue = 0; editor.edit { replace(0, length, "Short draft") } }
         await { surface.get().height() <= density.get() * 50 }
         runOnMainSync { focus.requestFocus() }

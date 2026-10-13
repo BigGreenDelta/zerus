@@ -6,8 +6,13 @@ import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
 
-/** Message text and its editor share natural character spacing and a compact baseline. */
+/** Conversation text is denser than the editor; both keep natural character spacing. */
 @Composable internal fun conversationTextStyle(): TextStyle = MaterialTheme.typography.bodyLarge.copy(
+    fontSize = 16.sp, lineHeight = 20.sp, letterSpacing = 0.sp,
+    platformStyle = PlatformTextStyle(includeFontPadding = false),
+)
+
+@Composable internal fun messageInputTextStyle(): TextStyle = MaterialTheme.typography.bodyLarge.copy(
     fontSize = 18.sp, lineHeight = 22.sp, letterSpacing = 0.sp,
     platformStyle = PlatformTextStyle(includeFontPadding = false),
 )

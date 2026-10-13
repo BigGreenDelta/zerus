@@ -54,7 +54,7 @@ import androidx.compose.ui.unit.dp
 ) {
     var expanded by remember(state) { mutableStateOf(false) }
     var visualLines by remember(state) { mutableIntStateOf(1) }
-    val style = conversationTextStyle().copy(color = MaterialTheme.colorScheme.onSurface)
+    val style = messageInputTextStyle().copy(color = MaterialTheme.colorScheme.onSurface)
     val controls = MaterialTheme.colorScheme.onSurfaceVariant
     Surface(modifier = modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
@@ -77,7 +77,7 @@ import androidx.compose.ui.unit.dp
             Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.BottomCenter) { action() }
             if (visualLines > 3 || expanded) IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(48.dp)) {
                 Icon(if (expanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
-                    if (expanded) "Collapse message" else "Expand message", tint = controls, modifier = Modifier.size(20.dp))
+                    if (expanded) "Collapse message" else "Expand message", tint = controls, modifier = Modifier.size(18.dp))
             }
         }, modifier = Modifier.fillMaxWidth()) { children, constraints ->
             val width = constraints.maxWidth

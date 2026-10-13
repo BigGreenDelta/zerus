@@ -50,6 +50,7 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -976,7 +977,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     val replies = parsedReply.takeIf { it.first == event.text }?.second
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
-        Surface(color = if (own) Color(0xFF203733) else Surface, shape = RoundedCornerShape(18.dp),
+        Surface(color = if (own) Color(0xFF203733) else Surface, shape = RoundedCornerShape(17.dp),
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
                 contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
             }) {
@@ -1135,24 +1136,23 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
                     enabled = !recording && !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
-                    Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
+                    Icon(Icons.Default.AttachFile, "Attach files", Modifier.size(24.dp).rotate(45f), tint = Muted)
                 }
             }, action = {
                 if (recording || (editor.text.isEmpty() && draft.attachments.isEmpty() && model.pickerDraft?.target != target)) {
                     SpeechComposerButton(model, target) {
                         if (model.draft(target).text != editor.text.toString()) model.edit(target, editor.text.toString())
                     }
-                } else FilledIconButton(onClick = {
+                } else ComposerActionButton(onClick = {
                     if (canSend) {
                         model.edit(target, editor.text.toString())
                         val captured = model.draft(target)
                         if (ContextPresentation.isCold(model.activity)) coldDraft = captured
                         else model.sendMessage(target, expectedDraft = captured)
                     } else if (sendReason.isNotBlank()) blockedSendReason = sendReason
-                }, enabled = !recording && (canSend || sendReason.isNotBlank()), modifier = Modifier.size(48.dp), shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
-                        disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted)) {
+                }, enabled = !recording && (canSend || sendReason.isNotBlank()),
+                    containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
+                    disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted) {
                     if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
                     else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
                 }

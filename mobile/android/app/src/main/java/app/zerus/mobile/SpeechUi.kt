@@ -5,7 +5,6 @@ import android.content.res.Configuration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -24,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -175,10 +175,10 @@ import androidx.compose.ui.unit.dp
     val gesture = remember(target, navigation, cancelDistance) { VoiceGesture(cancelDistance) }
     val label = if (speech.recording) "Stop recording" else "Voice input"
     val actionCapture = speech.activeCaptureId
+    val actionColor = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    val actionContent = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary
     Surface(shape = CircleShape,
-        border = if (focused) BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface) else null,
-        color = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary,
+        color = Color.Transparent, contentColor = actionContent,
         modifier = Modifier.size(48.dp).onFocusChanged {
             focused = it.isFocused
             if (!it.isFocused) activationKeys.clear()
@@ -227,8 +227,10 @@ import androidx.compose.ui.unit.dp
             }
         }) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, null,
-                Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
+            ComposerActionFace(actionColor, actionContent, focused) {
+                Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, null,
+                    Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
+            }
         }
     }
     speech.captureFailure?.takeIf { it.first == ownedCapture && it.first != dismissedFailure }?.let { failed ->

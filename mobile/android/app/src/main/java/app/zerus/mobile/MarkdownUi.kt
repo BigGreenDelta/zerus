@@ -118,7 +118,7 @@ private fun prepareMarkdownAnnotations(blocks: List<MarkdownBlock>, accent: Colo
     return Collections.unmodifiableMap(annotations)
 }
 
-@Composable private fun MarkdownBlocks(blocks: List<MarkdownBlock>, annotations: Map<List<MarkdownInline>, AnnotatedString>, gap: Int = 10) {
+@Composable private fun MarkdownBlocks(blocks: List<MarkdownBlock>, annotations: Map<List<MarkdownInline>, AnnotatedString>, gap: Int = 6) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(gap.dp)) {
         blocks.forEach { block -> when (block) {
             is MarkdownBlock.Paragraph -> MarkdownInlineText(block.content, annotations)
@@ -144,16 +144,16 @@ private fun prepareMarkdownAnnotations(blocks: List<MarkdownBlock>, accent: Colo
                 }.padding(start = 13.dp)) { MarkdownBlocks(block.blocks, annotations) }
             }
             is MarkdownBlock.Items -> Column(Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(if (block.tight) 4.dp else 10.dp)) {
+                verticalArrangement = Arrangement.spacedBy(if (block.tight) 2.dp else 6.dp)) {
                 block.items.forEachIndexed { index, item ->
                     val marker = when (item.checked) {
                         true -> "☑"
                         false -> "☐"
                         null -> block.start?.let { "${it.toLong() + index}." } ?: "•"
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(marker, Modifier.widthIn(min = 22.dp, max = 94.dp), textAlign = TextAlign.End)
-                        Box(Modifier.weight(1f)) { MarkdownBlocks(item.blocks, annotations, if (block.tight) 4 else 10) }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(marker, Modifier.widthIn(min = if (block.start == null) 16.dp else 22.dp, max = 94.dp), textAlign = TextAlign.End)
+                        Box(Modifier.weight(1f)) { MarkdownBlocks(item.blocks, annotations, if (block.tight) 2 else 6) }
                     }
                 }
             }
