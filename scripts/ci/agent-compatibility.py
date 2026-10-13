@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
@@ -19,12 +20,12 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).with_suffix('.json')
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
-# Official Linux x86_64 npm packages; each contains one native executable.
+# Official npm packages per target; each contains one native executable.
 AGENTS = {
     'codex': dict(
-        name='Codex', variable='HGS_CODEX_TEST_BIN', version_output='codex-cli {}',
-        tarball='https://registry.npmjs.org/@openai/codex/-/codex-',
-        metadata='https://registry.npmjs.org/@openai/codex/{}-linux-x64', published='{}-linux-x64',
+        name='Codex', variable='HGS_CODEX_TEST_BIN', version_output='codex-cli {}', targets=['linux-x64'],
+        tarball='https://registry.npmjs.org/@openai/codex/-/codex-{version}-{target}.tgz',
+        metadata='https://registry.npmjs.org/@openai/codex/{version}-{target}', published='{version}-{target}',
         member='package/vendor/x86_64-unknown-linux-musl/bin/codex',
         coverage='clear, draft preservation, identity, two terminal sizes and animation modes',
         timeout=180,
@@ -32,8 +33,9 @@ AGENTS = {
                 'test_external_agents_native.NativeExternalAgents']),
     'claude': dict(
         name='Claude Code', variable='HGS_CLAUDE_TEST_BIN', version_output='{} (Claude Code)',
-        tarball='https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-',
-        metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/{}', published='{}',
+        targets=['linux-x64', 'darwin-arm64'],
+        tarball='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/-/claude-code-{target}-{version}.tgz',
+        metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/{version}', published='{version}',
         member='package/claude',
         coverage='input, questions, approvals, trust, resume, clear, compaction and session-only model settings',
         timeout=900,
@@ -48,6 +50,12 @@ result = unittest.TextTestRunner(verbosity=2).run(suite)
 print('ZERUS_NATIVE_RESULT=' + json.dumps({'tests': result.testsRun, 'skipped': len(result.skipped)}))
 sys.exit(not result.wasSuccessful() or bool(result.skipped) or result.testsRun == 0)
 '''
+
+
+def host_target():
+    system = {'Linux': 'linux', 'Darwin': 'darwin'}.get(platform.system())
+    machine = {'x86_64': 'x64', 'amd64': 'x64', 'arm64': 'arm64', 'aarch64': 'arm64'}.get(platform.machine().lower())
+    return system + '-' + machine if system and machine else None
 
 
 def fetch_json(url):
@@ -85,7 +93,8 @@ def install_native(agent, package, destination):
     """Verify published bytes, then extract exactly one regular native executable."""
     spec = AGENTS[agent]
     url = package['url']
-    if not url.startswith(spec['tarball']):
+    if package['target'] not in spec['targets'] or url != spec['tarball'].format(
+            version=version_text(package['version']), target=package['target']):
         raise ValueError('Expected the official ' + spec['name'] + ' package distribution')
     algorithm, encoded = package['integrity'].split('-', 1)
     if algorithm != 'sha512':
@@ -174,7 +183,8 @@ def qualify(agent, package, work, results, hgs):
     spec = AGENTS[agent]
     version = version_text(package['version'])
     print('Checking real', spec['name'], version, flush=True)
-    row = {'agent': agent, 'version': version, 'package_integrity': package['integrity'], 'status': 'failed'}
+    row = {'agent': agent, 'version': version, 'target': package['target'],
+           'package_integrity': package['integrity'], 'status': 'failed'}
     directory = results / agent / version
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -229,7 +239,7 @@ def write_report(report, results):
         rows = [row for row in report['contracts'] if row['agent'] == agent]
         if rows:
             lines.extend(['', '## Real ' + spec['name'] + ' contracts', ''])
-            lines.extend(f"- `{row['version']}`: {row['status']}; {spec['coverage']}." for row in rows)
+            lines.extend(f"- `{row['version']}` ({row['target']}): {row['status']}; {spec['coverage']}." for row in rows)
     for label, changes in report.get('capability_changes', {}).items():
         lines.extend(['', '## ' + label + ' protocol changes', '', 'Experimental methods remain separate from supported APIs.'])
         for kind in ('added_methods', 'removed_methods', 'added_schemas', 'removed_schemas', 'changed_schemas'):
@@ -251,16 +261,22 @@ def write_report(report, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--latest', action='store_true', help='Discover agent releases and qualify latest Codex and Claude Code as canaries')
-    parser.add_argument('--agent', choices=sorted(AGENTS), action='append', help='Qualify only this agent (repeatable)')
+    parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
+                        help='Qualify only this agent (repeatable); default: every agent pinned for this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
     parser.add_argument('--hgs', type=Path, default=ROOT / 'target/debug/hgs')
     args = parser.parse_args()
     manifest = json.loads(MANIFEST.read_text())
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=True)
-    report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'contracts': [], 'errors': []}
-    agents = args.agent or list(AGENTS)
-    packages = {agent: manifest[agent][:] for agent in agents}
+    target = host_target()
+    agents = args.agent or [agent for agent, spec in AGENTS.items() if target in spec['targets']]
+    unsupported = [agent for agent in agents if target not in AGENTS[agent]['targets']]
+    if not agents or unsupported:
+        parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
+    report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'target': target,
+              'contracts': [], 'errors': []}
+    packages = {agent: [package for package in manifest[agent] if package['target'] == target] for agent in agents}
     if args.latest:
         report['upstream'] = discover_upstream(manifest)
         report['errors'].extend(row['name'] + ': ' + row['error'] for row in report['upstream'] if 'error' in row)
@@ -270,10 +286,10 @@ def main():
             try:
                 latest = next(row['version'] for row in report['upstream'] if row['name'] == spec['name'])
                 if latest not in {package['version'] for package in packages[agent]}:
-                    data = fetch_json(spec['metadata'].format(latest))
-                    if data['version'] != spec['published'].format(latest):
+                    data = fetch_json(spec['metadata'].format(version=latest, target=target))
+                    if data['version'] != spec['published'].format(version=latest, target=target):
                         raise ValueError('Latest native package version mismatch')
-                    packages[agent].append({'version': latest, 'url': data['dist']['tarball'],
+                    packages[agent].append({'version': latest, 'target': target, 'url': data['dist']['tarball'],
                                             'integrity': data['dist']['integrity']})
                 report['canary_versions'][agent] = latest
             except Exception as error:
@@ -284,7 +300,8 @@ def main():
                 report['contracts'].append(qualify(agent, package, Path(temporary), results, args.hgs.resolve()))
     for agent in agents:
         rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
-        current = rows.get(manifest[agent][-1]['version'])
+        current = rows.get(next((package['version'] for package in reversed(manifest[agent])
+                                 if package['target'] == target), None))
         latest = rows.get(report.get('canary_versions', {}).get(agent))
         if not (current and latest):
             continue

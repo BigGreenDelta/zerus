@@ -315,7 +315,6 @@ jobs:
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Keyless native Codex and Claude Code compatibility matrix
-        if: runner.os == 'Linux'
         run: python3 scripts/ci/agent-compatibility.py
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())

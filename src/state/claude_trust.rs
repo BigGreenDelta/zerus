@@ -10,7 +10,8 @@ const HINT: &str = "Enter to confirm · Esc to cancel";
 const LABELS: [&str; 2] = ["No, exit", "Yes, I trust this folder"];
 
 struct Panel {
-    folder: String,
+    /// Claude wraps a long folder at the panel width without a marker.
+    folder: Vec<String>,
     disclosure: String,
     selected: usize,
 }
@@ -34,11 +35,11 @@ fn parse(screen: &str) -> Option<Panel> {
         || rows[1] != TITLE
         || !rows[2].is_empty()
         || !rows[3].starts_with('/')
-        || !rows[4].is_empty()
         || *rows.last()? != HINT
     {
         return None;
     }
+    let blank = 3 + rows[3..].iter().position(|row| row.is_empty())?;
     let footer = rows.len().checked_sub(6)?;
     if rows[footer] != "Security guide"
         || !rows[footer + 1].is_empty()
@@ -59,9 +60,22 @@ fn parse(screen: &str) -> Option<Panel> {
     }
     // Claude itself abbreviates long permission lists. Keep its complete visible
     // warning, including the count and "and N more", without implying expansion.
-    let disclosure = rows[5..footer].join("\n").trim().to_owned();
+    let disclosure = rows.get(blank + 1..footer)?.join("\n").trim().to_owned();
     if disclosure.is_empty() { return None; }
-    Some(Panel { folder: rows[3].into(), disclosure, selected: selected? })
+    let folder = rows[3..blank].iter().map(|row| row.to_string()).collect();
+    Some(Panel { folder, disclosure, selected: selected? })
+}
+
+/// Whether the wrapped rows show exactly this folder. A wrap may drop the
+/// spaces it breaks at; no other difference is accepted.
+fn shows(rows: &[String], folder: &str) -> bool {
+    let mut rest = folder;
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 { rest = rest.trim_start_matches(' '); }
+        let Some(after) = rest.strip_prefix(row.as_str()) else { return false };
+        rest = after;
+    }
+    rest.is_empty()
 }
 
 fn eligible(record: &Value) -> bool {
@@ -78,17 +92,18 @@ fn eligible(record: &Value) -> bool {
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
-    if !eligible(record) || panel.folder != string(record, "launch_dir") { return None; }
+    let folder = string(record, "launch_dir");
+    if !eligible(record) || !shows(&panel.folder, folder) { return None; }
     let hash = format!("{:x}", Sha256::digest(json!([
         record["run_id"], record["pane"], record["pid"], record["process_start"],
-        record["expected_id"], panel.folder, panel.disclosure, LABELS
+        record["expected_id"], folder, panel.disclosure, LABELS
     ]).to_string()));
     Some(json!({"question_id":format!("claude-trust:{hash}"),"question_hash":hash,
         "tool_call_id":"claude_folder_trust","agent_id":"main","run_id":record["run_id"],
         "conversation_id":record["conversation_id"],"created_at":0,"source":"claude_folder_trust",
         "can_answer":true,"answer_transport":"claude_tui","answer_unavailable_reason":"",
         "questions":[{"id":"trust","header":"Folder trust","question":"Trust this folder?",
-            "body":format!("{}\n\n{}",panel.folder,panel.disclosure),"multi_select":false,"allow_other":false,
+            "body":format!("{}\n\n{}",folder,panel.disclosure),"multi_select":false,"allow_other":false,
             "options":LABELS.iter().enumerate().map(|(i,label)|json!({"id":format!("trust_{i}"),"label":label})).collect::<Vec<_>>()}]}))
 }
 
@@ -189,6 +204,22 @@ mod tests {
             ] {
                 assert!(parse(&invalid).is_none());
             }
+        }
+    }
+    #[test]
+    fn long_folder_wrapped_by_claude_still_names_exactly_the_launch_directory() {
+        let original = card(&record(), &parse(SCREEN).unwrap()).unwrap();
+        for (launch, shown) in [("/work/example", " /work/exam\n ple"), ("/work/example", " /work/\n example"),
+                                ("/work/my example", " /work/my\n example"), ("/work/example", " /wo\n rk/exa\n mple")] {
+            let screen = SCREEN.replace(" /work/example\n", &format!("{shown}\n"));
+            let mut record = record(); record["launch_dir"] = json!(launch);
+            let question = card(&record, &parse(&screen).unwrap()).unwrap();
+            assert_eq!(question["questions"][0]["body"].as_str().unwrap().split("\n\n").next(), Some(launch));
+            if launch == "/work/example" { assert_eq!(question["question_hash"], original["question_hash"]); }
+        }
+        for shown in [" /work/exam\n pl", " /work/exam\n plex", " /work/ex ample", " /work/exam\n\n ple"] {
+            let screen = SCREEN.replace(" /work/example\n", &format!("{shown}\n"));
+            assert!(parse(&screen).and_then(|panel| card(&record(), &panel)).is_none(), "{shown}");
         }
     }
     #[test]

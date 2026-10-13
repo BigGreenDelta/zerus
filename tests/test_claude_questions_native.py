@@ -27,6 +27,9 @@ class NativeClaudeQuestions(unittest.TestCase):
  write_record=fixtures.InputTransport.write_record
  inspect=questions.Questions.inspect
  def answer(self,*args,**kwargs):
+  # Every capture passes through the Python transport fixture; a retried
+  # answer takes about 12 s on Linux and up to three times longer on macOS.
+  kwargs.setdefault('timeout',60)
   try:return questions.Questions.answer(self,*args,**kwargs)
   except AssertionError as error:
    styled=self.tmux('capture-pane','-p','-e','-t',self.pane)

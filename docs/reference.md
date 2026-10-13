@@ -745,7 +745,9 @@ native wording stays answerable: Claude workspace trust preserves its full
 permissions warning, Kimi includes the visible MCP commands, and Claude's
 auto-mode and resume panels keep their explanation and cost warning. Zerus adds
 descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
-folder access names the repository root that Codex will trust.
+folder access names the repository root that Codex will trust. Claude wraps a
+long workspace path across rows; the joined rows must still equal the launch
+folder exactly.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
