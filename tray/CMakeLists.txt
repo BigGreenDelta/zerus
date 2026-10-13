@@ -13,6 +13,11 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+# A program's moc and rcc do not wait for the libraries it links (none generates a
+# header another target's moc reads; rcc runs in a per-resource target), so with
+# Ninja hgs-tray and the suites compile their own sources while the libraries build.
+set(CMAKE_AUTOGEN_ORIGIN_DEPENDS OFF)
+set(CMAKE_GLOBAL_AUTORCC_TARGET ON)
 # Чтобы clangd в редакторе знал пути к заголовкам Qt и не краснел на каждый #include.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -67,10 +72,15 @@ add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
 
-add_library(hgs-speech STATIC src/speech/SpeechClient.cpp src/speech/SpeechRecorder.cpp
+# The recorder alone serves the macOS microphone permission suite.
+add_library(hgs-speech-recorder STATIC src/speech/SpeechRecorder.cpp)
+target_include_directories(hgs-speech-recorder PUBLIC src)
+target_link_libraries(hgs-speech-recorder PUBLIC Qt6::Multimedia)
+add_library(hgs-speech STATIC src/speech/SpeechClient.cpp
     src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
 target_include_directories(hgs-speech PUBLIC src)
-target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia)
+# The voice composer extends MessageComposer (hgs-tray-ui below).
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder PRIVATE hgs-tray-ui)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -93,49 +103,86 @@ if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUA
 endif()
 include(cmake/BuildVersion.cmake)
 
+# Tray sources compile once, into static libraries that hgs-tray and the Qt suites
+# link; tests/CMakeLists.txt fails when a suite lists a source that one of them
+# builds. Each layer adds Qt modules, so a suite that links the lowest layer
+# covering its code keeps its QTEST_MAIN application type and gains no WebEngine.
+add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
+    src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
+    src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
+    # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
+    src/MainThreadWatchdog.cpp)
+if(NOT WIN32)
+    # Service stops and terminal signals quit like the tray menu (main.cpp).
+    target_sources(hgs-tray-core PRIVATE src/TerminationSignals.cpp)
+endif()
+target_include_directories(hgs-tray-core PUBLIC src)
+target_link_libraries(hgs-tray-core PUBLIC Qt6::Core Threads::Threads)
+
+add_library(hgs-tray-gui STATIC src/AttentionTracker.cpp
+    # The clipboard exists everywhere: unlike Konsole and Terminal.app, this
+    # backend builds on every platform and asks the platform itself.
+    src/ClipboardBackend.cpp)
+target_link_libraries(hgs-tray-gui PUBLIC hgs-tray-core Qt6::Gui)
+if(LINUX)
+    target_link_libraries(hgs-tray-gui PRIVATE Qt6::DBus)
+endif()
+
+add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
+    src/MachineFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
+    src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
+    src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
+    src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp
+    # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
+    # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
+    src/QuietTrayIcon.cpp)
+target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
+    PRIVATE hgs-markdown hgs-external-file hgs-updates)
+
+add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
+target_include_directories(hgs-tray-activity PUBLIC src)
+target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
+
+add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionSelection.cpp src/NativeUiView.cpp)
+target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity Qt6::WebEngineWidgets
+    PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)
+
+# Platform integration, each where it applies. The Windows pieces have portable
+# logic that a suite checks everywhere; other systems build them only for it.
+if(LINUX)
+    # Konsole (TerminalBackend.h is a header-only interface), KStatusNotifierItem
+    # as the tray icon (TrayIcon.h is header-only too), D-Bus notifications, the
+    # launcher badge and input idle time.
+    add_library(hgs-tray-linux STATIC src/KonsoleBackend.cpp src/SniTrayIcon.cpp
+        src/LinuxAttentionNotifier.cpp src/LinuxApplicationBadge.cpp src/LinuxPresenceSource.cpp)
+    target_link_libraries(hgs-tray-linux PUBLIC hgs-tray-core Qt6::DBus
+        PRIVATE Qt6::Widgets KF6::StatusNotifierItem KF6::IdleTime)
+endif()
+# Windows Terminal and console windows (hgs-tray.exe --console-run hosts the
+# latter), tray-icon notifications and the swarm worker the tray runs itself
+# (Windows has no user service manager).
+add_library(hgs-tray-windows STATIC src/WindowsTerminalBackend.cpp src/ConsoleHost.cpp
+    src/WindowsAttentionNotifier.cpp src/SwarmWorkerSupervisor.cpp)
+target_link_libraries(hgs-tray-windows PUBLIC hgs-tray-core Qt6::Widgets)
+if(NOT WIN32)
+    set_target_properties(hgs-tray-windows PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+if(APPLE)
+    # Like Konsole: osascript and Terminal.app exist only on macOS. QSystemTrayIcon
+    # with a native menu, notifications, Dock visibility, the badge and idle time.
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    add_library(hgs-tray-mac STATIC src/MacBackend.cpp src/QtTrayIcon.cpp src/MacTrayMenu.mm
+        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp)
+    set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(hgs-tray-mac PUBLIC hgs-tray-core Qt6::Widgets
+        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
+endif()
+
 # Qt finalization imports macOS permission plugins selected by our Info.plist.
 # A plain add_executable silently leaves QMicrophonePermission without a backend.
-qt_add_executable(hgs-tray MANUAL_FINALIZATION
-    resources.qrc
-    src/main.cpp
-    src/AppConfig.cpp
-    src/HgsClient.cpp
-    src/ProcessRunner.cpp
-    src/FleetState.cpp
-    src/ReadMarkSync.cpp
-    src/IconFactory.cpp
-    src/CommandBackend.cpp
-    # Буфер обмена есть везде -- в отличие от Konsole и Terminal.app, этот бэкенд не
-    # платформенный и собирается всегда (внутри он спрашивает платформу сам).
-    src/ClipboardBackend.cpp
-    src/SessionsWindow.cpp src/SessionSelection.cpp
-    src/MachinesPage.cpp src/SessionSearch.cpp
-    src/MachineFilter.cpp src/DashboardPage.cpp src/AccountsPage.cpp src/AccountUsageStore.cpp
-    src/SessionOrganization.cpp
-    src/SwarmController.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
-    src/SessionList.cpp
-    src/ActivityView.cpp
-    src/ProcessView.cpp
-    src/NativeUiView.cpp
-    src/MessageComposer.cpp
-    src/ComposerToolbar.cpp
-    src/ComposerDraftStore.cpp
-    src/QuestionCard.cpp
-    src/DirectoryDialog.cpp
-    src/NewSessionDialog.cpp
-    src/ProjectsDialog.cpp
-    src/TrayMenu.cpp
-    src/TrayAgent.cpp
-    src/AttentionTracker.cpp
-    src/DesktopPresence.cpp
-    src/AttentionNotifier.h
-    # Декоратор над иконкой трея (см. QuietTrayIcon.h). Платформенного в нём ничего нет,
-    # собирается везде; надевается на иконку только на маке -- см. makeTrayIcon() в
-    # TrayAgent.cpp, там же почему не на Linux.
-    src/QuietTrayIcon.cpp
-    # Сторож главного потока (см. MainThreadWatchdog.h): везде, повод -- маковский.
-    src/MainThreadWatchdog.cpp
-)
+qt_add_executable(hgs-tray MANUAL_FINALIZATION resources.qrc src/main.cpp src/TrayAgent.cpp)
 if(APPLE)
     # LSUIElement живёт в Info.plist; без MACOSX_BUNDLE получится голый исполняемый файл.
     # Icon Composer catalog provides native layers/masking; actool also produces
@@ -157,54 +204,29 @@ if(APPLE)
     )
 endif()
 if(LINUX)
-    # Konsole-бэкенд собирается только там, где он вообще применим; TerminalBackend.h
-    # (чистый интерфейс) заголовочный и в списке исходников не нужен.
-    target_sources(hgs-tray PRIVATE src/KonsoleBackend.cpp)
-    # Иконка трея: KStatusNotifierItem здесь, QSystemTrayIcon везде остальное -- тот же
-    # принцип, что у Konsole/MacBackend: реализация собирается там, где применима.
-    # TrayIcon.h (чистый интерфейс) заголовочный, как и TerminalBackend.h.
-    target_sources(hgs-tray PRIVATE src/SniTrayIcon.cpp)
-    target_sources(hgs-tray PRIVATE src/LinuxAttentionNotifier.cpp)
-    target_sources(hgs-tray PRIVATE src/LinuxApplicationBadge.cpp)
-    target_sources(hgs-tray PRIVATE src/LinuxPresenceSource.cpp)
+    target_link_libraries(hgs-tray PRIVATE hgs-tray-linux)
+elseif(APPLE)
+    target_link_libraries(hgs-tray PRIVATE hgs-tray-mac)
 else()
+    # QSystemTrayIcon, as on macOS (where it has a native menu).
     target_sources(hgs-tray PRIVATE src/QtTrayIcon.cpp)
 endif()
 if(WIN32)
-    # Windows Terminal and console windows (hgs-tray.exe --console-run hosts the
-    # latter), tray-icon notifications, the taskbar badge and the swarm worker the
-    # tray runs itself (Windows has no user service manager). The resource script
-    # carries the icon and version information; the manifest sets UTF-8 as the
-    # ANSI code page and long-path support.
+    # The taskbar badge. The resource script carries the icon and version
+    # information; the manifest sets UTF-8 as the ANSI code page and long-path support.
     set(HGS_TRAY_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/hgs-zerus.ico")
     configure_file(packaging/windows/hgs-tray.rc.in "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" @ONLY)
-    target_sources(hgs-tray PRIVATE src/WindowsTerminalBackend.cpp src/ConsoleHost.cpp src/WindowsAttentionNotifier.cpp
-        src/WindowsApplicationBadge.cpp src/SwarmWorkerSupervisor.cpp
+    target_sources(hgs-tray PRIVATE src/WindowsApplicationBadge.cpp
         "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" packaging/windows/hgs-tray.manifest)
+    target_link_libraries(hgs-tray PRIVATE hgs-tray-windows)
     # A GUI program: no console window opens with it (see attachParentConsole in main.cpp).
     set_target_properties(hgs-tray PROPERTIES WIN32_EXECUTABLE TRUE)
-else()
-    # Service stops and terminal signals quit like the tray menu (main.cpp).
-    target_sources(hgs-tray PRIVATE src/TerminationSignals.cpp)
-endif()
-if(APPLE)
-    # Тот же принцип, что и для Konsole: osascript и Terminal.app существуют только на маке.
-    enable_language(OBJCXX)
-    set(CMAKE_OBJCXX_STANDARD 17)
-    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
-    set_target_properties(hgs-tray PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED ON)
-    target_sources(hgs-tray PRIVATE src/MacBackend.cpp src/MacTrayMenu.mm)
-    target_sources(hgs-tray PRIVATE src/MacAttentionNotifier.mm)
-    target_sources(hgs-tray PRIVATE src/MacAppVisibility.mm)
-    target_sources(hgs-tray PRIVATE src/MacApplicationBadge.mm)
-    target_sources(hgs-tray PRIVATE src/MacPresenceSource.cpp)
-    set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(hgs-tray PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
 endif()
 target_compile_definitions(hgs-tray PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
 # QLocalServer/QLocalSocket (single-instance guard in main.cpp) live in QtNetwork, not
 # QtWidgets — the plan's dependency list missed this; noted in the Task 1 report.
-target_link_libraries(hgs-tray PRIVATE Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
+target_link_libraries(hgs-tray PRIVATE hgs-tray-views hgs-tray-gui Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets
+    Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
 if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()

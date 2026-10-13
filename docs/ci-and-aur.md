@@ -19,23 +19,42 @@ free for public repositories.
 Manual CI remains available and defaults to all suites. `ci.yml` chooses the cache
 trust boundary and calls the shared jobs in `checks.yml`. Reusable CI keeps explicit
 suite selection so another workflow cannot accidentally request unrelated jobs.
-Every job checks out the exact commit resolved by quick checks. PR checks use the
-GitHub merge commit; a manual `ref` can select a PR head or another exact revision.
+A short first job resolves the exact commit and the selected suites; every other
+job checks out that commit. PR checks use the GitHub merge commit; a manual `ref`
+can select a PR head or another exact revision.
 
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
+| Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
-| Arch desktop/package | Always | Qt build and all CTest suites, production package, namcap, staged and installed bundle checks |
+| Arch desktop | Always | Qt build and all CTest suites |
+| Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
-The full jobs start after quick checks. New CI runs cancel obsolete runs for the
-same branch/PR and workflow. PR jobs have read-only permissions and no publication
-credentials; fork PRs use `pull_request`, never `pull_request_target`. Publishing
-is confined to trusted upstream `main` and the branch-restricted `release`
-environment. Authenticated model-turn tests remain explicit opt-ins.
+Quick checks and the full suites start together once the commit is resolved, so
+a quick-check failure no longer holds back the other suites. New CI runs cancel
+obsolete runs for the same branch/PR and workflow. PR jobs have read-only
+permissions and no publication credentials; fork PRs use `pull_request`, never
+`pull_request_target`. Publishing is confined to trusted upstream `main` and the
+branch-restricted `release` environment. Authenticated model-turn tests remain
+explicit opt-ins.
+
+On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
+enabled, `dev-android.yml` starts with the checks instead of after them. In the
+`release` environment and without cache access, it runs the Android unit tests,
+`lintRelease` and the signed release build, seals the APK and deletes the signing
+inputs. It then polls this run's jobs with a read-only Actions token and uploads
+`zerus-dev-android-a<attempt>` only after the `CI gate` job succeeds. While this
+attempt has no gate record, an earlier successful gate counts (a failed-job retry
+does not rerun it); an earlier failed or cancelled gate means waiting. Any
+other gate result, repeated API failures or a 135-minute wait fail the job without
+an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
+the desktop candidate and moves the `dev` tag only after the gate and this job
+succeed. Release builds skip the `lintVital` tasks, which would repeat the fatal
+checks that `lintRelease` runs in the same build.
 
 ### Incoming PRs and publication trust
 
@@ -75,6 +94,55 @@ write-capable cache mode to untrusted code would bypass the secure cache default
 See [fork workflow approvals](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/approve-runs-from-forks),
 [Actions security](https://docs.github.com/en/actions/reference/security/secure-use)
 and [cache access limits](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+### Build caches
+
+`ci.yml` passes `save_caches: true` only to the trusted main checks, the one
+caller with a write-capable cache token. `checks.yml` uses explicit
+`actions/cache/restore` and `actions/cache/save` steps, and every save requires
+that input: PR, manual, nightly and release runs restore caches and never try to
+save them.
+
+| Family | Job | Key after the prefix | Saved when | Bound |
+| --- | --- | --- | --- | --- |
+| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
+| `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
+| `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | About 780 MB |
+| `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
+
+When `Cargo.lock` changes, a Rust cache restores the newest target directory of
+the same compiler and month. A new compiler or month starts empty, so stale
+dependency builds cannot accumulate. Compiler caches use one key per saving run
+and restore the newest entry by prefix, so each main build that compiles
+something refreshes them. Statistics are reset before and printed after each
+build. Before saving, `ccache --evict-older-than` drops every entry the build did
+not use (ccache updates an entry's time on each hit). Every new commit
+recompiles the update controller, which embeds the source commit, so main pushes
+normally save new ccache entries; GitHub evicts the least recently used entries
+above the 10 GiB limit. Desktop builds use Ninja and every runner vCPU (`ZERUS_BUILD_JOBS`
+4 on Arch and Windows, 3 on macOS), and the AUR recipes let Ninja choose the job
+count.
+
+The owner decided on 2026-10-13 that objects compiled by trusted main checks may
+feed published builds: the Arch package job produces the Dev, nightly and stable
+Arch candidates, and the Windows job the nightly portable zip. Cache directories
+stay outside the checkout (`/home/user/.cache/ccache`, `~/Library/Caches/ccache`
+and `RUNNER_TEMP`), so they never enter packages, the zip or uploaded artifacts.
+The Arch package job enables ccache for makepkg only through
+`/etc/makepkg.conf.d/ccache.conf` in its disposable container, after checking that
+the image's default `BUILDENV` differs only in `ccache`. The published recipes and
+their `check()` are unchanged. The package build uses different compiler flags
+from the desktop build, so it has its own cache family.
+
+Windows installs the official ccache 4.14.1 x86_64 release. The job pins its
+SHA-256, which matches the archive signed with the ccache minisign key
+`RWQX7yXbBedVfI4PNx6FLdFXu9GHUFsr28s4BVGxm4BeybtnX3P06saF`. ccache officially
+supports MSVC since 4.13. Release builds have no `/Zi`, which ccache cannot
+cache; a build with debug information would need `/Z7` instead. Depend mode
+(`CCACHE_DEPEND`) takes the includes from Ninja's `/showIncludes` instead of
+running the preprocessor again. The job sets no `CCACHE_BASEDIR`: rewriting
+paths to relative ones would also change `__FILE__`, from which suites locate
+their fixtures, and the runner's workspace path is the same on every run.
 
 ### Manual checks
 
@@ -119,6 +187,15 @@ Standard Ubuntu/macOS/Windows runners and public artifacts are free while the re
 is public. Larger runners and explicitly increased cache storage have separate
 billing rules. No self-hosted runner is attached to a development machine.
 [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+After the trusted `main` checks, the `cache-trim` job keeps the two newest `main`
+cache entries of each key family (the key without its last segment, which is a
+run ID or a content hash) and deletes pull-request entries older than a day. It
+logs each deleted key and size and the totals. The job has only `actions: write`
+and `cache-mode: none`, checks out nothing and runs one inline `gh api` script.
+An entry deleted concurrently is not an error, and a failed trim never fails the
+run or holds back Dev. Its first `main` run confirms whether `cache-mode: none`
+permits REST cache deletion; refused deletions appear in its log.
 
 The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses current
 Arch packages. This tests rolling-distribution compatibility; it does not promise
@@ -209,10 +286,10 @@ virtual environment under `RUNNER_TEMP` that no later step uses; aqtinstall chec
 the Qt archives against the checksums of the Qt repository. The header of the lock
 records how to regenerate it; review a new lock like the other pins. The Qt
 directory is cached with `actions/cache` under a key that covers the Qt release,
-its modules and the lock. That cache follows the same token rules as every other
-cache: upstream `main` pushes save it, while PR, manual and nightly runs restore
-it and only log a warning when saving is refused. Such a run downloads about
-1.5 GB of Qt when no cache entry exists yet.
+its modules and the lock. Like every cache, only trusted main checks save it; PR,
+manual and nightly runs restore it (see [build caches](#build-caches)). Such a run
+downloads about 1.5 GB of Qt when no cache entry exists yet. The desktop build
+compiles through ccache.
 
 `scripts/ci/gui.sh` re-enters itself through `scripts/ci/msvc-env.py`, which
 locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake

@@ -15,14 +15,19 @@ bash scripts/ci/gui.sh
 The CLI script clears inherited `HGS_*` session/account context, runs Rust unit
 tests and terminal smoke tests, then runs the Python integration test classes in
 parallel fresh processes and builds a release binary. Classes larger than twelve
-tests run as several jobs unless they share a class fixture, slowest first. The
+tests run as several jobs unless they share a class fixture, slowest first by
+the previous local run, or else by `scripts/ci/python-durations.json`. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
-headlessly in parallel; `test_sessionswindow` runs as ten shards of its test
-functions. `ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16
-Python and 8 Qt jobs, never more than the CPU count; `1` runs them one after
-another). Test logs and Python job durations live in ignored
-`artifacts/test-results/`. Set `ZERUS_BUILD_JOBS` to limit desktop build
-parallelism. Run `cargo +1.85.0 test --locked` for the minimum supported Rust.
+headlessly in parallel (`build` or `test` runs only that half);
+`test_sessionswindow` runs as ten shards of its test functions. Tray sources
+compile once, into the `hgs-tray-*` static libraries that the application and
+the suites link: a new suite links the lowest library that covers its code
+instead of listing `tray/src` files, which fails configuration.
+`ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16 Python and
+8 Qt jobs, never more than the CPU count; `1` runs them one after another). Test
+logs and Python job durations live in ignored `artifacts/test-results/`. Set
+`ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
+`cargo +1.85.0 test --locked` for the minimum supported Rust.
 
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
