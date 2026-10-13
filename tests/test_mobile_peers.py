@@ -35,7 +35,10 @@ if (root / ('old-' + alias)).exists() or (root / ('flip-' + alias)).exists():
 if (root / ('delay-' + alias)).exists() and args[:2] == ['swarm', '__mobile-peer-identity']:
     time.sleep(4)
 if (root / 'discovery-hang').exists() and args[:2] == ['swarm', '__mobile-peer-identity']:
-    (root / ('discovery-pids-' + alias)).write_text(json.dumps([os.getpid(), os.getppid()]))
+    # The test reads the file as soon as it exists: publish it whole.
+    staged = root / ('discovery-pids-' + alias + '.tmp')
+    staged.write_text(json.dumps([os.getpid(), os.getppid()]))
+    staged.replace(root / ('discovery-pids-' + alias))
     time.sleep(30); sys.exit(0)
 if args[:2] == ['swarm', '__mobile-peer-local']:
     if (root / 'hang').exists():
@@ -390,7 +393,9 @@ time.sleep(10)
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(lambda: process.kill() if process.poll() is None else None)
         paths = [self.root / ('discovery-pids-' + alias) for alias in ['b', 'c', 'd']]
-        until = time.monotonic() + 2
+        # Each peer's identity transport starts after the local identity and its own
+        # support probe, all separate processes: allow the 10 s discovery deadline.
+        until = time.monotonic() + 10
         while not all(path.exists() for path in paths) and time.monotonic() < until:
             time.sleep(.01)
         self.assertTrue(all(path.exists() for path in paths))
