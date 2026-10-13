@@ -29,7 +29,8 @@ class NativeCompactContext(unittest.TestCase):
         self.assertEqual(current['compact_context_request']['request_id'],payload['request_id'])
         self.assertEqual(current['conversation_id'],self.conversation_id)
         self.assertEqual(current['phase'],'idle')
-        self.assertIn('compacted',self.screen().lower())
+        # PostCompact completes the request before Claude redraws its summary.
+        self.wait_for(lambda:'compacted' in self.screen().lower())
         def compact_boundary():
             history=[json.loads(line) for line in Path(current['transcript']).read_text().splitlines()]
             return next((event for event in reversed(history) if event.get('subtype')=='compact_boundary'),None)

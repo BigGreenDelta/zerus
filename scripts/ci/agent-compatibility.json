@@ -11,6 +11,13 @@
       "integrity": "sha512-qHWp6oKpf456PqjberGN8avs8zChv2oS+UuDiqVFYAuDOhq6vBc1drh8jEsnR7dBX+zcw03PN5VLtePGlMcC3w=="
     }
   ],
+  "claude": [
+    {
+      "version": "2.1.296",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.296.tgz",
+      "integrity": "sha512-+m01urgelnI+VJxPaKPEK0wixgq42uZ8PeCaUk5tX/8YoDBvSmC/REVQG2jQfJAr8dxunpjJ600FvLrcj1WWTw=="
+    }
+  ],
   "upstream": [
     {
       "name": "Codex",
@@ -24,7 +31,7 @@
       "url": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
       "version_path": ["version"],
       "notes": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
-      "reviewed_versions": []
+      "reviewed_versions": ["2.1.296"]
     },
     {
       "name": "Kimi Code",

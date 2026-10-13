@@ -277,16 +277,17 @@ of one main run and rebuild that file with `scripts/ci/qt-shard-seed.py`; its
 usage lists the commands. A test the file does not list still runs exactly once.
 
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
-Claude TUI with a private home/socket and a localhost fake API. Set
-`HGS_CLAUDE_TEST_BIN` to a reviewed executable to run it; it never reads a user's
-account. Claude 2.1.296 coverage verifies literal trailing backslashes, multiline
-messages and durable request replay. Terminal submission alone is insufficient:
-the test waits for the unchanged user message in native history.
-`tests/test_claude_settings_native.py` drives the real `/model` picker under the
-same variable with a synthetic model catalog and history. Claude 2.1.296 coverage
-changes model and effort in a fresh session, accepts Claude's own cache notice in
-a resumed conversation, and requires the session-only transcript receipt while
-`settings.json` stays unchanged.
+Claude TUI with a private home/socket and a localhost fake API; it never reads a
+user's account. Full Linux CI runs it with the other Claude native suites
+against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
+selects another executable for a manual run. Claude 2.1.296 coverage verifies
+literal trailing backslashes, multiline messages and durable request replay.
+Terminal submission alone is insufficient: the test waits for the unchanged user
+message in native history. `tests/test_claude_settings_native.py` drives the
+real `/model` picker with a synthetic model catalog and history. Claude 2.1.296
+coverage changes model and effort in a fresh session, accepts Claude's own cache
+notice in a resumed conversation, and requires the session-only transcript
+receipt while `settings.json` stays unchanged.
 
 ### Windows client, desktop and portable zip
 
@@ -443,10 +444,19 @@ accounts in private configuration.
 
 Full Linux CLI CI also runs `python3 scripts/ci/agent-compatibility.py`. The
 reviewed Codex matrix in `scripts/ci/agent-compatibility.json` retains 0.160.1
-(a resident-session regression) and 0.162.0. Each official Linux x86_64 package
-has an exact version and SHA-512 integrity pin. Only its native executable is
-extracted into a disposable directory; agent binaries are neither committed
-nor bundled. The runner treats skipped or empty native suites as failures.
+(a resident-session regression) and 0.162.0; the Claude Code matrix pins
+2.1.296. Each official Linux x86_64 package has an exact version and SHA-512
+integrity pin. Only its native executable is extracted into a disposable
+directory; agent binaries are neither committed nor bundled. The runner treats
+skipped or empty native suites as failures. `--agent claude` or `--agent codex`
+limits a local run to one matrix.
+
+Claude Code runs every `tests/test_claude_*_native.py` suite plus the Claude
+clear and compaction fixtures: exact input, questions, approvals, trust,
+resume, clear, compaction and session-only model settings. Each test launches
+the real TUI under `env -i` with a fixture API key, a loopback or local fake API
+and no nonessential traffic, so no account, telemetry or model request leaves
+the runner.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
 enabled and disabled. Animated 95x47 checks require the actual released settled
@@ -470,27 +480,29 @@ home, so a shell's final history write cannot race with filesystem cleanup.
 The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
 Claude Code, Kimi Code and DeepSeek Harness versions from their official package
-indexes, links their official release notes and tests the latest Codex as an
-additional canary. It does not advance reviewed pins or install anything on
-development machines. Its hosted job has read-only repository access, no cache
-access and no publication credentials. Reports, native logs and public protocol
-schemas expire after three days. A discovery or native-contract failure fails
-the run; successful unittest skips do not hide missing coverage.
+indexes, links their official release notes and tests the latest Codex and
+Claude Code as additional canaries. It does not advance reviewed pins or install
+anything on development machines. Its hosted job has read-only repository
+access, no cache access and no publication credentials. Reports, native logs
+and public protocol schemas expire after three days. A discovery or
+native-contract failure fails the run; successful unittest skips do not hide
+missing coverage.
 
 Codex protocol schemas are generated separately with and without experimental
 APIs. The report compares the latest canary with the newest reviewed pin and
-lists added/removed methods and added/removed/changed schemas. Changes to CLI help
-appear with a generated diff. A detected addition is a review candidate, not
-evidence that Zerus supports it or that a signed-in
-account can use it. For Claude and Kimi this workflow currently discovers
-versions only; their authenticated native suites remain opt-in. DeepSeek's
-existing pinned keyless contract fixture runs in full Linux CLI CI.
+lists added/removed methods and added/removed/changed schemas. Changes to Codex
+and Claude Code CLI help appear with a generated diff per agent. A detected
+addition is a review candidate, not evidence that Zerus supports it or that a
+signed-in account can use it. For Kimi this workflow currently discovers
+versions only. DeepSeek's existing pinned keyless contract fixture runs in full
+Linux CLI CI.
 
 To run the reviewed matrix or inspect current upstream changes locally:
 
 ```sh
 cargo build --locked
 python3 scripts/ci/agent-compatibility.py
+python3 scripts/ci/agent-compatibility.py --agent claude
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 
