@@ -2441,8 +2441,14 @@ mod tests {
         let outer = Job::new(Limits::CLI).unwrap();
         let mut command = probe_command("platform::windows::tests::cli_job_probe", &report);
         let mut child = command.creation_flags(CREATE_SUSPENDED).spawn().unwrap();
-        outer.assign(child.as_handle()).unwrap();
-        resume(child.id()).unwrap();
+        if let Err(error) = outer
+            .assign(child.as_handle())
+            .and_then(|()| resume(child.id()))
+        {
+            // Never leave a suspended process behind.
+            let _ = child.kill();
+            panic!("cannot start the probe in its job: {error}");
+        }
         let lines = report_of(&report);
         assert_eq!(value(&lines, "allows"), "Some(true)");
         let detached = open(value(&lines, "detached"));

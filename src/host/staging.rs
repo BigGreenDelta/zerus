@@ -1118,6 +1118,20 @@ mod tests {
         copy.wait().unwrap();
     }
 
+    /// Stage again while `kept` says something stayed: a scanner may still hold
+    /// a file of a copy that has just ended.
+    #[cfg(windows)]
+    fn until_released<T>(mut stage: impl FnMut() -> T, kept: impl Fn(&T) -> bool) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let report = stage();
+            if !kept(&report) || Instant::now() >= deadline {
+                return report;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Another build of this test binary: the same image with data appended,
     /// which the loader ignores.
     #[cfg(windows)]
@@ -1150,7 +1164,10 @@ mod tests {
         assert_eq!(sha256(aside).unwrap(), sha256(&this).unwrap());
 
         end_copy(running);
-        let report = stage_cli(&other, &target).unwrap();
+        let report = until_released(
+            || stage_cli(&other, &target).unwrap(),
+            |report| !report.kept.is_empty(),
+        );
         assert!(!report.changed);
         assert_eq!((report.removed, report.kept), (1, Vec::new()));
         assert_eq!(names(target.parent().unwrap()), [EXECUTABLE]);
@@ -1178,7 +1195,10 @@ mod tests {
         assert_eq!(Image::read(&images, &first.name), Some(first.clone()));
 
         end_copy(running);
-        let report = stage_image(&other, &images, "1.1.0").unwrap();
+        let report = until_released(
+            || stage_image(&other, &images, "1.1.0").unwrap(),
+            |report| !report.kept.is_empty(),
+        );
         assert!(!report.changed);
         assert_eq!(
             (report.removed, report.kept),
