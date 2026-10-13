@@ -143,7 +143,9 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
-    void init() { ComposerDraftStore::flushWrites(); QSettings().remove("workspace"); QSettings().remove("processes"); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    // Shards run functions and data rows in any order, so every test starts without
+    // the settings an earlier one saved, window geometry included.
+    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
