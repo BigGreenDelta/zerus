@@ -1,0 +1,18 @@
+[?9001h[?1004h[?25l[2J[m[H]0;claude[?25h[?25l[?2004h[?2031h[?1004h]0;✳ Claude Code[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[m[1m[3CClaude[1CCode[38;2;153;153;153m[22m[1Cv2.1.296[38;2;215;119;87m
+▝▜[48;2;0;0;0m█████[49m█▀[38;2;153;153;153m[2COpus[1C5.5[1C·[1CAPI[1CUsage[1CBilling[38;2;215;119;87m
+ ▝▝[3C▝▝[38;2;153;153;153m[3C~\zerus-dev\p2\work[38;2;136;136;136m[6;1H────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[m
+❯ [7m [38;2;136;136;136m[27m
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[9;3H⏸[1Cmanual[1Cmode[1Con[1C·[1C?[1Cfor[1Cshortcuts[1C·[1C←[1Cfor[1Cagents[49C◐[1Cmedium[1C·[1C/effort[m[38;2;177;185;249m[6;1H────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[m [38;2;177;185;249m[1mMake auto mode your default permission mode?[m
+[K[9;3H Auto mode lets Claude handle permission prompts automatically.[1CClaude[1Cchecks[1Ceach[1Ctool[1Ccall[1Cfor[1Crisky actions and    [10;4Hprompt[1Cinjection[1Cbefore[1Cexecuting,[1Cruns[1Cthe[1Cones[1Cit[1Cassesses[1Cas[1Clower-risk,[1Cand[1Cblocks[1Cthe[1Crest.[38;2;177;185;249m[12;4H❯[1CYes,[1Cset[1Cauto[1Cmode[1Cas[1Cmy[1Cdefault[1Cpermission[1Cmode[m[13;6HNo,[1Ckeep[1Cmanual[1Cmode[>0q[?u]7501;?[?2004h[38;2;136;136;136m[6;1H────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[m❯ [7m [27m[K[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;255;193;7m[9;3H⏵⏵ auto mode on [38;2;153;153;153m(shift+tab to cycle) · ← for agents[12X[m[13C      [1C      [1C    [1C    [1C    [1C   [1C [38;2;153;153;153m◐ medium · /effort[m
+[K
+[K
+[K
+[K
+[K
+[K[120C[38;2;153;153;153m[6;1H● Auto mode lets Claude handle permission prompts automatically — Claude checks each tool call for risky actions        [m  [38;2;153;153;153mand prompt injection before executing. Actions Claude identifies as safe are executed, while actions Claude [m
+  [38;2;153;153;153midentifies as risky are blocked and Claude may try a different approach. Ideal for long-running tasks.                [9;3HSessions are slightly more[1Cexpensive. Claude[1Ccan make mistakes that allow harmful commands to run, it's[K[10;3Hrecommended[1Cto[1Conly[1Cuse[1Cin[1Cisolated[1Cenvironments.[1CShift+Tab[1Cto[1Cchange[1Cmode.[38;2;136;136;136m[12;1H────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[m
+❯ [7m [38;2;136;136;136m[27m
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;255;193;7m[15;3H⏵⏵[1Cauto[1Cmode[1Con [38;2;153;153;153m(shift+tab[1Cto[1Ccycle)[1C·[1C←[1Cfor[1Cagents[47C◐[1Cmedium[1C·[1C/effort[m[15;101H[K[20C[?1006l[?1003l[?1002l[?1000l[>4m[?2031l[?2004l[?1016l[?9001l[?1004l[2m[17;1HResume this session with:
+claude --resume ff51cc58-d847-4272-a7c3-145a143408ee
+]0;[?25h

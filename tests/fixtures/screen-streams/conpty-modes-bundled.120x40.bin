@@ -1,0 +1,27 @@
+[1t[c[?1004h[?9001hZERUS-MODES-BEGIN pid=37212 in_mode=0x1f7->0x3e0 out_mode=0x7->0xf set_in=true set_out=true
+[?2004h[?1049h[?1h[?1000h[?1006hMODES-SET 2004 1049 1 1000 1006
+COLOR256 [38;5;114mfg114[0m [38;5;246mfg246[0m [48;5;236mbg236[0m [38;5;1mfg1[0m [38;5;9mfg9[0m
+TRUECOLOR [38;2;215;119;87mfg(215,119,87)[0m [48;2;30;30;46mbg(30,30,46)[0m
+ATTRS [1mbold[0m [2mdim[0m [3mitalic[0m [4munderline[0m [7mreverse[0m [9mstrike[0m
+GLYPHS ❯ › ─ ✔ | ● ⎿ ✻ ⏺ │ ╭ ╮ ╰ ╯ … ↵ ⏵ 日本
+[6n[cREPLIES after_ms=2001 n=0 hex=-
+ECHO seconds=15 (type now)
+IN t=2327 n=6 hex=1b5b3230307e
+IN t=2327 n=42 hex=666972737420706173746564206c696e650a7365636f6e6420706173746564206c696e651b5b3230317e
+IN t=2507 n=1 hex=0d
+IN t=3108 n=6 hex=1b5b3230307e
+IN t=3108 n=42 hex=746869726420706173746564206c696e650d666f7572746820706173746564206c696e651b5b3230317e
+IN t=3288 n=1 hex=0d
+IN t=3888 n=1 hex=1b
+IN t=4138 n=13 hex=6573632d7468656e2d74657874
+IN t=4739 n=1 hex=03
+IN t=5340 n=1 hex=13
+IN t=5640 n=12 hex=61667465722d6374726c2d73
+IN t=6240 n=3 hex=1b5b41
+IN t=6541 n=3 hex=1b4f41
+IN t=6841 n=5 hex=c3a9e29daf
+IN t=7442 n=10 hex=1b5b3c303b31303b354d
+IN t=7442 n=10 hex=1b5b3c303b31303b356d
+IN t=7743 n=2 hex=1b78
+[?1006l[?1000l[?1l[?2004l[?1049lZERUS-MODES-END
+[?1004l[?9001l
