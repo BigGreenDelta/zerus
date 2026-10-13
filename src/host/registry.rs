@@ -44,6 +44,9 @@ pub(crate) const LINGER: Duration = Duration::from_secs(5);
 /// How long the host waits for a supervisor's answer.
 const INPUT_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a request waits for a supervisor whose registration was just
+/// answered to open its channel.
+const SUPERVISOR_OPENING: Duration = Duration::from_secs(2);
 /// D11: a terminate waits this long for the supervisor to record its exit.
 const TERMINATE_GRACE: Duration = Duration::from_secs(10);
 /// Ended launches that a retried create still finds.
@@ -619,11 +622,10 @@ impl<L: Launcher> Host<L> {
     }
 
     fn supervisor(&self, session: &Session) -> Result<Arc<SupervisorChannel>, ErrorBody> {
-        self.registry()
-            .supervisors
-            .get(&session.id)
-            .filter(|channel| channel.is_open())
-            .cloned()
+        let channel = self.registry().supervisors.get(&session.id).cloned();
+        // A registration answered a moment ago opens right after its answer.
+        channel
+            .filter(|channel| channel.wait_open(SUPERVISOR_OPENING))
             .ok_or_else(|| {
                 error(
                     ErrorCode::Refused,

@@ -4,7 +4,7 @@
 //! the pipe transport are covered by the Windows tests of their modules and by
 //! `tests/test_windows_host.py`.
 use super::{
-    channel::{answer_requests, NOT_AGENT_INPUT, NOT_RAW},
+    channel::{answer_requests, SupervisorChannel, NOT_AGENT_INPUT, NOT_RAW},
     client::{ClientError, Connection, Event},
     link::{memory_pair, write_json, Link},
     protocol::{
@@ -1161,6 +1161,36 @@ fn raw_mode_evidence_and_terminate_go_through_the_supervisor() {
         supervisor.join().unwrap(),
         [SupervisorOp::InputState, SupervisorOp::Stop]
     );
+}
+
+#[test]
+fn a_just_answered_registration_is_awaited_and_a_closed_one_is_not() {
+    // A client may act on an answered registration before the host's
+    // connection thread has opened the channel (seen on a hosted runner).
+    let (link, _peer) = memory_pair();
+    let channel = SupervisorChannel::new(Arc::new(link));
+    assert!(!channel.is_open());
+    let opener = {
+        let channel = channel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            channel.open();
+        })
+    };
+    assert!(channel.wait_open(LIMIT));
+    opener.join().unwrap();
+    assert!(channel.is_open());
+
+    let (link, _peer) = memory_pair();
+    let closed = SupervisorChannel::new(Arc::new(link));
+    closed.close();
+    let started = Instant::now();
+    assert!(!closed.wait_open(LIMIT));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let (link, _peer) = memory_pair();
+    let never = SupervisorChannel::new(Arc::new(link));
+    assert!(!never.wait_open(Duration::from_millis(50)));
 }
 
 #[test]
