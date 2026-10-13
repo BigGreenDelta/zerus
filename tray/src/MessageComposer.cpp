@@ -6,6 +6,7 @@
 #include "LocalFile.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
+#include "StatusMessage.h"
 
 #include <QApplication>
 #include <QBuffer>
@@ -206,10 +207,14 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_attach->setFixedSize(34, 34); m_attach->setIconSize(QSize(19, 19));
     m_attach->setToolTip(tr("Attach files, paste an image, or drop files onto this session"));
     m_attach->setAccessibleName(tr("Attach files to message"));
-    m_status = new QLabel; m_status->setObjectName("messageStatus"); m_status->setWordWrap(true);
+    m_status = new StatusMessage; m_status->setObjectName("messageStatus"); m_status->setFixedHeight(34);
     m_status->setTextFormat(Qt::PlainText); m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_retry = new QPushButton(tr("Allow retry")); m_retry->setObjectName("allowMessageRetry"); m_retry->hide();
     m_retry->setToolTip(tr("Check the terminal before sending again to avoid a duplicate message"));
+    m_refreshStatus = new QPushButton; m_refreshStatus->setObjectName("refreshSessionStatus"); m_refreshStatus->setFixedSize(34, 34);
+    m_refreshStatus->setIconSize(QSize(18, 18)); m_refreshStatus->setToolTip(tr("Refresh this session"));
+    m_refreshStatus->setAccessibleName(m_refreshStatus->toolTip()); m_refreshStatus->hide();
+    connect(m_refreshStatus, &QPushButton::clicked, this, [this] { emit sessionRefreshRequested(m_key); });
     m_send = new QPushButton(tr("Send")); m_send->setObjectName("sendMessage");
     m_send->setIconSize(QSize(14, 14)); m_send->setLayoutDirection(Qt::RightToLeft); // Arrow after the label.
     m_send->setToolTip(tr("Send: Enter; new line: Shift+Enter"));
@@ -248,9 +253,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
-    m_feedback = new QHBoxLayout; m_feedback->setContentsMargins(0, 0, 0, 0); m_feedback->setSpacing(8); inputLayout->addLayout(m_feedback);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
         if (m_drafts.value(m_key).sending || isWaitingToSend(m_key) || m_renamingKeys.contains(m_key)) {
@@ -312,26 +316,17 @@ MessageComposer::~MessageComposer() = default;
 void MessageComposer::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    const bool narrow = width() < 640;
-    if (narrow == m_narrow) return;
+    const bool narrow = width() < 400;
+    if (m_narrow == narrow) return;
     m_narrow = narrow;
-    if (narrow) {
-        m_actions->setStretch(1, 1);
-        m_actions->removeWidget(m_status);
-        m_actions->removeWidget(m_retry);
-        m_feedback->addWidget(m_status, 1); m_feedback->addWidget(m_retry);
-    } else {
-        m_actions->setStretch(1, m_status->isHidden() ? 1 : 0);
-        m_feedback->removeWidget(m_status); m_feedback->removeWidget(m_retry);
-        m_actions->insertWidget(2, m_status, 1);
-        m_actions->insertWidget(3, m_retry);
-    }
+    updateControls();
 }
 
 void MessageComposer::setSessionKey(const QString &key)
 {
     if (key == m_key) return;
     ++m_navigationRevision;
+    m_sessionStatus.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
     m_settingsPopup->hide();
     m_toolbar->closePopovers(); m_preview->hide();
     if (!key.isEmpty() && !m_drafts.contains(key)) {
@@ -409,7 +404,7 @@ bool MessageComposer::requestInterrupt()
 
 bool MessageComposer::offerDraft(const QString &key, const QString &text)
 {
-    if ((m_recording && key==m_key) || key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if (((m_recording || m_sessionStatusBlocksInput) && key==m_key) || key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
@@ -422,6 +417,14 @@ void MessageComposer::setAvailability(bool available, const QString &reason)
 {
     if (available != m_available || reason != m_unavailableReason) QToolTip::hideText();
     m_available = available; m_unavailableReason = reason; updateControls();
+}
+
+void MessageComposer::setSessionStatus(const QString &text, bool error, bool blockInput)
+{
+    blockInput = blockInput && !text.isEmpty();
+    if (m_sessionStatus == text && m_sessionStatusError == error && m_sessionStatusBlocksInput == blockInput) return;
+    m_sessionStatus = text; m_sessionStatusError = error; m_sessionStatusBlocksInput = blockInput;
+    updateControls();
 }
 
 bool MessageComposer::isSending(const QString &key) const { return m_drafts.value(key).sending || m_preparingKeys.contains(key); }
@@ -798,12 +801,18 @@ void MessageComposer::updateControls()
     const bool hasContent = !draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty();
     const bool tooLong = draft.text.toUtf8().size() > MaxTextBytes;
     const bool waiting = isWaitingToSend(m_key);
-    const bool locked = m_recording || draft.sending || waiting || m_loadingKeys.contains(m_key);
+    const bool operationLocked = m_recording || draft.sending || waiting || m_loadingKeys.contains(m_key);
+    const bool locked = operationLocked || m_sessionStatusBlocksInput;
     // Disabling a focused editor makes Qt focus another action (often Stop).
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
     m_editor->setReadOnly(locked);
-    const auto lockHint=m_recording?tr("Recording voice. Space / Esc to stop."):waiting?m_waitingSends.value(m_key):QString();
+    if (m_editor->property("sessionBlocked").toBool() != m_sessionStatusBlocksInput) {
+        m_editor->setProperty("sessionBlocked", m_sessionStatusBlocksInput);
+        m_editor->style()->unpolish(m_editor); m_editor->style()->polish(m_editor); m_editor->update();
+    }
+    const auto lockHint=m_recording?tr("Recording voice. Space / Esc to stop."):waiting?m_waitingSends.value(m_key)
+        :m_sessionStatusBlocksInput?m_sessionStatus:QString();
     m_editor->setToolTip(lockHint);
     m_editor->setAccessibleDescription(lockHint);
     m_attach->setEnabled(!m_key.isEmpty() && !locked);
@@ -811,18 +820,37 @@ void MessageComposer::updateControls()
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && !tooLong && !locked && !draft.uncertain);
     m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
-    m_retry->setVisible(draft.uncertain && !locked);
-    m_settings->setEnabled(!m_key.isEmpty() && !locked);
+    m_retry->setVisible(draft.uncertain && !operationLocked);
+    m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
+    m_refreshStatus->setEnabled(!operationLocked);
+    m_settings->setEnabled(!m_key.isEmpty() && !operationLocked);
     if (m_settingsPopup->isVisible()) updateSettingsApply();
     // Routine loading, saving and delivery feedback belongs to the controls.
     // Reserve this space for errors and cautions about blocked/deferred sends.
     QString status = !draft.storageError.isEmpty() ? draft.storageError : waiting ? m_waitingSends.value(m_key)
         : draft.error || draft.uncertain ? draft.notice : QString();
-    if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : m_unavailableReason;
-    m_status->setText(status); m_status->setToolTip(status);
+    const bool ownError = (!waiting && draft.error) || tooLong || !draft.storageError.isEmpty();
+    if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
+    const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
+    m_status->setText(status); m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
+    m_status->setAccessibleDescription(detail);
+    m_refreshStatus->setToolTip(Qt::convertFromPlainText(tr("Refresh this session") + '\n' + m_sessionStatus));
+    m_refreshStatus->setAccessibleDescription(m_sessionStatus);
     m_status->setVisible(!status.isEmpty());
-    m_actions->setStretch(1, m_narrow || status.isEmpty() ? 1 : 0);
-    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg((!waiting && draft.error) || tooLong || !draft.storageError.isEmpty() ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#a2adbc" : "#627082")));
+    // On a narrow column, keep recovery beside Attach without adding a row.
+    m_retry->setAccessibleName(tr("Allow retry"));
+    m_retry->setText(m_narrow ? QString() : tr("Allow retry"));
+    m_retry->setMinimumWidth(m_narrow ? 34 : 0); m_retry->setMaximumWidth(m_narrow ? 34 : QWIDGETSIZE_MAX);
+    const bool showSettings = !m_narrow || status.isEmpty();
+    const auto focus = QApplication::focusWidget();
+    const bool returnFocus = !showSettings && (m_settings->hasFocus() || (focus && m_settingsPopup->isAncestorOf(focus)));
+    m_settings->setVisible(showSettings);
+    if (!showSettings) m_settingsPopup->hide();
+    // Do not transfer an unfinished settings interaction to the Stop action.
+    if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
+    m_actions->setStretch(1, status.isEmpty() ? 1 : 0);
+    setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
+        ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
 }
 
@@ -1015,6 +1043,8 @@ void MessageComposer::setTheme(bool dark)
     updateSettingsButton();
     m_toolbar->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
+    m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
+    m_retry->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_stop->setIcon(workspaceIcon("stop",dark ? QColor("#ff9ca8") : QColor("#b52d48")));
     // Match the stylesheet's enabled and disabled Send text colors below.
     m_send->setIcon(composerIcon("send", QColor(dark ? "#10231b" : "#ffffff"), QColor(dark ? "#85909e" : "#6d7784")));
@@ -1023,6 +1053,7 @@ void MessageComposer::setTheme(bool dark)
     setStyleSheet(QString(R"(
         QPlainTextEdit#messageInput { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
         QPlainTextEdit#messageInput:focus { border-color:%5; }
+        QPlainTextEdit#messageInput[sessionBlocked="true"] { color:%7; border-color:%3; }
         QWidget#messageComposer { background:transparent; border:0; }
         QWidget#attachmentRow { border-radius:6px; }
         QWidget#attachmentRow:hover, QWidget#attachmentRow:focus { background:%4; }
@@ -1050,6 +1081,7 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#attachMessageFile { padding:0; border:1px solid %3; border-radius:7px; background:transparent; }
         QPushButton#attachMessageFile:hover { background:%1; border-color:%5; }
         QPushButton#attachMessageFile:focus[keyboardFocus="true"] { border-color:%5; }
+        QPushButton#refreshSessionStatus { padding:0; border:0; background:transparent; }
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")

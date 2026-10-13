@@ -184,6 +184,8 @@ private slots:
     void backgroundShellRowIsReadyAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
+    void refreshErrorsStayInComposerAndFooterWithoutMovingViews();
+    void remoteSessionLoadingIsDelayedAndFollowsSelection();
     void backgroundPollKeepsActivityAndComposerStable();
     void processPollingFollowsVisibilityAndSettings();
     void recoveryCountdownKeepsHistoryDraftAndFocus();
@@ -1524,7 +1526,9 @@ void TestSessionsWindow::recoveryCountdownKeepsHistoryDraftAndFocus()
     // already matches its own size hint. Apply that layout before the baseline.
     QCoreApplication::processEvents();
     QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
-    QTRY_COMPARE(composer->height(),composer->layout()->totalHeightForWidth(composer->width()));
+    // Feedback is now a single line, so the layout need not implement height-for-width.
+    QTRY_COMPARE(composer->height(),composer->layout()->hasHeightForWidth()
+        ? composer->layout()->totalHeightForWidth(composer->width()) : composer->sizeHint().height());
     QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
     QTRY_VERIFY(browser->toPlainText().contains("503 Service unavailable"));
     QTRY_VERIFY(!activity->renderPending());
@@ -2282,6 +2286,74 @@ void TestSessionsWindow::composerNavigationDuringPolling()
     QCOMPARE(editor->textCursor().position(), position);
     auto expected = editor->toPlainText(); expected.insert(position, "Y");
     QTest::keyClicks(editor, "Y"); QCOMPARE(editor->toPlainText(), expected);
+}
+
+void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews()
+{
+    const QJsonObject details{{"tracked",true},{"run_id","fixture-run"},{"conversation_id","fixture-conversation"},
+        {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const auto fixture = programInspecting("inline-status", details); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(fixture); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
+    QSignalSpy ready(client, &HgsClient::inspectionReady); QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    client->requestInspection({}, "codex/hgs/dashboard"); QTRY_VERIFY(!ready.isEmpty());
+    setComposerText(composer, "Keep my exact draft");
+    auto cursor = composer->editor()->textCursor(); cursor.setPosition(4); cursor.setPosition(9, QTextCursor::KeepAnchor);
+    composer->editor()->setTextCursor(cursor); composer->editor()->setFocus(); QTest::qWait(20);
+    const auto tabPosition = tabs->mapTo(&window, QPoint()); const auto tabSize = tabs->size();
+    const auto editorRect = composer->editor()->geometry();
+    client->inspectionFailed({}, "codex/hgs/dashboard", "timed out"); QTest::qWait(20);
+    QVERIFY(window.findChild<QLabel *>("hint")->isHidden());
+    auto *status = composer->findChild<QLabel *>("messageStatus");
+    QVERIFY(status->text().contains("Could not refresh activity: timed out")); QVERIFY(status->isVisible());
+    QCOMPARE(tabs->mapTo(&window, QPoint()), tabPosition); QCOMPARE(tabs->size(), tabSize);
+    QCOMPARE(composer->editor()->geometry(), editorRect); QVERIFY(composer->editor()->isReadOnly());
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep my exact draft"));
+    QCOMPARE(composer->editor()->textCursor().position(), 9); QCOMPARE(composer->editor()->textCursor().anchor(), 4);
+    const auto preview = qEnvironmentVariable("ZERUS_INLINE_STATUS_PREVIEW");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window.grab().save(preview + "/activity-error.png")); }
+    auto *terminal = window.findChild<TerminalView *>(); tabs->setCurrentWidget(terminal); QTest::qWait(20);
+    auto *footer = window.findChild<QLabel *>("sessionFeedback");
+    QVERIFY(footer->isVisible()); QVERIFY(footer->text().contains("timed out"));
+    QCOMPARE(tabs->mapTo(&window, QPoint()), tabPosition); QCOMPARE(tabs->size(), tabSize);
+    if (!preview.isEmpty()) QVERIFY(window.grab().save(preview + "/terminal-error.png"));
+    client->inspectionReady({}, "codex/hgs/dashboard", details); QTest::qWait(20);
+    QVERIFY(footer->isHidden()); QVERIFY(!composer->editor()->isReadOnly());
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep my exact draft"));
+}
+
+void TestSessionsWindow::remoteSessionLoadingIsDelayedAndFollowsSelection()
+{
+    const auto fixture = m_dir->filePath("slow-session-read");
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import json,sys,time
+a=sys.argv[1:]
+if 'inspect' in a:
+ if a and a[0]=='@mac':time.sleep(2.8)
+ print(json.dumps({'tracked':True,'run_id':'fixture-run','conversation_id':'fixture-conversation',
+  'runtime_state':'live','process_state':'running','phase':'idle','activity':'idle','events':[],'cursor':0}))
+else:print('{}')
+)PY"));
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *loading = window.findChild<QWidget *>("sessionLoading"); auto *title = window.findChild<QLabel *>("detailTitle");
+    QVERIFY(loading); QVERIFY(title);
+    window.setPollingHosts({QString()}); QTest::qWait(2100); QVERIFY(loading->isHidden()); window.setPollingHosts({});
+    window.showSession("mac", "claude/infra/review"); QTest::qWait(100);
+    const auto titleText = title->text(); const auto titleRect = title->geometry();
+    QVERIFY(loading->isHidden()); QTest::qWait(700); QVERIFY(loading->isHidden());
+    QTRY_VERIFY_WITH_TIMEOUT(loading->isVisible(), 1800);
+    QCOMPARE(title->text(), titleText); QCOMPARE(title->geometry(), titleRect);
+    QVERIFY(loading->geometry().left() >= title->fontMetrics().horizontalAdvance(titleText));
+    const auto preview = qEnvironmentVariable("ZERUS_INLINE_STATUS_PREVIEW");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window.grab().save(preview + "/remote-loading.png")); }
+    QTRY_VERIFY_WITH_TIMEOUT(loading->isHidden(), 2000);
+    // The same remote read is still real work, but cannot decorate another selection.
+    auto *client = window.findChild<HgsClient *>(); client->requestInspection("mac", "claude/infra/review");
+    window.showSession({}, "codex/hgs/dashboard"); QTest::qWait(2200); QVERIFY(loading->isHidden());
+    client->inspectionLoadingChanged("mac", "claude/infra/review", {}, {}, false); QVERIFY(loading->isHidden());
 }
 
 void TestSessionsWindow::connectionStatusSurvivesNoticesAndRetries()

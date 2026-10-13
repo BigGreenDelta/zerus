@@ -538,6 +538,20 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Session refresh, connection and recovery errors appear on one line beside the
+attachment button, with the complete diagnostic in its tooltip and an explicit
+session refresh action. They do not move the Activity or Terminal tabs. A blocking
+session error makes the message field read-only and muted while preserving its
+draft, focus and selection; informational notices leave editing available. When
+the composer is hidden, the same diagnostic uses the existing workspace footer.
+Other operation notices retain their priority there.
+
+Reads from the selected remote machine show a yellow loading circle beside the
+session name only after two seconds. It remains visible while an actual read is
+pending and clears when that read completes or fails. Switching sessions shows
+only reads belonging to the newly selected session or machine. Local reads do not
+show this indicator, and its appearance does not change the header layout.
+
 Ordinary text, cursor and question-form edits save through one ordered background
 writer. Waiting edits coalesce to the latest snapshot per draft, so typing does
 not wait for disk commits. The editor shows **Saving draft** until its latest

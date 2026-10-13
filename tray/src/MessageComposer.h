@@ -28,6 +28,8 @@ public:
     ~MessageComposer() override;
     void setSessionKey(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
+    // Session feedback uses the existing action row and never replaces a draft.
+    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
@@ -65,7 +67,7 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_recording && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canAttachFiles() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -83,6 +85,7 @@ public:
     std::function<bool(const QUrl &)> openUrl;
 
 signals:
+    void sessionRefreshRequested(const QString &sessionKey);
     void interruptRequested(const QString &sessionKey);
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
@@ -133,6 +136,8 @@ private:
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
+    QString m_sessionStatus;
+    bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false;
     double m_scale = 1.0;
     QPlainTextEdit *m_editor;
@@ -148,6 +153,7 @@ private:
     QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey;
     bool m_settingsEnabled = false;
     QPushButton *m_attach, *m_send, *m_retry;
+    QPushButton *m_refreshStatus;
     QPushButton *m_stop;
     ComposerToolbar *m_toolbar;
     ToolbarChip *m_attachmentsChip;
@@ -156,6 +162,5 @@ private:
     QLabel *m_preview;
     QHash<int, QPixmap> m_previews;   // decoded once per list; a null pixmap marks a non-image
     QHBoxLayout *m_actions;
-    QHBoxLayout *m_feedback;
     bool m_narrow = false;
 };

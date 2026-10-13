@@ -38,6 +38,8 @@
 #include "SessionList.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
+#include "BusyIndicator.h"
+#include "StatusMessage.h"
 #include "WorkspaceFocus.h"
 #include "WindowLayer.h"
 #include "SwarmButton.h"
@@ -130,20 +132,6 @@ public:
         const auto insets = contentsMargins();
         return {fontMetrics().horizontalAdvance(text()) + insets.left() + insets.right() + 2 * margin(),
                 fontMetrics().height() + insets.top() + insets.bottom() + 2 * margin()};
-    }
-};
-
-class StatusMessage : public QLabel {
-public:
-    StatusMessage() {
-        setObjectName("notice"); setTextFormat(Qt::PlainText);
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    }
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter painter(this); painter.setPen(palette().color(QPalette::WindowText));
-        painter.drawText(contentsRect(), Qt::AlignVCenter | Qt::AlignLeft,
-                         fontMetrics().elidedText(text().simplified(), Qt::ElideRight, contentsRect().width()));
     }
 };
 
@@ -504,6 +492,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *details = new QWidget;details->setObjectName("sessionDetailPanel"); auto *detail = new QVBoxLayout(details); detail->setContentsMargins(12, 8, 12, 10); detail->setSpacing(4);
     auto *badges = new QHBoxLayout; badges->setSpacing(4);
     m_title = label({}, "detailTitle"); m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_title->setMinimumWidth(70);
+    m_sessionLoading = new BusyIndicator(m_title); m_sessionLoading->setObjectName("sessionLoading");
+    m_sessionLoading->setAccessibleName(tr("Loading data from the remote machine"));
+    m_sessionLoadingTimer.setSingleShot(true);
+    connect(&m_sessionLoadingTimer, &QTimer::timeout, this, &SessionsWindow::updateSessionLoading);
+    connect(&m_client, &HgsClient::inspectionLoadingChanged, this,
+        [this](const QString &host, const QString &name, const QString &archive, const QString &agent, bool loading) {
+            if (host.isEmpty()) return;
+            const auto key = host + '\n' + name + '\n' + archive + '\n' + agent;
+            if (loading) {
+                if (!m_sessionReads.contains(key)) {
+                    SessionRead read{host, name, archive, agent, {}}; read.age.start(); m_sessionReads.insert(key, read);
+                }
+            } else m_sessionReads.remove(key);
+            updateSessionLoading();
+        });
     badges->addWidget(m_title, 1);
     connect(&m_client,&HgsClient::sessionReferenceReady,this,[this](const QString &uri){emit copyTextRequested(uri);showNotice(tr("Session reference copied"));});
     connect(&m_client,&HgsClient::sessionReferenceFailed,this,[this](const QString &error){showNotice(error,true);});
@@ -557,7 +560,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_pages->setCurrentIndex(4);m_accountsPage->showAccount(entry->host,m_accountUsageData.value("id").toString());
     });
     m_meta->installEventFilter(this); m_title->installEventFilter(this);
-    m_hint = label({}, "hint"); m_hint->setWordWrap(true); detail->addWidget(m_hint);
+    // Context feedback belongs to the fixed composer/footer rows, never the header.
+    m_hint = label({}, "hint", details); m_hint->hide();
     m_goal = new QPushButton; m_goal->setObjectName("sessionGoal"); m_goal->hide();
     m_goal->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); detail->addWidget(m_goal);
     connect(m_goal, &QPushButton::clicked, this, [this] { setInspectorVisible(true); m_inspector->setCurrentIndex(0); });
@@ -826,6 +830,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();
     });
     inputColumn->addWidget(m_composer);
+    connect(m_composer, &MessageComposer::sessionRefreshRequested, this, [this](const QString &key) {
+        if (key != m_selectedKey) return;
+        emit refreshRequested(); inspect();
+    });
     connect(m_markRead,&QPushButton::clicked,this,[this]{
         const auto *entry=selected();if(!entry||entry->session.state=="archived"||!entryNeedsAttention(*entry))return;
         const auto original=*entry;
@@ -1125,6 +1133,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     if (settings.value("workspace/inspectorVisible", false).toBool())
         QTimer::singleShot(0, this, [this] { setInspectorVisible(true); });
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
+        updateSessionFeedback();
         if (m_detailTabs->currentWidget() == m_terminal) m_terminal->connectSession();
         if (m_detailTabs->currentWidget() == m_processes) m_processPollAge.invalidate();
         if(m_detailTabs->currentWidget()!=m_terminal && m_detailTabs->currentWidget()!=m_nativeUi)inspect();
@@ -1291,6 +1300,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
     m_notice = new StatusMessage; m_notice->hide(); statusLayout->addWidget(m_notice, 1);
+    m_sessionFeedback = new StatusMessage; m_sessionFeedback->setObjectName("sessionFeedback");
+    m_sessionFeedback->hide(); statusLayout->addWidget(m_sessionFeedback, 1);
+    connect(m_pages, &QStackedWidget::currentChanged, this, [this] { updateSessionFeedback(); });
     m_noticeDismiss = new QPushButton; m_noticeDismiss->setObjectName("dismissNotice");
     m_noticeDismiss->setProperty("glyph", "close"); m_noticeDismiss->setIconSize(QSize(14, 14));
     m_noticeDismiss->setFixedSize(20, 20); m_noticeDismiss->setFlat(true);
@@ -1471,6 +1483,7 @@ void SessionsWindow::applyTheme()
 {
     const QString theme = QSettings().value("workspace/theme", "system").toString();
     m_dark = theme == "dark" || (theme != "light" && qApp->palette().color(QPalette::Window).lightness() < 128);
+    m_sessionLoading->setTheme(m_dark);
     m_fg = m_dark ? "#e8edf4" : "#1a2733";
     m_muted = m_dark ? "#a2adbc" : "#627082";
     m_surface = m_dark ? "#1c2229" : "#ffffff";
@@ -1813,9 +1826,47 @@ void SessionsWindow::saveOrganization()
 
 void SessionsWindow::updateHeaderText()
 {
-    m_title->setText(m_title->fontMetrics().elidedText(m_fullTitle, Qt::ElideMiddle, qMax(20, m_title->width())));
+    // Always reserve the indicator's space; appearing must not re-elide the title.
+    m_title->setText(m_title->fontMetrics().elidedText(m_fullTitle, Qt::ElideMiddle, qMax(20, m_title->width() - 22)));
+    m_sessionLoading->move(qMin(m_title->fontMetrics().horizontalAdvance(m_title->text()) + 6, m_title->width() - 16),
+        qMax(0, (m_title->height() - 16) / 2));
     m_meta->setText(m_meta->fontMetrics().elidedText(m_fullMeta, Qt::ElideMiddle, qMax(20, m_meta->width())));
     m_title->setAccessibleName(m_fullTitle); m_meta->setAccessibleName(m_fullMeta);
+}
+
+void SessionsWindow::updateSessionLoading()
+{
+    if (!m_sessionLoading) return;
+    const auto *entry = selected();
+    bool pending = false; int remaining = 2000;
+    const auto consider = [&](const QElapsedTimer &age) {
+        pending = true; remaining = qMin(remaining, int(qMax<qint64>(0, 2000 - age.elapsed())));
+    };
+    if (entry && entry->online && !entry->host.isEmpty()) {
+        if (m_remotePollAges.contains(entry->host)) consider(m_remotePollAges.value(entry->host));
+        for (const auto &read : m_sessionReads)
+            if (read.host == entry->host && read.name == entry->session.name && read.archive == entry->session.archiveId
+                && (read.agent.isEmpty() || read.agent == m_subagentId)) consider(read.age);
+    }
+    m_sessionLoading->setRunning(pending && remaining == 0);
+    m_title->setAccessibleDescription(pending && remaining == 0 ? tr("Loading data from the remote machine") : QString());
+    if (pending && remaining > 0) m_sessionLoadingTimer.start(remaining);
+    else m_sessionLoadingTimer.stop();
+}
+
+void SessionsWindow::updateSessionFeedback()
+{
+    if (!m_sessionFeedback) return;
+    const bool outsideComposer = m_detailTabs->currentWidget() != m_activityStack || !m_subagentId.isEmpty()
+        || !m_composer->isInputVisible();
+    const bool visible = m_pages->currentIndex() == 0 && selected() && outsideComposer
+        && m_hint->property("active").toBool() && m_notice->isHidden();
+    m_sessionFeedback->setText(visible ? m_hint->text() : QString());
+    m_sessionFeedback->setToolTip(Qt::convertFromPlainText(m_sessionFeedback->text()));
+    m_sessionFeedback->setAccessibleName(m_sessionFeedback->text());
+    setWorkspaceStyle(m_sessionFeedback, QString("color:%1;").arg(m_hint->property("error").toBool()
+        ? (m_dark ? "#f4ab9b" : "#a13224") : (m_dark ? "#efc978" : "#92641b")));
+    m_sessionFeedback->setVisible(visible);
 }
 
 void SessionsWindow::revealSession(const QString &key)
@@ -1979,8 +2030,15 @@ void SessionsWindow::setConnectionError(const QString &error) {
 
 void SessionsWindow::setPollingHosts(const QSet<QString> &hosts)
 {
+    for (auto it = m_remotePollAges.begin(); it != m_remotePollAges.end();) {
+        if (!hosts.contains(it.key())) it = m_remotePollAges.erase(it); else ++it;
+    }
+    for (const auto &host : hosts) if (!host.isEmpty() && !m_remotePollAges.contains(host)) {
+        QElapsedTimer age; age.start(); m_remotePollAges.insert(host, age);
+    }
     m_pollingHosts = hosts;
     updateConnectionStatus();
+    updateSessionLoading();
 }
 
 void SessionsWindow::updateConnectionStatus()
@@ -2813,6 +2871,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
 
 void SessionsWindow::renderDetails()
 {
+    updateSessionLoading();
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
     const auto recoveryDetails=entry && entry->session.state != "archived"
@@ -2857,6 +2916,8 @@ void SessionsWindow::renderDetails()
     if (!m_subagentId.isEmpty() && (!entry || (m_subagentConversation != m_details.value("conversation_id").toString(entry->session.conversationId))
         || !childRoster(*entry).contains(m_subagentId))) closeSubagent();
     if (!entry) {
+        m_hint->clear(); m_hint->setProperty("active", false); m_hint->hide();
+        m_composer->setSessionStatus({}); updateSessionFeedback();
         m_detailsIdValue->setText(tr("Not confirmed")); m_detailsIdValue->setProperty("copyValue", QString());
         m_copySessionId->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
@@ -2977,7 +3038,11 @@ void SessionsWindow::renderDetails()
     m_badge->setToolTip(sessionTooltip({hint, m_model->text()}, 380).html);
     m_pause->setToolTip(sessionTooltip({pauseCaption, canPause
         ? tr("Close the idle agent and save its conversation. Resume starts it again with the same history.") : hint}, 380).html);
-    m_hint->setVisible(!entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty() || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty())));
+    const bool contextVisible = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
+        || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty()));
+    const bool contextError = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
+        || (archived && !m_details.value("last_restore_error").toString().isEmpty());
+    m_hint->setProperty("active", contextVisible); m_hint->setProperty("error", contextError); m_hint->hide();
     m_nativeSignIn->setVisible(s.cmd == "dsh" && entry->online && m_details.value("auth_required").toBool() && s.runtimeState == "live");
     setWorkspaceStyle(m_nativeSignIn, QString("QWidget#nativeSignInBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
         .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
@@ -2987,6 +3052,8 @@ void SessionsWindow::renderDetails()
     if (!entry->online || !m_inspectError.isEmpty()) { auto queue=activityDetails["input_queue"].toObject(); queue["can_send_now"]=false; activityDetails["input_queue"]=queue; }
     m_activityView->setTimeline(activityDetails, m_events, m_localMessages.value(m_selectedKey), s.prompt, s.tracked);
     const QString messageProblem = messageBlockReason(*entry);
+    m_composer->setSessionStatus(contextVisible ? hint : QString(), contextError,
+        contextError && !messageProblem.isEmpty());
     if (!messageProblem.isEmpty() && canStartStopped(*entry))
         m_composer->setAvailability(true, tr("Session stopped. Send asks whether to resume it or start fresh."));
     else m_composer->setAvailability(messageProblem.isEmpty(), messageProblem);
@@ -3007,6 +3074,7 @@ void SessionsWindow::renderDetails()
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
         m_details.value("settings_apply_when").toString());
     renderQuestion(*entry);
+    updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());
     m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
     const bool terminalTab = s.cmd != "dsh" && m_subagentId.isEmpty();
@@ -4012,6 +4080,7 @@ void SessionsWindow::showNotice(const QString &message, bool error)
     m_notice->style()->unpolish(m_notice); m_notice->style()->polish(m_notice); m_notice->update();
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
+    updateSessionFeedback();
     if (!error) QTimer::singleShot(5000, this, [this,revision] {
         if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
@@ -4021,6 +4090,7 @@ void SessionsWindow::clearNotice()
 {
     m_notice->setProperty("noticeRevision", m_notice->property("noticeRevision").toInt() + 1);
     m_notice->clear(); m_notice->setToolTip({}); m_notice->hide(); m_noticeDismiss->hide();
+    updateSessionFeedback();
 }
 
 bool SessionsWindow::selectSessionEntry(const Entry &original)
@@ -4429,7 +4499,7 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 
     if (m_children && watched == m_children->viewport() && event->type() == QEvent::Resize)
         QTimer::singleShot(0, this, &SessionsWindow::renderDetails);
-    if ((watched == m_meta || watched == m_title) && event->type() == QEvent::Resize) updateHeaderText();
+    if ((watched == m_meta || watched == m_title) && (event->type() == QEvent::Resize || event->type() == QEvent::FontChange)) updateHeaderText();
     if (watched == m_sessions && event->type() == QEvent::KeyPress) {
         const auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Menu || (key->key() == Qt::Key_F10 && key->modifiers().testFlag(Qt::ShiftModifier))) {

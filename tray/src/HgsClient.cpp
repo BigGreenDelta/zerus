@@ -551,6 +551,7 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
     if (m_inspectionsInFlight.contains(key))
         return false;
     m_inspectionsInFlight.insert(key);
+    emit inspectionLoadingChanged(host, name, archiveId, {}, true);
     QStringList args{QStringLiteral("inspect"), name, QStringLiteral("--after"), QString::number(after)};
     if (!includeProcesses) args << QStringLiteral("--skip-processes");
     if (!archiveId.isEmpty())
@@ -560,6 +561,7 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
     runHgs(m_hgs, args, host.isEmpty() ? 5000 : 15000, this,
            [this, host, name, key, archiveId](const QByteArray &out) {
                m_inspectionsInFlight.remove(key);
+               emit inspectionLoadingChanged(host, name, archiveId, {}, false);
                QJsonParseError error;
                const auto doc = QJsonDocument::fromJson(out, &error);
                if (error.error != QJsonParseError::NoError || !doc.isObject()) {
@@ -569,6 +571,7 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
                emit inspectionReady(host, name, doc.object(), archiveId);
            }, [this, host, name, key, archiveId](const QString &, const QString &detail) {
                m_inspectionsInFlight.remove(key);
+               emit inspectionLoadingChanged(host, name, archiveId, {}, false);
                emit inspectionFailed(host, name, detail, archiveId);
            });
     return true;
@@ -637,18 +640,21 @@ void HgsClient::requestSubagentInspection(const QString &host, const QString &na
     const QString key = host + '\n' + name + '\n' + archiveId + '\n' + agentId;
     if (m_inspectionsInFlight.contains(key)) return;
     m_inspectionsInFlight.insert(key);
+    emit inspectionLoadingChanged(host, name, archiveId, agentId, true);
     QStringList args{"inspect", name, "--agent", agentId, "--skip-processes"};
     if (!archiveId.isEmpty()) args << "--archive" << archiveId;
     if (!host.isEmpty()) args.prepend('@' + host);
     runHgs(m_hgs, args, host.isEmpty() ? 5000 : 15000, this,
         [this,host,name,agentId,archiveId,key](const QByteArray &out) {
             m_inspectionsInFlight.remove(key);
+            emit inspectionLoadingChanged(host, name, archiveId, agentId, false);
             QJsonParseError error; const auto doc = QJsonDocument::fromJson(out,&error);
             if (error.error != QJsonParseError::NoError || !doc.isObject())
                 emit subagentInspectionFailed(host,name,agentId,archiveId,tr("Invalid subagent activity response"));
             else emit subagentInspectionReady(host,name,agentId,archiveId,doc.object());
         }, [this,host,name,agentId,archiveId,key](const QString &,const QString &error) {
             m_inspectionsInFlight.remove(key);
+            emit inspectionLoadingChanged(host, name, archiveId, agentId, false);
             emit subagentInspectionFailed(host,name,agentId,archiveId,error);
         });
 }

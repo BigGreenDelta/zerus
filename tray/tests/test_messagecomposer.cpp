@@ -159,6 +159,8 @@ private slots:
     void modelSettingsPreserveDraftAndDistinguishPending();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
+    void sessionStatusPreservesGeometryAndLockedDraft_data();
+    void sessionStatusPreservesGeometryAndLockedDraft();
     void cursorStaysWithDraftAcrossPollingSwitchesAndFailures();
     void attachmentDropReleasesVisualCaret_data();
     void attachmentDropReleasesVisualCaret();
@@ -801,10 +803,51 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     QVERIFY(button->geometry().right() < send->geometry().left()); QVERIFY(send->geometry().right() < composer.width());
     QVERIFY(status(composer)->isHidden());
     composer.deliveryFinished("arch/session", false, "Check terminal before retrying", true); QTest::qWait(20);
-    QVERIFY(status(composer)->isVisible()); QVERIFY(status(composer)->geometry().top() > button->geometry().bottom());
+    QVERIFY(status(composer)->isVisible()); QVERIFY(button->isHidden());
     const auto *retry = composer.findChild<QPushButton *>("allowMessageRetry"); QVERIFY(retry->isVisible());
-    QCOMPARE(composer.width(), 280); QVERIFY(retry->geometry().top() > button->geometry().bottom());
+    QCOMPARE(composer.width(), 280); QCOMPARE(retry->geometry().center().y(), attach->geometry().center().y());
     QVERIFY(retry->geometry().right() < composer.width()); QVERIFY(send->geometry().right() < composer.width());
+}
+
+void TestMessageComposer::sessionStatusPreservesGeometryAndLockedDraft_data()
+{
+    QTest::addColumn<int>("width"); QTest::addColumn<bool>("dark");
+    QTest::newRow("wide-dark") << 900 << true;
+    QTest::newRow("narrow-light") << 280 << false;
+}
+
+void TestMessageComposer::sessionStatusPreservesGeometryAndLockedDraft()
+{
+    QFETCH(int, width); QFETCH(bool, dark);
+    MessageComposer composer; setSessionReady(composer, "remote/session"); composer.setAvailability(true); composer.setTheme(dark);
+    composer.resize(width, 220); composer.show(); composer.editor()->setPlainText("Keep this exact draft");
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(5); cursor.setPosition(15, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor); composer.editor()->setFocus(); QTest::qWait(20);
+    const auto before = composer.editor()->geometry(); const auto height = composer.sizeHint().height();
+    const QString error = "Could not refresh activity: timed out. Refresh this session to try again. " + QString(1200, 'x');
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested), refresh(&composer, &MessageComposer::sessionRefreshRequested);
+    composer.setSessionStatus(error, true, true); QTest::qWait(20);
+    QCOMPARE(composer.editor()->geometry(), before); QCOMPARE(composer.sizeHint().height(), height);
+    QVERIFY(composer.editor()->isReadOnly()); QVERIFY(composer.editor()->property("sessionBlocked").toBool());
+    QCOMPARE(composer.editor()->toPlainText(), QString("Keep this exact draft"));
+    QCOMPARE(composer.editor()->textCursor().position(), 15); QCOMPARE(composer.editor()->textCursor().anchor(), 5);
+    QCOMPARE(QApplication::focusWidget(), composer.editor());
+    auto *attach = composer.findChild<QPushButton *>("attachMessageFile");
+    auto *retry = composer.findChild<QPushButton *>("refreshSessionStatus");
+    QVERIFY(!attach->isEnabled()); QVERIFY(!sendButton(composer)->isEnabled());
+    QVERIFY(!composer.addAttachment("fixture.txt", "text/plain", "fixture"));
+    QTest::keyClicks(composer.editor(), "rejected"); QTest::keyClick(composer.editor(), Qt::Key_Return);
+    QCOMPARE(composer.editor()->toPlainText(), QString("Keep this exact draft")); QCOMPARE(sends.size(), 0);
+    QCOMPARE(status(composer)->text(), error); QCOMPARE(status(composer)->accessibleName(), error);
+    QCOMPARE(status(composer)->geometry().center().y(), attach->geometry().center().y());
+    QVERIFY(status(composer)->geometry().right() < retry->geometry().left());
+    QVERIFY(retry->geometry().right() < composer.width()); QVERIFY(sendButton(composer)->geometry().right() < composer.width());
+    retry->click(); QCOMPARE(refresh.size(), 1); QCOMPARE(refresh[0][0].toString(), QString("remote/session"));
+    composer.setSessionStatus({}); QTest::qWait(20);
+    QVERIFY(!composer.editor()->isReadOnly()); QCOMPARE(composer.editor()->geometry(), before);
+    QCOMPARE(composer.editor()->textCursor().position(), 15); QCOMPARE(composer.editor()->textCursor().anchor(), 5);
+    composer.setSessionStatus("Copy completed", false, false); QVERIFY(!composer.editor()->isReadOnly());
+    setSessionReady(composer, "remote/other"); QVERIFY(!composer.editor()->isReadOnly()); QVERIFY(status(composer)->isHidden());
 }
 
 void TestMessageComposer::isolatesDraftsAcrossSessions()

@@ -253,6 +253,7 @@ signals:
     void sessionWriteDone(const QString &host);
     void stateReadFailed(const QString &host, const QString &detail);
     void stateReadStarted(const QString &host);
+    void inspectionLoadingChanged(const QString &host, const QString &name, const QString &archiveId, const QString &agentId, bool loading);
     void inspectionReady(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId = QString());
     void processFinished(quint64 request, const QJsonObject &data, const QString &error);
     void inspectionFailed(const QString &host, const QString &name, const QString &detail, const QString &archiveId = QString());

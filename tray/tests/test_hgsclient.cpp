@@ -1214,6 +1214,7 @@ void TestHgsClient::inspectionCursorAndFailures()
     QSignalSpy ready(&client, &HgsClient::inspectionReady);
     QSignalSpy failed(&client, &HgsClient::inspectionFailed);
     QSignalSpy stateFailed(&client, &HgsClient::stateReadFailed);
+    QSignalSpy loading(&client, &HgsClient::inspectionLoadingChanged);
     client.requestInspection("mac", "codex/p/a b", 42);
     client.requestInspection("mac", "codex/p/a b", 0); // In-flight duplicate must be ignored.
     QTRY_COMPARE(ready.size(), 1);
@@ -1225,6 +1226,12 @@ void TestHgsClient::inspectionCursorAndFailures()
     QTRY_COMPARE(failed.size(), 1);
     QCOMPARE(failed[0][0].toString(), QStringLiteral("mac"));
     QCOMPARE(stateFailed.size(), 0); // Inspection errors don't mark another machine offline.
+    QCOMPARE(loading.size(), 4); // One accepted start and end per request; duplicates do not restart it.
+    for (int i = 0; i < loading.size(); ++i) {
+        QCOMPARE(loading[i][0].toString(), QString("mac")); QCOMPARE(loading[i][1].toString(), QString("codex/p/a b"));
+        QVERIFY(loading[i][2].toString().isEmpty()); QVERIFY(loading[i][3].toString().isEmpty());
+        QCOMPARE(loading[i][4].toBool(), i % 2 == 0);
+    }
     client.requestPeer("mac");
     QTRY_COMPARE(stateFailed.size(), 1);
     QCOMPARE(stateFailed[0][0].toString(), QStringLiteral("mac"));

@@ -47,6 +47,7 @@ class SessionSearch;
 class IdentityBadge;
 class SwarmButton;
 class QToolBar;
+class BusyIndicator;
 
 // A view over hgs snapshots and its durable event journal. Closing this window
 // never owns or terminates an agent. All operations still go through the CLI.
@@ -105,6 +106,8 @@ private:
     void showWorkspaceSettings();
     void revealSession(const QString &key);
     void updateHeaderText();
+    void updateSessionLoading();
+    void updateSessionFeedback();
     void rebuild();
     void selectSession();
     void inspect();
@@ -291,6 +294,11 @@ private:
     bool m_draftRefreshPending = false;
     int m_tick = 0;
     QTimer m_timer;
+    QTimer m_sessionLoadingTimer;
+    struct SessionRead { QString host, name, archive, agent; QElapsedTimer age; };
+    QHash<QString, SessionRead> m_sessionReads;
+    QHash<QString, QElapsedTimer> m_remotePollAges;
+    BusyIndicator *m_sessionLoading = nullptr;
     QElapsedTimer m_processPollAge,m_inspectionAge;
     SessionList *m_sessions;
     SessionSearch *m_searchResults;
@@ -310,6 +318,7 @@ private:
     QLabel *m_heading, *m_count, *m_title, *m_meta, *m_badge, *m_model, *m_hint, *m_notice;
     QString m_modelElision;
     QLabel *m_connectionStatus;
+    QLabel *m_sessionFeedback = nullptr;
     QPushButton *m_noticeDismiss;
     QPushButton *m_connectionRetry;
     QSet<QString> m_pollingHosts;
