@@ -6,6 +6,8 @@
 //! On Windows the folder is a drive path compared without case (`shown_path`),
 //! and Codex 0.162 adds its Git root note with the root lower-cased even when
 //! the folder is that root: there a note naming the folder names no other root.
+//! A root in another form than the folder (`/c/…` for a drive folder) is
+//! unfamiliar text, so the panel keeps only the native wording.
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -48,8 +50,10 @@ fn parse(screen: &str) -> Option<Panel> {
     // Wrapped rows are rejoined per paragraph; a clipped disclosure is incomplete.
     let paragraphs: Vec<_> = rows[2..filled[options]].split(|r| r.is_empty()).filter(|p| !p.is_empty()).collect();
     if paragraphs.is_empty() || paragraphs.concat().iter().any(|r| r.contains('…')) {return None;}
+    // The root has the folder's own form: a Unix path, or a Windows drive path.
+    let windows=shown_path::drive(rows[1]);
     let note=|p: &[&str]| match p {
-        [text @ .., path] if shown_path::absolute(path) && words(&text.join(" "))==GIT_ROOT => Some(path.to_string()),
+        [text @ .., path] if (if windows {shown_path::drive(path)} else {path.starts_with('/')}) && words(&text.join(" "))==GIT_ROOT => Some(path.to_string()),
         _ => None,
     };
     let (mut root, mut noted, mut explained, mut known)=(None, false, false, true);
@@ -58,7 +62,7 @@ fn parse(screen: &str) -> Option<Panel> {
         else if let Some(path)=note(p).filter(|_| !noted) {
             noted=true;
             // Only Windows Codex names the folder itself (lower-cased) as root.
-            if !(shown_path::drive(rows[1]) && shown_path::same(&path, rows[1])) {root=Some(path);}
+            if !(windows && shown_path::same(&path, rows[1])) {root=Some(path);}
         }
         else {known=false;}
     }
@@ -270,6 +274,11 @@ mod tests {
             format!("Trust the repository root {root} and remember the decision."));
         assert!(card(&windows_record(&root.replace(r"\repo", r"\Repo")), &panel).is_none());
         assert!(parse(&WINDOWS_GIT_ROOT.replace(&format!("  {root}\n"), "  \\\\server\\share\\repo\n")).is_some_and(|panel| !panel.known));
+        // A root in another path form than the folder is not a reviewed note.
+        let msys = parse(&WINDOWS_GIT_ROOT.replace(&format!("  {root}\n"), "  /c/users/user01/repo\n")).unwrap();
+        assert_eq!((msys.root, msys.known), (None, false));
+        let drive = parse(&GIT_ROOT_SCREEN.replace("/work/repository", r"C:\work\repository")).unwrap();
+        assert_eq!((drive.root, drive.known), (None, false));
     }
     #[test]
     fn startup_identity_pins_folder_and_run_but_not_highlight() {
