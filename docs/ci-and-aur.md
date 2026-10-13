@@ -42,6 +42,20 @@ permissions and no publication credentials; fork PRs use `pull_request`, never
 branch-restricted `release` environment. Authenticated model-turn tests remain
 explicit opt-ins.
 
+On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
+enabled, `dev-android.yml` starts with the checks instead of after them. In the
+`release` environment and without cache access, it runs the Android unit tests,
+`lintRelease` and the signed release build, seals the APK and deletes the signing
+inputs. It then polls this run's jobs with a read-only Actions token and uploads
+`zerus-dev-android-a<attempt>` only after the `CI gate` job succeeds. While this
+attempt has no gate record, an earlier successful gate counts (a failed-job retry
+does not rerun it); an earlier failed or cancelled gate means waiting. Any
+other gate result, repeated API failures or a 135-minute wait fail the job without
+an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
+the desktop candidate and moves the `dev` tag only after the gate and this job
+succeed. Release builds skip the `lintVital` tasks, which would repeat the fatal
+checks that `lintRelease` runs in the same build.
+
 ### Incoming PRs and publication trust
 
 Running a PR compiles and executes code supplied by its author, including Rust
@@ -173,6 +187,15 @@ Standard Ubuntu/macOS/Windows runners and public artifacts are free while the re
 is public. Larger runners and explicitly increased cache storage have separate
 billing rules. No self-hosted runner is attached to a development machine.
 [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+After the trusted `main` checks, the `cache-trim` job keeps the two newest `main`
+cache entries of each key family (the key without its last segment, which is a
+run ID or a content hash) and deletes pull-request entries older than a day. It
+logs each deleted key and size and the totals. The job has only `actions: write`
+and `cache-mode: none`, checks out nothing and runs one inline `gh api` script.
+An entry deleted concurrently is not an error, and a failed trim never fails the
+run or holds back Dev. Its first `main` run confirms whether `cache-mode: none`
+permits REST cache deletion; refused deletions appear in its log.
 
 The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses current
 Arch packages. This tests rolling-distribution compatibility; it does not promise

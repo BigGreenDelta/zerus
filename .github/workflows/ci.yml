@@ -103,20 +103,100 @@ jobs:
           if conclusions != ['skipped', 'success']:
               raise SystemExit(f'Exactly one selected check workflow must succeed: {conclusions}')
           PY
-  dev:
-    name: Verified main dev candidates
-    needs: [gate, automatic]
-    # The PR/manual branch is intentionally skipped on main. An explicit status
-    # check avoids inheriting success() over that transitive skipped dependency.
+  dev-android:
+    name: Signed Android dev candidate
+    # Builds and signs alongside the checks; dev-android.yml uploads the sealed
+    # APK only after this run's CI gate succeeds, so no needs here.
     if: >-
-      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
-      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
     permissions:
-      contents: write
-    uses: ./.github/workflows/dev.yml
+      contents: read
+      actions: read
+    uses: ./.github/workflows/dev-android.yml
     secrets:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+  dev:
+    name: Verified main dev candidates
+    needs: [gate, automatic, dev-android]
+    # The PR/manual branch is intentionally skipped on main. An explicit status
+    # check avoids inheriting success() over that transitive skipped dependency.
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' && needs.dev-android.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dev.yml
+  cache-trim:
+    name: Trim superseded caches
+    needs: [automatic]
+    # Housekeeping only: a failure never fails the run or holds back Dev.
+    if: >-
+      always() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (!inputs.ref || inputs.ref == github.sha)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    cache-mode: none
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the two newest main entries per key family and drop day-old PR entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, subprocess
+
+          def when(value):
+              return datetime.datetime.fromisoformat(value[:19]).replace(tzinfo=datetime.timezone.utc)
+
+          def stale(caches, now):
+              """Main entries beyond the newest two of each key family, and PR entries older than a day."""
+              families, doomed = {}, []
+              for cache in caches:
+                  if cache['ref'] == 'refs/heads/main':
+                      # The last key segment is a run ID or a content hash.
+                      families.setdefault(cache['key'].rsplit('-', 1)[0], []).append(cache)
+                  elif cache['ref'].startswith('refs/pull/') and now - when(cache['created_at']) > datetime.timedelta(days=1):
+                      doomed.append(cache)
+              for entries in families.values():
+                  entries.sort(key=lambda cache: (when(cache['created_at']), cache['id']), reverse=True)
+                  doomed += entries[2:]
+              return doomed
+
+          def api(path, *args):
+              result = subprocess.run(['gh', 'api', 'repos/ufna/zerus/actions/caches' + path, *args],
+                                      capture_output=True, text=True)
+              return result.returncode, result.stdout, (result.stderr.strip().splitlines() or [''])[-1][:200]
+
+          if __name__ == '__main__':
+              caches = []
+              for page in range(1, 21):
+                  status, output, error = api(f'?per_page=100&page={page}')
+                  if status:
+                      raise SystemExit(f'Cache listing failed: {error}')
+                  data = json.loads(output)
+                  caches += data['actions_caches']
+                  if not data['actions_caches'] or len(caches) >= data['total_count']:
+                      break
+              doomed = stale(caches, datetime.datetime.now(datetime.timezone.utc))
+              deleted = freed = failed = 0
+              for cache in doomed:
+                  status, _, error = api(f'/{cache["id"]}', '--method', 'DELETE')
+                  label = f'{cache["ref"]} {cache["key"]} ({cache["size_in_bytes"] / 2**20:.1f} MiB)'
+                  if not status:
+                      deleted, freed = deleted + 1, freed + cache['size_in_bytes']
+                      print('Deleted ' + label)
+                  elif 'HTTP 404' in error:
+                      print('Already deleted ' + label)
+                  else:
+                      failed += 1
+                      print(f'Not deleted {label}: {error}')
+              total = sum(cache['size_in_bytes'] for cache in caches)
+              print(f'Deleted {deleted} of {len(caches)} entries, {freed / 2**30:.2f} of {total / 2**30:.2f} GiB.')
+              if failed:
+                  raise SystemExit(f'{failed} cache deletions failed.')
+          PY

@@ -47,9 +47,15 @@ remain explicit; desktop continues to provide notifications and instructions.
 
 For dev, the provenance origin is successful upstream-main **CI artifacts** plus
 the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
-`ci.yml` invokes `dev.yml` only after its complete Linux/Arch/macOS/Windows gate succeeds,
-and only on an upstream main push. Dev assembly reuses the checked Arch package,
-builds/tests a signed Android APK, and includes exact `git archive` source bytes.
+Only an upstream main push builds Dev candidates. `ci.yml` builds, tests and signs
+the Android APK (`dev-android.yml`) in parallel with the checks; Crashlytics receives
+the R8 mapping during that build, and the mapping stays private. The job then
+removes its signing inputs and uploads the sealed APK only after the complete
+Linux/Arch/macOS/Windows CI gate of the same run succeeds. If the gate fails, the
+job fails without uploading anything, and **Re-run failed jobs** rebuilds the
+candidate. `ci.yml` invokes `dev.yml` only after the gate and that Android job
+succeed. Dev assembly reuses the checked Arch package and includes exact
+`git archive` source bytes. No Dev artifact of a run exists before its gate succeeds.
 The final main-only release-environment job advances `refs/tags/dev` to that
 commit using a fast-forward update. A late older build cannot move the tag back;
 diverged history requires explicit review. Stable `v*` and immutable nightly tags

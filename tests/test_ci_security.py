@@ -1,4 +1,6 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
+import datetime
+import io
 import json
 from itertools import takewhile
 import os
@@ -17,6 +19,15 @@ def job(text, name):
     if not match:
         raise AssertionError(f"Missing workflow job: {name}")
     return match[1]
+
+
+def steps(text):
+    """The steps of one job, in order, each starting at its list marker."""
+    return re.split(r"(?m)^(?=      - )", text.split("\n    steps:\n", 1)[1])[1:]
+
+
+def inline_python(text):
+    return textwrap.dedent(re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", text)[1])
 
 
 def field(text, name):
@@ -42,18 +53,20 @@ class WorkflowSecurityTests(unittest.TestCase):
         expression = expression.replace('&&', ' and ')
         expression = re.sub(r'!(?!=)', 'not ', expression)
         expression = re.sub(r'\bfalse\b', 'False', expression)
+        # Job IDs such as dev-android are not Python identifiers.
+        expression = re.sub(r"\bneeds\.([\w-]+)\.", r"needs['\1'].", expression)
         return bool(eval(expression, {'__builtins__': {}}, {
             'cancelled': lambda: cancelled,
             'github': SimpleNamespace(repository=repository, ref=ref, event_name=event,
                                       event=SimpleNamespace(repository=SimpleNamespace(private=private))),
             'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled),
-            'needs': SimpleNamespace(**{key: SimpleNamespace(result=value) for key,value in results.items()}),
+            'needs': {key: SimpleNamespace(result=value) for key,value in results.items()},
         }))
 
     def test_dev_requires_exact_main_gate_without_inheriting_skipped_review(self):
-        passed = {'gate':'success', 'automatic':'success', 'review':'skipped'}
+        passed = {'gate':'success', 'automatic':'success', 'dev-android':'success', 'review':'skipped'}
         self.assertTrue(self.dev_selected(self.ci, 'dev', passed))
-        for key in ['gate','automatic']:
+        for key in ['gate','automatic','dev-android']:
             for result in ['failure','cancelled','skipped']:
                 with self.subTest(key=key, result=result):
                     self.assertFalse(self.dev_selected(self.ci, 'dev', {**passed,key:result}))
@@ -64,31 +77,67 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertFalse(self.dev_selected(self.ci, 'dev', passed, **overrides))
 
     def test_dev_reusable_jobs_preserve_status_and_candidate_success_checks(self):
-        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
-        passed = {'desktop':'success', 'android':'success', 'review':'skipped'}
-        for name in ['desktop','android','channel']:
+        dev = (ROOT / '.github/workflows/dev.yml').read_text()
+        android = (ROOT / '.github/workflows/dev-android.yml').read_text()
+        passed = {'desktop':'success', 'review':'skipped'}
+        for workflow, name in [(dev,'desktop'),(dev,'channel'),(android,'android')]:
             self.assertTrue(self.dev_selected(workflow,name,passed))
             for overrides in [dict(cancelled=True),dict(event='pull_request'),
                               dict(ref='refs/heads/feature'),dict(repository='example/zerus')]:
                 with self.subTest(name=name,overrides=overrides):
                     self.assertFalse(self.dev_selected(workflow,name,passed,**overrides))
-        for key in ['desktop','android']:
-            for result in ['failure','cancelled','skipped']:
-                with self.subTest(key=key,result=result):
-                    self.assertFalse(self.dev_selected(workflow,'channel',{**passed,key:result}))
+        # The caller checks the Android candidate; the tag waits for the desktop seal.
+        self.assertEqual(field(job(dev,'channel'),'needs'),'[desktop]')
+        for result in ['failure','cancelled','skipped']:
+            with self.subTest(result=result):
+                self.assertFalse(self.dev_selected(dev,'channel',{**passed,'desktop':result}))
+        self.assertNotRegex(dev, r'(?m)^  android:')
+        self.assertNotIn('zerus-dev-android', dev)
+
+    def test_android_candidate_builds_with_the_checks_but_only_on_dev_main_pushes(self):
+        caller = job(self.ci,'dev-android')
+        # No needs: building starts with the checks; the callee waits for the gate.
+        self.assertNotRegex(caller, r'(?m)^    needs:')
+        self.assertEqual(field(caller,'uses'),'./.github/workflows/dev-android.yml')
+        self.assertIn('    permissions:\n      contents: read\n      actions: read\n', caller)
+        self.assertTrue(self.dev_selected(self.ci,'dev-android',{}))
+        for overrides in [dict(cancelled=True), dict(event='pull_request'), dict(event='workflow_dispatch'),
+                          dict(event='schedule'), dict(ref='refs/heads/feature'), dict(repository='example/zerus'),
+                          dict(enabled=''), dict(private=True)]:
+            with self.subTest(overrides=overrides):
+                self.assertFalse(self.dev_selected(self.ci,'dev-android',{},**overrides))
+        # A newer main push must never cancel a signed build in progress.
+        android = (ROOT / '.github/workflows/dev-android.yml').read_text()
+        self.assertNotIn('concurrency', caller)
+        self.assertNotIn('concurrency', android)
 
     def test_dev_passes_only_required_android_secrets_to_protected_build(self):
-        workflow = (ROOT / '.github/workflows/dev.yml').read_text()
+        workflow = (ROOT / '.github/workflows/dev-android.yml').read_text()
         names = {'ANDROID_KEYSTORE_BASE64','ANDROID_STORE_PASSWORD','ANDROID_KEY_ALIAS',
                  'ANDROID_KEY_PASSWORD','ANDROID_GOOGLE_SERVICES_JSON'}
-        caller = job(self.ci,'dev')
+        caller = job(self.ci,'dev-android')
         passed = dict(re.findall(r'(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$',caller))
         self.assertEqual(passed,{name:name for name in names})
         self.assertNotIn('secrets: inherit',caller)
         header = workflow.split('\npermissions:',1)[0]
         declared = set(re.findall(r'(?m)^      (\w+):\n        required: true$',header))
         self.assertEqual(declared,names)
-        self.assertEqual(field(job(workflow,'android'),'environment'),'release')
+        android = job(workflow,'android')
+        self.assertEqual(field(android,'environment'),'release')
+        self.assertEqual(set(re.findall(r'secrets\.(\w+)', workflow)), names)
+        self.assertEqual(set(re.findall(r'secrets\.(\w+)', android)), names)
+        # Dev assembly and the tag move no longer receive the signer.
+        self.assertNotIn('secrets', job(self.ci,'dev'))
+        self.assertNotIn('secrets', (ROOT / '.github/workflows/dev.yml').read_text())
+        for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
+            text = path.read_text()
+            if path.name == 'ci.yml':
+                text = text.replace(caller, '')
+            elif path.name == 'dev-android.yml':
+                continue
+            for name in names:
+                with self.subTest(workflow=path.name, secret=name):
+                    self.assertNotIn(name, text)
 
     def test_dev_main_build_finishes_while_newer_main_waits(self):
         expression = re.search(r'(?m)^  cancel-in-progress: \$\{\{ (.*) \}\}$', self.ci)[1]
@@ -148,6 +197,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         expression = expression.replace("&&", " and ").replace("||", " or ")
         expression = re.sub(r"!(?!=)", "not ", expression)
         return bool(eval(expression, {"__builtins__": {}}, {
+            "always": lambda: True,
             "github": SimpleNamespace(repository=repository, ref=ref, event_name=event, sha="a" * 40),
             "inputs": SimpleNamespace(ref=test_ref),
         }))
@@ -169,6 +219,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(event=event, ref=ref, test_ref=test_ref, repository=repository):
                 self.assertEqual(self.selected("automatic", event, ref, test_ref, repository), trusted)
                 self.assertEqual(self.selected("review", event, ref, test_ref, repository), not trusted)
+                self.assertEqual(self.selected("cache-trim", event, ref, test_ref, repository), trusted)
         self.assertEqual(field(job(self.ci, "automatic"), "cache-mode"), "write")
         self.assertEqual(field(job(self.ci, "review"), "cache-mode"), "read")
         for name in ("automatic", "review"):
@@ -550,7 +601,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(suite=name):
                 self.assertTrue(eval(expression.replace("||", " or "), {"__builtins__": {}}, {
                     "github": SimpleNamespace(event_name="push"), "inputs": SimpleNamespace(**{name: False})}))
-        self.assertIn("    needs: [gate, automatic]\n", job(self.ci, "dev"))
+        self.assertIn("    needs: [gate, automatic, dev-android]\n", job(self.ci, "dev"))
         # The v2 Dev catalogs have no Windows artifact kind; the portable zip
         # stays a nightly-only GitHub asset.
         dev = (ROOT / ".github/workflows/dev.yml").read_text()
@@ -560,12 +611,202 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("windows-x86_64", dev)
 
     def test_privileged_publishers_have_no_cache_access(self):
-        for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "publish-dev.yml"):
+        for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "dev-android.yml", "publish-dev.yml"):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
                 self.assertRegex(text, r"(?m)^cache-mode: none$")
-                self.assertNotIn("actions/cache@", text)
+                self.assertNotRegex(text, r"actions/cache[@/]")
                 self.assertNotRegex(text, r"(?m)^    cache-mode:")
+
+    def dev_android(self):
+        return job((ROOT / ".github/workflows/dev-android.yml").read_text(), "android")
+
+    def test_android_candidate_is_uploaded_only_after_this_runs_ci_gate(self):
+        android = self.dev_android()
+        listed = steps(android)
+        names = [re.match(r"      - (?:name|uses): (.*)", step)[1] for step in listed]
+        remove, wait = "Remove private signing inputs before waiting", "Wait for this run's CI gate"
+        self.assertEqual(names[-3:-1], [remove, wait])
+        self.assertTrue(names[-1].startswith("actions/upload-artifact@"))
+        self.assertEqual(android.count("actions/upload-artifact@"), 1)
+        self.assertLess(names.index("Prepare existing Android identity and private Firebase configuration"),
+                        names.index("Seal the signed APK and exact source"))
+        self.assertLess(names.index("Seal the signed APK and exact source"), names.index(remove))
+        # The signer, its properties and the Firebase file are gone before the
+        # wait, also after a failed build; the upload needs a successful wait.
+        removal, waiting, upload = listed[-3:]
+        self.assertIn("        if: always()\n", removal)
+        for path in ('"$RUNNER_TEMP/zerus-dev-signing"', "mobile/android/app/google-services.json"):
+            self.assertIn(path, removal)
+        for step in (waiting, upload):
+            self.assertNotRegex(step, r"(?m)^        if:")
+        self.assertIn("'CI gate'", waiting)
+        for line in ("name: zerus-dev-android-a${{ github.run_attempt }}", "path: artifacts/dev-android",
+                     "retention-days: 3", "if-no-files-found: error"):
+            self.assertIn(f"          {line}\n", upload)
+        # Only the wait step receives the job token; it can only read Actions.
+        self.assertEqual([step for step in listed if "github.token" in step], [waiting])
+        self.assertIn("    permissions:\n      contents: read\n      actions: read\n", android)
+        self.assertEqual(field(android, "environment"), "release")
+        # The wait covers the slowest checks (quick checks 20 plus Windows 90)
+        # and the gate; the job timeout also covers the build before it.
+        minutes = int(re.search(r"time\.monotonic\(\) \+ (\d+) \* 60", waiting)[1])
+        self.assertGreaterEqual(minutes, 20 + 90 + 5)
+        self.assertGreaterEqual(int(field(android, "timeout-minutes")), minutes + 35)
+        # A hung build stays bounded like the former 35-minute job.
+        build = listed[names.index("Test and build the dev APK with the shared signer")]
+        self.assertLessEqual(int(re.search(r"(?m)^        timeout-minutes: (\d+)$", build)[1]), 35)
+
+    def test_android_candidate_accepts_only_a_successful_gate_of_this_attempt(self):
+        namespace = {}
+        exec(compile(inline_python(steps(self.dev_android())[-2]), "workflow-dev-android-wait", "exec"), namespace)
+        gate = namespace["gate"]
+        def record(attempt, status="completed", conclusion=None, name="CI gate"):
+            return {"name": name, "run_attempt": attempt, "status": status, "conclusion": conclusion}
+        others = [record(1, conclusion="success", name="Trusted main checks / Suite results"),
+                  record(1, conclusion="success", name="Signed Android dev candidate / CI gate")]
+        for jobs, attempt, state in [
+            ([], 1, "pending"),
+            ([record(1, "queued")], 1, "pending"),
+            ([record(1, "in_progress")], 1, "pending"),
+            ([record(1, conclusion="success")], 1, "success"),
+            ([record(1, conclusion="failure")], 1, "failure"),
+            ([record(1, conclusion="cancelled")], 1, "cancelled"),
+            ([record(1, conclusion="skipped")], 1, "skipped"),
+            ([record(1, conclusion="timed_out")], 1, "timed_out"),
+            # A failed-job retry reruns a failed gate: the earlier record is not final.
+            ([record(1, conclusion="failure")], 2, "pending"),
+            ([record(1, conclusion="cancelled")], 2, "pending"),
+            ([record(1, conclusion="failure"), record(2, "queued")], 2, "pending"),
+            ([record(2, conclusion="failure")], 2, "failure"),
+            ([record(1, conclusion="failure"), record(2, conclusion="success")], 2, "success"),
+            # A gate that already passed is not rerun with the failed jobs.
+            ([record(1, conclusion="success")], 2, "success"),
+            ([record(3, conclusion="success")], 2, "invalid attempt"),
+            ([record(1, conclusion="success"), record(1, conclusion="success")], 1, "ambiguous"),
+        ]:
+            with self.subTest(jobs=jobs, attempt=attempt):
+                self.assertEqual(gate(others + jobs, attempt), state)
+
+    def test_android_candidate_wait_fails_closed_without_printing_the_token(self):
+        code = compile(inline_python(steps(self.dev_android())[-2]), "workflow-dev-android-wait", "exec")
+        def page(jobs, total=None):
+            body = {"total_count": len(jobs) if total is None else total, "jobs": jobs}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="")
+        def gate(status, conclusion=None):
+            return {"name": "CI gate", "run_attempt": 1, "status": status, "conclusion": conclusion}
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="gh: Server Error (HTTP 502)\n")
+        filler = [{"name": f"job {n}", "run_attempt": 1, "status": "completed", "conclusion": "success"}
+                  for n in range(100)]
+        for responses, clock, succeeds in [
+            ([page([gate("in_progress")]), page([gate("completed", "success")])], None, True),
+            ([page(filler, 101), page([gate("completed", "success")], 101)], None, True),
+            ([failed, page([gate("completed", "success")])], None, True),
+            ([page([gate("in_progress")]), page([gate("completed", "failure")])], None, False),
+            ([page([gate("completed", "cancelled")])], None, False),
+            ([failed] * 6, None, False),
+            ([page([gate("queued")])], [0, 135 * 60 + 1], False),
+        ]:
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                return responses[len(calls) - 1]
+            environment = {"RUN_ID": "123", "RUN_ATTEMPT": "1", "GH_TOKEN": "synthetic-token"}
+            with (self.subTest(responses=len(responses), succeeds=succeeds),
+                  patch.dict(os.environ, environment), patch("subprocess.run", run), patch("time.sleep"),
+                  patch("time.monotonic", side_effect=clock or (lambda: 0)),
+                  patch("sys.stdout", new_callable=io.StringIO) as output):
+                if succeeds:
+                    exec(code, {"__name__": "__main__"})
+                else:
+                    with self.assertRaises(SystemExit) as stopped:
+                        exec(code, {"__name__": "__main__"})
+                    self.assertIn("nothing uploaded", str(stopped.exception.code))
+                self.assertEqual(len(calls), len(responses))
+                for command in calls:
+                    self.assertEqual(command[:2], ["gh", "api"])
+                    self.assertRegex(command[2], r"^repos/ufna/zerus/actions/runs/123/jobs\?filter=all&per_page=100&page=\d$")
+                self.assertNotIn("synthetic-token", output.getvalue())
+
+    def test_cache_trim_is_main_only_housekeeping_without_checked_out_code(self):
+        trim = job(self.ci, "cache-trim")
+        self.assertEqual(field(trim, "needs"), "[automatic]")
+        self.assertEqual(field(trim, "if"), "always() && " + field(job(self.ci, "automatic"), "if"))
+        self.assertEqual(field(trim, "cache-mode"), "none")
+        self.assertEqual(field(trim, "runs-on"), "ubuntu-24.04")
+        self.assertLessEqual(int(field(trim, "timeout-minutes")), 10)
+        # A housekeeping failure must not fail the run, which gates Publish Dev.
+        self.assertEqual(field(trim, "continue-on-error"), "true")
+        self.assertIn("    permissions:\n      actions: write\n    steps:\n", trim)
+        self.assertEqual(len(re.findall(r"(?m)^\s*actions: write", self.ci)), 1)
+        # Only the inline trusted script runs with the write token.
+        self.assertNotRegex(trim, r"(?m)^\s*(?:- )?uses:")
+        self.assertNotIn("checkout", trim)
+        self.assertEqual(len(steps(trim)), 1)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", trim)
+        self.assertIn("'repos/ufna/zerus/actions/caches'", trim)
+
+    def test_cache_trim_keeps_the_two_newest_main_entries_per_key_family(self):
+        namespace = {}
+        exec(compile(inline_python(job(self.ci, "cache-trim")), "workflow-cache-trim", "exec"), namespace)
+        def entry(number, key, created, ref="refs/heads/main"):
+            return {"id": number, "key": key, "ref": ref, "created_at": created, "size_in_bytes": 1}
+        qt = "windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-"
+        caches = [
+            entry(1, "arch-ccache-v1-100", "2026-10-12T10:00:00.123456Z"),
+            entry(2, "arch-ccache-v1-101", "2026-10-12T11:00:00Z"),
+            entry(3, "arch-ccache-v1-102", "2026-10-12T12:00:00Z"),
+            entry(4, "arch-package-ccache-v1-100", "2026-10-12T10:00:00Z"),
+            # Equal timestamps keep the later entry.
+            entry(5, "mac-desktop-ccache-v1-ARM64-100", "2026-10-12T10:00:00Z"),
+            entry(6, "mac-desktop-ccache-v1-ARM64-101", "2026-10-12T10:00:00Z"),
+            entry(7, "mac-desktop-ccache-v1-ARM64-102", "2026-10-12T10:00:00Z"),
+            entry(8, "windows-ccache-v1-X64-qt6.10.3-100", "2026-10-12T10:00:00Z"),
+            entry(9, "cli-Linux-X64-1a2b3c-2026w41-" + "a" * 64, "2026-10-10T10:00:00Z"),
+            entry(10, "cli-Linux-X64-1a2b3c-2026w41-" + "b" * 64, "2026-10-12T10:00:00Z"),
+            entry(11, "cli-Linux-X64-1a2b3c-2026w41-" + "c" * 64, "2026-10-11T10:00:00Z"),
+            entry(12, "cli-macOS-ARM64-1a2b3c-2026w41-" + "a" * 64, "2026-10-01T10:00:00Z"),
+            entry(13, "msrv-Linux-1.85-2026w41-" + "a" * 64, "2026-10-01T10:00:00Z"),
+            entry(14, qt + "d" * 64, "2026-10-01T10:00:00Z"),
+            entry(15, qt + "e" * 64, "2026-10-12T10:00:00Z"),
+            entry(16, "arch-ccache-v1-90", "2026-10-12T11:59:59Z", "refs/pull/7/merge"),
+            entry(17, "arch-ccache-v1-91", "2026-10-12T12:00:01Z", "refs/pull/8/merge"),
+            entry(18, "arch-ccache-v1-1", "2026-09-01T00:00:00Z", "refs/heads/feature"),
+        ]
+        now = datetime.datetime(2026, 10, 13, 12, tzinfo=datetime.timezone.utc)
+        self.assertEqual(sorted(cache["id"] for cache in namespace["stale"](caches, now)), [1, 5, 9, 16])
+
+    def test_cache_trim_tolerates_concurrent_deletion_and_reports_totals(self):
+        code = compile(inline_python(job(self.ci, "cache-trim")), "workflow-cache-trim", "exec")
+        caches = [{"id": n, "key": f"arch-ccache-v1-{n}", "ref": "refs/heads/main",
+                   "created_at": f"2026-10-0{n}T00:00:00Z", "size_in_bytes": n * 2**20} for n in range(1, 6)]
+        pages = [{"total_count": 5, "actions_caches": caches[:3]}, {"total_count": 5, "actions_caches": caches[3:]}]
+        done = SimpleNamespace(returncode=0, stdout="", stderr="")
+        gone = SimpleNamespace(returncode=1, stdout="{}", stderr="gh: Not Found (HTTP 404)\n")
+        denied = SimpleNamespace(returncode=1, stdout="{}", stderr="gh: Resource not accessible by integration (HTTP 403)\n")
+        for results, succeeds in [({1: done, 2: gone, 3: done}, True), ({1: done, 2: denied, 3: done}, False)]:
+            deleted = []
+            def run(command, **kwargs):
+                self.assertEqual(command[:2], ["gh", "api"])
+                if command[3:] == ["--method", "DELETE"]:
+                    number = int(command[2].removeprefix("repos/ufna/zerus/actions/caches/"))
+                    deleted.append(number)
+                    return results[number]
+                page = int(command[2].removeprefix("repos/ufna/zerus/actions/caches?per_page=100&page="))
+                return SimpleNamespace(returncode=0, stdout=json.dumps(pages[page - 1]), stderr="")
+            with (self.subTest(succeeds=succeeds), patch("subprocess.run", run),
+                  patch("sys.stdout", new_callable=io.StringIO) as output):
+                if succeeds:
+                    exec(code, {"__name__": "__main__"})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(code, {"__name__": "__main__"})
+                self.assertEqual(sorted(deleted), [1, 2, 3])
+                log = output.getvalue()
+                self.assertIn("Deleted refs/heads/main arch-ccache-v1-1 (1.0 MiB)\n", log)
+                self.assertIn("Deleted refs/heads/main arch-ccache-v1-3 (3.0 MiB)\n", log)
+                self.assertIn(("Already deleted " if succeeds else "Not deleted ") + "refs/heads/main arch-ccache-v1-2", log)
+                self.assertIn("Deleted 2 of 5 entries, 0.00 of 0.01 GiB.\n", log)
 
     def test_candidate_verification_has_a_read_only_reusable_chain(self):
         for name in ("release.yml", "nightly.yml"):
