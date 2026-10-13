@@ -40,8 +40,8 @@ pub fn capture(program: &str, args: &[&str]) -> Option<String> {
         None
     }
 }
-// Its callers (the tmux backend, the recovery and voice workers) are Unix-only
-// until `state` compiles on Windows.
+// Its callers (the tmux backend, the Unix clipboard helpers, the recovery and
+// voice workers) are Unix-only until `state` compiles on Windows.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn silent(program: &str, args: &[&str]) -> bool {
     Command::new(program)
