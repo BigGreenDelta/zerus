@@ -406,8 +406,8 @@ fn capture(record: &Value) -> Result<String> {
     {
         return Err("invalid tracked pane".into());
     }
-    let output = tmux(&["capture-pane", "-p", "-t", pane].map(str::to_owned), true)?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let output = backend::current().capture(pane, backend::Capture::Plain)?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
 fn footer(agent: &str, model: &str, screen: &str) -> Option<String> {
@@ -762,9 +762,9 @@ fn ready(record: &Value) -> bool {
     ((string(record, "activity") == "idle" && string(record, "phase") == "idle")
         || input::first_message_candidate(record))
         && telemetry::grouped_active(record) == 0
-        && !record["active_tools"]
+        && record["active_tools"]
             .as_object()
-            .is_some_and(|v| !v.is_empty())
+            .is_none_or(|v| v.is_empty())
         && !record["subagents"]
             .as_object()
             .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))
@@ -873,11 +873,15 @@ fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
 }
 
 fn send_key(record: &Value, key: &str) -> Result<()> {
-    tmux(
-        &["send-keys", "-t", string(record, "pane"), key].map(str::to_owned),
-        true,
-    )?;
-    Ok(())
+    backend::current().send(string(record, "pane"), &[backend::Key::Named(key)])
+}
+
+/// The cursor as reported, in cells.
+fn cursor(record: &Value) -> Result<backend::PaneInfo> {
+    backend::current().pane_info(
+        backend::Target::Pane(string(record, "pane")),
+        &[backend::PaneField::CursorX, backend::PaneField::CursorY],
+    )
 }
 
 fn wait_until<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
@@ -978,19 +982,8 @@ fn kimi_picker(screen: &str) -> Option<(Vec<String>, usize)> {
 }
 
 fn kimi_command_ready(record: &Value) -> Result<bool> {
-    let output = tmux(
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            string(record, "pane"),
-            "#{cursor_x}\t#{cursor_y}",
-        ]
-        .map(str::to_owned),
-        true,
-    )?;
-    let cursor = String::from_utf8_lossy(&output.stdout);
-    let Some((x, y)) = cursor.trim().split_once('\t') else {
+    let cursor = cursor(record)?;
+    let Some((x, y)) = cursor.pair() else {
         return Ok(false);
     };
     let screen = capture(record)?;
@@ -1009,10 +1002,7 @@ fn kimi_change(name: &str, request: &Request, current: &Settings) -> Result<()> 
     {
         return Err("the current Kimi effort is not visible; open Terminal".into());
     }
-    tmux(
-        &["send-keys", "-t", string(&record, "pane"), "-l", "/effort"].map(str::to_owned),
-        true,
-    )?;
+    backend::current().send(string(&record, "pane"), &[backend::Key::Literal("/effort")])?;
     wait_until(|| {
         let record = checked(name, request, false)?;
         Ok(kimi_command_ready(&record)?.then_some(()))
@@ -1062,19 +1052,8 @@ fn kimi_change(name: &str, request: &Request, current: &Settings) -> Result<()> 
 // Only interact with provider-owned settings dialogs that advertise their
 // session-only action. Enter on the final selection would change shared defaults.
 fn command_ready(record: &Value, command: &str) -> Result<bool> {
-    let output = tmux(
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            string(record, "pane"),
-            "#{cursor_x}\t#{cursor_y}",
-        ]
-        .map(str::to_owned),
-        true,
-    )?;
-    let cursor = String::from_utf8_lossy(&output.stdout);
-    let Some((x, y)) = cursor.trim().split_once('\t') else {
+    let cursor = cursor(record)?;
+    let Some((x, y)) = cursor.pair() else {
         return Ok(false);
     };
     let screen = capture(record)?;
@@ -1106,10 +1085,7 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
 
 fn open_model(name: &str, request: &Request) -> Result<()> {
     let record = checked(name, request, true)?;
-    tmux(
-        &["send-keys", "-t", string(&record, "pane"), "-l", "/model"].map(str::to_owned),
-        true,
-    )?;
+    backend::current().send(string(&record, "pane"), &[backend::Key::Literal("/model")])?;
     wait_until(|| {
         let r = checked(name, request, false)?;
         Ok(command_ready(&r, "/model")?.then_some(()))

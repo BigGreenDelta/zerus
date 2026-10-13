@@ -98,8 +98,8 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
             .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
             .and_then(|v| v["port"].as_u64())
             .filter(|n| *n > 0 && *n <= 65535);
-        let local = if alive && saved.is_some() {
-            saved.unwrap() as u16
+        let local = if let Some(port) = saved.filter(|_| alive) {
+            port as u16
         } else {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let local = listener.local_addr()?.port();

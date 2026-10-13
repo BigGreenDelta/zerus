@@ -428,10 +428,7 @@ fn read_tail(path: &Path) -> Result<(String, bool)> {
     Ok((String::from_utf8_lossy(&bytes).into_owned(), offset > 0))
 }
 fn open_regular(path: &Path) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+    let f = crate::platform::never_block(std::fs::OpenOptions::new().read(true))
         .open(path)
         .map_err(|e| e.to_string())?;
     if !f.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -522,12 +519,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             read(name)?
         }
     };
-    if output.is_some() || stop.is_some() {
-        if run != Some(string(&record, "run_id"))
-            || conversation != Some(string(&record, "conversation_id"))
-        {
-            return Err("The process belongs to a different session run or conversation".into());
-        }
+    if (output.is_some() || stop.is_some())
+        && (run != Some(string(&record, "run_id"))
+            || conversation != Some(string(&record, "conversation_id")))
+    {
+        return Err("The process belongs to a different session run or conversation".into());
     }
     if let Some(id) = stop {
         if archive.is_some() {

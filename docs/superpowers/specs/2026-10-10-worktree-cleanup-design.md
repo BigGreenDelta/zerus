@@ -90,6 +90,9 @@ Blocking `reasons` (code and plain-English text):
 - `detached_unreachable`: a detached HEAD whose commit is on no branch, tag or
   remote branch.
 - `status_unavailable`: status or metadata could not be read in time.
+- `processes_unavailable`: this computer cannot read other processes' working
+  directories (Unix systems other than Linux and macOS, and Windows for now), so
+  a program may still use the folder.
 
 Attention `notes`:
 

@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::process::ExitStatusExt;
+use crate::platform::ExitInfo;
 use std::time::{Duration, Instant};
 
 fn required_env(name: &str) -> Result<String> {
@@ -90,24 +90,18 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
-    let _signals = supervisor::Signals::install()?;
+    let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let pane = required_env("TMUX_PANE")?;
+    let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     {
         let _guard = lock(None)?;
-        let actual_name = tmux(
-            &[
-                "display-message".into(),
-                "-p".into(),
-                "-t".into(),
-                pane.clone(),
-                "#{session_name}".into(),
-            ],
-            true,
-        )?;
-        let actual_name = String::from_utf8_lossy(&actual_name.stdout)
-            .trim()
+        let actual_name = backend::current()
+            .pane_info(
+                backend::Target::Pane(&pane),
+                &[backend::PaneField::SessionName],
+            )?
+            .value()
             .to_owned();
         if actual_name.is_empty() {
             return Err("launch pane has no session name".into());
@@ -205,16 +199,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else if let Some(previous) = replaced.as_ref().filter(|_| replaces.is_some()) {
             clear_context::carry_fresh_start(previous, &mut record);
         }
-        tmux(
-            &[
-                "set-option".into(),
-                "-t".into(),
-                format!("={name}:"),
-                "@hgs_run".into(),
-                token.clone(),
-            ],
-            true,
-        )?;
+        backend::current().set_run_marker(&name, &token)?;
         write(&mut record)?;
     }
     std::env::set_var("HGS_RUN_ID", &token);
@@ -254,14 +239,12 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             .map_err(|_| "invalid HGS_FALLBACK_SECS")?;
         if status.success()
             || supervisor::shutdown_requested()
-            || status.signal().is_some()
+            || ExitInfo::of(status).signal.is_some()
             || confirmed
             || started.elapsed().as_secs_f64() >= fallback
         {
             supervisor::finish(&name, &token, child_id, status)?;
-            return Ok(status
-                .code()
-                .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)));
+            return Ok(ExitInfo::of(status).exit_code());
         }
         eprintln!("hgs: nothing to resume — starting fresh");
         {
@@ -282,9 +265,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let child_id = child.id();
     let status = supervisor::wait(&mut child)?;
     supervisor::finish(&name, &token, child_id, status)?;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
+    Ok(ExitInfo::of(status).exit_code())
 }
 
 fn nonempty_value(record: &Value, key: &str) -> Option<String> {
@@ -375,9 +356,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
         // Only signal the exact PID whose start identity was just checked.
         // Never target a process group, terminal input or the tmux server.
         if let Some(scope)=scope {scope.changing();}
-        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-            return Err(io::Error::last_os_error().to_string());
-        }
+        crate::platform::request_exit(pid as u32).map_err(|e| e.to_string())?;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {
@@ -428,14 +407,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
             })
             .unwrap_or(false)
         {
-            tmux(
-                &[
-                    "kill-pane".into(),
-                    "-t".into(),
-                    string(record, "pane").into(),
-                ],
-                true,
-            )?;
+            backend::current().kill_pane(string(record, "pane"))?;
         }
     }
     if let Some(scope)=scope {scope.result(name,string(record,"run_id"),string(record,"conversation_id"),None);} else {println!("hgs: paused {name}");}
@@ -512,24 +484,34 @@ pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_a
     Ok(0)
 }
 
-fn resume_arguments(record: &Value, run_id: &str, archive_id: Option<&str>) -> Result<Vec<String>> {
+fn resume_spec(
+    record: &Value,
+    run_id: &str,
+    archive_id: Option<&str>,
+) -> Result<backend::LaunchSpec> {
     let argv = recipes::resume_argv(
         string(record, "agent"),
         &recipes::argv(record)?,
         string(record, "conversation_id"),
     )?;
-    session_arguments(record, effort::resume_argv(record, argv), run_id, archive_id, None)
+    session_spec(
+        record,
+        effort::resume_argv(record, argv),
+        run_id,
+        archive_id,
+        None,
+    )
 }
 
 /// The saved recipe relaunched in its own tmux slot. `replaces` starts a new
 /// conversation in place of that exact stopped run instead of resuming it.
-fn session_arguments(
+fn session_spec(
     record: &Value,
     argv: Vec<String>,
     run_id: &str,
     archive_id: Option<&str>,
     replaces: Option<&str>,
-) -> Result<Vec<String>> {
+) -> Result<backend::LaunchSpec> {
     let name = string(record, "name");
     if !Path::new(string(record, "launch_dir")).is_dir() {
         return Err(format!(
@@ -582,33 +564,30 @@ fn session_arguments(
         home_var(string(record, "agent"))?,
         string(record, "agent_home").to_owned(),
     );
-    let mut arguments = vec![
-        "new-session".into(),
-        "-d".into(),
-        "-s".into(),
-        name.into(),
-        "-c".into(),
-        string(record, "launch_dir").to_owned(),
-    ];
-    for (key, value) in environment {
-        arguments.push("-e".into());
-        arguments.push(format!("{key}={value}"));
-    }
-    arguments.push(join_command(&launch));
-    Ok(arguments)
+    Ok(backend::LaunchSpec {
+        name: name.into(),
+        cwd: string(record, "launch_dir").to_owned(),
+        env: environment
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        command: launch,
+        detached: true,
+    })
 }
 
-fn print_resume(arguments: &[String]) {
-    let mut display = vec!["tmux".into()];
-    display.extend_from_slice(arguments);
-    println!("{}", join_command(&display));
+fn print_resume(spec: &backend::LaunchSpec) {
+    println!(
+        "{}",
+        backend::current().describe(&backend::DryRun::Start(spec))
+    );
 }
 
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let archived = archive::read_archive(name, id)?;
     recipes::verify_history(&archived, true)?;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let arguments = resume_arguments(&archived, &run_id, Some(id))?;
+    let spec = resume_spec(&archived, &run_id, Some(id))?;
     let _guard = lock(None)?;
     if live()?.contains_key(name) || record_path(name).exists() {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
@@ -621,7 +600,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
         return Err("archived binding changed; retry resume".into());
     }
     if dry {
-        print_resume(&arguments);
+        print_resume(&spec);
         return Ok(0);
     }
     // Reserve the name while holding the same lock used by hooks and ordinary
@@ -654,7 +633,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     pending["process_start"] = json!("");
     if let Some(scope)=scope {scope.changing();}
     write(&mut pending)?;
-    if let Err(error) = tmux(&arguments, true) {
+    if let Err(error) = backend::current().start(&spec) {
         let mut failed = read(name)?;
         if string(&failed, "run_id") == run_id {
             failed["error"] = json!(error);
@@ -711,15 +690,11 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         recipes::verify_history(&record, true)?;
         let restore_id = nonempty_value(&record, "restore_archive_id");
         let new_run=uuid::Uuid::new_v4().to_string();
-        let arguments = resume_arguments(
-            &record,
-            &new_run,
-            restore_id.as_deref(),
-        )?;
-        recipes.push((name, arguments, record["run_id"].clone(), record["conversation_id"].clone(),new_run));
+        let spec = resume_spec(&record, &new_run, restore_id.as_deref())?;
+        recipes.push((name, spec, record["run_id"].clone(), record["conversation_id"].clone(),new_run));
     }
     let _guard = lock(None)?;
-    for (name, arguments, original_run, original_conversation,new_run) in recipes {
+    for (name, spec, original_run, original_conversation,new_run) in recipes {
         let current_snapshot = live()?;
         let current = read(&name)?;
         if let Some(scope)=scope {scope.check(&current)?;}
@@ -734,10 +709,10 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             return Err(format!("{name}: saved binding changed; retry resume"));
         }
         if dry {
-            print_resume(&arguments);
+            print_resume(&spec);
         } else {
             if let Some(scope)=scope {scope.changing();}
-            tmux(&arguments, true)?;
+            backend::current().start(&spec)?;
             if let Some(scope)=scope {scope.result(&name,&new_run,string(&current,"conversation_id"),None);} else {println!("hgs: resuming {name}");}
         }
     }
@@ -760,7 +735,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     }
     let argv = recipes::fresh_argv(string(&record, "agent"), &recipes::argv(&record)?)?;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let arguments = session_arguments(
+    let spec = session_spec(
         &record,
         effort::resume_argv(&record, argv),
         &run_id,
@@ -785,10 +760,10 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
         return Err(format!("{name}: wait for the current pause or restore to finish"));
     }
     if dry {
-        print_resume(&arguments);
+        print_resume(&spec);
         return Ok(0);
     }
-    tmux(&arguments, true)?;
+    backend::current().start(&spec)?;
     println!("hgs: starting {name} with a fresh conversation");
     Ok(0)
 }

@@ -3,8 +3,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 const MAX_SCREEN: usize = 128 * 1024;
 const KEYS: &[&str] = &[
@@ -124,10 +122,27 @@ fn frame(record: &Value) -> Result<Value> {
     {
         return Err("Invalid tracked pane".into());
     }
-    let output=tmux(&["display-message","-p","-t",pane,
-        "#{session_id}\t#{pane_id}\t#{pid}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{pane_in_mode}\t#{pane_dead}\t#{@hgs_run}\t#{session_name}\t#{bracket_paste_flag}\t#{pane_tty}"].map(str::to_owned),true)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<_> = text.trim_end_matches('\n').split('\t').collect();
+    use backend::PaneField::*;
+    let info = backend::current().pane_info(
+        backend::Target::Pane(pane),
+        &[
+            SessionId,
+            PaneId,
+            ServerPid,
+            PanePid,
+            Width,
+            Height,
+            CursorX,
+            CursorY,
+            InMode,
+            Dead,
+            RunMarker,
+            SessionName,
+            BracketedPaste,
+            Tty,
+        ],
+    )?;
+    let fields = info.fields();
     if fields.len() != 14
         || fields[1] != pane
         || fields[9] != "0"
@@ -171,14 +186,7 @@ fn frame(record: &Value) -> Result<Value> {
         .as_u64()
         .ok_or("Missing tracked process")?
         .to_string();
-    let tty = Command::new("ps")
-        .args(["-p", &pid, "-o", "tty="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !tty.status.success()
-        || fields[13].is_empty()
-        || String::from_utf8_lossy(&tty.stdout).trim() != fields[13].trim_start_matches("/dev/")
-    {
+    if !backend::current().on_terminal(&pid, fields[13])? {
         return Err("Tracked process is no longer attached to this Terminal".into());
     }
     let binding = format!(
@@ -237,26 +245,19 @@ fn input(name: &str, request: &Request, path: &Path, hash: &str) -> Result<Value
     answer["terminal_binding_id"] = json!(request.terminal_binding_id);
     let buffer = format!("hgs-terminal-{}", request.request_id);
     let staged = request.text.as_ref().is_some_and(|text| !text.is_empty());
+    let terminal = backend::current();
     let cleanup = || {
         if staged {
-            let _ = tmux(&["delete-buffer", "-b", &buffer].map(str::to_owned), false);
+            terminal.discard(&buffer);
         }
     };
     if staged {
         let stage: Result<()> = (|| {
-            let mut loader = Command::new("tmux")
-                .args(["load-buffer", "-b", &buffer, "-"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            let written = match loader.stdin.take() {
-                Some(mut stdin) => stdin.write_all(request.text.as_ref().unwrap().as_bytes()),
-                None => Err(io::Error::other("Missing terminal buffer input")),
-            };
-            let status = loader.wait().map_err(|e| e.to_string())?;
-            if !status.success() || written.is_err() {
+            if !terminal.stage(
+                &buffer,
+                request.text.as_ref().unwrap().as_bytes(),
+                backend::StageErrors::Discard,
+            )? {
                 return Err("Could not stage terminal text; nothing was delivered".into());
             }
             Ok(())
@@ -277,31 +278,20 @@ fn input(name: &str, request: &Request, path: &Path, hash: &str) -> Result<Value
     let result: Result<()> = (|| {
         let pane = string(&record, "pane");
         if let Some(key) = &request.key {
-            tmux(&["send-keys", "-t", pane, key].map(str::to_owned), true)?;
+            terminal.send(pane, &[backend::Key::Named(key)])?;
         } else {
             if staged {
-                let mut paste = vec![
-                    "paste-buffer".to_owned(),
-                    "-r".to_owned(),
-                    "-d".to_owned(),
-                    "-b".to_owned(),
-                    buffer.clone(),
-                    "-t".to_owned(),
-                    pane.to_owned(),
-                ];
                 // Use literal stdin buffers even for a single line; terminal
                 // text must not appear in child-process command arguments.
-                if frame(&record)?["bracket_paste"] == true {
-                    paste.push("-p".to_owned());
-                }
-                tmux(&paste, true)?;
+                let bracketed = frame(&record)?["bracket_paste"] == true;
+                terminal.paste(&buffer, pane, backend::Paste::Terminal { bracketed })?;
             }
             if request.enter == Some(true) {
                 if staged {
                     std::thread::sleep(std::time::Duration::from_millis(180));
                 }
                 check_handoff(name, request)?;
-                tmux(&["send-keys", "-t", pane, "Enter"].map(str::to_owned), true)?;
+                terminal.send(pane, &[backend::Key::Named("Enter")])?;
             }
         }
         Ok(())
@@ -337,11 +327,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let _guard = lock(None)?;
         let record = checked(name, &request)?;
         let metadata = frame(&record)?;
-        let output = tmux(
-            &["capture-pane", "-p", "-e", "-t", string(&record, "pane")].map(str::to_owned),
-            true,
-        )?;
-        let screen = String::from_utf8_lossy(&output.stdout);
+        let output =
+            backend::current().capture(string(&record, "pane"), backend::Capture::Styled)?;
+        let screen = String::from_utf8_lossy(&output);
         let truncated = screen.len() > MAX_SCREEN;
         let mut boundary = screen.len().min(MAX_SCREEN);
         while !screen.is_char_boundary(boundary) {

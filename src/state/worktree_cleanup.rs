@@ -6,7 +6,6 @@ use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const MAX_REVIEWED: usize = 64;
@@ -25,7 +24,8 @@ struct Reference {
 struct Context {
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
-    processes: Vec<(u32, PathBuf, String)>,
+    /// Other processes' current directories, or why they cannot be read.
+    processes: std::result::Result<Vec<(u32, PathBuf, String)>, String>,
     bindings: Vec<Reference>,
     archives: Vec<Reference>,
 }
@@ -54,10 +54,10 @@ fn step(total: Instant, seconds: u64) -> Instant {
 /// Missing folders keep their spelling; an existing parent is resolved so that
 /// the same checkout compares equal through symlinked parents.
 fn resolved(path: &Path) -> PathBuf {
-    if let Ok(path) = fs::canonicalize(path) {
+    if let Ok(path) = crate::platform::canonical(path) {
         return path;
     }
-    match (path.parent().and_then(|p| fs::canonicalize(p).ok()), path.file_name()) {
+    match (path.parent().and_then(|p| crate::platform::canonical(p).ok()), path.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
@@ -65,84 +65,6 @@ fn resolved(path: &Path) -> PathBuf {
 
 fn inside(folder: &Path, tree: &Path) -> bool {
     folder.starts_with(tree)
-}
-
-#[cfg(target_os = "linux")]
-fn processes() -> Vec<(u32, PathBuf, String)> {
-    let own = std::process::id();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            if pid == own {
-                return None;
-            }
-            let cwd = fs::read_link(entry.path().join("cwd")).ok()?;
-            let name = fs::read_to_string(entry.path().join("comm"))
-                .map(|s| s.trim().to_owned())
-                .unwrap_or_default();
-            Some((pid, cwd, name))
-        })
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn processes() -> Vec<(u32, PathBuf, String)> {
-    use std::os::unix::ffi::OsStrExt;
-    let own = std::process::id();
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count <= 0 {
-        return Vec::new();
-    }
-    let mut pids = vec![0 as libc::c_int; count as usize + 64];
-    let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
-    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
-    if found <= 0 {
-        return Vec::new();
-    }
-    pids.truncate((found as usize).min(pids.len()));
-    pids.into_iter()
-        .filter(|pid| *pid > 0 && *pid as u32 != own)
-        .filter_map(|pid| {
-            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as libc::c_int;
-            let read = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDVNODEPATHINFO,
-                    0,
-                    &mut info as *mut _ as *mut libc::c_void,
-                    size,
-                )
-            };
-            if read != size {
-                return None;
-            }
-            let path = &info.pvi_cdir.vip_path;
-            let bytes = unsafe {
-                std::slice::from_raw_parts(path.as_ptr() as *const u8, std::mem::size_of_val(path))
-            };
-            let end = bytes.iter().position(|b| *b == 0)?;
-            if end == 0 {
-                return None;
-            }
-            let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
-            let mut name = [0u8; 256];
-            let length = unsafe {
-                libc::proc_name(pid, name.as_mut_ptr() as *mut libc::c_void, name.len() as u32)
-            };
-            let name = String::from_utf8_lossy(&name[..length.clamp(0, 256) as usize]).into_owned();
-            Some((pid as u32, cwd, name))
-        })
-        .collect()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn processes() -> Vec<(u32, PathBuf, String)> {
-    Vec::new()
 }
 
 fn reference(record: &Value) -> Reference {
@@ -196,7 +118,7 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     bindings.extend(deepseek_bindings());
     Context {
         bases,
-        processes: processes(),
+        processes: crate::platform::current_directories(),
         bindings,
         archives: archive::records()
             .unwrap_or_default()
@@ -365,11 +287,20 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         return finish(row, reasons, notes);
     }
 
-    let samples: Vec<_> = context
-        .processes
-        .iter()
-        .filter(|(_, cwd, _)| inside(cwd, &path))
-        .collect();
+    // Without the running processes' folders, nothing may count as unused.
+    let samples: Vec<_> = match &context.processes {
+        Ok(processes) => processes
+            .iter()
+            .filter(|(_, cwd, _)| inside(cwd, &path))
+            .collect(),
+        Err(error) => {
+            reasons.push(reason(
+                "processes_unavailable",
+                format!("{error}, so a program may still use this folder."),
+            ));
+            Vec::new()
+        }
+    };
     row["processes"] = json!(samples
         .iter()
         .take(MAX_SAMPLES)
@@ -614,7 +545,7 @@ fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
     let machine = crate::config::Config::load()
         .map(|c| c.host().to_owned())
         .unwrap_or_default();
-    let Ok(path) = fs::canonicalize(path).map_err(|_| ()).and_then(|p| {
+    let Ok(path) = crate::platform::canonical(path).map_err(|_| ()).and_then(|p| {
         if p.is_dir() {
             Ok(p)
         } else {
@@ -630,7 +561,7 @@ fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             step(total, 3),
         )?;
-        let common = fs::canonicalize(text(common)).map_err(|e| error("metadata_error", e.to_string()))?;
+        let common = crate::platform::canonical(text(common)).map_err(|e| error("metadata_error", e.to_string()))?;
         let (trees, partial) = list(&path, &common, step(total, 3))?;
         let context = context(&common, &trees, step(total, 3));
         let wanted = only.map(|only| (only.to_path_buf(), resolved(only)));
@@ -738,7 +669,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     if !target.is_absolute() || !common.is_absolute() {
         return Err("Worktree and repository must be absolute paths".into());
     }
-    let common = fs::canonicalize(common).map_err(|e| format!("Repository: {e}"))?;
+    let common = crate::platform::canonical(common).map_err(|e| format!("Repository: {e}"))?;
     let changed = "Repository changed or this folder is not one of its worktrees. Review the worktrees again.";
     let actual = git(
         &common,
@@ -746,7 +677,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         Instant::now() + Duration::from_secs(5),
     )
     .map_err(|e| e.detail)?;
-    if fs::canonicalize(text(actual)).ok().as_ref() != Some(&common) {
+    if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
         return Err(changed.into());
     }
     if target.exists() {
@@ -757,7 +688,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         )
         .map(text)
         .ok()
-        .and_then(|own| fs::canonicalize(own).ok());
+        .and_then(|own| crate::platform::canonical(own).ok());
         if own.as_ref() != Some(&common) {
             return Err(changed.into());
         }
@@ -765,14 +696,11 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
 
     let cache = cache_file("repo", &common.to_string_lossy());
     private_dir(cache.parent().unwrap())?;
-    let guard = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(cache.with_extension("lock"))
-        .map_err(|e| e.to_string())?;
+    let guard = crate::platform::private_open(
+        OpenOptions::new().create(true).truncate(false).read(true).write(true),
+    )
+    .open(cache.with_extension("lock"))
+    .map_err(|e| e.to_string())?;
     let waited = Instant::now() + Duration::from_secs(10);
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= waited {

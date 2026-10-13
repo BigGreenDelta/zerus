@@ -7,10 +7,37 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     process::{Command, Stdio},
     time::Duration,
 };
+
+/// Voice messages need the speech service, the peer transport and a detached
+/// worker, which Phase 2 leaves out on Windows; `dispatch` refuses there.
+const UNSUPPORTED: &str =
+    "Voice messages are not supported on Windows yet; send them to a Linux or macOS machine.";
+#[cfg(unix)]
+use crate::speech;
+/// The speech calls of voice messages, which Windows builds do not make.
+#[cfg(not(unix))]
+mod speech {
+    use super::{Result, Value, UNSUPPORTED};
+    use crate::config::Config;
+    use std::time::Duration;
+    pub(super) use crate::speech::{validate_request, MAX_REQUEST_BYTES};
+
+    pub(super) fn voice_computers(_: &Config) -> Result<Value> {
+        Err(UNSUPPORTED.into())
+    }
+    pub(super) fn voice_route(_: &Config, _: &str) -> Result<String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub(super) fn voice_request(_: &Config, _: &str, _: &Value) -> Result<Value> {
+        Err(UNSUPPORTED.into())
+    }
+    pub(super) fn capture(_: &[String], _: &[u8], _: Duration) -> Result<Value> {
+        Err(UNSUPPORTED.into())
+    }
+}
 
 const MAX_JOBS: i64 = 10_000;
 const MAX_AUDIO: i64 = 2 * 1024 * 1024 * 1024;
@@ -73,7 +100,7 @@ pub(crate) fn validate_request(value: &Value) -> Result<()> {
         if let Some(revision) = value["speech"].get("profile_revision") {
             asr["profile_revision"] = revision.clone();
         }
-        crate::speech::validate_request(&asr).map_err(err)?;
+        speech::validate_request(&asr).map_err(err)?;
     }
     Ok(())
 }
@@ -84,39 +111,29 @@ struct Store {
 impl Store {
     fn open_at(directory: &Path) -> Result<Self> {
         private_dir(directory)?;
-        let info = fs::symlink_metadata(directory).map_err(err)?;
-        if !info.is_dir()
-            || info.uid() != unsafe { libc::geteuid() }
-            || info.permissions().mode() & 0o077 != 0
+        if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+            .map_err(err)?
         {
             return Err("Voice storage must be private to this user".into());
         }
         // SQLite NOFOLLOW rejects symlinks in every path component, including
         // macOS's ordinary /var -> /private/var parent. Resolve the verified
         // directory only; keep refusing a symlink at the database itself.
-        let path = directory
-            .canonicalize()
+        let path = crate::platform::canonical(directory)
             .map_err(err)?
             .join("messages.sqlite3");
         if !path.try_exists().map_err(err)? {
-            match OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
+            match crate::platform::refuse_link(crate::platform::private_open(
+                OpenOptions::new().create_new(true).write(true),
+            ))
+            .open(&path)
             {
                 Ok(file) => drop(file),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
                 Err(error) => return Err(err(error)),
             }
         }
-        let info = fs::symlink_metadata(&path).map_err(err)?;
-        if !info.is_file()
-            || info.uid() != unsafe { libc::geteuid() }
-            || info.permissions().mode() & 0o077 != 0
-            || info.nlink() != 1
-        {
+        if !crate::platform::verify_private(&path, crate::platform::Private::File).map_err(err)? {
             return Err("Voice database must be a private regular file".into());
         }
         // Never open/close a raw descriptor for an existing SQLite inode: that
@@ -491,6 +508,9 @@ fn cancel_job(job: &mut Value) -> bool {
     true
 }
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if !cfg!(unix) {
+        return Err(UNSUPPORTED.into());
+    }
     if args == ["worker"] {
         return worker();
     }
@@ -499,10 +519,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut bytes = Vec::new();
     io::stdin()
-        .take((crate::speech::MAX_REQUEST_BYTES + 1) as u64)
+        .take((speech::MAX_REQUEST_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(err)?;
-    if bytes.len() > crate::speech::MAX_REQUEST_BYTES {
+    if bytes.len() > speech::MAX_REQUEST_BYTES {
         return Err("Voice request is too large".into());
     }
     let request: Value = serde_json::from_slice(&bytes).map_err(err)?;
@@ -510,12 +530,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let target = checked(&args[0], &request)?;
     let config = crate::config::Config::load().map_err(|e| e.message)?;
     if request["action"] == "profiles" {
-        println!("{}", crate::speech::voice_computers(&config)?);
+        println!("{}", speech::voice_computers(&config)?);
         return Ok(0);
     }
     let mut store = Store::open()?;
     let job = if request["action"] == "submit" {
-        crate::speech::voice_route(&config, string(&request["speech"], "machine_id"))?;
+        speech::voice_route(&config, string(&request["speech"], "machine_id"))?;
         let pcm = STANDARD
             .decode(string(&request["audio"], "data_base64"))
             .map_err(err)?;
@@ -727,8 +747,8 @@ fn boundary(record: &Value) -> Value {
         })
         .ok();
     let path = string(record, "transcript");
-    let metadata = fs::metadata(path).ok();
-    json!({"journal_seq":seq,"transcript":path,"source_bytes":metadata.as_ref().map(|m|m.len()),"source_device":metadata.as_ref().map(|m|m.dev()),"source_inode":metadata.as_ref().map(|m|m.ino()),"at":now()})
+    let source = crate::platform::FileIdentity::at(Path::new(path)).ok();
+    json!({"journal_seq":seq,"transcript":path,"source_bytes":source.as_ref().map(|(_, m)|m.len()),"source_device":source.as_ref().map(|(i, _)|i.device),"source_inode":source.as_ref().map(|(i, _)|i.inode),"at":now()})
 }
 fn receipt(job: &Value) -> Result<Option<Value>> {
     let directory = if job["backend"]=="opencode" || job["agent"]=="opencode" {"opencode/receipts"} else if job["backend"] == "dsh" || job["agent"] == "dsh" {
@@ -739,11 +759,7 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     let path = root()
         .join(directory)
         .join(format!("{}.json", string(job, "id")));
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
+    let file = match crate::platform::refuse_link(OpenOptions::new().read(true)).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(err(e)),
@@ -861,7 +877,7 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
     if job["state"] == "cancelled" {
         if job["asr_cancel_pending"] == true {
             let attempts = job["asr_cancel_attempts"].as_u64().unwrap_or(0) + 1;
-            let cancelled = crate::speech::voice_request(
+            let cancelled = speech::voice_request(
                 config,
                 string(&job["speech"], "machine_id"),
                 &json!({"action":"cancel","job_id":job["asr_id"]}),
@@ -915,7 +931,7 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
         let machine = string(&job["speech"], "machine_id").to_owned();
         // Always recover by status first. Not-found proves no accepted ASR
         // receipt, so resending this same attempt UUID cannot duplicate work.
-        let status = crate::speech::voice_request(
+        let status = speech::voice_request(
             config,
             &machine,
             &json!({"action":"status","job_id":job["asr_id"]}),
@@ -939,7 +955,7 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
             if let Some(revision) = job["speech"].get("profile_revision") {
                 asr["profile_revision"] = revision.clone();
             }
-            response = match crate::speech::voice_request(config, &machine, &asr) {
+            response = match speech::voice_request(config, &machine, &asr) {
                 Ok(v) => v,
                 Err(_) => return speech_unavailable(store, &mut job),
             };
@@ -976,7 +992,7 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
     // A crash after this marker never causes native delivery to replay. The
     // existing send path owns identity, cold-cache consent and PTY guards.
     let result = if ["dsh","opencode"].contains(&string(&target,"backend")) || ["dsh","opencode"].contains(&string(&target,"agent")) {
-        crate::speech::capture(
+        speech::capture(
             &[
                 "send".into(),
                 string(&target, "name").into(),
@@ -1033,21 +1049,19 @@ fn native_refusal(error: &str) -> (&'static str, &'static str) {
 }
 fn worker() -> Result<i32> {
     let store = Store::open()?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(root().join("voice/worker.lock"))
-        .map_err(err)?;
+    let lock = crate::platform::refuse_link(crate::platform::private_open(
+        OpenOptions::new().create(true).truncate(false).write(true),
+    ))
+    .open(root().join("voice/worker.lock"))
+    .map_err(err)?;
     if lock.try_lock_exclusive().is_err() {
         return Ok(0);
     }
     let executable = std::env::current_exe().map_err(err)?;
-    let original = fs::metadata(&executable).ok().map(|m| (m.dev(), m.ino()));
+    let identity = |path: &Path| crate::platform::file_identity(path).map(|i| (i.device, i.inode));
+    let original = identity(&executable);
     loop {
-        if fs::metadata(&executable).ok().map(|m| (m.dev(), m.ino())) != original {
+        if identity(&executable) != original {
             return Ok(0);
         }
         let config = crate::config::Config::load().map_err(|e| e.message)?;
@@ -1085,26 +1099,17 @@ fn ensure_worker() -> Result<()> {
     {
         return Ok(());
     }
-    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(std::env::current_exe().map_err(err)?);
     cmd.args(["voice", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    cmd.spawn().map_err(err)?;
+    crate::platform::spawn_detached(&mut cmd).map_err(err)?;
     Ok(())
 }
 
-#[cfg(test)]
+// Voice messages are a Phase 2 non-goal on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";

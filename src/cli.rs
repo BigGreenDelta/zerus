@@ -2,13 +2,18 @@
 use crate::{
     config::{self, Config},
     platform::{self, TabGuard},
-    state,
+    state::{
+        self,
+        backend::{DryRun, LaunchSpec, PaneField, Target, TerminalBackend},
+    },
 };
 use serde_json::{json, Value};
+#[cfg(unix)]
+use std::process::Command;
 use std::{
     env, fmt, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Instant,
 };
 
@@ -133,10 +138,10 @@ resume --all excludes Archive. kill --archive forgets only that archived entry.
 rename changes the session label while preserving its agent/project, process and conversation.
 "#;
 
-/// Fails where this build runs no local sessions (Windows). Forwarded `@host`
-/// commands never reach it.
+/// Fails where this computer runs no local sessions (Windows for now). Forwarded
+/// `@host` commands never reach it.
 fn local_sessions() -> Result<()> {
-    if platform::LOCAL_SESSIONS {
+    if platform::local_sessions() {
         Ok(())
     } else {
         Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
@@ -181,7 +186,11 @@ fn basename(path: &str) -> String {
         .into()
 }
 fn session_exists(name: &str) -> bool {
-    platform::silent("tmux", &["has-session", "-t", &format!("={name}")])
+    terminal().session_exists(name)
+}
+/// This computer's session terminal (tmux on Unix).
+fn terminal() -> &'static dyn TerminalBackend {
+    state::backend::current()
 }
 fn binding_exists(config: &Config, name: &str) -> Result<bool> {
     if !config.state.is_dir() {
@@ -218,14 +227,11 @@ fn executable_path() -> Result<PathBuf> {
     Ok(env::current_exe()?)
 }
 fn nested_guard(dry: bool) -> Result<()> {
-    if !dry && env::var("TMUX").is_ok_and(|s| !s.is_empty()) {
-        let name = platform::capture("tmux", &["display", "-p", "#S"]).unwrap_or_default();
+    if !dry && terminal().inside() {
+        let name = terminal().enclosing_session();
         return Err(Error::new(
             2,
-            format!(
-                "already inside tmux session {}; open a new tab",
-                name.trim()
-            ),
+            format!("already inside tmux session {name}; open a new tab"),
         ));
     }
     Ok(())
@@ -698,7 +704,7 @@ fn remote(
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> {
-    if !platform::LOCAL_SESSIONS {
+    if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.
         let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":{},"sessions":[],"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state),"local_sessions":false});
@@ -712,29 +718,13 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
     }
-    let clients = platform::capture(
-        "tmux",
-        &["list-clients", "-F", "#{client_session}\t#{client_tty}"],
-    )
-    .unwrap_or_default();
-    let rows = platform::capture(
-        "tmux",
-        &[
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_attached}\t#{session_created}\t#{HGS_LAUNCH_ID}",
-        ],
-    )
-    .unwrap_or_default();
-    let sessions: Vec<Value> = rows.lines().filter(|line| !line.is_empty()).map(|line| {
-        let mut fields = line.split('\t'); let name = fields.next().unwrap_or_default();
-        let attached = fields.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
-        let created = fields.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
-        let launch_id = fields.next().unwrap_or_default();
+    let listing = terminal().listing();
+    let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
+        let name = row.name.as_str();
         let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
         let project = parts.next().filter(|s| !s.is_empty()); let tag = parts.next().filter(|s| !s.is_empty());
-        let ttys: Vec<&str> = clients.lines().filter_map(|line| line.split_once('\t')).filter_map(|(session, tty)| if session == name { Some(tty) } else { None }).collect();
-        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":attached,"clients":ttys,"created":created,"launch_id":launch_id})
+        let ttys: Vec<&str> = listing.clients.iter().filter_map(|client| if client.session == name { Some(client.terminal.as_str()) } else { None }).collect();
+        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":row.attached,"clients":ttys,"created":row.created,"launch_id":row.launch_id})
     }).collect();
     let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
     // Phone alerts wait while the owner is active here; see src/presence.rs.
@@ -745,22 +735,17 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {
-    if !platform::LOCAL_SESSIONS {
+    if !platform::local_sessions() {
         println!("  (control console: sessions run on remote machines)");
         return Ok(());
     }
-    match platform::capture(
-        "tmux",
-        &["list-sessions", "-F", "#{session_name}|#{session_attached}"],
-    ) {
-        Some(rows) if !rows.trim().is_empty() => {
-            for row in rows.lines() {
-                if let Some((name, count)) = row.split_once('|') {
-                    println!("  {name:<40} {count} client(s)");
-                }
+    match terminal().attached_counts() {
+        Some(rows) => {
+            for (name, count) in rows {
+                println!("  {name:<40} {count} client(s)");
             }
         }
-        _ => println!("  (no sessions)"),
+        None => println!("  (no sessions)"),
     }
     if config.state.is_dir() {
         state_command("list", &[])?;
@@ -769,12 +754,12 @@ fn local_list(config: &Config) -> Result<()> {
 }
 fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     let dry = global_dry || has(args, "--dry-run");
-    if dry && !platform::LOCAL_SESSIONS {
+    if dry && !platform::local_sessions() {
         return Ok(0); // this machine's listing runs no command
     }
     if has(args, "--json") {
         if dry {
-            println!("tmux list-clients -F \"#{{client_session}}\\t#{{client_tty}}\"\ntmux list-sessions -F \"#{{session_name}}\\t#{{session_attached}}\\t#{{session_created}}\\t#{{HGS_LAUNCH_ID}}\"");
+            println!("{}", terminal().describe(&DryRun::ListJson));
             return Ok(0);
         }
         let local = local_json(config)?;
@@ -788,7 +773,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
         return Ok(0);
     }
     if dry {
-        println!("tmux list-sessions");
+        println!("{}", terminal().describe(&DryRun::List));
         return Ok(0);
     }
     if args.first().is_some_and(|a| a == "--local") {
@@ -850,29 +835,21 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     }
     if dry {
         println!(
-            "tmux attach existing session {}{}",
-            platform::quote(session),
-            run_id
-                .map(|id| format!(" (run {})", platform::quote(id)))
-                .unwrap_or_default()
+            "{}",
+            terminal().describe(&DryRun::AttachExisting { session, run_id })
         );
         return Ok(0);
     }
     nested_guard(false)?;
     // Resolve exact name to an immutable tmux session ID before checking the run.
     // If it disappears later, attach fails instead of creating or selecting a new one.
-    let target = platform::capture(
-        "tmux",
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={session}:"),
-            "#{session_id}\t#{@hgs_run}",
-        ],
-    )
-    .ok_or_else(|| Error::new(1, "session is no longer running; resume it explicitly"))?;
-    let fields: Vec<_> = target.trim_end_matches('\n').split('\t').collect();
+    let target = terminal()
+        .probe(
+            Target::Name(session),
+            &[PaneField::SessionId, PaneField::RunMarker],
+        )
+        .ok_or_else(|| Error::new(1, "session is no longer running; resume it explicitly"))?;
+    let fields = target.fields();
     if fields.len() != 2
         || !fields[0]
             .strip_prefix('$')
@@ -886,12 +863,15 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
             "session run changed; refresh before reconnecting",
         ));
     }
-    attach_target(config, session, client, fields[0])
+    attach_target(config, session, client, Target::Session(fields[0]))
 }
 
 fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32> {
     if dry {
-        println!("tmux set-environment -t ={session} HGS_CLIENT {client}\ntmux -u attach-session -t ={session}");
+        println!(
+            "{}",
+            terminal().describe(&DryRun::Attach { session, client })
+        );
         return Ok(0);
     }
     nested_guard(false)?;
@@ -902,24 +882,15 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
             return Ok(rc);
         }
     }
-    attach_target(config, session, client, &format!("={session}"))
+    attach_target(config, session, client, Target::Name(session))
 }
 
-fn attach_target(config: &Config, session: &str, client: &str, target: &str) -> Result<i32> {
-    platform::silent(
-        "tmux",
-        &["set-environment", "-t", target, "HGS_CLIENT", client],
-    );
+fn attach_target(config: &Config, session: &str, client: &str, target: Target) -> Result<i32> {
+    terminal().set_client(target, client);
     let _tab = TabGuard::begin(config, session, &platform::tab_color(config, "local"));
-    let rc = platform::wait_interactive(Command::new("tmux").args([
-        "-u",
-        "attach-session",
-        "-t",
-        target,
-    ]))?;
-    platform::client_done(rc);
+    let exit = terminal().attach(target)?;
     report_startup_failure(session);
-    Ok(rc)
+    Ok(exit.code)
 }
 
 fn report_startup_failure(session: &str) -> bool {
@@ -940,30 +911,21 @@ fn attach_requested(
 ) -> Result<i32> {
     // Capture the tmux identity before rechecking the conversation. If the name
     // is reused afterwards, attach must fail instead of selecting its new owner.
-    let target = platform::capture(
-        "tmux",
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={session}:"),
-            "#{session_id}",
-        ],
-    )
-    .filter(|value| {
-        value
-            .trim()
-            .strip_prefix('$')
-            .is_some_and(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
-    })
-    .ok_or_else(|| {
-        Error::new(
-            1,
-            "requested session ended before attach; repeat the command",
-        )
-    })?;
+    let target = terminal()
+        .probe(Target::Name(session), &[PaneField::SessionId])
+        .filter(|info| {
+            info.value().strip_prefix('$').is_some_and(|value| {
+                !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+            })
+        })
+        .ok_or_else(|| {
+            Error::new(
+                1,
+                "requested session ended before attach; repeat the command",
+            )
+        })?;
     state::check_requested_session(session, agent, id).map_err(|error| Error::new(1, error))?;
-    attach_target(config, session, client, target.trim())
+    attach_target(config, session, client, Target::Session(target.value()))
 }
 fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
     let session = require(args, 0, "usage: hgs kill <session> [--archive <id>]")?;
@@ -990,15 +952,11 @@ fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
         return state_command("forget", &args);
     }
     if dry {
-        println!("tmux kill-session -t ={session}");
+        println!("{}", terminal().describe(&DryRun::Kill { session }));
         return Ok(0);
     }
     if session_exists(session) {
-        let rc = platform::code(
-            Command::new("tmux")
-                .args(["kill-session", "-t", &format!("={session}")])
-                .status()?,
-        );
+        let rc = terminal().kill(session)?;
         if rc != 0 {
             return Ok(rc);
         }
@@ -1038,7 +996,7 @@ fn rename(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
     }
     let result = state_command("rename", &state_args)?;
     if result == 0 && !dry && archive.is_none() && config.tab {
-        if let Err(error) = platform::refresh_session_title(new) {
+        if let Err(error) = terminal().refresh_titles(new) {
             eprintln!("hgs: session renamed; could not update a terminal title: {error}");
         }
     }
@@ -1076,7 +1034,7 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
         }
         index += 1;
     }
-    if !detached && !dry && env::var("TMUX").is_ok_and(|value| !value.is_empty()) {
+    if !detached && !dry && terminal().inside() {
         return Err(Error::new(
             2,
             "already inside tmux; use fork -d or open a new tab",
@@ -1139,7 +1097,7 @@ fn pause_resume(
     if expected_run.is_some() && !fresh {
         return Err(Error::new(1, "--expected-run-id is only valid with --fresh"));
     }
-    if command == "resume" && !detached && !dry && env::var("TMUX").is_ok_and(|s| !s.is_empty()) {
+    if command == "resume" && !detached && !dry && terminal().inside() {
         return Err(Error::new(
             2,
             "already inside tmux; use resume -d or open a new tab",
@@ -1300,7 +1258,7 @@ fn logical_cwd() -> std::io::Result<PathBuf> {
     Ok(env::var("PWD")
         .ok()
         .filter(|p| {
-            Path::new(p).is_absolute() && fs::canonicalize(p).ok().as_ref() == Some(&actual)
+            Path::new(p).is_absolute() && platform::canonical(p).ok().as_ref() == Some(&actual)
         })
         .map(PathBuf::from)
         .unwrap_or(actual))
@@ -1748,8 +1706,8 @@ fn launch(
         }
     }
     let executable = executable_path()?.to_string_lossy().into_owned();
-    let command_string = if command_name == "sh" {
-        platform::join(&base)
+    let command = if command_name == "sh" {
+        base
     } else {
         let mut words = vec![
             shell,
@@ -1771,7 +1729,7 @@ fn launch(
             words.push("0".into());
         }
         words.extend(base);
-        platform::join(&words)
+        words
     };
     if existing {
         if options.dry {
@@ -1829,6 +1787,13 @@ fn launch(
             Ok(rc)
         };
     }
+    let mut spec = LaunchSpec {
+        name: session.clone(),
+        cwd: directory,
+        env: environment,
+        command,
+        detached: options.detached,
+    };
     if options.dry {
         if !options.detached && config.tab {
             println!(
@@ -1836,21 +1801,13 @@ fn launch(
                 platform::tab_color(config, "local")
             );
         }
-        println!(
-            "tmux -u new-session {}{} -s {session} -c {directory} -- {command_string}",
-            if options.detached { "-d " } else { "" },
-            environment
-                .iter()
-                .map(|v| format!("-e {v}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        println!("{}", terminal().describe(&DryRun::Launch(&spec)));
         return Ok(0);
     }
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
-        environment.extend([
+        spec.env.extend([
             format!("HGS_SESSION={session}"),
             format!("HGS_AGENT={command_name}"),
             format!(
@@ -1871,20 +1828,12 @@ fn launch(
             "HGS_TRACKING=1".into(),
         ]);
         for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
-            environment.push(format!("{key}={}", env::var(key).unwrap_or_default()));
+            spec.env
+                .push(format!("{key}={}", env::var(key).unwrap_or_default()));
         }
     }
-    let mut tmux = Command::new("tmux");
-    tmux.args(["-u", "new-session"]);
     if options.detached {
-        tmux.arg("-d");
-    }
-    for value in &environment {
-        tmux.args(["-e", value]);
-    }
-    tmux.args(["-s", &session, "-c", &directory, &command_string]);
-    if options.detached {
-        let rc = platform::code(tmux.status()?);
+        let rc = terminal().launch(&spec)?.code;
         if rc == 0 {
             println!("hgs: started {session}");
         }
@@ -1892,10 +1841,10 @@ fn launch(
     }
     let _tab = TabGuard::begin(config, &session, &platform::tab_color(config, "local"));
     let start = Instant::now();
-    let rc = platform::wait_interactive(&mut tmux)?;
-    let server_died = platform::client_done(rc);
+    let exit = terminal().launch(&spec)?;
+    let rc = exit.code;
     if !report_startup_failure(&session)
-        && !server_died
+        && !exit.server_died
         && !session_exists(&session)
         && start.elapsed().as_secs() < 3
     {

@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -400,10 +399,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     drop(listener);
     let mut metadata = json!({"version":VERSION,"port":port,"password":uuid::Uuid::new_v4().to_string(),"generation":uuid::Uuid::new_v4().to_string()});
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    let log = crate::platform::private_open(OpenOptions::new().create(true).append(true))
         .open(dir.join("host.log"))
         .map_err(|e| e.to_string())?;
     let mut command = Command::new("opencode");
@@ -451,15 +447,9 @@ fn ensure_host(record: &Value) -> Result<()> {
     if !string(record, "native_config_file").is_empty() {
         command.env("OPENCODE_CONFIG", string(record, "native_config_file"));
     }
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // Detach only the dedicated native host: its own session outlives the
+    // launching terminal and HGS process.
+    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
     metadata["pid"] = json!(child.id());
     metadata["process_start"] = json!(process_start(child.id()));
     atomic(&dir.join("host.json"), &metadata.to_string())?;
@@ -683,9 +673,7 @@ pub(crate) fn launch(
         save(&record)?;
         return Ok(());
     }
-    let cwd = PathBuf::from(cwd)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
     if !cwd.is_dir() {
         return Err("OpenCode requires an existing directory".into());
     }

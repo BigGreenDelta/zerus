@@ -4,7 +4,10 @@
 *.py text eol=lf
 
 # Captured terminal screens intentionally preserve whitespace and blank lines.
-tests/fixtures/*.txt -whitespace
+# They and the recorded screen data are embedded with include_str!, so checkouts
+# keep their bytes exactly (no CRLF conversion on Windows).
+tests/fixtures/*.txt -text -whitespace
+src/state/data/*.txt -text -whitespace
 
 # Keep vendored libvterm byte-for-byte identical to the documented upstream.
 tray/vendor/libvterm/** -whitespace

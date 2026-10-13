@@ -2,7 +2,6 @@
 //! Scan incrementally; retain only terminal receipts for existing job identities.
 use super::*;
 use std::collections::BTreeSet;
-use std::os::unix::fs::MetadataExt;
 
 const SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const LINE_BYTES: u64 = 1024 * 1024;
@@ -31,7 +30,8 @@ fn recover(record: &Value, jobs: &mut Jobs, directory: &Path, budget: u64) -> Re
         return Ok(());
     }
     let file = open_regular(path)?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let (source, meta) =
+        crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
     let mut first = String::new();
     (&mut reader)
@@ -61,7 +61,7 @@ fn recover(record: &Value, jobs: &mut Jobs, directory: &Path, budget: u64) -> Re
         .ok()
         .and_then(|f| serde_json::from_reader(f.take(8 * 1024 * 1024)).ok())
         .unwrap_or(Value::Null);
-    let identity = json!([meta.dev(), meta.ino(), conversation]);
+    let identity = json!([source.device, source.inode, conversation]);
     if cache["source"] != identity
         || !cache["settled"].is_object()
         || !cache["targets"].is_array()

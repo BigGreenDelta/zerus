@@ -14,12 +14,6 @@ mod presence;
 mod screen;
 mod speech;
 mod status;
-// The local session host (tmux, hooks, agent state) runs on Unix. Windows builds
-// are control consoles for remote machines and link the stubs in state_windows.rs.
-#[cfg(unix)]
-mod state;
-#[cfg(not(unix))]
-#[path = "state_windows.rs"]
 mod state;
 mod swarm;
 

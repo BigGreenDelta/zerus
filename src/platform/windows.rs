@@ -1,57 +1,89 @@
 //! Windows process, console and file primitives. A Windows build manages remote
 //! machines through the system OpenSSH client; no agent session runs here.
-use super::capture;
+use super::{
+    capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
+    RunError,
+};
 use crate::cli::{Error, Result};
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     fs,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     os::windows::{
-        fs::OpenOptionsExt,
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt},
         io::{AsRawHandle, FromRawHandle, RawHandle},
         process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
 };
-use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION,
-        ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-        WAIT_TIMEOUT,
-    },
-    Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
-        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
-        FILE_READ_ATTRIBUTES, FILE_TYPE, FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE,
-        FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
-    },
-    System::{
-        Console::{
-            GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler, SetConsoleMode, CTRL_BREAK_EVENT,
-            CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
-            ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+use windows_sys::{
+    Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation},
+    Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER,
+            ERROR_LOCK_VIOLATION, ERROR_MORE_DATA, ERROR_SHARING_VIOLATION, ERROR_SUCCESS,
+            FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
+            WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        Security::{
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
+            WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
+            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
         },
-        Pipes::{
-            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-            PIPE_WAIT,
+        Storage::FileSystem::{
+            CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE,
+            FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+            PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, READ_CONTROL,
         },
-        Threading::{
-            GetCurrentProcess, OpenProcess, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP,
-            PROCESS_SYNCHRONIZE,
+        System::{
+            Console::{
+                GenerateConsoleCtrlEvent, GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler,
+                SetConsoleMode, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+                CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                STD_OUTPUT_HANDLE,
+            },
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First,
+                Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+            Pipes::{
+                CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+                PIPE_WAIT,
+            },
+            RestartManager::{
+                RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+                RM_PROCESS_INFO,
+            },
+            Threading::{
+                GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, OpenThread,
+                QueryFullProcessImageNameW, ResumeThread, TerminateProcess, WaitForSingleObject,
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+                CREATE_SUSPENDED, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
+            },
         },
+        UI::Shell::CommandLineToArgvW,
     },
 };
 
@@ -81,9 +113,62 @@ pub fn prepare_environment() {
         }
     }
 }
-/// Windows reports every exit as a code; there are no signals.
+/// Whether this computer runs agent sessions. A Windows computer will once the
+/// user enables them (the `%USERPROFILE%\.config\hgs\local-sessions` marker) and
+/// its session host exists (Phase 2 milestone M3); until then it is a control
+/// console for remote machines whatever the marker says.
+pub fn local_sessions() -> bool {
+    false
+}
+/// Windows reports every exit as a code; crash statuses read as signals (see `exit_info`).
 pub fn code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(1)
+    ExitInfo::of(status).exit_code()
+}
+/// NTSTATUS values that end a process the way a signal ends a Unix one, with
+/// that signal's number: Ctrl+C or a closed console, memory faults, illegal
+/// instructions, arithmetic faults, breakpoints and fail-fast aborts (which is
+/// how a Rust panic set to abort ends).
+const CRASH_SIGNALS: [(u32, i32); 18] = [
+    (0xC000_013A, 2),  // STATUS_CONTROL_C_EXIT: SIGINT
+    (0xC000_0005, 11), // STATUS_ACCESS_VIOLATION: SIGSEGV
+    (0xC000_0006, 11), // STATUS_IN_PAGE_ERROR
+    (0xC000_00FD, 11), // STATUS_STACK_OVERFLOW
+    (0xC000_008C, 11), // STATUS_ARRAY_BOUNDS_EXCEEDED
+    (0xC000_001D, 4),  // STATUS_ILLEGAL_INSTRUCTION: SIGILL
+    (0xC000_0096, 4),  // STATUS_PRIVILEGED_INSTRUCTION
+    (0xC000_008D, 8),  // STATUS_FLOAT_DENORMAL_OPERAND: SIGFPE
+    (0xC000_008E, 8),  // STATUS_FLOAT_DIVIDE_BY_ZERO
+    (0xC000_008F, 8),  // STATUS_FLOAT_INEXACT_RESULT
+    (0xC000_0090, 8),  // STATUS_FLOAT_INVALID_OPERATION
+    (0xC000_0091, 8),  // STATUS_FLOAT_OVERFLOW
+    (0xC000_0092, 8),  // STATUS_FLOAT_STACK_CHECK
+    (0xC000_0093, 8),  // STATUS_FLOAT_UNDERFLOW
+    (0xC000_0094, 8),  // STATUS_INTEGER_DIVIDE_BY_ZERO
+    (0xC000_0095, 8),  // STATUS_INTEGER_OVERFLOW
+    (0x8000_0003, 5),  // STATUS_BREAKPOINT: SIGTRAP
+    (0xC000_0409, 6),  // STATUS_STACK_BUFFER_OVERRUN (fail fast): SIGABRT
+];
+/// Other codes, including large ones such as `exit(-1)`, stay exit codes.
+pub(super) fn exit_info(status: ExitStatus) -> ExitInfo {
+    let Some(code) = status.code() else {
+        return ExitInfo {
+            code: None,
+            signal: None,
+        };
+    };
+    match CRASH_SIGNALS
+        .iter()
+        .find(|(status, _)| *status == code as u32)
+    {
+        Some(&(_, signal)) => ExitInfo {
+            code: None,
+            signal: Some(signal),
+        },
+        None => ExitInfo {
+            code: Some(code),
+            signal: None,
+        },
+    }
 }
 fn extensions() -> Vec<String> {
     env::var("PATHEXT")
@@ -489,29 +574,51 @@ pub fn process_alive(pid: u32) -> bool {
         running
     }
 }
-/// Distinguishes a file from a different one later found at the same path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub modified: i64,
-    pub modified_nanos: i64,
-}
 /// Volume and file index identify the file itself; creation times do not,
 /// because NTFS tunnelling gives a replacement under the same name the old one.
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
-    let file = fs::File::open(path).ok()?;
+    FileIdentity::of(&fs::File::open(path).ok()?).ok()
+}
+impl FileIdentity {
+    /// The identity and metadata of an open file.
+    pub fn with_metadata(file: &fs::File) -> io::Result<(Self, fs::Metadata)> {
+        Ok((Self::of(file)?, file.metadata()?))
+    }
+    /// The identity and metadata of the file `path` names, following links.
+    pub fn at(path: &Path) -> io::Result<(Self, fs::Metadata)> {
+        Self::with_metadata(&fs::File::open(path)?)
+    }
+    /// The identity of a file this process has open.
+    pub fn of(file: &fs::File) -> io::Result<Self> {
+        let info = file_information(file)?;
+        let (modified, modified_nanos) = unix_time(ticks(info.ftLastWriteTime));
+        Ok(Self {
+            device: info.dwVolumeSerialNumber.into(),
+            inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            modified,
+            modified_nanos,
+        })
+    }
+}
+fn file_information(file: &fs::File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
-    Some(FileIdentity {
-        device: info.dwVolumeSerialNumber.into(),
-        inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-        modified: (i64::from(info.ftLastWriteTime.dwHighDateTime) << 32)
-            | i64::from(info.ftLastWriteTime.dwLowDateTime),
-        modified_nanos: 0,
-    })
+    Ok(info)
+}
+/// 100 ns ticks from 1601-01-01, when FILETIME starts, to 1970-01-01.
+const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+fn ticks(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+/// FILETIME ticks as Unix seconds and nanoseconds, floored like `st_mtime`.
+fn unix_time(ticks: u64) -> (i64, i64) {
+    let since = ticks as i128 - UNIX_EPOCH_TICKS as i128;
+    (
+        since.div_euclid(10_000_000) as i64,
+        (since.rem_euclid(10_000_000) * 100) as i64,
+    )
 }
 /// Link markers live in `hgs-link-<pid>-<random>` folders of the temporary
 /// directory. A client that is killed leaves its folder behind: the desktop
@@ -587,10 +694,6 @@ pub(super) fn virtual_terminal() -> bool {
 pub fn gui_env() -> Vec<String> {
     Vec::new()
 }
-/// Saved terminal titles belong to local tmux sessions, which Windows does not run.
-pub fn refresh_session_title(_: &str) -> Result<()> {
-    Ok(())
-}
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// The console delivers Ctrl+C and Ctrl+Break to every attached process. The
@@ -641,6 +744,912 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
     } else {
         rc
     })
+}
+
+pub use self::process::*;
+/// Process, file and control primitives for `state`.
+mod process {
+    use super::*;
+
+    /// `home` as a path.
+    pub fn home_dir() -> Option<PathBuf> {
+        home().map(PathBuf::from)
+    }
+    /// The canonical form of `path` without the `\\?\` prefix that canonicalize
+    /// adds, whenever the plain form names the same file. Stored and compared
+    /// paths, and paths agents report, use the plain form.
+    pub fn canonical(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+        fs::canonicalize(path).map(plain_path)
+    }
+    /// A verbatim path is kept only when the plain form would differ: longer than
+    /// MAX_PATH, or with a component Win32 would change or treat as a device
+    /// (trailing dots or spaces, `NUL`, `COM1.txt`, a stream name after `:`).
+    pub(super) fn plain_path(path: PathBuf) -> PathBuf {
+        let Some(text) = path.to_str() else {
+            return path;
+        };
+        let (plain, components) = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            (format!(r"\\{rest}"), rest)
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            let bytes = rest.as_bytes();
+            if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || &bytes[1..3] != b":\\" {
+                return path;
+            }
+            (rest.to_owned(), &rest[3..])
+        } else {
+            return path;
+        };
+        let legacy = |name: &str| {
+            let stem = name
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .trim_end()
+                .to_ascii_uppercase();
+            let device = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str())
+                || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.len() == 4
+                    && stem.as_bytes()[3].is_ascii_digit()
+                    && stem.as_bytes()[3] != b'0');
+            !name.is_empty()
+                && !name.ends_with(['.', ' '])
+                && !name.contains(['<', '>', '"', '/', '|', '?', '*', ':'])
+                && !device
+        };
+        if plain.encode_utf16().count() >= 260
+            || !components
+                .split('\\')
+                .filter(|name| !name.is_empty())
+                .all(legacy)
+        {
+            return path;
+        }
+        PathBuf::from(plain)
+    }
+    /// Extensions of process images and of the command shims npm installs. Not
+    /// PATHEXT: it differs between computers and by default also lists scripts
+    /// such as `.js`, so `codex.js` would read as `codex` on one and not another.
+    const PROGRAM_EXTENSIONS: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
+    /// The name a program goes by in process names and command lines: the file
+    /// name without an extension that makes it a program (`node.exe` is `node`),
+    /// lowercase because Windows names are case-insensitive.
+    pub fn program_name(path: &Path) -> Option<String> {
+        let name = path.file_name()?.to_str()?.to_lowercase();
+        match name.rfind('.') {
+            Some(dot) if dot > 0 && PROGRAM_EXTENSIONS.contains(&&name[dot..]) => {
+                Some(name[..dot].to_owned())
+            }
+            _ => Some(name),
+        }
+    }
+    /// Directories below the user profile inherit its owner-only ACL.
+    pub fn private_dir(path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
+    /// Open a reparse point (a symbolic link) itself; it is then not a regular file.
+    pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+    }
+    /// A file path names no FIFO here, so opening one never waits for a writer.
+    pub fn never_block(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+        options
+    }
+    /// Whether `path` itself (a link or junction is a reparse point and never
+    /// counts) is the expected kind of entry, owned by this user, with no access
+    /// for anyone but this user, SYSTEM and Administrators and, for a file, a
+    /// single link.
+    pub fn verify_private(path: &Path, kind: Private) -> io::Result<bool> {
+        let entry = fs::OpenOptions::new()
+            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        private_entry(&entry, kind)
+    }
+    /// `verify_private` for a file this process has open (for reading or writing).
+    pub fn verify_private_file(file: &fs::File) -> io::Result<bool> {
+        private_entry(file, Private::File)
+    }
+    fn private_entry(file: &fs::File, kind: Private) -> io::Result<bool> {
+        let info = file_information(file)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(false);
+        }
+        let shaped = match kind {
+            Private::Directory => attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            Private::File => attributes & FILE_ATTRIBUTE_DIRECTORY == 0 && info.nNumberOfLinks == 1,
+        };
+        Ok(shaped && private_security(file.as_raw_handle() as HANDLE)?)
+    }
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+    /// The owner is this user and every ACE that grants access names this user,
+    /// SYSTEM, Administrators or OWNER RIGHTS, the ACL a user profile passes on.
+    /// An unknown kind of allowing ACE fails closed.
+    fn private_security(handle: HANDLE) -> io::Result<bool> {
+        let user = current_user()
+            .ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        struct Descriptor(PSECURITY_DESCRIPTOR);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+        let _descriptor = Descriptor(descriptor);
+        if owner.is_null() || unsafe { sid_bytes(owner) } != user {
+            return Ok(false);
+        }
+        // A missing DACL grants everyone everything.
+        if dacl.is_null() {
+            return Ok(false);
+        }
+        for index in 0..u32::from(unsafe { (*dacl).AceCount }) {
+            let mut ace = std::ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0
+                || header.AceType == ACCESS_DENIED_ACE_TYPE
+            {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                return Ok(false);
+            }
+            let sid = unsafe { std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) }
+                as PSID;
+            let trusted = unsafe {
+                sid_bytes(sid) == user
+                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                    || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0
+            };
+            if !trusted {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    /// # Safety
+    /// `sid` points to a valid SID.
+    unsafe fn sid_bytes<'a>(sid: PSID) -> &'a [u8] {
+        std::slice::from_raw_parts(sid as *const u8, GetLengthSid(sid) as usize)
+    }
+    /// The user SID of `process`'s token, when it can be read.
+    fn token_user(process: HANDLE) -> Option<Vec<u8>> {
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return None;
+        }
+        let token = Owned(token);
+        let mut size = 0;
+        unsafe {
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut size);
+        }
+        if size == 0 {
+            return None;
+        }
+        // u64 elements keep the TOKEN_USER header aligned.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &mut size,
+            )
+        } == 0
+        {
+            return None;
+        }
+        let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+        Some(unsafe { sid_bytes(user.User.Sid) }.to_vec())
+    }
+    fn current_user() -> Option<&'static [u8]> {
+        static USER: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        USER.get_or_init(|| token_user(unsafe { GetCurrentProcess() }))
+            .as_deref()
+    }
+
+    /// A kernel handle this process owns, closed when dropped.
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    fn open_process(pid: u32, access: u32) -> io::Result<Owned> {
+        let process = unsafe { OpenProcess(access, 0, pid) };
+        if process.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Owned(process))
+        }
+    }
+    /// OpenProcess reports an ID that no process has as an invalid parameter.
+    fn no_such_process(error: &io::Error) -> bool {
+        error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32)
+    }
+    /// A process object stays readable after its process exits while any handle
+    /// to it is open; such a process is gone, like a Unix zombie.
+    fn exited(process: HANDLE) -> bool {
+        unsafe { WaitForSingleObject(process, 0) == WAIT_OBJECT_0 }
+    }
+    fn creation_ticks(process: HANDLE) -> Option<u64> {
+        let mut times: [FILETIME; 4] = unsafe { std::mem::zeroed() };
+        let [creation, exit, kernel, user] = &mut times;
+        (unsafe { GetProcessTimes(process, creation, exit, kernel, user) } != 0)
+            .then(|| ticks(*creation))
+    }
+
+    pub fn presence(pid: u32) -> Presence {
+        // 0 is the idle process, never a process of ours.
+        if pid == 0 {
+            return Presence::Unknown;
+        }
+        match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE) {
+            Ok(process) if exited(process.0) => Presence::Gone,
+            Ok(_) => Presence::Present,
+            Err(error) if no_such_process(&error) => Presence::Gone,
+            Err(_) => Presence::Unknown,
+        }
+    }
+    /// When `pid` was created, as decimal 100 ns ticks. Records are per computer,
+    /// so this compares as text exactly like the Unix `lstart` form, at a far finer
+    /// resolution: Windows reuses process IDs quickly. Empty when the process does
+    /// not exist or has exited; None when it cannot be opened (another user's).
+    pub fn process_start_time(pid: u32) -> Option<String> {
+        if pid == 0 {
+            return Some(String::new());
+        }
+        let process =
+            match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE) {
+                Ok(process) => process,
+                Err(error) if no_such_process(&error) => return Some(String::new()),
+                Err(_) => return None,
+            };
+        if exited(process.0) {
+            return Some(String::new());
+        }
+        creation_ticks(process.0).map(|ticks| ticks.to_string())
+    }
+    /// There is no ps to ask.
+    pub fn process_start_fallback(_: u32) -> Option<String> {
+        None
+    }
+
+    /// Every process as (pid, parent, image file name) from a Toolhelp snapshot.
+    fn snapshot() -> io::Result<Vec<(u32, u32, String)>> {
+        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let handle = Owned(handle);
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut rows = Vec::new();
+        let mut more = unsafe { Process32FirstW(handle.0, &mut entry) } != 0;
+        while more {
+            let name = &entry.szExeFile;
+            let length = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+            rows.push((
+                entry.th32ProcessID,
+                entry.th32ParentProcessID,
+                String::from_utf16_lossy(&name[..length]),
+            ));
+            more = unsafe { Process32NextW(handle.0, &mut entry) } != 0;
+        }
+        Ok(rows)
+    }
+    /// Toolhelp keeps a parent's ID after the parent exits, and Windows soon gives
+    /// that ID to another process: a parent link counts only while a process with
+    /// that ID exists and was created no later than the child. Otherwise 0.
+    fn verified_parent(parent: u32, child_created: u64) -> u32 {
+        let created = open_process(parent, PROCESS_QUERY_LIMITED_INFORMATION)
+            .ok()
+            .and_then(|process| creation_ticks(process.0));
+        match created {
+            Some(created) if parent != 0 && created <= child_created => parent,
+            _ => 0,
+        }
+    }
+    fn listed_parent(pid: u32) -> Option<u32> {
+        snapshot()
+            .ok()?
+            .into_iter()
+            .find(|row| row.0 == pid)
+            .map(|row| row.1)
+    }
+    /// FILETIME ticks as Unix seconds.
+    fn unix_seconds(ticks: u64) -> f64 {
+        (ticks as f64 - UNIX_EPOCH_TICKS as f64) / 10_000_000.
+    }
+
+    pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+        let process =
+            open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE).ok()?;
+        if exited(process.0) || token_user(process.0).as_deref() != current_user() {
+            return None;
+        }
+        let created = creation_ticks(process.0)?;
+        Some(ProcessIdentity {
+            parent: verified_parent(listed_parent(pid)?, created),
+            group: None,
+            birth: created.to_string(),
+            started: unix_seconds(created),
+        })
+    }
+    pub fn describe(pid: u32) -> Option<ProcessImage> {
+        let process = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
+        let mut path = vec![0u16; 32_768];
+        let mut size = path.len() as u32;
+        if unsafe {
+            QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut size)
+        } == 0
+        {
+            return None;
+        }
+        Some(ProcessImage {
+            executable: String::from_utf16_lossy(&path[..size as usize]),
+            argv: command_line(process.0).map(|line| split_command_line(&line)),
+        })
+    }
+    /// The command line a process was started with (Windows 8.1 and later).
+    fn command_line(process: HANDLE) -> Option<Vec<u16>> {
+        let mut size = 0u32;
+        unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                std::ptr::null_mut(),
+                0,
+                &mut size,
+            );
+        }
+        if (size as usize) < std::mem::size_of::<UNICODE_STRING>() {
+            return None;
+        }
+        // A UNICODE_STRING followed by its text; u64 elements keep it aligned.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &mut size,
+            )
+        };
+        if status < 0 {
+            return None;
+        }
+        let text = unsafe { &*(buffer.as_ptr() as *const UNICODE_STRING) };
+        if text.Buffer.is_null() {
+            return Some(Vec::new());
+        }
+        Some(
+            unsafe { std::slice::from_raw_parts(text.Buffer, usize::from(text.Length) / 2) }
+                .to_vec(),
+        )
+    }
+    /// Arguments as the C runtime splits a command line.
+    fn split_command_line(line: &[u16]) -> Vec<String> {
+        // An empty line would give this process's own path instead.
+        if line
+            .iter()
+            .all(|c| *c == u16::from(b' ') || *c == u16::from(b'\t'))
+        {
+            return Vec::new();
+        }
+        let text: Vec<u16> = line.iter().copied().chain(Some(0)).collect();
+        let mut count = 0;
+        let argv = unsafe { CommandLineToArgvW(text.as_ptr(), &mut count) };
+        if argv.is_null() {
+            return Vec::new();
+        }
+        let arguments = (0..usize::try_from(count).unwrap_or(0))
+            .map(|index| unsafe {
+                let argument = *argv.add(index);
+                let length = (0..).take_while(|&at| *argument.add(at) != 0).count();
+                String::from_utf16_lossy(std::slice::from_raw_parts(argument, length))
+            })
+            .collect();
+        unsafe {
+            LocalFree(argv.cast());
+        }
+        arguments
+    }
+    /// Every process with its parent as Toolhelp lists it; Windows has no process
+    /// groups. Parent links are raw here; `process_identity` verifies them.
+    pub fn process_table() -> std::result::Result<BTreeMap<u32, ProcessRow>, String> {
+        let rows = snapshot().map_err(|_| "Live process inspection is unavailable".to_owned())?;
+        Ok(rows
+            .into_iter()
+            .map(|(pid, parent, _)| {
+                (
+                    pid,
+                    ProcessRow {
+                        pid,
+                        parent,
+                        group: None,
+                    },
+                )
+            })
+            .collect())
+    }
+    /// The verified parent and the arguments of `pid`.
+    pub fn parent_and_argv(pid: u32) -> Option<(u32, Vec<String>)> {
+        let process = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
+        let created = creation_ticks(process.0)?;
+        let argv = split_command_line(&command_line(process.0)?);
+        Some((verified_parent(listed_parent(pid)?, created), argv))
+    }
+    pub fn parent_process_id() -> u32 {
+        let created = creation_ticks(unsafe { GetCurrentProcess() }).unwrap_or(0);
+        listed_parent(std::process::id()).map_or(0, |parent| verified_parent(parent, created))
+    }
+    /// The verified parent and image file name of `pid`, each None when unknown.
+    pub fn parent_and_name(pid: u32) -> io::Result<(Option<u32>, Option<String>)> {
+        let Some((_, parent, name)) = snapshot()?.into_iter().find(|row| row.0 == pid) else {
+            return Ok((None, None));
+        };
+        let created = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+            .ok()
+            .and_then(|process| creation_ticks(process.0));
+        let parent = created
+            .map(|created| verified_parent(parent, created))
+            .filter(|parent| *parent != 0);
+        Ok((parent, Some(name)))
+    }
+    /// Another process's current directory lives in its memory, not in anything
+    /// the system reports; until hgs reads it there, nothing may count as unused.
+    pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+        Err("Running processes cannot be inspected on this computer".into())
+    }
+    /// Windows cannot list another process's open files without a driver; it can
+    /// only say who holds a given file (`holds_open`).
+    pub fn open_files(_: u32) -> std::result::Result<Vec<PathBuf>, RunError> {
+        Err(RunError::Unsupported)
+    }
+    /// Whether `pid` has the file at `path` open, as the Restart Manager reports it.
+    pub fn holds_open(pid: u32, path: &Path) -> std::result::Result<bool, RunError> {
+        let check = |code: u32| {
+            if code == ERROR_SUCCESS {
+                Ok(())
+            } else {
+                Err(RunError::Io(io::Error::from_raw_os_error(code as i32)))
+            }
+        };
+        struct Session(u32);
+        impl Drop for Session {
+            fn drop(&mut self) {
+                unsafe {
+                    RmEndSession(self.0);
+                }
+            }
+        }
+        let mut handle = 0;
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+        check(unsafe { RmStartSession(&mut handle, 0, key.as_mut_ptr()) })?;
+        let session = Session(handle);
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let files = [name.as_ptr()];
+        check(unsafe {
+            RmRegisterResources(
+                session.0,
+                1,
+                files.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            )
+        })?;
+        let mut holders: Vec<RM_PROCESS_INFO> = Vec::new();
+        loop {
+            let (mut needed, mut count, mut reasons) = (0, holders.len() as u32, 0);
+            let list = if holders.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                holders.as_mut_ptr()
+            };
+            let code = unsafe { RmGetList(session.0, &mut needed, &mut count, list, &mut reasons) };
+            if code == ERROR_SUCCESS {
+                holders.truncate(count as usize);
+                break;
+            }
+            if code != ERROR_MORE_DATA {
+                return Err(RunError::Io(io::Error::from_raw_os_error(code as i32)));
+            }
+            holders = (0..needed).map(|_| RM_PROCESS_INFO::default()).collect();
+        }
+        Ok(holders
+            .iter()
+            .any(|holder| holder.Process.dwProcessId == pid))
+    }
+
+    /// A process to stop, pinned by an open handle: Windows never gives its ID to
+    /// another process while the handle is open.
+    pub struct PinnedProcess {
+        pid: u32,
+        handle: Owned,
+    }
+    impl PinnedProcess {
+        pub fn pin(pid: u32, birth: &str) -> std::result::Result<Self, String> {
+            let handle = open_process(
+                pid,
+                PROCESS_SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            )
+            .map_err(|_| "Process changed or cannot be opened".to_owned())?;
+            if exited(handle.0)
+                || creation_ticks(handle.0)
+                    .map(|ticks| ticks.to_string())
+                    .as_deref()
+                    != Some(birth)
+            {
+                return Err("Process identity changed".into());
+            }
+            Ok(Self { pid, handle })
+        }
+        pub fn alive(&self) -> bool {
+            !exited(self.handle.0)
+        }
+        /// Windows has no polite request to exit that reaches any process; the
+        /// caller's grace period passes and `kill` ends it.
+        pub fn terminate(&self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        pub fn kill(&self) -> std::result::Result<(), String> {
+            if self.alive() && unsafe { TerminateProcess(self.handle.0, 1) } == 0 && self.alive() {
+                return Err(format!(
+                    "Could not stop PID {}: {}",
+                    self.pid,
+                    io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    /// Windows has no request to exit that reaches a process on another console;
+    /// the session host asks an agent's supervisor instead (Phase 2 D11).
+    pub fn request_exit(_: u32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "an agent on Windows is stopped through its session host",
+        ))
+    }
+
+    /// Stop requests in the signal numbers records use: SIGTERM for Ctrl+Break
+    /// (the pause request), SIGHUP for a console that closes.
+    const SIGHUP: i32 = 1;
+    const SIGTERM: i32 = 15;
+    static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
+    static SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
+    pub(super) unsafe extern "system" fn shutdown_event(event: u32) -> i32 {
+        match event {
+            // Ctrl+C belongs to the agent, which shares the console and gets it too.
+            CTRL_C_EVENT => 1,
+            CTRL_BREAK_EVENT => {
+                SHUTDOWN_SIGNAL.store(SIGTERM, Ordering::SeqCst);
+                1
+            }
+            CTRL_CLOSE_EVENT => {
+                SHUTDOWN_SIGNAL.store(SIGHUP, Ordering::SeqCst);
+                // Windows ends this process once the handler returns, and at the
+                // latest after 5 s: leave time to record how the agent ended.
+                let deadline = Instant::now() + Duration::from_secs(4);
+                while !SHUTDOWN_DONE.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                1
+            }
+            // Neither says which user logs off or whether this session ends.
+            CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => 1,
+            _ => 0,
+        }
+    }
+    /// A supervisor's stop handling until it is dropped. Ctrl+C belongs to the
+    /// agent; Ctrl+Break and a closing console are recorded for `shutdown_signal`.
+    /// The console delivers both to the agent itself, which shares it.
+    pub struct ShutdownGuard(());
+    impl ShutdownGuard {
+        pub fn install() -> io::Result<Self> {
+            SHUTDOWN_SIGNAL.store(0, Ordering::SeqCst);
+            SHUTDOWN_DONE.store(false, Ordering::SeqCst);
+            unsafe {
+                // A process group created for this process starts with Ctrl+C
+                // ignored, and children inherit that; the agent must receive it.
+                SetConsoleCtrlHandler(None, 0);
+                if SetConsoleCtrlHandler(Some(shutdown_event), 1) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(Self(()))
+        }
+    }
+    impl Drop for ShutdownGuard {
+        fn drop(&mut self) {
+            SHUTDOWN_DONE.store(true, Ordering::SeqCst);
+            unsafe {
+                SetConsoleCtrlHandler(Some(shutdown_event), 0);
+            }
+        }
+    }
+    pub fn shutdown_signal() -> i32 {
+        SHUTDOWN_SIGNAL.load(Ordering::SeqCst)
+    }
+    /// The console delivers later requests to `child` itself. One that arrived
+    /// before it started never reached it: raise Ctrl+Break again on this console.
+    pub fn forward_shutdown(_: &Child) {
+        if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
+            unsafe {
+                GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+            }
+        }
+    }
+    /// Nothing is passed on (see `forward_shutdown`), so nothing stops.
+    pub fn shutdown_child_exited() {}
+
+    /// Start `command` outside this process's job, with a hidden console of its
+    /// own (its console children never open a window) and its own process group.
+    /// Fails while an enclosing job forbids breakaway; `prepare_environment`'s job
+    /// does today.
+    pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
+        command
+            .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .spawn()
+    }
+
+    /// A job that ends its processes when its last handle, held only here, closes.
+    /// It never allows breakaway, so nothing in it (MSYS programs break away
+    /// whenever a job lets them) can leave it.
+    struct Job(Owned);
+    impl Job {
+        fn new() -> io::Result<Self> {
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let job = Self(Owned(job));
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    job.0 .0,
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+        fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0 .0, 1);
+            }
+        }
+    }
+    /// Start `command` suspended, put it in a job of its own and only then let it
+    /// run, so that everything it starts is in the job too. Its own process group
+    /// keeps a console Ctrl+C for the caller from reaching it.
+    fn spawn_in_job(command: &mut Command) -> io::Result<(Child, Job)> {
+        let job = Job::new()?;
+        let mut child = command
+            .creation_flags(CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP)
+            .spawn()?;
+        let started = if unsafe {
+            AssignProcessToJobObject(job.0 .0, child.as_raw_handle() as HANDLE)
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            resume(child.id())
+        };
+        if let Err(error) = started {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok((child, job))
+    }
+    /// Resume the threads of a process created suspended (it has only its first).
+    fn resume(pid: u32) -> io::Result<()> {
+        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let handle = Owned(handle);
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut resumed = false;
+        let mut more = unsafe { Thread32First(handle.0, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let thread = Owned(thread);
+                if unsafe { ResumeThread(thread.0) } == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                resumed = true;
+            }
+            more = unsafe { Thread32Next(handle.0, &mut entry) } != 0;
+        }
+        if resumed {
+            Ok(())
+        } else {
+            Err(io::Error::other("the new process has no thread to resume"))
+        }
+    }
+
+    type Reader = thread::JoinHandle<io::Result<Vec<u8>>>;
+    fn read_limited(pipe: Option<impl Read + Send + 'static>, limit: usize) -> Option<Reader> {
+        let pipe = pipe?;
+        Some(thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.take(limit as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        }))
+    }
+    /// Run `command` without input in a job of its own (see `spawn_in_job`),
+    /// collecting at most `limits` bytes of standard output and errors, until it
+    /// exits and both streams end. When the output is too large, `deadline`
+    /// passes, `cancelled` says so or the child fails, the whole job ends at
+    /// once; whatever a successful child left running ends with the job when
+    /// the call returns.
+    pub fn run_bounded(
+        command: &mut Command,
+        limits: [usize; 2],
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let (mut child, job) = spawn_in_job(command).map_err(RunError::Spawn)?;
+        let mut readers = [
+            read_limited(child.stdout.take(), limits[0]),
+            read_limited(child.stderr.take(), limits[1]),
+        ];
+        let mut outputs: [Option<Vec<u8>>; 2] = [None, None];
+        let mut status = None;
+        let result = loop {
+            for (reader, output) in readers.iter_mut().zip(outputs.iter_mut()) {
+                if reader.as_ref().is_some_and(|reader| reader.is_finished()) {
+                    // A failed read leaves the stream unfinished, as on Unix: the
+                    // run then ends at its deadline.
+                    if let Ok(Ok(bytes)) = reader.take().unwrap().join() {
+                        *output = Some(bytes);
+                    }
+                }
+            }
+            if outputs
+                .iter()
+                .zip(limits)
+                .any(|(output, limit)| output.as_ref().is_some_and(|bytes| bytes.len() > limit))
+            {
+                break Err(RunError::TooLarge);
+            }
+            if status.is_none() {
+                status = child.try_wait().map_err(RunError::Io)?;
+            }
+            if let Some(status) = status {
+                if outputs.iter().all(Option::is_some) {
+                    break Ok(status);
+                }
+            }
+            if cancelled() || Instant::now() >= deadline {
+                break Err(RunError::Stopped);
+            }
+            thread::sleep(Duration::from_millis(3));
+        };
+        if !result.as_ref().is_ok_and(ExitStatus::success) {
+            job.terminate();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(job);
+        let [out, err] = outputs;
+        result.map(|status| (status, out.unwrap_or_default(), err.unwrap_or_default()))
+    }
+    /// `Command::output` with a time limit and closed input, in a job of its own
+    /// (see `spawn_in_job`). Output goes to regular files, so a child writing much
+    /// before it exits never blocks on a pipe and no reader thread outlives the
+    /// call. The job ends at the limit, and with the call.
+    pub fn output_until(
+        command: &mut Command,
+        duration: Duration,
+    ) -> std::result::Result<Output, RunError> {
+        let mut stdout = tempfile::tempfile().map_err(RunError::Io)?;
+        let mut stderr = tempfile::tempfile().map_err(RunError::Io)?;
+        command.stdout(Stdio::from(stdout.try_clone().map_err(RunError::Io)?));
+        command.stderr(Stdio::from(stderr.try_clone().map_err(RunError::Io)?));
+        command.stdin(Stdio::null());
+        let (mut child, job) = spawn_in_job(command).map_err(RunError::Spawn)?;
+        let deadline = Instant::now() + duration;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(RunError::Io)? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                job.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunError::Stopped);
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        drop(job);
+        stdout.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
+        stderr.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
+        let mut output = Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        stdout
+            .read_to_end(&mut output.stdout)
+            .map_err(RunError::Io)?;
+        stderr
+            .read_to_end(&mut output.stderr)
+            .map_err(RunError::Io)?;
+        Ok(output)
+    }
+
+    /// Keep Git for Windows from asking for credentials. A set but empty
+    /// GIT_ASKPASS also overrides core.askpass and SSH_ASKPASS, Git Credential
+    /// Manager must not open a window, and the ssh command runs in Git's own
+    /// shell, whose `ssh` is Git's bundled client (System32 OpenSSH hangs on the
+    /// synchronous pipes Git gives it). To be confirmed on a Windows computer.
+    pub fn git_noninteractive(command: &mut Command) -> &mut Command {
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("GCM_INTERACTIVE", "never")
+            .env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=2",
+            )
+    }
+
+    /// The modification time as Unix seconds and the nanoseconds within that second.
+    pub fn modified(metadata: &fs::Metadata) -> (i64, i64) {
+        unix_time(metadata.last_write_time())
+    }
 }
 
 #[cfg(test)]
@@ -860,5 +1869,344 @@ mod tests {
         assert!(super::super::persist(temporary, &target).is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn verbatim_prefixes_go_only_when_the_plain_path_names_the_same_file() {
+        let plain = |text: &str| {
+            process::plain_path(PathBuf::from(text))
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(plain(r"\\?\C:\Users\a b\project"), r"C:\Users\a b\project");
+        assert_eq!(plain(r"\\?\C:\"), r"C:\");
+        assert_eq!(plain(r"\\?\UNC\server\share\dir"), r"\\server\share\dir");
+        // Win32 would change or misread these, so they keep the prefix.
+        for kept in [
+            r"\\?\C:\dir\name.",
+            r"\\?\C:\dir\name ",
+            r"\\?\C:\NUL",
+            r"\\?\C:\dir\com1.txt",
+            r"\\?\C:\file:stream",
+            r"\\?\Volume{0b7f}\dir",
+            r"\\?\GLOBALROOT\Device\X",
+        ] {
+            assert_eq!(plain(kept), kept);
+        }
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(plain(&long), long);
+        assert_eq!(plain(r"C:\already\plain"), r"C:\already\plain");
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical(dir.path()).unwrap();
+        assert!(!path.to_string_lossy().starts_with(r"\\?\"), "{path:?}");
+        assert_eq!(
+            fs::canonicalize(&path).unwrap(),
+            fs::canonicalize(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn program_names_drop_runnable_extensions_and_case() {
+        let name = |path: &str| program_name(Path::new(path));
+        assert_eq!(
+            name(r"C:\Program Files\nodejs\node.exe").as_deref(),
+            Some("node")
+        );
+        assert_eq!(name("C:/npm/Codex.CMD").as_deref(), Some("codex"));
+        // The default PATHEXT lists `.js` and `.vbs`; scripts keep their names.
+        assert_eq!(name("codex.js").as_deref(), Some("codex.js"));
+        assert_eq!(name("Setup.VBS").as_deref(), Some("setup.vbs"));
+        assert_eq!(name("python3.12.exe").as_deref(), Some("python3.12"));
+        assert_eq!(name(".exe").as_deref(), Some(".exe"));
+    }
+
+    #[test]
+    fn crash_statuses_read_as_signals() {
+        use std::os::windows::process::ExitStatusExt;
+        let info = |raw: u32| ExitInfo::of(ExitStatus::from_raw(raw));
+        assert_eq!(
+            info(3),
+            ExitInfo {
+                code: Some(3),
+                signal: None
+            }
+        );
+        // exit(-1) is an ordinary failure, not a crash.
+        assert_eq!(
+            info(u32::MAX),
+            ExitInfo {
+                code: Some(-1),
+                signal: None
+            }
+        );
+        assert_eq!(
+            info(0xC000_013A),
+            ExitInfo {
+                code: None,
+                signal: Some(2)
+            }
+        );
+        assert_eq!(info(0xC000_0005).signal, Some(11));
+        assert_eq!(info(0xC000_0409).exit_code(), 134);
+        // The --run fallback counts 128 and above as a crash, never as
+        // "nothing to resume".
+        assert_eq!(code(ExitStatus::from_raw(0xC000_013A)), 130);
+        assert_eq!(code(ExitStatus::from_raw(1)), 1);
+    }
+
+    #[test]
+    fn processes_have_identities_parents_and_images() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let own = std::process::id();
+        assert_eq!(presence(own), Presence::Present);
+        assert_eq!(presence(0), Presence::Unknown);
+        let start = process_start_time(own).unwrap();
+        assert!(
+            !start.is_empty() && start.bytes().all(|b| b.is_ascii_digit()),
+            "{start}"
+        );
+        assert_eq!(process_start_fallback(own), None);
+        let identity = process_identity(own).unwrap();
+        assert_eq!(identity.birth, start);
+        assert_eq!(identity.group, None);
+        assert_eq!(identity.parent, parent_process_id());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        assert!(identity.started > now - 86_400. && identity.started <= now + 1.);
+        assert_eq!(process_table().unwrap()[&own].group, None);
+        let image = describe(own).unwrap();
+        assert_eq!(
+            fs::canonicalize(&image.executable).unwrap(),
+            fs::canonicalize(env::current_exe().unwrap()).unwrap()
+        );
+        assert_eq!(image.argv, Some(env::args().collect::<Vec<_>>()));
+
+        let mut child = Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let (parent, name) = parent_and_name(child.id()).unwrap();
+        let (argv_parent, argv) = parent_and_argv(child.id()).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert_eq!(parent, Some(own));
+        assert_eq!(
+            name.and_then(|name| program_name(Path::new(&name)))
+                .as_deref(),
+            Some("cmd")
+        );
+        assert_eq!(argv_parent, own);
+        assert_eq!(argv[1..], ["/c", "pause"]);
+        // `child` still holds the exited process's handle: it counts as gone.
+        assert_eq!(process_start_time(child.id()).as_deref(), Some(""));
+        assert_eq!(presence(child.id()), Presence::Gone);
+        assert!(process_identity(child.id()).is_none());
+        assert!(matches!(current_directories(), Err(error) if !error.is_empty()));
+        assert!(matches!(open_files(own), Err(RunError::Unsupported)));
+    }
+
+    #[test]
+    fn pinned_processes_end_only_their_identity() {
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let birth = process_identity(child.id()).unwrap().birth;
+        assert!(PinnedProcess::pin(child.id(), "1").is_err());
+        let pinned = PinnedProcess::pin(child.id(), &birth).unwrap();
+        assert!(pinned.alive());
+        // No polite request reaches an arbitrary process; the caller then kills.
+        pinned.terminate().unwrap();
+        assert!(pinned.alive());
+        let error = request_exit(child.id()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(pinned.alive());
+        pinned.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!pinned.alive());
+        pinned.kill().unwrap();
+    }
+
+    #[test]
+    fn restart_manager_names_the_holder_of_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let other = dir.path().join("other.jsonl");
+        fs::write(&path, b"{}\n").unwrap();
+        fs::write(&other, b"{}\n").unwrap();
+        // The child holds the file as its standard input while it runs.
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(fs::File::open(&path).unwrap())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let held = holds_open(child.id(), &path);
+        let unrelated = holds_open(child.id(), &other);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(held.unwrap());
+        assert!(!unrelated.unwrap());
+    }
+
+    #[test]
+    fn bounded_runs_end_their_whole_job() {
+        let never = || false;
+        let far = Instant::now() + Duration::from_secs(30);
+        let (status, out, err) = run_bounded(
+            Command::new("cmd.exe").raw_arg("/c echo out& echo err 1>&2& exit 3"),
+            [64, 64],
+            far,
+            &never,
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&out).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&err).trim(), "err");
+        assert!(matches!(
+            run_bounded(
+                Command::new("cmd.exe").raw_arg("/c echo 12345"),
+                [4, 64],
+                far,
+                &never
+            ),
+            Err(RunError::TooLarge)
+        ));
+        assert!(matches!(
+            run_bounded(
+                &mut Command::new("hgs-no-such-program"),
+                [4, 4],
+                far,
+                &never
+            ),
+            Err(RunError::Spawn(_))
+        ));
+        assert!(matches!(
+            run_bounded(
+                Command::new("ping").args(["-n", "30", "127.0.0.1"]),
+                [4096, 4096],
+                far,
+                &|| true
+            ),
+            Err(RunError::Stopped)
+        ));
+        // A helper that outlives the shell holds the output open; the deadline
+        // ends the whole job.
+        let started = Instant::now();
+        let result = run_bounded(
+            Command::new("cmd.exe").raw_arg("/c start /b ping -n 60 127.0.0.1 & exit 0"),
+            [8192, 8192],
+            Instant::now() + Duration::from_millis(500),
+            &never,
+        );
+        assert!(matches!(result, Err(RunError::Stopped)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+
+        let output = output_until(
+            Command::new("cmd.exe").raw_arg("/c echo out"),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert!(matches!(
+            output_until(
+                Command::new("ping").args(["-n", "30", "127.0.0.1"]),
+                Duration::from_millis(200)
+            ),
+            Err(RunError::Stopped)
+        ));
+    }
+
+    #[test]
+    fn private_entries_need_their_kind_and_one_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("store");
+        private_dir(&folder).unwrap();
+        let file = folder.join("data");
+        fs::write(&file, b"x").unwrap();
+        // The file inherits the folder's owner and ACL, so both answers agree.
+        let private = verify_private(&folder, Private::Directory).unwrap();
+        assert_eq!(verify_private(&file, Private::File).unwrap(), private);
+        assert_eq!(
+            verify_private_file(&fs::File::open(&file).unwrap()).unwrap(),
+            private
+        );
+        assert!(!verify_private(&folder, Private::File).unwrap());
+        assert!(!verify_private(&file, Private::Directory).unwrap());
+        fs::hard_link(&file, folder.join("second")).unwrap();
+        assert!(!verify_private(&file, Private::File).unwrap());
+        assert!(verify_private(&folder.join("missing"), Private::File).is_err());
+    }
+
+    #[test]
+    fn file_identities_carry_unix_time_with_nanoseconds() {
+        use std::time::UNIX_EPOCH;
+        assert_eq!(unix_time(UNIX_EPOCH_TICKS), (0, 0));
+        assert_eq!(unix_time(UNIX_EPOCH_TICKS + 15_000_001), (1, 500_000_100));
+        assert_eq!(unix_time(UNIX_EPOCH_TICKS - 1), (-1, 999_999_900));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"x").unwrap();
+        let (identity, metadata) = FileIdentity::at(&path).unwrap();
+        assert_eq!(file_identity(&path), Some(identity));
+        assert_eq!(
+            (identity.modified, identity.modified_nanos),
+            modified(&metadata)
+        );
+        let since = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(identity.modified, since.as_secs() as i64);
+        assert_eq!(identity.modified_nanos, i64::from(since.subsec_nanos()));
+    }
+
+    #[test]
+    fn supervisor_console_events_record_stop_requests() {
+        let guard = ShutdownGuard::install().unwrap();
+        let event = |kind| unsafe { process::shutdown_event(kind) };
+        // Ctrl+C belongs to the agent; logoff and shutdown name no session.
+        for kind in [CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT] {
+            assert_eq!(event(kind), 1);
+        }
+        assert_eq!(shutdown_signal(), 0);
+        assert_eq!(event(CTRL_BREAK_EVENT), 1);
+        assert_eq!(shutdown_signal(), 15);
+        drop(guard);
+        // Once the outcome is recorded, a closing console waits no longer.
+        let started = Instant::now();
+        assert_eq!(event(CTRL_CLOSE_EVENT), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(shutdown_signal(), 1);
+    }
+
+    #[test]
+    fn git_never_prompts_on_windows() {
+        let mut git = Command::new("git");
+        git_noninteractive(&mut git);
+        let environment: Vec<_> = git
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.and_then(|v| v.to_str())))
+            .collect();
+        assert_eq!(
+            environment,
+            [
+                ("GCM_INTERACTIVE", Some("never")),
+                ("GIT_ASKPASS", Some("")),
+                (
+                    "GIT_SSH_COMMAND",
+                    Some("ssh -o BatchMode=yes -o ConnectTimeout=2")
+                ),
+                ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("SSH_ASKPASS", Some("")),
+            ]
+        );
     }
 }

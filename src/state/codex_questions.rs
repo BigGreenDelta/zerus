@@ -6,7 +6,6 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 fn cache_path(record: &Value) -> Result<PathBuf> {
@@ -169,7 +168,8 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
         },
     };
     let file = File::open(&path).map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let (identity, meta) =
+        crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     reader
@@ -185,7 +185,7 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({"items":{}}));
-    let inode = json!([meta.dev(), meta.ino()]);
+    let inode = json!([identity.device, identity.inode]);
     let offset = cache["offset"].as_u64().unwrap_or(0);
     if cache["inode"] != inode || offset > meta.len() {
         cache = json!({"items":{},"offset":0,"inode":inode});
@@ -294,7 +294,7 @@ pub(super) fn messages(record: &Value) -> Result<Vec<Value>> {
     let cache = read_cache(record)?;
     Ok(cache["items"].as_object().into_iter().flat_map(|m|m.values()).filter(|c|c["accepted"]==true).map(|card|{
         let question=&card["questions"][0];
-        let choices=question["options"].as_array().unwrap().iter().map(|o|format!("\n- {}",string(o,"label"))).collect::<String>();
+        let choices=question["options"].as_array().unwrap().iter().flat_map(|o|["\n- ",string(o,"label")]).collect::<String>();
         let status=if card["skipped"]==true {"Skipped"}else if !card["response"].is_null(){"Answered"}else{"Optional"};
         json!({"type":"AgentMessage","source":"codex_transcript","message_id":card["question_id"],"agent_id":"",
             "at":card["created_at"],"message_phase":"commentary","detail":format!("{}\n{}{}",status,string(question,"question"),choices)})
@@ -656,12 +656,13 @@ mod tests {
         let accepted = json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}});
         let mut lines = vec![json!({"type":"session_meta","payload":{"id":id}}), request(), accepted];
         lines.extend((0..5).map(|i| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":format!("call-{i}"),"output":"x"}})));
-        fs::write(&transcript, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        fs::write(&transcript, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
         let record = json!({"agent":"codex","run_id":"run","conversation_id":id,"transcript":transcript});
         let cache = dir.path().join("cache.json");
         let meta = fs::metadata(&transcript).unwrap();
+        let source = crate::platform::file_identity(&transcript).unwrap();
         // Skip the one-time submission recovery, which reads the hgs state directory.
-        fs::write(&cache, json!({"items":{},"offset":0,"inode":[meta.dev(),meta.ino()],"scan_version":2,
+        fs::write(&cache, json!({"items":{},"offset":0,"inode":[source.device,source.inode],"scan_version":2,
             "initialized":true,"submission_scan_run":"run"}).to_string()).unwrap();
         // An expired deadline still indexes one line per call and keeps it.
         let expired = Instant::now();

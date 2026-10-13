@@ -10,11 +10,11 @@ struct Caller {
 }
 
 fn native_caller(argv: &[String]) -> Option<Caller> {
-    let executable = Path::new(argv.first()?).file_name()?.to_str()?;
+    let executable = crate::platform::program_name(Path::new(argv.first()?))?;
     // macOS framework builds run python3 scripts as .../Python.app/Contents/MacOS/Python.
     let offset = if executable == "node" || executable.to_ascii_lowercase().starts_with("python") { 1 } else { 0 };
-    let name = Path::new(argv.get(offset)?).file_name()?.to_str()?;
-    let provider = match name {
+    let name = crate::platform::program_name(Path::new(argv.get(offset)?))?;
+    let provider = match name.as_str() {
         "codex" | "codex.exe" | "codex.js" => "codex",
         "claude" | "claude.exe" => "claude",
         "kimi" => "kimi",
@@ -38,28 +38,6 @@ fn native_caller(argv: &[String]) -> Option<Caller> {
     Some(Caller { provider, headless })
 }
 
-#[cfg(target_os = "linux")]
-fn process(pid: u32) -> Option<(u32, Vec<String>)> {
-    let path = PathBuf::from(format!("/proc/{pid}"));
-    let stat = std::fs::read_to_string(path.join("stat")).ok()?;
-    let parent = stat[stat.rfind(')')? + 2..].split_whitespace().nth(1)?.parse().ok()?;
-    let bytes = std::fs::read(path.join("cmdline")).ok()?;
-    let argv = bytes.split(|byte| *byte == 0).filter(|arg| !arg.is_empty())
-        .map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
-    Some((parent, argv))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process(pid: u32) -> Option<(u32, Vec<String>)> {
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "command="])
-        .env("LC_ALL", "C").output().ok()?;
-    if !output.status.success() { return None; }
-    let line = String::from_utf8_lossy(&output.stdout);
-    let (parent, command) = line.trim().split_once(char::is_whitespace)?;
-    Some((parent.parse().ok()?, shell_words::split(command.trim()).ok()?))
-}
-
 fn ancestry(root: u32, mut pid: u32, mut read: impl FnMut(u32) -> Option<(u32, Vec<String>)>) -> Option<Caller> {
     let mut caller = None;
     for _ in 0..64 {
@@ -74,7 +52,7 @@ fn ancestry(root: u32, mut pid: u32, mut read: impl FnMut(u32) -> Option<(u32, V
 
 fn caller(record: &Value) -> Option<Caller> {
     if !process_alive(record) { return None; }
-    ancestry(record["pid"].as_u64()? as u32, unsafe { libc::getppid() } as u32, process)
+    ancestry(record["pid"].as_u64()? as u32, crate::platform::parent_process_id(), crate::platform::parent_and_argv)
 }
 
 // An inherited HGS token is not proof that a new same-provider conversation

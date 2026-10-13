@@ -203,9 +203,9 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
 /// newline. Wait this long after a typed command, then recheck it and press Enter.
 pub(super) const COMMAND_SETTLE: Duration = Duration::from_millis(250);
 pub(super) fn ready(record: &Value, command: &str) -> Result<bool> {
-    let output=tmux(&["display-message","-p","-t",string(record,"pane"),"#{cursor_x}\t#{cursor_y}"].map(str::to_owned),true)?;
-    let cursor=String::from_utf8_lossy(&output.stdout);
-    let Some((x,y))=cursor.trim().split_once('\t') else {return Ok(false)};
+    let cursor=backend::current().pane_info(backend::Target::Pane(string(record,"pane")),
+        &[backend::PaneField::CursorX,backend::PaneField::CursorY])?;
+    let Some((x,y))=cursor.pair() else {return Ok(false)};
     let (Ok(x),Ok(y))=(x.parse::<usize>(),y.parse::<usize>()) else {return Ok(false)};
     let screen=kimi_tui_choice::capture(record)?;
     Ok(screen.lines().nth(y).is_some_and(|row|command_row(string(record,"agent"),row,x,command)))
@@ -239,7 +239,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if dismiss {
             // One Esc answers the chooser as in Terminal: an approval is denied,
             // a question stays unanswered. It is never repeated.
-            tmux(&["send-keys","-t",string(&record,"pane"),"Escape"].map(str::to_owned),true)?;
+            backend::current().send(string(&record,"pane"),&[backend::Key::Named("Escape")])?;
             guard=None; // Hooks reporting the dismissal must be able to commit.
             let deadline=Instant::now()+Duration::from_secs(3);
             loop {
@@ -252,7 +252,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             guard=Some(lock(None)?);
             input::checked_terminal(&kimi_tui_choice::identity(&record)?,true)?;
         }
-        tmux(&["send-keys","-t",string(&record,"pane"),"-l","/clear"].map(str::to_owned),true)?;
+        backend::current().send(string(&record,"pane"),&[backend::Key::Literal("/clear")])?;
         let deadline=Instant::now()+Duration::from_secs(3);
         loop {
             let current=kimi_tui_choice::identity(&record)?;
@@ -266,7 +266,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
         if !ready(&current,"/clear")? {return Err("The native input changed before /clear".into());}
-        tmux(&["send-keys","-t",string(&current,"pane"),"Enter"].map(str::to_owned),true)?;
+        backend::current().send(string(&current,"pane"),&[backend::Key::Named("Enter")])?;
         Ok(())
     })();
     drop(guard); // SessionStart hooks must be able to commit the new identity.
@@ -370,6 +370,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(record["cleared_conversations"].is_null() && record["session_clear"].is_null());
         assert_eq!(earlier_conversations(&record),json!([]));
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn only_the_complete_native_empty_reset_header_matches() {
         let panel="\n >_ OpenAI Codex (v0.162.0)\n /fixture\n permissions: YOLO mode\n\n\n› Ask Codex to do anything\n GPT-6.1-Sol default\n ? for shortcuts\n";
         assert!(codex_reset_panel(panel,"/fixture"));
@@ -381,6 +383,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&screen,"/fixture"),"{screen}");
         }
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn resident_native_greetings_match_without_accepting_other_prose() {
         let header = ">_ OpenAI Codex (v0.160.1)\n/fixture\npermissions: YOLO mode\n\n";
         let footer = "\n\n› Ask Codex to do anything\nGPT-6.1-Sol default\n? for shortcuts\n";
@@ -395,6 +399,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&format!("{header}{prose}{footer}"), "/fixture"), "{prose}");
         }
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn only_the_complete_released_idle_logo_is_decoration() {
         let header = ">_ OpenAI Codex (v0.162.0)\n/fixture\npermissions: YOLO mode\n\n";
         let logo = include_str!("data/codex-empty-state-60x21.txt").lines()

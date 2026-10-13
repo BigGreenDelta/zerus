@@ -3,8 +3,7 @@
 use super::*;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -543,312 +542,6 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
     output["recovery_error_class"] = json!(class(&output["provider_error"]));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn codex_copy(snapshot: &mut Value) {
-        let original = failure_id(snapshot);
-        snapshot["provider_error"]["source"] = json!("codex_native_log");
-        snapshot["provider_error"]["message_id"] = json!("log-copy");
-        snapshot["provider_error"]["at"] = json!(10.000328);
-        snapshot["provider_error"]["failure_ids"] = json!([original, failure_id(snapshot)]);
-    }
-    #[test]
-    fn equivalent_native_evidence_preserves_deadline_budget_and_retry_acknowledgement() {
-        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
-        let waiting = advance(Value::Null, &s, &on(), 11.0);
-        codex_copy(&mut s);
-        let observed = advance(waiting.clone(), &s, &on(), 12.0);
-        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id", "state"] { assert_eq!(observed[key], waiting[key]); }
-        assert!(same_failure(&observed, &s));
-        let mut retrying = observed; retrying["state"] = json!("retrying");
-        retrying["attempt"] = json!(1); retrying["sent_at"] = json!(10.0001); retrying["acknowledged"] = json!(true);
-        assert_eq!(advance(retrying.clone(), &s, &on(), 12.0), retrying);
-        let mut completion_only = snapshot("codex"); completion_only["provider_error"]["source"] = json!("codex_native_transcript");
-        assert_eq!(advance(retrying.clone(), &completion_only, &on(), 12.0), retrying);
-        s["provider_error"]["message_id"] = json!("new-turn-error");
-        s["provider_error"]["at"] = json!(20.0); s["provider_error"]["failure_ids"] = json!([failure_id(&s)]);
-        let following = advance(retrying, &s, &on(), 21.0);
-        assert_eq!(following["state"], "waiting"); assert_eq!(following["attempt"], 1);
-        assert_eq!(following["failure_id"], failure_id(&s));
-        assert!(!same_failure(&following, &completion_only));
-    }
-    #[test]
-    fn repairs_only_proven_source_switch_cancellations_without_an_attempt() {
-        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
-        let mut cancelled = advance(Value::Null, &s, &on(), 11.0);
-        stop(&mut cancelled, "cancelled", "The failed turn is no longer current");
-        codex_copy(&mut s);
-        let repaired = advance(cancelled.clone(), &s, &on(), 30.0);
-        assert_eq!(repaired["state"], "waiting");
-        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id"] { assert_eq!(repaired[key], cancelled[key]); }
-        for (key, value) in [("attempt", json!(1)), ("sent_at", json!(12.0)), ("request_id", json!("request")),
-            ("reason", json!("Cancelled by user")), ("state", json!("uncertain"))] {
-            let mut protected = cancelled.clone(); protected[key] = value;
-            assert_eq!(advance(protected.clone(), &s, &on(), 30.0), protected);
-        }
-        for (key, value) in [("recovery_cancel_at", json!(20.0)), ("recovery_success_at", json!(20.0)),
-            ("phase", json!("idle")), ("process_state", json!("exited"))] {
-            let mut changed = s.clone(); changed[key] = value;
-            assert_eq!(advance(cancelled.clone(), &changed, &on(), 30.0), cancelled);
-        }
-        let mut changed = s.clone(); changed["recovery_user_at"] = json!(20.0);
-        assert!(advance(cancelled.clone(), &changed, &on(), 30.0).is_null());
-        let mut disabled = on(); disabled.enabled = false;
-        assert_eq!(advance(cancelled.clone(), &s, &disabled, 30.0), cancelled);
-        s["provider_error"]["failure_ids"] = Value::Null;
-        assert_eq!(advance(cancelled.clone(), &s, &on(), 30.0), cancelled);
-    }
-    fn snapshot(agent: &str) -> Value {
-        json!({"name":"session","agent":agent,"run_id":"run","conversation_id":"conversation","model":"model","account_id":"account",
-            "phase":"error","process_state":"running","recovery_user_at":5.0,
-            "provider_error":{"source":"native","message_id":"error-1","at":10.0,"detail":"API Error: 529 Overloaded"}})
-    }
-    fn on() -> Policy {
-        Policy {
-            enabled: true,
-            enabled_at: 1.0,
-            ..Policy::default()
-        }
-    }
-    #[test]
-    fn independent_sequences_keep_class_budgets_and_repeat_last_delay() {
-        for values in [vec![0],vec![1,0,2],vec![1,-1,3],vec![-2],vec![]] {assert!(validate_delays(&values).is_err());}
-        assert_eq!(next_delay(&vec![json!(15),json!(30),json!(0)],42),Some(30.0));
-        assert_eq!(next_delay(&vec![json!(15),json!(-1)],1),None);
-        assert_eq!(next_delay(&vec![json!(-1)],0),None);
-        let mut p=on();p.schedules.insert("service".into(),vec![10,20,-1]);p.schedules.insert("network".into(),vec![3,0]);
-        let mut s=snapshot("claude");let mut job=advance(Value::Null,&s,&p,11.0);
-        assert_eq!(job["delays"],json!([10,20,-1]));
-        job["attempts"]["service"]=json!(1);job["attempt"]=json!(1);
-        s["provider_error"]["detail"]=json!("connection reset");schedule(&mut job,&s,100.0);
-        assert_eq!(job["class_attempt"],0);assert_eq!(job["delays"],json!([3,0]));
-        job["attempts"]["network"]=json!(10);schedule(&mut job,&s,200.0);assert_eq!(job["state"],"waiting");
-        s["provider_error"]["detail"]=json!("503 unavailable");schedule(&mut job,&s,300.0);
-        assert_eq!(job["class_attempt"],1);assert!(seconds(&job,"due_at")>=320.0&&seconds(&job,"due_at")<323.0);
-        job["attempts"]["service"]=json!(2);schedule(&mut job,&s,400.0);assert_eq!(job["state"],"exhausted");
-    }
-    #[test]
-    fn transient_classes_exclude_permanent_errors_and_future_agents() {
-        for (detail, expected) in [
-            ("529 Overloaded", "service"),
-            ("HTTP 503", "service"),
-            ("500 internal server error", "service"),
-            ("429 rate limit", "rate_limit"),
-            ("429 insufficient quota", "manual"),
-            ("overloaded account balance exhausted", "manual"),
-            ("401 authentication failed", "manual"),
-            ("policy_violation: HTTP 503 service unavailable", "manual"),
-            ("Request blocked by usage policy; HTTP 429", "manual"),
-            ("context window exceeded", "manual"),
-            ("stream disconnected", "network"),
-            ("ECONNRESET", "network"),
-            ("tool returned 1", "manual"),
-        ] {
-            assert_eq!(class(&json!({"detail":detail})), expected, "{detail}");
-        }
-        for detail in ["HTTP 503", "429 rate limit", "network error"] {
-            assert_eq!(
-                class(&json!({"error_kind":"provider_policy","detail":detail})),
-                "manual"
-            );
-            let mut s = snapshot("codex");
-            s["provider_error"] = json!({"error_kind":"provider_policy","detail":detail});
-            assert!(advance(Value::Null, &s, &on(), 11.0).is_null());
-        }
-        for agent in ["claude", "kimi", "codex"] {
-            assert_eq!(
-                advance(Value::Null, &snapshot(agent), &on(), 11.0)["action"],
-                "continue_message"
-            );
-        }
-        assert!(advance(Value::Null, &snapshot("future-agent"), &on(), 11.0).is_null());
-        let mut s = snapshot("dsh");
-        assert_eq!(
-            advance(Value::Null, &s, &on(), 11.0)["action"],
-            "continue_message"
-        );
-        s["native_recovery"] = json!({"id":"step"});
-        assert_eq!(
-            advance(Value::Null, &s, &on(), 11.0)["action"],
-            "retry_request"
-        );
-    }
-    #[test]
-    fn off_and_old_errors_never_schedule_and_deadlines_survive_restart() {
-        let mut s = snapshot("claude");
-        assert!(advance(Value::Null, &s, &Policy::default(), 11.0).is_null());
-        let mut p = on();
-        p.enabled_at = 20.0;
-        assert!(advance(Value::Null, &s, &p, 21.0).is_null());
-        s["provider_error"]["retry_not_before"] = json!(1000.0);
-        let job = advance(Value::Null, &s, &on(), 11.0);
-        assert_eq!(job["due_at"], 1000.0);
-        let restored: Value = serde_json::from_str(&job.to_string()).unwrap();
-        assert_eq!(advance(restored, &s, &on(), 500.0), job);
-    }
-    #[test]
-    fn session_limits_wait_for_reset_and_interval_mode_uses_its_own_budget() {
-        let mut s = snapshot("claude");
-        s["provider_error"] = json!({"source":"provider_hook","message_id":"limit","at":10.0,
-            "error_kind":"rate_limit","detail":"You've hit your session limit","reset_at":3600.0});
-        let p = on();
-        let job = advance(Value::Null, &s, &p, 11.0);
-        assert_eq!(job["class"], "session_limit");
-        assert_eq!(job["session_limit_mode"], "reset");
-        assert_eq!(job["state"], "waiting");
-        assert_eq!(job["due_at"], 3600.0);
-        assert_eq!(job["not_before"], 3600.0);
-        assert_eq!(advance(serde_json::from_str(&job.to_string()).unwrap(), &s, &p, 1000.0), job);
-        // A worker recovering after the deadline can still make the scheduled attempt.
-        assert_eq!(advance(Value::Null, &s, &p, 4000.0)["due_at"], 3600.0);
-        assert_eq!(advance(job.clone(), &s, &Policy::default(), 12.0)["state"], "cancelled");
-        let mut disabled = p.clone(); disabled.session_limit = false;
-        assert!(advance(Value::Null, &s, &disabled, 11.0).is_null());
-        assert_eq!(advance(job.clone(), &s, &disabled, 12.0)["state"], "cancelled");
-        let mut interval = p.clone(); interval.session_limit_mode = "interval".into();
-        interval.schedules.insert("session_limit".into(), vec![90, 0]);
-        let mut repeat = advance(Value::Null, &s, &interval, 11.0);
-        assert!(seconds(&repeat, "due_at") >= 101.0 && seconds(&repeat, "due_at") <= 110.0);
-        assert_eq!(repeat["not_before"], 0.0);
-        repeat["attempts"]["session_limit"] = json!(50);
-        schedule(&mut repeat, &s, 200.0);
-        assert_eq!(repeat["state"], "waiting");
-        assert_eq!(repeat["class_attempt"], 50);
-        s["provider_error"]["retry_not_before"] = json!(1000.0);
-        schedule(&mut repeat, &s, 300.0);
-        assert_eq!(repeat["due_at"], 1000.0);
-        s["provider_error"]["detail"] = json!("429 temporary rate limit");
-        schedule(&mut repeat, &s, 400.0);
-        assert_eq!(repeat["class"], "rate_limit");
-        assert_eq!(repeat["class_attempt"], 0);
-    }
-    #[test]
-    fn missing_or_expired_reset_never_starts_a_short_retry_loop() {
-        let mut s = snapshot("claude");
-        s["provider_error"]["detail"] = json!("You've hit your session limit");
-        for reset in [Value::Null, json!(10.0)] {
-            s["provider_error"]["reset_at"] = reset;
-            let job = advance(Value::Null, &s, &on(), 11.0);
-            assert_eq!(job["state"], "blocked");
-            assert_eq!(advance(job.clone(), &s, &on(), 100000.0), job);
-        }
-        assert_eq!(class(&json!({"error_kind":"provider_policy","detail":"You've hit your session limit"})), "manual");
-        assert_eq!(class(&json!({"detail":"You've hit your session limit; insufficient balance"})), "manual");
-    }
-    #[test]
-    fn legacy_policies_and_waiting_episodes_upgrade_without_short_limit_retries() {
-        for version in [1, 2] {
-            let p: Policy = serde_json::from_value(json!({"version":version,"enabled":true,
-                "delays":[5,20,-1],"schedules":{"network":[7,0]}})).unwrap();
-            validate_policy(&p).unwrap();
-            assert!(p.session_limit);
-            assert_eq!(p.session_limit_mode, "reset");
-            assert_eq!(delays_for(&p, "network"), &[7,0]);
-            assert_eq!(delays_for(&p, "session_limit"), &[300,0]);
-        }
-        let mut invalid = on(); invalid.session_limit_mode = "guess".into();
-        assert!(validate_policy(&invalid).is_err());
-        let mut s = snapshot("claude");
-        s["provider_error"]["detail"] = json!("429 rate limit");
-        let mut old = advance(Value::Null, &s, &on(), 11.0);
-        old.as_object_mut().unwrap().remove("session_limit_mode");
-        old.as_object_mut().unwrap().remove("schedules");
-        old["attempt"] = json!(2);
-        s["provider_error"]["detail"] = json!("You've hit your session limit");
-        s["provider_error"]["reset_at"] = json!(3600.0);
-        let upgraded = advance(old.clone(), &s, &on(), 12.0);
-        assert_eq!(upgraded["id"], old["id"]);
-        assert_eq!(upgraded["attempts"]["rate_limit"], 2);
-        assert_eq!(upgraded["class"], "session_limit");
-        assert_eq!(upgraded["due_at"], 3600.0);
-    }
-    #[test]
-    fn budget_is_finite_across_distinct_errors_not_reset_by_progress() {
-        let mut s = snapshot("kimi");
-        let mut job = advance(Value::Null, &s, &on(), 11.0);
-        for attempt in 1..=4 {
-            let sent = attempt as f64 * 1000.0;
-            job["attempt"] = json!(attempt);
-            job["attempts"]["service"]=json!(attempt);
-            job["state"] = json!("retrying");
-            job["sent_at"] = json!(sent);
-            job["acknowledged"] = json!(false);
-            s["phase"] = json!("working");
-            s["provider_error"] = Value::Null;
-            s["recovery_user_at"] = json!(sent + 1.0);
-            s["recovery_user_text"] = json!(CONTINUATION);
-            job = advance(job, &s, &on(), sent + 2.0);
-            assert_eq!(job["acknowledged"], true);
-            s["phase"] = json!("tool");
-            job = advance(job, &s, &on(), sent + 10.0);
-            assert_eq!(job["attempt"], attempt);
-            s["phase"] = json!("error");
-            s["provider_error"] = json!({"source":"native","message_id":format!("error-{attempt}"),"at":sent+20.0,"detail":"503 unavailable"});
-            job = advance(job, &s, &on(), sent + 21.0);
-            assert_eq!(
-                job["state"],
-                if attempt == 4 { "exhausted" } else { "waiting" }
-            );
-        }
-        assert_eq!(advance(job.clone(), &s, &on(), 99999.0), job);
-    }
-    #[test]
-    fn new_input_cancellation_success_and_uncertain_delivery_are_terminal() {
-        let mut s = snapshot("codex");
-        let original = advance(Value::Null, &s, &on(), 11.0);
-        let cancelled = advance(original.clone(), &s, &Policy::default(), 12.0);
-        assert_eq!(cancelled["state"], "cancelled");
-        assert_eq!(advance(cancelled.clone(), &s, &on(), 1000.0), cancelled);
-        s["recovery_user_at"] = json!(12.0);
-        s["recovery_user_text"] = json!("new task");
-        assert_eq!(
-            advance(original.clone(), &s, &on(), 13.0)["state"],
-            "cancelled"
-        );
-        s = snapshot("codex");
-        s["phase"] = json!("approval");
-        assert_eq!(
-            advance(original.clone(), &s, &on(), 13.0)["state"],
-            "cancelled"
-        );
-        s = snapshot("codex");
-        let mut sent = original.clone();
-        sent["state"] = json!("retrying");
-        sent["sent_at"] = json!(12.0);
-        assert_eq!(advance(sent.clone(), &s, &on(), 43.0)["state"], "uncertain");
-        s["recovery_success_at"] = json!(20.0);
-        s["recovery_user_at"] = json!(13.0);
-        s["recovery_user_text"] = json!(CONTINUATION);
-        assert_eq!(advance(sent, &s, &on(), 21.0)["state"], "succeeded");
-        s = snapshot("codex");
-        s["run_id"] = json!("new-run");
-        s["provider_error"] = Value::Null;
-        assert!(advance(original, &s, &on(), 30.0).is_null());
-    }
-    #[test]
-    fn late_acknowledgement_cannot_restart_an_uncertain_episode() {
-        let mut s = snapshot("claude");
-        let mut job = advance(Value::Null, &s, &on(), 11.0);
-        job["state"] = json!("retrying");
-        job["sent_at"] = json!(12.0);
-        job["attempt"] = json!(1);
-        job = advance(job, &s, &on(), 43.0);
-        assert_eq!(job["state"], "uncertain");
-        s["recovery_user_at"] = json!(13.0);
-        s["recovery_user_text"] = json!(CONTINUATION);
-        s["provider_error"]["at"] = json!(45.0);
-        s["provider_error"]["message_id"] = json!("late-error");
-        assert_eq!(advance(job.clone(), &s, &on(), 46.0), job);
-        s["recovery_user_at"] = json!(47.0);
-        s["recovery_user_text"] = json!("Please try a new task");
-        s["provider_error"]["at"] = json!(50.0);
-        let fresh = advance(job.clone(), &s, &on(), 51.0);
-        assert_ne!(fresh["id"], job["id"]);
-        assert_eq!(fresh["attempt"], 0);
-    }
-}
-
 pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
     let job = load_job(string(record, "name"));
     let p = policy()?;
@@ -1054,12 +747,7 @@ fn recover_interrupted_jobs() -> Result<()> {
 }
 fn worker() -> Result<i32> {
     private_dir(&root().join("recovery"))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(root().join("recovery/worker.lock"))
-        .map_err(|e| e.to_string())?;
+    let file = lock_file(&root().join("recovery/worker.lock"))?;
     if file.try_lock_exclusive().is_err() {
         return Ok(0);
     }
@@ -1087,21 +775,12 @@ fn ensure_worker() -> Result<()> {
     }
     // Detached from both SSH and GUI lifetime; service installation additionally
     // restarts the worker after login. The worker lock handles competing GUIs.
-    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     cmd.args(["recovery", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn().map_err(|e| e.to_string())?;
+    crate::platform::spawn_detached(&mut cmd).map_err(|e| e.to_string())?;
     Ok(())
 }
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
@@ -1343,4 +1022,310 @@ fn scoped_action(request: Value) -> Result<()> {
     answer.as_object_mut().unwrap().remove("request_hash");
     println!("{answer}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn codex_copy(snapshot: &mut Value) {
+        let original = failure_id(snapshot);
+        snapshot["provider_error"]["source"] = json!("codex_native_log");
+        snapshot["provider_error"]["message_id"] = json!("log-copy");
+        snapshot["provider_error"]["at"] = json!(10.000328);
+        snapshot["provider_error"]["failure_ids"] = json!([original, failure_id(snapshot)]);
+    }
+    #[test]
+    fn equivalent_native_evidence_preserves_deadline_budget_and_retry_acknowledgement() {
+        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
+        let waiting = advance(Value::Null, &s, &on(), 11.0);
+        codex_copy(&mut s);
+        let observed = advance(waiting.clone(), &s, &on(), 12.0);
+        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id", "state"] { assert_eq!(observed[key], waiting[key]); }
+        assert!(same_failure(&observed, &s));
+        let mut retrying = observed; retrying["state"] = json!("retrying");
+        retrying["attempt"] = json!(1); retrying["sent_at"] = json!(10.0001); retrying["acknowledged"] = json!(true);
+        assert_eq!(advance(retrying.clone(), &s, &on(), 12.0), retrying);
+        let mut completion_only = snapshot("codex"); completion_only["provider_error"]["source"] = json!("codex_native_transcript");
+        assert_eq!(advance(retrying.clone(), &completion_only, &on(), 12.0), retrying);
+        s["provider_error"]["message_id"] = json!("new-turn-error");
+        s["provider_error"]["at"] = json!(20.0); s["provider_error"]["failure_ids"] = json!([failure_id(&s)]);
+        let following = advance(retrying, &s, &on(), 21.0);
+        assert_eq!(following["state"], "waiting"); assert_eq!(following["attempt"], 1);
+        assert_eq!(following["failure_id"], failure_id(&s));
+        assert!(!same_failure(&following, &completion_only));
+    }
+    #[test]
+    fn repairs_only_proven_source_switch_cancellations_without_an_attempt() {
+        let mut s = snapshot("codex"); s["provider_error"]["source"] = json!("codex_native_transcript");
+        let mut cancelled = advance(Value::Null, &s, &on(), 11.0);
+        stop(&mut cancelled, "cancelled", "The failed turn is no longer current");
+        codex_copy(&mut s);
+        let repaired = advance(cancelled.clone(), &s, &on(), 30.0);
+        assert_eq!(repaired["state"], "waiting");
+        for key in ["id", "due_at", "attempt", "delays", "identity", "failure_id"] { assert_eq!(repaired[key], cancelled[key]); }
+        for (key, value) in [("attempt", json!(1)), ("sent_at", json!(12.0)), ("request_id", json!("request")),
+            ("reason", json!("Cancelled by user")), ("state", json!("uncertain"))] {
+            let mut protected = cancelled.clone(); protected[key] = value;
+            assert_eq!(advance(protected.clone(), &s, &on(), 30.0), protected);
+        }
+        for (key, value) in [("recovery_cancel_at", json!(20.0)), ("recovery_success_at", json!(20.0)),
+            ("phase", json!("idle")), ("process_state", json!("exited"))] {
+            let mut changed = s.clone(); changed[key] = value;
+            assert_eq!(advance(cancelled.clone(), &changed, &on(), 30.0), cancelled);
+        }
+        let mut changed = s.clone(); changed["recovery_user_at"] = json!(20.0);
+        assert!(advance(cancelled.clone(), &changed, &on(), 30.0).is_null());
+        let mut disabled = on(); disabled.enabled = false;
+        assert_eq!(advance(cancelled.clone(), &s, &disabled, 30.0), cancelled);
+        s["provider_error"]["failure_ids"] = Value::Null;
+        assert_eq!(advance(cancelled.clone(), &s, &on(), 30.0), cancelled);
+    }
+    fn snapshot(agent: &str) -> Value {
+        json!({"name":"session","agent":agent,"run_id":"run","conversation_id":"conversation","model":"model","account_id":"account",
+            "phase":"error","process_state":"running","recovery_user_at":5.0,
+            "provider_error":{"source":"native","message_id":"error-1","at":10.0,"detail":"API Error: 529 Overloaded"}})
+    }
+    fn on() -> Policy {
+        Policy {
+            enabled: true,
+            enabled_at: 1.0,
+            ..Policy::default()
+        }
+    }
+    #[test]
+    fn independent_sequences_keep_class_budgets_and_repeat_last_delay() {
+        for values in [vec![0],vec![1,0,2],vec![1,-1,3],vec![-2],vec![]] {assert!(validate_delays(&values).is_err());}
+        assert_eq!(next_delay(&[json!(15),json!(30),json!(0)],42),Some(30.0));
+        assert_eq!(next_delay(&[json!(15),json!(-1)],1),None);
+        assert_eq!(next_delay(&[json!(-1)],0),None);
+        let mut p=on();p.schedules.insert("service".into(),vec![10,20,-1]);p.schedules.insert("network".into(),vec![3,0]);
+        let mut s=snapshot("claude");let mut job=advance(Value::Null,&s,&p,11.0);
+        assert_eq!(job["delays"],json!([10,20,-1]));
+        job["attempts"]["service"]=json!(1);job["attempt"]=json!(1);
+        s["provider_error"]["detail"]=json!("connection reset");schedule(&mut job,&s,100.0);
+        assert_eq!(job["class_attempt"],0);assert_eq!(job["delays"],json!([3,0]));
+        job["attempts"]["network"]=json!(10);schedule(&mut job,&s,200.0);assert_eq!(job["state"],"waiting");
+        s["provider_error"]["detail"]=json!("503 unavailable");schedule(&mut job,&s,300.0);
+        assert_eq!(job["class_attempt"],1);assert!(seconds(&job,"due_at")>=320.0&&seconds(&job,"due_at")<323.0);
+        job["attempts"]["service"]=json!(2);schedule(&mut job,&s,400.0);assert_eq!(job["state"],"exhausted");
+    }
+    #[test]
+    fn transient_classes_exclude_permanent_errors_and_future_agents() {
+        for (detail, expected) in [
+            ("529 Overloaded", "service"),
+            ("HTTP 503", "service"),
+            ("500 internal server error", "service"),
+            ("429 rate limit", "rate_limit"),
+            ("429 insufficient quota", "manual"),
+            ("overloaded account balance exhausted", "manual"),
+            ("401 authentication failed", "manual"),
+            ("policy_violation: HTTP 503 service unavailable", "manual"),
+            ("Request blocked by usage policy; HTTP 429", "manual"),
+            ("context window exceeded", "manual"),
+            ("stream disconnected", "network"),
+            ("ECONNRESET", "network"),
+            ("tool returned 1", "manual"),
+        ] {
+            assert_eq!(class(&json!({"detail":detail})), expected, "{detail}");
+        }
+        for detail in ["HTTP 503", "429 rate limit", "network error"] {
+            assert_eq!(
+                class(&json!({"error_kind":"provider_policy","detail":detail})),
+                "manual"
+            );
+            let mut s = snapshot("codex");
+            s["provider_error"] = json!({"error_kind":"provider_policy","detail":detail});
+            assert!(advance(Value::Null, &s, &on(), 11.0).is_null());
+        }
+        for agent in ["claude", "kimi", "codex"] {
+            assert_eq!(
+                advance(Value::Null, &snapshot(agent), &on(), 11.0)["action"],
+                "continue_message"
+            );
+        }
+        assert!(advance(Value::Null, &snapshot("future-agent"), &on(), 11.0).is_null());
+        let mut s = snapshot("dsh");
+        assert_eq!(
+            advance(Value::Null, &s, &on(), 11.0)["action"],
+            "continue_message"
+        );
+        s["native_recovery"] = json!({"id":"step"});
+        assert_eq!(
+            advance(Value::Null, &s, &on(), 11.0)["action"],
+            "retry_request"
+        );
+    }
+    #[test]
+    fn off_and_old_errors_never_schedule_and_deadlines_survive_restart() {
+        let mut s = snapshot("claude");
+        assert!(advance(Value::Null, &s, &Policy::default(), 11.0).is_null());
+        let mut p = on();
+        p.enabled_at = 20.0;
+        assert!(advance(Value::Null, &s, &p, 21.0).is_null());
+        s["provider_error"]["retry_not_before"] = json!(1000.0);
+        let job = advance(Value::Null, &s, &on(), 11.0);
+        assert_eq!(job["due_at"], 1000.0);
+        let restored: Value = serde_json::from_str(&job.to_string()).unwrap();
+        assert_eq!(advance(restored, &s, &on(), 500.0), job);
+    }
+    #[test]
+    fn session_limits_wait_for_reset_and_interval_mode_uses_its_own_budget() {
+        let mut s = snapshot("claude");
+        s["provider_error"] = json!({"source":"provider_hook","message_id":"limit","at":10.0,
+            "error_kind":"rate_limit","detail":"You've hit your session limit","reset_at":3600.0});
+        let p = on();
+        let job = advance(Value::Null, &s, &p, 11.0);
+        assert_eq!(job["class"], "session_limit");
+        assert_eq!(job["session_limit_mode"], "reset");
+        assert_eq!(job["state"], "waiting");
+        assert_eq!(job["due_at"], 3600.0);
+        assert_eq!(job["not_before"], 3600.0);
+        assert_eq!(advance(serde_json::from_str(&job.to_string()).unwrap(), &s, &p, 1000.0), job);
+        // A worker recovering after the deadline can still make the scheduled attempt.
+        assert_eq!(advance(Value::Null, &s, &p, 4000.0)["due_at"], 3600.0);
+        assert_eq!(advance(job.clone(), &s, &Policy::default(), 12.0)["state"], "cancelled");
+        let mut disabled = p.clone(); disabled.session_limit = false;
+        assert!(advance(Value::Null, &s, &disabled, 11.0).is_null());
+        assert_eq!(advance(job.clone(), &s, &disabled, 12.0)["state"], "cancelled");
+        let mut interval = p.clone(); interval.session_limit_mode = "interval".into();
+        interval.schedules.insert("session_limit".into(), vec![90, 0]);
+        let mut repeat = advance(Value::Null, &s, &interval, 11.0);
+        assert!(seconds(&repeat, "due_at") >= 101.0 && seconds(&repeat, "due_at") <= 110.0);
+        assert_eq!(repeat["not_before"], 0.0);
+        repeat["attempts"]["session_limit"] = json!(50);
+        schedule(&mut repeat, &s, 200.0);
+        assert_eq!(repeat["state"], "waiting");
+        assert_eq!(repeat["class_attempt"], 50);
+        s["provider_error"]["retry_not_before"] = json!(1000.0);
+        schedule(&mut repeat, &s, 300.0);
+        assert_eq!(repeat["due_at"], 1000.0);
+        s["provider_error"]["detail"] = json!("429 temporary rate limit");
+        schedule(&mut repeat, &s, 400.0);
+        assert_eq!(repeat["class"], "rate_limit");
+        assert_eq!(repeat["class_attempt"], 0);
+    }
+    #[test]
+    fn missing_or_expired_reset_never_starts_a_short_retry_loop() {
+        let mut s = snapshot("claude");
+        s["provider_error"]["detail"] = json!("You've hit your session limit");
+        for reset in [Value::Null, json!(10.0)] {
+            s["provider_error"]["reset_at"] = reset;
+            let job = advance(Value::Null, &s, &on(), 11.0);
+            assert_eq!(job["state"], "blocked");
+            assert_eq!(advance(job.clone(), &s, &on(), 100000.0), job);
+        }
+        assert_eq!(class(&json!({"error_kind":"provider_policy","detail":"You've hit your session limit"})), "manual");
+        assert_eq!(class(&json!({"detail":"You've hit your session limit; insufficient balance"})), "manual");
+    }
+    #[test]
+    fn legacy_policies_and_waiting_episodes_upgrade_without_short_limit_retries() {
+        for version in [1, 2] {
+            let p: Policy = serde_json::from_value(json!({"version":version,"enabled":true,
+                "delays":[5,20,-1],"schedules":{"network":[7,0]}})).unwrap();
+            validate_policy(&p).unwrap();
+            assert!(p.session_limit);
+            assert_eq!(p.session_limit_mode, "reset");
+            assert_eq!(delays_for(&p, "network"), &[7,0]);
+            assert_eq!(delays_for(&p, "session_limit"), &[300,0]);
+        }
+        let mut invalid = on(); invalid.session_limit_mode = "guess".into();
+        assert!(validate_policy(&invalid).is_err());
+        let mut s = snapshot("claude");
+        s["provider_error"]["detail"] = json!("429 rate limit");
+        let mut old = advance(Value::Null, &s, &on(), 11.0);
+        old.as_object_mut().unwrap().remove("session_limit_mode");
+        old.as_object_mut().unwrap().remove("schedules");
+        old["attempt"] = json!(2);
+        s["provider_error"]["detail"] = json!("You've hit your session limit");
+        s["provider_error"]["reset_at"] = json!(3600.0);
+        let upgraded = advance(old.clone(), &s, &on(), 12.0);
+        assert_eq!(upgraded["id"], old["id"]);
+        assert_eq!(upgraded["attempts"]["rate_limit"], 2);
+        assert_eq!(upgraded["class"], "session_limit");
+        assert_eq!(upgraded["due_at"], 3600.0);
+    }
+    #[test]
+    fn budget_is_finite_across_distinct_errors_not_reset_by_progress() {
+        let mut s = snapshot("kimi");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        for attempt in 1..=4 {
+            let sent = attempt as f64 * 1000.0;
+            job["attempt"] = json!(attempt);
+            job["attempts"]["service"]=json!(attempt);
+            job["state"] = json!("retrying");
+            job["sent_at"] = json!(sent);
+            job["acknowledged"] = json!(false);
+            s["phase"] = json!("working");
+            s["provider_error"] = Value::Null;
+            s["recovery_user_at"] = json!(sent + 1.0);
+            s["recovery_user_text"] = json!(CONTINUATION);
+            job = advance(job, &s, &on(), sent + 2.0);
+            assert_eq!(job["acknowledged"], true);
+            s["phase"] = json!("tool");
+            job = advance(job, &s, &on(), sent + 10.0);
+            assert_eq!(job["attempt"], attempt);
+            s["phase"] = json!("error");
+            s["provider_error"] = json!({"source":"native","message_id":format!("error-{attempt}"),"at":sent+20.0,"detail":"503 unavailable"});
+            job = advance(job, &s, &on(), sent + 21.0);
+            assert_eq!(
+                job["state"],
+                if attempt == 4 { "exhausted" } else { "waiting" }
+            );
+        }
+        assert_eq!(advance(job.clone(), &s, &on(), 99999.0), job);
+    }
+    #[test]
+    fn new_input_cancellation_success_and_uncertain_delivery_are_terminal() {
+        let mut s = snapshot("codex");
+        let original = advance(Value::Null, &s, &on(), 11.0);
+        let cancelled = advance(original.clone(), &s, &Policy::default(), 12.0);
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(advance(cancelled.clone(), &s, &on(), 1000.0), cancelled);
+        s["recovery_user_at"] = json!(12.0);
+        s["recovery_user_text"] = json!("new task");
+        assert_eq!(
+            advance(original.clone(), &s, &on(), 13.0)["state"],
+            "cancelled"
+        );
+        s = snapshot("codex");
+        s["phase"] = json!("approval");
+        assert_eq!(
+            advance(original.clone(), &s, &on(), 13.0)["state"],
+            "cancelled"
+        );
+        s = snapshot("codex");
+        let mut sent = original.clone();
+        sent["state"] = json!("retrying");
+        sent["sent_at"] = json!(12.0);
+        assert_eq!(advance(sent.clone(), &s, &on(), 43.0)["state"], "uncertain");
+        s["recovery_success_at"] = json!(20.0);
+        s["recovery_user_at"] = json!(13.0);
+        s["recovery_user_text"] = json!(CONTINUATION);
+        assert_eq!(advance(sent, &s, &on(), 21.0)["state"], "succeeded");
+        s = snapshot("codex");
+        s["run_id"] = json!("new-run");
+        s["provider_error"] = Value::Null;
+        assert!(advance(original, &s, &on(), 30.0).is_null());
+    }
+    #[test]
+    fn late_acknowledgement_cannot_restart_an_uncertain_episode() {
+        let mut s = snapshot("claude");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        job["state"] = json!("retrying");
+        job["sent_at"] = json!(12.0);
+        job["attempt"] = json!(1);
+        job = advance(job, &s, &on(), 43.0);
+        assert_eq!(job["state"], "uncertain");
+        s["recovery_user_at"] = json!(13.0);
+        s["recovery_user_text"] = json!(CONTINUATION);
+        s["provider_error"]["at"] = json!(45.0);
+        s["provider_error"]["message_id"] = json!("late-error");
+        assert_eq!(advance(job.clone(), &s, &on(), 46.0), job);
+        s["recovery_user_at"] = json!(47.0);
+        s["recovery_user_text"] = json!("Please try a new task");
+        s["provider_error"]["at"] = json!(50.0);
+        let fresh = advance(job.clone(), &s, &on(), 51.0);
+        assert_ne!(fresh["id"], job["id"]);
+        assert_eq!(fresh["attempt"], 0);
+    }
 }

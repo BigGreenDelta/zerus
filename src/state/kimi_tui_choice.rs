@@ -18,14 +18,11 @@ pub(super) fn launcher_notices(rows: &[&str], agent: &str) -> bool {
 }
 
 pub(super) fn capture(record: &Value) -> Result<String> {
-    let out = tmux(
-        &["capture-pane", "-p", "-t", string(record, "pane")].map(str::to_owned),
-        true,
-    )?;
-    if out.stdout.len() > 512 * 1024 {
+    let out = backend::current().capture(string(record, "pane"), backend::Capture::Plain)?;
+    if out.len() > 512 * 1024 {
         return Err("Terminal snapshot is too large".into());
     }
-    String::from_utf8(out.stdout).map_err(|_| "Invalid terminal text".into())
+    String::from_utf8(out).map_err(|_| "Invalid terminal text".into())
 }
 pub(super) fn identity(original: &Value) -> Result<Value> {
     let record = read_run(string(original, "name"), string(original, "run_id"))?
@@ -102,12 +99,10 @@ fn navigate(
             if panel.0 != question["question_hash"] {
                 return Err("The agent's dialog changed".into());
             }
-            let key = if panel.1 == chosen {
-                "Enter"
-            } else if panel.1 < chosen {
-                "Down"
-            } else {
-                "Up"
+            let key = match panel.1.cmp(&chosen) {
+                std::cmp::Ordering::Equal => "Enter",
+                std::cmp::Ordering::Less => "Down",
+                std::cmp::Ordering::Greater => "Up",
             };
             let active = identity(record)?;
             // Compare the complete parsed request and highlighted option.
@@ -117,10 +112,7 @@ fn navigate(
                 return Err("Terminal changed before the answer; inspect Terminal".into());
             }
             touched = true;
-            tmux(
-                &["send-keys", "-t", string(&active, "pane"), key].map(str::to_owned),
-                true,
-            )?;
+            backend::current().send(string(&active, "pane"), &[backend::Key::Named(key)])?;
             let expected = if key == "Down" {
                 panel.1 + 1
             } else {

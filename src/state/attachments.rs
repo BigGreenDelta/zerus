@@ -3,13 +3,10 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 const MAX_FILE: u64 = 10 * 1024 * 1024;
 
 fn receipt(path: &Path) -> Result<Value> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+    let file = crate::platform::refuse_link(OpenOptions::new().read(true))
         .open(path)
         .map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -240,12 +237,9 @@ pub(super) fn stage_native(request: &Value) -> Result<Value> {
         if bytes.is_empty() || bytes.len() > MAX_FILE as usize || total > 20 * 1024 * 1024 {
             return Err("Attachments exceed the size limit".into());
         }
-        private_dir(&dir)?;
+        private_dir(dir)?;
         let path = dir.join(input::safe_filename(string(file, "name"), index));
-        let mut output = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
+        let mut output = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(&path)
             .map_err(|e| e.to_string())?;
         output.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -258,20 +252,15 @@ pub(super) fn stage_native(request: &Value) -> Result<Value> {
     Ok(json!(staged))
 }
 fn read_file(root: &Path, file: &Value) -> Result<Vec<u8>> {
-    let allowed = root
-        .join("attachments")
-        .canonicalize()
+    let allowed = crate::platform::canonical(root.join("attachments"))
         .map_err(|_| "The attachment is no longer available")?;
     let path = PathBuf::from(string(file, "path"));
-    let resolved = path
-        .canonicalize()
-        .map_err(|_| "The attachment is no longer available")?;
+    let resolved =
+        crate::platform::canonical(&path).map_err(|_| "The attachment is no longer available")?;
     if !resolved.starts_with(&allowed) {
         return Err("Invalid attachment location".into());
     }
-    let handle = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    let handle = crate::platform::no_follow(OpenOptions::new().read(true))
         .open(&path)
         .map_err(|_| "The attachment is no longer available")?;
     let meta = handle.metadata().map_err(|e| e.to_string())?;
@@ -420,6 +409,8 @@ mod tests {
         r["status"] = json!("pending");
         assert!(!belongs(&r, &record, "child"));
     }
+    // Creates a Unix symlink.
+    #[cfg(unix)]
     #[test]
     fn attachment_reads_cannot_escape_the_private_store() {
         let temp = tempfile::tempdir().unwrap();

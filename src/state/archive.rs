@@ -1,6 +1,6 @@
 //! Immutable completion records, indexed independently of reusable tmux names.
 use super::*;
-use std::fs::{self, File};
+use std::fs;
 
 pub(super) fn path(id: &str) -> Result<PathBuf> {
     uuid::Uuid::parse_str(id).map_err(|_| "invalid archive ID")?;
@@ -64,8 +64,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => File::open(path.parent().ok_or("invalid record path")?)
-            .and_then(|file| file.sync_all())
+        Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
             .map_err(|error| error.to_string()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),

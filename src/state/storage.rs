@@ -1,10 +1,8 @@
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::process::{Command, Output};
 
 pub(super) fn root() -> PathBuf {
     nonempty_env("HGS_STATE_DIR")
@@ -18,16 +16,12 @@ pub(super) fn root() -> PathBuf {
 }
 
 pub(super) fn private_dir(path: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .map_err(|e| e.to_string())
+    crate::platform::private_dir(path).map_err(|e| e.to_string())
 }
 
 pub(super) fn absolute_root() -> Result<PathBuf> {
     private_dir(&root())?;
-    root().canonicalize().map_err(|e| e.to_string())
+    crate::platform::canonical(root()).map_err(|e| e.to_string())
 }
 
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
@@ -40,10 +34,8 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
     temp.write_all(contents.as_bytes())
         .map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;
-    temp.persist(path).map_err(|e| e.to_string())?;
-    File::open(parent)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| e.to_string())
+    crate::platform::persist(temp, path).map_err(|e| e.to_string())?;
+    crate::platform::sync_dir(parent).map_err(|e| e.to_string())
 }
 
 pub(super) type Guard = crate::platform::FileLock;
@@ -52,12 +44,7 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     let default = root().join(".lock");
     let path = path.unwrap_or(&default);
     private_dir(path.parent().ok_or("invalid lock path")?)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| e.to_string())?;
+    let file = lock_file(path)?;
     let guard = Guard::exclusive(file).map_err(|e| e.to_string())?;
     if path == default {
         rename::recover_locked()?;
@@ -70,20 +57,23 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
 /// holds it at `deadline`. Never use it for the default state lock.
 pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(path.parent().ok_or("invalid lock path")?)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| e.to_string())?;
+    let file = lock_file(path)?;
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(Some(Guard::held(file))),
-            Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error.to_string()),
+            Err(error) if !crate::platform::lock_contended(&error) => return Err(error.to_string()),
             Err(_) if std::time::Instant::now() >= deadline => return Ok(None),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
+}
+
+/// An owner-only lock file, never written. Windows locks a byte range only
+/// through a handle with read or write access, which append-only lacks.
+pub(super) fn lock_file(path: &Path) -> Result<fs::File> {
+    crate::platform::private_open(OpenOptions::new().create(true).truncate(false).write(true))
+        .open(path)
+        .map_err(|e| e.to_string())
 }
 
 pub(super) fn legacy_record_path(name: &str) -> PathBuf {
@@ -203,46 +193,17 @@ pub(super) fn records() -> Result<Vec<Value>> {
     Ok(result)
 }
 
-pub(super) fn tmux(args: &[String], check: bool) -> Result<Output> {
-    let output = Command::new("tmux")
-        .args(args)
-        .output()
-        .map_err(|e| format!("tmux: {e}"))?;
-    if check && !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if error.is_empty() {
-            "tmux command failed".into()
-        } else {
-            error
-        });
-    }
-    Ok(output)
-}
-
 pub(super) type Pane = (String, String, String);
 pub(super) type Snapshot = BTreeMap<String, Vec<Pane>>;
 
+/// Each live session's panes as (pane, dead, run marker). No server means none.
 pub(super) fn live() -> Result<Snapshot> {
-    let output = tmux(
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_id}\t#{pane_dead}\t#{@hgs_run}",
-        ]
-        .map(str::to_owned),
-        false,
-    )?;
     let mut result: Snapshot = BTreeMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let fields: Vec<&str> = line.splitn(4, '\t').collect();
-        if fields.len() == 4 {
-            result.entry(fields[0].to_owned()).or_default().push((
-                fields[1].into(),
-                fields[2].into(),
-                fields[3].into(),
-            ));
-        }
+    for row in backend::current().panes()? {
+        result
+            .entry(row.session)
+            .or_default()
+            .push((row.pane, row.dead, row.run_marker));
     }
     Ok(result)
 }
@@ -260,21 +221,8 @@ pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
 }
 
 pub(super) fn process_start(pid: u32) -> String {
-    crate::platform::process_start_time(pid).unwrap_or_else(|| ps_process_start(pid).unwrap_or_default())
-}
-
-/// ps's own start time: `Some` with its (possibly empty) output when ps ran successfully.
-pub(super) fn ps_process_start(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "lstart="])
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC")
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    crate::platform::process_start_time(pid)
+        .unwrap_or_else(|| crate::platform::process_start_fallback(pid).unwrap_or_default())
 }
 
 pub(super) fn process_alive(record: &Value) -> bool {
@@ -305,12 +253,7 @@ pub(super) fn join_command(args: &[String]) -> String {
 pub(super) fn runner_executable() -> Result<String> {
     if let Some(executable) = nonempty_env("HGS_EXECUTABLE") {
         let path = Path::new(&executable);
-        if path.is_absolute()
-            && path
-                .metadata()
-                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        {
+        if path.is_absolute() && crate::platform::executable(path) {
             return Ok(executable);
         }
     }

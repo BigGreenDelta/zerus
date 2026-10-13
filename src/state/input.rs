@@ -7,9 +7,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -565,64 +562,32 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
     {
         return Err("invalid tracked pane".into());
     }
-    let output = tmux(&["display-message", "-p", "-t", pane,
-        "#{pane_tty}\t#{cursor_x}\t#{cursor_y}\t#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}\t#{@hgs_run}\t#{session_name}\t#{bracket_paste_flag}"]
-        .map(str::to_owned), true)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<_> = text.trim_end_matches('\n').split('\t').collect();
-    if fields.len() != 9
-        || fields[3] != "0"
-        || fields[5] != "0"
-        || fields[6] != string(record, "run_id")
-        || fields[7] != string(record, "name")
-        || fields[8] != "1"
-    {
-        return Err("terminal is not in the expected agent input mode; open Terminal".into());
-    }
-    let tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
-        .open(fields[0])
-        .map_err(|e| e.to_string())?;
-    let pid = record["pid"].as_u64().ok_or("missing agent process")? as i32;
-    let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut attributes) } != 0
-        || attributes.c_lflag & (libc::ICANON | libc::ECHO) != 0
-    {
-        return Err("agent does not own an interactive input terminal; open Terminal".into());
-    }
-    // Ensure the pinned process is attached to this tty, not just a PID sharing a group.
-    let tty_output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "tty=,pgid=,tpgid=,comm="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let tty_text = String::from_utf8_lossy(&tty_output.stdout);
-    let process_fields: Vec<_> = tty_text.split_whitespace().collect();
-    if process_fields.len() < 4
-        || process_fields[0] != fields[0].trim_start_matches("/dev/")
-        || process_fields[1] != process_fields[2]
-        || !process_fields[2].parse::<i32>().is_ok_and(|id| id > 0)
-    {
-        return Err("tracked agent is not attached to the selected terminal".into());
-    }
-    if ["sh", "bash", "zsh", "fish", "dash", "tcsh"].contains(&fields[4])
-        && !(string(record, "agent") == "kimi"
-            && Path::new(process_fields[3])
-                .file_name()
-                .is_some_and(|name| name == "kimi"))
-    {
-        return Err("terminal is not in the expected agent input mode; open Terminal".into());
-    }
+    let terminal = backend::current();
+    let state = terminal.input_state(&backend::InputClaim {
+        pane,
+        name: string(record, "name"),
+        run_id: string(record, "run_id"),
+        agent: string(record, "agent"),
+        pid: record["pid"].as_u64(),
+    })?;
     if empty {
-        let screen = tmux(
-            &["capture-pane", "-p", "-e", "-t", pane].map(str::to_owned),
-            true,
-        )?;
-        let screen = String::from_utf8_lossy(&screen.stdout);
-        let cursor_y: usize = fields[2].parse().map_err(|_| "invalid terminal cursor")?;
-        let cursor_x: usize = fields[1].parse().map_err(|_| "invalid terminal cursor")?;
-        if !composer_empty_for_model(string(record, "agent"), &screen, cursor_x, cursor_y, codex_footer_model(record)) {
+        let screen = terminal.capture(pane, backend::Capture::Styled)?;
+        let screen = String::from_utf8_lossy(&screen);
+        let cursor_y: usize = state
+            .cursor_y
+            .parse()
+            .map_err(|_| "invalid terminal cursor")?;
+        let cursor_x: usize = state
+            .cursor_x
+            .parse()
+            .map_err(|_| "invalid terminal cursor")?;
+        if !composer_empty_for_model(
+            string(record, "agent"),
+            &screen,
+            cursor_x,
+            cursor_y,
+            codex_footer_model(record),
+        ) {
             return Err("terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into());
         }
     }
@@ -663,9 +628,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     let request: Request =
-        serde_json::from_slice(&input).map_err(|e| format!("invalid send payload: {e}"))?;
+        serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;
-    let digest = format!("{:x}", Sha256::digest(&input));
+    let digest = format!("{:x}", Sha256::digest(input));
     let request_id = uuid::Uuid::parse_str(&request.request_id)
         .unwrap()
         .to_string();
@@ -696,17 +661,13 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         .prefix("message-")
         .tempdir_in(attachments_root)
         .map_err(|e| e.to_string())?;
-    fs::set_permissions(attachments.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
+    crate::platform::restrict_dir(attachments.path()).map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
     for (index, (attachment, bytes)) in request.attachments.iter().zip(files.iter()).enumerate() {
         let path = attachments
             .path()
             .join(safe_filename(&attachment.name, index));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
+        let mut file = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(&path)
             .map_err(|e| e.to_string())?;
         file.write_all(bytes).map_err(|e| e.to_string())?;
@@ -726,25 +687,11 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         text.clone()
     };
     let buffer = format!("hgs-input-{request_id}");
-    let mut loader = Command::new("tmux")
-        .args(["load-buffer", "-b", &buffer, "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let written = loader
-        .stdin
-        .take()
-        .ok_or("missing buffer input")?
-        .write_all(pasted.as_bytes());
-    let loaded = loader.wait_with_output().map_err(|e| e.to_string())?;
-    if written.is_err() || !loaded.status.success() {
+    let terminal = backend::current();
+    if !terminal.stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)? {
         return Err("could not stage terminal input; nothing was submitted".into());
     }
-    let cleanup = || {
-        let _ = tmux(&["delete-buffer", "-b", &buffer].map(str::to_owned), false);
-    };
+    let cleanup = || terminal.discard(&buffer);
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
     if let Err(error) = checked_record(name, &request).and_then(|r| checked_terminal(&r, true)) {
@@ -770,10 +717,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     }
     let pane = string(&record, "pane");
     let result: Result<()> = (|| {
-        tmux(
-            &["paste-buffer", "-p", "-r", "-d", "-b", &buffer, "-t", pane].map(str::to_owned),
-            true,
-        )?;
+        terminal.paste(&buffer, pane, backend::Paste::Composer)?;
         // Let bracketed-paste handlers finish before Enter. Never send a second
         // Enter as a retry: that could approve a new dialog or duplicate a turn.
         std::thread::sleep(Duration::from_millis(180));
@@ -781,7 +725,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
             return Err("agent changed after paste".into());
         }
         checked_terminal(&record, false)?;
-        tmux(&["send-keys", "-t", pane, "Enter"].map(str::to_owned), true)?;
+        terminal.send(pane, &[backend::Key::Named("Enter")])?;
         receipt["status"] = json!("submitted");
         atomic(&receipt_path, &receipt.to_string())?;
         Ok(())

@@ -4,7 +4,6 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 
 const MAX_READ: u64 = 32 * 1024 * 1024;
 
@@ -254,13 +253,14 @@ fn output(state: &Value, provider: &str, partial: bool) -> Value {
 
 fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> Result<Value> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let (identity, meta) =
+        crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
     let mut prefix = vec![0; meta.len().min(256) as usize];
     file.read_exact(&mut prefix).map_err(|e| e.to_string())?;
     let fingerprint = format!(
         "{}:{}:{:x}",
-        meta.dev(),
-        meta.ino(),
+        identity.device,
+        identity.inode,
         Sha256::digest(&prefix)
     );
     if provider == "codex" {
@@ -280,7 +280,7 @@ fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> R
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null);
     let mut offset = number(&state["offset"]).unwrap_or(0);
-    let stamp = json!([meta.mtime(), meta.mtime_nsec()]);
+    let stamp = json!([identity.modified, identity.modified_nanos]);
     if state["version"] != 4
         || state["fingerprint"] != fingerprint
         || offset > meta.len()

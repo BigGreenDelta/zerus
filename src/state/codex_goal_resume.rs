@@ -122,12 +122,10 @@ fn parse(screen: &str, width: usize) -> Option<Panel> {
 }
 
 fn width(record: &Value) -> Option<usize> {
-    let output = tmux(
-        &["display-message", "-p", "-t", string(record, "pane"), "#{pane_width}"].map(str::to_owned),
-        true,
-    )
-    .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let info = backend::current()
+        .pane_info(backend::Target::Pane(string(record, "pane")), &[backend::PaneField::Width])
+        .ok()?;
+    info.value().parse().ok()
 }
 
 fn eligible(record: &Value) -> bool {
@@ -189,7 +187,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
     // Resume goal changes the goal state before the dialog closes, so only the
     // closed dialog acknowledges the choice.
     kimi_tui_choice::answer(record, question, chosen, IDS.len(), snapshot,
-        |screen| !screen.trim().is_empty() && !(screen.contains(TITLE) && screen.contains(HINT)), false)
+        |screen| !(screen.trim().is_empty() || screen.contains(TITLE) && screen.contains(HINT)), false)
 }
 
 #[cfg(test)]

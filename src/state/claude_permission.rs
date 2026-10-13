@@ -21,7 +21,7 @@ fn parse(screen: &str) -> Option<Panel> {
         return None;
     }
     let folder = rows[2]
-        .get(rows[2].find(|c| c == '/' || c == '~')?..)?
+        .get(rows[2].find(['/', '~'])?..)?
         .to_owned();
     let divider = rows
         .iter()
@@ -193,6 +193,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
 mod tests {
     use super::*;
     const SCREEN: &str = include_str!("../../tests/fixtures/claude-auto-mode.txt");
+    #[cfg(unix)]
     const HOME_SCREEN: &str = include_str!("../../tests/fixtures/claude-auto-mode-home.txt");
     fn record() -> Value {
         json!({"agent":"claude","run_id":"run","run_identity_version":1,
@@ -231,6 +232,8 @@ mod tests {
             assert_ne!(question["question_hash"], original["question_hash"]);
         }
     }
+    // A POSIX home; Windows banners come with the path-aware parsers (Phase 2 M4).
+    #[cfg(unix)]
     #[test]
     fn home_abbreviations_match_only_the_exact_launch_directory() {
         let mut r = record();

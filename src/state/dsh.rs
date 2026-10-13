@@ -2,13 +2,21 @@
 //! Zerus, tmux, and individual sessions. HGS stores bindings, not credentials.
 use super::*;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::{fs::OpenOptionsExt, net::UnixStream, process::CommandExt};
+use std::fs;
+use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+// The native host's socket and start (see `rpc` and `ensure_host`).
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, BufReader},
+    os::unix::net::UnixStream,
+    time::{Duration, Instant},
+};
 
+#[cfg(unix)]
 const VERSION: &str = "0.2.0-rc.2";
+#[cfg(unix)]
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
@@ -59,16 +67,29 @@ pub(crate) fn account_ui_url(home: &Path) -> Result<String> {
 }
 fn host_dir(record: &Value) -> PathBuf {
     root().join("dsh/hosts").join(
-        format!(
+        &format!(
             "{:x}",
             Sha256::digest(string(record, "agent_home").as_bytes())
-        )[..16]
-            .to_owned(),
+        )[..16],
     )
 }
+/// The native host listens on a Unix socket; DeepSeek is a Phase 2 non-goal on
+/// Windows, so nothing there starts or reaches a host.
+#[cfg(not(unix))]
+const UNSUPPORTED: &str =
+    "DeepSeek sessions are not supported on Windows yet; run them on a Linux or macOS machine.";
+#[cfg(not(unix))]
+fn rpc(_: &Value, _: &str, _: Value) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(not(unix))]
+fn ensure_host(_: &Value) -> Result<()> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
-        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect".to_owned())?;
+        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
     socket
         .set_read_timeout(Some(Duration::from_secs(35)))
         .map_err(|e| e.to_string())?;
@@ -87,6 +108,7 @@ fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     }
     Ok(response["value"].clone())
 }
+#[cfg(unix)]
 fn ensure_host(record: &Value) -> Result<()> {
     let dir = host_dir(record);
     private_dir(&dir)?;
@@ -124,11 +146,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         &json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
             .to_string(),
     )?;
-    let log = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
+    let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
         .map_err(|e| e.to_string())?;
     let mut command = Command::new("dsh");
@@ -175,15 +193,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         .stderr(log);
     // Detach only the dedicated native host. Closing its launching terminal or
     // HGS process must not stop conversations.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
     atomic(&dir.join("host.pid"), &child.id().to_string())?;
     let deadline = Instant::now() + Duration::from_secs(35);
     while Instant::now() < deadline {
@@ -353,9 +363,7 @@ pub(crate) fn launch(
         save(&record)?;
         return Ok(());
     }
-    let cwd = PathBuf::from(cwd)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});
@@ -1218,7 +1226,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(test)]
+// DeepSeek is a Phase 2 non-goal on Windows.
+#[cfg(all(test, unix))]
 mod provider_failure_tests {
     use super::*;
     #[test]
@@ -1266,7 +1275,7 @@ mod provider_failure_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod question_identity_tests {
     use super::*;
     #[test]

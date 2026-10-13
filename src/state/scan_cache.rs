@@ -7,7 +7,6 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 
 #[cfg(test)]
 thread_local! {
@@ -24,13 +23,14 @@ fn dir() -> Option<PathBuf> {
 
 /// The cached result of `scan` over `path` for `key`, or a fresh scan stored for later.
 pub(super) fn cached(kind: &str, path: &Path, key: &str, scan: impl FnOnce() -> Option<Value>) -> Option<Value> {
-    let (Some(dir), Ok(meta)) = (dir(), fs::metadata(path)) else {
+    let (Some(dir), Ok((identity, meta))) = (dir(), crate::platform::FileIdentity::at(path)) else {
         return scan();
     };
     if !path.is_absolute() || !meta.is_file() {
         return scan();
     }
-    let stamp = json!([env!("CARGO_PKG_VERSION"), kind, path, key, meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec()]);
+    let stamp = json!([env!("CARGO_PKG_VERSION"), kind, path, key, identity.device, identity.inode, meta.len(),
+        identity.modified, identity.modified_nanos]);
     let entry = dir.join(format!("{:x}.json", Sha256::digest(format!("{kind}\0{}\0{key}", path.display()))));
     let stored = fs::metadata(&entry)
         .ok()
@@ -47,7 +47,7 @@ pub(super) fn cached(kind: &str, path: &Path, key: &str, scan: impl FnOnce() -> 
         let mut temp = tempfile::Builder::new().prefix(".hgs-").tempfile_in(&dir).map_err(|e| e.to_string())?;
         std::io::Write::write_all(&mut temp, json!({"stamp": stamp, "value": value}).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
-        temp.persist(&entry).map(|_| ()).map_err(|e| e.to_string())
+        crate::platform::persist(temp, &entry).map(|_| ()).map_err(|e| e.to_string())
     });
     Some(value)
 }

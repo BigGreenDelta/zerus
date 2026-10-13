@@ -56,7 +56,6 @@ fn merge(previous: Option<&Value>, current: Option<&Value>, base: Option<&Value>
     }
     current.cloned()
 }
-#[cfg(unix)]
 fn write(path: &Path, value: &Value) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
     platform::make_private(file.as_file())?;
@@ -77,7 +76,6 @@ pub(super) fn preview(native: &Path, profile: &Path) -> Result<Value> {
     Ok(merge(Some(&old),Some(&current),Some(&base)).unwrap_or_else(||json!({})))
 }
 
-#[cfg(unix)]
 pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     let path = profile.join("settings.json");
     let source = native.join("settings.json");
@@ -104,9 +102,10 @@ pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn inheritance_updates_without_replacing_profile_overrides_or_identity() {
@@ -127,6 +126,7 @@ mod tests {
         assert_eq!(next["permissions"],json!({"defaultMode":"default","allow":["Write"]}));
         assert_eq!(next["theme"],"light");assert!(next.get("model").is_none());assert_eq!(next["env"],json!({"PROFILE_ONLY":"keep"}));
         let bytes=fs::read(&dst).unwrap(); inherit(&native,&profile).unwrap();assert_eq!(fs::read(&dst).unwrap(),bytes);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&dst).unwrap().permissions().mode()&0o777,0o600);
     }
     #[test]

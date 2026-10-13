@@ -4,8 +4,6 @@
 //! interaction.resolved event acknowledges delivery. Never retry after input.
 use super::*;
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const REVIEW: &str = "Review your answer before submit";
@@ -679,14 +677,12 @@ impl Native<'_> {
         Ok(current)
     }
     pub(super) fn capture(current: &Value) -> Result<String> {
-        let result = tmux(
-            &["capture-pane", "-p", "-e", "-t", string(current, "pane")].map(str::to_owned),
-            true,
-        )?;
-        if result.stdout.len() > 512 * 1024 {
+        let result =
+            backend::current().capture(string(current, "pane"), backend::Capture::Styled)?;
+        if result.len() > 512 * 1024 {
             return Err("terminal snapshot is too large".into());
         }
-        String::from_utf8(result.stdout).map_err(|_| "terminal snapshot is not UTF-8".into())
+        String::from_utf8(result).map_err(|_| "terminal snapshot is not UTF-8".into())
     }
     fn before_write(&self) -> Result<Value> {
         let current = self.pending()?;
@@ -717,50 +713,21 @@ impl Transport for Native<'_> {
     fn key(&mut self, key: &str) -> Result<()> {
         let current = self.before_write()?;
         self.touched = true;
-        tmux(
-            &["send-keys", "-t", string(&current, "pane"), key].map(str::to_owned),
-            true,
-        )?;
-        Ok(())
+        backend::current().send(string(&current, "pane"), &[backend::Key::Named(key)])
     }
     fn paste(&mut self, text: &str) -> Result<()> {
         let buffer = format!("hgs-question-{}", uuid::Uuid::new_v4());
-        let mut loader = Command::new("tmux")
-            .args(["load-buffer", "-b", &buffer, "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        let write_result = loader
-            .stdin
-            .take()
-            .ok_or("missing buffer input")?
-            .write_all(text.as_bytes());
-        let loaded = loader.wait().map_err(|error| error.to_string())?;
+        let terminal = backend::current();
+        let loaded = terminal.stage(&buffer, text.as_bytes(), backend::StageErrors::Discard)?;
         let result = (|| {
-            if write_result.is_err() || !loaded.success() {
+            if !loaded {
                 return Err("failed to stage Other text".into());
             }
             let current = self.before_write()?;
             self.touched = true;
-            tmux(
-                &[
-                    "paste-buffer",
-                    "-p",
-                    "-r",
-                    "-d",
-                    "-b",
-                    &buffer,
-                    "-t",
-                    string(&current, "pane"),
-                ]
-                .map(str::to_owned),
-                true,
-            )?;
-            Ok(())
+            terminal.paste(&buffer, string(&current, "pane"), backend::Paste::Composer)
         })();
-        let _ = tmux(&["delete-buffer", "-b", &buffer].map(str::to_owned), false);
+        terminal.discard(&buffer);
         result
     }
     fn resolved(&mut self) -> Result<Option<Value>> {

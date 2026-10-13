@@ -94,8 +94,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     kimi_tui_choice::identity(&current)?;
     let latest=parse(string(&current,"agent"),&kimi_tui_choice::capture(&current)?).ok_or("Queue disappeared before sending")?;
     if snapshot(&current,&latest)["id"]!=request.queue_id {return Err("Queue changed before sending".into());}
-    let mut keys=vec!["send-keys".to_owned(),"-t".into(),string(&current,"pane").into()];keys.extend(queue.keys.iter().map(|s|s.to_string()));
-    tmux(&keys,true).map_err(|e|format!("Delivery uncertain: {e}. Check Terminal before trying again"))?;
+    let keys:Vec<_>=queue.keys.iter().map(|key|backend::Key::Named(key)).collect();
+    backend::current().send(string(&current,"pane"),&keys).map_err(|e|format!("Delivery uncertain: {e}. Check Terminal before trying again"))?;
     atomic(&path,&receipt.to_string())?;println!("{receipt}");Ok(0)
 }
 #[cfg(test)]
