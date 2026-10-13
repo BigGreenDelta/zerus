@@ -52,7 +52,7 @@ class StopClipping(unittest.TestCase):
         f.history(f.request(around_incoming_seq=1,history_epoch=before['history_epoch']),reject=True)
         with sqlite3.connect(index) as db:
             self.assertEqual(db.execute("SELECT key,value FROM meta WHERE key LIKE 'offset:%'").fetchall(),prior_offsets)
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key='reconcile_version'").fetchone()[0],'2')
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key='reconcile_version'").fetchone()[0],'3')
         repeat=f.complete();self.assertEqual(repeat['history_epoch'],after['history_epoch']);self.assertEqual(repeat['events'],after['events'])
 
     def test_clean_existing_cache_upgrade_retains_epoch_and_cursors(self):

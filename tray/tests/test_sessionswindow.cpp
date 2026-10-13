@@ -134,6 +134,38 @@ static void setComposerText(MessageComposer *composer, const QString &text)
     composer->editor()->setPlainText(text);
 }
 
+// Wait for a read accepted through the window's ordinary Refresh path. Earlier
+// fake-CLI replies cannot then overwrite the next manually injected transition;
+// the window's polling age is refreshed too, as it is for a real user refresh.
+static void settleSelectedInspection(MessageComposer *composer, HgsClient *client,
+                                    const QString &host, const QString &name, const QJsonObject &details)
+{
+    QSignalSpy loading(client, &HgsClient::inspectionLoadingChanged);
+    QSignalSpy ready(client, &HgsClient::inspectionReady);
+    qsizetype accepted = -1;
+    QTRY_VERIFY_WITH_TIMEOUT(([&] {
+        if (accepted >= 0) return true;
+        const auto before = loading.size();
+        composer->sessionRefreshRequested(composer->sessionKey());
+        for (qsizetype i = before; i < loading.size(); ++i) {
+            const auto &row = loading[i];
+            if (row[0].toString() == host && row[1].toString() == name && row[2].toString().isEmpty()
+                && row[3].toString().isEmpty() && row[4].toBool()) {
+                accepted = ready.size(); return true;
+            }
+        }
+        return false;
+    })(), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(([&] {
+        for (qsizetype i = accepted; i < ready.size(); ++i) {
+            const auto &row = ready[i];
+            if (row[0].toString() == host && row[1].toString() == name && row[3].toString().isEmpty()
+                && row[2].toJsonObject() == details) return true;
+        }
+        return false;
+    })(), 10000);
+}
+
 class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
@@ -1746,18 +1778,27 @@ import json,pathlib,sys
 p=pathlib.Path(__file__).parent/'details.json'
 print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
 )PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
-    SessionsWindow window(FakeCli::program(program));window.resize(1080,760);window.setFleet(fleet());window.show();window.showSession("mac","claude/infra/review");
-    auto *client=window.findChild<HgsClient *>();
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"phase","idle"},{"activity","idle"},{"runtime_state","live"},{"process_state","running"},
         {"conversation_id","old"},{"cursor",40},{"events",QJsonArray{QJsonObject{{"seq",40},{"at",1791018000.0},{"type","Stop"},{"agent_id",""},{"detail","Earlier answer"}}}},
         {"session_usage",QJsonObject{{"status","ok"},{"context",QJsonObject{{"used",109000},{"limit",258400}}}}},
         {"cache_hint",QJsonObject{{"status","cold"},{"tokens",109000}}}};
     // Polls read details.json while it changes: replace it atomically, or a torn read
     // fails an inspection and the session refuses to send.
-    const auto apply=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));client->inspectionReady("mac","claude/infra/review",details);};
+    const auto writeDetails=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));};
+    // The first real inspection must already see the original conversation.
+    // An empty startup reply would reset the earlier timeline during draft load.
+    writeDetails();
+    SessionsWindow window(FakeCli::program(program));window.resize(1080,760);window.setFleet(fleet());window.show();window.showSession("mac","claude/infra/review");
+    auto *client=window.findChild<HgsClient *>();
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    const auto apply=[&]{writeDetails();client->inspectionReady("mac","claude/infra/review",details);};
+    settleSelectedInspection(composer,client,"mac","claude/infra/review",details);
     apply();auto *context=window.findChild<QPushButton *>("activityContext");QVERIFY(context->text().contains("42%"));
     auto *cache=window.findChild<ToolbarChip *>("cacheChip");QVERIFY(cache->isActive());
-    auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep this draft");
+    setComposerText(composer, "Keep this draft");
+    auto *activity=window.findChild<ActivityView *>("mainActivity");QVERIFY(activity);
+    QTRY_VERIFY(activity->plainText().contains("Earlier answer"));
+    settleSelectedInspection(composer,client,"mac","claude/infra/review",details);
     details["conversation_id"]="new";details["session_usage"]=QJsonObject{{"status","unavailable"}};details.remove("cache_hint");
     details["session_clear"]=QJsonObject{{"type","SessionCleared"},{"at",1791018003.0},{"activity_key","clear-new"}};
     details["cleared_conversations"]=QJsonArray{"old"};details["cursor"]=41;
@@ -1765,7 +1806,6 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
     apply();
     // The first new-conversation reply paints now, before the follow-up read
     // with its reset journal cursor returns.
-    auto *activity=window.findChild<ActivityView *>("mainActivity");QVERIFY(activity);
     QTRY_VERIFY(activity->plainText().contains("Session cleared"));
     // Earlier activity stays in place above the boundary.
     const auto timeline=activity->plainText();
@@ -2328,11 +2368,12 @@ void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews(
     SessionsWindow window(fixture); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
-    QSignalSpy ready(client, &HgsClient::inspectionReady); QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
-    client->requestInspection({}, "codex/hgs/dashboard"); QTRY_VERIFY(!ready.isEmpty());
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
     setComposerText(composer, "Keep my exact draft");
     auto cursor = composer->editor()->textCursor(); cursor.setPosition(4); cursor.setPosition(9, QTextCursor::KeepAnchor);
     composer->editor()->setTextCursor(cursor); composer->editor()->setFocus(); QTest::qWait(20);
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
     const auto tabPosition = tabs->mapTo(&window, QPoint()); const auto tabSize = tabs->size();
     const auto editorRect = composer->editor()->geometry();
     client->inspectionFailed({}, "codex/hgs/dashboard", "timed out"); QTest::qWait(20);
