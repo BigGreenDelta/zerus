@@ -373,6 +373,8 @@ void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
     cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
     browser->setTextCursor(cursor);
     const auto selected = browser->textCursor().selectedText(); QVERIFY(!selected.isEmpty());
+    const auto preview = qEnvironmentVariable("HGS_ACTIVITY_SCROLL_PREVIEW");
+    if (!preview.isEmpty()) QVERIFY(view.grab().save(preview));
     const int scrollBefore = bar->value();
     QLineEdit editor; editor.show();
     qint64 bestCpu = std::numeric_limits<qint64>::max();
