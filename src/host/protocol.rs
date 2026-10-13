@@ -458,7 +458,9 @@ pub struct CreateSession {
     pub cwd: String,
     /// The whole environment block of the session's supervisor as `KEY=VALUE`
     /// strings, in order: the creating client's environment with the session's
-    /// overrides (D8). The host never adds its own.
+    /// overrides (D8). The host never adds its own environment; it sets only
+    /// what it alone knows (`HGS_HOST_SESSION`, `HGS_HOST_PANE`) and the
+    /// terminal type (`TERM=xterm-256color`, without `COLORTERM`).
     pub env: Vec<String>,
     /// The supervisor's command line, program first.
     pub argv: Vec<String>,
@@ -531,9 +533,10 @@ pub enum Op {
         target: Target,
         keys: Vec<Key>,
     },
-    /// Paste text as is, line feeds included. With `bracketed`, the text goes
-    /// inside bracketed-paste markers when the application enabled them (tmux
-    /// `paste-buffer -p`).
+    /// Paste text as tmux `paste-buffer -r` does: line feeds included, other
+    /// control characters shown as `^X` (tmux 3.7 and later). With `bracketed`,
+    /// the text goes inside bracketed-paste markers when the application
+    /// enabled them (tmux `paste-buffer -p`).
     Paste {
         target: Target,
         text: String,

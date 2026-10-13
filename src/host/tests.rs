@@ -1,0 +1,1382 @@
+//! The session host's protocol end to end, on every platform: a real `Host`,
+//! its connection handling and the client library over in-memory links, with
+//! a fake launcher whose "programs" the tests drive. The ConPTY launcher and
+//! the pipe transport are covered by the Windows tests of their modules and by
+//! `tests/test_windows_host.py`.
+use super::{
+    channel::{answer_requests, NOT_AGENT_INPUT, NOT_RAW},
+    client::{ClientError, Connection, Event},
+    link::{memory_pair, write_json, Link},
+    protocol::{
+        Attach, Attached, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
+        Created, Done, EnvValue, ErrorBody, ErrorCode, Hello, HelloAnswer, HelloReply, InputClaim,
+        InputReady, Integrity, Key, Kind, Listed, Op, PaneDetails, Protocols, Resolved, Role,
+        Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
+    },
+    registry::{Host, Linger, Next},
+    server::serve_connection,
+    session::{
+        self, foreground, paste_bytes, Attachment, Console, LaunchPlan, Launched, Launcher, Out,
+    },
+};
+use std::{
+    collections::VecDeque,
+    io::{self, Read, Write},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Condvar, Mutex, PoisonError,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+const LIMIT: Duration = Duration::from_secs(10);
+const CLIENT_PID: u32 = 4242;
+/// Absolute paths as the host checks them on this platform.
+#[cfg(windows)]
+const PROGRAM: &str = r"C:\hgs\hgs.exe";
+#[cfg(windows)]
+const WORK: &str = r"C:\work\project";
+#[cfg(not(windows))]
+const PROGRAM: &str = "/opt/hgs/hgs";
+#[cfg(not(windows))]
+const WORK: &str = "/work/project";
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Poll `done` until it holds or `LIMIT` passes.
+fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + LIMIT;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A byte pipe like the pseudoconsole's: the reader blocks until bytes come
+/// or the pipe is closed.
+#[derive(Default)]
+struct Bytes {
+    state: Mutex<(VecDeque<u8>, bool)>,
+    ready: Condvar,
+}
+
+impl Bytes {
+    fn push(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.1 {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        state.0.extend(bytes);
+        self.ready.notify_all();
+        Ok(())
+    }
+
+    fn close(&self) {
+        lock(&self.state).1 = true;
+        self.ready.notify_all();
+    }
+
+    /// Everything readable now, waiting at most `timeout` for something.
+    fn take(&self, timeout: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.state);
+        while state.0.is_empty() && !state.1 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = self
+                .ready
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        state.0.drain(..).collect()
+    }
+}
+
+struct Reader(Arc<Bytes>);
+
+impl Read for Reader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut state = lock(&self.0.state);
+        loop {
+            if !state.0.is_empty() {
+                let count = buffer.len().min(state.0.len());
+                for (slot, byte) in buffer.iter_mut().zip(state.0.drain(..count)) {
+                    *slot = byte;
+                }
+                return Ok(count);
+            }
+            if state.1 {
+                return Ok(0);
+            }
+            state = self
+                .0
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+struct Writer(Arc<Bytes>);
+
+impl Write for Writer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.push(buffer)?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One fake session's program and console.
+struct Program {
+    pid: u32,
+    argv: Vec<String>,
+    cwd: String,
+    environment: Vec<(String, Option<String>)>,
+    /// What the program writes to its console.
+    output: Arc<Bytes>,
+    /// What the host writes to the console's input.
+    input: Arc<Bytes>,
+    exit: Mutex<Option<u32>>,
+    exited: Condvar,
+    sizes: Mutex<Vec<Size>>,
+    hung_up: AtomicBool,
+    ended: AtomicBool,
+    /// Like a program that handles CTRL_CLOSE_EVENT by exiting.
+    exit_on_hang_up: AtomicBool,
+    /// Processes in the session's job besides the root.
+    members: Mutex<Vec<u32>>,
+}
+
+impl Program {
+    fn write(&self, bytes: &[u8]) {
+        self.output.push(bytes).unwrap();
+    }
+
+    /// What the host has written to the input so far, after a short wait.
+    fn read_input(&self, wait: Duration) -> Vec<u8> {
+        self.input.take(wait)
+    }
+
+    /// Read input until it ends with `expected`, returning all of it.
+    fn input_until(&self, expected: &[u8]) -> Vec<u8> {
+        let mut seen = Vec::new();
+        eventually("console input", || {
+            seen.extend(self.input.take(Duration::from_millis(20)));
+            seen.ends_with(expected)
+        });
+        seen
+    }
+
+    fn exit(&self, code: u32) {
+        let mut exit = lock(&self.exit);
+        if exit.is_none() {
+            *exit = Some(code);
+        }
+        self.exited.notify_all();
+    }
+
+    fn sizes(&self) -> Vec<Size> {
+        lock(&self.sizes).clone()
+    }
+}
+
+struct FakeConsole(Arc<Program>);
+
+impl Console for FakeConsole {
+    fn resize(&self, size: Size) -> io::Result<()> {
+        lock(&self.0.sizes).push(size);
+        Ok(())
+    }
+
+    fn wait(&self) -> Option<u32> {
+        let mut exit = lock(&self.0.exit);
+        while exit.is_none() {
+            exit = self
+                .0
+                .exited
+                .wait(exit)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *exit
+    }
+
+    fn wait_exit(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut exit = lock(&self.0.exit);
+        while exit.is_none() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            exit = self
+                .0
+                .exited
+                .wait_timeout(exit, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
+    fn hang_up(&self) {
+        if self.0.hung_up.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.0.exit_on_hang_up.load(Ordering::SeqCst) {
+            self.0.exit(0xC000_013A);
+        }
+        // The console's output ends when it is closed.
+        self.0.output.close();
+    }
+
+    fn end(&self) {
+        self.0.ended.store(true, Ordering::SeqCst);
+        self.0.exit(1);
+        self.0.output.close();
+    }
+
+    fn current_command(&self) -> String {
+        "fake".into()
+    }
+
+    fn holds(&self, pid: u32) -> bool {
+        lock(&self.0.members).contains(&pid)
+    }
+}
+
+#[derive(Default)]
+struct Launches {
+    programs: Mutex<Vec<Arc<Program>>>,
+    next_pid: AtomicU32,
+    fail: AtomicBool,
+    /// The next programs have exited by the time their launch returns.
+    exit_at_once: AtomicBool,
+    /// While set, a launch waits (`waiting` counts those that do).
+    held: Mutex<bool>,
+    released: Condvar,
+    waiting: AtomicU32,
+}
+
+#[derive(Clone, Default)]
+struct FakeLauncher(Arc<Launches>);
+
+impl FakeLauncher {
+    fn program(&self, index: usize) -> Arc<Program> {
+        lock(&self.0.programs)[index].clone()
+    }
+
+    fn count(&self) -> usize {
+        lock(&self.0.programs).len()
+    }
+
+    fn hold(&self, held: bool) {
+        *lock(&self.0.held) = held;
+        self.0.released.notify_all();
+    }
+}
+
+impl Launcher for FakeLauncher {
+    fn launch(&self, plan: &LaunchPlan<'_>) -> io::Result<Launched> {
+        if self.0.fail.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("no such program"));
+        }
+        {
+            let mut held = lock(&self.0.held);
+            if *held {
+                self.0.waiting.fetch_add(1, Ordering::SeqCst);
+            }
+            while *held {
+                held = self
+                    .0
+                    .released
+                    .wait(held)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+        let exited = self.0.exit_at_once.load(Ordering::SeqCst).then_some(0);
+        let names = [
+            "TERM",
+            "COLORTERM",
+            "HGS_HOST_SESSION",
+            "HGS_HOST_PANE",
+            "Path",
+        ];
+        let program = Arc::new(Program {
+            pid: 1000 + self.0.next_pid.fetch_add(1, Ordering::SeqCst),
+            argv: plan.argv.to_vec(),
+            cwd: plan.cwd.into(),
+            environment: names
+                .iter()
+                .map(|name| {
+                    (
+                        name.to_string(),
+                        plan.environment.get(name).map(String::from),
+                    )
+                })
+                .collect(),
+            output: Arc::default(),
+            input: Arc::default(),
+            exit: Mutex::new(exited),
+            exited: Condvar::new(),
+            sizes: Mutex::new(vec![plan.size]),
+            hung_up: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+            exit_on_hang_up: AtomicBool::new(true),
+            members: Mutex::new(Vec::new()),
+        });
+        lock(&self.0.programs).push(program.clone());
+        Ok(Launched {
+            pid: program.pid,
+            output: Box::new(Reader(program.output.clone())),
+            input: Box::new(Writer(program.input.clone())),
+            console: Box::new(FakeConsole(program)),
+        })
+    }
+}
+
+fn identity() -> HelloReply {
+    HelloReply {
+        pid: 77,
+        created: "133000000000000000".into(),
+        image: r"C:\hgs\hgs.exe".into(),
+        image_hash: "ab".repeat(32),
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol: 0,
+        capabilities: vec!["attach".into()],
+        integrity: Integrity::from_rid(Integrity::MEDIUM),
+        windows_session: 1,
+        in_job: false,
+    }
+}
+
+fn no_argv(_: u32) -> Option<Vec<String>> {
+    None
+}
+
+fn new_host() -> (Arc<Host<FakeLauncher>>, FakeLauncher) {
+    let launcher = FakeLauncher::default();
+    (
+        Host::new(launcher.clone(), 77, "bundled", no_argv),
+        launcher,
+    )
+}
+
+/// A served connection's client end, authenticated as `pid`.
+fn raw_client(host: &Arc<Host<FakeLauncher>>, pid: u32) -> Arc<dyn Link> {
+    let (client, server) = memory_pair();
+    let host = host.clone();
+    thread::spawn(move || serve_connection(&host, Arc::new(server), &identity(), || Ok(pid)));
+    Arc::new(client)
+}
+
+fn connect_as(host: &Arc<Host<FakeLauncher>>, pid: u32, role: Role) -> Connection {
+    Connection::hello(raw_client(host, pid), role).unwrap()
+}
+
+fn connect(host: &Arc<Host<FakeLauncher>>) -> Connection {
+    connect_as(host, CLIENT_PID, Role::Cli)
+}
+
+fn strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| word.to_string()).collect()
+}
+
+fn create(launch_id: &str, name: &str) -> Op {
+    Op::CreateSession(CreateSession {
+        launch_id: launch_id.into(),
+        name: name.into(),
+        cwd: WORK.into(),
+        env: strings(&["Path=/bin", "COLORTERM=truecolor", "TERM=dumb"]),
+        argv: strings(&[PROGRAM, "--run", "claude"]),
+        size: Size { cols: 80, rows: 24 },
+    })
+}
+
+fn pane(name: &str) -> Target {
+    Target::Name(name.into())
+}
+
+fn capture(connection: &mut Connection, target: Target) -> String {
+    connection
+        .call::<Captured>(Op::Capture {
+            target,
+            styled: false,
+        })
+        .unwrap()
+        .text
+}
+
+fn info(connection: &mut Connection, target: Target) -> PaneDetails {
+    connection.call(Op::PaneInfo { target }).unwrap()
+}
+
+#[test]
+fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    assert_eq!(client.host().protocol, 1);
+    assert_eq!(client.host().pid, 77);
+    let created: Created = client.call(create("launch-a", "claude/p/a")).unwrap();
+    assert_eq!(
+        created,
+        Created {
+            session: "$0".into(),
+            pane: "%0".into(),
+            name: "claude/p/a".into(),
+            pid: 1000,
+            existing: false,
+        }
+    );
+    // A retried create starts nothing.
+    let again: Created = client.call(create("launch-a", "claude/p/a")).unwrap();
+    assert_eq!((again.session.as_str(), again.existing), ("$0", true));
+    assert_eq!(launcher.count(), 1);
+    // Another launch may not take the name.
+    let error = client
+        .call::<Created>(create("launch-b", "claude/p/a"))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Exists);
+    let second: Created = client.call(create("launch-c", "codex/p/b")).unwrap();
+    assert_eq!(
+        (second.session.as_str(), second.pane.as_str()),
+        ("$1", "%1")
+    );
+
+    // The program got the client's environment with the session's own.
+    let program = launcher.program(0);
+    assert_eq!(program.argv, [PROGRAM, "--run", "claude"]);
+    assert_eq!(program.cwd, WORK);
+    let variable = |name: &str| {
+        program
+            .environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.clone())
+    };
+    assert_eq!(variable("TERM").as_deref(), Some("xterm-256color"));
+    assert_eq!(variable("COLORTERM"), None);
+    assert_eq!(variable("HGS_HOST_SESSION").as_deref(), Some("$0"));
+    assert_eq!(variable("HGS_HOST_PANE").as_deref(), Some("%0"));
+    assert_eq!(variable("Path").as_deref(), Some("/bin"));
+
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-1".into()),
+        })
+        .unwrap();
+    let listed: Listed = client.call(Op::List).unwrap();
+    assert_eq!(listed.sessions.len(), 2);
+    assert_eq!(listed.sessions[0].id, "$0");
+    assert_eq!(listed.sessions[0].name, "claude/p/a");
+    assert_eq!(listed.sessions[0].attached, 0);
+    assert_eq!(listed.sessions[0].launch_id, "launch-a");
+    assert!(listed.sessions[0].created > 1_600_000_000);
+    assert_eq!(listed.panes[0].session, "claude/p/a");
+    assert_eq!(listed.panes[0].session_id, "$0");
+    assert_eq!(listed.panes[0].pane, "%0");
+    assert_eq!(listed.panes[0].pid, 1000);
+    assert!(!listed.panes[0].dead);
+    assert_eq!(listed.panes[0].run_marker, "run-1");
+    assert_eq!(listed.panes[1].run_marker, "");
+    assert!(listed.clients.is_empty());
+
+    for target in [
+        pane("codex/p/b"),
+        Target::Session("$1".into()),
+        Target::Pane("%1".into()),
+    ] {
+        let resolved: Resolved = client.call(Op::ResolveTarget { target }).unwrap();
+        assert_eq!(
+            resolved,
+            Resolved {
+                session: "$1".into(),
+                name: "codex/p/b".into(),
+                pane: "%1".into()
+            }
+        );
+    }
+    let missing = client
+        .call::<Resolved>(Op::ResolveTarget {
+            target: Target::Pane("%9".into()),
+        })
+        .unwrap_err();
+    assert_eq!(
+        (missing.code, missing.message.as_str()),
+        (ErrorCode::NotFound, "can't find pane: %9")
+    );
+}
+
+#[test]
+fn creates_check_their_request_and_report_a_failed_start() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    let mut cases = Vec::new();
+    for change in 0..5 {
+        let Op::CreateSession(mut request) = create("launch", "claude/p/a") else {
+            unreachable!()
+        };
+        match change {
+            0 => request.launch_id.clear(),
+            1 => request.name = "bad\nname".into(),
+            2 => request.argv = strings(&["hgs", "--run"]),
+            3 => request.cwd = "relative".into(),
+            _ => request.size = Size { cols: 0, rows: 24 },
+        }
+        cases.push(Op::CreateSession(request));
+    }
+    for op in cases {
+        assert_eq!(
+            client.call::<Created>(op).unwrap_err().code,
+            ErrorCode::Invalid
+        );
+    }
+    launcher.0.fail.store(true, Ordering::SeqCst);
+    let error = client
+        .call::<Created>(create("launch", "claude/p/a"))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert!(
+        error.message.contains("no such program"),
+        "{}",
+        error.message
+    );
+    // The launch ID was not used up.
+    let created: Created = client.call(create("launch", "claude/p/a")).unwrap();
+    assert!(!created.existing);
+}
+
+#[test]
+fn screens_keys_and_pastes_reach_the_pane_as_tmux_sends_them() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    program.write(b"hello\r\nworld \x1b[31mred\x1b[0m");
+    eventually("the screen", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("hello\nworld red\n")
+    });
+    let styled: Captured = client
+        .call(Op::Capture {
+            target: pane("claude/p/a"),
+            styled: true,
+        })
+        .unwrap();
+    assert!(
+        styled
+            .text
+            .starts_with("hello\nworld \x1b[31mred\x1b[39m\n"),
+        "{:?}",
+        styled.text
+    );
+    let details = info(&mut client, pane("claude/p/a"));
+    assert_eq!(
+        (
+            details.width,
+            details.height,
+            details.cursor_x,
+            details.cursor_y
+        ),
+        (80, 24, 9, 1)
+    );
+    assert_eq!(details.server_pid, 77);
+    assert_eq!(details.pane_pid, 1000);
+    assert_eq!(details.current_command, "fake");
+    assert_eq!(details.tty, "conpty:%0");
+    assert!(!details.in_mode && !details.dead && !details.bracketed_paste);
+
+    client
+        .call::<Done>(Op::SendKeys {
+            target: pane("claude/p/a"),
+            keys: vec![
+                Key::Literal("echo marker".into()),
+                Key::Named("Enter".into()),
+            ],
+        })
+        .unwrap();
+    assert_eq!(program.input_until(b"\r"), b"echo marker\r");
+    // Cursor keys follow the application's DECCKM.
+    program.write(b"\x1b[?1h");
+    eventually("DECCKM", || {
+        client
+            .call::<Done>(Op::SendKeys {
+                target: pane("claude/p/a"),
+                keys: vec![Key::Named("Up".into())],
+            })
+            .unwrap();
+        program.read_input(Duration::from_millis(50)) == b"\x1bOA"
+    });
+    // An empty list only checks the pane.
+    client
+        .call::<Done>(Op::SendKeys {
+            target: pane("claude/p/a"),
+            keys: Vec::new(),
+        })
+        .unwrap();
+
+    // Pastes are bracketed only when asked and the application enabled it.
+    let paste = |client: &mut Connection, bracketed| {
+        client
+            .call::<Done>(Op::Paste {
+                target: pane("claude/p/a"),
+                text: "a\nb".into(),
+                bracketed,
+            })
+            .unwrap();
+    };
+    paste(&mut client, true);
+    assert_eq!(program.input_until(b"b"), b"a\nb");
+    program.write(b"\x1b[?2004h");
+    eventually("bracketed paste", || {
+        info(&mut client, pane("claude/p/a")).bracketed_paste
+    });
+    paste(&mut client, true);
+    assert_eq!(program.input_until(b"\x1b[201~"), b"\x1b[200~a\nb\x1b[201~");
+    paste(&mut client, false);
+    assert_eq!(program.input_until(b"b"), b"a\nb");
+    assert_eq!(paste_bytes("", true), b"\x1b[200~\x1b[201~");
+    // A pasted end marker cannot end the paste early.
+    client
+        .call::<Done>(Op::Paste {
+            target: pane("claude/p/a"),
+            text: "x\x1b[201~\ry".into(),
+            bracketed: true,
+        })
+        .unwrap();
+    assert_eq!(
+        program.input_until(b"\x1b[201~"),
+        b"\x1b[200~x^[[201~\ry\x1b[201~"
+    );
+}
+
+#[test]
+fn pastes_show_control_characters_as_tmux_does() {
+    // Recorded from tmux 3.8 `paste-buffer -p -r` with bracketed paste on:
+    // every ASCII byte, then characters it leaves alone (C1 controls too).
+    let ascii: String = (0u8..0x80).map(char::from).collect();
+    let mut expected =
+        b"\x1b[200~^@^A^B^C^D^E^F\x07\x08\t\n^K^L\r^N^O^P^Q^R^S^T^U^V^W^X^Y^Z^[^\\^]^^^_".to_vec();
+    expected.extend((0x20u8..0x7f).collect::<Vec<_>>());
+    expected.extend_from_slice(b"^?\x1b[201~");
+    assert_eq!(paste_bytes(&ascii, true), expected);
+    let other = "e\u{301}\u{85}\u{9b}\u{a0}\u{ad}\u{200b}\u{feff}\u{fffe}😀";
+    assert_eq!(paste_bytes(other, false), other.as_bytes());
+}
+
+#[test]
+fn queries_get_one_answer_from_the_host_and_never_reach_clients() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    let (attached, stream) = connect_as(&host, 9, Role::Attach)
+        .attach(Attach {
+            target: pane("claude/p/a"),
+            size: Size { cols: 80, rows: 24 },
+            run_id: None,
+        })
+        .unwrap();
+    assert_eq!(attached.client, "c1");
+    // The repaint comes first.
+    let Event::Output(repaint) = stream.next().unwrap().unwrap() else {
+        panic!("no repaint")
+    };
+    assert!(repaint.starts_with(b"\x1b[?25l"), "{repaint:?}");
+
+    program.write(b"ab\x1b[6n\x1b[c\x1b]11;?\x07cd");
+    // The model answers CPR and DA1 once each; OSC 11 stays unanswered, as in tmux.
+    assert_eq!(program.input_until(b"c"), b"\x1b[1;3R\x1b[?1;2c");
+    let mut relayed = Vec::new();
+    eventually("relayed output", || {
+        if let Ok(Some(Event::Output(bytes))) = stream.next() {
+            relayed.extend(bytes);
+        }
+        relayed.ends_with(b"cd")
+    });
+    assert_eq!(relayed, b"abcd");
+
+    // The client's terminal answers too; only its typing reaches the pane.
+    stream
+        .send(b"\x1b[?1;2c\x1b[5;1Rtyped\x1b]11;rgb:0/0/0\x07")
+        .unwrap();
+    assert_eq!(program.input_until(b"typed"), b"typed");
+    // A lone ESC goes out once nothing completes it.
+    stream.send(b"\x1b").unwrap();
+    assert_eq!(program.input_until(b"\x1b"), b"\x1b");
+    assert!(program.read_input(session::ESCAPE_TIME * 3).is_empty());
+}
+
+#[test]
+fn attached_clients_follow_the_latest_size_and_learn_of_the_end() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    program.write(b"screen text");
+    eventually("the screen", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("screen text")
+    });
+    let attach = |host: &Arc<Host<FakeLauncher>>, pid, size| {
+        connect_as(host, pid, Role::Attach)
+            .attach(Attach {
+                target: pane("claude/p/a"),
+                size,
+                run_id: None,
+            })
+            .unwrap()
+    };
+    let small = Size { cols: 60, rows: 20 };
+    let large = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let (first, one) = attach(&host, 10, small);
+    let Event::Output(repaint) = one.next().unwrap().unwrap() else {
+        panic!("no repaint")
+    };
+    assert!(String::from_utf8_lossy(&repaint).contains("screen text"));
+    let details = info(&mut client, pane("claude/p/a"));
+    assert_eq!((details.width, details.height), (60, 20));
+    let (second, two) = attach(&host, 11, large);
+    assert_eq!(program.sizes().last(), Some(&large));
+    // Typing makes a client the latest.
+    one.send(b"x").unwrap();
+    program.input_until(b"x");
+    eventually("the resize", || program.sizes().last() == Some(&small));
+    one.resize(Size { cols: 70, rows: 21 }).unwrap();
+    eventually("the resize", || {
+        info(&mut client, pane("claude/p/a")).width == 70
+    });
+
+    let listed: Listed = client.call(Op::List).unwrap();
+    assert_eq!(listed.sessions[0].attached, 2);
+    let ids: Vec<(String, u32)> = listed
+        .clients
+        .iter()
+        .map(|entry| (entry.id.clone(), entry.pid))
+        .collect();
+    assert_eq!(
+        ids,
+        [(second.client.clone(), 11), (first.client.clone(), 10)]
+    );
+    client
+        .call::<Done>(Op::Notify {
+            client: second.client.clone(),
+            text: "Pasted".into(),
+        })
+        .unwrap();
+    let notice = loop {
+        match two.next().unwrap().unwrap() {
+            Event::Control(control) => break control,
+            Event::Output(_) => {}
+        }
+    };
+    assert_eq!(
+        notice,
+        Control::Notice {
+            text: "Pasted".into()
+        }
+    );
+    assert_eq!(
+        client
+            .call::<Done>(Op::Notify {
+                client: "c99".into(),
+                text: "x".into()
+            })
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+
+    // The first client detaches: the pane takes the other's size.
+    one.detach().unwrap();
+    while one.next().unwrap().is_some() {}
+    eventually("the detach", || {
+        info(&mut client, pane("claude/p/a")).width == 120
+    });
+    let clients: super::protocol::ClientList = client
+        .call(Op::ListClients {
+            target: Some(pane("claude/p/a")),
+        })
+        .unwrap();
+    assert_eq!(clients.clients.len(), 1);
+
+    // The session ends: the client gets its exit code, then the end.
+    program.exit(3);
+    let mut events = Vec::new();
+    while let Some(event) = two.next().unwrap() {
+        events.push(event);
+    }
+    assert_eq!(
+        events.last(),
+        Some(&Event::Control(Control::Exit { code: Some(3) }))
+    );
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+    assert!(program.hung_up.load(Ordering::SeqCst) && program.ended.load(Ordering::SeqCst));
+    // A retried create of the ended launch still finds it.
+    let created: Created = client.call(create("l", "claude/p/a")).unwrap();
+    assert_eq!((created.session.as_str(), created.existing), ("$0", true));
+}
+
+#[test]
+fn attach_checks_the_run_and_the_target() {
+    let (host, _launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let request = |run_id: Option<&str>| Attach {
+        target: pane("claude/p/a"),
+        size: Size { cols: 80, rows: 24 },
+        run_id: run_id.map(String::from),
+    };
+    let refused = connect(&host).attach(request(Some("run-1"))).err().unwrap();
+    assert_eq!(refused.code, ErrorCode::Refused);
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-1".into()),
+        })
+        .unwrap();
+    let (attached, _stream) = connect(&host).attach(request(Some("run-1"))).unwrap();
+    assert_eq!(
+        attached,
+        Attached {
+            client: "c1".into(),
+            session: "$0".into(),
+            name: "claude/p/a".into(),
+            pane: "%0".into()
+        }
+    );
+    let missing = connect(&host)
+        .attach(Attach {
+            target: pane("nothing"),
+            ..request(None)
+        })
+        .err()
+        .unwrap();
+    assert_eq!(missing.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn variables_names_and_kills() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    client.call::<Created>(create("m", "claude/p/b")).unwrap();
+    let show = |client: &mut Connection, name: &str| {
+        client
+            .call::<EnvValue>(Op::ShowEnvironment {
+                target: Target::Session("$0".into()),
+                name: name.into(),
+            })
+            .unwrap()
+            .value
+    };
+    assert_eq!(show(&mut client, "HGS_CLIENT"), None);
+    let set = |client: &mut Connection, value: Option<&str>| {
+        client
+            .call::<Done>(Op::SetEnvironment {
+                target: Target::Session("$0".into()),
+                name: "HGS_CLIENT".into(),
+                value: value.map(String::from),
+            })
+            .unwrap()
+    };
+    set(&mut client, Some("phone"));
+    assert_eq!(show(&mut client, "HGS_CLIENT").as_deref(), Some("phone"));
+    set(&mut client, None);
+    assert_eq!(show(&mut client, "HGS_CLIENT"), None);
+
+    let rename = |client: &mut Connection, name: &str| {
+        client.call::<Done>(Op::Rename {
+            target: Target::Session("$0".into()),
+            name: name.into(),
+        })
+    };
+    assert_eq!(
+        rename(&mut client, "claude/p/b").unwrap_err().code,
+        ErrorCode::Exists
+    );
+    rename(&mut client, "claude/p/c").unwrap();
+    assert_eq!(info(&mut client, pane("claude/p/c")).session_id, "$0");
+
+    // A kill hangs the console up; the program's close handler ends it.
+    client
+        .call::<Done>(Op::Kill {
+            target: pane("claude/p/c"),
+        })
+        .unwrap();
+    eventually("the kill", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.len() == 1
+    });
+    let program = launcher.program(0);
+    assert!(program.hung_up.load(Ordering::SeqCst));
+    assert_eq!(*lock(&program.exit), Some(0xC000_013A));
+    // Keys to an ended session fail.
+    assert_eq!(
+        client
+            .call::<Done>(Op::SendKeys {
+                target: pane("claude/p/c"),
+                keys: vec![Key::Named("Enter".into())],
+            })
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+/// A supervisor on its own connection, answering with `evidence`.
+fn supervise(
+    host: &Arc<Host<FakeLauncher>>,
+    pid: u32,
+    evidence: ConsoleEvidence,
+    program: Arc<Program>,
+) -> Result<thread::JoinHandle<Vec<SupervisorOp>>, ErrorBody> {
+    let link =
+        connect_as(host, pid, Role::Supervisor).register_supervisor(SupervisorRegistration {
+            session: "$0".into(),
+            pane: "%0".into(),
+            pid,
+        })?;
+    Ok(thread::spawn(move || {
+        let mut seen = Vec::new();
+        let _ = answer_requests(&*link, |op| {
+            seen.push(op.clone());
+            match op {
+                SupervisorOp::InputState => Ok(serde_json::to_value(&evidence).unwrap()),
+                SupervisorOp::Stop => {
+                    // Ctrl+Break ends the agent; the supervisor records and exits.
+                    program.exit(0);
+                    Ok(serde_json::json!({}))
+                }
+                SupervisorOp::Unsupported => Err(ErrorBody::new(ErrorCode::Unsupported, "?")),
+            }
+        });
+        seen
+    }))
+}
+
+fn evidence(echo: bool) -> ConsoleEvidence {
+    ConsoleEvidence {
+        line_input: false,
+        echo_input: echo,
+        processes: vec![
+            ConsoleProcess {
+                pid: 1000,
+                name: "hgs.exe".into(),
+            },
+            ConsoleProcess {
+                pid: 2000,
+                name: "node.exe".into(),
+            },
+        ],
+        agent_pid: Some(2000),
+        agent_alive: true,
+        agent_in_job: true,
+    }
+}
+
+#[test]
+fn the_supervisor_channel_carries_input_checks_and_stops() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    let claim = |pid| {
+        Op::InputState(InputClaim {
+            target: Target::Pane("%0".into()),
+            name: "claude/p/a".into(),
+            run_id: "run-1".into(),
+            agent: "claude".into(),
+            pid: Some(pid),
+        })
+    };
+    // Without the run marker and bracketed paste the pane is not ready.
+    let error = client.call::<InputReady>(claim(2000)).unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::Refused, NOT_AGENT_INPUT)
+    );
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-1".into()),
+        })
+        .unwrap();
+    program.write(b"\x1b[?2004h> ");
+    eventually("bracketed paste", || {
+        info(&mut client, pane("claude/p/a")).bracketed_paste
+    });
+    // No supervisor yet: signals and input checks fail closed.
+    let no_supervisor = client.call::<InputReady>(claim(2000)).unwrap_err();
+    assert_eq!(no_supervisor.code, ErrorCode::Refused);
+    assert!(
+        no_supervisor.message.contains("no supervisor"),
+        "{}",
+        no_supervisor.message
+    );
+    let pause = |client: &mut Connection, signal| {
+        client.call::<Done>(Op::Signal {
+            target: pane("claude/p/a"),
+            signal,
+        })
+    };
+    assert_eq!(
+        pause(&mut client, Signal::Pause).unwrap_err().code,
+        ErrorCode::Refused
+    );
+
+    // Only the session's own processes may register, under their own pid.
+    let stranger = supervise(&host, 3000, evidence(false), program.clone())
+        .err()
+        .unwrap();
+    assert_eq!(stranger.code, ErrorCode::Refused);
+    lock(&program.members).push(1500);
+    let lying = connect_as(&host, 1500, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: "$0".into(),
+            pane: "%0".into(),
+            pid: 1000,
+        })
+        .err()
+        .unwrap();
+    assert_eq!(lying.code, ErrorCode::Refused);
+    let supervisor = supervise(&host, 1000, evidence(false), program.clone()).unwrap();
+    let twice = supervise(&host, 1500, evidence(false), program.clone())
+        .err()
+        .unwrap();
+    assert_eq!(twice.code, ErrorCode::Exists);
+
+    let ready: InputReady = client.call(claim(2000)).unwrap();
+    assert_eq!((ready.cursor_x, ready.cursor_y), (2, 0));
+    let error = client.call::<InputReady>(claim(2001)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Refused);
+
+    // A pause is the supervisor's stop; the session then ends.
+    pause(&mut client, Signal::Pause).unwrap();
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+    assert_eq!(
+        supervisor.join().unwrap(),
+        [
+            SupervisorOp::InputState,
+            SupervisorOp::InputState,
+            SupervisorOp::Stop
+        ]
+    );
+}
+
+#[test]
+fn raw_mode_evidence_and_terminate_go_through_the_supervisor() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-1".into()),
+        })
+        .unwrap();
+    program.write(b"\x1b[?2004h");
+    eventually("bracketed paste", || {
+        info(&mut client, pane("claude/p/a")).bracketed_paste
+    });
+    let supervisor = supervise(&host, 1000, evidence(true), program.clone()).unwrap();
+    let error = client
+        .call::<InputReady>(Op::InputState(InputClaim {
+            target: pane("claude/p/a"),
+            name: "claude/p/a".into(),
+            run_id: "run-1".into(),
+            agent: "claude".into(),
+            pid: Some(2000),
+        }))
+        .unwrap_err();
+    assert_eq!(error.message, NOT_RAW);
+    // Terminate answers at once; the stop ends the session within its grace.
+    client
+        .call::<Done>(Op::Signal {
+            target: pane("claude/p/a"),
+            signal: Signal::Terminate,
+        })
+        .unwrap();
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+    assert_eq!(
+        supervisor.join().unwrap(),
+        [SupervisorOp::InputState, SupervisorOp::Stop]
+    );
+}
+
+#[test]
+fn hellos_are_checked_and_bad_requests_answered() {
+    let (host, _launcher) = new_host();
+    // Authentication refuses the client.
+    let (client, server) = memory_pair();
+    let served = {
+        let host = host.clone();
+        thread::spawn(move || {
+            serve_connection(&host, Arc::new(server), &identity(), || {
+                Err(ErrorBody::new(
+                    ErrorCode::Refused,
+                    "the session host runs elevated",
+                ))
+            })
+        })
+    };
+    let refused = Connection::hello(Arc::new(client), Role::Cli)
+        .err()
+        .unwrap();
+    assert!(matches!(refused, ClientError::Refused(ref body) if body.message.contains("elevated")));
+    served.join().unwrap();
+
+    // No common protocol.
+    let link = raw_client(&host, 1);
+    let mut hello = Hello::new(Role::Cli);
+    hello.protocols = Protocols { min: 7, max: 9 };
+    write_json(&*link, Kind::Json, &hello).unwrap();
+    let answer: HelloAnswer = link.read_frame().unwrap().unwrap().json().unwrap();
+    assert!(
+        matches!(answer, HelloAnswer::Refused(ref body) if body.code == ErrorCode::Unsupported)
+    );
+
+    // A first frame that is no hello.
+    let link = raw_client(&host, 1);
+    link.write_frame(Kind::Stream, b"x").unwrap();
+    let answer: HelloAnswer = link.read_frame().unwrap().unwrap().json().unwrap();
+    assert!(matches!(answer, HelloAnswer::Refused(ref body) if body.code == ErrorCode::Invalid));
+
+    // Bad and unknown requests are answered; the connection goes on.
+    let link = raw_client(&host, 1);
+    let mut connection = Connection::hello(link.clone(), Role::Cli).unwrap();
+    link.write_frame(Kind::Json, br#"{"id":5,"op":"capture"}"#)
+        .unwrap();
+    let response: super::protocol::Response = link.read_frame().unwrap().unwrap().json().unwrap();
+    assert_eq!(response.id, 5);
+    assert_eq!(response.result.unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(
+        connection.request(Op::Unsupported).unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    let status: super::protocol::HostStatus = connection.call(Op::HostStatus).unwrap();
+    assert_eq!((status.sessions, status.conpty.as_str()), (0, "bundled"));
+}
+
+#[test]
+fn an_idle_host_lingers_then_refuses_new_sessions() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    // A stop is refused while sessions run.
+    assert_eq!(
+        client.call::<Done>(Op::StopHost).unwrap_err().code,
+        ErrorCode::Busy
+    );
+    let waiting = {
+        let host = host.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            host.wait_for_exit(Duration::from_millis(200));
+            started.elapsed()
+        })
+    };
+    thread::sleep(Duration::from_millis(400));
+    assert!(!waiting.is_finished(), "a session runs");
+    let ended = Instant::now();
+    launcher.program(0).exit(0);
+    let waited = waiting.join().unwrap();
+    // It lingered after the last session ended.
+    assert!(ended.elapsed() >= Duration::from_millis(200), "{waited:?}");
+    assert!(host.exiting());
+    // A create that races the decision is refused; its client starts a new host.
+    let error = client
+        .call::<Created>(create("m", "claude/p/b"))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Busy);
+
+    // stop_host on an idle host ends the linger at once.
+    let (host, _launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Done>(Op::StopHost).unwrap();
+    let started = Instant::now();
+    host.wait_for_exit(Duration::from_secs(60));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn linger_counts_from_the_first_idle_moment() {
+    let mut linger = Linger::new(Duration::from_secs(5));
+    let start = Instant::now();
+    assert_eq!(linger.next(false, start), Next::Serve);
+    assert_eq!(
+        linger.next(true, start),
+        Next::Linger(Duration::from_secs(5))
+    );
+    assert_eq!(
+        linger.next(true, start + Duration::from_secs(2)),
+        Next::Linger(Duration::from_secs(3))
+    );
+    // Activity starts the count again.
+    assert_eq!(
+        linger.next(false, start + Duration::from_secs(3)),
+        Next::Serve
+    );
+    assert_eq!(
+        linger.next(true, start + Duration::from_secs(4)),
+        Next::Linger(Duration::from_secs(5))
+    );
+    assert_eq!(
+        linger.next(true, start + Duration::from_secs(9)),
+        Next::Exit
+    );
+}
+
+#[test]
+fn foreground_is_the_newest_child_of_the_root() {
+    assert_eq!(foreground(10, &[]), 10);
+    let processes = [(20, 10, 5), (21, 10, 9), (22, 21, 12), (23, 99, 30)];
+    assert_eq!(foreground(10, &processes), 21);
+}
+
+#[test]
+fn a_client_that_falls_behind_gets_a_repaint_instead() {
+    let (host, launcher) = new_host();
+    let mut connection = connect(&host);
+    connection
+        .call::<Created>(create("l", "claude/p/a"))
+        .unwrap();
+    let session = host.find(&pane("claude/p/a")).unwrap();
+    // Attached, but never read: six megabytes of output arrive meanwhile.
+    let client = Attachment::new(1, 1, Size { cols: 80, rows: 24 });
+    session.attach(client.clone()).unwrap();
+    let program = launcher.program(0);
+    let chunk = vec![b'x'; 1 << 20];
+    for _ in 0..6 {
+        program.write(&chunk);
+    }
+    program.write(b"\r\nEND");
+    eventually("the output", || {
+        capture(&mut connection, pane("claude/p/a")).contains("END")
+    });
+    session.detach(client.id);
+    let mut total = 0;
+    let mut last = Vec::new();
+    while let Some(item) = client.next() {
+        if let Out::Stream(bytes) = item {
+            total += bytes.len();
+            last = bytes;
+        }
+    }
+    // What was queued stayed near the limit, and the client still ends up
+    // with the whole screen.
+    assert!(total < (5 << 20), "{total} bytes queued");
+    assert!(String::from_utf8_lossy(&last).contains("END"));
+}
+
+#[test]
+fn a_session_that_ends_at_once_still_leaves_the_listing() {
+    // Its waiter may finish before the create registers it; it must neither
+    // stay listed as dead nor block the name or the host's exit.
+    let (host, launcher) = new_host();
+    launcher.0.exit_at_once.store(true, Ordering::SeqCst);
+    let mut client = connect(&host);
+    for round in 0..1000 {
+        let (launch, name) = (format!("quick-{round}"), format!("claude/p/q{round}"));
+        let created: Created = client.call(create(&launch, &name)).unwrap();
+        assert!(!created.existing);
+        eventually("the end", || {
+            client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+        });
+        // A retry finds the ended launch and starts nothing.
+        let again: Created = client.call(create(&launch, &name)).unwrap();
+        assert_eq!((again.pane, again.existing), (created.pane, true));
+    }
+    assert_eq!(launcher.count(), 1000);
+}
+
+#[test]
+fn a_rename_cannot_take_the_name_of_a_session_being_created() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    launcher.hold(true);
+    let creating = {
+        let mut other = connect(&host);
+        thread::spawn(move || other.call::<Created>(create("m", "claude/p/b")))
+    };
+    eventually("the launch", || {
+        launcher.0.waiting.load(Ordering::SeqCst) == 1
+    });
+    let refused = client
+        .call::<Done>(Op::Rename {
+            target: pane("claude/p/a"),
+            name: "claude/p/b".into(),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Exists);
+    launcher.hold(false);
+    assert_eq!(creating.join().unwrap().unwrap().name, "claude/p/b");
+    let mut names: Vec<String> = client
+        .call::<Listed>(Op::List)
+        .unwrap()
+        .sessions
+        .into_iter()
+        .map(|session| session.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["claude/p/a", "claude/p/b"]);
+}
+
+#[test]
+fn an_exiting_host_admits_no_hello_and_answers_the_connections_it_had() {
+    let (host, _launcher) = new_host();
+    let mut admitted = connect(&host);
+    host.wait_for_exit(Duration::from_millis(20));
+    assert!(host.exiting());
+    // A hello after the decision gets no answer: its client looks for the
+    // next host, as if this one were gone.
+    assert!(matches!(
+        Connection::hello(raw_client(&host, CLIENT_PID), Role::Cli),
+        Err(ClientError::Closed)
+    ));
+    // The host waits for the connection it had accepted, which is answered.
+    let draining = {
+        let host = host.clone();
+        thread::spawn(move || host.drain(LIMIT))
+    };
+    thread::sleep(Duration::from_millis(100));
+    assert!(!draining.is_finished(), "an admitted connection is open");
+    assert!(admitted
+        .call::<Listed>(Op::List)
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert_eq!(
+        admitted
+            .call::<Created>(create("late", "claude/p/late"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    drop(admitted);
+    let started = Instant::now();
+    draining.join().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
