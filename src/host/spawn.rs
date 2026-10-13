@@ -616,7 +616,8 @@ mod native {
             value: *const c_void,
             size: usize,
         ) -> io::Result<()> {
-            // The list was initialized in `new`; the caller vouches for `value`.
+            // SAFETY: the list was initialized in `new` and is not deleted while
+            // `self` lives; the caller vouches for `value`.
             if UpdateProcThreadAttribute(
                 self.as_mut_ptr(),
                 0,

@@ -336,6 +336,8 @@ pub(crate) struct PseudoConsole {
     /// The console's ends of the pipes, kept until a child has started on it.
     /// Then only the console holds them, so the output ends when it does.
     console_ends: Option<(OwnedHandle, OwnedHandle)>,
+    /// `release` gave up this handle's reference to the console.
+    released: bool,
 }
 
 impl PseudoConsole {
@@ -363,6 +365,7 @@ impl PseudoConsole {
                 api,
                 handle: Some(handle),
                 console_ends: Some((console_input, console_output)),
+                released: false,
             },
             Pipes {
                 input: File::from(input),
@@ -373,8 +376,16 @@ impl PseudoConsole {
 
     /// Start `command` on this console. Its flags may not ask for another console
     /// (`no_window`). Once it has started, the console's own pipe ends here close.
+    /// A released console takes no new process: its handle no longer holds the
+    /// console, which may already have ended, and a process given an ended
+    /// pseudoconsole fails to initialize with an error box (0xC0000142).
     pub(crate) fn spawn(&mut self, command: &Command) -> io::Result<Child> {
         let handle = self.open()?;
+        if self.released {
+            return Err(io::Error::other(
+                "the pseudoconsole was released and takes no new process",
+            ));
+        }
         // SAFETY: `self` is borrowed for the whole call, so the pseudoconsole
         // stays open until CreateProcessW has returned.
         let child = unsafe { spawn::spawn_attached(command, handle) }?;
@@ -391,17 +402,25 @@ impl PseudoConsole {
 
     /// Let the console end with its last client, so that the output ends when the
     /// session's processes have exited (ReleasePseudoConsole: the bundled pair and
-    /// Windows 11 24H2). Call it once the first process has started on the
-    /// console, which holds a reference from then on. False when this API lacks
-    /// it; then the output ends only when the console is closed. The console must
-    /// still be closed.
-    pub(crate) fn release(&self) -> io::Result<bool> {
+    /// Windows 11 24H2). Only once a process has started on the console, which
+    /// holds a reference from then on: released earlier, the console would end
+    /// at once. False when this API lacks it; then the output ends only when the
+    /// console is closed. The console must still be closed.
+    pub(crate) fn release(&mut self) -> io::Result<bool> {
         let Some(release) = self.api.release else {
             return Ok(false);
         };
         let handle = self.open()?;
-        // SAFETY: the pseudoconsole is open.
-        checked(unsafe { release(handle) })?;
+        if self.console_ends.is_some() {
+            return Err(io::Error::other(
+                "no process has started on the pseudoconsole yet",
+            ));
+        }
+        if !self.released {
+            // SAFETY: the pseudoconsole is open.
+            checked(unsafe { release(handle) })?;
+            self.released = true;
+        }
         Ok(true)
     }
 
@@ -620,6 +639,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bundled_dll_without_the_exports_is_unloaded_for_inbox() {
+        // A real DLL that loads with the bundled pair's flags but exports no
+        // pseudoconsole function: the loader path runs, then the inbox API wins.
+        let dir = tempfile::tempdir().unwrap();
+        let system = PathBuf::from(env::var_os("SystemRoot").expect("SystemRoot is set"))
+            .join(r"System32\version.dll");
+        fs::copy(system, dir.path().join(BUNDLED_DLL)).unwrap();
+        fs::write(dir.path().join(BUNDLED_SERVER), b"").unwrap();
+        let api = Api::load(Some(dir.path())).unwrap();
+        assert_eq!(api.source(), Source::Inbox);
+        assert_eq!(
+            api.fallback(),
+            Some(Fallback::Export("ConptyCreatePseudoConsole"))
+        );
+        assert_eq!(
+            Fallback::Export("ConptyCreatePseudoConsole").to_string(),
+            "the bundled conpty.dll lacks ConptyCreatePseudoConsole"
+        );
+    }
+
+    #[test]
     fn output_reaches_the_host_and_the_console_closes_after_its_child() {
         let api = Api::get().unwrap();
         assert!(PseudoConsole::new(
@@ -652,6 +692,8 @@ mod tests {
             console.spawn(&hidden).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+        // Released before any process has started, the console would end at once.
+        assert_eq!(console.release().is_err(), api.can_release());
 
         let marker = unique("echo");
         let argv = strings(&["cmd.exe", "/d", "/c", "echo", &marker]);
@@ -660,6 +702,12 @@ mod tests {
             .unwrap();
         let released = console.release().unwrap();
         assert_eq!(released, api.can_release());
+        if released {
+            // Its handle no longer holds the console, so nothing more starts on it.
+            assert!(console
+                .spawn(&on_console(&refused, &environment, &application))
+                .is_err());
+        }
         assert!(reader.wait_for(&marker), "{}", reader.text());
         assert_eq!(child.wait(LIMIT).unwrap(), Some(0));
         if released {

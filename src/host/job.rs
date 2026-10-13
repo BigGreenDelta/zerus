@@ -216,12 +216,14 @@ impl Job {
     /// Wait at most `timeout` until no process is left in the job; whether that
     /// happened. A job's own signal only reports time limits, so this polls.
     pub(crate) fn wait_empty(&self, timeout: Duration) -> io::Result<bool> {
-        let deadline = Instant::now() + timeout;
+        // A timeout past the clock's range (Duration::MAX) has no deadline
+        // instead of panicking.
+        let deadline = Instant::now().checked_add(timeout);
         loop {
             if self.process_ids()?.is_empty() {
                 return Ok(true);
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Ok(false);
             }
             thread::sleep(Duration::from_millis(10));
