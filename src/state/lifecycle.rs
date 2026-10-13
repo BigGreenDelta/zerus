@@ -356,9 +356,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
         // Only signal the exact PID whose start identity was just checked.
         // Never target a process group, terminal input or the tmux server.
         if let Some(scope)=scope {scope.changing();}
-        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-            return Err(io::Error::last_os_error().to_string());
-        }
+        crate::platform::request_exit(pid as u32).map_err(|e| e.to_string())?;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {

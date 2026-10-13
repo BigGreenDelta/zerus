@@ -494,11 +494,18 @@ pub(super) fn output_path(record: &Value, job: &Value) -> Result<Option<PathBuf>
             .filter_map(|p| p.parent().and_then(Path::parent).and_then(Path::parent))
             .any(|root| path.starts_with(root)),
         "claude" => {
-            let directory = format!("claude-{}", unsafe { libc::getuid() });
-            let mut roots = vec![
-                std::env::temp_dir().join(&directory),
-                Path::new("/tmp").join(directory),
-            ];
+            // Claude's own output directories on Windows are not known yet (Phase 2
+            // M4); there only the transcript's tool results qualify.
+            #[cfg(unix)]
+            let mut roots = {
+                let directory = format!("claude-{}", unsafe { libc::getuid() });
+                vec![
+                    std::env::temp_dir().join(&directory),
+                    Path::new("/tmp").join(directory),
+                ]
+            };
+            #[cfg(not(unix))]
+            let mut roots = Vec::new();
             if let Some(parent) = Path::new(string(record, "transcript")).parent() {
                 if uuid::Uuid::parse_str(string(record, "conversation_id")).is_ok() {
                     roots.push(

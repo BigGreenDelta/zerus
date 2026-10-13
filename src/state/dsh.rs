@@ -2,13 +2,21 @@
 //! Zerus, tmux, and individual sessions. HGS stores bindings, not credentials.
 use super::*;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::fs;
+use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+// The native host's socket and start (see `rpc` and `ensure_host`).
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, BufReader},
+    os::unix::net::UnixStream,
+    time::{Duration, Instant},
+};
 
+#[cfg(unix)]
 const VERSION: &str = "0.2.0-rc.2";
+#[cfg(unix)]
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
@@ -65,6 +73,20 @@ fn host_dir(record: &Value) -> PathBuf {
         )[..16],
     )
 }
+/// The native host listens on a Unix socket; DeepSeek is a Phase 2 non-goal on
+/// Windows, so nothing there starts or reaches a host.
+#[cfg(not(unix))]
+const UNSUPPORTED: &str =
+    "DeepSeek sessions are not supported on Windows yet; run them on a Linux or macOS machine.";
+#[cfg(not(unix))]
+fn rpc(_: &Value, _: &str, _: Value) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(not(unix))]
+fn ensure_host(_: &Value) -> Result<()> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
         .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
@@ -86,6 +108,7 @@ fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     }
     Ok(response["value"].clone())
 }
+#[cfg(unix)]
 fn ensure_host(record: &Value) -> Result<()> {
     let dir = host_dir(record);
     private_dir(&dir)?;
@@ -1203,7 +1226,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(test)]
+// DeepSeek is a Phase 2 non-goal on Windows.
+#[cfg(all(test, unix))]
 mod provider_failure_tests {
     use super::*;
     #[test]
@@ -1251,7 +1275,7 @@ mod provider_failure_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod question_identity_tests {
     use super::*;
     #[test]

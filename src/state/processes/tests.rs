@@ -169,6 +169,8 @@ fn bounded_outputs_and_projection_do_not_leak_output() {
     assert_ne!(id(&r, "child-a", "a"), id(&r, "child-b", "a"));
 }
 
+// Creates a Unix symlink.
+#[cfg(unix)]
 #[test]
 fn kimi_native_tasks_are_scoped_and_dead_running_records_stay_unconfirmed() {
     let temp = std::env::temp_dir().join(format!("hgs-process-test-{}", uuid::Uuid::new_v4()));

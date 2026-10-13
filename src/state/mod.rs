@@ -68,6 +68,9 @@ mod worktree_cleanup;
 
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
+    if let Err(detail) = local_sessions() {
+        return json!({"state":"unavailable","detail":detail,"stale":true,"worktrees":[]});
+    }
     worktrees::catalog(path, true)
 }
 mod launch_project;
@@ -82,12 +85,25 @@ use storage::*;
 pub(super) type Result<T> = std::result::Result<T, String>;
 pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi"];
 
-/// Whether the automatic recovery worker holds its lock.
+/// The entry points other modules call fail first where this computer runs no
+/// local sessions (a Windows control console), as they always have there.
+pub(super) fn local_sessions() -> Result<()> {
+    if crate::platform::local_sessions() {
+        Ok(())
+    } else {
+        Err(crate::platform::LOCAL_SESSIONS_UNSUPPORTED.into())
+    }
+}
+
+/// Whether the automatic recovery worker holds its lock; unknown without local
+/// sessions.
 pub(crate) fn recovery_worker_running() -> Option<bool> {
+    local_sessions().ok()?;
     Some(crate::status::locked(&root().join("recovery/worker.lock")))
 }
 
 pub(crate) fn account_context(name: &str) -> Result<Value> {
+    local_sessions()?;
     if dsh::exists(name) {
         return dsh::account_context(name);
     }
@@ -200,6 +216,7 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
 
 /// Enrich the CLI's tmux snapshot without a subprocess or a JSON stdin pipe.
 pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
+    local_sessions()?;
     archive::reconcile()?;
     let snapshot = live()?;
     let archived = archive::records()?;
@@ -298,6 +315,7 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
 /// Select a tracked conversation or explicit pending request by exact ID/home.
 /// Archives are separate instances and require an explicit archive restore.
 pub fn find_requested_session(agent: &str, requested: &str) -> Result<Option<String>> {
+    local_sessions()?;
     archive::reconcile()?;
     let _guard = lock(None)?;
     let snapshot = live()?;
@@ -340,12 +358,14 @@ pub fn find_requested_session(agent: &str, requested: &str) -> Result<Option<Str
 }
 
 pub fn startup_failure(name: &str) -> Result<Option<String>> {
+    local_sessions()?;
     attempts::startup_failure(name)
 }
 
 /// True means an exact confirmed binding; false is a matching pending request.
 /// A live name must still belong to the same pane/run, not merely an old record.
 pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Result<bool> {
+    local_sessions()?;
     let _guard = lock(None)?;
     let snapshot = live()?;
     if !record_path(name).exists() {
@@ -394,6 +414,7 @@ pub fn fork_session(
     expected_conversation: Option<&str>,
     dry: bool,
 ) -> Result<String> {
+    local_sessions()?;
     fork::start(
         name,
         tag,
@@ -405,6 +426,7 @@ pub fn fork_session(
 }
 
 pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Result<Value> {
+    local_sessions()?;
     if dsh::exists(name) {
         if !archive.is_empty() { return Err("DeepSeek archives are unavailable".into()); }
         return dsh::inspect(name, if agent.is_empty() { None } else { Some(agent) });
@@ -415,6 +437,7 @@ pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Resul
 }
 
 pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+    local_sessions()?;
     let matches_reference = |record: &Value| {
         string(record, "name").split('/').next() == reference.name.split('/').next()
             && string(record, "archive_id") == reference.archive
@@ -445,6 +468,7 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    local_sessions()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
     };
@@ -611,4 +635,25 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         _ => return Err(format!("unknown state operation: {command}")),
     }
     Ok(0)
+}
+
+#[cfg(all(test, not(unix)))]
+mod control_console_tests {
+    use super::*;
+    use crate::platform::LOCAL_SESSIONS_UNSUPPORTED as UNSUPPORTED;
+
+    #[test]
+    fn entry_points_answer_as_a_control_console() {
+        assert_eq!(dispatch(&["list".into()]).unwrap_err(), UNSUPPORTED);
+        assert_eq!(merge_snapshot(json!({"sessions":[]})).unwrap_err(), UNSUPPORTED);
+        assert_eq!(account_context("claude/p").unwrap_err(), UNSUPPORTED);
+        assert_eq!(startup_failure("claude/p").unwrap_err(), UNSUPPORTED);
+        assert_eq!(recovery_worker_running(), None);
+        assert_eq!(
+            worktree_catalog(Path::new(r"C:\work")),
+            json!({"state":"unavailable","detail":UNSUPPORTED,"stale":true,"worktrees":[]})
+        );
+        let error = with_launch_binding("claude/p", |_| Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), UNSUPPORTED);
+    }
 }

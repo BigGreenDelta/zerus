@@ -6,6 +6,7 @@ pub(crate) fn with_launch_binding<T>(
     name: &str,
     check: impl FnOnce(&Value) -> std::result::Result<T, anyhow::Error>,
 ) -> anyhow::Result<T> {
+    local_sessions().map_err(anyhow::Error::msg)?;
     let _writer = lock(None).map_err(anyhow::Error::msg)?;
     let _dsh = lock(Some(&root().join("dsh/bindings.lock"))).map_err(anyhow::Error::msg)?;
     let record = if dsh::exists(name) {

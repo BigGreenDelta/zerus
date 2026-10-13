@@ -219,6 +219,7 @@ pub(super) fn inherit(provider: &str, home: &Path, profile: &Path) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -245,6 +246,7 @@ mod tests {
         assert_eq!(first["oauthAccount"]["email"], "managed");
         let baseline = fs::read_to_string(profile.join(BASELINE)).unwrap();
         assert!(!baseline.contains("fixture-token") && !baseline.contains("memory.example.com"));
+        #[cfg(unix)]
         assert_eq!(fs::metadata(profile.join(".claude.json")).unwrap().permissions().mode() & 0o777, 0o600);
 
         // The profile changes one server and removes another; the user then edits both.

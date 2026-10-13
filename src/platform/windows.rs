@@ -113,6 +113,13 @@ pub fn prepare_environment() {
         }
     }
 }
+/// Whether this computer runs agent sessions. A Windows computer will once the
+/// user enables them (the `%USERPROFILE%\.config\hgs\local-sessions` marker) and
+/// its session host exists (Phase 2 milestone M3); until then it is a control
+/// console for remote machines whatever the marker says.
+pub fn local_sessions() -> bool {
+    false
+}
 /// Windows reports every exit as a code; crash statuses read as signals (see `exit_info`).
 pub fn code(status: ExitStatus) -> i32 {
     ExitInfo::of(status).exit_code()
@@ -742,12 +749,8 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
     })
 }
 
-#[allow(unused_imports)]
 pub use self::process::*;
-/// Process, file and control primitives for `state`, which does not compile on
-/// Windows yet; until it does, only `canonical` has callers here (the CLI's
-/// logical working directory and the account transfer).
-#[allow(dead_code)]
+/// Process, file and control primitives for `state`.
 mod process {
     use super::*;
 
@@ -1334,6 +1337,15 @@ mod process {
             }
             Ok(())
         }
+    }
+
+    /// Windows has no request to exit that reaches a process on another console;
+    /// the session host asks an agent's supervisor instead (Phase 2 D11).
+    pub fn request_exit(_: u32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "an agent on Windows is stopped through its session host",
+        ))
     }
 
     /// Stop requests in the signal numbers records use: SIGTERM for Ctrl+Break
@@ -2013,6 +2025,9 @@ mod tests {
         assert!(pinned.alive());
         // No polite request reaches an arbitrary process; the caller then kills.
         pinned.terminate().unwrap();
+        assert!(pinned.alive());
+        let error = request_exit(child.id()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(pinned.alive());
         pinned.kill().unwrap();
         child.wait().unwrap();

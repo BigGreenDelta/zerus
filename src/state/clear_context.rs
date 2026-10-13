@@ -369,6 +369,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(record["cleared_conversations"].is_null() && record["session_clear"].is_null());
         assert_eq!(earlier_conversations(&record),json!([]));
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn only_the_complete_native_empty_reset_header_matches() {
         let panel="\n >_ OpenAI Codex (v0.162.0)\n /fixture\n permissions: YOLO mode\n\n\n› Ask Codex to do anything\n GPT-6.1-Sol default\n ? for shortcuts\n";
         assert!(codex_reset_panel(panel,"/fixture"));
@@ -380,6 +382,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&screen,"/fixture"),"{screen}");
         }
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn resident_native_greetings_match_without_accepting_other_prose() {
         let header = ">_ OpenAI Codex (v0.160.1)\n/fixture\npermissions: YOLO mode\n\n";
         let footer = "\n\n› Ask Codex to do anything\nGPT-6.1-Sol default\n? for shortcuts\n";
@@ -394,6 +398,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&format!("{header}{prose}{footer}"), "/fixture"), "{prose}");
         }
     }
+    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    #[cfg(unix)]
     #[test] fn only_the_complete_released_idle_logo_is_decoration() {
         let header = ">_ OpenAI Codex (v0.162.0)\n/fixture\npermissions: YOLO mode\n\n";
         let logo = include_str!("data/codex-empty-state-60x21.txt").lines()

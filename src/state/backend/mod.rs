@@ -7,8 +7,8 @@
 //! where callers validate it, so their checks and messages stay where they were.
 //! Operations a backend lacks report local sessions as unavailable; Windows builds
 //! have no backend yet (Phase 2 adds the native session host).
-// Until `state` itself compiles on Windows, Windows builds reach this module only
-// through the CLI's local-session paths, which they reject before any call.
+// Only the tmux backend reads these types so far; Windows builds construct them
+// for a backend that refuses every action.
 #![cfg_attr(not(unix), allow(dead_code))]
 
 #[cfg(unix)]
@@ -16,7 +16,9 @@ mod tmux;
 
 use super::Result;
 use crate::cli::{Error, Result as CliResult};
-use crate::platform::LOCAL_SESSIONS_UNSUPPORTED as UNSUPPORTED;
+
+/// What an operation reports on a computer without a session terminal.
+const UNSUPPORTED: &str = "Local sessions are not supported on this computer yet";
 
 /// What a command acts on.
 #[derive(Clone, Copy, Debug)]
@@ -319,11 +321,23 @@ pub(crate) trait TerminalBackend: Sync {
     }
 }
 
-/// No local sessions on this computer.
+/// A computer without a session terminal (Windows until its session host
+/// exists). No host runs, so it has no live sessions: listings are empty, which
+/// leaves saved sessions stopped, and every action fails.
 #[cfg(not(unix))]
 struct Unavailable;
 #[cfg(not(unix))]
-impl TerminalBackend for Unavailable {}
+impl TerminalBackend for Unavailable {
+    fn panes(&self) -> Result<Vec<PaneRow>> {
+        Ok(Vec::new())
+    }
+    fn pane_paths(&self) -> Result<Vec<PanePath>> {
+        Ok(Vec::new())
+    }
+    fn session_name(&self, _id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
 
 #[cfg(unix)]
 static BACKEND: tmux::Tmux = tmux::Tmux;
@@ -413,5 +427,39 @@ mod tests {
             assert!(workspace::pane_cwds().is_empty());
             assert!(!current().session_exists("claude/p/a"));
         });
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unavailable_tests {
+    use super::*;
+    use crate::state::{storage, workspace};
+
+    #[test]
+    fn no_host_lists_no_live_sessions_and_refuses_every_action() {
+        let terminal = current();
+        assert!(!terminal.server_running() && !terminal.inside());
+        let listing = terminal.listing();
+        assert!(listing.clients.is_empty() && listing.sessions.is_empty());
+        assert!(terminal.attached_counts().is_none());
+        assert!(storage::live().unwrap().is_empty());
+        assert!(workspace::pane_cwds().is_empty());
+        assert!(!terminal.session_exists("claude/p"));
+        assert_eq!(terminal.session_name("$1").unwrap(), None);
+        assert_eq!(terminal.own_pane().unwrap_err(), UNSUPPORTED);
+        assert_eq!(
+            terminal.pane_info(Target::Pane("%1"), &[PaneField::Dead]).err(),
+            Some(UNSUPPORTED.into())
+        );
+        assert_eq!(terminal.capture("%1", Capture::Plain).unwrap_err(), UNSUPPORTED);
+        assert_eq!(terminal.send("%1", &[Key::Named("Enter")]).unwrap_err(), UNSUPPORTED);
+        assert_eq!(terminal.kill_session(Target::Name("claude/p")).unwrap_err(), UNSUPPORTED);
+        for result in [
+            terminal.attach(Target::Name("claude/p")).map(|exit| exit.code),
+            terminal.kill("claude/p"),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!((error.code, error.message.as_str()), (2, UNSUPPORTED));
+        }
     }
 }

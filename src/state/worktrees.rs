@@ -10,8 +10,11 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_TREES: usize = 512;
 const TTL: f64 = 30.0;
 static MOBILE_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn stop_mobile(_: libc::c_int) { MOBILE_STOP.store(true, std::sync::atomic::Ordering::Relaxed); }
+#[cfg(unix)]
 struct MobileSignals(Vec<(libc::c_int, libc::sighandler_t)>);
+#[cfg(unix)]
 impl MobileSignals {
     fn install() -> Self {
         MOBILE_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -20,8 +23,20 @@ impl MobileSignals {
         })).collect())
     }
 }
+#[cfg(unix)]
 impl Drop for MobileSignals {
     fn drop(&mut self) { for (signal, old) in &self.0 { unsafe { libc::signal(*signal, *old); } } }
+}
+/// Windows is no mobile gateway in Phase 2 (the mobile connector is Unix-only),
+/// so nothing cancels a mobile creation there; every Git call keeps its deadline.
+#[cfg(not(unix))]
+struct MobileSignals;
+#[cfg(not(unix))]
+impl MobileSignals {
+    fn install() -> Self {
+        MOBILE_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
 }
 fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Relaxed) }
 

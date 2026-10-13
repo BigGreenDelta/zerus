@@ -136,10 +136,10 @@ resume --all excludes Archive. kill --archive forgets only that archived entry.
 rename changes the session label while preserving its agent/project, process and conversation.
 "#;
 
-/// Fails where this build runs no local sessions (Windows). Forwarded `@host`
-/// commands never reach it.
+/// Fails where this computer runs no local sessions (Windows for now). Forwarded
+/// `@host` commands never reach it.
 fn local_sessions() -> Result<()> {
-    if platform::LOCAL_SESSIONS {
+    if platform::local_sessions() {
         Ok(())
     } else {
         Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
@@ -698,7 +698,7 @@ fn remote(
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> {
-    if !platform::LOCAL_SESSIONS {
+    if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.
         let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":{},"sessions":[],"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state),"local_sessions":false});
@@ -729,7 +729,7 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {
-    if !platform::LOCAL_SESSIONS {
+    if !platform::local_sessions() {
         println!("  (control console: sessions run on remote machines)");
         return Ok(());
     }
@@ -748,7 +748,7 @@ fn local_list(config: &Config) -> Result<()> {
 }
 fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     let dry = global_dry || has(args, "--dry-run");
-    if dry && !platform::LOCAL_SESSIONS {
+    if dry && !platform::local_sessions() {
         return Ok(0); // this machine's listing runs no command
     }
     if has(args, "--json") {

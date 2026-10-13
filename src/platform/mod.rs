@@ -2,7 +2,7 @@
 //! never interpolated shell commands (the SSH peer and tmux pane are explicit exceptions).
 //!
 //! Operating-system specific parts live in `unix` and `windows`. On Windows hgs is a
-//! control console for remote machines: the local session host is compiled out.
+//! control console for remote machines until local sessions run there (`local_sessions`).
 use crate::config::Config;
 use std::{
     env,
@@ -22,9 +22,8 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-/// Whether this build runs agent sessions on this machine. Windows builds manage
-/// remote machines only; their local session commands exit with code 2.
-pub const LOCAL_SESSIONS: bool = cfg!(unix);
+/// What a local session command reports where `local_sessions()` is false; it
+/// exits with code 2.
 pub const LOCAL_SESSIONS_UNSUPPORTED: &str =
     "Local sessions are not supported on Windows yet; choose a remote machine.";
 
@@ -40,8 +39,8 @@ pub fn capture(program: &str, args: &[&str]) -> Option<String> {
         None
     }
 }
-// Its callers (the tmux backend, the Unix clipboard helpers, the recovery and
-// voice workers) are Unix-only until `state` compiles on Windows.
+// Its callers (the tmux backend, the Unix clipboard helpers, the Linux recovery
+// and voice service starts) are Unix-only.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn silent(program: &str, args: &[&str]) -> bool {
     Command::new(program)
@@ -152,11 +151,8 @@ impl Drop for FileLock {
     }
 }
 
-// The process, file and control types below serve `state`, which compiles
-// only on Unix for now.
 /// Whether a process ID belongs to a running process, as far as this user can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub enum Presence {
     /// No process has this ID.
     Gone,
@@ -189,7 +185,6 @@ impl ExitInfo {
 
 /// One row of the system process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub struct ProcessRow {
     pub pid: u32,
     pub parent: u32,
@@ -200,7 +195,6 @@ pub struct ProcessRow {
 /// A process of this user, as the system reports it now. Other users' and
 /// exited (zombie) processes have none.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub struct ProcessIdentity {
     pub parent: u32,
     /// The process group; Windows has none.
@@ -215,7 +209,6 @@ pub struct ProcessIdentity {
 
 /// The executable and arguments of a process, read from the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub struct ProcessImage {
     pub executable: String,
     /// None when only the executable could be read.
@@ -234,7 +227,6 @@ pub struct FileIdentity {
 
 /// What `verify_private` expects at a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub enum Private {
     Directory,
     /// A regular file with a single link.
@@ -243,7 +235,6 @@ pub enum Private {
 
 /// Why a bounded child process gave no result.
 #[derive(Debug)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub enum RunError {
     /// The child could not be started.
     Spawn(io::Error),
@@ -253,8 +244,8 @@ pub enum RunError {
     TooLarge,
     /// The deadline passed or the caller cancelled the run.
     Stopped,
-    /// The child reported a failure.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    /// The child reported a failure (`lsof` outside Linux).
+    #[cfg_attr(any(target_os = "linux", not(unix)), allow(dead_code))]
     Failed,
     /// This computer cannot answer the question.
     #[cfg_attr(unix, allow(dead_code))]

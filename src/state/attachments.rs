@@ -407,6 +407,8 @@ mod tests {
         r["status"] = json!("pending");
         assert!(!belongs(&r, &record, "child"));
     }
+    // Creates a Unix symlink.
+    #[cfg(unix)]
     #[test]
     fn attachment_reads_cannot_escape_the_private_store() {
         let temp = tempfile::tempdir().unwrap();

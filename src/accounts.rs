@@ -2,8 +2,6 @@
 mod inspection;
 mod claude;
 mod claude_settings;
-// Only the Unix session host prepares managed agent homes for a launch.
-#[cfg(unix)]
 mod mcp_servers;
 mod permission_status;
 mod install;
@@ -339,7 +337,6 @@ pub const AUTH_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
 /// Called before state lookup: a resumed/forked record still retains its original native home.
-#[cfg(unix)]
 pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result<String> {
     let id = if account.is_empty() {format!("native-{provider}")} else {account.into()};
     let (profile,_,_) = lookup(config,&id)?;
@@ -349,7 +346,6 @@ pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result
 
 /// Append native switches only to the spawned argv; saved resume recipes stay
 /// unchanged so returning to provider settings takes effect on the next start.
-#[cfg(unix)]
 pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
     if mode != "bypass" || argv.is_empty() { return; }
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
@@ -370,7 +366,6 @@ pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
     argv.splice(at..at,values.iter().map(|v|(*v).to_owned()));
 }
 
-#[cfg(unix)]
 pub fn prepare_claude_settings() -> Result<()> {
     let account = env::var("HGS_ACCOUNT_ID").unwrap_or_default();
     if account.is_empty() || account.starts_with("native-") { return Ok(()); }
@@ -380,7 +375,6 @@ pub fn prepare_claude_settings() -> Result<()> {
     claude_settings::inherit(&Path::new(&home).join(".claude"),Path::new(&profile))
 }
 /// Managed profiles use the user's MCP servers; provider logins stay separate.
-#[cfg(unix)]
 pub fn prepare_mcp_servers(agent: &str) -> Result<()> {
     let account = env::var("HGS_ACCOUNT_ID").unwrap_or_default();
     if account.is_empty() || account.starts_with("native-") { return Ok(()); }
@@ -453,7 +447,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let dry = dry || args.iter().any(|arg| arg == "--dry-run");
     let operation = args.first().map(String::as_str).unwrap_or("ls");
     let id = args.get(1).map(String::as_str).unwrap_or("");
-    if !platform::LOCAL_SESSIONS {
+    if !platform::local_sessions() {
         // No agents run here: an empty catalog, and copies between remote machines.
         // As on Unix, `ls` ignores further arguments and `default` lists without an ID.
         match operation {
@@ -880,7 +874,7 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
     let from = arg(args, "--from").unwrap_or("@local");
     let to = arg(args, "--to").ok_or_else(|| Error::new(1, "--to MACHINE is required."))?;
     let local = |host: &str| host.is_empty() || host == "@local" || config.is_self(host);
-    if !platform::LOCAL_SESSIONS && (local(from) || local(to)) {
+    if !platform::local_sessions() && (local(from) || local(to)) {
         return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
     }
     validate(
@@ -916,7 +910,6 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 }
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
-#[cfg(unix)]
 pub fn run_script(account: &str, provider: &str, home: &str) -> String {
     if account.is_empty() {
         return "exec \"$0\" --run \"$@\"".into();
@@ -942,7 +935,7 @@ pub fn run_script(account: &str, provider: &str, home: &str) -> String {
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod permission_tests {
     use super::*;
     #[test]

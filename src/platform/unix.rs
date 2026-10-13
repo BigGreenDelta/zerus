@@ -48,6 +48,10 @@ pub fn prepare_environment() {
         env::remove_var("LC_ALL");
     }
 }
+/// Whether this computer runs agent sessions: Unix always does.
+pub fn local_sessions() -> bool {
+    true
+}
 pub fn code(status: ExitStatus) -> i32 {
     ExitInfo::of(status).exit_code()
 }
@@ -674,6 +678,14 @@ impl PinnedProcess {
         }
         Ok(())
     }
+}
+
+/// Ask process `pid` to exit (SIGTERM). Nothing forces it to.
+pub fn request_exit(pid: u32) -> io::Result<()> {
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 static SHUTDOWN_CHILD: AtomicI32 = AtomicI32::new(0);
@@ -1509,6 +1521,15 @@ mod tests {
         assert!(!pinned.alive());
         // Gone: no signal reaches whatever has the ID now.
         pinned.kill().unwrap();
+    }
+
+    #[test]
+    fn exit_requests_are_sigterm_and_report_a_missing_process() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        request_exit(child.id()).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        let error = request_exit(u32::MAX >> 1).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
     }
 
     #[test]
