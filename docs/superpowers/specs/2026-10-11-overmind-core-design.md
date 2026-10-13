@@ -541,7 +541,7 @@ The host resolves a pin that missed a rename of the session before the
 
 ### Tasks tab
 
-- A main tab **Tasks** after Activity, Terminal and Processes.
+- A main tab **Tasks** after Activity and Terminal, before Processes.
 - The tab shows one project's board and follows the selected session: selecting
   a session of another project shows that project, with the card it had open.
   A session of the same project, or without one, keeps the board, its scroll

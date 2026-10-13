@@ -1925,20 +1925,20 @@ if a[:1]!=['a']:
     auto log=[&]{QList<QJsonArray> result;QFile file(temp.filePath("inspections.jsonl"));if(file.open(QIODevice::ReadOnly))while(!file.atEnd())result<<QJsonDocument::fromJson(file.readLine()).array();return result;};
     auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);
     QTRY_VERIFY(!log().isEmpty());QTest::qWait(200);
-    QVERIFY(!tabs->isTabVisible(3));for(const auto &call:log())QVERIFY(call.contains("--skip-processes"));
+    QVERIFY(!tabs->isTabVisible(4));for(const auto &call:log())QVERIFY(call.contains("--skip-processes"));
     auto *settings=window.findChild<QWidget *>("settingsPage");
     settings->findChild<QDoubleSpinBox *>("activeSeconds")->setValue(1);
     settings->findChild<QDoubleSpinBox *>("backgroundSeconds")->setValue(5);
     QCOMPARE(QSettings().value("processes/activeSeconds").toDouble(),1.);
     const auto before=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>before,3500);
-    QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(3),QString("Processes"));
-    auto *enabled=settings->findChild<QCheckBox *>("processesEnabled");QVERIFY(enabled);enabled->setChecked(true);QVERIFY(tabs->isTabVisible(3));
-    tabs->setCurrentIndex(3);QTRY_VERIFY(!log().last().contains("--skip-processes"));
+    QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(4),QString("Processes"));
+    auto *enabled=settings->findChild<QCheckBox *>("processesEnabled");QVERIFY(enabled);enabled->setChecked(true);QVERIFY(tabs->isTabVisible(4));
+    tabs->setCurrentIndex(4);QTRY_VERIFY(!log().last().contains("--skip-processes"));
     const auto active=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>active,1800);QVERIFY(!log().last().contains("--skip-processes"));
     tabs->setCurrentIndex(1);settle();const auto terminal=log().size();QTest::qWait(2800);QCOMPARE(log().size(),terminal);
     for(const auto &call:log())QCOMPARE(call[1].toString(),QString("codex/hgs/dashboard"));
     tabs->setCurrentIndex(0);QTRY_VERIFY(log().size()>terminal); // Activity refreshes immediately on return.
-    tabs->setCurrentIndex(3);QTest::qWait(200);enabled->setChecked(false);QVERIFY(!tabs->isTabVisible(3));QCOMPARE(tabs->currentIndex(),0);
+    tabs->setCurrentIndex(4);QTest::qWait(200);enabled->setChecked(false);QVERIFY(!tabs->isTabVisible(4));QCOMPARE(tabs->currentIndex(),0);
     settle();const auto disabled=log().size();QTest::qWait(5600);
     QVERIFY(log().size()>disabled);for(const auto &call:log().sliced(disabled))QVERIFY(call.contains("--skip-processes"));
     window.hide();settle();const auto hidden=log().size();QTest::qWait(2800);QCOMPARE(log().size(),hidden);
@@ -4153,8 +4153,8 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
     QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
-    QCOMPARE(tabs->tabText(3),QString("Processes"));QVERIFY(tabs->isTabVisible(3));
-    QCOMPARE(tabs->tabText(4),QString("Tasks"));QVERIFY(tabs->isTabVisible(4));
+    QCOMPARE(tabs->tabText(3),QString("Tasks"));QVERIFY(tabs->isTabVisible(3));
+    QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
     QVERIFY(tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2));
     QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
@@ -4186,8 +4186,8 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
         QJsonObject{{"id","build"},{"command","cargo build --release"},{"description","Build the updated CLI"},{"owner","main"},{"cwd","/workspace/zerus"},{"status","running"},{"started_at",QDateTime::currentSecsSinceEpoch()-23}},
         QJsonObject{{"id","tests"},{"command","python3 tests/test_dsh_native.py -v"},{"owner","main"},{"cwd","/workspace/zerus"},{"status","completed"},{"started_at",QDateTime::currentSecsSinceEpoch()-65},{"ended_at",QDateTime::currentSecsSinceEpoch()-12},{"exit_code",0}}
     }}};
-    client->inspectionReady({},"codex/hgs/dashboard",data);QCOMPARE(tabs->tabText(3),QString("Processes (1)"));
-    tabs->setCurrentIndex(3);QVERIFY(window.findChild<QTreeWidget*>("processList")->isVisible());QCOMPARE(editor->toPlainText(),QString("Keep this draft"));
+    client->inspectionReady({},"codex/hgs/dashboard",data);QCOMPARE(tabs->tabText(4),QString("Processes (1)"));
+    tabs->setCurrentIndex(4);QVERIFY(window.findChild<QTreeWidget*>("processList")->isVisible());QCOMPARE(editor->toPlainText(),QString("Keep this draft"));
     if(!qEnvironmentVariable("HGS_PROCESSES_WINDOW_PREVIEW").isEmpty()){
         QTest::mouseClick(toggle,Qt::LeftButton);QTest::qWait(80);QVERIFY(window.grab().save(qEnvironmentVariable("HGS_PROCESSES_WINDOW_PREVIEW")));QTest::mouseClick(toggle,Qt::LeftButton);
     }
@@ -4307,8 +4307,8 @@ void TestSessionsWindow::tasksTabFollowsTheSessionsProject()
         SessionsWindow window(FakeCli::program(hgs));
         auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>("tasksView");
         QVERIFY(tabs && view);
-        // After Processes; Native UI keeps index 2.
-        QCOMPARE(tabs->indexOf(view), 4); QCOMPARE(tabs->tabText(4), QString("Tasks")); QCOMPARE(tabs->tabText(2), QString("Native UI"));
+        // Before Processes; Native UI keeps index 2.
+        QCOMPARE(tabs->indexOf(view), 3); QCOMPARE(tabs->tabText(3), QString("Tasks")); QCOMPARE(tabs->tabText(4), QString("Processes")); QCOMPARE(tabs->tabText(2), QString("Native UI"));
         QVERIFY(view->project().isEmpty());
         open(window);
         // First use opens the selected session's project.

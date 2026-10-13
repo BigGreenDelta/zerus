@@ -1870,8 +1870,8 @@ that does not know the session.
 
 <a id="overmind-desktop"></a>
 
-**On the desktop.** A session's **Tasks** tab, after Activity, Terminal and
-Processes, shows the board of one project. It follows the selected session:
+**On the desktop.** A session's **Tasks** tab, after Activity and Terminal and
+before Processes, shows the board of one project. It follows the selected session:
 selecting a session of another project shows that project's board, with the
 card it had open. Selecting a session of the same project, or one without a
 project, keeps the board, its scroll position, its filter and the open card, so

@@ -1093,9 +1093,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_nativeUi = new NativeUiView(&m_client); tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
-    // Tasks come last: Native UI keeps its index (2) and the Processes tab its place.
+    // Tasks sit before Processes; Native UI keeps its index (2).
     m_overmind = overmind ? overmind : new OvermindModel(&m_client, this);
-    m_tasks = new TasksView(m_overmind); tabs->addTab(m_tasks, tr("Tasks"));
+    m_tasks = new TasksView(m_overmind); tabs->insertTab(tabs->indexOf(m_processes), m_tasks, tr("Tasks"));
     connect(m_tasks, &TasksView::showRequested, this, [this] { if (selected()) m_detailTabs->setCurrentWidget(m_tasks); });
     connect(m_overmind, &OvermindModel::machineChanged, this, [this] { updateTasksView(); resolvePendingDecision(); });
     // Queues and decisions feed the Tasks chip and the session rows' badges.
