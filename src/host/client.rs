@@ -12,12 +12,15 @@ use super::{
     link::{write_json, Link},
     protocol::{
         Attach, Attached, Control, ErrorBody, ErrorCode, FrameError, Hello, HelloAnswer,
-        HelloReply, Kind, Op, Request, Response, Role, Size, SupervisorRegistration,
+        HelloReply, Kind, Op, Request, Response, Role, Size, SupervisorRegistration, PROTOCOLS,
     },
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{fmt, sync::Arc};
+use std::{fmt, io, sync::Arc, time::Duration};
+
+/// How long a client waits for the answer to its hello.
+const HELLO_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why there is no connection to a host.
 #[derive(Debug)]
@@ -72,23 +75,41 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
-    /// Say hello as `role` and read the host's answer.
+    /// Say hello as `role` and read the host's answer, waiting at most
+    /// `HELLO_ANSWER_TIMEOUT` for it.
     pub(crate) fn hello(link: Arc<dyn Link>, role: Role) -> Result<Self, ClientError> {
         let early = |error: FrameError| match error {
             FrameError::Io(_) | FrameError::Truncated => ClientError::Closed,
             other => ClientError::Protocol(format!("invalid session host hello answer: {other}")),
         };
+        let unusable = |error: io::Error| {
+            ClientError::Connect(format!("the session host connection failed: {error}"))
+        };
+        link.set_read_timeout(Some(HELLO_ANSWER_TIMEOUT))
+            .map_err(unusable)?;
         write_json(&*link, Kind::Json, &Hello::new(role)).map_err(early)?;
         let frame = link
             .read_frame()
             .map_err(early)?
             .ok_or(ClientError::Closed)?;
+        link.set_read_timeout(None).map_err(unusable)?;
         if frame.kind != Kind::Json {
             return Err(ClientError::Protocol(
                 "the session host answered the hello with stream data".into(),
             ));
         }
         match frame.json::<HelloAnswer>() {
+            // The host chooses from the range this hello offered; any other
+            // major is one this build cannot speak.
+            Ok(HelloAnswer::Accepted(host))
+                if !(PROTOCOLS.min..=PROTOCOLS.max).contains(&host.protocol) =>
+            {
+                Err(ClientError::Protocol(format!(
+                    "the session host chose protocol {}, which hgs {} does not speak",
+                    host.protocol,
+                    env!("CARGO_PKG_VERSION")
+                )))
+            }
             Ok(HelloAnswer::Accepted(host)) => Ok(Self {
                 link,
                 host,
@@ -104,6 +125,12 @@ impl Connection {
     /// The host's identity from its hello answer.
     pub(crate) fn host(&self) -> &HelloReply {
         &self.host
+    }
+
+    /// How long a request waits for its answer; None (the default) waits for
+    /// ever. A request that timed out leaves the connection out of step.
+    pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.link.set_read_timeout(timeout)
     }
 
     /// Send `op` and wait for its answer.
@@ -445,5 +472,26 @@ mod tests {
         drop(connection);
         server.join().unwrap();
         assert_eq!(ClientError::NoHost.to_string(), "no session host runs");
+    }
+
+    #[test]
+    fn a_protocol_outside_the_offered_range_is_refused() {
+        let (client, host) = memory_pair();
+        let server = thread::spawn(move || {
+            host.read_frame().unwrap().unwrap();
+            let chosen = HelloReply {
+                protocol: PROTOCOLS.max + 1,
+                ..identity()
+            };
+            write_json(&host, Kind::Json, &HelloAnswer::Accepted(chosen)).unwrap();
+        });
+        let error = Connection::hello(Arc::new(client), Role::Cli)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&error, ClientError::Protocol(message) if message.contains("does not speak")),
+            "{error}"
+        );
+        server.join().unwrap();
     }
 }

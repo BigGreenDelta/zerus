@@ -345,121 +345,50 @@ mod native {
         cli::{Error, Result},
         config::Config,
         host::{
-            endpoint,
-            pipe::{self, ConnectError, PipeStream},
-            protocol::{
-                self, Done, ErrorBody, ErrorCode, Hello, HelloAnswer, Kind, Op, Response, Role,
-                PROTOCOLS,
-            },
-            token,
+            client::{self, ClientError, Connection},
+            protocol::{Done, ErrorCode, Op, Role},
         },
         platform,
     };
-    use serde::de::DeserializeOwned;
     use std::{
         io,
         time::{Duration, Instant},
     };
 
     const VERSION: &str = env!("CARGO_PKG_VERSION");
-    /// How long a busy host may keep a connection waiting, and an answer may take.
+    /// How long an answer may take.
     const PATIENCE: Duration = Duration::from_secs(5);
     /// How long `stop` waits for a stopped host to exit.
     const EXIT_WAIT: Duration = Duration::from_secs(10);
 
-    /// A connection to this user's host for this state directory.
-    struct Connection {
-        stream: PipeStream,
-        hello: HelloReply,
-        next: u64,
-    }
-
-    impl Connection {
-        /// The host's connection, None when no host runs. Never starts one: a
-        /// host creates its secret before it listens, so without the secret or
-        /// the state directory there is none.
-        fn open(state: &Path) -> std::result::Result<Option<Self>, String> {
-            let state = match platform::canonical(state) {
-                Ok(state) => state,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(format!("{}: {error}", state.display())),
-            };
-            let Some(secret) = endpoint::existing_secret(&state).map_err(|e| e.to_string())? else {
-                return Ok(None);
-            };
-            let user = token::user_sid().map_err(|error| error.to_string())?;
-            let name = endpoint::pipe_name(&user, &state, &secret);
-            let mut stream = match pipe::connect(&name, Instant::now() + PATIENCE) {
-                Ok(stream) => stream,
-                Err(ConnectError::NoHost) => return Ok(None),
-                Err(error) => return Err(error.to_string()),
-            };
-            let failed = |error: io::Error| error.to_string();
-            stream.set_read_timeout(Some(PATIENCE)).map_err(failed)?;
-            stream.set_write_timeout(Some(PATIENCE)).map_err(failed)?;
-            protocol::write_json(&mut stream, Kind::Json, &Hello::new(Role::Cli))
-                .map_err(|error| error.to_string())?;
-            let hello = match json_frame(&mut stream)?.json::<HelloAnswer>() {
-                Ok(HelloAnswer::Accepted(hello)) => hello,
-                Ok(HelloAnswer::Refused(error)) => return Err(error.message),
-                Err(error) => return Err(format!("invalid session host hello: {error}")),
-            };
-            // The host chooses from the range this hello offered; any other
-            // major is a host this build cannot talk to.
-            if !(PROTOCOLS.min..=PROTOCOLS.max).contains(&hello.protocol) {
-                return Err(format!(
-                    "the session host chose protocol {}, which hgs {VERSION} does not speak",
-                    hello.protocol
-                ));
+    /// The connection to this user's host for `state`, None when no host
+    /// runs. Never starts one, and never creates the state directory: without
+    /// it, or without the secret a host creates before it listens, none runs.
+    fn open(state: &Path) -> std::result::Result<Option<Connection>, String> {
+        let state = match platform::canonical(state) {
+            Ok(state) => state,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("{}: {error}", state.display())),
+        };
+        match client::connect(&state, Role::Cli) {
+            Ok(connection) => {
+                connection
+                    .set_read_timeout(Some(PATIENCE))
+                    .map_err(|error| error.to_string())?;
+                Ok(Some(connection))
             }
-            Ok(Some(Self {
-                stream,
-                hello,
-                next: 1,
-            }))
-        }
-
-        /// Send `op` and read its answer.
-        fn call<T: DeserializeOwned>(&mut self, op: Op) -> std::result::Result<T, ErrorBody> {
-            let internal = |message: String| ErrorBody::new(ErrorCode::Internal, message);
-            let id = self.next;
-            self.next += 1;
-            protocol::write_json(&mut self.stream, Kind::Json, &protocol::Request { id, op })
-                .map_err(|error| internal(error.to_string()))?;
-            let response: Response = json_frame(&mut self.stream)
-                .map_err(internal)?
-                .json()
-                .map_err(|error| internal(format!("invalid session host answer: {error}")))?;
-            if response.id != id {
-                return Err(internal(format!(
-                    "the session host answered request {} instead of {id}",
-                    response.id
-                )));
-            }
-            response.payload()
-        }
-    }
-
-    /// The next frame, which must hold JSON.
-    fn json_frame(stream: &mut PipeStream) -> std::result::Result<protocol::Frame, String> {
-        match protocol::read_frame(stream) {
-            Ok(Some(frame)) if frame.kind == Kind::Json => Ok(frame),
-            Ok(Some(frame)) => Err(format!(
-                "the session host answered with a {:?} frame",
-                frame.kind
-            )),
-            Ok(None) => Err("the session host closed the connection".into()),
+            Err(ClientError::NoHost) => Ok(None),
             Err(error) => Err(error.to_string()),
         }
     }
 
     /// The host for `state`, asked for its status; never started.
     fn query(state: &Path) -> Host {
-        match Connection::open(state) {
+        match open(state) {
             Ok(None) => Host::Stopped,
             Ok(Some(mut connection)) => match connection.call::<HostStatus>(Op::HostStatus) {
                 Ok(status) => Host::Running {
-                    hello: Box::new(connection.hello),
+                    hello: Box::new(connection.host().clone()),
                     status,
                 },
                 Err(error) => Host::Unavailable(error.message),
@@ -510,7 +439,7 @@ mod native {
     fn stop(state: &Path, json: bool) -> Result<i32> {
         let unavailable =
             |error: String| Error::new(1, format!("cannot reach the session host: {error}"));
-        let Some(mut connection) = Connection::open(state).map_err(unavailable)? else {
+        let Some(mut connection) = open(state).map_err(unavailable)? else {
             if json {
                 print_json(&json!({"was_running": false, "pid": null, "exited": true}));
             } else {
@@ -518,18 +447,16 @@ mod native {
             }
             return Ok(0);
         };
-        let pid = connection.hello.pid;
+        let pid = connection.host().pid;
         // Pinned first, so a reused process ID is never mistaken for the host.
         // The host has just answered, so a process that cannot be pinned is not
         // known to be gone: its exit is then never reported.
-        let pinned = platform::PinnedProcess::pin(pid, &connection.hello.created).ok();
+        let pinned = platform::PinnedProcess::pin(pid, &connection.host().created).ok();
         match connection.call::<Done>(Op::StopHost) {
             Ok(Done {}) => {}
+            // The host says why it keeps running.
             Err(error) if error.code == ErrorCode::Busy => {
-                return Err(Error::new(
-                    1,
-                    format!("the session host keeps running: {}", error.message),
-                ))
+                return Err(Error::new(1, error.message))
             }
             Err(error) => return Err(unavailable(error.message)),
         }
