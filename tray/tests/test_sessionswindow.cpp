@@ -2662,7 +2662,16 @@ void TestSessionsWindow::modelSettingsKeepSessionIdentity()
     QByteArray body = "#!/usr/bin/env python3\nimport json,sys,pathlib,time\nroot=pathlib.Path(__file__).parent\nargs=sys.argv[1:]\n";
     body += "apply_error=" + QJsonDocument(QJsonArray{applyError}).toJson(QJsonDocument::Compact) + "[0]\n";
     body += preflightRefusal ? "preflight=True\n" : "preflight=False\n";
-    body += R"PY(if args[0]=='inspect':
+    // Polls read snapshot.json while a settings call rewrites it: replace it, so no
+    // inspection reads a truncated file and fails. Windows refuses the rename while
+    // a poll has the file open; retry then.
+    body += R"PY(def publish(data):
+ staged=root/'snapshot.tmp';staged.write_text(json.dumps(data))
+ for _ in range(250):
+  try:return staged.replace(root/'snapshot.json')
+  except PermissionError:time.sleep(.02)
+ sys.exit('snapshot.json stayed open')
+if args[0]=='inspect':
  print((root/'snapshot.json').read_text())
 elif args[0]=='settings':
  p=json.load(sys.stdin)
@@ -2676,14 +2685,14 @@ elif args[0]=='settings':
    # A send or another client consumed the pending request before this guard.
    data['model']=p['model'];data['effort']=p['effort']
    for field in ['pending_model','pending_effort','pending_settings_id']:data.pop(field,None)
-   (root/'snapshot.json').write_text(json.dumps(data))
+   publish(data)
   print(apply_error,file=sys.stderr);sys.exit(1)
  result='applied' if previous else 'scheduled'
  if result=='scheduled':
   data['pending_model']=p['model'];data['pending_effort']=p['effort'];data['pending_settings_id']=p['request_id']
  else:
   data['model']=p['model'];data['effort']=p['effort'];data.pop('pending_model',None);data.pop('pending_effort',None)
- (root/'snapshot.json').write_text(json.dumps(data))
+ publish(data)
  print(json.dumps({'status':result,'request_id':p['request_id'],'name':args[1],'run_id':p['expected_run_id'],
  'conversation_id':p['expected_conversation_id'],'model':p['model'],'effort':p['effort']}))
 )PY";
@@ -3017,7 +3026,9 @@ elif args[0]=='send':
         state["conversation_id"] = "saved-conversation"; state["expected_id"] = "saved-conversation";
         state["resume_message_can_send"] = false; state["resume_message_reason"] = "Finish login in Terminal";
     }
-    const auto save = [&] { QFile f(m_dir->filePath("first-state.json")); if (!f.open(QIODevice::WriteOnly)) return false; return f.write(QJsonDocument(state).toJson()) > 0; };
+    // Polls read first-state.json while it changes: replace it atomically, or a torn
+    // read fails an inspection and the session refuses to send.
+    const auto save = [&] { return FakeCli::replace(m_dir->filePath("first-state.json"), QJsonDocument(state).toJson()); };
     QVERIFY(save());
     SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
@@ -3351,8 +3362,11 @@ elif args[0]=='answer':
 void TestSessionsWindow::queuedQuestionAnswersDisappearAfterSubmission()
 {
     QTemporaryDir directory;QFile program(directory.filePath("hgs"));QVERIFY(program.open(QIODevice::WriteOnly));
+    // Polls read details.json while the answer rewrites it: replace it, so no inspection
+    // reads a truncated file and fails. Windows refuses the rename while a poll has the
+    // file open; retry then.
     program.write(R"PY(#!/usr/bin/env python3
-import json,pathlib,sys
+import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
 if sys.argv[1]=='inspect':
  print((root/'details.json').read_text())
@@ -3367,7 +3381,11 @@ elif sys.argv[1]=='answer':
   'question_hash':p['expected_question_hash'],'answers':p['answers']}
  details['input_queue']={'id':'native-queue-one','text':'↳ Which validation should run? → '+p['answers'][0]['text'],
   'can_send_now':True,'hint':'Interrupt and send the queued answer using the native action.'}
- (root/'details.json').write_text(json.dumps(details))
+ staged=root/'details.tmp';staged.write_text(json.dumps(details))
+ for _ in range(250):
+  try:staged.replace(root/'details.json');break
+  except PermissionError:time.sleep(.02)
+ else:sys.exit('details.json stayed open')
  print(json.dumps(dict(q['answer_delivery'],name=sys.argv[2])))
 )PY");program.close();QVERIFY(FakeCli::makeRunnable(program.fileName()));
     const QJsonObject question{{"question_id","optional-one"},{"question_hash","hash-one"},{"run_id","run-one"},
@@ -5787,6 +5805,9 @@ void TestSessionsWindow::stopNoticesExplainOriginalTargetAndCanBeDismissed()
         {"interrupt_supported", true}, {"turn_started", 1790928000.0}, {"prompt", "Original turn prompt"}, {"events", QJsonArray{}}, {"cursor", 0}};
     QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
     QVERIFY(FakeCli::replace(directory.filePath("failure"), outcome == "failed" ? QByteArray("hgs: Native interruption could not be verified") : QByteArray("hgs: This turn is no longer working")));
+    // Polls read details.json while the interrupt rewrites it: replace it, so no
+    // inspection reads a truncated file and fails. Windows refuses the rename while a
+    // poll has the file open; retry then.
     QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
     fixture.write(R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
@@ -5796,7 +5817,11 @@ elif sys.argv[1]=='interrupt':
  p=json.load(sys.stdin)
  with (root/'calls').open('a') as f:f.write('call\n')
  d=json.loads((root/'details.json').read_text());d.update(activity='idle',phase='idle',interrupt_supported=False)
- (root/'details.json').write_text(json.dumps(d))
+ staged=root/'details.tmp';staged.write_text(json.dumps(d))
+ for _ in range(250):
+  try:staged.replace(root/'details.json');break
+  except PermissionError:time.sleep(.02)
+ else:sys.exit('details.json stayed open')
  time.sleep(.15)
  print((root/'failure').read_text(),file=sys.stderr);sys.exit(1)
 else: print('{}')
