@@ -47,6 +47,7 @@ private:
     bool projectWorktree(const QString &path) const;
     void loadAccounts(bool refresh = false);
     void updateAccounts();
+    QJsonObject cachedUsage(const QJsonObject &profile) const;
     void updateUsage();
     void updateModels();
     QString agent() const;
@@ -90,5 +91,5 @@ private:
     QString m_prefillPath,m_prefillCanonicalPath,m_prefillContext;
     QToolButton *m_manage;
     quint64 m_validation = 0,m_accountRequest = 0;
-    QJsonArray m_accounts,m_removedAccounts;
+    QJsonArray m_accounts;
 };

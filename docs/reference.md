@@ -1197,10 +1197,16 @@ hosts. Limits use one current account snapshot, never the sum of machine usage.
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. **New session**
 shows one list of **Account and agent** pairs for the chosen computer on desktop
-(including macOS) and Android. A large provider logo spans two text lines: the
-account email and compact cached limits, or **limits n/a**. Default labels, profile
-IDs and quota error details are omitted from these rows. Exact profile identities
-remain separate even when their emails match. Opening the chooser, changing a
+(including macOS) and Android. A large colored provider logo spans two text lines: the
+account email and compact cached limits, or **limits n/a**. Desktop reuses the
+status footer's compact meter widget, including the selected usage indicator;
+Android shows the same usage/elapsed rails and pace colors. Default labels, profile
+IDs and quota error details are omitted from these rows. The account list uses
+the same provider identity and organization grouping as **Agent accounts**, with
+bindings only from the selected computer. Aliases of one account share a row;
+conflicting account IDs, organizations and unidentified profiles stay separate.
+The selected, remembered or default local profile remains the exact launch binding.
+Opening the chooser, changing a
 selection and refreshing its account catalog never probe providers for limits;
 existing shared or credential-validated native caches supply them. **Run shell** is a single desktop
 separate choice. The last successfully launched agent and account per computer

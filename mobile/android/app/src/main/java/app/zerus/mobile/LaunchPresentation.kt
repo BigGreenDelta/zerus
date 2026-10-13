@@ -2,11 +2,14 @@ package app.zerus.mobile
 
 import org.json.JSONObject
 import org.json.JSONArray
+import android.icu.lang.UCharacter
 
 data class LaunchAccount(val id: String,val provider: String,val label: String,val native: Boolean=false,val isDefault: Boolean=false,val installed:Boolean=true,val authStatus:String="unknown",val usage:ReportedAccount?=null)
-data class LaunchAccountChoice(val account:LaunchAccount,val title:String,val limits:String) {
+data class LaunchAccountChoice(val account:LaunchAccount,val title:String,val limits:String,val usage:ReportedAccount?=null) {
     val key get() = account.provider+"/"+account.id
 }
+enum class LaunchLimitTone { Normal, Warning, Critical }
+data class LaunchLimitPace(val used:Double,val elapsed:Double?,val tone:LaunchLimitTone)
 data class LaunchModel(val value:String,val label:String)
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
@@ -80,22 +83,51 @@ object LaunchPresentation {
     fun accountTitle(account:LaunchAccount):String = account.usage?.identity?.email?.takeIf(String::isNotBlank)
         ?: account.label.takeUnless { it.isBlank() || it in setOf("Default account","Native account") } ?: "Account n/a"
     /** Exact machine/profile cache reads only; recomposition never fetches provider limits. */
-    fun accountChoices(raw:JSONObject?,machine:MachineKey,catalogs:List<AccountCatalog>,now:Double):List<LaunchAccountChoice> {
+    fun accountChoices(raw:JSONObject?,machine:MachineKey,catalogs:List<AccountCatalog>,now:Double,
+        selectedProvider:String="",selectedAccount:String="",fold:(String)->String={ UCharacter.foldCase(it,true) }):List<LaunchAccountChoice> {
         val cache=catalogs.find { it.key==machine }?.accounts.orEmpty()
-        return agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
+        val local=agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
             val cached=cache.find { it.provider==account.provider && it.id==account.id }
                 ?.takeIf { account.authStatus in setOf("unknown","signed_in") &&
                     (account.usage==null || account.usage.identity.email.isNotBlank() && account.usage.identity.email==it.identity.email &&
                         account.usage.identity.accountId==it.identity.accountId && account.usage.identity.organization==it.identity.organization) }
             val reported=if(cached!=null && (account.usage==null || (cached.checkedAt ?: 0.0)>(account.usage.checkedAt ?: 0.0))) cached else account.usage
-            val title=accountTitle(account.copy(usage=reported))
-            LaunchAccountChoice(account,title,accountLimits(reported,now))
+            val snapshot=reported ?: AccountSnapshots.account(JSONObject().put("id",account.id).put("provider",account.provider).put("label",account.label))!!
+            account to snapshot.copy(id=account.id,provider=account.provider,label=account.label,native=account.native,isDefault=account.isDefault,installed=account.installed)
+        }
+        val catalog=AccountCatalog(machine,"",true,true,false,true,null,local.map { it.second })
+        // Match Accounts grouping within the selected computer; never borrow
+        // another computer's binding, even when its provider identity matches.
+        return AccountGrouping.group(listOf(catalog),fold).map { group ->
+            val members=group.members.map { member -> local.single { it.first.provider==member.account.provider && it.first.id==member.account.id }.first }
+            val chosen=members.firstOrNull { it.provider==selectedProvider && it.id==selectedAccount }
+                ?: members.firstOrNull { it.isDefault } ?: members.firstOrNull { it.native } ?: members.first()
+            val reported=group.snapshot.account
+            LaunchAccountChoice(chosen,accountTitle(chosen.copy(usage=reported)),accountLimits(reported,now),reported)
         }
     }
+    fun limitWindows(account:ReportedAccount?,now:Double)=account?.windows.orEmpty().filter {
+        it.usedPercent?.isFinite()==true && !AccountPresentation.ended(it,now)
+    }
+    /** Same quota/elapsed rails and pace colors as the desktop footer. */
+    fun limitPace(window:AccountWindow,now:Double):LaunchLimitPace {
+        val used=window.usedPercent?.takeIf { it.isFinite() }?.coerceIn(0.0,100.0) ?: 0.0
+        val threshold=if(used>=90) LaunchLimitTone.Critical else if(used>=70) LaunchLimitTone.Warning else LaunchLimitTone.Normal
+        val length=(window.minutes ?: 0.0)*60
+        val left=(window.resetsAt ?: now)-now
+        if(!length.isFinite() || length<=0 || !left.isFinite() || left<=0) return LaunchLimitPace(used,null,threshold)
+        val passed=(length-left).coerceAtLeast(0.0);val elapsed=passed/length
+        if(used>=100 || elapsed<.08) return LaunchLimitPace(used,elapsed,threshold)
+        val projected=used/elapsed
+        val tone=if(projected>100) {
+            val runsOut=(100-used)*passed/used
+            if(runsOut>=left/2) LaunchLimitTone.Warning else LaunchLimitTone.Critical
+        } else if(used>=90) LaunchLimitTone.Warning else LaunchLimitTone.Normal
+        return LaunchLimitPace(used,elapsed,tone)
+    }
     fun accountLimits(account:ReportedAccount?,now:Double):String {
-        val limits=account?.windows.orEmpty().mapNotNull { window ->
-            val used=window.usedPercent?.takeIf { it.isFinite() } ?: return@mapNotNull null
-            if(AccountPresentation.ended(window,now)) return@mapNotNull null
+        val limits=limitWindows(account,now).map { window ->
+            val used=window.usedPercent!!
             "${AccountPresentation.shortPeriod(window)} ${(used.coerceIn(0.0,100.0)+.5).toInt()}% used"
         } + account?.balances.orEmpty().mapNotNull { balance -> balance.balance?.let { "Balance: $it ${balance.currency}".trim() } }
         return limits.joinToString("  ").ifBlank { "limits n/a" }

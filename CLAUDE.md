@@ -55,6 +55,9 @@ which saves drafts and keeps one rollback copy. Never stage GUI copies in
 `~/Applications` or `~/.local/bin` by hand. Another session may be testing its own
 build: check the running GUI's `--build-info` and
 `~/.local/share/hgs/build-provenance.json`, and coordinate before replacing it.
+Source GUI installs from main must set `ZERUS_DEV_BUILD_NUMBER` to the CI sequence
+for that exact source. Never replace a numbered Dev installation with an
+unnumbered Stable-labelled main build.
 Test tmux operations with an existing isolated socket directory.
 Do not hot-reload a DeepSeek bridge that owns live agents: its disposal closes
 them. Use the native API compatibility path for resident adapters and keep
