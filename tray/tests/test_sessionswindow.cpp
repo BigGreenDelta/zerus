@@ -1749,7 +1749,9 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
         {"conversation_id","old"},{"cursor",40},{"events",QJsonArray{QJsonObject{{"seq",40},{"at",1791018000.0},{"type","Stop"},{"agent_id",""},{"detail","Earlier answer"}}}},
         {"session_usage",QJsonObject{{"status","ok"},{"context",QJsonObject{{"used",109000},{"limit",258400}}}}},
         {"cache_hint",QJsonObject{{"status","cold"},{"tokens",109000}}}};
-    const auto apply=[&]{QFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());data.close();client->inspectionReady("mac","claude/infra/review",details);};
+    // Polls read details.json while it changes: replace it atomically, or a torn read
+    // fails an inspection and the session refuses to send.
+    const auto apply=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));client->inspectionReady("mac","claude/infra/review",details);};
     apply();auto *context=window.findChild<QPushButton *>("activityContext");QVERIFY(context->text().contains("42%"));
     auto *cache=window.findChild<ToolbarChip *>("cacheChip");QVERIFY(cache->isActive());
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep this draft");
@@ -2106,7 +2108,9 @@ else:print('{}')
     // picked up by the next compaction poll, which reads details.json: poll often.
     constexpr int compactPollMs = 200; window.setCompactPollIntervalForTests(compactPollMs);
     auto *client=window.findChild<HgsClient *>();
-    const auto apply=[&]{QFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());data.close();client->inspectionReady("mac","claude/infra/review",details);};apply();
+    // Polls read details.json while it changes: replace it atomically, or a torn read
+    // fails an inspection and the held send is refused.
+    const auto apply=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));client->inspectionReady("mac","claude/infra/review",details);};apply();
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep until compacted");
     QSignalSpy finished(client,&HgsClient::sessionActionFinished);
     QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("coldCacheConfirm");QVERIFY(dialog);
@@ -2151,7 +2155,7 @@ else:print('{}')
     }
     details["compact_context_request"]=QJsonObject{{"request_id",id},{"status",navigated||outcome=="draft"||outcome=="identity"||outcome=="cancel"?"completed":outcome}};
     details["activity"]="idle";details["phase"]="idle";
-    if (navigated) { QFile data(temp.filePath("details.json")); QVERIFY(data.open(QIODevice::WriteOnly)); data.write(QJsonDocument(details).toJson()); }
+    if (navigated) QVERIFY(FakeCli::replace(temp.filePath("details.json"), QJsonDocument(details).toJson()));
     else apply();
     if(outcome=="completed" || outcome=="navigation" || outcome=="hidden") {
         QTRY_VERIFY(QFileInfo::exists(temp.filePath("send.json")));QFile sent(temp.filePath("send.json"));QVERIFY(sent.open(QIODevice::ReadOnly));
@@ -2608,7 +2612,7 @@ void TestSessionsWindow::modelSettingsKeepSessionIdentity()
         {"settings_change_supported", true}, {"settings_apply_when", state == "running" ? "ready" : "resume"},
         {"model_options", QJsonArray{QJsonObject{{"id", "gpt-6.1-sol"}, {"effort_options", QJsonArray{"high", "xhigh"}}}}},
         {"cursor", 0}, {"events", QJsonArray{}}};
-    const auto saveSnapshot = [&] { QFile data(snapshot); if (!data.open(QIODevice::WriteOnly)) return false; data.write(QJsonDocument(details).toJson()); return true; };
+    const auto saveSnapshot = [&] { return FakeCli::replace(snapshot, QJsonDocument(details).toJson()); };
     QVERIFY(saveSnapshot());
     QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
     QByteArray body = "#!/usr/bin/env python3\nimport json,sys,pathlib,time\nroot=pathlib.Path(__file__).parent\nargs=sys.argv[1:]\n";
@@ -3328,10 +3332,7 @@ elif sys.argv[1]=='answer':
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},
         {"runtime_state","live"},{"process_state","running"},{"activity","busy"},{"phase","thinking"},
         {"pending_questions",QJsonArray{question}},{"events",QJsonArray{}},{"cursor",0}};
-    const auto save=[&] {
-        QFile fixture(directory.filePath("details.json"));if(!fixture.open(QIODevice::WriteOnly))return false;
-        return fixture.write(QJsonDocument(details).toJson())>0;
-    };QVERIFY(save());
+    const auto save=[&] { return FakeCli::replace(directory.filePath("details.json"), QJsonDocument(details).toJson()); };QVERIFY(save());
     SessionsWindow window(FakeCli::program(program.fileName()));window.setFleet(fleet());window.show();window.activateWindow();window.showSession({},"codex/hgs/dashboard");
     auto *client=window.findChild<HgsClient *>();auto *card=window.findChild<QuestionCard *>();
     auto *composer=window.findChild<MessageComposer *>("messageComposer");
