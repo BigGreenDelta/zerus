@@ -49,6 +49,14 @@ if command -v ccache >/dev/null 2>&1; then
 fi
 if [ "$phase" != test ]; then
     cmake "${cmake_args[@]}"
+    # ccache learns an MSVC compile's headers from /showIncludes lines with the
+    # English prefix. A localized compiler prints another one, so ccache would
+    # miss header changes and return stale objects: it only passes compiles on.
+    if [ "$windows" = true ] && command -v ccache >/dev/null 2>&1 \
+        && ! grep -q '^msvc_deps_prefix = Note: including file:' "$gui_build/CMakeFiles/rules.ninja"; then
+        echo "ccache disabled: this compiler does not report included files in English" >&2
+        export CCACHE_DISABLE=1
+    fi
     cmake --build "$gui_build" --parallel "${ZERUS_BUILD_JOBS:-2}"
 fi
 if [ "$phase" = build ]; then
