@@ -13,6 +13,7 @@
 #include "HgsClient.h"
 #include "ProcessRunner.h"
 #include "SessionPresentation.h"
+#include "NativeSessionCapabilities.h"
 
 class TestHgsClient : public QObject {
     Q_OBJECT
@@ -64,6 +65,7 @@ private slots:
     void effortLateResponsesKeepRequestIdentity();
     void terminationPinsRun();
     void nativeLaunchReportsProcessResult();
+    void nativeApiSessionsRetainExactCapabilities();
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
@@ -434,6 +436,31 @@ print('DeepSeek session ready')
     client.launchDetachedSession("mac","codex",folder,"background","work","launch-three");
     QTRY_COMPARE(result.size(),3);QVERIFY(result[2][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@mac","codex",folder,"--new","-n","background","--launch-id","launch-three","-d","--account","work"}));
+}
+
+
+void TestHgsClient::nativeApiSessionsRetainExactCapabilities()
+{
+    QTemporaryDir directory;const auto program=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport json,sys\nopen(__file__+'.args','w').write(json.dumps(sys.argv[1:]))\n"
+        "print('{\"host\":\"fixture\",\"ok\":true,\"sessions\":[{\"name\":\"opencode/project/local\",\"cmd\":\"opencode\",\"tracked\":true,\"model\":\"ollama/qwen3:8b\",\"terminal_supported\":false,\"terminal_reason\":\"Native API session\",\"allowed_actions\":[\"pause\",\"rename\"]},{\"name\":\"opencode/project/legacy\",\"cmd\":\"opencode\",\"terminal_supported\":true}]}')\n"));
+    HgsClient client(FakeCli::program(program));QSignalSpy ready(&client,&HgsClient::localReady);
+    client.requestLocal();QTRY_COMPARE(ready.size(),1);
+    const auto session=qvariant_cast<BoxState>(ready[0][0]).sessions.first();
+    QCOMPARE(session.cmd,QString("opencode"));QCOMPARE(session.model,QString("ollama/qwen3:8b"));
+    QVERIFY(!session.bulkLifecycleSupported);QVERIFY(!NativeSessionCapabilities::terminal(session));QCOMPARE(NativeSessionCapabilities::terminalReason(session),QString("Native API session"));
+    QVERIFY(NativeSessionCapabilities::action(session,"pause"));QVERIFY(!NativeSessionCapabilities::action(session,"archive"));
+    QVERIFY(!NativeSessionCapabilities::action(session,"resume"));
+    const auto rows=qvariant_cast<BoxState>(ready[0][0]).sessions;QCOMPARE(rows.size(),2);
+    auto legacy=rows.last();QVERIFY(legacy.terminalReported);QVERIFY(legacy.terminalSupported);QVERIFY(NativeSessionCapabilities::terminal(legacy));
+    legacy.terminalReported=false;QVERIFY(!NativeSessionCapabilities::terminal(legacy));
+    QVERIFY(NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
+    legacy.cmd="dsh";QVERIFY(!NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
+    QSignalSpy launched(&client,&HgsClient::nativeSessionLaunched);
+    const auto model=QString("ollama/qwen3:8b");client.launchDetachedSession("remote","opencode","/fixture/folder","local","native-opencode","launch-local",model);
+    QTRY_COMPARE(launched.size(),1);QVERIFY(launched[0][1].toBool());
+    QFile args(program+".args");QVERIFY(args.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@remote","opencode","/fixture/folder","--new","-n","local","--launch-id","launch-local","--account","native-opencode","--model",model}));
 }
 
 void TestHgsClient::settingsUseStdinAndPinnedIdentityReceipt()

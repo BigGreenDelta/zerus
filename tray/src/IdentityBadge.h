@@ -13,7 +13,7 @@ namespace IdentityBadges {
 enum Kind { Provider, Machine };
 inline QString providerName(const QString &value) {
     return value == "codex" ? QStringLiteral("Codex") : value == "claude" ? QStringLiteral("Claude") :
-        value == "kimi" ? QStringLiteral("Kimi") : value == "dsh" ? QStringLiteral("DeepSeek") : value == "sh" ? QStringLiteral("Shell") : value;
+        value == "kimi" ? QStringLiteral("Kimi") : value == "opencode" ? QStringLiteral("OpenCode") : value == "dsh" ? QStringLiteral("DeepSeek") : value == "sh" ? QStringLiteral("Shell") : value;
 }
 inline QFont font(QFont base, Kind kind) {
     base.setPixelSize(11); base.setWeight(kind == Provider ? QFont::Medium : QFont::Normal); return base;
@@ -44,6 +44,9 @@ inline void paint(QPainter *p, const QRect &rect, Kind kind, const QString &valu
         } else if (value == "kimi") {
             p->drawLine(c + QPointF(-3, -4), c + QPointF(-3, 4));
             p->drawLine(c + QPointF(-3, 0), c + QPointF(3, -4)); p->drawLine(c + QPointF(-3, 0), c + QPointF(3, 4));
+        } else if (value == "opencode") {
+            p->drawLine(c+QPointF(-2,-3),c+QPointF(-5,0));p->drawLine(c+QPointF(-5,0),c+QPointF(-2,3));
+            p->drawLine(c+QPointF(2,-3),c+QPointF(5,0));p->drawLine(c+QPointF(5,0),c+QPointF(2,3));
         } else {
             p->drawLine(c + QPointF(-4, -3), c + QPointF(-1, 0)); p->drawLine(c + QPointF(-1, 0), c + QPointF(-4, 3));
             p->drawLine(c + QPointF(1, 3), c + QPointF(4, 3));

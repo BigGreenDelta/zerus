@@ -45,8 +45,19 @@ class Accounts(unittest.TestCase):
         return json.loads(self.run_hgs('account','add',id,'--provider',provider,'--label','Work').stdout)
     def fake_auth(self):
         d=self.home/'.codex'; d.mkdir(); (d/'auth.json').write_text(json.dumps({'OPENAI_API_KEY':'TEMPORARY-TEST-KEY'})); return d
+    def test_native_opencode_login_dry_run_never_invokes_auth(self):
+        fake=self.bin
+        binary=fake/"opencode";marker=self.root/"opencode-auth-marker"
+        binary.write_text("#!/bin/sh\nprintf called > "+str(marker)+"\n");binary.chmod(0o700)
+        previous=self.env.get("PATH","");self.env["PATH"]=str(fake)+":"+previous
+        try:
+            planned=self.run_hgs('account','login','native-opencode','--dry-run')
+            self.assertIn(b'opencode auth login',planned.stdout)
+            self.assertFalse(marker.exists())
+        finally:self.env["PATH"]=previous
+
     def test_defaults_do_not_touch_agent_homes(self):
-        data=self.ls(); self.assertEqual({p['provider'] for p in data['profiles'] if p['provider']!='dsh'}, {'codex','claude','kimi'})
+        data=self.ls(); self.assertEqual({p['provider'] for p in data['profiles'] if p['provider'] not in {'dsh','opencode'}}, {'codex','claude','kimi'})
         self.assertFalse((self.home/'.codex').exists()); self.assertFalse((self.config/'accounts.json').exists())
         self.assertNotIn('TEMPORARY',json.dumps(data))
     def test_create_private_catalog_and_profile(self):
@@ -57,7 +68,7 @@ class Accounts(unittest.TestCase):
         before=self.ls()['revision']; self.add()
         self.run_hgs('account','add','other','--provider','kimi','--revision',before,ok=False)
         self.run_hgs('account','add','work','--provider','codex',ok=False)
-        self.assertEqual(len([p for p in self.ls()['profiles'] if p['provider']!='dsh']),4)
+        self.assertEqual(len([p for p in self.ls()['profiles'] if p['provider'] not in {'dsh','opencode'}]),4)
     def test_permissions_are_revision_checked_and_machine_local(self):
         self.add();native=self.fake_auth();before=(native/'auth.json').read_bytes()
         for account in ['work','native-codex','native-claude','native-kimi','native-dsh']:
@@ -156,6 +167,8 @@ for line in sys.stdin:
         self.assertEqual((home/'probes').read_text(),'1')
         catalog=self.ls(); row=next(p for p in catalog['profiles'] if p['id']=='work')
         self.assertEqual(row['account_status']['identity']['email'],'work@example.test')
+        self.assertEqual(row['account_status']['windows'][0]['used_percent'],72)
+        self.assertEqual(row['account_status']['windows'][0]['window_minutes'],300)
         self.assertEqual((home/'probes').read_text(),'1') # listing never contacts the provider
         self.assertNotIn('DO-NOT-EXPOSE',json.dumps(catalog))
         (home/'auth.json').write_text('{"tokens":{"access_token":"CHANGED"}}')

@@ -43,11 +43,12 @@ class NativeClaudeQuestions(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory(prefix='hgs-claude-native-');self.addCleanup(self.temp.cleanup)
   self.root=Path(self.temp.name).resolve();self.bin=self.root/'.local/bin';self.bin.mkdir(parents=True);self.state=self.root/'state';self.state.mkdir()
   work=self.root/'work';work.mkdir();(self.root/'.claude').mkdir()
-  self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
+  self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=self.native_tool_input(work) if hasattr(self,'native_tool_input') else getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
   wrapped=self._testMethodName.startswith('test_wrapped_')
   self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else WRAPPED_ITEMS if wrapped else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
-  (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':'default' if self.approval_fixture or self.message_fixture else 'bypassPermissions'}}))
+  permission_mode=getattr(self,'native_permission_mode','default' if self.approval_fixture or self.message_fixture else 'bypassPermissions')
+  (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':permission_mode}}))
   fixture=self;self.native_requests=[]
   class Server(BaseHTTPRequestHandler):
    def log_message(self,*args):pass
@@ -79,7 +80,7 @@ class NativeClaudeQuestions(unittest.TestCase):
   # Claude can flush files after kill-server returns; remove HOME only after
   # its owned process has exited. This also runs when native startup fails.
   self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
-  self.tmux('new-session','-d','-s',self.name,'-x','87' if wrapped else '120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*([] if self.approval_fixture or self.message_fixture else ['--dangerously-skip-permissions']),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  self.tmux('new-session','-d','-s',self.name,'-x','87' if wrapped else '120','-y','45','-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
   self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Which release should we prepare?') in self.screen())
   transcript=next((self.root/'.claude/projects').glob('*/*.jsonl'));self.conversation_id=transcript.stem

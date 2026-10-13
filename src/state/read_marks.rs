@@ -236,6 +236,9 @@ type Current = (Value, String, Option<Vec<Value>>);
 /// questions (None when not indexed in time); None when the name has no
 /// current tracked or native session.
 fn current(name: &str) -> Result<Option<Current>> {
+    if opencode::exists(name) {
+        let view=opencode::inspect(name,None)?; let questions=view["pending_questions"].as_array().cloned();return Ok(Some((view,name.to_owned(),questions)));
+    }
     if dsh::exists(name) {
         return Ok(dsh::snapshots()?
             .into_iter()
@@ -299,7 +302,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             .map(|record| journal::journal_name(record).to_owned())
             .collect();
         let map = sessions.as_object_mut().ok_or("invalid read marks")?;
-        map.retain(|key, _| key == &owner || owners.contains(key) || dsh::exists(key));
+        map.retain(|key, _| key == &owner || owners.contains(key) || dsh::exists(key) || opencode::exists(key));
         let conversations = map.entry(owner.clone()).or_insert_with(|| json!({}));
         if !conversations.is_object() {
             *conversations = json!({});

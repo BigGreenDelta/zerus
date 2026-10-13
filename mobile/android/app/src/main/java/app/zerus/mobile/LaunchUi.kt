@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -14,7 +15,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
@@ -29,8 +29,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -84,6 +86,7 @@ private val Amber = Color(0xFFFFCB7D)
     ObscureConversation()
     var provider by rememberSaveable(form) { mutableStateOf("") }
     var account by rememberSaveable(form) { mutableStateOf("") }
+    var selectedModel by rememberSaveable(form) { mutableStateOf("") }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
     var folder by rememberSaveable(form) { mutableStateOf("") }
     var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
@@ -103,6 +106,9 @@ private val Amber = Color(0xFFFFCB7D)
     val catalog = model.launchCatalogState
     val providers = remember(catalog) { LaunchPresentation.agents(catalog) }
     val accounts = remember(catalog,provider) { LaunchPresentation.accounts(catalog,provider) }
+    val modelOptions = remember(catalog,provider,account) { LaunchPresentation.models(catalog,provider,account) }
+    LaunchedEffect(provider,account,modelOptions) { if(selectedModel.isNotBlank() && modelOptions.none { it.value==selectedModel }) selectedModel="" }
+    val accountChoices = LaunchPresentation.accountChoices(catalog,machine,model.accountCatalogs,System.currentTimeMillis()/1000.0)
     val projects = remember(catalog) { LaunchPresentation.projects(catalog) }
     val projectSupported = catalog?.opt("project_launch_supported") == true
     val project = projects.find { it.id == projectId }
@@ -169,8 +175,8 @@ private val Amber = Color(0xFFFFCB7D)
     fun requestClose() { if(busy) return;if(dirty) discarding = true else model.closeLaunch() }
     fun create() {
         if(busy || reason.isNotBlank()) return
-        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId)
-        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement)
+        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel)
+        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel)
     }
     fun selectFolder(path: String) { folder = path;browsedFolder = "";edited = true;model.browseLaunchDirectory(machine,path) }
     val canChoose = !busy && !model.launchWorktreeLoading && WorktreePresentation.entries(evidence).isNotEmpty()
@@ -293,18 +299,18 @@ private val Amber = Color(0xFFFFCB7D)
                         else WorktreePresentation.automaticNote(model.launchWorktreeState,folder,supported,model.launchWorktreeLoading)
                             .takeIf { it.isNotBlank() }?.let { LaunchHint(it) }
                     }
-                    LaunchSection("Agent and account") {
-                        LaunchMenuField("Agent",DesktopIcons.providerName(provider).takeIf { provider.isNotBlank() } ?: "Choose agent",!busy,
-                            providers.map { it to DesktopIcons.providerName(it) },provider,{ if(it != provider) { provider = it;account = "";edited = true } },
-                            leading = if(provider.isNotBlank()) { { ProviderBadge(provider,Modifier.size(22.dp)) } } else null,
-                            choiceLeading = { ProviderBadge(it,Modifier.size(22.dp)) })
+                    LaunchSection("Account and agent") {
+                        LaunchAccountList(accountChoices,provider,account,!busy) { chosen ->
+                            provider = chosen.provider;account = chosen.id;edited = true
+                        }
                         if(providers.isEmpty() && !model.launchCatalogLoading && catalog != null) LaunchHint("No installed native providers were reported.")
-                        val selectedAccount = accounts.find { it.id == account }
-                        LaunchMenuField("Account",selectedAccount?.let { LaunchPresentation.accountTitle(it,accounts) } ?: "Choose account",!busy && provider.isNotBlank(),
-                            accounts.map { it.id to LaunchPresentation.accountTitle(it,accounts) },account,{ account = it;edited = true },
-                            supporting = selectedAccount?.let { LaunchPresentation.accountStatus(it) }?.takeIf { it.isNotBlank() },
-                            leading = { Icon(Icons.Default.AccountCircle,null,tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                            choiceSupporting = { id -> accounts.find { it.id == id }?.let { LaunchPresentation.accountStatus(it) }.orEmpty() })
+                    }
+                    if(provider=="opencode") LaunchSection("Model") {
+                        val chosen=modelOptions.find { it.value==selectedModel }
+                        LaunchMenuField("Model",chosen?.label ?: "Native default model",!busy,
+                            listOf("" to "Native default model") + modelOptions.map { it.value to it.label },selectedModel,
+                            { selectedModel=it;edited=true },supporting=chosen?.value,choiceSupporting={ it },choiceSupportingMaxLines=3)
+                        LaunchHint("Models configured on $computer. Native default uses OpenCode's configuration.")
                     }
                     LaunchSection("Session name") {
                         OutlinedTextField(tag,{ tag = it },Modifier.fillMaxWidth(),singleLine = true,readOnly = busy,shape = RoundedCornerShape(12.dp),
@@ -366,6 +372,31 @@ private val Amber = Color(0xFFFFCB7D)
 @Composable private fun LaunchHint(text: String,modifier: Modifier = Modifier,color: Color = MaterialTheme.colorScheme.onSurfaceVariant) =
     Text(text,modifier,style = MaterialTheme.typography.bodySmall,color = color)
 
+@Composable internal fun LaunchAccountList(choices:List<LaunchAccountChoice>,provider:String,account:String,enabled:Boolean,onChoose:(LaunchAccount)->Unit) {
+    val logoSize=with(LocalDensity.current) { MaterialTheme.typography.bodyLarge.lineHeight.toDp()+MaterialTheme.typography.bodySmall.lineHeight.toDp() }
+    Surface(Modifier.fillMaxWidth(),shape = RoundedCornerShape(12.dp),color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp,MaterialTheme.colorScheme.outline)) {
+        Column(Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()).selectableGroup().alpha(if(enabled) 1f else .5f)) {
+            choices.forEach { choice -> key(choice.key) {
+                val selected = choice.account.provider == provider && choice.account.id == account
+                Surface(color = if(selected) MaterialTheme.colorScheme.primary.copy(alpha = .14f) else Color.Transparent) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).selectable(selected,enabled = enabled,role = Role.RadioButton) { onChoose(choice.account) }
+                        .semantics { contentDescription = "${DesktopIcons.providerName(choice.account.provider)} ${choice.title}, ${choice.limits}" }
+                        .padding(horizontal = 14.dp,vertical = 10.dp),verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(DesktopIcons.providerLogo(choice.account.provider),DesktopIcons.providerName(choice.account.provider),Modifier.size(logoSize),
+                            tint = DesktopIcons.providerColor(choice.account.provider,MaterialTheme.colorScheme.surface.luminance()<.5f))
+                        Column(Modifier.weight(1f)) {
+                            Text(choice.title,maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.bodyLarge,fontWeight = FontWeight.SemiBold)
+                            Text(choice.limits,maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            } }
+        }
+    }
+}
+
 @Composable private fun LaunchNotice(accent: Color?,content: @Composable ColumnScope.() -> Unit) {
     Surface(Modifier.fillMaxWidth(),color = MaterialTheme.colorScheme.surface,shape = RoundedCornerShape(12.dp),
         border = BorderStroke(1.dp,accent?.copy(alpha = .55f) ?: MaterialTheme.colorScheme.outline)) {
@@ -401,7 +432,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
 
 @Composable private fun LaunchMenuField(label: String,value: String,enabled: Boolean,choices: List<Pair<String,String>>,selected: String,onChoose: (String) -> Unit,
     modifier: Modifier = Modifier,supporting: String? = null,leading: (@Composable () -> Unit)? = null,choiceLeading: (@Composable (String) -> Unit)? = null,
-    choiceSupporting: ((String) -> String)? = null,onEmpty: (() -> Unit)? = null) {
+    choiceSupporting: ((String) -> String)? = null,choiceSupportingMaxLines:Int = 1,onEmpty: (() -> Unit)? = null) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         LaunchField(label,value,enabled && (choices.isNotEmpty() || onEmpty != null),{ if(choices.isEmpty()) onEmpty?.invoke() else expanded = true },
@@ -410,7 +441,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
             choices.forEach { (id,title) -> DropdownMenuItem(text = {
                 Column {
                     Text(title,fontWeight = if(id == selected) FontWeight.SemiBold else FontWeight.Normal,maxLines = 1,overflow = TextOverflow.Ellipsis)
-                    choiceSupporting?.invoke(id)?.takeIf { it.isNotBlank() }?.let { Text(it,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = 1,overflow = TextOverflow.Ellipsis) }
+                    choiceSupporting?.invoke(id)?.takeIf { it.isNotBlank() }?.let { Text(it,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = choiceSupportingMaxLines,overflow = TextOverflow.Ellipsis) }
                 }
             },leadingIcon = choiceLeading?.let { icon -> { icon(id) } },
                 trailingIcon = if(id == selected) { { Icon(Icons.Default.Check,"Selected",tint = MaterialTheme.colorScheme.primary) } } else null,

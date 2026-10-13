@@ -454,8 +454,8 @@ pub fn request(v: &Value) -> Result<()> {
                 if p.get("model").is_none() && p.get("effort").is_none() {
                     return Err(Error::BAD);
                 }
-                if p.get("model").is_some() {
-                    text(&p["model"], 120, false)?;
+                if p.get("model").is_some() && text(&p["model"], 256, false)?.len() > 256 {
+                    return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
                     if ![
@@ -609,6 +609,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                 &["request_id", "agent", "directory", "tag"],
                 &[
                     "account_id",
+                    "model",
                     "swarm_id",
                     "project_id",
                     "project_folder_id",
@@ -617,7 +618,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                     "worktree_common_dir",
                 ],
             )?;
-            if !["codex", "claude", "kimi", "dsh"]
+            if !["codex", "claude", "kimi", "dsh", "opencode"]
                 .iter()
                 .any(|a| p["agent"] == *a)
             {
@@ -631,6 +632,25 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                     .bytes()
                     .enumerate()
                     .all(|(i, c)| c.is_ascii_alphanumeric() || c == b'_' || (i > 0 && c == b'-'))
+                {
+                    return Err(Error::BAD);
+                }
+            }
+            if let Some(v) = p.get("model") {
+                let model = text(v, 256, false)?;
+                let (provider, identity) = model.split_once('/').ok_or(Error::BAD)?;
+                if p["agent"] != "opencode"
+                    || p["account_id"] != "native-opencode"
+                    || model.len() > 256
+                    || provider.is_empty()
+                    || provider.len() > 80
+                    || identity.is_empty()
+                    || model.chars().any(char::is_whitespace)
+                    || !provider.bytes().enumerate().all(|(i, c)| {
+                        c.is_ascii_alphanumeric()
+                            || c == b'_'
+                            || (i > 0 && [b'.', b'-'].contains(&c))
+                    })
                 {
                     return Err(Error::BAD);
                 }

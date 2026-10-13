@@ -72,12 +72,11 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         // belong to conversations so a rename/resume does not repeat a banner.
         if (s.state != "archived" && s.unreadReply && !s.replyId.isEmpty() && !s.conversationId.isEmpty()) {
             const auto key = "reply:" + s.cmd + ':' + s.conversationId;
-            // A main Stop can be a progress reply while subagents still work.
-            // Keep it unread, but wait for confirmed idleness before posting a
-            // banner. Commands the agent left running (stands, dev servers)
-            // never delay it: a finished turn is finished. Retain delivered
-            // identities below so a working/idle cycle cannot notify again.
-            const bool idle = s.activity == "idle" && s.phase == "idle" && s.subagentActiveCount == 0 && !s.needsAction();
+            // A main Stop can be a progress reply while background work is
+            // still running. Keep it unread, but wait for confirmed idleness
+            // before posting a banner. Retain delivered identities below so
+            // a working/idle cycle cannot notify again for the same reply.
+            const bool idle = s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses <= 0 && s.subagentActiveCount == 0 && !s.needsAction();
             // Hosts do not report routine ticks of a recurring scheduled job as
             // replies; consume any that arrive. The reply after the schedule
             // ends, or once its count is known, notifies as usual.

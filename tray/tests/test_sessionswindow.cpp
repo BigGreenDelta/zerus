@@ -218,7 +218,7 @@ private slots:
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
     void activeFilterCombinesWorkAndAttentionOnce();
-    void backgroundShellRowIsReadyAndOpensItsProcesses();
+    void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
     void refreshErrorsStayInComposerAndFooterWithoutMovingViews();
@@ -327,6 +327,9 @@ private slots:
     void terminationProgress();
     void remoteFolderLaunch();
     void launchNameFollowsRenameRules();
+    void openCodeModelLaunchUsesNativeAccountAndActivity();
+    void openCodeCapabilitiesPreserveDraftWithoutTerminal();
+    void machineBatchCountsExcludeNativeOpenCodeSessions();
     void nativeLaunchStaysInWorkspace_data();
     void nativeLaunchStaysInWorkspace();
     void nativeSignInPreservesDraftAndUnblocks();
@@ -2523,24 +2526,30 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/reminder"));
 }
 
-void TestSessionsWindow::backgroundShellRowIsReadyAndOpensItsProcesses()
+void TestSessionsWindow::backgroundShellRowKeepsActiveAndOpensItsProcesses()
 {
-    // Stands and dev servers the agent left running never keep a finished
-    // session working or hide its reply; Processes still shows them.
+    // A main Stop can leave two build/check commands running, as in the owner
+    // report. Both the list and opened header retain Background until they exit.
     QSettings().setValue("processes/enabled", true);
     auto state = fleet(); auto box = state.local(); auto &s = box.sessions[1];
     s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 2;
-    s.conversationId = "background-conversation"; s.replyId = "final-reply"; s.sharedRead = true;
+    s.backgroundStarted = QDateTime::currentSecsSinceEpoch() - 90;
+    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    s.conversationId = "background-conversation"; s.replyId = "progress-reply"; s.sharedRead = true;
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(script()); window.setFleet(state); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     QListWidgetItem *row = nullptr;
     for (int i=0;i<list->count();++i) if (list->item(i)->data(SessionRoles::Key).toString()==QString("\n")+s.name) row=list->item(i);
     QVERIFY(row);
-    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Ready"));
-    QVERIFY(!row->data(SessionRoles::Working).toBool());
-    QVERIFY(row->data(SessionRoles::Unread).toBool());
-    QVERIFY(!row->data(SessionRoles::Detail).toString().contains("running command"));
+    QCOMPARE(row->data(SessionRoles::Status).toString(),QString("Background"));
+    QCOMPARE(SessionDelegate::statusOf(list->model()->index(list->row(row),0),true).kind,SessionStatusBadge::Background);
+    QVERIFY(row->data(SessionRoles::Working).toBool());
+    QVERIFY(!row->data(SessionRoles::Unread).toBool());
+    QVERIFY(state.local().sessions[1].unreadReply);
+    QVERIFY(!row->data(SessionRoles::Scheduled).toBool());
+    QCOMPARE(row->data(SessionRoles::WorkingSince).toDouble(),s.backgroundStarted);
+    QVERIFY(row->data(SessionRoles::Detail).toString().contains("build --wait"));
     list->setCurrentItem(row);
     QSignalSpy terminated(&window,&SessionsWindow::sessionActivated);
     QContextMenuEvent event(QContextMenuEvent::Mouse,list->visualItemRect(row).center(),list->viewport()->mapToGlobal(list->visualItemRect(row).center()));
@@ -2551,6 +2560,7 @@ void TestSessionsWindow::backgroundShellRowIsReadyAndOpensItsProcesses()
     QCOMPARE(window.findChild<QTabWidget *>("sessionDetailTabs")->currentWidget(),window.findChild<ProcessView *>());
     QCOMPARE(terminated.size(),0);
     auto *badge=window.findChild<QLabel *>("badge"); QVERIFY(badge);
+    QVERIFY(badge->text().startsWith("Background"));
     QVERIFY(badge->width() >= badge->fontMetrics().horizontalAdvance(badge->text()) + 16);
     const QString preview=qEnvironmentVariable("ZERUS_BACKGROUND_PREVIEW");
     if(!preview.isEmpty())QVERIFY(window.grab().save(preview));
@@ -6390,14 +6400,14 @@ void TestSessionsWindow::launchFoldersFollowProject()
     const auto alternative=projects.addFolder(first,"mac","/remote/list-choice");
     projects.addFolder(second,"mac","/remote/different");projects.addFolder(second,"arch","/local/second");
     NewSessionDialog dialog(program(),fleet(),"mac","codex");dialog.setGroups(projects,first);QVERIFY(dialog.selectFolder(original));dialog.show();
-    auto *project=dialog.findChild<QComboBox *>("launchProject");auto *machine=dialog.findChild<QComboBox *>("launchComputer");auto *folder=dialog.findChild<QComboBox *>("launchProjectFolder");auto *account=dialog.findChild<QComboBox *>("launchAccount");
+    auto *project=dialog.findChild<QComboBox *>("launchProject");auto *machine=dialog.findChild<QComboBox *>("launchComputer");auto *folder=dialog.findChild<QComboBox *>("launchProjectFolder");auto *account=dialog.findChild<QListWidget *>("launchAccount");
     auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(hint);QTRY_VERIFY(account->count()>0);
-    auto *agent=dialog.findChild<QComboBox *>("launchAgent");QTest::qWait(1);const auto agentTop=agent->geometry().top();
+    auto *agent=dialog.findChild<QListWidget *>("launchAccount");QTest::qWait(1);const auto agentTop=agent->geometry().top();
     auto change=[&](const QString &id){project->setCurrentIndex(project->findData(id));};
     folder->setCurrentIndex(folder->findData(alternative));dialog.setFleet(fleet());
     QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/remote/list-choice"));
     change(second);QCOMPARE(machine->currentData().toString(),QString("mac"));QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/remote/different"));
-    QVERIFY(!hint->property("outsideProject").toBool());QCOMPARE(account->currentData().toString(),QString("native-codex"));
+    QVERIFY(!hint->property("outsideProject").toBool());QCOMPARE(account->currentItem()->data(Qt::UserRole).toString(),QString("native-codex"));
     change(empty);QVERIFY(folder->currentData(Qt::UserRole+2).toString().isEmpty());
     QTest::qWait(1);QCOMPARE(agent->geometry().top(),agentTop);
     dialog.setFleet(fleet());QVERIFY(folder->currentData(Qt::UserRole+2).toString().isEmpty());
@@ -6566,7 +6576,7 @@ elif args[0] == 'worktrees':
     QTRY_VERIFY(start->isEnabled());
     QCOMPARE(creations().size(),0);QTRY_COMPARE(dialog.findChild<QLabel *>("muted")->property("outsideProject").toBool(),mode=="outside");
     auto *manage=dialog.findChild<QToolButton *>("manageLaunchProject");QVERIFY(manage->text().isEmpty());QVERIFY(!manage->icon().isNull());
-    auto *agents=dialog.findChild<QComboBox *>("launchAgent");for(int i=0;i<agents->count();++i)QVERIFY(!agents->itemIcon(i).isNull());
+    auto *agents=dialog.findChild<QListWidget *>("launchAccount");for(int i=0;i<agents->count();++i)QVERIFY(!agents->item(i)->icon().isNull());
     const auto generated=name->text();const auto destination="/repo-"+generated;
     name->setText("review-session");
     if(mode=="not_repo"){
@@ -6739,7 +6749,7 @@ void TestSessionsWindow::remoteFolderLaunch()
     QCOMPARE(launched[0][5].toString(), QString("ungrouped"));
     NewSessionDialog second(program(), fleet(), {}, "martty-dsh", "infra");
     QVERIFY(second.findChild<QLineEdit *>("launchName")->text() != name);
-    QCOMPARE(second.findChild<QComboBox *>("launchAgent")->currentText(), QStringLiteral("martty-dsh"));
+    QCOMPARE(second.findChild<QListWidget *>("launchAccount")->currentItem()->data(Qt::UserRole+1).toString(), QStringLiteral("martty-dsh"));
 }
 
 void TestSessionsWindow::launchNameFollowsRenameRules()
@@ -6763,6 +6773,87 @@ void TestSessionsWindow::launchNameFollowsRenameRules()
     start->click();
     QTRY_COMPARE(launched.size(), 1);
     QCOMPARE(launched[0][3].toString(), QStringLiteral("my plan"));
+}
+
+void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
+{
+    QTemporaryDir fixture;const auto fake=fixture.filePath("hgs");
+    const QString longId = "ollama/" + QString(249, 'x');
+    const QString unicodeId = "ollama/" + QString(124, QChar(0x00e9)) + "x";
+    const QString id121 = "ollama/" + QString(114, 'x');
+    QCOMPARE(longId.toUtf8().size(), 256); QCOMPARE(unicodeId.toUtf8().size(), 256);
+    const QJsonArray modelsOffered{
+        QJsonObject{{"value","ollama/qwen3:8b"},{"label","Qwen 3"}},
+        QJsonObject{{"value","ollama/qwen3:14b"},{"label","Qwen 3 large"}},
+        QJsonObject{{"value",id121}},QJsonObject{{"value",longId}},QJsonObject{{"value",unicodeId}},
+        QJsonObject{{"value",longId+"x"}},QJsonObject{{"value","ollama/"+QString(125,QChar(0x00e9))}}};
+    const QJsonObject accounts{{"profiles",QJsonArray{
+        QJsonObject{{"id","native-opencode"},{"provider","opencode"},{"label","Native configuration"},{"installed",true},{"is_default",true},{"model_options",modelsOffered}},
+        QJsonObject{{"id","native-codex"},{"provider","codex"},{"label","Native account"},{"installed",true}}}}};
+    QVERIFY(FakeCli::install(fake,"#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[0]=='account':print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(accounts).toJson(QJsonDocument::Compact)))+")\n"
+        "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
+        "elif a[0]=='worktrees':print('{\"state\":\"not_repo\"}')\n"));
+    QSettings().setValue("workspace/launchOpenTerminal",true);
+    NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
+    auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
+    auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
+    QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
+    auto *terminal=dialog.findChild<QCheckBox *>("launchOpenTerminal");
+    QTRY_VERIFY(start->isEnabled());QTRY_COMPARE(models->count(),6);
+    QCOMPARE(account->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));QVERIFY(models->isVisible());QVERIFY(!terminal->isEnabled());
+    QVERIFY(terminal->toolTip().contains("Activity"));QVERIFY(none->isChecked());
+    QCOMPARE(models->currentData().toString(),QString());models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    QVERIFY(models->findData(id121)>=0);QVERIFY(models->findData(longId)>=0);QVERIFY(models->findData(unicodeId)>=0);
+    QCOMPARE(models->findData(longId+"x"),-1);QCOMPARE(models->findData("ollama/"+QString(125,QChar(0x00e9))),-1);
+    const auto selectAccount=[&](const QString &id){for(int i=0;i<account->count();++i)if(account->item(i)->data(Qt::UserRole).toString()==id){account->setCurrentRow(i);return true;}return false;};
+    QVERIFY(selectAccount("native-codex"));QVERIFY(!models->isVisible());QCOMPARE(models->currentData().toString(),QString());
+    QVERIFY(selectAccount("native-opencode"));QTRY_COMPARE(models->count(),6);models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    QVERIFY(models->geometry().right()<dialog.width());QVERIFY(start->geometry().bottom()<dialog.height());
+    QSignalSpy launch(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launch.size(),1);
+    QCOMPARE(launch[0][1].toString(),QString("opencode"));QCOMPARE(launch[0][2].toString(),QString("/fixture/project"));
+    QCOMPARE(launch[0][4].toString(),QString("native-opencode"));QVERIFY(!launch[0][6].toBool());QCOMPARE(launch[0][8].toString(),QString("ollama/qwen3:8b"));
+    QSettings().remove("workspace/launchOpenTerminal");QSettings().remove("workspace/launchAgent");QSettings().remove("workspace/launchAccounts");
+}
+
+void TestSessionsWindow::machineBatchCountsExcludeNativeOpenCodeSessions()
+{
+    BoxState box;box.host="fixture";box.ok=true;
+    SessionInfo terminal;terminal.name="codex/project/terminal";terminal.cmd="codex";terminal.resumable=true;terminal.activity="idle";
+    auto api=terminal;api.name="opencode/project/api";api.cmd="opencode";api.activity="busy";
+    auto saved=api;saved.name="opencode/project/saved";saved.state="paused";saved.activity="idle";
+    box.sessions={terminal,api,saved};FleetState state;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);
+    auto *menu=window.findChild<QPushButton *>("batchActions")->menu();QMetaObject::invokeMethod(menu,"aboutToShow");
+    auto *machine=menu->actions().first()->menu();QVERIFY(machine);
+    const auto action=[&](const QString &text){for(auto *entry:machine->actions())if(entry->text()==text)return entry;return static_cast<QAction *>(nullptr);};
+    auto *pause=action("Pause all (1)"),*resume=action("Resume all in background (0)");QVERIFY(pause);QVERIFY(resume);
+    QVERIFY(pause->isEnabled());QVERIFY(!resume->isEnabled());QVERIFY(pause->toolTip().contains("OpenCode sessions are excluded"));
+    box.sessions={api,saved};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QMetaObject::invokeMethod(menu,"aboutToShow");
+    machine=menu->actions().first()->menu();pause=action("Pause all (0)");resume=action("Resume all in background (0)");
+    QVERIFY(pause);QVERIFY(resume);QVERIFY(!pause->isEnabled());QVERIFY(!resume->isEnabled());
+}
+
+void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()
+{
+    const QString name="opencode/project/local",run="open-run",conversation="open-session";
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"resumable",true},
+        {"terminal_supported",false},{"terminal_reason","OpenCode runs through its native API"},{"attachments_supported",false},
+        {"clear_context_supported",false},{"compact_context_supported",false},{"fork_supported",false},
+        {"allowed_actions",QJsonArray{"pause","rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("opencode-capabilities",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.resumable=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";
+    session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"pause","rename"};box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);setComposerText(composer,"Keep my local model draft");
+    auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);QVERIFY(!tabs->isTabVisible(1));QVERIFY(!tabs->isTabVisible(2));
+    QTRY_VERIFY2(composer->findChild<QPushButton *>("sendMessage")->isEnabled(),qPrintable(composer->findChild<QLabel *>("messageStatus")->text()+" key="+composer->sessionKey()+" draft="+composer->editor()->toPlainText()));QVERIFY(!composer->canAttachFiles());
+    QVERIFY(!composer->findChild<QPushButton *>("attachMessageFile")->isEnabled());
+    QVERIFY(!window.findChild<QAction *>("clearSessionAction")->isEnabled());QVERIFY(!window.findChild<QAction *>("forgetSessionAction")->isEnabled());
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep my local model draft"));QVERIFY(!composer->editor()->isReadOnly());
 }
 
 void TestSessionsWindow::nativeLaunchStaysInWorkspace_data()
@@ -7154,7 +7245,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         auto *folders=dialog->findChild<QComboBox *>("launchProjectFolder");QCOMPARE(folders->currentData().toString(),remoteId);
         window.setFleet(fleet());QCOMPARE(folders->currentData().toString(),remoteId);
         QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),QString("/remote/work tree"));remoteOpened=true;
-        dialog->findChild<QComboBox *>("launchAgent")->setCurrentText("claude");dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
+        auto *accounts=dialog->findChild<QListWidget *>("launchAccount");for(int i=0;i<accounts->count();++i)if(accounts->item(i)->data(Qt::UserRole+1).toString()=="claude")accounts->setCurrentRow(i);dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
         const auto preview=qEnvironmentVariable("HGS_PROJECT_LAUNCH_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/launch.png"));}
         auto *start=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(),15000);start->click();});
     launch->trigger();QVERIFY(remoteOpened);QCOMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),QString("mac"));

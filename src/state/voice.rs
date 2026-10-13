@@ -471,7 +471,7 @@ fn public(job: &Value) -> Value {
     value
 }
 fn record(name: &str) -> Result<Value> {
-    if dsh::exists(name) {
+    if opencode::exists(name) {opencode::binding(name)} else if dsh::exists(name) {
         dsh::binding(name)
     } else {
         read(name)
@@ -715,8 +715,7 @@ fn current(job: &Value) -> Result<Value> {
     }
     let mut candidates = records()?.into_iter().filter(matches).collect::<Vec<_>>();
     // DSH bindings are separate; inspect only private bounded manifests.
-    for entry in fs::read_dir(root().join("dsh/bindings"))
-        .into_iter()
+    for entry in ["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
         .flatten()
         .flatten()
         .take(10000)
@@ -752,7 +751,7 @@ fn boundary(record: &Value) -> Value {
     json!({"journal_seq":seq,"transcript":path,"source_bytes":source.as_ref().map(|(_, m)|m.len()),"source_device":source.as_ref().map(|(i, _)|i.device),"source_inode":source.as_ref().map(|(i, _)|i.inode),"at":now()})
 }
 fn receipt(job: &Value) -> Result<Option<Value>> {
-    let directory = if job["backend"] == "dsh" || job["agent"] == "dsh" {
+    let directory = if job["backend"]=="opencode" || job["agent"]=="opencode" {"opencode/receipts"} else if job["backend"] == "dsh" || job["agent"] == "dsh" {
         "dsh/receipts"
     } else {
         "input_receipts"
@@ -770,13 +769,16 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     if bytes.len() > 131072 {
         return Err("Native voice receipt is oversized".into());
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(err)?;
+    let mut value: Value = serde_json::from_slice(&bytes).map_err(err)?;
     if value["request_id"] != job["id"]
         || value["run_id"] != job["run_id"]
         || value["conversation_id"] != job["conversation_id"]
         || value["text"] != job["transcript"]
     {
         return Err("Native request UUID conflicts with this voice message".into());
+    }
+    if job["agent"]=="opencode" || job["backend"]=="opencode" {
+        let record=current(job)?; opencode::reconcile_receipt(&record,&mut value)?;
     }
     Ok(Some(value))
 }
@@ -989,7 +991,7 @@ fn step(store: &Store, config: &crate::config::Config, mut job: Value) -> Result
     }
     // A crash after this marker never causes native delivery to replay. The
     // existing send path owns identity, cold-cache consent and PTY guards.
-    let result = if target["backend"] == "dsh" || target["agent"] == "dsh" {
+    let result = if ["dsh","opencode"].contains(&string(&target,"backend")) || ["dsh","opencode"].contains(&string(&target,"agent")) {
         speech::capture(
             &[
                 "send".into(),

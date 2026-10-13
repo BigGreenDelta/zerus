@@ -20,7 +20,8 @@
   <a href="https://code.claude.com/"><kbd><img src="https://www.google.com/s2/favicons?domain=claude.ai&amp;sz=64" alt="" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
   <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&amp;sz=64" alt="" width="16" valign="middle" /> Codex</kbd></a> &nbsp;
   <a href="https://www.kimi.com/code/"><kbd><img src="https://www.google.com/s2/favicons?domain=kimi.com&amp;sz=64" alt="" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
-  <a href="https://deepseek-harness.github.io/deepseek-harness/"><kbd><img src="https://www.google.com/s2/favicons?domain=deepseek.com&amp;sz=64" alt="" width="16" valign="middle" /> DeepSeek Harness</kbd></a>
+  <a href="https://deepseek-harness.github.io/deepseek-harness/"><kbd><img src="https://www.google.com/s2/favicons?domain=deepseek.com&amp;sz=64" alt="" width="16" valign="middle" /> DeepSeek Harness</kbd></a> &nbsp;
+  <a href="https://opencode.ai/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&amp;sz=64" alt="" width="16" valign="middle" /> OpenCode</kbd></a>
 </p>
 
 Zerus is an **Agent Development Environment (ADE)** where your machines are peers
@@ -30,7 +31,7 @@ settings sync directly between machines, with no permanent main machine.
 Work from your laptop or workstation using the SSH access configured there.
 Bring your own agents and subscriptions.
 
-**Claude Code, Codex, Kimi Code and DeepSeek Harness** run in their own native
+**Claude Code, Codex, Kimi Code, DeepSeek Harness and OpenCode** run in their own native
 runtimes. Zerus brings their Activity, messages, questions, approvals and session
 controls together, while their original tools, hooks, permissions and history
 remain with the native harness. Agents from different providers can discover
@@ -83,8 +84,8 @@ Missing your agent or a feature?
 
 Use each provider's agent in its own environment, with its native tools and
 workflows. Zerus preserves existing hooks while adding session tracking and
-connects native events to the shared workspace. The original Terminal or Native
-UI stays available for provider-specific features.
+connects native events to the shared workspace. Supported integrations also expose
+their original Terminal or Native UI for provider-specific features.
 
 **Agent-to-agent communication is built in.** For example, let Codex implement a
 change and Claude review it. Agents with shell access can use `hgs ls` to find
@@ -94,9 +95,14 @@ continues in its own native conversation. The same inspection and message
 interfaces serve the desktop and other clients.
 [CLI protocol and delivery guarantees](docs/reference.md#json-and-external-clients).
 
+**Local coding models** can run on your own computer through Ollama. Keep the
+agent harness and inference provider separate: use the existing Codex adapter
+with a local model, or the [OpenCode native adapter](docs/opencode.md).
+[Setup and qualified local example](docs/local-models.md).
+
 ### Voice control across agents and devices
 
-Speak a task to **Claude Code, Codex, Kimi Code or DeepSeek Harness** from the
+Speak a task to **Claude Code, Codex, Kimi Code, DeepSeek Harness or OpenCode** from the
 desktop or Android app. Record, review and send: Zerus transcribes the recording
 and delivers the text to the selected agent's native conversation, including on
 another connected computer. Your message stays in Activity as a **playable voice

@@ -59,7 +59,7 @@ pub(super) fn answer(
     acknowledged: fn(&str) -> bool,
     expect_exit: bool,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false)
+    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false, Duration::ZERO)
 }
 
 // Claude shows queued tool approvals one after another, so the next complete
@@ -71,8 +71,9 @@ pub(super) fn answer_queued(
     option_count: usize,
     parse: fn(&Value, &str) -> Option<(Value, usize)>,
     acknowledged: fn(&str) -> bool,
+    navigation_settle: Duration,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, false, true)
+    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,6 +86,7 @@ fn navigate(
     acknowledged: fn(&str) -> bool,
     expect_exit: bool,
     queued: bool,
+    navigation_settle: Duration,
 ) -> Result<()> {
     let mut touched = false;
     let result = (|| {
@@ -162,6 +164,11 @@ fn navigate(
                         return Err("The agent's dialog changed after navigation".into());
                     }
                     if next.1 == expected {
+                        // Claude's safety chooser ignores Enter arriving just
+                        // after an arrow. Wait once, then the next iteration
+                        // rechecks process, request and highlighted option
+                        // before its single Enter. Other choosers use zero.
+                        if !navigation_settle.is_zero() {std::thread::sleep(navigation_settle);}
                         break;
                     }
                 } else {

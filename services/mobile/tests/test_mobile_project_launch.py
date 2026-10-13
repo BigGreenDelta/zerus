@@ -79,13 +79,14 @@ class ProjectLaunchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProjectCatalogTests(unittest.TestCase):
-    def test_exact_profiles_default_and_known_status_survive_without_identity_or_secrets(self):
-        rows=[{'id':'work-one','provider':'claude','label':'Same','installed':True,'is_default':True,'account_status':{'auth_status':'signed_in','identity':{'email':'private@example.test'}},'home':'/private'},
+    def test_exact_profiles_default_and_cached_email_survive_without_paths_or_secrets(self):
+        rows=[{'id':'work-one','provider':'claude','label':'Same','installed':True,'is_default':True,'account_status':{'auth_status':'signed_in','identity':{'email':'account@example.invalid','token':'private'}},'home':'/private'},
               {'id':'work-two','provider':'claude','label':'Same','installed':True,'account_status':{'status':'expired'}}]
         result=catalog({'profiles':rows})
         self.assertEqual([row['id'] for row in result['accounts']],['work-one','work-two'])
         self.assertTrue(result['accounts'][0]['is_default'])
         self.assertEqual([row['auth_status'] for row in result['accounts']],['signed_in','expired'])
+        self.assertEqual(result['accounts'][0]['usage']['identity'],{'email':'account@example.invalid'})
         self.assertNotIn('private',str(result))
 
     def test_project_catalog_has_only_local_folders_and_accessible_groups(self):

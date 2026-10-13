@@ -28,6 +28,16 @@ def inspection(identity="native-codex"):
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_native_opencode_account_and_models_keep_configuration_private(self):
+        raw={'id':'native-opencode','provider':'opencode','label':'Native OpenCode','installed':True,'native':True,
+             'home':'/private/config','model_options':[{'value':'ollama/qwen3-coder:30b','label':'Local model','baseURL':'https://private.example.test','api_key':'private'}],
+             'account_status':{'status':'configured','source':'OpenCode','checked_at':1000,'credentials':'private'}}
+        entry=catalog({'profiles':[raw]})['native-opencode']
+        self.assertEqual(entry['public']['model_options'],[{'value':'ollama/qwen3-coder:30b','label':'Local model','provider':'ollama'}])
+        self.assertEqual(entry['usage']['status'],'configured')
+        self.assertEqual(entry['usage']['source'],'OpenCode')
+        self.assertNotIn('private',json.dumps(entry['public']|{'usage':entry['usage']}))
+
     def test_only_allowlisted_fields_leave_native_projection(self):
         projected = usage(inspection())
         encoded = json.dumps(projected)

@@ -20,7 +20,7 @@ object SessionActionPolicies {
     fun arguments(operation: String, raw: JSONObject): JSONObject {
         require(operation in operations) { "Unsupported session action." }
         val allowed = when(operation) { "rename" -> setOf("new_name"); "fork" -> setOf("tag"); "send_now" -> setOf("queue_id")
-            "launch" -> setOf("agent","directory","tag","account_id","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
+            "launch" -> setOf("agent","directory","tag","account_id","model","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
             "worktree_create" -> setOf("path","common_dir","destination","branch","base")
             "recovery_action" -> setOf("job_id","action")
             "terminal_input" -> setOf("terminal_binding_id", "text", "enter", "key")
@@ -46,7 +46,8 @@ object SessionActionPolicies {
                 require(WorktreePresentation.createError(args.getString("branch"),args.getString("base"),args.getString("destination")).isBlank())
             }
             "launch" -> {
-                require(args.getString("agent") in setOf("codex","claude","kimi","dsh"))
+                require(args.getString("agent") in setOf("codex","claude","kimi","dsh","opencode"))
+                if(args.has("model")) require(args.getString("agent")=="opencode" && LaunchPresentation.validModel(args.getString("model"))) { "Choose a valid native OpenCode model." }
                 require(args.getString("directory").let { it.startsWith('/') && it.length <= 4096 && it.none(Char::isISOControl) })
                 require(args.getString("tag").let { it.isNotBlank() && it.trim() == it && it.toByteArray(Charsets.UTF_8).size <= 120 && it.none { c -> c == '/' || c == '\\' || c == ':' || c == '.' || c.isISOControl() } })
                 if(args.has("account_id")) require(args.getString("account_id").let { it.isNotBlank() && it.length <= 256 && it.none(Char::isISOControl) })

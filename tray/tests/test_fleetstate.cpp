@@ -46,7 +46,7 @@ private slots:
     void olderHostsKeepLocalReadStateAndQueueNothing();
     void recoveryAttentionWithoutSignatureStaysLocal();
     void controlOnlyComputerHasNoLocalCount();
-    void backgroundCommandsLeaveAFinishedSessionReady();
+    void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
     void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
     void intermediateRepliesStayUnreadUntilWorkFinishes();
 };
@@ -68,9 +68,8 @@ void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
             QVERIFY(fleet.readReplies().isEmpty()); QVERIFY(fleet.takeNewReadMarks().isEmpty());
         };
         waiting();
-        s.activity = "idle"; s.phase = "idle"; s.subagentActiveCount = 1; waiting();
-        // Commands left running in the background never postpone the reply.
-        s.backgroundProcesses = 2;
+        s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1; waiting();
+        s.backgroundProcesses = 0; s.subagentActiveCount = 1; waiting();
         s.reviewLater = true; QVERIFY(s.needsAttention()); s.reviewLater = false;
         s.phase = "approval"; QVERIFY(s.needsAttention()); s.phase = "idle";
         s.subagentActiveCount = 0; fleet.setLocal(box, 1);
@@ -82,28 +81,28 @@ void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
     }
 }
 
-void TestFleetState::backgroundCommandsLeaveAFinishedSessionReady()
+void TestFleetState::idleShellWorkKeepsActiveAndPreservesInputAndAttention()
 {
-    // Stands and dev servers the agent left running may run for days: once the
-    // agent has finished its turn, the session is Ready, not working.
     auto s = shared(); s.tracked = true; s.activity = "idle"; s.phase = "idle";
-    s.processState = "running"; s.backgroundProcesses = 2;
-    QCOMPARE(SessionPresentation::status(s), QString("Ready"));
-    QVERIFY(!SessionPresentation::working(s)); QVERIFY(!SessionPresentation::active(s));
-    QVERIFY(!s.replyInProgress()); QVERIFY(!s.needsAction());
-    QVERIFY(!SessionPresentation::currentAction(s).contains("running"));
-    s.scheduledJobs = 1;
-    QVERIFY(SessionPresentation::scheduled(s)); QVERIFY(SessionPresentation::active(s));
-    s.scheduledJobs = 0;
+    s.processState = "running"; s.backgroundProcesses = 1; s.backgroundStarted = 100;
+    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    QCOMPARE(SessionPresentation::status(s), QString("Background"));
+    QVERIFY(SessionPresentation::working(s)); QVERIFY(SessionPresentation::active(s));
+    QVERIFY(!SessionPresentation::scheduled(s)); QVERIFY(!s.needsAction());
+    QVERIFY(SessionPresentation::currentAction(s).contains("build --wait"));
+    QVERIFY(!SessionPresentation::working(s, false)); QVERIFY(!SessionPresentation::active(s, false));
+    QCOMPARE(SessionPresentation::status(s, false), QString("Offline"));
     s.phase = "approval";
     QCOMPARE(SessionPresentation::status(s), QString("Needs approval"));
     QVERIFY(!SessionPresentation::working(s));
-    // Work is an unfinished turn or a working subagent.
     s.phase = "working"; s.activity = "busy";
     QCOMPARE(SessionPresentation::status(s), QString("Working"));
-    QVERIFY(SessionPresentation::working(s)); QVERIFY(s.replyInProgress());
-    s.phase = "idle"; s.activity = "idle"; s.subagentActiveCount = 1;
-    QVERIFY(s.replyInProgress());
+    s.phase = "idle"; s.activity = "idle"; s.backgroundProcesses = 0;
+    QVERIFY(SessionPresentation::scheduled(s));
+    s.scheduledJobs = 0;
+    QCOMPARE(SessionPresentation::status(s), QString("Ready"));
+    s.backgroundProcesses = -1;
+    QVERIFY(!SessionPresentation::working(s));
 }
 
 void TestFleetState::processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns()

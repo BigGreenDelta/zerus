@@ -116,6 +116,7 @@ bool setSendingReady(MessageComposer &composer, const QString &key, bool preserv
 class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
+    void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -157,6 +158,7 @@ private slots:
     void renamePreservesDraft();
     void retryOfAnotherMessagePreservesDraftAndUncertainty();
     void modelSettingsPreserveDraftAndDistinguishPending();
+    void modelSettingsShowProviderNoticeBeforeApply();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
     void sessionStatusPreservesGeometryAndLockedDraft_data();
@@ -179,6 +181,20 @@ private slots:
 private:
     QTemporaryDir m_settings;
 };
+
+void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval()
+{
+    MessageComposer composer;composer.setSessionKey("opencode/fixture");
+    QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.setAvailability(true);
+    QVERIFY(composer.addAttachment("file.txt","text/plain","fixture"));composer.editor()->setPlainText("Keep text");
+    composer.setAttachmentAvailability(false,"OpenCode files unavailable");
+    QVERIFY(!composer.canAttachFiles());QVERIFY(!composer.addAttachment("new.txt","text/plain","new"));
+    auto *send=composer.findChild<QPushButton *>("sendMessage");QVERIFY(send);QVERIFY(!send->isEnabled());
+    // A retained file can still be removed; an unavailable adapter must not trap a draft.
+    auto *remove=composer.findChild<QPushButton *>("removeAttachment");QVERIFY(remove);QVERIFY(remove->isEnabled());remove->click();
+    QTRY_VERIFY(send->isEnabled());QCOMPARE(composer.editor()->toPlainText(),QString("Keep text"));
+    composer.setRecording(true);QVERIFY(!send->isEnabled());composer.setRecording(false);QVERIFY(send->isEnabled());
+}
 
 void TestMessageComposer::initTestCase()
 {
@@ -778,6 +794,24 @@ void TestMessageComposer::modelSettingsPreserveDraftAndDistinguishPending()
     setSessionReady(composer, "mac/other"); QVERIFY(!composer.findChild<QFrame *>("sessionSettingsPopup")->isVisible());
     apply->click(); QCOMPARE(changes.size(), 1);
     setSessionReady(composer, "arch/session"); QCOMPARE(composer.editor()->toPlainText(), QString("[File #1] Keep this draft"));
+}
+
+void TestMessageComposer::modelSettingsShowProviderNoticeBeforeApply()
+{
+    MessageComposer composer; setSessionReady(composer, "claude/session"); composer.resize(440, 220); composer.show();
+    const QJsonArray options{QJsonObject{{"id", "claude-opus-5-5"}, {"label", "Opus 5.5"}, {"effort_options", QJsonArray{"low", "high"}}},
+        QJsonObject{{"id", "claude-haiku-5-5"}, {"label", "Haiku 5.5"}, {"effort_options", QJsonArray{"low", "high"}}}};
+    composer.setModelSettings("claude-opus-5-5", "high", options, true, {}, {}, {}, "now");
+    composer.setSettingsNotice("Claude re-reads the full history on the next message.");
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *hint = composer.findChild<QLabel *>("sessionSettingsHint");
+    QVERIFY(hint->text().contains("Applies to this session only.")); QVERIFY(hint->text().contains("re-reads the full history"));
+    QVERIFY(!composer.findChild<QPushButton *>("sessionSettingsTerminal")->isVisible());
+    // An unavailable change explains why instead of warning about its cost.
+    composer.setModelSettings("claude-opus-5-5", "high", options, false, "Wait for the session transition to finish");
+    QVERIFY(hint->text().contains("transition")); QVERIFY(!hint->text().contains("re-reads"));
+    composer.setModelSettings("claude-opus-5-5", "high", options, true, {}, {}, {}, "now"); composer.setSettingsNotice({});
+    QVERIFY(!hint->text().contains("re-reads"));
 }
 
 void TestMessageComposer::modelSettingsUnavailableExplainsWhy()
@@ -1446,6 +1480,7 @@ void TestMessageComposer::voiceInsertionRequiresUnchangedDraftAndNavigation()
     QVERIFY(composer.setWaitingToSend(composer.sessionKey(), "Waiting"));
     QVERIFY(!composer.insertVoiceText(beforeLock, "locked words", [](bool) {}));
     QVERIFY(composer.setWaitingToSend(composer.sessionKey(), {}));
+    composer.setAttachmentAvailability(false,"Native file attachments unavailable");QVERIFY(!composer.canAttachFiles());
     composer.editor()->moveCursor(QTextCursor::End); bool finished = false, durable = false;
     QVERIFY(composer.insertVoiceText(composer.voiceTarget(), "spoken words", [&](bool saved) { finished = true; durable = saved; }));
     QTRY_VERIFY(finished); QVERIFY(durable); QCOMPARE(sent.count(), 0);

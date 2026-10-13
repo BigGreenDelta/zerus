@@ -91,8 +91,9 @@ hgs @mac pause --all
 
 Pause preserves an exact native conversation binding. It does not preserve open
 network connections, child processes or an unsent native terminal draft. Supported
-integrations include Claude Code, Codex, Kimi Code and the official DeepSeek Harness;
-the latter uses its native engine instead of a terminal-agent process.
+integrations include Claude Code, Codex, Kimi Code, the official DeepSeek Harness
+and OpenCode. DeepSeek and OpenCode use their native engines instead of a
+terminal-agent process. [OpenCode controls and limits](opencode.md).
 
 For terminal agents, pause verifies the live pane, run and conversation identity,
 native history, supported resume arguments and an idle state. It sends SIGTERM only
@@ -366,16 +367,17 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. A
-session works while its agent's turn is unfinished or a subagent works. When the
-agent finishes its turn, the session is finished: shell commands it left running,
-such as test stands and dev servers that never exit, do not keep it Working, do
-not remove it from Ready and do not postpone its reply badge or notification.
-Open **Processes** to follow their output or stop them. Input/approval requests
-take precedence, followed by Working, Scheduled and Ready. The CLI's additive
-`process_work` summary uses current owned OS trees (one process-table sample per
-fleet listing) or the native DeepSeek job registry; it does not scan native
-transcripts on each fleet poll.
+**Ready** means a reply ended, not that a long-running task is complete. An idle
+agent with confirmed live shell commands shows **Background** in muted blue, with
+the command preview and elapsed time. Open **Processes** to follow output or inspect
+the running commands. The session remains in **Active** and still accepts new
+messages. Green **Working** indicates native agent work. Input/approval requests
+take precedence; ordinary agent work takes precedence over background work,
+followed by Scheduled and Ready. Offline and
+historical/unconfirmed process records never establish background work. The CLI's
+additive `process_work` summary uses current owned OS trees (one process-table
+sample per fleet listing) or the native DeepSeek job registry; it does not scan
+native transcripts on each fleet poll.
 
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
@@ -716,6 +718,15 @@ option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
 plan approval stay visible with **Open Terminal**.
 
+Claude's Bash safety confirmations, including warnings about possibly empty
+paths in `rm` commands, also appear in Activity with the native warning text.
+A visible safety confirmation makes the session **Needs approval** even if
+its permission hook was not recorded, and ordinary message sending waits for
+the decision. Without a matching permission request, or when the full command
+is clipped, the card offers **Open Terminal**. With a complete matching request,
+Activity can submit the native **Yes** or **No** choice. Claude's unattended
+denial countdown stays visible without replacing the request as it ticks.
+
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
 its options verbatim with **Open Terminal** while Terminal still shows them: no
@@ -796,9 +807,22 @@ leaving account defaults intact. Codex/Kimi options come from the selected
 account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
-Claude controls and unverified states fall back to Terminal with an explanation.
+Unverified states fall back to Terminal with an explanation.
 A choice that the agent's status line already shows is confirmed without typing
 anything into Terminal.
+
+Claude options are the models its `/model` picker lists, from the catalog Claude
+Code caches in the account's profile. Zerus selects the model and effort in that
+picker and applies them with its session-only choice (`s`). Its Enter, and a typed
+`/model NAME` or `/effort LEVEL`, would save new defaults and are never used. The
+change is confirmed by Claude's receipt in the exact conversation transcript and by
+its effort indicator when shown. In a conversation that already has replies, Claude
+warns that the next message re-reads the full history and uses more tokens: the
+selector states this before **Apply**, and Zerus then accepts only that built-in
+notice. A confirmation requested by a `PreModelSwitch` hook is declined and
+reported, as is a picker without the session-only choice; use Terminal for those.
+A stopped Claude session resumes with a choice made in Zerus through `--model` and
+`--effort`; otherwise it starts with the account's settings.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.
@@ -1170,7 +1194,15 @@ hosts. Limits use one current account snapshot, never the sum of machine usage.
 
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. **New session**
-selects an account for the chosen provider and machine. **Make default on…** sets
+shows one list of **Account and agent** pairs for the chosen computer on desktop
+(including macOS) and Android. A large provider logo spans two text lines: the
+account email and compact cached limits, or **limits n/a**. Default labels, profile
+IDs and quota error details are omitted from these rows. Exact profile identities
+remain separate even when their emails match. Opening the chooser, changing a
+selection and refreshing its account catalog never probe providers for limits;
+existing shared or credential-validated native caches supply them. **Run shell** is a single desktop
+separate choice. The last successfully launched agent and account per computer
+remain remembered. **Make default on…** sets
 the default for new sessions; explicit `--account` wins, and attach, resume and fork
 retain the original profile. Ordinary agent commands outside `hgs` keep their
 native sign-in. Use `hgs [@host] account default native-claude` to restore the native
@@ -1232,6 +1264,22 @@ inspection or launch. It passes system session authority, not passwords or token
 starts on demand and exits after a minute idle. A logged-in desktop session is
 required; screen lock differs from logout. If Keychain is actually locked in that
 session, unlock it there. Authentication diagnostics distinguish these cases.
+
+<a id="local-models"></a>
+
+## Local models and OpenCode
+
+Ollama runs model inference on the chosen agent computer. The native harness
+owns tools, permissions and conversation state. Codex can use a local Ollama
+model with its existing adapter; see the [qualified local-model example](local-models.md).
+
+Choose **OpenCode** in New session to use its separate native API adapter.
+Select its native account and an offered `provider/model`, or retain the native
+model default. The initial adapter supports text/voice conversations, native
+questions and permissions, status/history, Stop, model selection, pause/resume,
+rename and forgetting a saved binding. Terminal, attachments, children,
+archive/fork and context reset/compaction remain unavailable with explicit
+capabilities. See [OpenCode setup and reviewed version](opencode.md).
 
 <a id="deepseek"></a>
 
@@ -1362,10 +1410,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
-The small count of commands an agent left running is part of ordinary fleet
-polling even when this tab is disabled; it never changes the session's status.
-Full process history and output remain opt-in. The context menu of a session with
-running commands offers **Show running commands** when Processes is enabled.
+The small **Background** summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. A
+background session's context menu offers **Show running commands** when Processes
+is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal

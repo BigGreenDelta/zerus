@@ -99,6 +99,7 @@ fn validate(request: &Request) -> Result<()> {
     }
 }
 fn checked(name: &str, request: &Request) -> Result<Value> {
+    if opencode::exists(name) {return Err("OpenCode uses its native API without a tmux Terminal".into());}
     if dsh::exists(name) {
         return Err("DeepSeek uses a structured native API without a tmux Terminal".into());
     }

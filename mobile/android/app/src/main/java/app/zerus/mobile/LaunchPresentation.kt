@@ -3,7 +3,11 @@ package app.zerus.mobile
 import org.json.JSONObject
 import org.json.JSONArray
 
-data class LaunchAccount(val id: String,val provider: String,val label: String,val native: Boolean=false,val isDefault: Boolean=false,val installed:Boolean=true,val authStatus:String="unknown")
+data class LaunchAccount(val id: String,val provider: String,val label: String,val native: Boolean=false,val isDefault: Boolean=false,val installed:Boolean=true,val authStatus:String="unknown",val usage:ReportedAccount?=null)
+data class LaunchAccountChoice(val account:LaunchAccount,val title:String,val limits:String) {
+    val key get() = account.provider+"/"+account.id
+}
+data class LaunchModel(val value:String,val label:String)
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
 data class LaunchProject(val id:String,val name:String,val color:String,val folders:List<LaunchProjectFolder>)
@@ -49,7 +53,7 @@ object LaunchPresentation {
         else -> ""
     }
     fun agents(raw: JSONObject?): List<String> = raw?.optJSONArray("agents")?.let { array ->
-        (0 until array.length()).mapNotNull { array.opt(it) as? String }.filter { it in setOf("codex","claude","kimi","dsh") }.distinct()
+        (0 until array.length()).mapNotNull { array.opt(it) as? String }.filter { it in setOf("codex","claude","kimi","dsh","opencode") }.distinct()
     }.orEmpty()
     fun accounts(raw: JSONObject?,provider: String): List<LaunchAccount> = raw?.optJSONArray("accounts")?.objects().orEmpty().mapNotNull { row ->
         val id = row.opt("id") as? String
@@ -57,23 +61,44 @@ object LaunchPresentation {
         val label = row.opt("label") as? String
         if(id.isNullOrBlank() || !id.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_-]{0,79}")) || agent != provider || label == null) null else LaunchAccount(id,agent,label,
             row.opt("native") == true,row.opt("is_default") == true,row.opt("installed") != false,
-            (row.opt("auth_status") as? String)?.takeIf { it in setOf("signed_in","signed_out","expired","credentials_locked","desktop_session_unavailable","credentials_unavailable") } ?: "unknown")
+            (row.opt("auth_status") as? String)?.takeIf { it in setOf("signed_in","signed_out","expired","credentials_locked","desktop_session_unavailable","credentials_unavailable") } ?: "unknown",
+            if(row.optJSONObject("usage") != null) AccountSnapshots.account(row) else null)
     }.distinctBy { it.id }
+    fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
+    /** Only exact models offered by this computer's selected native OpenCode account. */
+    fun models(raw:JSONObject?,provider:String,accountId:String):List<LaunchModel> {
+        if(provider!="opencode") return emptyList()
+        val account=raw?.optJSONArray("accounts")?.objects().orEmpty().singleOrNull { it.string("provider")==provider && it.string("id")==accountId } ?: return emptyList()
+        return account.optJSONArray("model_options")?.objects().orEmpty().take(256).mapNotNull { option ->
+            val value=((option.opt("value") ?: option.opt("id")) as? String)?.takeIf(::validModel) ?: return@mapNotNull null
+            val label=(option.opt("label") as? String)?.takeIf { it.isNotBlank() && it.length<=160 && it.none(Char::isISOControl) } ?: value
+            LaunchModel(value,label)
+        }.distinctBy { it.value }
+    }
     fun defaultAccount(accounts:List<LaunchAccount>,selected:String=""):String = accounts.firstOrNull { it.id == selected }?.id
         ?: accounts.singleOrNull { it.isDefault }?.id ?: accounts.firstOrNull()?.id.orEmpty()
-    fun accountTitle(account:LaunchAccount,accounts:List<LaunchAccount>):String {
-        val duplicate=accounts.count { it.label == account.label }>1
-        val suffix=if(duplicate) " (${account.id})" else ""
-        return account.label + suffix + if(account.isDefault) " (default)" else ""
+    fun accountTitle(account:LaunchAccount):String = account.usage?.identity?.email?.takeIf(String::isNotBlank)
+        ?: account.label.takeUnless { it.isBlank() || it in setOf("Default account","Native account") } ?: "Account n/a"
+    /** Exact machine/profile cache reads only; recomposition never fetches provider limits. */
+    fun accountChoices(raw:JSONObject?,machine:MachineKey,catalogs:List<AccountCatalog>,now:Double):List<LaunchAccountChoice> {
+        val cache=catalogs.find { it.key==machine }?.accounts.orEmpty()
+        return agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
+            val cached=cache.find { it.provider==account.provider && it.id==account.id }
+                ?.takeIf { account.authStatus in setOf("unknown","signed_in") &&
+                    (account.usage==null || account.usage.identity.email.isNotBlank() && account.usage.identity.email==it.identity.email &&
+                        account.usage.identity.accountId==it.identity.accountId && account.usage.identity.organization==it.identity.organization) }
+            val reported=if(cached!=null && (account.usage==null || (cached.checkedAt ?: 0.0)>(account.usage.checkedAt ?: 0.0))) cached else account.usage
+            val title=accountTitle(account.copy(usage=reported))
+            LaunchAccountChoice(account,title,accountLimits(reported,now))
+        }
     }
-    fun accountStatus(account:LaunchAccount):String = when(account.authStatus) {
-        "signed_in" -> "Signed in"
-        "signed_out" -> "Signed out"
-        "expired" -> "Sign-in expired"
-        "credentials_locked" -> "Credentials locked"
-        "desktop_session_unavailable" -> "Desktop sign-in unavailable"
-        "credentials_unavailable" -> "Credentials unavailable"
-        else -> ""
+    fun accountLimits(account:ReportedAccount?,now:Double):String {
+        val limits=account?.windows.orEmpty().mapNotNull { window ->
+            val used=window.usedPercent?.takeIf { it.isFinite() } ?: return@mapNotNull null
+            if(AccountPresentation.ended(window,now)) return@mapNotNull null
+            "${AccountPresentation.shortPeriod(window)} ${(used.coerceIn(0.0,100.0)+.5).toInt()}% used"
+        } + account?.balances.orEmpty().mapNotNull { balance -> balance.balance?.let { "Balance: $it ${balance.currency}".trim() } }
+        return limits.joinToString("  ").ifBlank { "limits n/a" }
     }
     fun projects(raw:JSONObject?):List<LaunchProject> {
         if(raw?.opt("project_launch_supported") != true || (raw.opt("swarm_id") as? String).isNullOrBlank()) return emptyList()
@@ -99,6 +124,8 @@ object LaunchPresentation {
         result.put("accounts",JSONArray(agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
             JSONObject().put("id",account.id).put("provider",account.provider).put("label",account.label)
                 .put("native",account.native).put("is_default",account.isDefault).put("installed",account.installed).put("auth_status",account.authStatus)
+                .put("model_options",JSONArray(models(raw,account.provider,account.id).map { JSONObject().put("value",it.value).put("label",it.label) }))
+                .also { row -> account.usage?.let { row.put("usage",AccountSnapshots.accountJson(it).getJSONObject("usage")) } }
         }))
         val supported=raw.opt("project_launch_supported")==true
         result.put("project_launch_supported",supported).put("worktree_supported",raw.opt("worktree_supported") == true)

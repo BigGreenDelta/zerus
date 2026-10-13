@@ -196,7 +196,8 @@ private slots:
         AccountUsageRef ref{{},"work","claude","/accounts/work","Work",{},{},"before"};
         store.ensure(ref);client->accountsReady(1,{},{{"id","work"},{"home",ref.home},{"provider","claude"},{"status","signed_out"}});
         store.ensure(ref);QVERIFY(!store.data(ref)["refreshing"].toBool());
-        ref.authRevision="after";store.ensure(ref);QVERIFY(store.data(ref)["refreshing"].toBool());
+        ref.authRevision="after";QCOMPARE(store.data(ref)["status"].toString(),QString("loading"));
+        store.ensure(ref);QVERIFY(store.data(ref)["refreshing"].toBool());
         client->accountsReady(2,{},{{"id","work"},{"home",ref.home},{"provider","claude"},{"status","ok"},{"identity",QJsonObject{{"email","work@example.test"}}}});
         QCOMPARE(store.data(ref)["status"].toString(),QString("ok"));
     }

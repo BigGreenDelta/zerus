@@ -65,6 +65,14 @@ only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
+An idle agent with confirmed owned live shell or native jobs shows `Background`,
+remains in Active and accepts new messages. Native work and explicit attention
+take precedence. A native Stop ends a turn; it does not prove those jobs finished.
+Retain unread reply identity and defer reply-only badges/notifications until the
+work completes. Historical, unknown and offline jobs never establish current work.
+Keep this contract aligned across desktop, Android, shared fixtures and docs;
+changes to these status semantics need explicit owner direction.
+
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after
 using a synchronous pipe, so scripts and tests must not pipe it directly.
@@ -84,10 +92,11 @@ the 10 GiB cache limit without owner authorization. Authenticated model tests st
 opt-in. Validate workflow edits locally before pushing. See `docs/ci-and-aur.md`.
 Native terminal/lifecycle changes need isolated real-agent contract coverage for
 reviewed versions, including retained resident versions. Full Linux CI runs the
-keyless pinned Codex matrix; the separate upstream canary reports new releases
-and protocol changes without advancing pins or updating live agents. Review
-capabilities before adopting them; a skipped native suite is not compatibility
-evidence. See the native compatibility section in `docs/ci-and-aur.md`.
+keyless pinned Codex and Claude Code matrices; the separate upstream canary
+reports new releases and protocol changes without advancing pins or updating
+live agents. Review capabilities before adopting them; a skipped native suite is
+not compatibility evidence. See the native compatibility section in
+`docs/ci-and-aur.md`.
 External fork workflows require maintainer approval for every external contributor.
 PR/manual checks inherit read-only cache tokens; only exact upstream main pushes
 and scheduled checks may write caches. Publish jobs have no cache access. Keep

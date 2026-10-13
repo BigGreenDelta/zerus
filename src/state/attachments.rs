@@ -34,7 +34,7 @@ fn belongs(receipt: &Value, record: &Value, agent: &str) -> bool {
                 && receipt["run_id"] == record["run_id"]))
 }
 fn directory(record: &Value) -> PathBuf {
-    root().join(if record["agent"] == "dsh" || record["backend"] == "dsh" {
+    root().join(if record["agent"]=="opencode" || record["backend"]=="opencode" {"opencode/receipts"} else if record["agent"] == "dsh" || record["backend"] == "dsh" {
         "dsh/receipts"
     } else {
         "input_receipts"
@@ -280,6 +280,7 @@ fn read_file(root: &Path, file: &Value) -> Result<Vec<u8>> {
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose the attachment session")?;
     if args.get(1).map(String::as_str) == Some("--stage") {
+        if opencode::exists(name) {return Err("OpenCode file attachments are not yet supported by this adapter".into());}
         if args.len() != 3 || args[2] != "--json" {
             return Err("usage: hgs attachment <session> --stage --json".into());
         }
@@ -316,6 +317,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let record = if !flag("--archive").is_empty() {
         archive::read_archive(name, flag("--archive"))?
+    } else if opencode::exists(name) { opencode::binding(name)?
     } else if dsh::exists(name) {
         dsh::binding(name)?
     } else {

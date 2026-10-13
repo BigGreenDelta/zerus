@@ -38,9 +38,15 @@ class ReadAllTest {
         val newer=alreadyRead.copy(raw=JSONObject(alreadyRead.raw.toString()).put("reply_id","new-reply"))
         assertTrue(ReadAllPolicies.listCandidate(newer,true))
     }
-    @Test fun finishedBackgroundCommandsAndOfflineUnreadBadgesKeepTheirExistingScope() {
-        val finished=session(raw=JSONObject().put("activity","idle").put("phase","idle")
+    @Test fun backgroundCommandsDeferOnlineRepliesAndPreserveOfflineReadScope() {
+        val background=session(raw=JSONObject().put("activity","idle").put("phase","idle")
             .put("process_work",JSONObject().put("count",2)).put("unread_reply",true))
+        assertFalse(SessionFilters.visibleUnreadReply(background,true))
+        assertFalse(ReadAllPolicies.listCandidate(background,true))
+        assertTrue(SessionFilters.visibleUnreadReply(background,false))
+        assertTrue(ReadAllPolicies.listCandidate(background,false))
+        val finished=background.copy(raw=JSONObject(background.raw.toString())
+            .put("process_work",JSONObject().put("count",0)))
         assertTrue(SessionFilters.visibleUnreadReply(finished,true))
         assertTrue(ReadAllPolicies.listCandidate(finished,true))
         assertTrue(SessionFilters.visibleUnreadReply(finished,false))

@@ -16,7 +16,7 @@ data class AccountCatalog(val key:MachineKey,val machineName:String,val supporte
 
 object AccountSnapshots {
     private val accountId=Regex("[A-Za-z0-9_][A-Za-z0-9_-]{0,79}")
-    private val providers=setOf("codex","claude","kimi","dsh")
+    private val providers=setOf("codex","claude","kimi","dsh","opencode")
     private val statuses=setOf("ok","loading","configured","offline","expired","signed_out","credentials_locked","desktop_session_unavailable","credentials_unavailable","unavailable","error","unknown")
     private fun str(raw:JSONObject,key:String,max:Int=256):String = (raw.opt(key) as? String)?.takeIf { it.length<=max && it.none { c -> c.isISOControl() && c!='\n' } }.orEmpty()
     private fun number(raw:JSONObject,key:String):Double?=(raw.opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && it>=0 && it<=9_007_199_254_740_991.0 }
@@ -38,7 +38,7 @@ object AccountSnapshots {
         val complete=eligible && accounts.size==list!!.length()
         return AccountCatalog(key,str(computer,"name"),true,complete,flag(raw,"stale") || !online || !complete,online,number(raw,"checked_at"),accounts)
     }
-    private fun account(raw:JSONObject):ReportedAccount? {
+    internal fun account(raw:JSONObject):ReportedAccount? {
         val id=str(raw,"id",80);val provider=str(raw,"provider",16)
         if(!accountId.matches(id) || provider !in providers) return null
         val usage=raw.optJSONObject("usage") ?: JSONObject();val identity=usage.optJSONObject("identity") ?: JSONObject()
@@ -73,7 +73,7 @@ object AccountSnapshots {
             .put("supported",catalog.supported).put("available",catalog.available).put("stale",catalog.stale).put("checked_at",catalog.observedAt)
             .put("accounts",JSONArray(catalog.accounts.map(::accountJson)))
     }).also { require(it.toString().toByteArray(Charsets.UTF_8).size<=1024*1024) { "Account cache exceeds its private storage limit" } }
-    private fun accountJson(a:ReportedAccount):JSONObject = JSONObject().put("id",a.id).put("provider",a.provider).put("label",a.label).put("native",a.native).put("installed",a.installed).put("is_default",a.isDefault).put("usage",
+    internal fun accountJson(a:ReportedAccount):JSONObject = JSONObject().put("id",a.id).put("provider",a.provider).put("label",a.label).put("native",a.native).put("installed",a.installed).put("is_default",a.isDefault).put("usage",
         JSONObject().put("status",a.status).put("auth_status",a.authStatus).put("identity",JSONObject().put("name",a.identity.name).put("email",a.identity.email).put("organization",a.identity.organization).put("plan",a.identity.plan).put("auth_method",a.identity.authMethod).put("account_id",a.identity.accountId))
             .put("windows",JSONArray(a.windows.map { JSONObject().put("id",it.id).put("label",it.label).put("used_percent",it.usedPercent).put("window_minutes",it.minutes).put("resets_at",it.resetsAt) }))
             .put("credits",JSONObject().put("balance",a.creditBalance).put("unlimited",a.unlimited)).put("balances",JSONArray(a.balances.map { JSONObject().put("kind",it.kind).put("balance",it.balance).put("currency",it.currency) }))

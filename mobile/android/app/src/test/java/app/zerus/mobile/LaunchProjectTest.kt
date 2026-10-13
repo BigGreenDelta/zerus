@@ -19,10 +19,8 @@ class LaunchProjectTest {
         assertEquals(listOf("profile-one","profile-two"),accounts.map { it.id })
         assertEquals("profile-two",LaunchPresentation.defaultAccount(accounts))
         assertEquals("profile-one",LaunchPresentation.defaultAccount(accounts,"profile-one"))
-        assertEquals("Same label (profile-one)",LaunchPresentation.accountTitle(accounts[0],accounts))
-        assertEquals("Same label (profile-two) (default)",LaunchPresentation.accountTitle(accounts[1],accounts))
-        assertEquals("Signed in",LaunchPresentation.accountStatus(accounts[0]))
-        assertEquals("",LaunchPresentation.accountStatus(accounts[0].copy(authStatus="unknown")))
+        assertEquals("Same label",LaunchPresentation.accountTitle(accounts[0]))
+        assertEquals("Same label",LaunchPresentation.accountTitle(accounts[1]))
     }
     @Test fun defaultAbsentOrGoneStillChoosesAnExplicitOfferedProfile() {
         val accounts=LaunchPresentation.accounts(catalog(),"claude").map { it.copy(isDefault=false) }

@@ -87,7 +87,9 @@ def validate_core(operation, payload, request_id):
         if not {"model", "effort"} & set(payload):
             raise ValueError("select a model or effort")
         if "model" in payload:
-            bounded(payload["model"], 120)
+            model = bounded(payload["model"], 256)
+            if len(model.encode("utf-8")) > 256:
+                raise ValueError("native model identifier exceeds UTF-8 byte limit")
         if "effort" in payload and payload["effort"] not in ("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on"):
             raise ValueError("invalid native effort")
         if "expected_pending_id" in payload:

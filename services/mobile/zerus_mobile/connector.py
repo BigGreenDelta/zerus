@@ -47,7 +47,7 @@ CONTEXT_KEYS = frozenset({
     "HGS_EXECUTABLE", "HGS_AGENT", "HGS_FRESH", "HGS_FRESH_REPLACES", "HGS_REQUESTED_ID",
     "HGS_ARCHIVE_ID", "HGS_LAUNCH_ID", "HGS_FORK_PARENT_ID", "HGS_ACCOUNT_ID",
     "HGS_CLIENT", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME",
-    "DSH_HOME", "DSH_CONFIG_DIR",
+    "DSH_HOME", "DSH_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
 })
 MAX_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD = MAX_REQUEST_BYTES
@@ -879,6 +879,10 @@ class Connector:
                 except ValueError as error: raise ConnectorError(str(error)) from None
                 if payload["agent"] not in accounts["agents"] or ("account_id" in payload and not any(row["id"] == payload["account_id"] and row["provider"] == payload["agent"] for row in accounts["accounts"])):
                     raise ConnectorError("selected native provider/account is unavailable")
+                if "model" in payload:
+                    account = next((row for row in accounts["accounts"] if row["id"] == payload["account_id"] and row["provider"] == payload["agent"]), None)
+                    if account is None or not any(row["value"] == payload["model"] for row in account.get("model_options", [])):
+                        raise ConnectorError("selected native model is no longer offered by this account")
                 directory = await self.native(["dirs", payload["directory"]], timeout=5)
                 if not isinstance(directory, dict) or not isinstance(directory.get("path"), str) or not Path(directory["path"]).is_absolute():
                     raise ConnectorError("native directory is unavailable")
@@ -947,6 +951,7 @@ class Connector:
             elif operation == "launch":
                 argv = [payload["agent"], launch_directory, "--new", "-n", payload["tag"], "-d", "--launch-id", request_id]
                 if "account_id" in payload: argv.extend(["--account", payload["account_id"]])
+                if "model" in payload: argv.extend(["--model", payload["model"]])
                 await self.native(argv, timeout=15, json_output=False)
                 target = None
                 until = time.monotonic()+5

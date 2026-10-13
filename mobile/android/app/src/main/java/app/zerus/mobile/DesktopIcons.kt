@@ -129,6 +129,7 @@ object DesktopIcons {
     private fun providerKey(agent: String) = when (agent.trim().lowercase(Locale.ROOT)) {
         "claude", "claude code", "claude-code" -> "claude"
         "codex" -> "codex"
+        "opencode", "open code", "open-code" -> "opencode"
         "kimi", "kimi code", "kimi-code" -> "kimi"
         "dsh", "deepseek", "deepseek harness", "deepseek-harness" -> "dsh"
         "sh", "shell", "terminal", "bash", "zsh" -> "sh"
@@ -138,6 +139,7 @@ object DesktopIcons {
     fun providerName(agent: String): String = when (providerKey(agent)) {
         "claude" -> "Claude"
         "codex" -> "Codex"
+        "opencode" -> "OpenCode"
         "kimi" -> "Kimi"
         "dsh" -> "DeepSeek"
         "sh" -> "Shell"
@@ -157,14 +159,46 @@ object DesktopIcons {
         moveTo(6f, 5f); lineTo(6f, 13f)
         moveTo(6f, 9f); lineTo(12f, 5f); moveTo(6f, 9f); lineTo(12f, 13f)
     }
+    private val OpenCodeBadge = stroke("DesktopOpenCodeBadge", 1.4f, 18f) {
+        moveTo(7f,6f); lineTo(4f,9f); lineTo(7f,12f)
+        moveTo(11f,6f); lineTo(14f,9f); lineTo(11f,12f)
+    }
     private val TerminalBadge = stroke("DesktopTerminalBadge", 1.4f, 18f) {
         moveTo(5f, 6f); lineTo(8f, 9f); lineTo(5f, 12f)
         moveTo(10f, 12f); lineTo(13f, 12f)
     }
+    private val CodexLogo = stroke("DesktopCodexLogo",1.6f) {
+        repeat(6) { index ->
+            val radians=Math.toRadians(index*60.0);val c=kotlin.math.cos(radians).toFloat();val s=kotlin.math.sin(radians).toFloat()
+            fun x(x:Float,y:Float)=12+(x-12)*c-(y-12)*s
+            fun y(x:Float,y:Float)=12+(x-12)*s+(y-12)*c
+            moveTo(x(12f,5f),y(12f,5f));curveTo(x(20f,2f),y(20f,2f),x(23f,12f),y(23f,12f),x(16f,15f),y(16f,15f))
+            lineTo(x(10f,12f),y(10f,12f));lineTo(x(10f,7f),y(10f,7f))
+        }
+    }
+    private val ClaudeLogo = stroke("DesktopClaudeLogo",1.6f) {
+        repeat(8) { index ->
+            val radians=Math.toRadians(index*45.0);val x=-kotlin.math.sin(radians).toFloat();val y=kotlin.math.cos(radians).toFloat()
+            moveTo(12+x*3,12+y*3);lineTo(12+x*9,12+y*9)
+        }
+    }
+    private val KimiLogo = stroke("DesktopKimiLogo",1.6f) {
+        moveTo(6f,4f);lineTo(6f,20f);moveTo(6f,12f);lineTo(18f,4f);moveTo(6f,12f);lineTo(18f,20f)
+    }
+    private val DeepSeekLogo = stroke("DesktopDeepSeekLogo",1.6f) {
+        moveTo(3f,10f);curveTo(5f,5f,15f,4f,18f,10f);lineTo(23f,7f);lineTo(22f,13f);lineTo(18f,13f)
+        curveTo(15f,22f,3f,19f,3f,10f);moveTo(8f,10f);lineTo(8.01f,10f)
+    }
+    fun providerLogo(agent:String):ImageVector = when(providerKey(agent)) {
+        "codex" -> CodexLogo;"claude" -> ClaudeLogo;"kimi" -> KimiLogo;"dsh" -> DeepSeekLogo;else -> providerIcon(agent)
+    }
 
     fun providerIcon(agent: String): ImageVector = when (providerKey(agent)) {
+        "codex" -> CodexLogo
+        "dsh" -> DeepSeekLogo
         "claude" -> ClaudeBadge
         "kimi" -> KimiBadge
+        "opencode" -> OpenCodeBadge
         else -> TerminalBadge
     }
     fun providerColor(agent: String, dark: Boolean): Color = when (providerKey(agent)) {

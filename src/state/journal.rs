@@ -456,7 +456,8 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         // Native startup choosers have no hook. A later recognized panel wins;
         // an unrecognized chooser before a conversation stays visible read-only.
         type Current = fn(&Value) -> Option<Value>;
-        let choosers: [(Current, &str, &str); 9] = [
+        let choosers: [(Current, &str, &str); 10] = [
+            (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
             (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
             (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
             (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
@@ -890,7 +891,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         record["model"] = json!(clipped(&event["model"], 120));
     }
     for field in ["effort", "reasoning_effort", "thinking_effort"] {
-        if let Some(value) = event[field].as_str().filter(|value| effort::valid(value)) {
+        // Claude hooks report the turn's applied effort as {"level": ...}.
+        let value = event[field].as_str().or(event[field]["level"].as_str());
+        if let Some(value) = value.filter(|value| effort::valid(value)) {
             record["effort"] = json!(value);
         }
     }
@@ -1303,6 +1306,17 @@ mod attention_regressions {
         let (messages, truncated) = message_events(&db, "unicode", Some("conversation"), "[]").unwrap();
         assert!(truncated); assert_eq!(messages.len(), 3);
         assert!(json!(messages).to_string().len() <= MESSAGE_EVENTS_BYTES);
+    }
+    #[test]
+    fn claude_hook_effort_object_sets_the_main_effort_only() {
+        let mut record = json!({"agent":"claude","activity":"busy","phase":"tool","active_tools":{},"subagents":{}});
+        update_activity(&mut record, &json!({"hook_event_name":"PostToolUse","tool_name":"Read","tool_use_id":"t1","effort":{"level":"xhigh"}}));
+        assert_eq!(record["effort"], "xhigh");
+        // A subagent's turn reports its own effort; it is not the session's.
+        update_activity(&mut record, &json!({"hook_event_name":"PostToolUse","agent_id":"child","agent_type":"general-purpose","effort":{"level":"low"}}));
+        assert_eq!(record["effort"], "xhigh");
+        update_activity(&mut record, &json!({"hook_event_name":"Stop","effort":{"level":"turbo"}}));
+        assert_eq!(record["effort"], "xhigh");
     }
     #[test]
     fn compaction_has_its_own_clock_and_survives_duplicate_start_and_queued_input() {

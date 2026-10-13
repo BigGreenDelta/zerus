@@ -1042,20 +1042,24 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             } finally { actionFlights-=action.requestId;worktreeSubmitting=false }
         }
     }
-    private fun launchArguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?):JSONObject {
+    private fun launchArguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?,model:String=""):JSONObject {
         check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
         check(accountId != null && LaunchPresentation.accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
         val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
+        if(model.isNotBlank()) {
+            check(LaunchPresentation.models(catalog,agent,accountId).any { it.value==model }) { "The native model changed. Review the current choices." }
+            args.put("model",model)
+        }
         if(catalog.opt("project_launch_supported")==true) LaunchPresentation.projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
         else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
         return SessionActionPolicies.arguments("launch",args)
     }
-    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null) {
+    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null,model:String="") {
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         val catalog=launchCatalogState ?: return
         if(!LaunchPresentation.selectedFolder(launchDirectoryState,directory)) { launchError="Select a folder from the current native browser.";return }
-        val args=try { launchArguments(catalog,agent,directory,tag,accountId,projectId,worktrees) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val args=try { launchArguments(catalog,agent,directory,tag,accountId,projectId,worktrees,model) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
         val generation=launchGeneration;launchSubmitting=true;actionFlights+=action.requestId;launchError=""
@@ -1090,7 +1094,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
      * Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
      * Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
      */
-    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String) {
+    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String,model:String="") {
         val reason=worktreeReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         // One generated branch per form: after any creation or failed attempt, only direct launches remain.
@@ -1102,7 +1106,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val branch=launchGeneratedName
         val destination=WorktreePresentation.automaticPath(evidence,branch)
         // Everything the session needs is checked before anything is created.
-        try { launchArguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        try { launchArguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination),model) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val (creation,arguments)=try { worktreeAction(machine,evidence,branch,"HEAD",destination) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration
@@ -1133,7 +1137,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(blocked.isNotBlank() || expectedCatalog != launchCatalogEvidence) { launchError="Worktree created at $created. ${blocked.ifBlank { "The creation details changed." }} Start the session there when ready.";return@launch }
                 val project=LaunchPresentation.projects(catalog).find { it.id == projectId }
                 val placement=WorktreePresentation.placement(fresh,launchCreatedEvidence,project,created)
-                val args=try { launchArguments(catalog,agent,created,tag,accountId,projectId,placement) }
+                val args=try { launchArguments(catalog,agent,created,tag,accountId,projectId,placement,model) }
                     catch(e:Exception) { launchError="Worktree created at $created. ${e.message.orEmpty()}";return@launch }
                 val launch=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
                 launchStage="launching";launchSubmitting=true;actionFlights+=launch.requestId
@@ -1195,6 +1199,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val emptyTerminalBuffers=mutableMapOf<String,TerminalBuffer>()
     fun terminalOpenReason(target:Target):String {
         if(selected?.target != target || target.agentId.isNotBlank() || target.archiveId.isNotBlank()) return "Terminal is available only for the live parent session."
+        val row=activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw
+        val nativeReason=SessionActionsMenu.nativeTerminalReason(target,row);if(nativeReason.isNotBlank()) return nativeReason
         if("terminal_snapshot" !in relayOperations[target.connectionId].orEmpty() || "terminal_snapshot" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return "This native adapter does not provide remote Terminal."
         return ""
     }
@@ -2073,6 +2079,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (childSendReason(target).isNotBlank() || !fresh(target) || demo || !storageReady || NativeParser.messageBlockReason(activity).isNotBlank() || sendingBlocked(target)) { if (continuationId.isNotBlank()) cancelCompactContinuation("The conversation is not ready. Your draft was kept without sending."); return@launch }
         val connection = connections.find { it.id == target.connectionId } ?: return@launch
         val original = draft(target)
+        if(original.attachments.isNotEmpty() && attachmentReason(target).isNotBlank()) { contextNotice=attachmentReason(target);return@launch }
         if (expectedDraft != null && !ContextPolicies.sameDraft(expectedDraft, original)) { contextNotice = "Your composition changed. Review it before sending."; return@launch }
         if (expectedCompactionId.isNotBlank() && (continuationId != expectedCompactionId || continuation?.requestId != continuationId ||
             ContextPolicies.compactStatus(messageState.contextOperations.find { it.requestId == continuationId } ?: return@launch, activity ?: return@launch) != "completed")) return@launch
@@ -2143,7 +2150,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
+    fun attachmentReason(target:Target):String = NativeAttachments.reason(target,
+        activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw)
     fun beginAttachmentPick(target: Target, onReady: (String) -> Unit) {
+        if(attachmentReason(target).isNotBlank()) return
         if (speech.recording || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
         if (continuation?.draft?.target == target) cancelCompactContinuation("Selecting files canceled the automatic continuation. Your composition is preserved.")
         val origin = draft(target); if (origin.status != "editing") return

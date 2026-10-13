@@ -10,12 +10,15 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QAction;
+class QListWidget;
+class AccountUsageStore;
 
 class NewSessionDialog : public QDialog {
     Q_OBJECT
 public:
     NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &host = {},
-                     const QString &agent = {},const QString &project = {},QWidget *parent = nullptr);
+                     const QString &agent = {},const QString &project = {},QWidget *parent = nullptr,
+                     AccountUsageStore *usage = nullptr);
     void setFleet(const FleetState &fleet);
     void setGroups(const SessionOrganization &organization,const QString &selectedProject = {});
     bool selectFolder(const QString &folderId);
@@ -26,7 +29,7 @@ public:
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
-    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder);
+    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model);
     void manageProjectsRequested(const QString &host);
     void projectFoldersRequested(const QString &project);
 private:
@@ -42,24 +45,35 @@ private:
     QString automaticWorktreePath() const;
     bool projectWorktree(const QString &path, const QJsonObject &catalog) const;
     bool projectWorktree(const QString &path) const;
-    void loadAccounts();
+    void loadAccounts(bool refresh = false);
     void updateAccounts();
+    void updateUsage();
+    void updateModels();
+    QString agent() const;
+    QString account() const;
     void updateForm();
     void start();
     void launch(const QString &target,const QString &addFolder);
     QString host() const;
     HgsClient m_client;
+    AccountUsageStore *m_usageStore;
     FleetState m_fleet;
     SessionOrganization m_projects;
     QString m_initialProject,m_initialHost,m_accountHost;
     QString m_preferredAccount;
+    QString m_preferredAgent;
+    QStringList m_agents;
     bool m_accountPreset=false;
-    QComboBox *m_agent,*m_project,*m_machine,*m_folder,*m_account;
+    bool m_accountCatalogLoaded=false;
+    QComboBox *m_project,*m_machine,*m_folder,*m_model;
+    QListWidget *m_account;
+    QPushButton *m_refreshAccounts;
+    QLabel *m_accountStatus;
     QCheckBox *m_openTerminal;
     QMap<QString, QString> m_browsedFolders;
     QString m_folderContext;
     QLineEdit *m_name;
-    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError;
+    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel;
     QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel;
     QAction *m_worktrees,*m_newWorktree;
     QLabel *m_worktreeTarget;

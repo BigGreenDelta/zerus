@@ -23,6 +23,37 @@ struct Fixture {
     paired: Value,
 }
 
+#[test]
+fn opencode_launch_model_is_native_account_scoped_and_bounded() {
+    let id = Uuid::new_v4().to_string();
+    let value = json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"launch","session":"", "payload":{"request_id":id,"agent":"opencode","directory":"/workspace/orbit","tag":"local","account_id":"native-opencode","model":"ollama/qwen3-coder:30b"}});
+    protocol::request(&value).unwrap();
+    let mut unicode_boundary = value.clone();
+    unicode_boundary["payload"]["model"] = json!(format!("ollama/{}", "界".repeat(83)));
+    protocol::request(&unicode_boundary).unwrap();
+    let mut default = value.clone();
+    default["payload"].as_object_mut().unwrap().remove("model");
+    protocol::request(&default).unwrap();
+    for (key, replacement) in [
+        ("agent", json!("codex")),
+        ("account_id", json!("native-codex")),
+        ("model", json!("local")),
+        ("model", json!("/local")),
+        ("model", json!("ollama/")),
+        ("model", json!("ollama/with space")),
+        ("model", json!("ollama/local\n")),
+        ("model", json!(format!("ollama/{}", "a".repeat(257)))),
+        ("model", json!(format!("ollama/{}", "界".repeat(84)))),
+    ] {
+        let mut bad = value.clone();
+        bad["payload"][key] = replacement;
+        assert!(
+            protocol::request(&bad).is_err(),
+            "accepted invalid model route {key}"
+        );
+    }
+}
+
 fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
     let id = Uuid::new_v4().to_string();
     let mut payload =
@@ -36,6 +67,26 @@ fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
         payload["message_id"] = json!(message.unwrap());
     }
     json!({"request_id":id,"computer_id":computer,"operation":op,"session":"codex/example/tag","payload":payload})
+}
+
+#[test]
+fn model_settings_match_launch_utf8_byte_bound() {
+    let id = Uuid::new_v4().to_string();
+    let mut value = json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"settings","session":"opencode/orbit/local", "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"ses_native","model":"ollama/local"}});
+    for model in [
+        format!("ollama/{}", "a".repeat(249)),
+        format!("ollama/{}", "界".repeat(83)),
+    ] {
+        value["payload"]["model"] = json!(model);
+        protocol::request(&value).unwrap();
+    }
+    for model in [
+        format!("ollama/{}", "a".repeat(250)),
+        format!("ollama/{}", "界".repeat(84)),
+    ] {
+        value["payload"]["model"] = json!(model);
+        assert!(protocol::request(&value).is_err());
+    }
 }
 
 #[test]

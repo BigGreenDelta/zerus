@@ -113,6 +113,22 @@ inline QString windowText(const QJsonObject &w,bool withReset=true) {
     const double used=w.value("used_percent").toDouble();
     return period(w)+" "+QString::number(used,'f',0)+"%"+(withReset&&used>=100?" ("+remaining(reset(w.value("resets_at")))+")":QString());
 }
+// New session only presents existing snapshots; unavailable windows add no detail.
+inline QString launchSummary(const QJsonObject &data) {
+    QStringList limits;
+    for(const auto &value:data["windows"].toArray()){
+        auto window=value.toObject();
+        if(!current(window)||!window["used_percent"].isDouble()||!std::isfinite(window["used_percent"].toDouble()))continue;
+        if(window["window_minutes"].toInt()>0)window.remove("label");
+        limits.append(period(window)+QObject::tr(" %1% used").arg(qRound(qBound(0.,window["used_percent"].toDouble(),100.))));
+    }
+    for(const auto &value:data["balances"].toArray()){
+        const auto balance=value.toObject();bool valid=false;
+        const auto amount=balance["balance"].toString();const double number=amount.toDouble(&valid);
+        if(valid&&std::isfinite(number))limits.append(QObject::tr("Balance: %1 %2").arg(amount,balance["currency"].toString()).trimmed());
+    }
+    return limits.isEmpty()?QObject::tr("limits n/a"):limits.join("  ");
+}
 inline double highest(const QJsonObject &data) {
     double used=-1;for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())used=qMax(used,w.value("used_percent").toDouble());}return used;
 }

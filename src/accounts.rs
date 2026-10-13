@@ -65,7 +65,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         validate(id, p)?;
     }
     for (id, label) in &catalog.native_labels {
-        if !["native-codex", "native-claude", "native-kimi", "native-dsh"].contains(&id.as_str()) {
+        if !["native-codex", "native-claude", "native-kimi", "native-dsh", "native-opencode"].contains(&id.as_str()) {
             return Err(Error::new(1, "Invalid native account label."));
         }
         validate_label(label)?;
@@ -94,7 +94,7 @@ pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>
     Ok(decode(&read(config)?)?.defaults.get(provider).cloned())
 }
 fn native_id(id: &str) -> bool {
-    ["native-codex", "native-claude", "native-kimi", "native-dsh"].contains(&id)
+    ["native-codex", "native-claude", "native-kimi", "native-dsh", "native-opencode"].contains(&id)
 }
 fn revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -132,6 +132,7 @@ pub fn home_var(provider: &str) -> Result<&'static str> {
     }
 }
 fn native_home(config: &Config, provider: &str) -> PathBuf {
+    if provider=="opencode" {return env::var_os("OPENCODE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(||env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(||Path::new(&config.home).join(".config")).join("opencode"));}
     env::var(if provider == "dsh" {
         "DSH_HOME"
     } else {
@@ -158,7 +159,7 @@ fn profile_home(config: &Config, id: &str) -> PathBuf {
 fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
     let catalog = decode(&read(config)?)?;
     if let Some(provider) = id.strip_prefix("native-") {
-        if provider != "dsh" {
+        if !["dsh","opencode"].contains(&provider) {
             home_var(provider)?;
         }
         return Ok((
@@ -187,6 +188,7 @@ fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
     Ok((profile, profile_home(config, id), false))
 }
 fn default_label(provider: &str) -> &'static str {
+    if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {
         "Native DeepSeek account"
     } else {
@@ -297,6 +299,19 @@ fn list(config: &Config) -> Result<Value> {
         rows.push(json!({"id":"native-dsh","provider":"dsh","label":catalog.native_labels.get("native-dsh").map(String::as_str).unwrap_or(default_label("dsh")),"home":home,
             "account_status":inspection::catalog_status(config,"native-dsh","dsh",&home),
             "native":true,"credential_file":false,"auth_status":"unknown","portable":false,"installed":platform::available("dsh")}));
+    }
+    if platform::available("opencode") || catalog.hidden_profiles.contains("native-opencode") {
+        let row=json!({"id":"native-opencode","provider":"opencode","label":catalog.native_labels.get("native-opencode").map(String::as_str).unwrap_or(default_label("opencode")),"home":native_home(config,"opencode"),"native":true,"credential_file":false,"auth_status":"native_configuration","portable":false,"installed":platform::available("opencode"),"permission_mode_supported":false});
+        #[cfg(unix)]
+        let row = {
+            let mut row = row;
+            let models = crate::state::opencode::catalog();
+            row["model_options"] = models["model_options"].clone();
+            row["settings_model"] = models["settings_model"].clone();
+            row["model_catalog_reason"] = models["model_catalog_reason"].clone();
+            row
+        };
+        rows.push(row);
     }
     for row in &mut rows {
         let provider = row["provider"].as_str().unwrap_or("");
@@ -478,13 +493,14 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if !["provider","bypass"].contains(&mode) {return Err(Error::new(1,"Choose provider or bypass permission mode."));}
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
             if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
+            if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
             if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "rename"=>{
             let label=arg(args,"--label").ok_or_else(||Error::new(1,"Account name is required."))?.trim();validate_label(label)?;
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
-            if ["native-codex","native-claude","native-kimi","native-dsh"].contains(&id) {
+            if ["native-codex","native-claude","native-kimi","native-dsh","native-opencode"].contains(&id) {
                 catalog.native_labels.insert(id.into(),label.into());
             } else {
                 catalog.profiles.get_mut(id).ok_or_else(||Error::new(1,"Account profile does not exist."))?.label=label.into();
@@ -528,6 +544,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
+            if id=="native-opencode" {if dry {println!("opencode auth login");return Ok(0);}let status=Command::new("opencode").args(["auth","login"]).status()?;return Ok(status.code().unwrap_or(1));}
             let (p,home,native)=lookup(config,id)?; let key=home_var(&p.provider)?;
             let arguments: Vec<&str> = if p.provider == "claude" && !native { vec!["auth", "login", "--claudeai"] }
                 else if p.provider == "claude" { vec!["auth", "login"] } else { vec!["login"] };

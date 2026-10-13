@@ -361,6 +361,7 @@ import org.json.JSONObject
         Text("Effort",fontWeight = FontWeight.SemiBold)
         (listOf("") + efforts).distinct().forEach { effort -> NativeSettingChoice(effort.ifBlank { "Default" },selectedEffort == effort) { selectedEffort = effort } }
         Text(when(snapshot.applyWhen) { "ready" -> "Apply when the agent is ready."; "resume" -> "Save for the next resume."; "now" -> "Apply now."; else -> "The machine determines when these settings apply." },style = MaterialTheme.typography.bodySmall)
+        if(snapshot.supported && snapshot.notice.isNotBlank()) Text(snapshot.notice,style = MaterialTheme.typography.bodySmall)
         if(reason.isNotBlank()) Text(reason,style = MaterialTheme.typography.bodySmall)
     } },confirmButton = { TextButton(onClick = { model.updateSettings(target,selectedModel,selectedEffort,if(applyingPending) snapshot.pendingId else ""); onDismiss() },enabled = reason.isBlank()) {
         Text(when(snapshot.applyWhen) { "ready" -> "Apply when ready"; "resume" -> "Save for resume"; else -> if(applyingPending) "Apply pending" else "Apply" })

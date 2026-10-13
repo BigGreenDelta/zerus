@@ -217,6 +217,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let name=&args[0];
+    if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
     let mut guard=Some(lock(None)?);
     let dismiss=request.dismiss_prompt && !available(&read(name)?,true);

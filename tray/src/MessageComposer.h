@@ -32,6 +32,7 @@ public:
     void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
+    void setAttachmentAvailability(bool available, const QString &reason = {});
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
@@ -47,6 +48,8 @@ public:
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
                           bool enabled, const QString &reason, const QString &pendingModel = {},
                           const QString &pendingEffort = {}, const QString &applyWhen = {});
+    // The provider's own warning about applying a change, shown before Apply.
+    void setSettingsNotice(const QString &notice);
     void setSettingsTerminalAvailable(bool available);
     // Only a successful callback permits transport; pending work locks this exact draft.
     void prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done);
@@ -67,7 +70,8 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canEditAttachments() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
+    bool canAttachFiles() const { return m_attachmentsAvailable && canEditAttachments(); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -138,7 +142,8 @@ private:
     QString m_key, m_unavailableReason;
     QString m_sessionStatus;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
-    bool m_available = false, m_loading = false, m_dark = true, m_recording = false;
+    bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
+    QString m_attachmentsReason;
     double m_scale = 1.0;
     QPlainTextEdit *m_editor;
     QLabel *m_status;
@@ -150,7 +155,7 @@ private:
     bool m_settingsTerminalAvailable = false;
     QPushButton *m_settings, *m_applySettings;
     QJsonArray m_modelOptions;
-    QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey;
+    QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;
     bool m_settingsEnabled = false;
     QPushButton *m_attach, *m_send, *m_retry;
     QPushButton *m_refreshStatus;

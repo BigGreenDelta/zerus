@@ -3,12 +3,13 @@
 #include <QPainter>
 
 namespace SessionStatusBadge {
-enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled };
+enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled, Background };
 inline QFont font(QFont base) { base.setPixelSize(11); base.setWeight(QFont::Medium); return base; }
 // The state's color for a frame around the session; invalid for Neutral.
 inline QColor edge(Kind kind, bool dark) {
     switch (kind) {
     case Working: return QColor(dark ? "#4cc98a" : "#2a9d63");
+    case Background: return QColor(dark ? "#86a9d3" : "#466b99");
     case Attention: case Unread: return QColor(dark ? "#ffda76" : "#e0a82e");
     case Error: return QColor(dark ? "#ff8fa0" : "#c7405a");
     case Paused: return QColor(dark ? "#a988d6" : "#9474c0");
@@ -32,12 +33,14 @@ inline QRect workingIndicatorRect(const QRect &rect) {
 inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1, bool indicatorOnly = false) {
     p->save(); p->setRenderHint(QPainter::Antialiasing); p->setClipRect(rect, Qt::IntersectClip);
     const QColor background = kind == Working ? QColor(dark ? "#194d36" : "#ccefdc")
+        : kind == Background ? QColor(dark ? "#273544" : "#e9f0f8")
         : (kind == Attention || kind == Unread) ? QColor(dark ? "#ffda76" : "#f4ce65")
         : kind == Error ? QColor(dark ? "#ffabb6" : "#b73750")
         : kind == Paused ? QColor(dark ? "#443654" : "#e8ddf5")
         : kind == Draft ? QColor(dark ? "#263446" : "#e3edf9")
         : kind == Scheduled ? QColor(dark ? "#173e48" : "#d3edf4") : QColor(dark ? "#2b343e" : "#e7edf2");
     const QColor foreground = kind == Working ? QColor(dark ? "#97f0ba" : "#145b37")
+        : kind == Background ? QColor(dark ? "#aac0df" : "#466b99")
         : (kind == Attention || kind == Unread) ? QColor("#392900")
         : kind == Error ? QColor(dark ? "#46202a" : "#ffffff")
         : kind == Paused ? QColor(dark ? "#dec3ff" : "#634187")
@@ -50,6 +53,8 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         p->setPen(Qt::NoPen); QColor halo(foreground); halo.setAlphaF(.08 + .25 * pulse);
         p->setBrush(halo); p->drawEllipse(center, 4 + pulse, 4 + pulse);
         p->setBrush(foreground); p->drawEllipse(center, 2.5, 2.5);
+    } else if (kind == Background) {
+        p->setPen(Qt::NoPen);p->setBrush(foreground);p->drawEllipse(center,2.5,2.5);
     } else if (kind == Attention || kind == Error) {
         auto bold = p->font(); bold.setBold(true); p->setFont(bold);
         CachedText::draw(p, QRectF(center.x() - 5, rect.y(), 10, rect.height()), Qt::AlignCenter, QStringLiteral("!"));

@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPaintEngine>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QStyle>
@@ -18,11 +19,89 @@
 #include <QTextTable>
 #include <QUrlQuery>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 
 namespace {
 using MarkdownObjects::ChipFill, MarkdownObjects::ChipScale, MarkdownObjects::ChipHeading;
+
+// Draw the document's backgrounds and images without painting glyphs. A
+// transparent foreground selection still shapes/draws every glyph through a
+// complicated selection clip; QTextLayout's public paint-engine path lets us
+// omit those text items while keeping the original layout and decoration.
+class BackgroundEngine final : public QPaintEngine {
+public:
+    explicit BackgroundEngine(QPainter &target) : QPaintEngine(AllFeatures), m_target(target) {}
+    bool begin(QPaintDevice *) override { m_target.save(); return true; }
+    bool end() override { m_target.restore(); return true; }
+    Type type() const override { return User; }
+    void updateState(const QPaintEngineState &state) override
+    {
+        const auto dirty = state.state();
+        if (dirty & DirtyPen) m_target.setPen(state.pen());
+        if (dirty & DirtyBrush) m_target.setBrush(state.brush());
+        if (dirty & DirtyBrushOrigin) m_target.setBrushOrigin(state.brushOrigin());
+        if (dirty & DirtyFont) m_target.setFont(state.font());
+        if (dirty & DirtyBackground) m_target.setBackground(state.backgroundBrush());
+        if (dirty & DirtyBackgroundMode) m_target.setBackgroundMode(state.backgroundMode());
+        if (dirty & DirtyTransform) m_target.setWorldTransform(state.transform());
+        if (dirty & DirtyHints) {
+            m_target.setRenderHints(m_target.renderHints(), false); m_target.setRenderHints(state.renderHints());
+        }
+        if (dirty & DirtyCompositionMode) m_target.setCompositionMode(state.compositionMode());
+        if (dirty & DirtyOpacity) m_target.setOpacity(state.opacity());
+        if (dirty & DirtyClipRegion) m_target.setClipRegion(state.clipRegion(), state.clipOperation());
+        if (dirty & DirtyClipPath) m_target.setClipPath(state.clipPath(), state.clipOperation());
+        if (dirty & DirtyClipEnabled) m_target.setClipping(state.isClipEnabled());
+    }
+    void drawTextItem(const QPointF &, const QTextItem &) override {}
+    void drawPixmap(const QRectF &r, const QPixmap &p, const QRectF &s) override { m_target.drawPixmap(r, p, s); }
+    void drawImage(const QRectF &r, const QImage &i, const QRectF &s, Qt::ImageConversionFlags f) override { m_target.drawImage(r, i, s, f); }
+    void drawPath(const QPainterPath &path) override { m_target.drawPath(path); }
+    void drawRects(const QRectF *r, int n) override { m_target.drawRects(r, n); }
+    void drawRects(const QRect *r, int n) override { m_target.drawRects(r, n); }
+    void drawLines(const QLineF *l, int n) override { m_target.drawLines(l, n); }
+    void drawLines(const QLine *l, int n) override { m_target.drawLines(l, n); }
+    void drawEllipse(const QRectF &r) override { m_target.drawEllipse(r); }
+    void drawEllipse(const QRect &r) override { m_target.drawEllipse(r); }
+    void drawPoints(const QPointF *p, int n) override { m_target.drawPoints(p, n); }
+    void drawPoints(const QPoint *p, int n) override { m_target.drawPoints(p, n); }
+    void drawPolygon(const QPointF *p, int n, PolygonDrawMode mode) override
+    {
+        if (mode == PolylineMode) m_target.drawPolyline(p, n);
+        else if (mode == ConvexMode) m_target.drawConvexPolygon(p, n);
+        else m_target.drawPolygon(p, n, mode == WindingMode ? Qt::WindingFill : Qt::OddEvenFill);
+    }
+private:
+    QPainter &m_target;
+};
+
+class BackgroundDevice final : public QPaintDevice {
+public:
+    BackgroundDevice(QImage &image, QPainter &target) : m_image(image), m_engine(target) {}
+    QPaintEngine *paintEngine() const override { return &m_engine; }
+protected:
+    int metric(PaintDeviceMetric m) const override
+    {
+        switch (m) {
+        case PdmWidth: return m_image.width();
+        case PdmHeight: return m_image.height();
+        case PdmWidthMM: return qRound(m_image.width() * 25.4 / m_image.logicalDpiX());
+        case PdmHeightMM: return qRound(m_image.height() * 25.4 / m_image.logicalDpiY());
+        case PdmDepth: return m_image.depth();
+        case PdmDpiX: case PdmPhysicalDpiX: return m_image.logicalDpiX();
+        case PdmDpiY: case PdmPhysicalDpiY: return m_image.logicalDpiY();
+        case PdmDevicePixelRatio: return 1;
+        case PdmDevicePixelRatioScaled: return devicePixelRatioFScale();
+        default: return 0;
+        }
+    }
+private:
+    QImage &m_image;
+    mutable BackgroundEngine m_engine;
+};
 
 // GitHub pads code .2em .4em, and 0 .2em inside headings.
 QPointF chipPadding(const QTextCharFormat &format)
@@ -31,15 +110,22 @@ QPointF chipPadding(const QTextCharFormat &format)
     return format.boolProperty(ChipHeading) ? QPointF(0.2 * em, 0) : QPointF(0.4 * em, 0.2 * em);
 }
 
-// The inline code runs of a document, found again after each change so that
-// painting never walks a whole long journal.
+// Content and layout indexes are independent: resizing keeps the code runs but
+// rebuilds their block bounds. Paint only the blocks intersecting the viewport.
 class Chips final : public QObject {
     Q_OBJECT
 public:
     struct Run { int start = 0, end = 0; QTextCharFormat format; };
+    struct BlockRuns {
+        QTextBlock block;
+        QRectF bounds, padded;
+        qsizetype begin = 0, end = 0;
+    };
     explicit Chips(QTextDocument *document) : QObject(document), m_document(document)
     {
-        connect(document, &QTextDocument::contentsChange, this, [this] { m_stale = true; });
+        connect(document, &QTextDocument::contentsChange, this, [this] { m_stale = m_boundsStale = true; });
+        connect(document, &QTextDocument::documentLayoutChanged, this, [this] { watchLayout(); });
+        watchLayout();
     }
     static Chips *of(QTextDocument *document) { return document->findChild<Chips *>(QString(), Qt::FindDirectChildrenOnly); }
     const QList<Run> &runs()
@@ -55,10 +141,64 @@ public:
             }
         return m_runs;
     }
+    void prepare()
+    {
+        auto *layout = m_document->documentLayout();
+        const QSizeF size = layout->documentSize(); // Finish any pending layout before indexing.
+        if (!m_boundsStale && m_size == size && m_width == m_document->textWidth()
+            && m_font == m_document->defaultFont()) return;
+        const auto &code = runs();
+        m_blocks.clear();
+        for (qsizetype i = 0; i < code.size();) {
+            const auto block = m_document->findBlock(code[i].start);
+            const qsizetype begin = i;
+            qreal padding = 0;
+            do { padding = qMax(padding, qreal(code[i++].format.font().pixelSize())); }
+            while (i < code.size() && block.contains(code[i].start));
+            const QRectF bounds = layout->blockBoundingRect(block);
+            m_blocks.append({block, bounds, bounds.adjusted(-padding, -padding, padding, padding), begin, i});
+        }
+        std::sort(m_blocks.begin(), m_blocks.end(), [](const auto &a, const auto &b) { return a.padded.top() < b.padded.top(); });
+        // Blocks in table columns need not be ordered vertically, or have equal
+        // heights. Prefix maxima retain a tall overlapping block at any scroll.
+        m_bottoms.clear();
+        qreal bottom = -std::numeric_limits<qreal>::infinity();
+        for (const auto &block : std::as_const(m_blocks)) {
+            bottom = qMax(bottom, block.padded.bottom()); m_bottoms.append(bottom);
+        }
+        m_size = size; m_width = m_document->textWidth(); m_font = m_document->defaultFont();
+        m_boundsStale = false;
+    }
+    QList<const BlockRuns *> visible(const QRectF &exposed)
+    {
+        prepare();
+        QList<const BlockRuns *> result;
+        auto i = std::lower_bound(m_bottoms.cbegin(), m_bottoms.cend(), exposed.top()) - m_bottoms.cbegin();
+        for (; i < m_blocks.size() && m_blocks[i].padded.top() <= exposed.bottom(); ++i)
+            if (m_blocks[i].padded.intersects(exposed)) result.append(&m_blocks[i]);
+        std::sort(result.begin(), result.end(), [](const auto *a, const auto *b) { return a->begin < b->begin; });
+        return result;
+    }
 private:
+    void watchLayout()
+    {
+        for (const auto &connection : std::as_const(m_layoutConnections)) disconnect(connection);
+        m_layoutConnections.clear(); m_boundsStale = true;
+        auto *layout = m_document->documentLayout();
+        m_layoutConnections.append(connect(layout, &QAbstractTextDocumentLayout::update, this, [this] { m_boundsStale = true; }));
+        m_layoutConnections.append(connect(layout, &QAbstractTextDocumentLayout::updateBlock, this, [this] { m_boundsStale = true; }));
+        m_layoutConnections.append(connect(layout, &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_boundsStale = true; }));
+    }
     QTextDocument *m_document;
     QList<Run> m_runs;
+    QList<BlockRuns> m_blocks;
+    QList<qreal> m_bottoms;
+    QList<QMetaObject::Connection> m_layoutConnections;
+    QSizeF m_size;
+    QFont m_font;
+    qreal m_width = 0;
     bool m_stale = true;
+    bool m_boundsStale = true;
 };
 
 QString markerText(const QString &imageName)
@@ -182,80 +322,167 @@ bool MarkdownObjects::isInlineCode(const QTextFormat &format)
     return format.hasProperty(ChipFill);
 }
 
+void MarkdownObjects::prepareChips(QTextDocument *document)
+{
+    if (auto *chips = Chips::of(document)) chips->prepare();
+}
+
 void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, const QRectF &exposed, const QPalette &palette,
                                  const QList<QAbstractTextDocumentLayout::Selection> &selections)
 {
     auto *chips = Chips::of(document);
     if (!chips) return;
     auto *layout = document->documentLayout();
-    struct Piece { QPainterPath shape; QColor fill; };
+    struct Piece { QPainterPath shape; QColor fill; QTextBlock block; };
     QList<Piece> pieces; QList<QTextBlock> blocks;
-    QPainterPath area; area.setFillRule(Qt::WindingFill);
-    QTextBlock block; QRectF bounds;
-    for (const auto &run : chips->runs()) {
-        // Runs come in document order, often several to a block.
-        if (!block.isValid() || !block.contains(run.start)) { block = document->findBlock(run.start); bounds = layout->blockBoundingRect(block); }
-        const QFont font = run.format.font(); const qreal em = font.pixelSize();
-        if (!bounds.adjusted(-em, -em, em, em).intersects(exposed)) continue;
-        const QFontMetricsF metrics(font); const QPointF padding = chipPadding(run.format);
-        const qreal radius = 6 * run.format.doubleProperty(ChipScale);
+    const auto &runs = chips->runs();
+    for (const auto *entry : chips->visible(exposed)) {
+        const auto block = entry->block; const auto bounds = entry->bounds;
         const QTextLayout *text = block.layout(); const QString content = block.text();
-        const int from = run.start - block.position(), to = run.end - block.position();
-        bool drawn = false;
-        for (int i = 0; i < text->lineCount(); ++i) {
-            const QTextLine line = text->lineAt(i);
-            const int start = qMax(from, line.textStart());
-            int end = qMin(to, line.textStart() + line.textLength());
-            // Like GitHub's (box-decoration-break: slice): padded and rounded where the code begins
-            // and ends, cut square where a line breaks it, and without the spaces hanging there.
-            const bool first = start == from, last = end == to;
-            while (!last && end > start && content.at(end - 1).isSpace()) --end;
-            if (start >= end) continue;
-            const qreal baseline = bounds.top() + line.y() + line.ascent();
-            const QRectF rect(QPointF(bounds.left() + line.cursorToX(start) - (first ? padding.x() : 0), baseline - metrics.ascent() - padding.y()),
-                              QPointF(bounds.left() + line.cursorToX(end), baseline + metrics.descent() + padding.y()));
-            if (!rect.intersects(exposed)) continue;
-            QPainterPath shape; shape.setFillRule(Qt::WindingFill);
-            shape.addRoundedRect(rect, radius, radius);
-            const qreal square = qMin(radius, rect.width() / 2);
-            if (!first) shape.addRect(QRectF(rect.left(), rect.top(), square, rect.height()));
-            if (!last) shape.addRect(QRectF(rect.right() - square, rect.top(), square, rect.height()));
-            pieces.append({shape, run.format.colorProperty(ChipFill)}); area.addPath(shape); drawn = true;
+        for (qsizetype r = entry->begin; r < entry->end; ++r) {
+            const auto &run = runs[r];
+            const QFont font = run.format.font(); const qreal em = font.pixelSize();
+            if (!bounds.adjusted(-em, -em, em, em).intersects(exposed)) continue;
+            const QFontMetricsF metrics(font); const QPointF padding = chipPadding(run.format);
+            const qreal radius = 6 * run.format.doubleProperty(ChipScale);
+            const int from = run.start - block.position(), to = run.end - block.position();
+            bool drawn = false;
+            for (int i = 0; i < text->lineCount(); ++i) {
+                const QTextLine line = text->lineAt(i);
+                const int start = qMax(from, line.textStart());
+                int end = qMin(to, line.textStart() + line.textLength());
+                // Like GitHub's (box-decoration-break: slice): padded and rounded where the code begins
+                // and ends, cut square where a line breaks it, and without the spaces hanging there.
+                const bool first = start == from, last = end == to;
+                while (!last && end > start && content.at(end - 1).isSpace()) --end;
+                if (start >= end) continue;
+                const qreal baseline = bounds.top() + line.y() + line.ascent();
+                const QRectF rect(QPointF(bounds.left() + line.cursorToX(start) - (first ? padding.x() : 0), baseline - metrics.ascent() - padding.y()),
+                                  QPointF(bounds.left() + line.cursorToX(end), baseline + metrics.descent() + padding.y()));
+                if (!rect.intersects(exposed)) continue;
+                QPainterPath shape; shape.setFillRule(Qt::WindingFill);
+                shape.addRoundedRect(rect, radius, radius);
+                const qreal square = qMin(radius, rect.width() / 2);
+                if (!first) shape.addRect(QRectF(rect.left(), rect.top(), square, rect.height()));
+                if (!last) shape.addRect(QRectF(rect.right() - square, rect.top(), square, rect.height()));
+                pieces.append({shape, run.format.colorProperty(ChipFill), block}); drawn = true;
+            }
+            if (drawn && (blocks.isEmpty() || blocks.last() != block)) blocks.append(block);
         }
-        if (drawn && (blocks.isEmpty() || blocks.last() != block)) blocks.append(block);
     }
     if (pieces.isEmpty()) return;
-    const QRectF reach = area.boundingRect();
-    // What lies beneath the chips: the view's base, then the document with transparent
-    // text and no selection. The clip is aliased, so glyphs are drawn only once.
-    painter->save();
-    painter->setClipPath(area, Qt::IntersectClip);
-    painter->fillRect(reach, palette.brush(QPalette::Base));
-    QAbstractTextDocumentLayout::PaintContext context;
-    context.palette = palette; context.clip = reach;
+    // Bound the clip complexity even for a single dense paragraph. Large
+    // rounded-path unions make the raster engine clip every glyph against all
+    // the other pills. Disjoint horizontal bands preserve every pixel once.
+    struct Batch { QTextBlock block; QPainterPath area; QRectF clip; bool sliced = false; };
+    QList<Batch> batches;
+    qsizetype pieceStart = 0;
+    for (const QTextBlock &each : std::as_const(blocks)) {
+        const qsizetype from = pieceStart;
+        QPainterPath area; area.setFillRule(Qt::WindingFill);
+        while (pieceStart < pieces.size() && pieces[pieceStart].block == each)
+            area.addPath(pieces[pieceStart++].shape);
+        const QRectF reach = area.boundingRect();
+        auto logicalTransform = painter->combinedTransform();
+        const qreal deviceRatio = painter->device()->devicePixelRatioF();
+        logicalTransform.scale(1 / deviceRatio, 1 / deviceRatio);
+        if (pieceStart - from <= 8 || logicalTransform.type() > QTransform::TxTranslate) {
+            batches.append({each, area, reach}); continue;
+        }
+        const auto device = painter->deviceTransform();
+        const auto inverse = device.inverted();
+        const QRect pixels = device.mapRect(reach).toAlignedRect();
+        const int step = qMax(1, qRound(32 * painter->device()->devicePixelRatioF()));
+        for (int top = pixels.top(); top < pixels.top() + pixels.height(); top += step) {
+            const QRectF band = inverse.mapRect(QRectF(pixels.left(), top, pixels.width(),
+                qMin(step, pixels.top() + pixels.height() - top)));
+            QPainterPath local; local.setFillRule(Qt::WindingFill);
+            for (qsizetype i = from; i < pieceStart; ++i)
+                if (pieces[i].shape.boundingRect().intersects(band)) local.addPath(pieces[i].shape);
+            if (!local.isEmpty()) batches.append({each, local, band, true});
+        }
+    }
+    // Restore backgrounds everywhere first, then paint every pill once in its
+    // original order. This also preserves overlapping decorations at line ends.
     QTextCursor everything(document); everything.select(QTextCursor::Document);
     QTextCharFormat hidden; hidden.setForeground(QColor(Qt::transparent));
-    context.selections.append({everything, hidden});
-    layout->draw(painter, context);
-    painter->restore();
-    // The chips themselves, antialiased.
-    painter->save();
-    painter->setRenderHint(QPainter::Antialiasing);
+    QAbstractTextDocumentLayout::PaintContext context;
+    context.palette = palette; context.selections.append({everything, hidden});
+    // Render the underlying document once with a rectangular clip. Repeating
+    // transparent text through each rounded clip is costly for long paragraphs.
+    // Align the temporary tile to the destination's physical pixel grid.
+    QImage background;
+    QPointF backgroundOrigin;
+    // combinedTransform includes the ordinary HiDPI scale. Remove only that
+    // scale when deciding whether the caller added a nontranslation transform.
+    auto transform = painter->combinedTransform();
+    const qreal deviceRatio = painter->device()->devicePixelRatioF();
+    transform.scale(1 / deviceRatio, 1 / deviceRatio);
+    const bool translated = transform.type() <= QTransform::TxTranslate;
+    if (translated && painter->opacity() == 1 && painter->compositionMode() == QPainter::CompositionMode_SourceOver
+        && palette.brush(QPalette::Base).isOpaque()) {
+        QRectF reach;
+        for (const auto &batch : std::as_const(batches)) reach = reach.united(batch.clip);
+        const qreal ratio = painter->device()->devicePixelRatioF();
+        const QRect pixels = painter->deviceTransform().mapRect(reach).toAlignedRect();
+        backgroundOrigin = painter->deviceTransform().inverted().map(QPointF(pixels.topLeft()));
+        background = QImage(pixels.size(), QImage::Format_ARGB32_Premultiplied);
+        background.setDotsPerMeterX(qRound(painter->device()->logicalDpiX() / .0254));
+        background.setDotsPerMeterY(qRound(painter->device()->logicalDpiY() / .0254));
+        {
+            QPainter target(&background); BackgroundDevice device(background, target); QPainter behind(&device);
+            behind.setRenderHints(painter->renderHints());
+            behind.setWorldTransform(QTransform(ratio, 0, 0, ratio, -backgroundOrigin.x() * ratio, -backgroundOrigin.y() * ratio));
+            behind.fillRect(QRectF(backgroundOrigin, QSizeF(pixels.size()) / ratio), palette.brush(QPalette::Base));
+            auto backdrop = context; backdrop.clip = reach; backdrop.selections.clear();
+            layout->draw(&behind, backdrop);
+        }
+        background.setDevicePixelRatio(ratio);
+    }
+    if (background.isNull()) {
+        // Preserve the caller's compositing for transparent bases or unusual
+        // transforms. Restore once, rather than repainting all text per band.
+        QPainterPath area; area.setFillRule(Qt::WindingFill);
+        for (const auto &piece : std::as_const(pieces)) area.addPath(piece.shape);
+        painter->save(); painter->setClipPath(area, Qt::IntersectClip);
+        context.clip = area.boundingRect();
+        painter->fillRect(context.clip, palette.brush(QPalette::Base)); layout->draw(painter, context);
+        painter->restore();
+    } else for (const auto &batch : std::as_const(batches)) {
+        painter->save();
+        if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
+        painter->setClipPath(batch.area, Qt::IntersectClip);
+        const qreal ratio = background.devicePixelRatio();
+        const QRectF pixels((batch.clip.topLeft() - backgroundOrigin) * ratio, batch.clip.size() * ratio);
+        painter->drawImage(batch.clip, background, pixels);
+        painter->restore();
+    }
+    painter->save(); painter->setRenderHint(QPainter::Antialiasing);
     for (const auto &piece : std::as_const(pieces)) painter->fillPath(piece.shape, piece.fill);
     painter->restore();
-    // On top, as in a browser: the selections as the view painted them, then the text.
-    painter->save();
-    painter->setClipPath(area, Qt::IntersectClip);
-    painter->setPen(palette.color(QPalette::Text));
-    for (const QTextBlock &each : std::as_const(blocks)) {
+    for (const auto &batch : std::as_const(batches)) {
+        const auto each = batch.block;
         QList<QTextLayout::FormatRange> ranges;
         for (const auto &selection : selections) {
             const int start = selection.cursor.selectionStart() - each.position(), end = selection.cursor.selectionEnd() - each.position();
             if (start < each.length() && end > 0 && end > start) ranges.append({start, end - start, selection.format});
         }
-        each.layout()->draw(painter, layout->blockBoundingRect(each).topLeft() - each.layout()->position(), ranges, reach);
+        painter->save();
+        if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
+        painter->setClipPath(batch.area, Qt::IntersectClip);
+        painter->setPen(palette.color(QPalette::Text));
+        QRectF textClip = batch.clip;
+        if (batch.sliced) {
+            qreal lineHeight = 0;
+            for (int i = 0; i < each.layout()->lineCount(); ++i) lineHeight = qMax(lineHeight, each.layout()->lineAt(i).height());
+            // Retain neighboring lines: CoreText glyph ink can overhang line
+            // metrics, and slicing Qt's selection regions changes glyph edges.
+            textClip.adjust(0, -lineHeight, 0, lineHeight);
+        }
+        each.layout()->draw(painter, layout->blockBoundingRect(each).topLeft() - each.layout()->position(), ranges, textClip);
+        painter->restore();
     }
-    painter->restore();
+
 }
 
 void MarkdownObjects::paintChips(QTextEdit *view, const QRect &exposed)

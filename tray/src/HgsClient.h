@@ -34,10 +34,9 @@ struct SessionInfo {
     bool replyScheduled = false;
     int scheduledJobs = -1, recurringSchedules = -1;
     double nextScheduledAt = 0;
-    // Commands the agent left running (stands, dev servers). They are never
-    // work: a session whose agent finished its turn is finished.
     int backgroundProcesses = -1;
-    double backgroundObservedAt = 0;
+    double backgroundStarted = 0, backgroundObservedAt = 0;
+    QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
@@ -45,6 +44,10 @@ struct SessionInfo {
     QString attentionSignature, readReplyId, readAttentionSignature;
     double archivedAt = 0;
     bool resumable = false;
+    bool terminalSupported = true, terminalReported = false, bulkLifecycleSupported = true, actionsReported = false;
+    QString terminalReason;
+    QSet<QString> allowedActions;
+    QJsonObject actionReasons;
     QString activity;
     bool tracked = false;
     QString phase, model, effort, prompt, currentTool, toolDetail;
@@ -61,7 +64,7 @@ struct SessionInfo {
     bool replyInProgress() const {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
-            && (activity == QLatin1String("busy") || subagentActiveCount > 0);
+            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
     }
     // Intermediate replies remain unread; only their notification presentation waits.
     bool visibleUnreadReply(bool online = true) const {
@@ -132,7 +135,7 @@ public:
 
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId);
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     void requestPeer(const QString &peer);
