@@ -515,12 +515,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             read(name)?
         }
     };
-    if output.is_some() || stop.is_some() {
-        if run != Some(string(&record, "run_id"))
-            || conversation != Some(string(&record, "conversation_id"))
-        {
-            return Err("The process belongs to a different session run or conversation".into());
-        }
+    if (output.is_some() || stop.is_some())
+        && (run != Some(string(&record, "run_id"))
+            || conversation != Some(string(&record, "conversation_id")))
+    {
+        return Err("The process belongs to a different session run or conversation".into());
     }
     if let Some(id) = stop {
         if archive.is_some() {

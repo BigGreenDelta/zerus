@@ -645,9 +645,9 @@ fn capture_control(
             if status.is_none() {
                 status = child.try_wait()?;
             }
-            if status.is_some() && stdout.is_none() && stderr.is_none() {
+            if let Some(status) = status.filter(|_| stdout.is_none() && stderr.is_none()) {
                 return Ok(Output {
-                    code: platform::code(status.unwrap()),
+                    code: platform::code(status),
                     stdout: out,
                     stderr: err,
                 });

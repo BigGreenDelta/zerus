@@ -153,7 +153,7 @@ mod tests {
     use super::*;
     #[test]
     fn nul_paths_and_renames_are_counted_once() {
-        let bytes = b"# branch.oid aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0# branch.head feature/status\0# branch.upstream origin/main\0# branch.ab +2 -3\01 MM ignored metadata file\02 R. ignored metadata new\nname\0old\nname\0? non-utf8-\xff\0u UU conflicted\0";
+        let bytes = b"# branch.oid aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0# branch.head feature/status\0# branch.upstream origin/main\0# branch.ab +2 -3\x001 MM ignored metadata file\x002 R. ignored metadata new\nname\0old\nname\0? non-utf8-\xff\0u UU conflicted\0";
         let status = parse_status(bytes).unwrap();
         assert_eq!(status["changed_files"], 4);
         assert_eq!(status["conflicts"], 1);

@@ -187,7 +187,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
     // Resume goal changes the goal state before the dialog closes, so only the
     // closed dialog acknowledges the choice.
     kimi_tui_choice::answer(record, question, chosen, IDS.len(), snapshot,
-        |screen| !screen.trim().is_empty() && !(screen.contains(TITLE) && screen.contains(HINT)), false)
+        |screen| !(screen.trim().is_empty() || screen.contains(TITLE) && screen.contains(HINT)), false)
 }
 
 #[cfg(test)]

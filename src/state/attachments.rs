@@ -237,7 +237,7 @@ pub(super) fn stage_native(request: &Value) -> Result<Value> {
         if bytes.is_empty() || bytes.len() > MAX_FILE as usize || total > 20 * 1024 * 1024 {
             return Err("Attachments exceed the size limit".into());
         }
-        private_dir(&dir)?;
+        private_dir(dir)?;
         let path = dir.join(input::safe_filename(string(file, "name"), index));
         let mut output = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(&path)

@@ -560,9 +560,9 @@ fn ready(record: &Value) -> bool {
     ((string(record, "activity") == "idle" && string(record, "phase") == "idle")
         || input::first_message_candidate(record))
         && telemetry::grouped_active(record) == 0
-        && !record["active_tools"]
+        && record["active_tools"]
             .as_object()
-            .is_some_and(|v| !v.is_empty())
+            .is_none_or(|v| v.is_empty())
         && !record["subagents"]
             .as_object()
             .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))

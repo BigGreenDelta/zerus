@@ -31,7 +31,7 @@ fn parse(screen: &str) -> Option<Panel> {
     }
     let rows = &all[divider..];
     if rows.len() < 15
-        || !border(*rows.last()?)
+        || !border(rows.last()?)
         || rows[1] != TITLE
         || rows[2] != HINT
         || !rows[3].is_empty()

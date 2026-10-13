@@ -97,12 +97,10 @@ fn navigate(
             if panel.0 != question["question_hash"] {
                 return Err("The agent's dialog changed".into());
             }
-            let key = if panel.1 == chosen {
-                "Enter"
-            } else if panel.1 < chosen {
-                "Down"
-            } else {
-                "Up"
+            let key = match panel.1.cmp(&chosen) {
+                std::cmp::Ordering::Equal => "Enter",
+                std::cmp::Ordering::Less => "Down",
+                std::cmp::Ordering::Greater => "Up",
             };
             let active = identity(record)?;
             // Compare the complete parsed request and highlighted option.

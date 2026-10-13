@@ -59,16 +59,15 @@ pub(crate) fn account_ui_url(home: &Path) -> Result<String> {
 }
 fn host_dir(record: &Value) -> PathBuf {
     root().join("dsh/hosts").join(
-        format!(
+        &format!(
             "{:x}",
             Sha256::digest(string(record, "agent_home").as_bytes())
-        )[..16]
-            .to_owned(),
+        )[..16],
     )
 }
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
-        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect".to_owned())?;
+        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
     socket
         .set_read_timeout(Some(Duration::from_secs(35)))
         .map_err(|e| e.to_string())?;

@@ -121,7 +121,7 @@ fn replay_goal_at(path: &Path, source: &str, cache_path: &Path) -> Result<Value>
     let (file, metadata) =
         crate::platform::FileIdentity::with_metadata(reader.get_ref()).map_err(|e| e.to_string())?;
     let _lock = lock(Some(&cache_path.with_extension("lock")))?;
-    let mut cache: Value = fs::read(&cache_path)
+    let mut cache: Value = fs::read(cache_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(json!({}));
@@ -192,7 +192,7 @@ fn replay_goal_at(path: &Path, source: &str, cache_path: &Path) -> Result<Value>
         }
     }
     if offset != cache["offset"].as_u64().unwrap_or(u64::MAX) {
-        atomic(&cache_path, &json!({"identity":identity,"offset":offset,"goal":goal,"skipping":skipping,"prefix_len":prefix_len,"prefix_hash":prefix_hash}).to_string())?;
+        atomic(cache_path, &json!({"identity":identity,"offset":offset,"goal":goal,"skipping":skipping,"prefix_len":prefix_len,"prefix_hash":prefix_hash}).to_string())?;
     }
     if offset < metadata.len() {
         return Err("Reading native goal history".into());

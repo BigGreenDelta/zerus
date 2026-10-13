@@ -177,11 +177,13 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
 }
 
+/// A chooser's title, body and (label, description) options.
+type Chooser=(String,String,Vec<(String,String)>);
 /// The chooser Claude draws at the bottom of its screen: a title under the
 /// nearest full-width rule, optional body rows, then consecutive numbered
 /// options with exactly one highlighted. Deeper indented rows describe the
 /// option above them; blank rows may separate options.
-fn bottom_choice(screen:&str)->Option<(String,String,Vec<(String,String)>)> {
+fn bottom_choice(screen:&str)->Option<Chooser> {
     let rows:Vec<&str>=screen.lines().map(str::trim_end).collect();
     let marked=rows.iter().rposition(|r|numbered(r.trim()).is_some_and(|(mark,_,_)|mark))?;
     let top=rows[..marked].iter().rposition(|r|rule(r.trim(),'─'))?;

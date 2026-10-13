@@ -657,9 +657,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if string(&question, "question_hash") != request.expected_question_hash {
             return Err("question changed; refresh before answering".into());
         }
-        if !["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_tool_approval"]
+        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_tool_approval"]
             .contains(&string(&question, "source"))
-            && !(string(&record,"agent")=="claude" && string(&question,"source")=="hook")
+            || string(&record,"agent")=="claude" && string(&question,"source")=="hook")
         {
             return Err("this question has no native response identity; open Terminal".into());
         }

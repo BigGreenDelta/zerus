@@ -21,7 +21,7 @@ fn parse(screen: &str) -> Option<Panel> {
         return None;
     }
     let folder = rows[2]
-        .get(rows[2].find(|c| c == '/' || c == '~')?..)?
+        .get(rows[2].find(['/', '~'])?..)?
         .to_owned();
     let divider = rows
         .iter()

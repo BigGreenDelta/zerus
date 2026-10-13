@@ -708,7 +708,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         events.push(event);
     }
     output["events"] = json!(events);
-    let (messages, truncated) = message_events(&db, &journal_name, conversation, &earlier)?;
+    let (messages, truncated) = message_events(&db, journal_name, conversation, &earlier)?;
     output["message_events"] = json!(messages);
     output["message_events_truncated"] = json!(truncated);
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);

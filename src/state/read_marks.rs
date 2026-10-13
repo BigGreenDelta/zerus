@@ -121,7 +121,7 @@ pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool
 /// While routine ticks of a recurring job are skipped, a reply already read
 /// stays current: moving back to an older reply would make it unread again.
 fn keep_read_reply(session: &mut Value, mark: &Value) {
-    if !session["schedules"]["recurring"].as_u64().is_some_and(|count| count > 0) {
+    if session["schedules"]["recurring"].as_u64().is_none_or(|count| count == 0) {
         return;
     }
     let journaled = |id: &Value| {
@@ -230,10 +230,12 @@ fn bounded(conversations: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// A session view, its mark owner and its pending questions.
+type Current = (Value, String, Option<Vec<Value>>);
 /// The session as `hgs ls --json` shows it, its mark owner and its pending
 /// questions (None when not indexed in time); None when the name has no
 /// current tracked or native session.
-fn current(name: &str) -> Result<Option<(Value, String, Option<Vec<Value>>)>> {
+fn current(name: &str) -> Result<Option<Current>> {
     if dsh::exists(name) {
         return Ok(dsh::snapshots()?
             .into_iter()

@@ -294,7 +294,7 @@ pub(super) fn messages(record: &Value) -> Result<Vec<Value>> {
     let cache = read_cache(record)?;
     Ok(cache["items"].as_object().into_iter().flat_map(|m|m.values()).filter(|c|c["accepted"]==true).map(|card|{
         let question=&card["questions"][0];
-        let choices=question["options"].as_array().unwrap().iter().map(|o|format!("\n- {}",string(o,"label"))).collect::<String>();
+        let choices=question["options"].as_array().unwrap().iter().flat_map(|o|["\n- ",string(o,"label")]).collect::<String>();
         let status=if card["skipped"]==true {"Skipped"}else if !card["response"].is_null(){"Answered"}else{"Optional"};
         json!({"type":"AgentMessage","source":"codex_transcript","message_id":card["question_id"],"agent_id":"",
             "at":card["created_at"],"message_phase":"commentary","detail":format!("{}\n{}{}",status,string(question,"question"),choices)})
@@ -656,7 +656,7 @@ mod tests {
         let accepted = json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}});
         let mut lines = vec![json!({"type":"session_meta","payload":{"id":id}}), request(), accepted];
         lines.extend((0..5).map(|i| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":format!("call-{i}"),"output":"x"}})));
-        fs::write(&transcript, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        fs::write(&transcript, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
         let record = json!({"agent":"codex","run_id":"run","conversation_id":id,"transcript":transcript});
         let cache = dir.path().join("cache.json");
         let meta = fs::metadata(&transcript).unwrap();

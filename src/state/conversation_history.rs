@@ -582,7 +582,7 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         set(db, &offset_key, &offset.to_string())?;
         let mut checkpoint = Vec::new();
         let mut file = File::open(
-            &descriptors[number][0]
+            descriptors[number][0]
                 .as_str()
                 .ok_or("Missing source identity")?,
         )

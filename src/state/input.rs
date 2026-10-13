@@ -581,9 +581,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     let request: Request =
-        serde_json::from_slice(&input).map_err(|e| format!("invalid send payload: {e}"))?;
+        serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;
-    let digest = format!("{:x}", Sha256::digest(&input));
+    let digest = format!("{:x}", Sha256::digest(input));
     let request_id = uuid::Uuid::parse_str(&request.request_id)
         .unwrap()
         .to_string();

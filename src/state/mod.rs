@@ -94,7 +94,7 @@ pub(crate) fn account_context(name: &str) -> Result<Value> {
     let _guard = lock(None)?;
     let record = read(name)?;
     let snapshot = live()?;
-    if snapshot.get(name).is_some() && !matches(&record, snapshot.get(name)) {
+    if snapshot.contains_key(name) && !matches(&record, snapshot.get(name)) {
         return Err("Session account binding is no longer current.".into());
     }
     Ok(account_binding(&record))
@@ -489,7 +489,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
-        return dsh::dispatch(&command, args);
+        return dsh::dispatch(command, args);
     }
     if command == "settings" {
         return effort::dispatch_settings(args);

@@ -184,7 +184,7 @@ mod tests {
     fn lines(events: &[Value]) -> Vec<u8> {
         events
             .iter()
-            .map(|event| format!("{event}\n"))
+            .map(|event| event.to_string() + "\n")
             .collect::<String>()
             .into_bytes()
     }
