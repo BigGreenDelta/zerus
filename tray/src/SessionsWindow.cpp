@@ -1584,10 +1584,11 @@ void SessionsWindow::applyTheme()
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
         QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
-        QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
+        QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles, QListWidget#launchAccount { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
         QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
-        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected { background:%10; color:%2; }
+        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected, QListWidget#launchAccount::item:selected { background:%10; color:%2; }
+        QListWidget#launchAccount::item:hover { background:%7; }
         QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
         QPushButton#machineFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }
@@ -2162,7 +2163,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const auto *row=m_sessions->currentItem();
     const bool sessionRow=!row||(!row->data(SessionRoles::Header).toBool()&&row->data(SessionRoles::LaunchId).toString().isEmpty());
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
-    NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this);
+    NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore);
     dialog.setGroups(m_organization, launchProject);
     if(context)dialog.prefillSessionFolder(selectedDirectory(),m_details.value("cwd_canonical").toString(context->session.canonicalCwd));
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}

@@ -4,6 +4,7 @@
 #include <QSettings>
 #include <QComboBox>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QTimer>
 #include <QCheckBox>
 #include <QMenu>
@@ -12,6 +13,14 @@
 #include "FakeCli.h"
 #include "WorktreePanel.h"
 #include "NewSessionDialog.h"
+
+static int launchAccountRow(const QListWidget *list,const QString &id) {
+    for(int row=0;row<list->count();++row)if(list->item(row)->data(Qt::UserRole).toString()==id)return row;
+    return -1;
+}
+static QString selectedLaunchAccount(const QListWidget *list) {
+    return list->currentItem()?list->currentItem()->data(Qt::UserRole).toString():QString();
+}
 
 class TestWorktreePanel:public QObject {
     Q_OBJECT
@@ -110,32 +119,32 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
     void pickerPreservesProjectMachineAccountAndCustomFolderAcrossPolls(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
-        auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
+        auto *account=dialog.findChild<QListWidget *>("launchAccount");QTRY_VERIFY(launchAccountRow(account,"work")>=0);account->setCurrentRow(launchAccountRow(account,"work"));
         auto *choose=dialog.findChild<QAction *>("chooseLaunchWorktree");QVERIFY(choose);QTRY_VERIFY(choose->isVisible());
         QTimer::singleShot(0,&dialog,[&]{auto *picker=dialog.findChild<QDialog *>("chooseWorktreeDialog");QVERIFY(picker);QTimer::singleShot(3000,picker,&QDialog::reject);auto *tree=picker->findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);tree->setCurrentItem(tree->topLevelItem(1));auto *use=picker->findChild<QPushButton *>("useWorktreeFolder");QTRY_VERIFY(use->isEnabled());use->click();});choose->trigger();
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/linked"));dialog.setFleet(state);
         auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());QVERIFY(hint->styleSheet().isEmpty());
-        QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(account->currentData().toString(),QString("work"));QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/linked"));
+        QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(selectedLaunchAccount(account),QString("work"));QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/linked"));
         QCOMPARE(org.group(project)->folders.size(),1);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);dialog.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched.first()[2].toString(),QString("/linked"));QCOMPARE(launched.first()[4].toString(),QString("work"));QCOMPARE(org.group(project)->folders.size(),1);
     }
     void accountPresetWaitsForCatalogAndNeverFallsBackSilently(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);dialog.selectAccount("work");dialog.show();
-        auto *account=dialog.findChild<QComboBox *>("launchAccount");auto *start=dialog.findChild<QPushButton *>("primary");
-        QVERIFY(!start->isEnabled());QTRY_COMPARE(account->currentData().toString(),QString("work"));QTRY_VERIFY(start->isEnabled());
-        dialog.setFleet(state);QCOMPARE(account->currentData().toString(),QString("work"));
-        dialog.selectAccount("removed");QVERIFY(!start->isEnabled());QCOMPARE(account->currentIndex(),-1);
+        auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *start=dialog.findChild<QPushButton *>("primary");
+        QVERIFY(!start->isEnabled());QTRY_COMPARE(selectedLaunchAccount(account),QString("work"));QTRY_VERIFY(start->isEnabled());
+        dialog.setFleet(state);QCOMPARE(selectedLaunchAccount(account),QString("work"));
+        dialog.selectAccount("removed");QVERIFY(!start->isEnabled());QCOMPARE(account->currentRow(),-1);
         QVERIFY(dialog.findChild<QLabel *>("launchError")->text().contains("unavailable"));
-        dialog.setFleet(state);QCOMPARE(account->currentIndex(),-1);
+        dialog.setFleet(state);QCOMPARE(account->currentRow(),-1);
         // This catalog contains only "work". A missing native profile must not
         // silently fall back to another account, just like any other missing ID.
-        dialog.selectAccount("native-codex");QCOMPARE(account->currentIndex(),-1);QVERIFY(!start->isEnabled());
-        dialog.selectAccount("work");QCOMPARE(account->currentData().toString(),QString("work"));QVERIFY(start->isEnabled());
+        dialog.selectAccount("native-codex");QCOMPARE(account->currentRow(),-1);QVERIFY(!start->isEnabled());
+        dialog.selectAccount("work");QCOMPARE(selectedLaunchAccount(account),QString("work"));QVERIFY(start->isEnabled());
     }
     void newWorktreeCreatesExplicitlyAndPreservesLaunchContext(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
-        auto *account=dialog.findChild<QComboBox *>("launchAccount");QTRY_VERIFY(account->findData("work")>=0);account->setCurrentIndex(account->findData("work"));
+        auto *account=dialog.findChild<QListWidget *>("launchAccount");QTRY_VERIFY(launchAccountRow(account,"work")>=0);account->setCurrentRow(launchAccountRow(account,"work"));
         auto *create=dialog.findChild<QAction *>("newLaunchWorktree");QVERIFY(create);QTRY_VERIFY(create->isVisible()&&create->isEnabled());
         QTimer::singleShot(0,&dialog,[&]{auto *form=dialog.findChild<QDialog *>("newWorktreeDialog");QVERIFY(form);form->reject();});create->trigger();
         QFile calls(dir.filePath("calls"));QVERIFY(calls.open(QIODevice::ReadOnly));QVERIFY(!calls.readAll().contains("worktrees create"));calls.close();
@@ -148,7 +157,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         });create->trigger();
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/new folder"));dialog.setFleet(state);
         auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(!hint->property("outsideProject").toBool());QVERIFY(hint->text().isEmpty());QVERIFY(hint->styleSheet().isEmpty());
-        QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(account->currentData().toString(),QString("work"));
+        QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(dialog.findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));QCOMPARE(selectedLaunchAccount(account),QString("work"));
         QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/new folder"));QCOMPARE(org.group(project)->folders.size(),1);
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);dialog.findChild<QPushButton *>("primary")->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched.first()[2].toString(),QString("/new folder"));
         QVERIFY(calls.open(QIODevice::ReadOnly));const auto commands=calls.readAll();QCOMPARE(commands.count("worktrees create"),1);QVERIFY(commands.contains("@mac worktrees create"));QVERIFY(commands.contains("--base origin/main"));

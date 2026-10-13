@@ -479,6 +479,10 @@ add_executable(test_accountusage test_accountusage.cpp)
 target_include_directories(test_accountusage PRIVATE ../src)
 target_link_libraries(test_accountusage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(accountusage test_accountusage)
+
+add_executable(test_newsessiondialog test_newsessiondialog.cpp)
+target_link_libraries(test_newsessiondialog PRIVATE Qt6::Test hgs-tray-views)
+zerus_add_test(newsessiondialog test_newsessiondialog)
 set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_attachmentviewer test_attachmentviewer.cpp)

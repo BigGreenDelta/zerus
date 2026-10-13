@@ -1183,7 +1183,13 @@ hosts. Limits use one current account snapshot, never the sum of machine usage.
 
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. **New session**
-selects an account for the chosen provider and machine. **Make default on…** sets
+shows one list of **Account and agent** pairs for the chosen computer on desktop
+(including macOS). Each row reports the account's usage windows and time until
+reset, or explains why limits are unavailable. **Refresh** updates accounts and
+limits; ended windows and failed/offline refreshes remain explicit. Profiles with
+the same label stay separate and include their IDs. **Run shell** is a single
+separate choice. The last successfully launched agent and account per computer
+remain remembered. **Make default on…** sets
 the default for new sessions; explicit `--account` wins, and attach, resume and fork
 retain the original profile. Ordinary agent commands outside `hgs` keep their
 native sign-in. Use `hgs [@host] account default native-claude` to restore the native

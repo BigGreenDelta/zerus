@@ -4,6 +4,10 @@
 #include "WorktreePanel.h"
 #include "NewWorktreeDialog.h"
 #include "SessionTag.h"
+#include "AccountUsage.h"
+#include "AccountUsageStore.h"
+#include "WorkspaceList.h"
+#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -15,28 +19,62 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QStyledItemDelegate>
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
+enum { ProviderRole=Qt::UserRole+1, ProfileRole, UsageTextRole, UsageColorRole };
+class LaunchAccountDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        return {260,16+option.fontMetrics.lineSpacing()*(2+int(index.data(UsageTextRole).toString().count('\n')))};
+    }
+    void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        auto background=option;initStyleOption(&background,index);background.text.clear();background.icon={};
+        const auto *widget=option.widget;auto *style=widget?widget->style():QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem,&background,p,widget);
+        p->save();p->setClipRect(option.rect);
+        const bool selected=option.state&QStyle::State_Selected;
+        const bool dark=widget&&widget->property("hgsDark").toBool();
+        const QColor color(dark?"#e8edf4":"#1a2733");
+        auto rect=option.rect.adjusted(10,8,-10,-8);
+        index.data(Qt::DecorationRole).value<QIcon>().paint(p,QRect(rect.x(),rect.y(),18,18));rect.adjust(26,0,0,0);
+        auto font=option.font;font.setWeight(QFont::DemiBold);p->setFont(font);p->setPen(color);
+        p->drawText(QRect(rect.x(),rect.y(),rect.width(),option.fontMetrics.lineSpacing()),Qt::AlignVCenter,
+            QFontMetrics(font).elidedText(index.data().toString(),Qt::ElideRight,rect.width()));
+        const auto usageColor=index.data(UsageColorRole).value<QColor>();
+        p->setFont(option.font);p->setPen(usageColor.isValid()?usageColor:selected?color:QColor(dark?"#a1adbb":"#647386"));
+        int y=rect.y()+option.fontMetrics.lineSpacing();
+        for(const auto &line:index.data(UsageTextRole).toString().split('\n')){
+            p->drawText(QRect(rect.x(),y,rect.width(),option.fontMetrics.lineSpacing()),Qt::AlignVCenter,
+                option.fontMetrics.elidedText(line,Qt::ElideRight,rect.width()));y+=option.fontMetrics.lineSpacing();
+        }
+        p->restore();
+    }
+};
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
 bool withinFolder(const QString &path,const QString &folder) {
     return QDir::isAbsolutePath(folder)&&(path==folder||path.startsWith(folder=="/"?folder:folder+'/'));
 }
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
-    const QString &agent,const QString &project,QWidget *parent)
+    const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage)
     : QDialog(parent),m_client(hgsPath,this),m_fleet(fleet),m_initialProject(project),m_initialHost(selectedHost)
 {
-    setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(590,540);setMinimumWidth(520);
+    m_usageStore=usage?usage:new AccountUsageStore(hgsPath,this);m_usageStore->setFleet(fleet);
+    setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(660,730);setMinimumWidth(520);
     auto *layout=new QVBoxLayout(this);layout->setContentsMargins(28,24,28,24);layout->setSpacing(18);
     auto *heading=plainLabel(tr("New session"));heading->setObjectName("heading");layout->addWidget(heading);
     auto *form=new QFormLayout;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_project=new QComboBox;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
-    const bool dark=palette().color(QPalette::Window).lightness()<128;
+    const auto theme=QSettings().value("workspace/theme","system").toString();
+    const bool dark=theme=="dark"||(theme!="light"&&palette().color(QPalette::Window).lightness()<128);
     const QColor iconColor(dark?"#a1adbb":"#647386");
     m_generatedBranch="work-"+QUuid::createUuid().toString(QUuid::Id128).left(8);
     m_manage=new QToolButton;m_manage->setObjectName("manageLaunchProject");
@@ -83,17 +121,20 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(m_plainFolder,&QPushButton::clicked,this,[this]{m_autoPreferred=false;updateForm();});
     connect(m_worktrees,&QAction::triggered,this,&NewSessionDialog::chooseWorktree);
     connect(m_newWorktree,&QAction::triggered,this,&NewSessionDialog::createWorktree);
-    m_agent=new QComboBox;m_agent->setObjectName("launchAgent");m_agent->addItems({"codex","claude","kimi","dsh","sh"});
-    if(!agent.isEmpty()&&m_agent->findText(agent)<0)m_agent->addItem(agent);
-    for(int i=0;i<m_agent->count();++i){
-        const auto provider=m_agent->itemText(i);
-        const auto glyph=provider=="codex"||provider=="claude"||provider=="kimi"||provider=="dsh"?provider:QString("terminal");
-        m_agent->setItemIcon(i,workspaceIcon(glyph,iconColor));
-    }
+    m_agents={"codex","claude","kimi","dsh"};
+    if(!agent.isEmpty()&&agent!="sh"&&!m_agents.contains(agent))m_agents.append(agent);
     const auto lastAgent=QSettings().value("workspace/launchAgent").toString();
-    if(!agent.isEmpty())m_agent->setCurrentText(agent);else if(m_agent->findText(lastAgent)>=0)m_agent->setCurrentText(lastAgent);
-    m_account=new QComboBox;m_account->setObjectName("launchAccount");m_account->addItem(tr("Default account"),QString());
-    form->addRow(tr("Agent"),m_agent);form->addRow(tr("Account"),m_account);
+    m_preferredAgent=!agent.isEmpty()?agent:m_agents.contains(lastAgent)||lastAgent=="sh"?lastAgent:QString("codex");
+    m_account=new WorkspaceList;m_account->setObjectName("launchAccount");m_account->setAccessibleName(tr("Account and agent"));
+    m_account->setProperty("hgsDark",dark);
+    m_account->setItemDelegate(new LaunchAccountDelegate(m_account));m_account->setMinimumHeight(180);m_account->setMaximumHeight(250);
+    m_account->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);m_account->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *accountField=new QVBoxLayout;accountField->setSpacing(6);accountField->addWidget(m_account);
+    auto *accountStatusRow=new QHBoxLayout;
+    m_accountStatus=plainLabel();m_accountStatus->setObjectName("launchAccountStatus");accountStatusRow->addWidget(m_accountStatus,1);
+    m_refreshAccounts=new QPushButton(workspaceIcon("refresh",iconColor),tr("Refresh"));m_refreshAccounts->setObjectName("refreshLaunchAccounts");m_refreshAccounts->setAutoDefault(false);
+    m_refreshAccounts->setAccessibleName(tr("Refresh accounts and limits"));accountStatusRow->addWidget(m_refreshAccounts);
+    accountField->addLayout(accountStatusRow);form->addRow(tr("Account and agent"),accountField);
     m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();form->addRow(QString(),m_nameError);
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
@@ -112,8 +153,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         loadAccounts();updateForm();updateWorktrees();
     });
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
-    connect(m_agent,&QComboBox::currentIndexChanged,this,[this]{m_accountPreset=false;updateAccounts();updateForm();});
-    connect(m_account,&QComboBox::activated,this,[this]{m_preferredAccount=m_account->currentData().toString();m_accountPreset=true;updateForm();});
+    connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateForm();});
+    connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{loadAccounts(true);});
+    connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){updateUsage();});
+    auto *usageTimer=new QTimer(this);usageTimer->setInterval(60000);
+    connect(usageTimer,&QTimer::timeout,this,[this]{updateUsage();for(int row=0;row<m_account->count();++row){const auto profile=m_account->item(row)->data(ProfileRole).toJsonObject();if(!profile.isEmpty())m_usageStore->ensure(AccountUsageRef::profile(profile));}});usageTimer->start();
     connect(m_name,&QLineEdit::textChanged,this,&NewSessionDialog::updateForm);
     connect(&m_client,&HgsClient::directoriesReady,this,[this](quint64 request,const QString &machine,const QJsonObject &data){
         if(!m_validation||request!=m_validation||machine!=host())return;
@@ -137,11 +181,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     connect(&m_client,&HgsClient::accountsReady,this,[this](quint64 id,const QString &machine,const QJsonObject &data){
         if(id!=m_accountRequest||machine!=host())return;
-        m_accountRequest=0;m_accounts=data["profiles"].toArray();m_removedAccounts=data["removed_profiles"].toArray();updateAccounts();
+        m_accountRequest=0;m_accountCatalogLoaded=true;m_accounts=data["profiles"].toArray();m_removedAccounts=data["removed_profiles"].toArray();m_accountStatus->setText({});updateAccounts();
     });
     connect(&m_client,&HgsClient::accountsFailed,this,[this](quint64 id,const QString &machine,const QString &error){
         if(id!=m_accountRequest||machine!=host())return;
-        m_accountRequest=0;m_accounts={};updateAccounts();m_account->setToolTip(tr("Could not load accounts: %1").arg(error));
+        m_accountRequest=0;m_accountCatalogLoaded=true;updateAccounts();m_accountStatus->setText(tr("Could not load accounts: %1").arg(error));
     });
     connect(&m_client,&HgsClient::worktreesReady,this,[this](quint64 request,const QString &machine,const QString &path,const QJsonObject &data){
         if(m_prefillRequest&&request==m_prefillRequest&&machine==host()&&path==m_prefillPath){
@@ -170,6 +214,7 @@ QString NewSessionDialog::host() const {return m_machine->currentData().toString
 void NewSessionDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
+    m_usageStore->setFleet(fleet);updateUsage();
     if(m_creation||m_validation){updateForm();return;}
     loadMachines();loadFolders();
 }
@@ -292,10 +337,11 @@ void NewSessionDialog::updateForm()
     const bool busy=m_validation||m_creation;
     const bool noMachine=m_machine->count()==0;
     const bool automatic=m_autoPreferred&&automaticWorktreeAvailable();
-    m_start->setEnabled(!noMachine&&m_account->currentIndex()>=0&&!m_accountRequest&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
+    m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
         &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_agent,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
     m_worktreeTarget->setText(automatic?automaticWorktreePath():QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
@@ -305,16 +351,15 @@ void NewSessionDialog::updateForm()
     m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
     m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
     m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled());
-    m_openTerminal->setEnabled(!busy&&m_agent->currentText()!="dsh");
-    m_openTerminal->setToolTip(m_agent->currentText()=="dsh"?tr("DeepSeek opens in the workspace's Native UI."):tr("Also open an external terminal for this session."));
-    m_account->setEnabled(!busy&&QStringList{"codex","claude","kimi"}.contains(m_agent->currentText()));
+    m_openTerminal->setEnabled(!busy&&agent()!="dsh");
+    m_openTerminal->setToolTip(agent()=="dsh"?tr("DeepSeek opens in the workspace's Native UI."):tr("Also open an external terminal for this session."));
     const auto offline=tr("This computer is unavailable. Choose another folder or reconnect it.");
     if(!path.isEmpty()&&!m_folder->currentData(Qt::UserRole+3).toBool())m_error->setText(offline);
     else if(m_error->text()==offline)m_error->clear();
     const auto noAccount=tr("Restore or add an account in Agent accounts to start this agent.");
     if(m_account->count()==0)m_error->setText(noAccount);else if(m_error->text()==noAccount)m_error->clear();
     const auto loadingAccount=tr("Loading this session's account…"),missingAccount=tr("This session's account is unavailable. Choose another account.");
-    if(m_accountPreset&&m_account->currentIndex()<0)m_error->setText(m_accountRequest?loadingAccount:missingAccount);
+    if(m_accountPreset&&!m_account->currentItem())m_error->setText(m_accountRequest?loadingAccount:missingAccount);
     else if(m_error->text()==loadingAccount||m_error->text()==missingAccount)m_error->clear();
     const auto remoteOnly=tr("Add a remote machine in Machines to start sessions from this computer.");
     if(noMachine)m_error->setText(remoteOnly);else if(m_error->text()==remoteOnly)m_error->clear();
@@ -346,46 +391,143 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
     QSettings settings;settings.setValue("workspace/launchOpenTerminal",m_openTerminal->isChecked());
     // The next dialog starts with this agent and, per machine and agent, this account.
-    settings.setValue("workspace/launchAgent",m_agent->currentText());
-    if(const auto account=m_account->currentData().toString();!account.isEmpty()){
+    settings.setValue("workspace/launchAgent",agent());
+    if(const auto selectedAccount=account();!selectedAccount.isEmpty()){
         auto accounts=QJsonDocument::fromJson(settings.value("workspace/launchAccounts").toByteArray()).object();
-        auto machine=accounts.value(host()).toObject();machine[m_agent->currentText()]=account;accounts[host()]=machine;
+        auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
         settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
     }
-    emit launchRequested(host(),m_agent->currentText(),target,m_name->text(),m_account->currentData().toString(),m_project->currentData().toString(),m_openTerminal->isChecked()&&m_agent->currentText()!="dsh",addFolder);accept();
+    emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh",addFolder);accept();
 }
-void NewSessionDialog::loadAccounts()
+QString NewSessionDialog::agent() const
 {
-    if(m_machine->count()==0){m_accounts={};updateAccounts();return;}
-    if(m_accountHost==host()&&(m_accountRequest||!m_accounts.isEmpty()))return;
-    if(m_accountHost!=host()){m_removedAccounts={};m_accountPreset=false;}
-    m_accountHost=host();m_accounts={};m_account->setToolTip({});updateAccounts();m_accountRequest=m_client.requestAccounts(host(),{"ls"});
+    return m_account->currentItem()?m_account->currentItem()->data(ProviderRole).toString():m_preferredAgent;
+}
+QString NewSessionDialog::account() const
+{
+    return m_account->currentItem()?m_account->currentItem()->data(Qt::UserRole).toString():QString();
+}
+void NewSessionDialog::loadAccounts(bool refresh)
+{
+    if(m_machine->count()==0){m_accountRequest=0;m_accounts={};updateAccounts();return;}
+    if(m_accountHost==host()&&(m_accountRequest||(!refresh&&m_accountCatalogLoaded)))return;
+    if(m_accountHost!=host()){
+        m_accounts={};m_removedAccounts={};m_accountPreset=false;m_accountCatalogLoaded=false;
+    }
+    m_accountHost=host();m_accountStatus->setText(tr("Loading accounts…"));
+    m_accountRequest=m_client.requestAccounts(host(),{"ls"});updateAccounts();
+    if(refresh)for(int row=0;row<m_account->count();++row){
+        const auto profile=m_account->item(row)->data(ProfileRole).toJsonObject();
+        if(!profile.isEmpty())m_usageStore->ensure(AccountUsageRef::profile(profile),true);
+    }
 }
 void NewSessionDialog::updateAccounts()
 {
-    m_account->clear();
-    bool removed=false;int defaultIndex=0;
-    for(const auto &value:m_removedAccounts)if(value.toObject()["id"].toString()=="native-"+m_agent->currentText())removed=true;
-    for(const auto &value:m_accounts){
-        const auto a=value.toObject();if(a["provider"].toString()!=m_agent->currentText())continue;
-        QString name=a["label"].toString();if(name=="Default account")name=tr("Native account");
-        if(a["is_default"].toBool()){defaultIndex=m_account->count();name+=tr(" (default)");}
-        m_account->addItem(name,a["id"].toString());
+    if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateForm();return;}
+    QList<QJsonObject> profiles;
+    auto providers=m_agents;
+    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider))providers.append(provider);}
+    for(const auto &provider:providers){
+        bool found=false,removed=false;
+        for(const auto &value:m_removedAccounts)if(value.toObject()["id"].toString()=="native-"+provider)removed=true;
+        for(const auto &value:m_accounts){
+            auto profile=value.toObject();if(profile["provider"]!=provider||profile["id"].toString().isEmpty())continue;
+            profile["host"]=host();profiles.append(profile);found=true;
+        }
+        // Retained/unavailable catalogs keep an explicit native profile, never
+        // an empty ID that could silently resolve to a different HGS default.
+        if(!found&&!removed&&(m_accounts.isEmpty()||provider=="dsh"))
+            profiles.append({{"id","native-"+provider},{"provider",provider},{"label",tr("Native account")},{"host",host()}});
     }
-    // Older/unavailable catalogs keep the native option explicit; an empty ID
-    // would silently select a different configured HGS default.
-    if((m_accounts.isEmpty()&&!removed)||(m_agent->currentText()=="dsh"&&m_account->count()==0))m_account->addItem(tr("Native account"),"native-"+m_agent->currentText());
-    // An explicit account must be found; a remembered one silently yields to the default.
+    const QSignalBlocker block(m_account);
+    bool same=m_account->count()==profiles.size()+1;
+    for(int row=0;same&&row<profiles.size();++row)
+        same=m_account->item(row)->data(Qt::UserRole).toString()==profiles[row]["id"].toString()
+            &&m_account->item(row)->data(ProviderRole).toString()==profiles[row]["provider"].toString()
+            &&m_account->item(row)->data(ProfileRole).toJsonObject()["host"]==profiles[row]["host"];
+    if(!same)m_account->clear();
+    const bool dark=m_account->property("hgsDark").toBool();
+    const QColor iconColor(dark?"#a1adbb":"#647386");
+    int defaultIndex=-1,lastIndex=-1,explicitIndex=-1;
     const auto lastAccount=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object()
-        .value(host()).toObject().value(m_agent->currentText()).toString();
-    const int lastIndex=lastAccount.isEmpty()?-1:m_account->findData(lastAccount);
-    m_account->setCurrentIndex(m_accountPreset?m_account->findData(m_preferredAccount):lastIndex>=0?lastIndex:defaultIndex);updateForm();
+        .value(host()).toObject().value(m_preferredAgent).toString();
+    for(int row=0;row<profiles.size();++row){
+        const auto profile=profiles[row];const auto provider=profile["provider"].toString(),id=profile["id"].toString();
+        auto *item=same?m_account->item(row):new QListWidgetItem(m_account);
+        item->setData(Qt::UserRole,id);item->setData(ProviderRole,provider);item->setData(ProfileRole,profile);
+        item->setIcon(workspaceIcon(m_agents.mid(0,4).contains(provider)?provider:QString("terminal"),iconColor));
+        if(provider==m_preferredAgent){
+            if(defaultIndex<0||profile["is_default"].toBool())defaultIndex=row;
+            if(id==lastAccount)lastIndex=row;
+            if(id==m_preferredAccount)explicitIndex=row;
+        }
+    }
+    auto *shell=same?m_account->item(profiles.size()):new QListWidgetItem(m_account);
+    shell->setText(tr("Run shell"));shell->setData(Qt::UserRole,QString());shell->setData(ProviderRole,"sh");
+    shell->setData(UsageTextRole,tr("Interactive terminal session"));shell->setIcon(workspaceIcon("terminal",iconColor));
+    shell->setData(Qt::AccessibleTextRole,shell->text());
+    if(m_preferredAgent=="sh")defaultIndex=lastIndex=explicitIndex=profiles.size();
+    // Explicit selections never silently switch accounts; remembered ones may
+    // fall back to the provider's default when the old profile no longer exists.
+    m_account->setCurrentRow(m_accountPreset?explicitIndex:lastIndex>=0?lastIndex:defaultIndex>=0?defaultIndex:0);
+    updateUsage();updateForm();
+    for(const auto &profile:profiles)if(m_accountCatalogLoaded&&(!profile.contains("installed")||profile["installed"].toBool()))
+        m_usageStore->ensure(AccountUsageRef::profile(profile));
 }
 
 void NewSessionDialog::selectAccount(const QString &account)
 {
-    m_preferredAccount=account.isEmpty()?"native-"+m_agent->currentText():account;
+    m_preferredAccount=account.isEmpty()?"native-"+m_preferredAgent:account;
     m_accountPreset=true;updateAccounts();
+}
+
+void NewSessionDialog::updateUsage()
+{
+    for(int row=0;row<m_account->count();++row){
+        auto *item=m_account->item(row);const auto profile=item->data(ProfileRole).toJsonObject();
+        if(profile.isEmpty())continue;
+        auto usage=m_usageStore->data(AccountUsageRef::profile(profile));
+        const auto cached=profile["usage"].toObject();
+        if(usage["status"]=="loading"&&!cached.isEmpty()){
+            const auto pending=usage["refreshing"];usage=cached;usage["refreshing"]=pending;
+        }
+        QString name=profile["label"].toString();
+        if(name.isEmpty()||name=="Default account"||name=="Native account")
+            name=usage["identity"].toObject()["email"].toString(tr("Native account"));
+        int duplicates=0;
+        for(const auto &value:m_accounts){const auto other=value.toObject();if(other["label"]==profile["label"]&&other["provider"]==profile["provider"])++duplicates;}
+        if(duplicates>1)name+=" ("+profile["id"].toString()+")";
+        name+=" ("+IdentityBadges::providerName(profile["provider"].toString())+")";
+        if(profile["is_default"].toBool())name+=tr(" (default)");
+        QStringList lines;
+        for(const auto &value:usage["windows"].toArray()){
+            const auto window=value.toObject();QString line=AccountUsage::period(window)+"  ";
+            if(!AccountUsage::current(window))line+=tr("Window ended; refresh usage");
+            else if(!window["used_percent"].isDouble()||!std::isfinite(window["used_percent"].toDouble()))line+=tr("Usage unavailable");
+            else {
+                const auto reset=AccountUsage::reset(window["resets_at"]);
+                line+=tr("%1% used").arg(qBound(0.,window["used_percent"].toDouble(),100.),0,'f',0)
+                    +(reset.isValid()?tr("  Reset in %1").arg(AccountUsage::remaining(reset)):tr("  Reset time unavailable"));
+            }
+            lines.append(line);
+        }
+        for(const auto &value:usage["balances"].toArray()){
+            const auto balance=value.toObject();lines.append(tr("Balance: %1 %2").arg(balance["balance"].toString(),balance["currency"].toString()));
+        }
+        if(lines.isEmpty())lines.append(!profile["installed"].toBool(true)?tr("Agent is not installed on this computer"):
+            usage["status"]=="loading"?tr("Loading limits…"):AccountUsage::state(usage));
+        if(usage["offline"].toBool())lines.prepend(tr("Offline (last reported limits)"));
+        else if(usage["refresh_error"].toBool())lines.prepend(tr("Update failed (last reported limits)"));
+        else if(usage["refreshing"].toBool()&&usage["status"]!="loading")lines.prepend(tr("Updating limits…"));
+        const auto summary=lines.join('\n');
+        const auto tone=AccountUsage::severest(usage);
+        const bool historical=usage["offline"].toBool()||usage["refresh_error"].toBool();
+        item->setData(UsageColorRole,!historical&&tone&&*tone!=AccountUsage::Tone::Normal
+            ?AccountUsage::toneColor(*tone,m_account->property("hgsDark").toBool()):QColor());
+        if(item->text()!=name)item->setText(name);
+        if(item->data(UsageTextRole).toString()!=summary)item->setData(UsageTextRole,summary);
+        item->setToolTip(name+'\n'+summary);item->setData(Qt::AccessibleTextRole,name+'\n'+summary);
+    }
 }
 
 void NewSessionDialog::selectPath(const QString &path, bool automaticWorktree)
