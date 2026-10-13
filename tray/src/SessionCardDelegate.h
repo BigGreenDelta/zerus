@@ -106,7 +106,7 @@ public:
             : s.working ? SessionStatusBadge::Working : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
             : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
             : s.paused ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
-        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
+        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;

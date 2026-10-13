@@ -180,7 +180,7 @@ QColor tone(const QString &status, bool dark)
 {
     if (status == "Needs approval" || status == "Needs input" || status == "Sign in") return QColor(dark ? "#f0c77b" : "#885400");
     if (status == "Error") return QColor(dark ? "#ff9298" : "#b52b3d");
-    if (status == "Working" || status == "Using a tool" || status == "Compacting" || status == "Background") return QColor(dark ? "#55e39a" : "#12834e");
+    if (status == "Working" || status == "Using a tool" || status == "Compacting") return QColor(dark ? "#55e39a" : "#12834e");
     if (status == "Ready") return QColor(dark ? "#78dabb" : "#11775d");
     if (status == "Paused") return QColor(dark ? "#b9a5ed" : "#7051a4");
     return QColor(dark ? "#9aa4b2" : "#646f7e");
@@ -2670,7 +2670,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Draft, m_composer->hasDraft(e.key));
         item->setData(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
         item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
-        item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+        item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         // Overmind: a session whose computer is not known shows no queue rather than a guess.
         QString overmind; const bool known = m_overmind && s.state != "archived" && overmindKnown(e, &overmind);
@@ -2683,7 +2683,7 @@ void SessionsWindow::rebuild()
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
-            accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
+            accessibleFields << tr("%1 since %2").arg(s.phase == "compacting" ? tr("Compacting") : tr("Working"),QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
         if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
@@ -3259,7 +3259,6 @@ void SessionsWindow::renderDetails()
     m_badge->setText(state); const auto color = tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
-    m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
     s.model = m_details.value("model").toString(s.model); s.effort = m_details.value("effort").toString(s.effort);
     const QString modelText = s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort);
     // Details render on every poll; elide again only when the text or font changes.
@@ -3310,10 +3309,9 @@ void SessionsWindow::renderDetails()
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
-    else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
-        ? tr("The agent has replied, but a command is still running.") : tr("The agent has replied, but %1 commands are still running.").arg(s.backgroundProcesses))
-        + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."))
-        + QStringLiteral(" ") + tr("You can send another message.");
+    else if (SessionPresentation::backgroundIdle(s)) hint = tr("Ready for your next message.") + QStringLiteral(" ") + (s.backgroundProcesses == 1
+        ? tr("A command it started is still running.") : tr("%1 commands it started are still running.").arg(s.backgroundProcesses))
+        + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."));
     else if (s.activity != "idle") hint = tr("Waiting for the agent to confirm its state. Open its terminal if it needs attention.");
     else hint = tr("Ready for your next message. Finishing a response does not mark the task complete.");
     m_hint->setText(hint);

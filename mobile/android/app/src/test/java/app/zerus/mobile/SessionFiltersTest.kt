@@ -9,7 +9,6 @@ class SessionFiltersTest {
     @Test fun intermediateRepliesKeepTheirIdentityAndReappearWhenAllWorkFinishes() {
         for (readFlag in listOf("unread_reply", "mobile_unread_reply")) {
             for (work in listOf("""{"activity":"busy","phase":"working"}""",
-                """{"activity":"idle","phase":"idle","process_work":{"count":1}}""",
                 """{"activity":"idle","phase":"idle","subagent_active_count":1}""",
                 """{"activity":"idle","phase":"idle","subagent_count":1}""")) {
                 val raw = JSONObject(work).put(readFlag, true).put("reply_id", "progress")
@@ -19,7 +18,7 @@ class SessionFiltersTest {
                 assertTrue(SessionFilters.active(item, true))
                 assertTrue(item.raw.optBoolean(readFlag)); assertEquals("progress", item.raw.string("reply_id"))
                 val finished = item.copy(raw = JSONObject(item.raw.toString()).put("activity", "idle").put("phase", "idle")
-                    .put("process_work", JSONObject().put("count", 0)).put("subagent_active_count", 0).put("subagent_count", 0))
+                    .put("subagent_active_count", 0).put("subagent_count", 0))
                 assertTrue(SessionFilters.visibleUnreadReply(finished, true))
                 assertTrue(SessionFilters.needsAttention(finished, true))
                 assertEquals("progress", finished.raw.string("reply_id"))
@@ -31,17 +30,18 @@ class SessionFiltersTest {
         }
     }
 
-    @Test fun liveShellWorkIsActiveAndOutranksScheduleWhileNativeInputStaysIdle() {
-        val item = session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"schedules":{"count":1}}""")
-        assertEquals("Background",SessionFilters.status(item,true))
-        assertTrue(SessionFilters.working(item,true))
-        assertTrue(SessionFilters.active(item,true))
-        assertFalse(SessionFilters.scheduled(item,true))
-        assertFalse(SessionFilters.needsAction(item))
-        assertFalse(SessionFilters.working(item,false))
-        val finished=item.copy(raw=JSONObject(item.raw.toString()).put("process_work",JSONObject().put("count",0)).put("schedules",JSONObject().put("count",0)))
-        assertEquals("Ready",SessionFilters.status(finished,true))
-        assertFalse(SessionFilters.active(finished,true))
+    /** A dev server the agent left running is information: its reply is final and the session Ready. */
+    @Test fun commandsLeftRunningKeepAFinishedReplyReady() {
+        val item = session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"unread_reply":true}""")
+        assertEquals("Ready",SessionFilters.status(item,true))
+        assertFalse(SessionFilters.working(item,true))
+        assertFalse(SessionFilters.replyInProgress(item,true))
+        assertTrue(SessionFilters.visibleUnreadReply(item,true))
+        val read=item.copy(raw=JSONObject(item.raw.toString()).put("unread_reply",false))
+        assertFalse(SessionFilters.active(read,true))
+        val scheduled=read.copy(raw=JSONObject(read.raw.toString()).put("schedules",JSONObject().put("count",1)))
+        assertTrue(SessionFilters.scheduled(scheduled,true))
+        assertEquals("Scheduled",SessionFilters.status(scheduled,true))
     }
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
     private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =

@@ -60,7 +60,7 @@ struct SessionInfo {
     bool replyInProgress() const {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
-            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
+            && (activity == QLatin1String("busy") || subagentActiveCount > 0);
     }
     // Intermediate replies remain unread; only their notification presentation waits.
     bool visibleUnreadReply(bool online = true) const {

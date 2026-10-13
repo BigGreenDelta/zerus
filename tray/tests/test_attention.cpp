@@ -29,18 +29,18 @@ private slots:
     void decisionsNotifyOncePerSignature();
     void decisionsFollowFocusAndRetryFailedDelivery();
     void decisionsReturnQuietlyAndBurstsAreSummarized();
-    void replyWaitsForLiveBackgroundShellToFinish();
+    void replyIsNotDelayedByCommandsLeftRunning();
 };
 
-void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
+void TestAttention::replyIsNotDelayedByCommandsLeftRunning()
 {
+    // A dev server the agent left running must not hold back the reply banner.
     SessionInfo s; s.name="codex/project/session"; s.runId="run"; s.conversationId="conversation";
     s.phase="idle"; s.activity="idle"; s.replyId="reply"; s.unreadReply=true; s.backgroundProcesses=1;
     BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
-    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
+    QCOMPARE(tracker.observe({},box,1000,false).raised.size(),1);
     box.sessions[0].backgroundProcesses=0;
-    QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
-    QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
+    QVERIFY(tracker.observe({},box,1001,false).raised.isEmpty());
 }
 
 void TestAttention::recoveryWaitsQuietlyAndNotifiesWhenExhausted()

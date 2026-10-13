@@ -360,16 +360,16 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. An idle
-agent with confirmed live shell commands shows **Background**, with the
-command preview and elapsed time. Open **Processes** to follow output or inspect
-the running commands. The session remains in **Active** and still accepts new
-messages. Input/approval requests take precedence; ordinary agent work takes
-precedence over background work, followed by Scheduled and Ready. Offline and
-historical/unconfirmed process records never establish background work. The CLI's
+**Ready** means a reply ended, not that a long-running task is complete.
+Commands the agent left running after its reply (a dev server, a watcher) do
+not make it Working: the session stays **Ready**, is not counted as Active, and
+its reply shows and notifies as usual. Its detail line names the running
+commands; open **Processes** to follow their output or stop them. Offline and
+historical/unconfirmed process records are never reported as running. The CLI's
 additive `process_work` summary uses current owned OS trees (one process-table
 sample per fleet listing) or the native DeepSeek job registry; it does not scan
-native transcripts on each fleet poll.
+native transcripts on each fleet poll. The agent's own helpers, such as Claude
+Code's `claude daemon` and the sessions it hosts, are not counted.
 
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
@@ -1332,10 +1332,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
-The small **Background** summary is part of ordinary fleet polling even
-when this tab is disabled. Full process history and output remain opt-in. A
-background session's context menu offers **Show running commands** when Processes
-is enabled.
+The small running-command summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. The
+context menu of a session with running commands offers **Show running commands**
+when Processes is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal

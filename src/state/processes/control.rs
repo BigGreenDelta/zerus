@@ -160,6 +160,39 @@ fn descendant(pid: u32, root: u32, rows: &BTreeMap<u32, Process>) -> bool {
     }
     false
 }
+// The agent's own helpers (Claude Code's `claude daemon` and the sessions it
+// hosts) run the agent's native executable. They and their children are not
+// commands the agent started. A script runtime proves nothing (an agent
+// installed through npm runs under node), so it never excludes a process.
+fn own_helper(pid: u32, root: u32, agent: &Process, rows: &BTreeMap<u32, Process>) -> bool {
+    let runtime = Path::new(&agent.executable)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if runtime.is_empty()
+        || ["node", "bun", "deno"].contains(&runtime)
+        || runtime.starts_with("python")
+    {
+        return false;
+    }
+    let mut at = pid;
+    for _ in 0..128 {
+        let Some(p) = rows.get(&at) else {
+            return false;
+        };
+        if at == root {
+            return false;
+        }
+        if p.executable == agent.executable {
+            return true;
+        }
+        if p.parent == at || p.parent <= 1 {
+            return false;
+        }
+        at = p.parent;
+    }
+    false
+}
 fn process_table() -> Result<BTreeMap<u32, Process>> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,pgid="])
@@ -276,6 +309,7 @@ fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
                 "hgs-tray",
             ]
             .contains(&executable)
+                || own_helper(p.pid, root, agent, rows)
             {
                 return false;
             }
@@ -456,11 +490,21 @@ mod tests {
             make(41, 40, 41, "/bin/sh"),
             make(50, 10, 10, "/bin/node"),
             make(60, 1, 60, "/bin/sh"),
+            // The agent's own daemon and a session it hosts.
+            make(70, 10, 70, "/bin/agent"),
+            make(71, 70, 71, "/bin/agent"),
+            make(72, 71, 72, "/bin/sh"),
         ]
         .into_iter()
         .map(|p| (p.pid, p))
         .collect();
         assert_eq!(roots(&json!({"pid":10}), &rows), vec![20, 30, 41]);
+        // Under a script runtime, a process sharing it is still a command.
+        let mut scripted = rows.clone();
+        for pid in [10, 70, 71] {
+            scripted.get_mut(&pid).unwrap().executable = "/usr/bin/node".into();
+        }
+        assert_eq!(roots(&json!({"pid":10}), &scripted), vec![20, 30, 41, 70]);
         let record = json!({"run_id":"run","conversation_id":"conversation"});
         let original = job(&record, &rows[&20], &rows)["id"].clone();
         let mut reused = rows[&20].clone();

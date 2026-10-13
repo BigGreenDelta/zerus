@@ -46,7 +46,7 @@ private slots:
     void olderHostsKeepLocalReadStateAndQueueNothing();
     void recoveryAttentionWithoutSignatureStaysLocal();
     void controlOnlyComputerHasNoLocalCount();
-    void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
+    void commandsLeftRunningKeepAFinishedReplyReady();
     void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
     void intermediateRepliesStayUnreadUntilWorkFinishes();
 };
@@ -68,11 +68,11 @@ void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
             QVERIFY(fleet.readReplies().isEmpty()); QVERIFY(fleet.takeNewReadMarks().isEmpty());
         };
         waiting();
-        s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1; waiting();
-        s.backgroundProcesses = 0; s.subagentActiveCount = 1; waiting();
+        s.activity = "idle"; s.phase = "idle"; s.subagentActiveCount = 1; waiting();
         s.reviewLater = true; QVERIFY(s.needsAttention()); s.reviewLater = false;
         s.phase = "approval"; QVERIFY(s.needsAttention()); s.phase = "idle";
-        s.subagentActiveCount = 0; fleet.setLocal(box, 1);
+        // Commands the agent left running (a dev server) do not hide its reply.
+        s.subagentActiveCount = 0; s.backgroundProcesses = 1; fleet.setLocal(box, 1);
         QVERIFY(fleet.local().sessions[0].unreadReply);
         QVERIFY(fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(1), 1);
         QCOMPARE(fleet.local().sessions[0].replyId, s.replyId);
@@ -81,28 +81,26 @@ void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
     }
 }
 
-void TestFleetState::idleShellWorkKeepsActiveAndPreservesInputAndAttention()
+void TestFleetState::commandsLeftRunningKeepAFinishedReplyReady()
 {
+    // A dev server or watcher the agent left running is information, not work:
+    // the session is Ready, neither Working nor Active, and schedules still show.
     auto s = shared(); s.tracked = true; s.activity = "idle"; s.phase = "idle";
     s.processState = "running"; s.backgroundProcesses = 1; s.backgroundStarted = 100;
-    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
-    QCOMPARE(SessionPresentation::status(s), QString("Background"));
-    QVERIFY(SessionPresentation::working(s)); QVERIFY(SessionPresentation::active(s));
-    QVERIFY(!SessionPresentation::scheduled(s)); QVERIFY(!s.needsAction());
-    QVERIFY(SessionPresentation::currentAction(s).contains("build --wait"));
-    QVERIFY(!SessionPresentation::working(s, false)); QVERIFY(!SessionPresentation::active(s, false));
-    QCOMPARE(SessionPresentation::status(s, false), QString("Offline"));
-    s.phase = "approval";
+    s.backgroundCommand = "node server.mjs";
+    QCOMPARE(SessionPresentation::status(s), QString("Ready"));
+    QVERIFY(!SessionPresentation::working(s)); QVERIFY(!SessionPresentation::active(s));
+    QVERIFY(!s.replyInProgress()); QVERIFY(!s.needsAction());
+    QVERIFY(SessionPresentation::currentAction(s).contains("node server.mjs"));
+    s.scheduledJobs = 1;
+    QVERIFY(SessionPresentation::scheduled(s)); QVERIFY(SessionPresentation::active(s));
+    QVERIFY(SessionPresentation::status(s).startsWith("Scheduled"));
+    QVERIFY(!SessionPresentation::currentAction(s).contains("node server.mjs"));
+    s.scheduledJobs = 0; s.phase = "approval";
     QCOMPARE(SessionPresentation::status(s), QString("Needs approval"));
-    QVERIFY(!SessionPresentation::working(s));
     s.phase = "working"; s.activity = "busy";
     QCOMPARE(SessionPresentation::status(s), QString("Working"));
-    s.phase = "idle"; s.activity = "idle"; s.backgroundProcesses = 0;
-    QVERIFY(SessionPresentation::scheduled(s));
-    s.scheduledJobs = 0;
-    QCOMPARE(SessionPresentation::status(s), QString("Ready"));
-    s.backgroundProcesses = -1;
-    QVERIFY(!SessionPresentation::working(s));
+    QVERIFY(SessionPresentation::working(s));
 }
 
 void TestFleetState::processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns()

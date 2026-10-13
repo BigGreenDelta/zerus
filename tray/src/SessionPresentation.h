@@ -94,6 +94,8 @@ inline bool scheduledIdle(const SessionInfo &s)
 {
     return s.activity == "idle" && s.phase == "idle" && s.scheduledJobs > 0;
 }
+// The reply ended but commands the agent started still run (a dev server,
+// a watcher). The agent itself is Ready; the commands are only information.
 inline bool backgroundIdle(const SessionInfo &s)
 {
     return s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses > 0;
@@ -132,7 +134,6 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "starting") return QObject::tr("Starting");
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
-    if (backgroundIdle(s)) return QObject::tr("Background");
     if (scheduledIdle(s)) {
         const auto next = nextScheduledRun(s);
         return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
@@ -218,12 +219,12 @@ inline bool currentActivity(const SessionInfo &s, bool online = true)
 
 inline bool working(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && (s.activity == "busy" || backgroundIdle(s)) && !s.needsAction();
+    return currentActivity(s, online) && s.activity == "busy" && !s.needsAction();
 }
 
 inline bool scheduled(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && !s.needsAction() && !backgroundIdle(s) && scheduledIdle(s);
+    return currentActivity(s, online) && !s.needsAction() && scheduledIdle(s);
 }
 
 inline bool needsAttention(const SessionInfo &s, bool online = true)
@@ -279,14 +280,14 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
     }
     if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);
     if (!currentActivity(s, online)) return status(s, online);
-    if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 running command") : QObject::tr("%1 running commands").arg(s.backgroundProcesses))
-        + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);
     if (scheduled(s, online)) {
         const auto now = QDateTime::currentDateTime();
         if (s.nextScheduledAt <= 0) return QObject::tr("Waiting for its next scheduled run");
         return s.nextScheduledAt <= now.toSecsSinceEpoch() ? QObject::tr("Next run due")
             : QObject::tr("Next run at %1").arg(nextScheduledRun(s, now));
     }
+    if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 command still running") : QObject::tr("%1 commands still running").arg(s.backgroundProcesses))
+        + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);
 
     if (!s.activitySummary.isEmpty()) return s.activitySummary + (s.activityDetail.isEmpty() ? QString() : QStringLiteral(": ") + activityDetailPreview(s));
     if (!s.currentTool.isEmpty()) return s.currentTool + (s.toolDetail.isEmpty() ? QString() : QStringLiteral(": ") + s.toolDetail);
