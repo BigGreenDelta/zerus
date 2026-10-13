@@ -127,11 +127,12 @@ void TestMachinesPage::removalRequiresExplicitConfirmationOfSameConnection()
         }
         for(auto *button:box->buttons())if(box->buttonRole(button)==QMessageBox::DestructiveRole)button->click();
     });respond.start();remove->click();respond.stop();QVERIFY(shown);
-    QTest::qWait(150);
-    QJsonArray removals;
-    for(const auto &call:calls())if(call.toArray().at(1)=="remove")removals.append(call);
-    QCOMPARE(removals.size(),choice=="proceed"?1:0);
-    if(choice=="proceed")QCOMPARE(removals.first().toArray(),QJsonArray({"machine","remove","mac","--revision","revision-1"}));
+    const auto removals=[&]{QJsonArray result;for(const auto &call:calls())if(call.toArray().at(1)=="remove")result.append(call);return result;};
+    // The confirmed removal runs a fake CLI process, which a loaded runner can start
+    // later than any fixed wait; a refused one must send nothing within the window.
+    if(choice=="proceed")QTRY_COMPARE(removals().size(),1);
+    else{QTest::qWait(150);QCOMPARE(removals().size(),0);}
+    if(choice=="proceed")QCOMPARE(removals().first().toArray(),QJsonArray({"machine","remove","mac","--revision","revision-1"}));
     if(choice=="selection"||choice=="revision")QVERIFY(widget<QLabel>(page,"machineNotice")->text().contains("connection changed"));
 }
 

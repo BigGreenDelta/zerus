@@ -274,8 +274,10 @@ void TestWindowsDesktop::powerShellTemplateRunsTheExactCommand()
     // into the exact arguments, also through the Start-Process form.
     QTemporaryDir dir; QVERIFY(dir.isValid());
     const QString script = dir.filePath("hgs");
-    QVERIFY(FakeCli::install(script, "#!/usr/bin/env python3\nimport json,sys\n"
-        "open(__file__+'.argv','w',encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"));
+    // The fixture outlives Start-Process -Wait's setup: Windows PowerShell 5.1 fails
+    // with "the process has exited" when the program ends before it is waited on.
+    QVERIFY(FakeCli::install(script, "#!/usr/bin/env python3\nimport json,sys,time\n"
+        "open(__file__+'.argv','w',encoding='utf-8').write(json.dumps(sys.argv[1:]))\ntime.sleep(.5)\n"));
     for (const QStringList &arguments : {QStringList{"@mac", "a", QString::fromUtf8("codex/проект/my name"), "it's"},
                                          awkwardArguments()}) {
         QFile::remove(script + ".argv");
