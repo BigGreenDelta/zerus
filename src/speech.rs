@@ -397,7 +397,20 @@ fn exchange(path: &std::path::Path, bytes: &[u8]) -> Result<Value> {
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     stream.write_all(bytes)?;
     stream.write_all(b"\n")?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    let shutdown = stream.shutdown(std::net::Shutdown::Write);
+    read_response_after_shutdown(stream, shutdown)
+}
+
+#[cfg(unix)]
+fn read_response_after_shutdown(stream: impl Read, shutdown: std::io::Result<()>) -> Result<Value> {
+    // A fast peer can send its reply and close before our write-half-close.
+    // macOS then reports NotConnected even with a valid reply still buffered.
+    // Preserve EOF framing and require the bounded, validated response below.
+    match shutdown {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+        Err(error) => return Err(error.into()),
+    }
     let mut response = Vec::new();
     stream
         .take((MAX_RESPONSE_BYTES + 1) as u64)
@@ -456,6 +469,105 @@ mod tests {
         input["audio"]["data_base64"] = json!("AAA=");
         input["audio"]["sample_rate"] = json!(16000.0);
         assert!(validate_request(&input).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn disconnected_half_close_still_requires_a_bounded_valid_response() {
+        use std::io::{Cursor, Error as IoError, ErrorKind};
+        let disconnected = || Err(IoError::from(ErrorKind::NotConnected));
+        let expected = json!({"schema":1,"job_id":"synthetic-job","state":"queued"});
+        assert_eq!(
+            read_response_after_shutdown(Cursor::new(expected.to_string()), disconnected())
+                .unwrap(),
+            expected
+        );
+        for (bytes, message) in [
+            (Vec::new(), "Invalid speech service response"),
+            (b"not JSON\n".to_vec(), "Invalid speech service response"),
+            (
+                b"{\"schema\":2}\n".to_vec(),
+                "Unsupported speech service schema",
+            ),
+            (
+                b"{\"state\":\"queued\"}\n".to_vec(),
+                "Unsupported speech service schema",
+            ),
+            (
+                vec![b' '; MAX_RESPONSE_BYTES + 1],
+                "Speech service response is too large",
+            ),
+        ] {
+            assert!(
+                read_response_after_shutdown(Cursor::new(bytes), disconnected())
+                    .unwrap_err()
+                    .message
+                    .contains(message)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn half_close_and_response_read_errors_are_not_hidden() {
+        use std::io::{Error as IoError, ErrorKind};
+        struct UnreadResponse;
+        impl Read for UnreadResponse {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("A real shutdown failure must not proceed to the response");
+            }
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::BrokenPipe,
+            ErrorKind::InvalidInput,
+        ] {
+            let error = read_response_after_shutdown(
+                UnreadResponse,
+                Err(IoError::new(kind, "original shutdown failure")),
+            )
+            .unwrap_err();
+            assert_eq!(error.message, "original shutdown failure");
+        }
+        struct FailedResponse;
+        impl Read for FailedResponse {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(IoError::new(
+                    ErrorKind::BrokenPipe,
+                    "original response read failure",
+                ))
+            }
+        }
+        assert_eq!(
+            read_response_after_shutdown(
+                FailedResponse,
+                Err(IoError::from(ErrorKind::NotConnected))
+            )
+            .unwrap_err()
+            .message,
+            "original response read failure"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn buffered_reply_survives_peer_close_before_half_close() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixStream;
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut input = String::new();
+            BufReader::new(&mut server).read_line(&mut input).unwrap();
+            assert_eq!(input, "{\"action\":\"providers\"}\n");
+            server
+                .write_all(b"{\"schema\":1,\"profiles\":[]}\n")
+                .unwrap();
+        });
+        client.write_all(b"{\"action\":\"providers\"}\n").unwrap();
+        worker.join().unwrap(); // the peer has closed with its valid reply buffered
+        let shutdown = client.shutdown(std::net::Shutdown::Write);
+        let response = read_response_after_shutdown(client, shutdown).unwrap();
+        assert_eq!(response, json!({"schema":1,"profiles":[]}));
     }
 
     #[test]
