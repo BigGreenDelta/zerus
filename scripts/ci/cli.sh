@@ -18,7 +18,8 @@ print('Terminal fixture toolchain: ' + version)
 PY
 cargo test --locked 2>&1 | tee artifacts/test-results/rust.log
 cargo build --locked
-# The native stand-in agent of tests/test_fake_agent.py and later terminal suites.
+# The native stand-in agent of tests/test_fake_agent.py, tests/test_backend_contract.py
+# and later terminal suites.
 cargo build --locked --example fake_agent
 export HGS_TEST_BIN="$PWD/target/debug/hgs"
 bash tests/test_hgs.sh 2>&1 | tee artifacts/test-results/cli-smoke.log

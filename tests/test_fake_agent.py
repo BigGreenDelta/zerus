@@ -64,10 +64,14 @@ class PipedAgent(Fixture):
         reader, writer = os.pipe()
         try:
             agent = subprocess.Popen([str(FAKE_AGENT), "--record", str(self.record), *options], stdin=reader,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, cwd=self.root)
             os.close(reader)
             reader = None
-            os.write(writer, stdin)
+            if stdin:
+                try:
+                    os.write(writer, stdin)
+                except BrokenPipeError:
+                    pass  # The agent may exit before reading, as on bad options.
             if not keep_open:
                 os.close(writer)
                 writer = None
@@ -97,6 +101,7 @@ class PipedAgent(Fixture):
         self.assertEqual(code, 5)
         start, *_ = self.events("start")
         self.assertEqual((start["tty"], start["raw"], start["name"]), (False, False, "fake_agent"))
+        self.assertEqual(start["cwd"], str(self.root.resolve()))
         tokens = self.tokens()
         self.assertEqual(bytes.fromhex("".join(token["hex"] for token in tokens)), sent)
         self.assertEqual([(token["kind"], token.get("text"), token.get("name")) for token in tokens],
@@ -198,7 +203,7 @@ class TerminalAgent(Fixture):
 
     def start(self, *options, program=FAKE_AGENT, env=None):
         variables = dict(FAKE_AGENT_RECORD=str(self.record), FAKE_AGENT_READY=str(self.ready), **(env or {}))
-        command = ["new-session", "-d", "-s", "agent", "-x", "100", "-y", "30"]
+        command = ["new-session", "-d", "-s", "agent", "-x", "100", "-y", "30", "-c", str(self.root)]
         for key, value in variables.items():
             command += ["-e", f"{key}={value}"]
         self.tmux(*command, str(program), *options, ";", "set-option", "-w", "-t", "agent", "remain-on-exit", "on")
@@ -280,6 +285,12 @@ class TerminalAgent(Fixture):
         started = subprocess.check_output(["ps", "-p", str(info["pid"]), "-o", "lstart="],
                                           env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
         self.assertEqual(info["process_start"], started)
+        # The start record carries the same identity and folder as the ready file.
+        start, = self.events("start")
+        self.assertEqual((start["pid"], start["process_start"], start["cwd"]),
+                         (info["pid"], started, str(self.root.resolve())))
+        self.assertEqual(info["cwd"], start["cwd"])
+        self.assertEqual({event["pid"] for event in self.events()}, {info["pid"]})
         self.assertEqual((info["tty"], info["raw"], info["session_id"]), (True, True, "fixture-session"))
         self.assertEqual(info["size"], [int(self.pane("#{pane_width}")), int(self.pane("#{pane_height}"))])
         self.keys("-l", "hi there")

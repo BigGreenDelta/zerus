@@ -16,10 +16,11 @@
 //! TEXT values understand `\e`, `\r`, `\n`, `\t`, `\a`, `\0`, `\\` and `\xHH`.
 //!
 //! - `--record PATH`: append one JSON object per line (below).
-//! - `--ready PATH`: once started, write `{"pid", "process_start", "argv",
-//!   "session_id", ...}` there (replaced atomically). `process_start` is the form
-//!   hgs records: `ps -o lstart=` with `LC_ALL=C TZ=UTC` on Unix, the creation
-//!   time in decimal 100 ns ticks on Windows.
+//! - `--ready PATH`: once started, write `{"pid", "process_start", "cwd",
+//!   "argv", "session_id", ...}` there (replaced atomically). `process_start` is
+//!   the form hgs records: `ps -o lstart=` with `LC_ALL=C TZ=UTC` on Unix, the
+//!   creation time in decimal 100 ns ticks on Windows. The `start` record carries
+//!   the same process identity and folder.
 //! - `--raw 1|0` (default 1): switch the terminal to raw input. On Unix this is
 //!   `cfmakeraw` (no `ICANON`, `ECHO`, `ISIG`, `IXON` or `OPOST`); on Windows it
 //!   clears `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT` and `ENABLE_PROCESSED_INPUT`
@@ -86,7 +87,8 @@
 //!   `hook start|submit|stop|end [PROMPT]`, `exit [CODE]`. A `control` record
 //!   follows each line. This replaces the SIGUSR1 redraws of the Python fakes.
 //!
-//! Records have `kind` and `t` (seconds since start). Input becomes one record
+//! Records have `kind`, `t` (seconds since start) and `pid`, so agents started
+//! one after another or side by side can share a record. Input becomes one record
 //! per token, carrying the exact bytes as `hex` (all `hex` values together are
 //! every byte received, in order), `read` (the number of the read that
 //! completed it) and, for printable data, `text`:
@@ -654,6 +656,9 @@ fn unix_ms() -> u64 {
 fn record(mut value: Value) {
     if value.get("t").is_none() {
         value["t"] = json!(seconds(Instant::now()));
+    }
+    if value.get("pid").is_none() {
+        value["pid"] = json!(process::id());
     }
     let mut guard = RECORD
         .lock()
@@ -1552,6 +1557,8 @@ struct Agent {
     /// SessionStart has run; Enter submits nothing before.
     started: bool,
     size: Option<(u16, u16)>,
+    process_start: Option<String>,
+    cwd: Option<String>,
 }
 
 impl Agent {
@@ -1989,7 +1996,8 @@ impl Agent {
         };
         let value = json!({
             "pid": process::id(),
-            "process_start": platform::process_start(),
+            "process_start": self.process_start,
+            "cwd": self.cwd,
             "ready_unix_ms": unix_ms(),
             "name": self.config.name,
             "argv": self.config.argv,
@@ -2100,10 +2108,16 @@ fn main() {
         None => (Vec::new(), None),
     };
     let size = platform::size();
+    let process_start = platform::process_start();
+    let cwd = env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
     record(json!({
         "kind": "start",
         "t": 0.0,
         "pid": process::id(),
+        "process_start": process_start,
+        "cwd": cwd,
         "unix_ms": started_unix_ms,
         "name": config.name,
         "argv": config.argv,
@@ -2135,6 +2149,8 @@ fn main() {
         recent: Vec::new(),
         started: false,
         size,
+        process_start,
+        cwd,
         config,
     };
     let modes = agent.config.modes.clone();
