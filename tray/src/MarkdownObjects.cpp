@@ -383,7 +383,10 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
         while (pieceStart < pieces.size() && pieces[pieceStart].block == each)
             area.addPath(pieces[pieceStart++].shape);
         const QRectF reach = area.boundingRect();
-        if (pieceStart - from <= 8 || painter->combinedTransform().type() > QTransform::TxTranslate) {
+        auto logicalTransform = painter->combinedTransform();
+        const qreal deviceRatio = painter->device()->devicePixelRatioF();
+        logicalTransform.scale(1 / deviceRatio, 1 / deviceRatio);
+        if (pieceStart - from <= 8 || logicalTransform.type() > QTransform::TxTranslate) {
             batches.append({each, area, reach}); continue;
         }
         const auto device = painter->deviceTransform();
@@ -410,7 +413,11 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     // Align the temporary tile to the destination's physical pixel grid.
     QImage background;
     QPointF backgroundOrigin;
-    const auto transform = painter->combinedTransform();
+    // combinedTransform includes the ordinary HiDPI scale. Remove only that
+    // scale when deciding whether the caller added a nontranslation transform.
+    auto transform = painter->combinedTransform();
+    const qreal deviceRatio = painter->device()->devicePixelRatioF();
+    transform.scale(1 / deviceRatio, 1 / deviceRatio);
     const bool translated = transform.type() <= QTransform::TxTranslate;
     if (translated && painter->opacity() == 1 && painter->compositionMode() == QPainter::CompositionMode_SourceOver
         && palette.brush(QPalette::Base).isOpaque()) {
