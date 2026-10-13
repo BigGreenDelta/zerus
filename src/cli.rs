@@ -840,11 +840,11 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     // Resolve exact name to an immutable tmux session ID before checking the run.
     // If it disappears later, attach fails instead of creating or selecting a new one.
     let target = terminal()
-        .pane_info(
+        .probe(
             Target::Name(session),
             &[PaneField::SessionId, PaneField::RunMarker],
         )
-        .map_err(|_| Error::new(1, "session is no longer running; resume it explicitly"))?;
+        .ok_or_else(|| Error::new(1, "session is no longer running; resume it explicitly"))?;
     let fields = target.fields();
     if fields.len() != 2
         || !fields[0]
@@ -908,8 +908,7 @@ fn attach_requested(
     // Capture the tmux identity before rechecking the conversation. If the name
     // is reused afterwards, attach must fail instead of selecting its new owner.
     let target = terminal()
-        .pane_info(Target::Name(session), &[PaneField::SessionId])
-        .ok()
+        .probe(Target::Name(session), &[PaneField::SessionId])
         .filter(|info| {
             info.value().strip_prefix('$').is_some_and(|value| {
                 !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())

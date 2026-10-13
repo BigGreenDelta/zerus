@@ -140,6 +140,14 @@ pub(crate) enum Paste {
     Terminal { bracketed: bool },
 }
 
+/// What staging does with the terminal's own error output. Neither form shows
+/// it: message input reads it to the end, other staging discards it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StageErrors {
+    Read,
+    Discard,
+}
+
 /// The pinned agent that should own a pane's input.
 pub(crate) struct InputClaim<'a> {
     pub pane: &'a str,
@@ -242,6 +250,11 @@ pub(crate) trait TerminalBackend: Sync {
     fn pane_info(&self, _target: Target, _fields: &[PaneField]) -> Result<PaneInfo> {
         Err(UNSUPPORTED.into())
     }
+    /// `pane_info` where only the answer matters: None when the terminal gives
+    /// none, its message discarded.
+    fn probe(&self, _target: Target, _fields: &[PaneField]) -> Option<PaneInfo> {
+        None
+    }
     /// Start a detached session.
     fn start(&self, _spec: &LaunchSpec) -> Result<()> {
         Err(UNSUPPORTED.into())
@@ -281,7 +294,7 @@ pub(crate) trait TerminalBackend: Sync {
     }
     /// Stage text under a unique name without placing it on argv. Err when the
     /// terminal could not be run, false when it did not take the text.
-    fn stage(&self, _buffer: &str, _text: &[u8]) -> Result<bool> {
+    fn stage(&self, _buffer: &str, _text: &[u8], _errors: StageErrors) -> Result<bool> {
         Err(UNSUPPORTED.into())
     }
     /// Paste and release staged text.
@@ -450,6 +463,13 @@ mod unavailable_tests {
         assert_eq!(
             terminal.pane_info(Target::Pane("%1"), &[PaneField::Dead]).err(),
             Some(UNSUPPORTED.into())
+        );
+        assert!(terminal
+            .probe(Target::Name("claude/p"), &[PaneField::SessionId])
+            .is_none());
+        assert_eq!(
+            terminal.stage("hgs-input-1", b"text", StageErrors::Read).unwrap_err(),
+            UNSUPPORTED
         );
         assert_eq!(terminal.capture("%1", Capture::Plain).unwrap_err(), UNSUPPORTED);
         assert_eq!(terminal.send("%1", &[Key::Named("Enter")]).unwrap_err(), UNSUPPORTED);

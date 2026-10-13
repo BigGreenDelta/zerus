@@ -718,7 +718,7 @@ impl Transport for Native<'_> {
     fn paste(&mut self, text: &str) -> Result<()> {
         let buffer = format!("hgs-question-{}", uuid::Uuid::new_v4());
         let terminal = backend::current();
-        let loaded = terminal.stage(&buffer, text.as_bytes())?;
+        let loaded = terminal.stage(&buffer, text.as_bytes(), backend::StageErrors::Discard)?;
         let result = (|| {
             if !loaded {
                 return Err("failed to stage Other text".into());

@@ -4,7 +4,7 @@
 //! session's pane) for pane and option commands.
 use super::{
     ClientExit, ClientRow, DryRun, InputClaim, InputState, Key, LaunchSpec, Listing, PaneField,
-    PaneInfo, PanePath, PaneRow, Paste, SessionRow, Target, TerminalBackend,
+    PaneInfo, PanePath, PaneRow, Paste, SessionRow, StageErrors, Target, TerminalBackend,
 };
 use crate::cli::{Error, Result as CliResult};
 use crate::platform;
@@ -321,6 +321,11 @@ impl TerminalBackend for Tmux {
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ))
     }
+    fn probe(&self, target: Target, fields: &[PaneField]) -> Option<PaneInfo> {
+        let arguments = pane_info_args(target, fields);
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        platform::capture("tmux", &arguments).map(PaneInfo::new)
+    }
     fn start(&self, spec: &LaunchSpec) -> Result<()> {
         tmux(&start_args(spec), true).map(drop)
     }
@@ -432,19 +437,25 @@ impl TerminalBackend for Tmux {
         }
         Ok(())
     }
-    fn stage(&self, buffer: &str, text: &[u8]) -> Result<bool> {
+    fn stage(&self, buffer: &str, text: &[u8], errors: StageErrors) -> Result<bool> {
         let mut loader = Command::new("tmux")
             .args(["load-buffer", "-b", buffer, "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(match errors {
+                StageErrors::Read => Stdio::piped(),
+                StageErrors::Discard => Stdio::null(),
+            })
             .spawn()
             .map_err(|e| e.to_string())?;
         let written = match loader.stdin.take() {
             Some(mut stdin) => stdin.write_all(text),
             None => Err(io::Error::other("missing buffer input")),
         };
-        let status = loader.wait().map_err(|e| e.to_string())?;
+        let status = match errors {
+            StageErrors::Read => loader.wait_with_output().map_err(|e| e.to_string())?.status,
+            StageErrors::Discard => loader.wait().map_err(|e| e.to_string())?,
+        };
         Ok(status.success() && written.is_ok())
     }
     fn paste(&self, buffer: &str, pane: &str, mode: Paste) -> Result<()> {

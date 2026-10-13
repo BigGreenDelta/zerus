@@ -253,7 +253,11 @@ fn input(name: &str, request: &Request, path: &Path, hash: &str) -> Result<Value
     };
     if staged {
         let stage: Result<()> = (|| {
-            if !terminal.stage(&buffer, request.text.as_ref().unwrap().as_bytes())? {
+            if !terminal.stage(
+                &buffer,
+                request.text.as_ref().unwrap().as_bytes(),
+                backend::StageErrors::Discard,
+            )? {
                 return Err("Could not stage terminal text; nothing was delivered".into());
             }
             Ok(())

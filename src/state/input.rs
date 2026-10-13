@@ -688,7 +688,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     };
     let buffer = format!("hgs-input-{request_id}");
     let terminal = backend::current();
-    if !terminal.stage(&buffer, pasted.as_bytes())? {
+    if !terminal.stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)? {
         return Err("could not stage terminal input; nothing was submitted".into());
     }
     let cleanup = || terminal.discard(&buffer);
