@@ -82,6 +82,13 @@ class SessionDetailsPresentationTest {
         val changed = JSONObject(original.toString()).put("last_event_at",123).put("journal",JSONArray().put(JSONObject().put("detail","next event")))
         assertEquals(SessionDetailsPresentation.settings(original).signature,SessionDetailsPresentation.settings(changed).signature)
     }
+    @Test fun settingsNoticeIsReadAndInvalidatesSnapshot() {
+        val raw = model()
+        assertEquals("",SessionDetailsPresentation.settings(raw).notice)
+        val noticed = JSONObject(raw.toString()).put("settings_change_notice","Claude re-reads the full history on the next message.")
+        assertEquals("Claude re-reads the full history on the next message.",SessionDetailsPresentation.settings(noticed).notice)
+        assertNotEquals(SessionDetailsPresentation.settings(raw).signature,SessionDetailsPresentation.settings(noticed).signature)
+    }
     @Test fun settingsCatalogAndPendingIdentityChangesInvalidateSnapshot() {
         val raw = model()
         val before = SessionDetailsPresentation.settings(raw).signature

@@ -282,6 +282,11 @@ Claude TUI with a private home/socket and a localhost fake API. Set
 account. Claude 2.1.296 coverage verifies literal trailing backslashes, multiline
 messages and durable request replay. Terminal submission alone is insufficient:
 the test waits for the unchanged user message in native history.
+`tests/test_claude_settings_native.py` drives the real `/model` picker under the
+same variable with a synthetic model catalog and history. Claude 2.1.296 coverage
+changes model and effort in a fresh session, accepts Claude's own cache notice in
+a resumed conversation, and requires the session-only transcript receipt while
+`settings.json` stays unchanged.
 
 ### Windows client, desktop and portable zip
 

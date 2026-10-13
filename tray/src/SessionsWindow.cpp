@@ -3085,6 +3085,7 @@ void SessionsWindow::renderDetails()
         settingsProblem.isEmpty() ? m_details.value("settings_change_reason").toString() : settingsProblem,
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
         m_details.value("settings_apply_when").toString());
+    m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
     renderQuestion(*entry);
     updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());

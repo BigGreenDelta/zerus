@@ -796,9 +796,22 @@ leaving account defaults intact. Codex/Kimi options come from the selected
 account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
-Claude controls and unverified states fall back to Terminal with an explanation.
+Unverified states fall back to Terminal with an explanation.
 A choice that the agent's status line already shows is confirmed without typing
 anything into Terminal.
+
+Claude options are the models its `/model` picker lists, from the catalog Claude
+Code caches in the account's profile. Zerus selects the model and effort in that
+picker and applies them with its session-only choice (`s`). Its Enter, and a typed
+`/model NAME` or `/effort LEVEL`, would save new defaults and are never used. The
+change is confirmed by Claude's receipt in the exact conversation transcript and by
+its effort indicator when shown. In a conversation that already has replies, Claude
+warns that the next message re-reads the full history and uses more tokens: the
+selector states this before **Apply**, and Zerus then accepts only that built-in
+notice. A confirmation requested by a `PreModelSwitch` hook is declined and
+reported, as is a picker without the session-only choice; use Terminal for those.
+A stopped Claude session resumes with a choice made in Zerus through `--model` and
+`--effort`; otherwise it starts with the account's settings.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.

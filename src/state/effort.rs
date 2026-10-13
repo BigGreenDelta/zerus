@@ -69,6 +69,184 @@ fn event_settings(agent: &str, event: &Value) -> Option<(String, String)> {
     ))
 }
 
+/// Claude names each transcript after its conversation; never trust another file.
+fn claude_transcript(record: &Value) -> Result<PathBuf> {
+    let id = string(record, "conversation_id");
+    let path = PathBuf::from(string(record, "transcript"));
+    if id.is_empty()
+        || !path.is_absolute()
+        || path.file_name().map(|name| name.to_string_lossy().into_owned())
+            != Some(format!("{id}.jsonl"))
+    {
+        return Err("Claude's conversation transcript is not confirmed; refresh or use Terminal".into());
+    }
+    Ok(path)
+}
+
+/// Settings of the newest main-conversation Claude turn, or of a /model
+/// receipt naming a catalog model. Rows of other conversations never count.
+fn claude_settings(
+    event: &Value,
+    conversation: &str,
+    models: &[ModelOption],
+) -> Option<(String, String)> {
+    if conversation.is_empty()
+        || string(event, "sessionId") != conversation
+        || event["isSidechain"] == true
+    {
+        return None;
+    }
+    match string(event, "type") {
+        "assistant" => {
+            let model = event["requestedModel"]
+                .as_str()
+                .filter(|model| !model.is_empty())
+                .or(event["message"]["model"].as_str())?;
+            // Locally generated replies carry "<synthetic>", not a model.
+            if !safe_model(model) || model.starts_with('<') {
+                return None;
+            }
+            let effort = event["effort"].as_str().filter(|value| valid(value));
+            Some((model.into(), effort.unwrap_or_default().into()))
+        }
+        "user" | "system" => {
+            let text = event["message"]["content"]
+                .as_str()
+                .or(event["content"].as_str())?;
+            let (name, effort) = claude_receipt(text)?;
+            let model = models.iter().find(|model| model.label == name)?;
+            Some((model.id.clone(), effort))
+        }
+        _ => None,
+    }
+}
+
+/// Claude's /model result: "Set model to `Name` for this session only", or
+/// "... and saved as your default for new sessions", with an optional
+/// " with `level` effort" when the picker changed effort.
+fn claude_receipt(text: &str) -> Option<(String, String)> {
+    let text = text
+        .strip_prefix("<local-command-stdout>")?
+        .strip_suffix("</local-command-stdout>")?;
+    let (name, rest) = text.strip_prefix("Set model to `")?.split_once('`')?;
+    let rest = rest
+        .strip_prefix(" for this session only")
+        .or_else(|| rest.strip_prefix(" and saved as your default for new sessions"))?;
+    let effort = rest
+        .strip_prefix(" with `")
+        .and_then(|rest| rest.split_once("` effort"))
+        .map(|(level, _)| level)
+        .filter(|level| valid(level))
+        .unwrap_or_default();
+    (!name.is_empty()).then(|| (name.to_owned(), effort.to_owned()))
+}
+
+/// An unindented full-width rule, such as the borders of Claude's composer.
+fn composer_rule(line: &str) -> bool {
+    line.chars().count() >= 12 && line.chars().all(|ch| ch == '─')
+}
+
+/// Claude's right-aligned effort indicator directly above its composer:
+/// "◐ medium · /effort", "● high · ultracode · /effort" or "effort: high · /effort".
+/// It shares a notification slot, so its absence is not evidence of a change.
+fn claude_footer(screen: &str) -> Option<String> {
+    let lines: Vec<_> = screen.lines().collect();
+    lines.iter().enumerate().rev().find_map(|(index, line)| {
+        if !lines.get(index + 1).is_some_and(|next| composer_rule(next)) {
+            return None;
+        }
+        let line = line.trim_end();
+        let rest = line.trim_start().strip_suffix(" · /effort")?;
+        if line.len() - line.trim_start().len() < 8 {
+            return None;
+        }
+        let rest = rest.strip_suffix(" · ultracode").unwrap_or(rest);
+        let words: Vec<_> = rest.split_whitespace().collect();
+        let [.., mark, level] = words.as_slice() else {
+            return None;
+        };
+        let glyph = mark.chars().count() == 1 && !mark.chars().all(char::is_alphanumeric);
+        (valid(level) && (glyph || *mark == "effort:")).then(|| (*level).to_owned())
+    })
+}
+
+/// Claude Code caches its account's signed model catalog for the /model picker.
+/// The picker lists the "main" section; other models need --model at launch.
+fn claude_catalog(record: &Value) -> Vec<ModelOption> {
+    type Cached = (u64, Option<SystemTime>, Vec<ModelOption>);
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, Cached>>> = OnceLock::new();
+    let Ok(entries) = fs::read_dir(agent_home(record).join("cache").join("model-catalog")) else {
+        return vec![];
+    };
+    // One file per account and organization; the newest belongs to this sign-in.
+    let newest = entries
+        .flatten()
+        .take(64)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with("-cc.json"))
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok().filter(|meta| meta.is_file())?;
+            Some((meta.modified().ok(), meta.len(), entry.path()))
+        })
+        .max_by_key(|(modified, _, _)| *modified);
+    let Some((modified, size, path)) = newest else {
+        return vec![];
+    };
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some((cached_size, stamp, models)) = cache.lock().ok().as_ref().and_then(|c| c.get(&path)) {
+        if *cached_size == size && *stamp == modified {
+            return models.clone();
+        }
+    }
+    let Some(value) = File::open(&path)
+        .ok()
+        .and_then(|file| serde_json::from_reader::<_, Value>(BufReader::new(file.take(MAX_TAIL))).ok())
+    else {
+        return vec![];
+    };
+    let catalog = &value["catalog"];
+    if value["version"] != 2 || string(catalog, "surface") != "cc" {
+        return vec![];
+    }
+    let defaults = catalog["state"]["thinking_by_model"].as_array();
+    let mut models = Vec::new();
+    for entry in catalog["config"]["models"].as_array().into_iter().flatten().take(64) {
+        let (id, label) = (string(entry, "id"), string(entry, "name"));
+        if string(entry, "section") != "main" || !safe_model(id) || !safe_model(label) {
+            continue;
+        }
+        let thinking = &entry["thinking"];
+        let options = thinking["effort_options"].as_array().filter(|_| string(thinking, "type") == "effort");
+        let efforts: Vec<String> = options
+            .into_iter()
+            .flatten()
+            .map(|option| string(option, "id"))
+            .filter(|value| valid(value))
+            .map(str::to_owned)
+            .collect();
+        let recommended = options.into_iter().flatten().find_map(|option| {
+            (option["badge"]["message"] == "Recommended").then(|| string(option, "id").to_owned())
+        });
+        let default_effort = defaults
+            .into_iter()
+            .flatten()
+            .find(|state| string(state, "id") == id)
+            .map(|state| string(&state["thinking"], "effort").to_owned())
+            .filter(|value| efforts.contains(value))
+            .or(recommended.filter(|value| efforts.contains(value)))
+            .unwrap_or_default();
+        models.push(ModelOption {
+            id: id.into(),
+            label: label.into(),
+            efforts,
+            default_effort,
+        });
+    }
+    if let Ok(mut cached) = cache.lock() {
+        cached.insert(path, (size, modified, models.clone()));
+    }
+    models
+}
+
 fn history(record: &Value) -> Settings {
     let agent = string(record, "agent");
     let path = if agent == "kimi" {
@@ -86,6 +264,8 @@ fn history(record: &Value) -> Settings {
         } else {
             None
         }
+    } else if agent == "claude" {
+        claude_transcript(record).ok()
     } else {
         None
     };
@@ -119,6 +299,8 @@ fn history(record: &Value) -> Settings {
             }
         }
     }
+    // Claude's /model receipts name a model as its picker does.
+    let models = if agent == "claude" { catalog(record) } else { Vec::new() };
     // Stopped and archived sessions keep their transcripts: reuse the scan across
     // listings instead of reading up to 8 MiB of each on every poll.
     let scanned = scan_cache::cached("effort-settings", &path, &key, || {
@@ -161,18 +343,26 @@ fn history(record: &Value) -> Settings {
                 {
                     continue;
                 }
-                let marker: &[u8] = if agent == "kimi" {
-                    b"thinkingEffort"
-                } else {
-                    b"turn_context"
+                let markers: &[&[u8]] = match agent {
+                    "kimi" => &[b"thinkingEffort"],
+                    "claude" => &[b"\"requestedModel\"", b"Set model to `"],
+                    _ => &[b"turn_context"],
                 };
-                if !line.windows(marker.len()).any(|part| part == marker) {
+                if !markers
+                    .iter()
+                    .any(|marker| line.windows(marker.len()).any(|part| part == *marker))
+                {
                     continue;
                 }
                 let Ok(event) = serde_json::from_slice::<Value>(line) else {
                     continue;
                 };
-                if let Some((model, effort)) = event_settings(agent, &event) {
+                let found_settings = if agent == "claude" {
+                    claude_settings(&event, string(record, "conversation_id"), &models)
+                } else {
+                    event_settings(agent, &event)
+                };
+                if let Some((model, effort)) = found_settings {
                     found = Some(Settings {
                         model,
                         effort,
@@ -221,6 +411,9 @@ fn capture(record: &Value) -> Result<String> {
 }
 
 fn footer(agent: &str, model: &str, screen: &str) -> Option<String> {
+    if agent == "claude" {
+        return claude_footer(screen);
+    }
     for line in screen.lines().rev().take(3) {
         let line = line.trim().to_ascii_lowercase();
         if agent == "codex" {
@@ -422,6 +615,11 @@ fn options(record: &Value, model: &str) -> Vec<String> {
             }
             levels
         }
+        "claude" => claude_catalog(record)
+            .into_iter()
+            .find(|option| option.id == model)
+            .map(|option| option.efforts)
+            .unwrap_or_default(),
         _ => vec![],
     }
 }
@@ -442,6 +640,9 @@ fn safe_model(value: &str) -> bool {
 }
 
 fn catalog(record: &Value) -> Vec<ModelOption> {
+    if string(record, "agent") == "claude" {
+        return claude_catalog(record);
+    }
     let mut result = Vec::new();
     if string(record, "agent") == "codex" {
         let parsed = codex_models(record);
@@ -529,14 +730,15 @@ fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     if record.get("archive_id").is_some() || string(record, "state") == "archived" {
         return "Restore the archived session before changing its settings";
     }
-    if string(record, "agent") == "claude" {
-        return "Change Claude’s model with /model and effort with /effort in Terminal.";
-    }
-    if !["codex", "kimi"].contains(&string(record, "agent")) {
+    if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
         return "Model settings are available in Terminal for this provider.";
     }
     if models.is_empty() {
         return "No model catalog is available for this account; open the agent once to populate it";
+    }
+    // Claude confirms each session-only change in its own transcript.
+    if string(record, "agent") == "claude" && claude_transcript(record).is_err() {
+        return "Waiting for the agent to confirm this conversation";
     }
     if string(record, "run_id").is_empty()
         || (string(record, "conversation_id").is_empty() && !input::first_message_candidate(record))
@@ -608,6 +810,10 @@ fn settings(record: &Value, live_pane: bool) -> Settings {
     value
 }
 
+/// Claude asks before a change that discards its prompt cache. Zerus states the
+/// cost before Apply and then confirms only that built-in notice.
+const CLAUDE_NOTICE: &str = "In a conversation that already has replies, Claude re-reads the full history on the next message after a model or effort change. That response is slower and uses more tokens.";
+
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let value = settings(record, live_pane);
     let mut choices = options(record, &value.model);
@@ -615,7 +821,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     if string(record, "agent") == "codex" {
         choices.retain(|value| value != "ultra");
     }
-    let reason = if !["codex", "kimi"].contains(&string(record, "agent")) {
+    let reason = if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
         "Use the provider's Terminal to change effort"
     } else if value.effort.is_empty() || choices.is_empty() {
         "Waiting for the provider's model and effort settings"
@@ -636,10 +842,11 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "ready"
     };
     let pending = &record["pending_settings"];
+    let notice = if string(record, "agent") == "claude" { CLAUDE_NOTICE } else { "" };
     json!({"model":value.model,"effort":value.effort,"effort_options":choices,
         "model_options":models.iter().map(|m| json!({"id":m.id,"label":m.label,"effort_options":m.efforts})).collect::<Vec<_>>(),
         "settings_change_supported":settings_reason.is_empty(),"settings_change_reason":settings_reason,
-        "settings_scope":"session","settings_apply_when":when,
+        "settings_change_notice":notice,"settings_scope":"session","settings_apply_when":when,
         "pending_model":string(pending,"model"),"pending_effort":string(pending,"effort"),
         "pending_settings_id":string(pending,"request_id"),
         "effort_change_supported":reason.is_empty(),"effort_change_reason":reason,
@@ -879,10 +1086,21 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
     };
     let before = row.chars().take(x).collect::<String>();
     let after = row.chars().skip(x).collect::<String>();
-    Ok(if string(record, "agent") == "kimi" {
-        before.trim() == format!("│ > {command}") && after.trim() == "│"
-    } else {
-        before.trim() == format!("› {command}") && after.trim().is_empty()
+    Ok(match string(record, "agent") {
+        "kimi" => before.trim() == format!("│ > {command}") && after.trim() == "│",
+        // Claude follows its prompt glyph with a non-breaking space. Enter runs
+        // the highlighted completion, so it must be this exact command.
+        "claude" => {
+            before.replace('\u{a0}', " ").trim() == format!("❯ {command}")
+                && after.trim().is_empty()
+                && screen.lines().all(|line| {
+                    let Some(completion) = line.strip_prefix("  ❯ /") else {
+                        return true;
+                    };
+                    completion.split_whitespace().next() == command.strip_prefix('/')
+                })
+        }
+        _ => before.trim() == format!("› {command}") && after.trim().is_empty(),
     })
 }
 
@@ -964,6 +1182,10 @@ fn effort_label(value: &str) -> &str {
 }
 
 fn target_footer(record: &Value, model: &ModelOption, screen: &str) -> Option<String> {
+    // Claude's indicator shows effort only; it cannot identify the model.
+    if string(record, "agent") == "claude" {
+        return None;
+    }
     if string(record, "agent") == "codex" && model.efforts.is_empty() {
         return screen
             .lines()
@@ -1227,6 +1449,276 @@ fn kimi_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> 
     Err("native model effort did not settle".into())
 }
 
+#[derive(Debug, PartialEq)]
+struct ClaudePicker {
+    /// The selected numbered row, as "2. Opus    Opus 5.5 · …".
+    row: String,
+    /// The shown effort; empty when the model has none, None when not visible.
+    effort: Option<String>,
+    /// Enter saves a new default; only `s` keeps the choice in this session.
+    session_only: bool,
+}
+
+/// Claude's /model picker: numbered rows (the label column, then the model's
+/// name and description), the effort adjusted with ←/→, and the key legend.
+fn claude_picker(screen: &str) -> Option<ClaudePicker> {
+    let lines: Vec<_> = screen.lines().collect();
+    let title = lines.iter().rposition(|line| line.trim() == "Select model")?;
+    let below = &lines[title + 1..];
+    let mut rows = below.iter().filter_map(|line| {
+        let row = line.trim_start().strip_prefix("❯ ")?.trim_end();
+        let (number, _) = row.split_once(". ")?;
+        number.parse::<usize>().ok()?;
+        Some(row.to_owned())
+    });
+    let row = rows.next()?;
+    if rows.next().is_some() {
+        return None;
+    }
+    let effort = below.iter().find_map(|line| {
+        if line.contains("Effort not supported") {
+            return Some(String::new());
+        }
+        let (shown, legend) = line.trim().split_once(" effort")?;
+        let level = shown.split_whitespace().last()?.to_ascii_lowercase();
+        (legend.contains("←/→ to adjust") && valid(&level)).then_some(level)
+    });
+    let session_only = below.iter().any(|line| {
+        line.contains("Enter to set as default") && line.contains("s to use this session only")
+    });
+    Some(ClaudePicker {
+        row,
+        effort,
+        session_only,
+    })
+}
+
+/// Whether a picker row shows this model: its description starts with the name.
+fn claude_row_is(row: &str, name: &str) -> bool {
+    let Some((_, rest)) = row.split_once(". ") else {
+        return false;
+    };
+    // The label column ("Opus", "Haiku ✔") ends at the first double space.
+    let Some((_, description)) = rest.split_once("  ") else {
+        return false;
+    };
+    let description = description.trim_start();
+    description == name || description.starts_with(&format!("{name} · "))
+}
+
+#[derive(Debug, PartialEq)]
+enum ClaudeSwitch {
+    /// Claude's own prompt-cache notice; `choice` follows "Yes, switch to".
+    Cache { model: bool, choice: String },
+    /// A PreModelSwitch hook asks; its policy is never answered for the user.
+    Hook,
+    Unknown,
+}
+
+fn claude_switch_dialog(screen: &str) -> Option<ClaudeSwitch> {
+    let lines: Vec<_> = screen.lines().collect();
+    let title = lines
+        .iter()
+        .rposition(|line| ["Switch model?", "Change effort level?"].contains(&line.trim()))?;
+    let model = lines[title].trim() == "Switch model?";
+    match lines.get(title + 1).map(|line| line.trim()) {
+        Some("A PreModelSwitch hook asked you to confirm") => return Some(ClaudeSwitch::Hook),
+        Some("Your next response will be slower and use more tokens") => {}
+        _ => return Some(ClaudeSwitch::Unknown),
+    }
+    let below = &lines[title + 2..];
+    let selected: Vec<_> = below
+        .iter()
+        .filter_map(|line| line.trim_start().strip_prefix("❯ "))
+        .collect();
+    let choice = match selected.as_slice() {
+        [row] => row.trim_end().strip_prefix("1. Yes, switch to "),
+        _ => None,
+    };
+    let declinable = below.iter().any(|line| line.trim() == "2. No, go back");
+    match choice {
+        Some(choice) if declinable => Some(ClaudeSwitch::Cache {
+            model,
+            choice: choice.to_owned(),
+        }),
+        _ => Some(ClaudeSwitch::Unknown),
+    }
+}
+
+/// The effort of a "Set model to `name` …" receipt appended after `offset` to
+/// this conversation's transcript, or None while Claude has not written it.
+fn claude_receipt_since(path: &Path, conversation: &str, offset: u64, name: &str) -> Result<Option<String>> {
+    let Ok(mut file) = File::open(path) else {
+        return Ok(None);
+    };
+    let length = file.metadata().map_err(|e| e.to_string())?.len();
+    if length <= offset {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TAIL).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if string(&event, "sessionId") != conversation || event["isSidechain"] == true {
+            continue;
+        }
+        let text = event["message"]["content"].as_str().or(event["content"].as_str());
+        if let Some((receipt, effort)) = text.and_then(claude_receipt) {
+            if receipt == name && text.is_some_and(|text| text.contains("` for this session only")) {
+                return Ok(Some(effort));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Esc cancels Claude's picker without saving anything.
+fn claude_close_picker(name: &str, request: &Request) {
+    let closed = || -> Result<bool> {
+        let record = checked(name, request, false)?;
+        Ok(claude_picker(&capture(&record)?).is_none())
+    };
+    if closed().unwrap_or(true) {
+        return;
+    }
+    if let Ok(record) = checked(name, request, false) {
+        let _ = send_key(&record, "Escape");
+        let _ = wait_until(|| Ok(closed()?.then_some(())));
+    }
+}
+
+/// Select the model and effort in Claude's /model picker and apply them with its
+/// session-only key. Enter would save both as defaults for new sessions.
+fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> {
+    let record = checked(name, request, true)?;
+    let transcript = claude_transcript(&record)?;
+    let conversation = string(&record, "conversation_id").to_owned();
+    let offset = fs::metadata(&transcript).map(|meta| meta.len()).unwrap_or(0);
+    open_model(name, request)?;
+    let selected = (|| -> Result<()> {
+        let picker = wait_until(|| {
+            let record = checked(name, request, false)?;
+            Ok(claude_picker(&capture(&record)?))
+        })?;
+        if !picker.session_only {
+            return Err("Claude's model picker does not offer a session-only choice; use Terminal".into());
+        }
+        let mut visited = Vec::new();
+        loop {
+            let record = checked(name, request, false)?;
+            let picker = claude_picker(&capture(&record)?).ok_or("model picker changed; inspect Terminal")?;
+            if claude_row_is(&picker.row, &model.label) {
+                break;
+            }
+            // The list wraps around: a repeated row means every row was seen.
+            if visited.contains(&picker.row) || visited.len() >= 64 {
+                return Err("model is not offered by Claude's model picker".into());
+            }
+            visited.push(picker.row.clone());
+            send_key(&record, "Down")?;
+            wait_until(|| {
+                let record = checked(name, request, false)?;
+                let moved = claude_picker(&capture(&record)?).is_some_and(|next| next.row != picker.row);
+                Ok(moved.then_some(()))
+            })?;
+        }
+        for _ in 0..=model.efforts.len() {
+            let record = checked(name, request, false)?;
+            let picker = claude_picker(&capture(&record)?).ok_or("model picker changed; inspect Terminal")?;
+            // In search mode `s` would be typed into the filter instead.
+            if !claude_row_is(&picker.row, &model.label) || !picker.session_only {
+                return Err("model picker selection changed; inspect Terminal".into());
+            }
+            let shown = picker.effort.ok_or("Claude's effort selection is not visible; enlarge Terminal")?;
+            if shown == request.effort {
+                return Ok(());
+            }
+            let index = model.efforts.iter().position(|value| value == &shown);
+            let target = model.efforts.iter().position(|value| value == &request.effort);
+            let (Some(index), Some(target)) = (index, target) else {
+                return Err("effort is not offered for this model by Claude's picker".into());
+            };
+            send_key(&record, if target > index { "Right" } else { "Left" })?;
+            wait_until(|| {
+                let record = checked(name, request, false)?;
+                let changed = claude_picker(&capture(&record)?)
+                    .is_some_and(|next| next.effort.as_deref() != Some(shown.as_str()));
+                Ok(changed.then_some(()))
+            })?;
+        }
+        Err("Claude's effort selection did not settle; inspect Terminal".into())
+    })();
+    if let Err(error) = selected {
+        claude_close_picker(name, request);
+        return Err(error);
+    }
+    send_key(&checked(name, request, false)?, "s")?;
+    let mut confirmed = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let record = checked(name, request, false)?;
+        let screen = capture(&record)?;
+        match claude_switch_dialog(&screen) {
+            Some(ClaudeSwitch::Cache { model: kind, choice }) if !confirmed.contains(&kind) => {
+                let expected = if kind {
+                    choice == model.label
+                } else {
+                    choice.eq_ignore_ascii_case(&request.effort)
+                };
+                if !expected {
+                    return Err("Claude asks to confirm a different change; inspect Terminal".into());
+                }
+                // The person accepted this notice in Zerus before applying.
+                send_key(&record, "Enter")?;
+                confirmed.push(kind);
+                continue;
+            }
+            Some(ClaudeSwitch::Hook) => {
+                send_key(&record, "Escape")?;
+                let _ = wait_until(|| {
+                    let record = checked(name, request, false)?;
+                    Ok(claude_switch_dialog(&capture(&record)?).is_none().then_some(()))
+                });
+                claude_close_picker(name, request);
+                return Err("a PreModelSwitch hook asks for confirmation; change the model in Terminal".into());
+            }
+            Some(ClaudeSwitch::Unknown) => {
+                return Err("Claude shows an unrecognized confirmation; inspect Terminal".into());
+            }
+            _ => {}
+        }
+        if claude_picker(&screen).is_none() {
+            if let Some(effort) = claude_receipt_since(&transcript, &conversation, offset, &model.label)? {
+                // The receipt names effort only when the picker changed it; the
+                // indicator, when shown, must agree with the request.
+                let shown = claude_footer(&screen);
+                if (effort.is_empty() || effort == request.effort)
+                    && shown.as_deref().is_none_or(|shown| shown == request.effort)
+                    && input::checked_terminal(&record, true).is_ok()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("Claude did not confirm the session-only change; inspect Terminal".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn claude_change(name: &str, request: &Request, current: &Settings) -> Result<()> {
+    let record = checked(name, request, true)?;
+    let model = catalog(&record)
+        .into_iter()
+        .find(|model| model.id == current.model)
+        .ok_or("the current model is not in Claude's model catalog; use Terminal")?;
+    claude_model(name, request, &model)
+}
+
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs effort <session> --json (JSON from stdin)".into());
@@ -1298,6 +1790,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         match string(&record, "agent") {
             "codex" => codex_change(name, &request, &current, &levels),
             "kimi" => kimi_change(name, &request, &current),
+            "claude" => claude_change(name, &request, &current),
             _ => Err("change this provider's effort in Terminal".into()),
         }
     };
@@ -1391,8 +1884,20 @@ fn apply_settings(
     receipt["run_id"] = json!(request.expected_run_id);
     receipt["name"] = json!(name);
     atomic(receipt_path, &receipt.to_string())?;
-    let visible_effort = target_footer(&record, model, &capture(&record)?);
-    let result = if visible_effort.as_deref() == Some(request.effort.as_str()) {
+    let screen = capture(&record)?;
+    let visible_effort = target_footer(&record, model, &screen);
+    let result = if string(&record, "agent") == "claude" {
+        // Its indicator shows effort only; history or a receipt names the model.
+        let shown = claude_footer(&screen);
+        if current.model == model.id
+            && (shown.as_deref() == Some(request.effort.as_str())
+                || (model.efforts.is_empty() && request.effort.is_empty()))
+        {
+            Ok(())
+        } else {
+            claude_model(name, request, model)
+        }
+    } else if visible_effort.as_deref() == Some(request.effort.as_str()) {
         Ok(())
     } else if current.model != model.id
         || visible_effort.is_none()
@@ -1640,6 +2145,11 @@ pub(super) fn restore_pending(record: &mut Value) -> Result<()> {
 }
 
 fn effective_resume_settings(record: &Value) -> Value {
+    // Claude resumes with the account's settings unless this session has a
+    // choice made through Zerus; then its newer native history wins as usual.
+    if string(record, "agent") == "claude" && !record["resume_settings"].is_object() {
+        return Value::Null;
+    }
     let native = history(record);
     if !record["pending_settings"].is_object()
         && safe_model(&native.model)
@@ -1666,6 +2176,10 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
                 i += if args[i].contains('=') { 1 } else { 2 };
                 continue;
             }
+            if string(record, "agent") == "claude" && key == "--effort" {
+                i += if args[i].contains('=') { 1 } else { 2 };
+                continue;
+            }
             if string(record, "agent") == "codex" && ["-c", "--config"].contains(&key) {
                 let value = if let Some((_, v)) = args[i].split_once('=') {
                     Some(v)
@@ -1687,6 +2201,12 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
         if string(record, "agent") == "codex" {
             if let Some(effort) = settings["effort"].as_str().filter(|v| valid(v)) {
                 args.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]);
+            }
+        }
+        // Claude's --effort applies to the launched session only.
+        if string(record, "agent") == "claude" {
+            if let Some(effort) = settings["effort"].as_str().filter(|v| valid(v)) {
+                args.extend(["--effort".into(), effort.into()]);
             }
         }
     }
@@ -2006,5 +2526,160 @@ mod tests {
         let bottom = models.replace("   ❯ kimi-plain", "     kimi-plain").replace("     kimi-levels", "   ❯ kimi-levels");
         assert_eq!(kimi_model_edges(&bottom), (false, true));
         assert!(kimi_picker(&panel.replace("[ High ]", "[ Low ]")).is_none());
+    }
+
+    // Captured from Claude Code 2.1.296 at 120 columns, trailing spaces trimmed.
+    const CLAUDE_PICKER: &str = "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,\n   specify with --model.\n\n   ❯ 1. Default (recommended) ✔  Use the default model (currently Opus 5.5) · $4/$20 per Mtok\n     2. Opus                     Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok\n     3. Fable                    Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per\n                                 Mtok\n     4. Sonnet                   Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok\n     5. Haiku                    Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for\n                                 prompts over 100k)\n\n   ◐ Medium effort (default) ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n";
+    const CLAUDE_SWITCH: &str = "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower and use more tokens\n   This conversation is cached for the current model. Switching to Haiku 5.5 means the full history gets re-read on\n   your next message.\n   ❯ 1. Yes, switch to Haiku 5.5\n     2. No, go back\n";
+
+    #[test]
+    fn claude_picker_rows_effort_and_session_only_legend() {
+        let picker = claude_picker(CLAUDE_PICKER).unwrap();
+        assert!(picker.row.starts_with("1. Default (recommended) ✔"));
+        assert_eq!(picker.effort.as_deref(), Some("medium"));
+        assert!(picker.session_only);
+        // The default row describes the default model; it is not that model's row.
+        assert!(!claude_row_is(&picker.row, "Opus 5.5"));
+        let opus = CLAUDE_PICKER.replace("   ❯ 1. Default", "     1. Default").replace("     2. Opus", "   ❯ 2. Opus");
+        let picker = claude_picker(&opus).unwrap();
+        assert!(claude_row_is(&picker.row, "Opus 5.5"));
+        assert!(!claude_row_is(&picker.row, "Opus 5"));
+        assert!(claude_row_is("5. Haiku ✔                Haiku 5.5 · Fastest for quick answers", "Haiku 5.5"));
+        assert!(claude_row_is("3. Fable                    Fable 5.1 · Most capable for your hardest and", "Fable 5.1"));
+        for (shown, level) in [("○ Low effort", "low"), ("● High effort", "high"), ("◉ xHigh effort", "xhigh"), ("◈ Max effort", "max")] {
+            let screen = CLAUDE_PICKER.replace("◐ Medium effort (default)", shown);
+            assert_eq!(claude_picker(&screen).unwrap().effort.as_deref(), Some(level), "{shown}");
+        }
+        let none = CLAUDE_PICKER.replace("◐ Medium effort (default) ←/→ to adjust", "○ Effort not supported for Haiku 4.5");
+        assert_eq!(claude_picker(&none).unwrap().effort.as_deref(), Some(""));
+        // Older pickers without the session-only key, or an ambiguous selection, are never driven.
+        assert!(!claude_picker(&CLAUDE_PICKER.replace(" · s to use this session only", "")).unwrap().session_only);
+        assert!(claude_picker(&CLAUDE_PICKER.replace("     4. Sonnet", "   ❯ 4. Sonnet")).is_none());
+        assert!(claude_picker(&CLAUDE_PICKER.replace("Select model", "Select a model")).is_none());
+    }
+
+    #[test]
+    fn claude_switch_dialog_distinguishes_its_notice_from_hooks() {
+        assert_eq!(
+            claude_switch_dialog(CLAUDE_SWITCH),
+            Some(ClaudeSwitch::Cache { model: true, choice: "Haiku 5.5".into() })
+        );
+        let effort = CLAUDE_SWITCH.replace("Switch model?", "Change effort level?").replace("Haiku 5.5", "high");
+        assert_eq!(claude_switch_dialog(&effort), Some(ClaudeSwitch::Cache { model: false, choice: "high".into() }));
+        let hook = CLAUDE_SWITCH.replace("Your next response will be slower and use more tokens", "A PreModelSwitch hook asked you to confirm");
+        assert_eq!(claude_switch_dialog(&hook), Some(ClaudeSwitch::Hook));
+        let focus = CLAUDE_SWITCH.replace("   ❯ 1. Yes", "     1. Yes").replace("     2. No", "   ❯ 2. No");
+        assert_eq!(claude_switch_dialog(&focus), Some(ClaudeSwitch::Unknown));
+        assert!(claude_switch_dialog(CLAUDE_PICKER).is_none());
+    }
+
+    #[test]
+    fn claude_effort_indicator_is_only_the_line_above_the_composer() {
+        let rule = "─".repeat(40);
+        let screen = |indicator: &str| format!("● Hi!\n{indicator}\n{rule}\n❯\u{a0}\n{rule}\n  ⏸ manual mode on");
+        assert_eq!(claude_footer(&screen("                    ◐ medium · /effort")).as_deref(), Some("medium"));
+        assert_eq!(claude_footer(&screen("                    ● high · ultracode · /effort")).as_deref(), Some("high"));
+        assert_eq!(claude_footer(&screen("                    effort: xhigh · /effort")).as_deref(), Some("xhigh"));
+        // Conversation text quoting the indicator, or an unknown level, is not the indicator.
+        assert!(claude_footer(&screen("◐ medium · /effort")).is_none());
+        assert!(claude_footer(&format!("                    ◐ medium · /effort\n\n{rule}\n❯\u{a0}")).is_none());
+        assert!(claude_footer(&screen("                    ◐ turbo · /effort")).is_none());
+        assert!(claude_footer(&screen("                    word medium · /effort")).is_none());
+    }
+
+    fn claude_home() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("cache/model-catalog");
+        fs::create_dir_all(&dir).unwrap();
+        let effort = |recommended: &str| {
+            let options: Vec<_> = ["low", "medium", "high", "xhigh", "max"].iter()
+                .map(|id| if *id == recommended { json!({"id":id,"badge":{"message":"Recommended"}}) } else { json!({"id":id}) }).collect();
+            json!({"type":"effort","effort_options":options})
+        };
+        fs::write(dir.join("org-0123456789ab-cc.json"), json!({"version":2,"catalog":{"surface":"cc","config":{"models":[
+            {"id":"claude-opus-5-5","name":"Opus 5.5","short_name":"Opus","section":"main","thinking":effort("medium")},
+            {"id":"claude-haiku-5-5","name":"Haiku 5.5","short_name":"Haiku","section":"main","thinking":effort("medium")},
+            {"id":"claude-haiku-4-5","name":"Haiku 4.5","short_name":"Haiku","section":"overflow","thinking":{"type":"none"}},
+            {"id":"-flag","name":"Bad","section":"main"}
+        ]},"state":{"thinking_by_model":[{"id":"claude-opus-5-5","thinking":{"type":"effort","effort":"high"}}]}}}).to_string()).unwrap();
+        fs::write(dir.join("masked-ids.json"), "{}").unwrap();
+        home
+    }
+
+    #[test]
+    fn claude_catalog_offers_the_pickers_main_models() {
+        let home = claude_home();
+        let record = json!({"agent":"claude","agent_home":home.path()});
+        let models = catalog(&record);
+        assert_eq!(models.iter().map(|m| (m.id.as_str(), m.label.as_str())).collect::<Vec<_>>(),
+            vec![("claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5")]);
+        assert_eq!(models[0].efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!((models[0].default_effort.as_str(), models[1].default_effort.as_str()), ("high", "medium"));
+        assert_eq!(options(&record, "claude-haiku-5-5").len(), 5);
+        assert!(options(&record, "claude-haiku-4-5").is_empty());
+        assert!(catalog(&json!({"agent":"claude","agent_home":home.path().join("missing")})).is_empty());
+    }
+
+    #[test]
+    fn claude_history_reads_turns_and_session_only_receipts_of_this_conversation() {
+        let home = claude_home();
+        let id = "11111111-2222-4333-8444-555555555555";
+        let path = home.path().join(format!("{id}.jsonl"));
+        let row = |value: Value| value.to_string() + "\n";
+        let turn = |model: &str, effort: &str, session: &str| row(json!({"type":"assistant","sessionId":session,"isSidechain":false,
+            "requestedModel":model,"effort":effort,"message":{"model":model,"content":[]}}));
+        let receipt = |text: &str, session: &str| row(json!({"type":"user","sessionId":session,"message":{"content":format!("<local-command-stdout>{text}</local-command-stdout>")}}));
+        fs::write(&path, turn("claude-opus-5-5", "xhigh", id)).unwrap();
+        let record = json!({"agent":"claude","agent_home":home.path(),"conversation_id":id,"transcript":path});
+        let found = history(&record);
+        assert_eq!((found.model.as_str(), found.effort.as_str()), ("claude-opus-5-5", "xhigh"));
+        // A later /model receipt changes the model before the next turn is written.
+        fs::write(&path, turn("claude-opus-5-5", "xhigh", id) + &receipt("Set model to `Haiku 5.5` for this session only with `high` effort", id)).unwrap();
+        let found = history(&record);
+        assert_eq!((found.model.as_str(), found.effort.as_str()), ("claude-haiku-5-5", "high"));
+        // Subagents, synthetic replies, other conversations and unknown names never count.
+        for extra in [
+            turn("claude-sonnet-5-5", "low", "another-conversation"),
+            row(json!({"type":"assistant","sessionId":id,"isSidechain":true,"requestedModel":"claude-sonnet-5-5","effort":"low"})),
+            row(json!({"type":"assistant","sessionId":id,"message":{"model":"<synthetic>"}})),
+            receipt("Set model to `Mystery 9` for this session only", id),
+            receipt("Kept model as `Sonnet 5.5`", id),
+        ] {
+            fs::write(&path, turn("claude-opus-5-5", "xhigh", id) + &extra).unwrap();
+            assert_eq!(history(&record).model, "claude-opus-5-5", "{extra}");
+        }
+        assert_eq!(claude_receipt("<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"),
+            Some(("Sonnet 5.5".into(), String::new())));
+        let other = json!({"agent":"claude","agent_home":home.path(),"conversation_id":"another","transcript":path});
+        assert!(history(&other).model.is_empty());
+        assert!(settings_reason(&other, &catalog(&other)).contains("confirm this conversation"));
+    }
+
+    #[test]
+    fn claude_receipt_after_the_request_must_be_session_only() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "conversation";
+        let path = root.path().join(format!("{id}.jsonl"));
+        let receipt = |text: &str| json!({"type":"user","sessionId":id,"message":{"content":format!("<local-command-stdout>{text}</local-command-stdout>")}}).to_string() + "\n";
+        let old = receipt("Set model to `Haiku 5.5` for this session only with `high` effort");
+        fs::write(&path, &old).unwrap();
+        let offset = old.len() as u64;
+        assert_eq!(claude_receipt_since(&path, id, offset, "Haiku 5.5").unwrap(), None);
+        fs::write(&path, old.clone() + &receipt("Set model to `Haiku 5.5` and saved as your default for new sessions")).unwrap();
+        assert_eq!(claude_receipt_since(&path, id, offset, "Haiku 5.5").unwrap(), None);
+        fs::write(&path, old.clone() + &receipt("Set model to `Haiku 5.5` for this session only")).unwrap();
+        assert_eq!(claude_receipt_since(&path, id, offset, "Haiku 5.5").unwrap(), Some(String::new()));
+        assert_eq!(claude_receipt_since(&path, "other", offset, "Haiku 5.5").unwrap(), None);
+        assert_eq!(claude_receipt_since(&path, id, offset, "Opus 5.5").unwrap(), None);
+    }
+
+    #[test]
+    fn claude_resume_replays_only_a_zerus_choice() {
+        let args: Vec<String> = ["claude", "--resume", "conversation", "--effort", "low", "--model=old", "--name", "x"]
+            .into_iter().map(str::to_owned).collect();
+        let record = json!({"agent":"claude","conversation_id":"conversation"});
+        assert_eq!(resume_argv(&record, args.clone()), args);
+        let record = json!({"agent":"claude","conversation_id":"conversation","resume_settings":{"model":"claude-haiku-5-5","effort":"high"}});
+        assert_eq!(resume_argv(&record, args), ["claude", "--resume", "conversation", "--name", "x", "--model", "claude-haiku-5-5", "--effort", "high"]);
     }
 }

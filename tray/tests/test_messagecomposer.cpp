@@ -157,6 +157,7 @@ private slots:
     void renamePreservesDraft();
     void retryOfAnotherMessagePreservesDraftAndUncertainty();
     void modelSettingsPreserveDraftAndDistinguishPending();
+    void modelSettingsShowProviderNoticeBeforeApply();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
     void sessionStatusPreservesGeometryAndLockedDraft_data();
@@ -778,6 +779,24 @@ void TestMessageComposer::modelSettingsPreserveDraftAndDistinguishPending()
     setSessionReady(composer, "mac/other"); QVERIFY(!composer.findChild<QFrame *>("sessionSettingsPopup")->isVisible());
     apply->click(); QCOMPARE(changes.size(), 1);
     setSessionReady(composer, "arch/session"); QCOMPARE(composer.editor()->toPlainText(), QString("[File #1] Keep this draft"));
+}
+
+void TestMessageComposer::modelSettingsShowProviderNoticeBeforeApply()
+{
+    MessageComposer composer; setSessionReady(composer, "claude/session"); composer.resize(440, 220); composer.show();
+    const QJsonArray options{QJsonObject{{"id", "claude-opus-5-5"}, {"label", "Opus 5.5"}, {"effort_options", QJsonArray{"low", "high"}}},
+        QJsonObject{{"id", "claude-haiku-5-5"}, {"label", "Haiku 5.5"}, {"effort_options", QJsonArray{"low", "high"}}}};
+    composer.setModelSettings("claude-opus-5-5", "high", options, true, {}, {}, {}, "now");
+    composer.setSettingsNotice("Claude re-reads the full history on the next message.");
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *hint = composer.findChild<QLabel *>("sessionSettingsHint");
+    QVERIFY(hint->text().contains("Applies to this session only.")); QVERIFY(hint->text().contains("re-reads the full history"));
+    QVERIFY(!composer.findChild<QPushButton *>("sessionSettingsTerminal")->isVisible());
+    // An unavailable change explains why instead of warning about its cost.
+    composer.setModelSettings("claude-opus-5-5", "high", options, false, "Wait for the session transition to finish");
+    QVERIFY(hint->text().contains("transition")); QVERIFY(!hint->text().contains("re-reads"));
+    composer.setModelSettings("claude-opus-5-5", "high", options, true, {}, {}, {}, "now"); composer.setSettingsNotice({});
+    QVERIFY(!hint->text().contains("re-reads"));
 }
 
 void TestMessageComposer::modelSettingsUnavailableExplainsWhy()

@@ -47,6 +47,8 @@ public:
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
                           bool enabled, const QString &reason, const QString &pendingModel = {},
                           const QString &pendingEffort = {}, const QString &applyWhen = {});
+    // The provider's own warning about applying a change, shown before Apply.
+    void setSettingsNotice(const QString &notice);
     void setSettingsTerminalAvailable(bool available);
     // Only a successful callback permits transport; pending work locks this exact draft.
     void prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done);
@@ -150,7 +152,7 @@ private:
     bool m_settingsTerminalAvailable = false;
     QPushButton *m_settings, *m_applySettings;
     QJsonArray m_modelOptions;
-    QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey;
+    QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;
     bool m_settingsEnabled = false;
     QPushButton *m_attach, *m_send, *m_retry;
     QPushButton *m_refreshStatus;

@@ -1004,6 +1004,13 @@ void MessageComposer::updateSettingsEfforts()
     m_efforts->setCurrentIndex(selected >= 0 ? selected : 0); updateSettingsApply();
 }
 
+void MessageComposer::setSettingsNotice(const QString &notice)
+{
+    if (m_settingsNotice == notice) return;
+    m_settingsNotice = notice;
+    if (m_settingsPopup->isVisible()) updateSettingsApply();
+}
+
 void MessageComposer::setSettingsTerminalAvailable(bool available)
 {
     m_settingsTerminalAvailable = available;
@@ -1031,6 +1038,7 @@ void MessageComposer::updateSettingsApply()
         : m_applyWhen == "resume" ? tr("Saved for the next resume. The session stays stopped.")
         : m_applyWhen == "ready" ? tr("Applies when the agent is ready. Messages sent while it is working use the current model.")
         : tr("Applies to this session only.");
+    if (m_settingsEnabled && !m_settingsNotice.isEmpty()) hint += '\n' + m_settingsNotice;
     if (pending)
         hint = tr("Pending: %1%2\nCurrent: %3%4\n%5").arg(intendedModel, intendedEffort.isEmpty() ? QString() : "  " + intendedEffort,
             m_model, m_effort.isEmpty() ? QString() : "  " + m_effort, hint);

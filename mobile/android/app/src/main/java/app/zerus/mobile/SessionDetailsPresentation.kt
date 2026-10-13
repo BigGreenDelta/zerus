@@ -17,10 +17,10 @@ data class SessionDetailsView(val fields: List<ContextDetail>, val goal: List<Co
 data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>)
 data class NativeSettings(val model: String, val effort: String, val models: List<NativeModelChoice>, val efforts: List<String>,
     val pendingModel: String, val pendingEffort: String, val pendingId: String, val applyWhen: String,
-    val supported: Boolean, val reason: String) {
+    val supported: Boolean, val reason: String, val notice: String = "") {
     /** Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog. */
     val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts) }, efforts,
-        pendingModel, pendingEffort, pendingId, applyWhen, supported, reason)).toString()
+        pendingModel, pendingEffort, pendingId, applyWhen, supported, reason, notice)).toString()
 }
 
 object SessionDetailsPresentation {
@@ -32,7 +32,7 @@ object SessionDetailsPresentation {
         raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options"))) },
         strings(raw?.optJSONArray("effort_options")), raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
-        raw?.string("settings_change_reason").orEmpty())
+        raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
 
     fun parse(raw: JSONObject?, target: Target, verified: Boolean): SessionDetailsView {
         val record = raw ?: JSONObject()
