@@ -74,7 +74,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-    // Release builds run with lintRelease, which also fails on the fatal vital checks.
+    // The CI gate requires lintRelease, which also fails on the fatal vital checks.
     lint { checkReleaseBuilds = false }
 }
 gradle.taskGraph.whenReady {

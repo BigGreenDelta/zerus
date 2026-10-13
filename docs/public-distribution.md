@@ -47,11 +47,14 @@ remain explicit; desktop continues to provide notifications and instructions.
 
 For dev, the provenance origin is successful upstream-main **CI artifacts** plus
 the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
-Only an upstream main push builds Dev candidates. `ci.yml` builds, tests and signs
+Only an upstream main push builds Dev candidates. `ci.yml` builds and signs
 the Android APK (`dev-android.yml`) in parallel with the checks; Crashlytics receives
-the R8 mapping during that build, and the mapping stays private. The job then
-removes its signing inputs and uploads the sealed APK only after the complete
-Linux/Arch/macOS/Windows CI gate of the same run succeeds. If the gate fails, the
+the R8 mapping during that build, and the mapping stays private. That job only
+assembles the APK. Android unit tests and release lint run without credentials in
+every CI run, including PR checks before merge, and the gate of the main run
+requires them again. The job then removes its signing inputs and uploads the
+sealed APK only after the complete Linux/Arch/macOS/Windows/Android CI gate of
+the same run succeeds. If the gate fails, the
 job fails without uploading anything, and **Re-run failed jobs** rebuilds the
 candidate. `ci.yml` invokes `dev.yml` only after the gate and that Android job
 succeed. Dev assembly reuses the checked Arch package and includes exact

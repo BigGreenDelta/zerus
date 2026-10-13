@@ -68,7 +68,9 @@ binary. For the connector and reference compatibility fixtures, install
 virtual environment and run `python -m unittest discover -s services/mobile/tests -v`.
 These tests use synthetic subprocesses and isolated databases, without live native
 agents. For Android, run `./gradlew testDebugUnitTest lintDebug assembleDebug` from
-`mobile/android` with JDK 17 or 21 and Android SDK 36. Follow
+`mobile/android` with JDK 17 or 21 and Android SDK 36. Every CI run, PRs included,
+also runs `testDebugUnitTest lintRelease` with `-PzerusFirebase=true` and a
+synthetic `google-services.json`. Follow
 [mobile setup](docs/mobile-deployment.md) for device and notification checks.
 
 Beads issues, history and memories must contain only information suitable for public

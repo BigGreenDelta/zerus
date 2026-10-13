@@ -27,6 +27,7 @@ can select a PR head or another exact revision.
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
+| Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
@@ -42,19 +43,27 @@ permissions and no publication credentials; fork PRs use `pull_request`, never
 branch-restricted `release` environment. Authenticated model-turn tests remain
 explicit opt-ins.
 
+The Android job runs in every CI run, including PR checks before merge, and needs
+no credential. It builds with `-PzerusFirebase=true`, like the signed Dev APK,
+from a `google-services.json` written in the job with placeholder values (project
+number zero, package `app.zerus.mobile`). The google-services and Crashlytics
+plugins only turn that file into resources; tests and lint never contact
+Firebase, and the mapping upload follows R8, which these tasks do not run.
+
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
 enabled, `dev-android.yml` starts with the checks instead of after them. In the
-`release` environment and without cache access, it runs the Android unit tests,
-`lintRelease` and the signed release build, seals the APK and deletes the signing
-inputs. It then polls this run's jobs with a read-only Actions token and uploads
+`release` environment and without cache access, it only assembles the signed
+release APK (`assembleRelease`), seals it and deletes the signing inputs. It
+then polls this run's jobs with a read-only Actions token and uploads
 `zerus-dev-android-a<attempt>` only after the `CI gate` job succeeds. While this
 attempt has no gate record, an earlier successful gate counts (a failed-job retry
 does not rerun it); an earlier failed or cancelled gate means waiting. Any
 other gate result, repeated API failures or a 135-minute wait fail the job without
 an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
 the desktop candidate and moves the `dev` tag only after the gate and this job
-succeed. Release builds skip the `lintVital` tasks, which would repeat the fatal
-checks that `lintRelease` runs in the same build.
+succeed. Release builds skip the `lintVital` tasks: the gate requires the
+Android job, whose `lintRelease` covers those fatal checks for the same commit
+and variant.
 
 ### Incoming PRs and publication trust
 
@@ -107,12 +116,15 @@ save them.
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
 | `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
+| `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | About 780 MB |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
 
 When `Cargo.lock` changes, a Rust cache restores the newest target directory of
 the same compiler and month. A new compiler or month starts empty, so stale
-dependency builds cannot accumulate. Compiler caches use one key per saving run
+dependency builds cannot accumulate. The Gradle cache does the same when the
+wrapper or a build script changes. The signed Dev build has no cache access and
+downloads its dependencies afresh. Compiler caches use one key per saving run
 and restore the newest entry by prefix, so each main build that compiles
 something refreshes them. Statistics are reset before and printed after each
 build. Before saving, `ccache --evict-older-than` drops every entry the build did
@@ -179,10 +191,10 @@ this package matrix.
 
 All CI jobs have bounded timeouts. Checkout credentials are not persisted and
 Actions are pinned to commit SHAs. Dependabot proposes monthly grouped action/Cargo
-updates. Rust/C++ caches reduce repeated build time; their repository limit stays
-at 10 GiB. Ordinary test artifacts expire after seven days and stable candidates
-after fourteen. Scheduled logs, Arch packages, Windows zips and nightly candidates
-expire after three days.
+updates. Rust, C++ and Gradle caches reduce repeated build time; their repository
+limit stays at 10 GiB. Ordinary test artifacts expire after seven days and stable
+candidates after fourteen. Scheduled logs, Arch packages, Windows zips and nightly
+candidates expire after three days.
 Standard Ubuntu/macOS/Windows runners and public artifacts are free while the repository
 is public. Larger runners and explicitly increased cache storage have separate
 billing rules. No self-hosted runner is attached to a development machine.

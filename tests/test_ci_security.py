@@ -304,6 +304,67 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run"):
             self.assertIn(line, windows)
 
+    def test_android_check_runs_in_every_call_without_credentials(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        android = job(checks, "android")
+        self.assertEqual(field(android, "name"), "Android unit tests and lint")
+        self.assertEqual(field(android, "runs-on"), "ubuntu-24.04")
+        self.assertRegex(field(android, "timeout-minutes"), r"^\d+$")
+        # PR, main, nightly and release verification calls all run it, and the gate requires it.
+        self.assertNotRegex(android, r"(?m)^    if:")
+        self.assertIn("'android': True,", job(checks, "gate"))
+        # No signer, Firebase project, protected environment or broader token.
+        # continue-on-error would report a failed check to the gate as success.
+        self.assertRegex(checks, r"(?m)^permissions:\n  contents: read\n\njobs:\n")
+        for text in ("secrets", "vars.", "environment", "permissions", "github.token", "ANDROID_", "continue-on-error"):
+            with self.subTest(forbidden=text):
+                self.assertNotIn(text, android.replace("$ANDROID_HOME/", ""))
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", android),
+                         ["actions/checkout", "actions/cache/restore", "actions/cache/save", "actions/upload-artifact"])
+        listed = self.checks_steps("android")
+        names = [re.match(r"      - (?:name|uses): (.*)", step)[1] for step in listed]
+        configure, gradle = (names.index("JDK 17 and synthetic Firebase configuration"),
+                             names.index("Unit tests and release lint"))
+        self.assertLess(configure, gradle)
+        self.assertLess(names.index("Restore Gradle cache"), gradle)
+        self.assertLess(gradle, names.index("Save Gradle cache"))
+        # The signed build's toolchain and Firebase variant, with placeholder values only.
+        signed = self.dev_android()
+        sdkmanager = r'(?m)^ +"\$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" (.+)$'
+        self.assertEqual(re.findall(sdkmanager, android), re.findall(sdkmanager, signed))
+        self.assertIn('echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"', listed[configure])
+        self.assertIn("os.environ['JAVA_HOME_17_X64']", signed)
+        self.assertIn("        working-directory: mobile/android\n"
+                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
+        self.assertIn("-PzerusFirebase=true", signed)
+        config = re.search(r"(?s)cat > mobile/android/app/google-services\.json <<'JSON'\n(.*?)\n          JSON\n",
+                           listed[configure])[1]
+        self.assertEqual(json.loads(textwrap.dedent(config)), {
+            "project_info": {"project_number": "000000000000", "project_id": "zerus-ci-example"},
+            "client": [{"client_info": {"mobilesdk_app_id": "1:000000000000:android:0000000000000000",
+                                        "android_client_info": {"package_name": "app.zerus.mobile"}},
+                        "api_key": [{"current_key": "synthetic-placeholder"}]}],
+            "configuration_version": "1"})
+        # Reports leave the job only after a failure, from inside artifacts/.
+        for step in listed[-2:]:
+            self.assertIn("        if: failure()\n", step)
+        self.assertIn("name: android-results\n          path: artifacts/test-results\n", listed[-1])
+
+    def test_android_gradle_cache_is_a_monthly_content_keyed_family(self):
+        restore = self.checks_step("android", "gradle-cache")
+        self.assertIn('echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"', self.checks_step("android", "gradle"))
+        self.assertEqual(self.step_paths(restore), ["~/.gradle/caches", "~/.gradle/wrapper"])
+        family = "android-gradle-v1-${{ steps.gradle.outputs.epoch }}-"
+        content = ("${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', "
+                   "'mobile/android/**/*.gradle.kts') }}")
+        self.assertIn(f"          key: {family}{content}\n          restore-keys: {family}\n", restore)
+        # cache-trim groups main entries by the key without its last segment:
+        # that segment must be the content hash, so the month stays in the family.
+        rendered = (family + content).replace("${{ steps.gradle.outputs.epoch }}", "2026-10").replace(content, "f" * 64)
+        self.assertEqual(rendered.rsplit("-", 1)[0], "android-gradle-v1-2026-10")
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        self.assertEqual(checks.count("android-gradle-v1-"), 2)
+
     def test_qt_installer_dependencies_are_exact_hashed_wheels(self):
         lock = (ROOT / "scripts/ci/aqt-requirements.txt").read_text()
         lines = [line for line in lock.splitlines() if not line.lstrip().startswith("#")]
@@ -322,11 +383,11 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, cli, arch, arch-package, mac-desktop, windows-desktop]", gate)
+        self.assertIn("needs: [source, quick, relay, android, cli, arch, arch-package, mac-desktop, windows-desktop]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        base = {"source": "success", "quick": "success", "relay": "success", "cli": "success",
+        base = {"source": "success", "quick": "success", "relay": "success", "android": "success", "cli": "success",
                 "arch": "success", "arch-package": "success", "mac-desktop": "success"}
         for selected, result, success in [("true", "success", True), ("true", "failure", False),
                                           ("true", "skipped", False), ("true", "cancelled", False),
@@ -340,11 +401,14 @@ class WorkflowSecurityTests(unittest.TestCase):
                 else:
                     with self.assertRaises(SystemExit):
                         exec(code, {})
-        # Quick checks always run; the Arch package is selected exactly with Arch desktop.
+        # Quick checks and the Android check always run; the Arch package is
+        # selected exactly with Arch desktop.
         base["windows-desktop"] = "success"
         arch_skipped = {**base, "arch": "skipped", "arch-package": "skipped"}
         for results, run_arch, success in [
             ({**base, "quick": "failure"}, "true", False), ({**base, "quick": "skipped"}, "true", False),
+            ({**base, "android": "failure"}, "true", False), ({**base, "android": "skipped"}, "true", False),
+            ({**base, "android": "cancelled"}, "true", False), ({**arch_skipped, "android": "skipped"}, "false", False),
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
             ({**base, "arch-package": "cancelled"}, "true", False), (arch_skipped, "false", True),
             ({**arch_skipped, "arch-package": "success"}, "false", False),
@@ -385,9 +449,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(field(quick, "name"), "Quick checks (source and Rust 1.85)")
         for line in ("run: python3 scripts/ci/check-source.py", "-p 'test_*publication.py'", "-p test_ci_security.py",
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
-                     "sdkmanager\" --version", "run: cargo +1.85.0 test --locked"):
+                     "run: cargo +1.85.0 test --locked"):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "cli", "arch", "arch-package", "mac-desktop", "windows-desktop"):
+        for name in ("quick", "relay", "android", "cli", "arch", "arch-package", "mac-desktop", "windows-desktop"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -475,7 +539,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                         saved.append(source)
             with self.subTest(job=name):
                 self.assertEqual(sorted(saved), sorted(restores))
-        self.assertGreaterEqual(saves, 9)
+        self.assertGreaterEqual(saves, 10)
         # Qt is saved only after the desktop build has used the installation.
         windows = job(checks, "windows-desktop")
         self.assertLess(windows.index("bash scripts/ci/gui.sh build"), windows.index("name: Save Qt 6.10.3"))
@@ -520,7 +584,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock') }}\n"
                       "          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-\n", cargo)
         for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("windows-desktop", "rust-cache"),
-                              ("arch-package", "cargo-cache"), ("windows-desktop", "qt-cache")):
+                              ("arch-package", "cargo-cache"), ("windows-desktop", "qt-cache"),
+                              ("android", "gradle-cache")):
             with self.subTest(job=name, cache=step_id):
                 # Exact content keys: 200-800 MB entries are saved only when missing.
                 self.assertNotIn("run_id", self.checks_step(name, step_id))
@@ -654,8 +719,32 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertGreaterEqual(minutes, 20 + 90 + 5)
         self.assertGreaterEqual(int(field(android, "timeout-minutes")), minutes + 35)
         # A hung build stays bounded like the former 35-minute job.
-        build = listed[names.index("Test and build the dev APK with the shared signer")]
+        build = listed[names.index("Build the dev APK with the shared signer")]
         self.assertLessEqual(int(re.search(r"(?m)^        timeout-minutes: (\d+)$", build)[1]), 35)
+
+    def test_signed_android_job_only_assembles_after_the_credential_free_checks(self):
+        workflow = (ROOT / ".github/workflows/dev-android.yml").read_text()
+        listed = steps(self.dev_android())
+        build = next(step for step in listed if "./gradlew" in step)
+        self.assertEqual(workflow.count("./gradlew"), 1)
+        self.assertIn('          ./gradlew --no-daemon assembleRelease \\\n'
+                      '            -PzerusFirebase=true -PzerusVersionCode="$version_code" \\\n'
+                      '            -PzerusDevBuildNumber="$DEV_RUN_NUMBER"\n', build)
+        # Unit tests and lint run in checks.yml, never with the signer.
+        self.assertNotRegex(workflow, r"\b(?:test|lint|check|connected)[A-Z]\w*")
+        # The wait accepts only ci.yml's CI gate. It requires exactly one
+        # checks.yml call, whose own gate requires the Android check.
+        self.assertIn("'CI gate'", listed[-2])
+        gate = job(self.ci, "gate")
+        self.assertEqual(field(gate, "name"), "CI gate")
+        self.assertEqual(field(gate, "needs"), "[automatic, review]")
+        for name in ("automatic", "review"):
+            self.assertEqual(field(job(self.ci, name), "uses"), "./.github/workflows/checks.yml")
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        suites = job(checks, "gate")
+        self.assertIn("android", field(suites, "needs").strip("[]").split(", "))
+        self.assertIn("'android': True,", suites)
+        self.assertIn("testDebugUnitTest lintRelease -PzerusFirebase=true", job(checks, "android"))
 
     def test_android_candidate_accepts_only_a_successful_gate_of_this_attempt(self):
         namespace = {}

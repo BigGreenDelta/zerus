@@ -62,7 +62,7 @@ jobs:
             echo "run_macos=$RUN_MACOS"
             echo "run_windows=$RUN_WINDOWS"
           } >> "$GITHUB_OUTPUT"
-          printf '### CI coverage\n\nCommit: %s\n\nQuick checks: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n\nWindows client/desktop/portable zip: %s\n' \
+          printf '### CI coverage\n\nCommit: %s\n\nQuick checks, Android unit tests and lint: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n\nWindows client/desktop/portable zip: %s\n' \
             "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
 
   quick:
@@ -92,10 +92,6 @@ jobs:
           tar xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
           cd "$GITHUB_WORKSPACE"
           "$lint_dir/actionlint" -color -ignore 'unexpected key "cache-mode" for "(workflow|job)" section'
-
-      - name: Android Dev toolchain preflight
-        if: vars.DEV_UPDATES_ENABLED == 'true'
-        run: JAVA_HOME="$JAVA_HOME_17_X64" "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
 
       - run: rustup toolchain install 1.85.0 --profile minimal
       # Rust caches: the compiler identity and a monthly epoch precede the lock
@@ -180,6 +176,75 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/python" services/mobile/relay/tests/load.py --kind late-malformed
           "$RUNNER_TEMP/relay-venv/bin/python" services/mobile/relay/tests/load.py --kind attachments_unicode --repeats 2 --concurrency 2
           "$RUNNER_TEMP/relay-venv/bin/python" services/mobile/relay/tests/load.py --kind attachments_unicode --backend postgres
+
+  # Every run, PRs included, tests and lints the Firebase variant that the signed
+  # Dev build ships. A synthetic configuration with placeholder values stands in
+  # for the private one; no signer or Firebase project reaches this job.
+  android:
+    name: Android unit tests and lint
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: JDK 17 and synthetic Firebase configuration
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          cat > mobile/android/app/google-services.json <<'JSON'
+          {
+            "project_info": {"project_number": "000000000000", "project_id": "zerus-ci-example"},
+            "client": [{
+              "client_info": {"mobilesdk_app_id": "1:000000000000:android:0000000000000000",
+                              "android_client_info": {"package_name": "app.zerus.mobile"}},
+              "api_key": [{"current_key": "synthetic-placeholder"}]
+            }],
+            "configuration_version": "1"
+          }
+          JSON
+      - name: Android platform and build tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+      # Gradle caches: a monthly epoch precedes the hash of the wrapper and build
+      # scripts. A dependency change restores the previous entry; a new month
+      # starts afresh, so unused artifacts cannot accumulate.
+      - name: Gradle cache identity
+        id: gradle
+        run: echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Gradle cache
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/**/*.gradle.kts') }}
+          restore-keys: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-
+      - name: Unit tests and release lint
+        working-directory: mobile/android
+        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+      - name: Save Gradle cache
+        if: inputs.save_caches && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+      - name: Collect Android reports
+        if: failure()
+        run: |
+          mkdir -p artifacts/test-results
+          cp -R mobile/android/app/build/reports artifacts/test-results/android || true
+      - name: Retain Android reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-results
+          path: artifacts/test-results
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
 
   cli:
     name: CLI (${{ matrix.os }})
@@ -673,7 +738,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, relay, cli, arch, arch-package, mac-desktop, windows-desktop]
+    needs: [source, quick, relay, android, cli, arch, arch-package, mac-desktop, windows-desktop]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -691,6 +756,7 @@ jobs:
               'source': True,
               'quick': True,
               'relay': True,
+              'android': True,
               'cli': json.loads(os.environ['RUN_CLI']),
               'arch': json.loads(os.environ['RUN_ARCH']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
