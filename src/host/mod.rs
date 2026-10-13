@@ -3,16 +3,22 @@
 //! state directory and serves the CLI, attach clients and supervisors over a
 //! private named pipe.
 //!
-//! `protocol` (framing and the protocol 1 vocabulary) and `endpoint` (pipe name,
-//! secret and host lock) are plain Rust and compile and run their tests on every
-//! platform; `pipe` and `token` wrap the Windows APIs.
+//! `protocol` (framing and the protocol 1 vocabulary), `endpoint` (pipe name,
+//! secret and host lock) and the portable half of `spawn` (environment blocks and
+//! command lines) are plain Rust and compile and run their tests on every
+//! platform; `pipe`, `token`, `conpty` and `job` wrap the Windows APIs.
 // The host server, the backend client and the supervisor channel wire these
 // modules in during M3; until then only their tests use them.
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(windows)]
+mod conpty;
 pub(crate) mod endpoint;
+#[cfg(windows)]
+mod job;
 #[cfg(windows)]
 pub(crate) mod pipe;
 pub(crate) mod protocol;
+pub(crate) mod spawn;
 #[cfg(windows)]
 pub(crate) mod token;
