@@ -12,7 +12,9 @@
 //! prefix. A name tmux does not know, or a key it cannot write (`C-BSpace`,
 //! `C-Escape`), is sent as literal text, as `send-keys` does. Mouse key names
 //! are not keys here; tmux refuses them without a mouse event and sends the
-//! name as text too. Literal text is written as its UTF-8 bytes.
+//! name as text too. `Any` and the user keys (`User0` to `User1000`) are
+//! internal key codes and write nothing. Literal text is written as its UTF-8
+//! bytes.
 //!
 //! The expected bytes in the tests were recorded from tmux 3.8 with a raw
 //! input recorder in a private server; 1317 names (every key and modifier
@@ -295,13 +297,49 @@ fn lookup(name: &str) -> Lookup {
         return Lookup::Key(key);
     }
     let Some(found) = table(rest) else {
-        return Lookup::Unknown;
+        return if user_key(rest) {
+            Lookup::Any
+        } else {
+            Lookup::Unknown
+        };
     };
     key.base = found.base;
     key.cursor = found.cursor;
     key.keypad = found.keypad;
     key.implied_meta = found.implied_meta && key.meta;
     Lookup::Key(key)
+}
+
+/// Whether `name` is one of tmux's user keys, `User0` to `User1000`, which the
+/// table search reads with `sscanf(name, "User%u")`: white space and a sign
+/// may come first, text after the digits is ignored, and the number wraps
+/// around as `strtoul` and an `unsigned int` make it (`User4294967296` is
+/// `User0`). They are internal key codes that write nothing, with any
+/// modifiers.
+fn user_key(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("User") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (negative, digits) = match rest.as_bytes().first() {
+        Some(b'+') => (false, &rest[1..]),
+        Some(b'-') => (true, &rest[1..]),
+        _ => (false, rest),
+    };
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return false;
+    }
+    // strtoul: a magnitude past its range is ULONG_MAX, sign or not.
+    let value = match digits[..end].parse::<u64>() {
+        Ok(magnitude) if negative => magnitude.wrapping_neg(),
+        Ok(magnitude) => magnitude,
+        Err(_) => u64::MAX,
+    };
+    // %u stores an unsigned int.
+    value as u32 <= 1000
 }
 
 /// The xterm modifier parameter (2 to 8) of a key with modifiers.
@@ -635,6 +673,17 @@ mod tests {
         ),
         ("^a", "01", "01", "01"),
         ("^C", "03", "03", "03"),
+        // User keys are internal and write nothing; others are text.
+        ("User0", "", "", ""),
+        ("M-User1000", "", "", ""),
+        ("User4294967296", "", "", ""),
+        (
+            "User1001",
+            "5573657231303031",
+            "5573657231303031",
+            "5573657231303031",
+        ),
+        ("User-1", "557365722d31", "557365722d31", "557365722d31"),
     ];
 
     #[test]

@@ -533,9 +533,10 @@ pub enum Op {
         target: Target,
         keys: Vec<Key>,
     },
-    /// Paste text as is, line feeds included. With `bracketed`, the text goes
-    /// inside bracketed-paste markers when the application enabled them (tmux
-    /// `paste-buffer -p`).
+    /// Paste text as tmux `paste-buffer -r` does: line feeds included, other
+    /// control characters shown as `^X` (tmux 3.7 and later). With `bracketed`,
+    /// the text goes inside bracketed-paste markers when the application
+    /// enabled them (tmux `paste-buffer -p`).
     Paste {
         target: Target,
         text: String,

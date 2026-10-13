@@ -41,6 +41,9 @@ pub(crate) struct SupervisorChannel {
     link: Arc<dyn Link>,
     waiting: Mutex<HashMap<u64, mpsc::Sender<Result<Value, ErrorBody>>>>,
     next: AtomicU64,
+    /// The supervisor has been told that it is registered; before that, a
+    /// request of the host would reach it ahead of that answer.
+    ready: AtomicBool,
     closed: AtomicBool,
 }
 
@@ -50,8 +53,19 @@ impl SupervisorChannel {
             link,
             waiting: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            ready: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// The registration has been answered: requests may go out now.
+    pub(crate) fn open(&self) {
+        self.ready.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether requests may go out: registered, answered and not closed.
+    pub(crate) fn is_open(&self) -> bool {
+        self.ready.load(Ordering::SeqCst) && !self.is_closed()
     }
 
     /// Read the supervisor's answers until the connection ends; runs on the

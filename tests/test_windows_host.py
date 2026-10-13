@@ -8,13 +8,16 @@ fake_agent`; HGS_TEST_FAKE_AGENT names another build).
 
 Every case has its own HGS_STATE_DIR, USERPROFILE and HOME, so it reaches only
 a host it started itself, and stops what it started: its sessions are killed,
-the host is asked to stop and, as a last resort, its process is ended (the
-host's kill-on-close job then ends anything left). Consoles stay hidden.
+the host is asked to stop, every host process the case saw is waited for (its
+pipe goes before the process does, and the process holds files in the state
+directory) and, as a last resort, ended through a handle opened while it was
+known to run (the host's kill-on-close job then ends anything left). Consoles
+stay hidden.
 """
+import ctypes
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import tempfile
 import time
@@ -28,6 +31,36 @@ HIDDEN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # The host's linger (registry::LINGER) plus margin.
 IDLE_EXIT = 30
 LIMIT = 30
+
+if os.name == "nt":
+    from ctypes import wintypes
+
+    KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    KERNEL32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+    KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    KERNEL32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    SYNCHRONIZE = 0x00100000
+    PROCESS_TERMINATE = 0x0001
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    WAIT_OBJECT_0 = 0
+
+
+def open_host(pid, created):
+    """A handle on host process `pid` when its creation time is `created` (100 ns
+    ticks, as the hello reports it), else None. The handle pins the process ID."""
+    handle = KERNEL32.OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if KERNEL32.GetProcessTimes(handle, *(ctypes.byref(time) for time in times)):
+        ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        if str(ticks) == created:
+            return handle
+    KERNEL32.CloseHandle(handle)
+    return None
 
 
 @unittest.skipUnless(os.name == "nt", "the session host runs on Windows only")
@@ -48,6 +81,8 @@ class HostCase(unittest.TestCase):
         self.env.update(HGS_STATE_DIR=str(self.state), USERPROFILE=str(self.home), HOME=str(self.home))
         self.unique = f"hgs-host-{os.getpid()}-{time.monotonic_ns()}"
         self.launches = 0
+        # Host processes this case saw running, by process ID.
+        self.hosts = {}
         self.addCleanup(self.stop_host)
 
     # The host and its tools.
@@ -76,7 +111,14 @@ class HostCase(unittest.TestCase):
     def status(self):
         result = self.run_hgs("status")
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
+        status = json.loads(result.stdout)
+        if status.get("running"):
+            host = status["host"]
+            if host["pid"] not in self.hosts:
+                handle = open_host(host["pid"], host["created"])
+                if handle:
+                    self.hosts[host["pid"]] = handle
+        return status
 
     def wait_for(self, what, predicate, timeout=LIMIT):
         deadline = time.monotonic() + timeout
@@ -89,6 +131,12 @@ class HostCase(unittest.TestCase):
             time.sleep(0.1)
 
     def stop_host(self):
+        try:
+            self.stop_sessions()
+        finally:
+            self.wait_for_hosts()
+
+    def stop_sessions(self):
         status = self.status()
         if not status.get("running"):
             return
@@ -99,11 +147,18 @@ class HostCase(unittest.TestCase):
             time.sleep(0.2)
         self.call({"op": "stop_host"})
         deadline = time.monotonic() + LIMIT
-        while time.monotonic() < deadline:
-            if not self.status().get("running"):
-                return
+        while time.monotonic() < deadline and self.status().get("running"):
             time.sleep(0.2)
-        os.kill(status["host"]["pid"], signal.SIGTERM)
+
+    def wait_for_hosts(self):
+        """Wait until every host process this case saw has exited; end those
+        that do not."""
+        for handle in self.hosts.values():
+            if KERNEL32.WaitForSingleObject(handle, LIMIT * 1000) != WAIT_OBJECT_0:
+                KERNEL32.TerminateProcess(handle, 1)
+                KERNEL32.WaitForSingleObject(handle, LIMIT * 1000)
+            KERNEL32.CloseHandle(handle)
+        self.hosts.clear()
 
     # Sessions.
 
@@ -270,9 +325,11 @@ class FakeAgent(HostCase):
         conpty = self.status()["status"]["conpty"]
         # Every query gets at most one answer: from the host's screen model for
         # what reaches it (the bundled ConPTY forwards DA1 and the cursor
-        # position), from the inbox ConPTY for what it answers itself. Colours,
-        # and with the bundled pair the terminal version, stay unanswered, as
-        # tmux leaves them.
+        # position), from the inbox ConPTY for what it answers itself. Colours
+        # stay unanswered, as tmux leaves them without a client terminal. The
+        # terminal version stays unanswered too, although tmux answers it with
+        # its own (`ESC P >|tmux 3.8 ESC \`): the screen model leaves it to the
+        # host, and the host does not answer it yet.
         answered = self.replies()
         self.assertFalse([query for query, unsolicited in answered if unsolicited], answered)
         queries = [query for query, _ in answered]

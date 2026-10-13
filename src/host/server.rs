@@ -6,8 +6,9 @@
 //! it cannot (D3), turns off system error boxes for itself and every child,
 //! binds the private pipe and serves one thread per connection. When its last
 //! session has ended it lingers, decides to exit (from then on a create is
-//! refused as `busy`), closes its listener first and exits once the requests
-//! in progress are answered (D3).
+//! refused as `busy` and a new connection ends before its hello is answered),
+//! closes its listener and exits once the connections it had accepted have
+//! ended, or after `DRAIN` (D3).
 //!
 //! `serve_connection` is the protocol of one connection and runs on every
 //! platform: the hello (read within `HELLO_TIMEOUT`, the client authenticated
@@ -40,7 +41,8 @@ pub(crate) fn serve_connection<L: Launcher>(
     identity: &HelloReply,
     authenticate: impl FnOnce() -> Result<u32, ErrorBody>,
 ) {
-    let Some(pid) = greet(&*link, identity, authenticate) else {
+    // Counted until this connection ends, so an exiting host waits for it.
+    let Some((pid, _admitted)) = greet(&*link, identity, authenticate, || host.admit()) else {
         return;
     };
     loop {
@@ -81,6 +83,8 @@ pub(crate) fn serve_connection<L: Launcher>(
                 match host.register_supervisor(&registration, pid, link.clone()) {
                     Ok(channel) => {
                         if answer(Ok(serde_json::json!(Done {}))) {
+                            // Only now may the host's requests follow the answer.
+                            channel.open();
                             channel.serve();
                         }
                         channel.close();
@@ -102,12 +106,16 @@ pub(crate) fn serve_connection<L: Launcher>(
     }
 }
 
-/// Read and answer the hello; the client's process ID once it is accepted.
-fn greet(
+/// Read and answer the hello; the client's process ID and its admission once
+/// it is accepted. `admit` gives None when the host has decided to exit: the
+/// connection then ends before the answer, as if the host were already gone,
+/// and the client looks for the next one (D3).
+fn greet<A>(
     link: &dyn Link,
     identity: &HelloReply,
     authenticate: impl FnOnce() -> Result<u32, ErrorBody>,
-) -> Option<u32> {
+    admit: impl FnOnce() -> Option<A>,
+) -> Option<(u32, A)> {
     link.set_read_timeout(Some(HELLO_TIMEOUT)).ok()?;
     let frame = link.read_frame().ok()??;
     let refuse = |body: ErrorBody| {
@@ -141,9 +149,10 @@ fn greet(
         protocol,
         ..identity.clone()
     };
+    let admitted = admit()?;
     write_json(link, Kind::Json, &HelloAnswer::Accepted(reply)).ok()?;
     link.set_read_timeout(None).ok()?;
-    Some(pid)
+    Some((pid, admitted))
 }
 
 /// An attached connection: the session's output to the client from a thread
@@ -227,6 +236,8 @@ mod windows {
 
     /// `__host serve`'s exit code when it cannot serve.
     const FAILED: i32 = 1;
+    /// How long an exiting host waits for the connections it accepted.
+    const DRAIN: Duration = Duration::from_secs(2);
 
     /// A host pipe end as a `Link`.
     pub(crate) struct PipeLink {
@@ -386,11 +397,12 @@ mod windows {
                 .map_err(|e| failed(e.to_string()))?
         };
         host.wait_for_exit(LINGER);
-        // Clients that lose this race see no host, or a broken pipe before
-        // their hello completes, and start a new host (D3).
+        // Clients that lose this race see no host, or a connection that ends
+        // before their hello is answered, and start a new host (D3). Those
+        // accepted before the decision may still send their request.
         listener.close();
         let _ = accepting.join();
-        host.drain(Duration::from_secs(1));
+        host.drain(DRAIN);
         if let Some(Ok(worker)) = worker {
             worker.stop();
         }

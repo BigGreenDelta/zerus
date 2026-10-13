@@ -259,6 +259,12 @@ struct Launches {
     programs: Mutex<Vec<Arc<Program>>>,
     next_pid: AtomicU32,
     fail: AtomicBool,
+    /// The next programs have exited by the time their launch returns.
+    exit_at_once: AtomicBool,
+    /// While set, a launch waits (`waiting` counts those that do).
+    held: Mutex<bool>,
+    released: Condvar,
+    waiting: AtomicU32,
 }
 
 #[derive(Clone, Default)]
@@ -272,6 +278,11 @@ impl FakeLauncher {
     fn count(&self) -> usize {
         lock(&self.0.programs).len()
     }
+
+    fn hold(&self, held: bool) {
+        *lock(&self.0.held) = held;
+        self.0.released.notify_all();
+    }
 }
 
 impl Launcher for FakeLauncher {
@@ -279,6 +290,20 @@ impl Launcher for FakeLauncher {
         if self.0.fail.swap(false, Ordering::SeqCst) {
             return Err(io::Error::other("no such program"));
         }
+        {
+            let mut held = lock(&self.0.held);
+            if *held {
+                self.0.waiting.fetch_add(1, Ordering::SeqCst);
+            }
+            while *held {
+                held = self
+                    .0
+                    .released
+                    .wait(held)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+        let exited = self.0.exit_at_once.load(Ordering::SeqCst).then_some(0);
         let names = [
             "TERM",
             "COLORTERM",
@@ -301,7 +326,7 @@ impl Launcher for FakeLauncher {
                 .collect(),
             output: Arc::default(),
             input: Arc::default(),
-            exit: Mutex::new(None),
+            exit: Mutex::new(exited),
             exited: Condvar::new(),
             sizes: Mutex::new(vec![plan.size]),
             hung_up: AtomicBool::new(false),
@@ -621,6 +646,32 @@ fn screens_keys_and_pastes_reach_the_pane_as_tmux_sends_them() {
     paste(&mut client, false);
     assert_eq!(program.input_until(b"b"), b"a\nb");
     assert_eq!(paste_bytes("", true), b"\x1b[200~\x1b[201~");
+    // A pasted end marker cannot end the paste early.
+    client
+        .call::<Done>(Op::Paste {
+            target: pane("claude/p/a"),
+            text: "x\x1b[201~\ry".into(),
+            bracketed: true,
+        })
+        .unwrap();
+    assert_eq!(
+        program.input_until(b"\x1b[201~"),
+        b"\x1b[200~x^[[201~\ry\x1b[201~"
+    );
+}
+
+#[test]
+fn pastes_show_control_characters_as_tmux_does() {
+    // Recorded from tmux 3.8 `paste-buffer -p -r` with bracketed paste on:
+    // every ASCII byte, then characters it leaves alone (C1 controls too).
+    let ascii: String = (0u8..0x80).map(char::from).collect();
+    let mut expected =
+        b"\x1b[200~^@^A^B^C^D^E^F\x07\x08\t\n^K^L\r^N^O^P^Q^R^S^T^U^V^W^X^Y^Z^[^\\^]^^^_".to_vec();
+    expected.extend((0x20u8..0x7f).collect::<Vec<_>>());
+    expected.extend_from_slice(b"^?\x1b[201~");
+    assert_eq!(paste_bytes(&ascii, true), expected);
+    let other = "e\u{301}\u{85}\u{9b}\u{a0}\u{ad}\u{200b}\u{feff}\u{fffe}😀";
+    assert_eq!(paste_bytes(other, false), other.as_bytes());
 }
 
 #[test]
@@ -1237,4 +1288,95 @@ fn a_client_that_falls_behind_gets_a_repaint_instead() {
     // with the whole screen.
     assert!(total < (5 << 20), "{total} bytes queued");
     assert!(String::from_utf8_lossy(&last).contains("END"));
+}
+
+#[test]
+fn a_session_that_ends_at_once_still_leaves_the_listing() {
+    // Its waiter may finish before the create registers it; it must neither
+    // stay listed as dead nor block the name or the host's exit.
+    let (host, launcher) = new_host();
+    launcher.0.exit_at_once.store(true, Ordering::SeqCst);
+    let mut client = connect(&host);
+    for round in 0..1000 {
+        let (launch, name) = (format!("quick-{round}"), format!("claude/p/q{round}"));
+        let created: Created = client.call(create(&launch, &name)).unwrap();
+        assert!(!created.existing);
+        eventually("the end", || {
+            client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+        });
+        // A retry finds the ended launch and starts nothing.
+        let again: Created = client.call(create(&launch, &name)).unwrap();
+        assert_eq!((again.pane, again.existing), (created.pane, true));
+    }
+    assert_eq!(launcher.count(), 1000);
+}
+
+#[test]
+fn a_rename_cannot_take_the_name_of_a_session_being_created() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    launcher.hold(true);
+    let creating = {
+        let mut other = connect(&host);
+        thread::spawn(move || other.call::<Created>(create("m", "claude/p/b")))
+    };
+    eventually("the launch", || {
+        launcher.0.waiting.load(Ordering::SeqCst) == 1
+    });
+    let refused = client
+        .call::<Done>(Op::Rename {
+            target: pane("claude/p/a"),
+            name: "claude/p/b".into(),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Exists);
+    launcher.hold(false);
+    assert_eq!(creating.join().unwrap().unwrap().name, "claude/p/b");
+    let mut names: Vec<String> = client
+        .call::<Listed>(Op::List)
+        .unwrap()
+        .sessions
+        .into_iter()
+        .map(|session| session.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["claude/p/a", "claude/p/b"]);
+}
+
+#[test]
+fn an_exiting_host_admits_no_hello_and_answers_the_connections_it_had() {
+    let (host, _launcher) = new_host();
+    let mut admitted = connect(&host);
+    host.wait_for_exit(Duration::from_millis(20));
+    assert!(host.exiting());
+    // A hello after the decision gets no answer: its client looks for the
+    // next host, as if this one were gone.
+    assert!(matches!(
+        Connection::hello(raw_client(&host, CLIENT_PID), Role::Cli),
+        Err(ClientError::Closed)
+    ));
+    // The host waits for the connection it had accepted, which is answered.
+    let draining = {
+        let host = host.clone();
+        thread::spawn(move || host.drain(LIMIT))
+    };
+    thread::sleep(Duration::from_millis(100));
+    assert!(!draining.is_finished(), "an admitted connection is open");
+    assert!(admitted
+        .call::<Listed>(Op::List)
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert_eq!(
+        admitted
+            .call::<Created>(create("late", "claude/p/late"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    drop(admitted);
+    let started = Instant::now();
+    draining.join().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
 }

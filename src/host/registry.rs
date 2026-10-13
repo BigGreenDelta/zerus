@@ -10,8 +10,10 @@
 //!
 //! The host exits like a tmux server: when its last session has ended, it
 //! lingers for `LINGER`, then decides to exit under the registry lock, so a
-//! `create_session` that comes later is refused as `busy` and its client starts
-//! a new host (D3).
+//! `create_session` that comes later is refused as `busy`, a connection whose
+//! hello comes later is not admitted, and either client starts a new host
+//! (D3). The connections admitted before the decision are counted, so the host
+//! answers what they still send before it exits.
 use super::{
     channel::{self, PaneFacts, SupervisorChannel},
     link::Link,
@@ -100,8 +102,13 @@ struct Registry {
     next_client: u64,
     /// Creates between their checks and their sessions' registration.
     starting: usize,
+    /// The name of the session being created (creates run one at a time), so
+    /// that no rename takes it meanwhile.
+    naming: Option<String>,
     /// Requests being answered.
     requests: usize,
+    /// Connections whose hello was accepted and that have not ended.
+    connections: usize,
     /// `stop_host` was accepted.
     stop: bool,
     /// The host has decided to exit: no session starts any more.
@@ -179,7 +186,9 @@ impl<L: Launcher> Host<L> {
                 next_pane: 0,
                 next_client: 0,
                 starting: 0,
+                naming: None,
                 requests: 0,
+                connections: 0,
                 stop: false,
                 exiting: false,
                 supervisors: HashMap::new(),
@@ -396,27 +405,46 @@ impl<L: Launcher> Host<L> {
             registry.next_session += 1;
             registry.next_pane += 1;
             registry.starting += 1;
+            registry.naming = Some(request.name.clone());
             ids
         };
         let started = self.launch(&request, id, pane);
         let mut registry = self.registry();
         registry.starting -= 1;
-        let created = started.map(|session| {
-            registry
-                .launches
-                .insert(request.launch_id.clone(), Launch::Running(id));
-            registry.sessions.insert(id, session.clone());
-            Created {
-                session: session.session_id(),
-                pane: session.pane_id(),
-                name: request.name.clone(),
-                pid: session.pid,
-                existing: false,
+        registry.naming = None;
+        let session = match started {
+            Ok(session) => session,
+            Err(error) => {
+                drop(registry);
+                self.changed();
+                return Err(error);
             }
-        });
+        };
+        registry
+            .launches
+            .insert(request.launch_id.clone(), Launch::Running(id));
+        registry.sessions.insert(id, session.clone());
         drop(registry);
+        // Watched only once registered: a root process that exits at once
+        // must find its session there when it ends.
+        if let Err(error) = self.watch(&session) {
+            let mut registry = self.registry();
+            registry.sessions.remove(&id);
+            registry.launches.remove(&request.launch_id);
+            drop(registry);
+            session.kill();
+            session.finish(None);
+            self.changed();
+            return Err(error);
+        }
         self.changed();
-        created
+        Ok(Created {
+            session: session.session_id(),
+            pane: session.pane_id(),
+            name: request.name.clone(),
+            pid: session.pid,
+            existing: false,
+        })
     }
 
     fn launch(
@@ -438,7 +466,7 @@ impl<L: Launcher> Host<L> {
                 size: request.size,
             })
             .map_err(|e| failed(format!("cannot start the session: {e}")))?;
-        let session = Session::start(
+        Session::start(
             id,
             pane,
             request.launch_id.clone(),
@@ -447,20 +475,26 @@ impl<L: Launcher> Host<L> {
             request.size,
             launched,
         )
-        .map_err(|e| failed(format!("cannot start the session: {e}")))?;
+        .map_err(|e| failed(format!("cannot start the session: {e}")))
+    }
+
+    /// Wait for a registered session's end on a thread of its own.
+    fn watch(self: &Arc<Self>, session: &Arc<Session>) -> Result<(), ErrorBody> {
         let host = self.clone();
         let watched = session.clone();
         thread::Builder::new()
-            .name(format!("hgs-pane-{pane}-wait"))
+            .name(format!("hgs-pane-{}-wait", session.pane))
             .spawn(move || {
                 let code = watched.watch();
                 host.ended(&watched, code);
             })
+            .map(drop)
             .map_err(|e| {
-                session.kill();
-                failed(format!("cannot watch the session: {e}"))
-            })?;
-        Ok(session)
+                error(
+                    ErrorCode::Internal,
+                    format!("cannot watch the session: {e}"),
+                )
+            })
     }
 
     /// A session's root process exited and its console and job are gone.
@@ -549,10 +583,11 @@ impl<L: Launcher> Host<L> {
         check_name(name)?;
         let session = self.find(target)?;
         let registry = self.registry();
-        if registry
-            .sessions
-            .values()
-            .any(|other| other.id != session.id && other.name() == name)
+        if registry.naming.as_deref() == Some(name)
+            || registry
+                .sessions
+                .values()
+                .any(|other| other.id != session.id && other.name() == name)
         {
             return Err(error(
                 ErrorCode::Exists,
@@ -567,7 +602,7 @@ impl<L: Launcher> Host<L> {
         self.registry()
             .supervisors
             .get(&session.id)
-            .filter(|channel| !channel.is_closed())
+            .filter(|channel| channel.is_open())
             .cloned()
             .ok_or_else(|| {
                 error(
@@ -703,6 +738,17 @@ impl<L: Launcher> Host<L> {
             ));
         }
         let mut registry = self.registry();
+        // A session that ended meanwhile keeps no channel.
+        if !registry
+            .sessions
+            .get(&session.id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, &session))
+        {
+            return Err(error(
+                ErrorCode::NotFound,
+                format!("can't find session: {}", registration.session),
+            ));
+        }
         if registry
             .supervisors
             .get(&session.id)
@@ -748,11 +794,26 @@ impl<L: Launcher> Host<L> {
         }
     }
 
-    /// Wait at most `timeout` for requests being answered to finish.
+    /// Count a connection whose hello is about to be accepted until the
+    /// returned admission is dropped. None once the host has decided to exit:
+    /// that connection then ends before its hello is answered, and its client
+    /// looks for the next host (D3).
+    pub(crate) fn admit(self: &Arc<Self>) -> Option<Admission<L>> {
+        let mut registry = self.registry();
+        if registry.exiting {
+            return None;
+        }
+        registry.connections += 1;
+        Some(Admission(self.clone()))
+    }
+
+    /// After the decision to exit: wait at most `timeout` for the requests
+    /// being answered and for the connections accepted before the decision,
+    /// whose clients may still send a request, to end.
     pub(crate) fn drain(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         let mut registry = self.registry();
-        while registry.requests > 0 {
+        while registry.requests > 0 || registry.connections > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return;
@@ -767,6 +828,16 @@ impl<L: Launcher> Host<L> {
 
     pub(crate) fn exiting(&self) -> bool {
         self.registry().exiting
+    }
+}
+
+/// A connection the host accepted (`Host::admit`), counted while it lives.
+pub(crate) struct Admission<L: Launcher>(Arc<Host<L>>);
+
+impl<L: Launcher> Drop for Admission<L> {
+    fn drop(&mut self) {
+        self.0.registry().connections -= 1;
+        self.0.changed();
     }
 }
 

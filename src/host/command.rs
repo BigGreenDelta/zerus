@@ -149,7 +149,11 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The bytes `text` spells as pairs of hex digits.
 fn unhex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     (0..text.len())
         .step_by(2)
         .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
@@ -165,6 +169,13 @@ fn attach(request: &str, steps: &str) -> i32 {
         Ok(steps) => steps,
         Err(code) => return code,
     };
+    if steps
+        .iter()
+        .any(|step| matches!(step, Step::SendHex(text) if unhex(text).is_none()))
+    {
+        eprintln!("hgs: invalid attach steps: send_hex takes pairs of hex digits");
+        return 2;
+    }
     let connection = match open(false, Role::Attach) {
         Ok(connection) => connection,
         Err(error) => return fail(&error),

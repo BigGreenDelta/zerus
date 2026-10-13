@@ -408,8 +408,10 @@ impl Session {
         Ok(())
     }
 
-    /// Write `text` as `paste-buffer -r` does: unchanged, inside bracketed-paste
-    /// markers when `bracketed` (`-p`) and the application enabled them.
+    /// Write `text` as `paste-buffer -r` does: line feeds kept, control
+    /// characters shown as tmux shows them (`paste_bytes`), inside
+    /// bracketed-paste markers when `bracketed` (`-p`) and the application
+    /// enabled them.
     pub(crate) fn paste(&self, text: &str, bracketed: bool) -> Result<(), ErrorBody> {
         if self.dead() {
             return Err(exited(&self.pane_id()));
@@ -446,7 +448,8 @@ impl Session {
         screen.clients.push(client.clone());
         self.follow_latest(&mut screen);
         let repaint = screen.model.repaint();
-        client.push_stream(&repaint, Vec::new);
+        // A repaint past the queue's limit still goes out whole.
+        client.push_stream(&repaint, || repaint.clone());
         Ok(())
     }
 
@@ -609,13 +612,28 @@ pub(crate) fn foreground(root: u32, processes: &[(u32, u32, u64)]) -> u32 {
         .map_or(root, |(pid, _, _)| *pid)
 }
 
-/// The bytes of a paste: `text` unchanged, inside the markers when `bracket`.
+/// The bytes of a paste as tmux 3.7 and later write them (`paste-buffer -r`,
+/// with `-p` when `bracket`), inside the markers when `bracket`. tmux passes
+/// the text through vis(3) with `VIS_SAFE | VIS_NOSLASH` unless `-S` is
+/// given, which hgs never does: an ASCII control character other than tab,
+/// line feed, carriage return, backspace and bell is written as `^` and a
+/// letter (ESC as `^[`, DEL as `^?`), so a paste can neither end bracketed
+/// paste early nor carry escape sequences. Every other character, UTF-8 C1
+/// controls included, is written unchanged (checked against tmux 3.8 for every
+/// Unicode scalar value).
 pub(crate) fn paste_bytes(text: &str, bracket: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 12);
     if bracket {
         bytes.extend_from_slice(PASTE_START);
     }
-    bytes.extend_from_slice(text.as_bytes());
+    for byte in text.bytes() {
+        match byte {
+            0x7f => bytes.extend_from_slice(b"^?"),
+            b'\t' | b'\n' | b'\r' | 0x08 | 0x07 => bytes.push(byte),
+            0x00..=0x1f => bytes.extend_from_slice(&[b'^', byte + b'@']),
+            _ => bytes.push(byte),
+        }
+    }
     if bracket {
         bytes.extend_from_slice(PASTE_END);
     }
