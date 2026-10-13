@@ -305,6 +305,8 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
                 return remote(&config, &target, "--help", args, dry);
             }
             print!("{USAGE}");
+            #[cfg(windows)]
+            print!("{}", crate::host::admin::HELP);
             return Ok(0);
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),
@@ -358,6 +360,18 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     if command == "download" {
         return crate::download::dispatch(&config, &target, args, dry);
+    }
+    // Windows only, before local sessions are enabled, and never forwarded: it
+    // enables them on this computer (spec D2). On Unix the word stays a program.
+    #[cfg(windows)]
+    if command == "session-host" {
+        if !target.is_empty() && !config.is_self(&target) {
+            return Err(Error::new(
+                2,
+                "hgs session-host manages the computer it runs on; run it on that computer",
+            ));
+        }
+        return crate::host::admin::dispatch(&config, args, dry);
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);

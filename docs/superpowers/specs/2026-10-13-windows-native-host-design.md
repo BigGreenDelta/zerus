@@ -74,6 +74,20 @@ Windows builds (on Unix that word still launches a program of that name, as toda
 is allowed before enablement (`src/cli.rs:355`), and is never forwarded to remote
 machines in Phase 2.
 
+**Admission (M3, `src/host/gate.rs`).** `__host serve` serves only when the marker
+exists and its own executable is a staged image (`<images>\<name>\hgs.exe` whose
+SHA-256 starts with `<name>`); otherwise it exits before writing anything (4: not
+enabled, 5: not staged). A running host refuses `create_session` once the marker is
+gone, so a launch racing `uninstall` starts nothing. A launcher reads `current`
+again before each start, as an install may retire the image it read. Tests run an
+unstaged build only for an isolated state directory: one that `HGS_STATE_DIR` names
+and that is none of the user's default state directories (every hgs process
+exports `HGS_STATE_DIR`, so the variable alone proves nothing). There
+`HGS_HOST_ALLOW_UNSTAGED=1` lets the host serve without the marker and from any
+image, and `HGS_HOST_IMAGE` names the executable `__host call --start` starts;
+elsewhere the first is ignored and the second is an error
+([testing the host](../../windows-host-testing.md)).
+
 The compile-time `platform::LOCAL_SESSIONS` (`src/platform/mod.rs:27`) becomes a
 run-time check: always true on Unix; on Windows true when the marker exists. Its
 consumers (`src/cli.rs:695,742,766`, `src/accounts.rs:456,883`) call the function.

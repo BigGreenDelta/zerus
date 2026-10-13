@@ -29,27 +29,28 @@ pub(super) fn run(provider: &str, dry: bool) -> Result<i32> {
     // Download completely before running, so a failed transfer cannot execute
     // a partial script. Only the provider's fixed HTTPS installer is accepted.
     let script = tempfile::NamedTempFile::new()?;
-    let status = Command::new("curl")
-        .args([
-            "--fail",
-            "--show-error",
-            "--silent",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "120",
-            "--max-filesize",
-            "2097152",
-            "--output",
-        ])
-        .arg(script.path())
-        .arg(url)
-        .status()?;
+    let status = platform::status(
+        Command::new("curl")
+            .args([
+                "--fail",
+                "--show-error",
+                "--silent",
+                "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "120",
+                "--max-filesize",
+                "2097152",
+                "--output",
+            ])
+            .arg(script.path())
+            .arg(url),
+    )?;
     if !status.success() {
         return Err(Error::new(
             1,

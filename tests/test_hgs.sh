@@ -139,6 +139,8 @@ check "codex subcommand -> as is"       0 "/hgs 0 codex resume abc\$"           
 check "-c on a cmd without resume -> warn" 0 "no resume mode known for sh"           --dry-run sh sample-project -c
 check "sh -> login shell, no runner"  0 "new-session -e HGS_CLIENT=local -s sh/sample-project -c $P -- [^ ]+ -l\$" --dry-run sh sample-project
 check "arbitrary command"             0 "new-session -e HGS_CLIENT=local -s htop/sample-project .*/hgs 0 htop\$" --dry-run htop sample-project
+# `session-host` manages the session host only in Windows builds; here it stays a program.
+check "session-host stays a command on Unix" 0 "new-session -e HGS_CLIENT=local -s session-host/sample-project .*/hgs 0 session-host install\$" --dry-run session-host sample-project -- install
 check_not "codex --rc ignored"        "remote-control" --dry-run codex sample-project --rc
 
 # Exact conversation IDs use provider resume arguments and their own stable session

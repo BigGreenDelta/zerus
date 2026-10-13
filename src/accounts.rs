@@ -544,7 +544,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
-            if id=="native-opencode" {if dry {println!("opencode auth login");return Ok(0);}let status=Command::new("opencode").args(["auth","login"]).status()?;return Ok(status.code().unwrap_or(1));}
+            if id=="native-opencode" {if dry {println!("opencode auth login");return Ok(0);}let status=platform::status(Command::new("opencode").args(["auth","login"]))?;return Ok(status.code().unwrap_or(1));}
             let (p,home,native)=lookup(config,id)?; let key=home_var(&p.provider)?;
             let arguments: Vec<&str> = if p.provider == "claude" && !native { vec!["auth", "login", "--claudeai"] }
                 else if p.provider == "claude" { vec!["auth", "login"] } else { vec!["login"] };

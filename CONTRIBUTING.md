@@ -151,7 +151,9 @@ python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --ru
 
 `tests/test_windows_client.py` runs `hgs.exe` against `examples/fake_ssh.rs`,
 injected through `HGS_SSH`, with `HOME` and `USERPROFILE` in a temporary folder;
-it never uses your SSH configuration and skips itself on other systems. On Windows,
+it never uses your SSH configuration and skips itself on other systems. The
+native session host of Windows Phase 2 has its own isolated recipe and tests:
+[testing the Windows session host](docs/windows-host-testing.md). On Windows,
 `scripts/ci/gui.sh` re-enters itself in the Visual Studio x64 environment
 (`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs
 every Qt suite offscreen. The Qt fixtures are Python scripts that a small native
