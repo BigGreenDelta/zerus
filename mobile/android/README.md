@@ -58,6 +58,10 @@ conversations have no message, answer, or interrupt composer. Scoped restore,
 rename, fork, and forget require fresh native capability and action evidence;
 destructive actions require a confirmation naming their target.
 
+An inline question card fits its content, up to three quarters of the
+conversation area. Its answer field and actions are laid out first and stay
+whole; a longer prompt and its options scroll inside the card. The history
+ends one message gap above the context footer.
 Question cards can expand into a full-screen form while keeping the selected
 options, text and current part. Sending, Answer submitted, Not sent and Delivery
 unknown distinguish an active attempt from its result. A submitted answer stays
@@ -446,6 +450,12 @@ bounds, keyboard retention and input rejection under the overlay, restored edito
 selection/expansion, and capture-scoped calls to the Android haptic API. The emulator
 verifies dispatch and timing; physical vibration still depends on the device and
 its settings.
+
+`QuestionLayoutSmokeInstrumentation` uses the same build, install and fresh-data
+steps. It opens synthetic history with a pending question, measures the inline
+card from a screenshot and checks the card limit, the whole answer field, the
+footer gap, scrolling to the last option and a compact short question. It sends
+no answers.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater
