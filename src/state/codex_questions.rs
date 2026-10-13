@@ -315,10 +315,10 @@ pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
 fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
     let plain = question_terminal::plain(screen)?;
     let lines: Vec<_> = plain.lines().collect();
-    let Some(footer) = lines
-        .iter()
-        .rposition(|line| line.contains("enter submit") && line.contains("ctrl+] skip"))
-    else {
+    let Some(footer) = lines.iter().rposition(|line| {
+        // Codex 0.162 abbreviates the skip key as "^]".
+        line.contains("enter submit") && (line.contains("ctrl+] skip") || line.contains("^] skip"))
+    }) else {
         return Ok(None);
     };
     let Some(body_end) = (0..footer).rev().find(|i| !lines[*i].trim().is_empty()) else {
@@ -330,10 +330,18 @@ fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
     let Some(title_end) = (0..separator).rev().find(|i| !lines[*i].trim().is_empty()) else {
         return Ok(None);
     };
-    let title_start = (0..title_end)
+    let mut title_start = (0..title_end)
         .rev()
         .find(|i| lines[*i].trim().is_empty())
         .map_or(0, |i| i + 1);
+    // Codex 0.162 numbers the questions of one call above the title ("1 of 2").
+    // Only this card's own position may stand there.
+    if let Some(shown) = progress(lines[title_start]) {
+        if title_start == title_end || Some(shown) != position(card) {
+            return Ok(None);
+        }
+        title_start += 1;
+    }
     let compact = |s: &str| s.split_whitespace().collect::<String>();
     if compact(&lines[title_start..=title_end].join("\n"))
         != compact(string(&card["questions"][0], "question"))
@@ -351,6 +359,19 @@ fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(body))
+}
+fn progress(line: &str) -> Option<usize> {
+    let (shown, total) = line.trim().split_once(" of ")?;
+    let shown: usize = shown.parse().ok()?;
+    (total.parse::<usize>().ok()? >= shown).then_some(shown)
+}
+fn position(card: &Value) -> Option<usize> {
+    let index: usize = string(card, "question_id")
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()?;
+    Some(index + 1)
 }
 fn visible_panel(screen: &str, card: &Value) -> Result<bool> {
     Ok(panel_body(screen, card)?.is_some())
@@ -715,5 +736,28 @@ mod tests {
         ] {
             assert!(!visible_panel(&wrong, card).unwrap());
         }
+    }
+    #[test]
+    fn codex_0_162_panels_with_progress_and_short_skip_key_accept_input() {
+        let mut cache = json!({"items":{}});
+        observe(&json!({}), &mut cache, &request());
+        let card = &cache["items"]["codex-async:call_one:0"];
+        // Captured from Codex 0.162.1 (trailing spaces trimmed).
+        let screen = "• Queued follow-up inputs\n\n\n  1 of 2\n  Which option?\n\n  › 1. One\n    2. Two\n    3. Other\n\n  enter submit   ^] skip   shift+→ main prompt   shift+← next question\n\n";
+        assert!(visible_panel(screen, card).unwrap());
+        assert!(panel_empty(screen, card).unwrap());
+        let freeform = &cache["items"]["codex-async:call_one:1"];
+        let notes = "• Queued follow-up inputs\n\n\n  Any notes?\n\n  Type your answer\n\n  enter submit   ^] skip   shift+→ main prompt\n\n";
+        assert!(panel_empty(notes, freeform).unwrap());
+        assert!(!panel_empty(&notes.replace("Type your answer", "Free notes"), freeform).unwrap());
+        // Another question's position, or a progress line alone, is never this card.
+        for wrong in [
+            screen.replace("1 of 2", "2 of 2"),
+            screen.replace("  Which option?\n", ""),
+            screen.replace("^] skip", "esc cancel"),
+        ] {
+            assert!(!visible_panel(&wrong, card).unwrap());
+        }
+        assert!(visible_panel(&notes.replace("  Any notes?", "  2 of 2\n  Any notes?"), freeform).unwrap());
     }
 }
