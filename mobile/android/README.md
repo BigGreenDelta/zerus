@@ -331,6 +331,8 @@ or sends automatically. The conversation must have a confirmed run and conversat
 identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
+With a narrow screen, large system text and an expanded editor, you may need to
+close the keyboard to reach the preview controls.
 
 While recording, the typed draft and selection remain saved beneath the recording
 row, and ordinary message sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture

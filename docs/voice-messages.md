@@ -44,6 +44,10 @@ the pointer or leaving the composer must end capture without submission; a late
 release or permission callback must never start another recording or affect a
 newer one. Capture stays pinned to its original conversation and provider.
 
+With a narrow screen, large system text and an expanded editor, the open keyboard
+can leave no space for the retained preview. Close the keyboard to reach its
+controls; the editor's text, selection and expanded state remain saved.
+
 Haptic feedback is scoped to one capture. A confirmed microphone start and an
 explicit stop or cancellation each request a short `KEYBOARD_TAP`; duplicate and
 late callbacks cannot replay it. The terminal pulse waits until the microphone
