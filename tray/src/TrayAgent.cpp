@@ -492,7 +492,10 @@ void TrayAgent::observeDecisions()
     if (organization != m_organizationSeen || m_projectNames.isEmpty()) {
         m_organizationSeen = organization;
         m_projectNames.clear();
-        for (const auto &group : SessionOrganization(QJsonDocument::fromJson(organization).object()).groups())
+        // groups() returns a reference into the organization, so it must outlive the
+        // loop: a temporary would be destroyed before the first iteration (C++17).
+        const SessionOrganization saved(QJsonDocument::fromJson(organization).object());
+        for (const auto &group : saved.groups())
             m_projectNames.insert(group.id, group.name);
     }
     const auto before = m_attention.decisionState();
