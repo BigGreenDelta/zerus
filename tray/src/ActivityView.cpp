@@ -505,6 +505,17 @@ struct ActivityRenderResult {
     void build() {
     const bool searching = !m_searchResult.isEmpty();
     const QJsonObject details = searching ? QJsonObject() : m_details;
+    // A refetched journal window can overlap the previous one. Deduplicate
+    // native identities before receipts replace their display keys and text.
+    QSet<qint64> journalSequences;
+    QJsonArray uniqueEvents;
+    for (const auto &value : m_events) {
+        const auto seq = value.toObject().value("seq").toInteger();
+        if (seq > 0 && journalSequences.contains(seq)) continue;
+        if (seq > 0) journalSequences.insert(seq);
+        uniqueEvents.append(value);
+    }
+    m_events = std::move(uniqueEvents);
     const auto clear = details.value("session_clear").toObject();
     if (clear.value("type") == "SessionCleared") m_fallbackPrompt.clear();
     if (clear.value("type") == "SessionCleared" && !std::any_of(m_events.cbegin(), m_events.cend(), [&clear](const QJsonValue &value) {

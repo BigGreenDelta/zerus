@@ -237,6 +237,7 @@ private slots:
     void providerErrorsStayVisibleAndStable();
     void providerErrorsStayVisibleAndStable_data();
     void attachmentsStayWithTheirMessageAndOpenExactFile();
+    void repeatedJournalWindowKeepsOneAttachmentMessage();
     void voiceMessageRetainsAudioAndExpandableTranscript();
     void voiceWaveformSeeksWithoutRelayout_data();
     void voiceWaveformSeeksWithoutRelayout();
@@ -1443,6 +1444,43 @@ void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()
     view.setLocalMessages({});view.setActivity({{"attachment_messages",QJsonArray{receipt}}, {"prompt","Inspect the attached image at \"/private/image.png\""}},events);
     text=view.browser()->toPlainText();QCOMPARE(text.count("screen.png"),1);QVERIFY(!text.contains("/private/image.png"));QVERIFY(text.indexOf("screen.png")<text.indexOf("Later response"));
     view.setSessionKey("other");activate(view.browser(),link);QCOMPARE(opened.size(),1);
+}
+
+void TestActivityView::repeatedJournalWindowKeepsOneAttachmentMessage()
+{
+    SettledActivityView view; view.setSessionKey("fixture/attachment");
+    const QString text = QString::fromUtf8("Посмотри [Image #1] и [Image #2], затем сравни.");
+    const QString submitted = QString::fromUtf8("Посмотри [Image #1] (Inspect the attached image at \"/synthetic/one.png\") и [Image #2] (Inspect the attached image at \"/synthetic/two.png\"), затем сравни.");
+    QJsonArray files;
+    for (int i = 0; i < 2; ++i) files.append(QJsonObject{{"name", i ? "two.png" : "one.png"},
+        {"mime", "image/png"}, {"bytes", 120}, {"reference", QString("[Image #%1]").arg(i + 1)},
+        {"request_id", "delivery"}, {"index", i}});
+    const QJsonObject local{{"id", "outgoing"}, {"message_id", "delivery"}, {"text", text},
+        {"submitted_text", submitted}, {"status", "sent"}, {"submitted_at", 1791018002.0}, {"attachments", files}};
+    const QJsonObject receipt{{"source", "hgs_delivery"}, {"type", "UserPromptSubmit"},
+        {"message_id", "delivery"}, {"at", 1791018002.0}, {"detail", text}, {"submitted_text", submitted}, {"attachments", files}};
+    auto prompt = journalEvent(2, "UserPromptSubmit", submitted);
+    const QJsonObject details{{"conversation_id", "conversation"}, {"prompt", submitted}, {"attachment_messages", QJsonArray{receipt}}};
+    // Retain the outgoing card's identity when its durable receipt arrives.
+    view.setTimeline(details, {prompt}, {local});
+    // A conversation change fetches a full window which can repeat a sequence.
+    view.setTimeline(details, {prompt, prompt}, {});
+    auto plain = view.browser()->toPlainText();
+    QCOMPARE(plain.count(QString::fromUtf8("Посмотри")), 1);
+    QVERIFY(!plain.contains("Inspect the attached image"));
+    QCOMPARE(plain.count("one.png"), 1); QCOMPARE(plain.count("two.png"), 1);
+    QSignalSpy opened(&view, &ActivityView::attachmentActivated);
+    QSet<int> indexes;
+    for (const auto &link : links(view.browser())) if (link.startsWith("hgs-attachment:")) {
+        activate(view.browser(), link);
+        indexes.insert(opened.last()[0].toJsonObject().value("index").toInt());
+    }
+    QCOMPARE(indexes, QSet<int>({0, 1}));
+    // Equal text with a different journal identity is a separate submission.
+    auto repeated = prompt; repeated["seq"] = 4; repeated["at"] = 1791018004.0;
+    view.setTimeline(details, {prompt, journalEvent(3, "Stop", "Compared"), repeated}, {});
+    plain = view.browser()->toPlainText();
+    QCOMPARE(plain.count(QString::fromUtf8("Посмотри")), 2);
 }
 
 void TestActivityView::attachmentThumbnailArrivesWithoutMovingTranscript()

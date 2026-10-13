@@ -2863,7 +2863,17 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     else if(!data.contains("processes") && sameRun && previousProcesses.isObject())m_details["processes"]=previousProcesses;
     else if(!data.contains("processes"))m_processPollAge.invalidate();
     if (data.value("replace_events").toBool()) m_events = data.value("events").toArray();
-    else for (const auto &event : data.value("events").toArray()) if (event.toObject().value("seq").toInteger() > m_cursor) m_events.append(event);
+    else {
+        // A conversation switch resets the fetch cursor while retaining its
+        // first window. The full refetch must not append those events again.
+        QSet<qint64> knownSequences;
+        for (const auto &event : m_events) knownSequences.insert(event.toObject().value("seq").toInteger());
+        for (const auto &event : data.value("events").toArray()) {
+            const auto seq = event.toObject().value("seq").toInteger();
+            if (seq <= m_cursor || knownSequences.contains(seq)) continue;
+            knownSequences.insert(seq); m_events.append(event);
+        }
+    }
     while (m_events.size() > 500) m_events.removeFirst();
     m_cursor = data.value("cursor").toInteger(); reconcileMessages(); renderDetails(); applyPendingModelSettings();
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
