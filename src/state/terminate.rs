@@ -28,17 +28,13 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             {
                 return Err("session terminal identity changed; refresh before terminating".into());
             }
-            let target = tmux(
-                &[
-                    "display-message".into(),
-                    "-p".into(),
-                    "-t".into(),
-                    string(&record, "pane").into(),
-                    "#{session_id}".into(),
-                ],
-                true,
-            )?;
-            let target = String::from_utf8_lossy(&target.stdout).trim().to_owned();
+            let target = backend::current()
+                .pane_info(
+                    backend::Target::Pane(string(&record, "pane")),
+                    &[backend::PaneField::SessionId],
+                )?
+                .value()
+                .to_owned();
             if !target
                 .strip_prefix('$')
                 .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
@@ -49,7 +45,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
                 // Pin the tmux instance, never resolve a reusable name a second time.
                 // The writer lock prevents a concurrent HGS rename/relaunch here.
                 if let Some(scope)=scope {scope.changing();}
-                tmux(&["kill-session".into(), "-t".into(), target], true)?;
+                backend::current().kill_session(backend::Target::Session(&target))?;
             }
         } else if process_alive(&record) {
             return Err(

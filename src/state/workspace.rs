@@ -6,29 +6,20 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(super) fn pane_cwds() -> BTreeMap<String, String> {
-    let Ok(output) = tmux(
-        &[
-            "list-panes".into(),
-            "-a".into(),
-            "-F".into(),
-            "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_current_path}".into(),
-        ],
-        false,
-    ) else {
+    let Ok(panes) = backend::current().pane_paths() else {
         return BTreeMap::new();
     };
     let mut rows = BTreeMap::<String, (u8, String)>::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<_> = line.splitn(4, '\t').collect();
-        if parts.len() != 4 || !valid_path(parts[3]) {
+    for pane in panes {
+        if !valid_path(&pane.path) {
             continue;
         }
-        let priority = u8::from(parts[1] == "1") * 2 + u8::from(parts[2] == "1");
+        let priority = u8::from(pane.active_window) * 2 + u8::from(pane.active_pane);
         if rows
-            .get(parts[0])
+            .get(&pane.session)
             .is_none_or(|(score, _)| priority > *score)
         {
-            rows.insert(parts[0].into(), (priority, parts[3].into()));
+            rows.insert(pane.session, (priority, pane.path));
         }
     }
     rows.into_iter()

@@ -8,6 +8,10 @@ use std::path::Path;
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
+/// The terminal backend's types, with no backend: every operation is unavailable.
+#[path = "state/backend/mod.rs"]
+pub(crate) mod backend;
+
 pub(crate) fn worktree_catalog(_: &Path) -> Value {
     json!({"state":"unavailable","detail":UNSUPPORTED,"stale":true,"worktrees":[]})
 }

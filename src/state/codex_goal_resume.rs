@@ -122,12 +122,10 @@ fn parse(screen: &str, width: usize) -> Option<Panel> {
 }
 
 fn width(record: &Value) -> Option<usize> {
-    let output = tmux(
-        &["display-message", "-p", "-t", string(record, "pane"), "#{pane_width}"].map(str::to_owned),
-        true,
-    )
-    .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let info = backend::current()
+        .pane_info(backend::Target::Pane(string(record, "pane")), &[backend::PaneField::Width])
+        .ok()?;
+    info.value().parse().ok()
 }
 
 fn eligible(record: &Value) -> bool {

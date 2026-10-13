@@ -322,51 +322,6 @@ pub fn gui_env() -> Vec<String> {
     result
 }
 
-/// Title output goes to the attached client terminals, never to an agent's pane
-/// input. SSH relays the same OSC sequence to clients on another machine.
-pub fn refresh_session_title(session: &str) -> Result<()> {
-    if session.chars().any(char::is_control) {
-        return Err(Error::new(1, "terminal title contains control characters"));
-    }
-    let target = format!("={session}");
-    if !silent("tmux", &["has-session", "-t", &target]) {
-        return Ok(()); // Saved sessions have no attached terminals.
-    }
-    let option_target = format!("={session}:");
-    for (key, value) in [("set-titles-string", "#S"), ("set-titles", "on")] {
-        if !silent("tmux", &["set-option", "-t", &option_target, key, value]) {
-            return Err(Error::new(1, format!("cannot update tmux {key}")));
-        }
-    }
-    let terminals = capture(
-        "tmux",
-        &["list-clients", "-t", &target, "-F", "#{client_tty}"],
-    )
-    .ok_or_else(|| Error::new(1, "cannot list attached terminals"))?;
-    // Konsole's previous hgs attachment may use a literal tab format. %w makes
-    // it follow the window title; OSC 0 is also understood by macOS terminals.
-    let title = format!("\x1b]30;%w\x07\x1b]0;{session}\x07");
-    let mut seen = std::collections::BTreeSet::new();
-    for path in terminals.lines().filter(|path| !path.is_empty()) {
-        if !seen.insert(path) {
-            continue;
-        }
-        if !path.starts_with("/dev/") || path.chars().any(char::is_control) {
-            return Err(Error::new(1, "tmux returned an invalid client terminal"));
-        }
-        let mut terminal = fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_NOFOLLOW)
-            .open(path)?;
-        let metadata = terminal.metadata()?;
-        if !metadata.file_type().is_char_device() || metadata.uid() != unsafe { libc::getuid() } {
-            return Err(Error::new(1, "client terminal is not owned by this user"));
-        }
-        terminal.write_all(title.as_bytes())?;
-    }
-    Ok(())
-}
-
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 extern "C" fn forward_signal(signal: libc::c_int) {
@@ -522,36 +477,17 @@ fn paste_log(config: &Config, message: &str) {
         let _ = writeln!(file, "{} {message}", stamp.trim());
     }
 }
+/// The tmux C-v binding: pull the viewing peer's clipboard image, then pass C-v on.
 pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result<i32> {
+    let terminal = crate::state::backend::current();
     let message = |text: String| {
         if !client.is_empty() {
-            silent(
-                "tmux",
-                &[
-                    "display-message",
-                    "-c",
-                    client,
-                    "-d",
-                    "4000",
-                    &format!("hgs: {text}"),
-                ],
-            );
+            terminal.notify(client, &format!("hgs: {text}"));
         }
     };
-    let environment = capture(
-        "tmux",
-        &[
-            "show-environment",
-            "-t",
-            &format!("={session}"),
-            "HGS_CLIENT",
-        ],
-    )
-    .unwrap_or_default();
-    let who = environment
-        .trim_end_matches('\n')
-        .strip_prefix("HGS_CLIENT=")
-        .unwrap_or(environment.trim_end_matches('\n'));
+    let who = terminal.viewer(session);
+    let who = who.as_str();
+    // tmux reports a variable removed from the session as "-NAME".
     if matches!(who, "" | "-HGS_CLIENT" | "local") {
         paste_log(
             config,
@@ -620,9 +556,7 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
         }
     }
     // A failed clipboard transfer must never swallow the agent's paste key.
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", pane, "C-v"])
-        .status();
+    terminal.forward_key(pane, "C-v");
     Ok(0)
 }
 

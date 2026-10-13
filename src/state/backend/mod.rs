@@ -1,0 +1,417 @@
+//! The terminal that hosts agent sessions: tmux on Unix. Each session holds one
+//! pane, addressed by its exact name, its immutable session ID (`$N`) or its pane
+//! ID (`%N`); records, rename transactions and question hashes keep those forms.
+//!
+//! The tmux backend issues exactly the commands hgs always has, in the same order,
+//! with the same arguments, stdin and stdio. Answers keep the terminal's own text
+//! where callers validate it, so their checks and messages stay where they were.
+//! Operations a backend lacks report local sessions as unavailable; Windows builds
+//! have no backend yet (Phase 2 adds the native session host).
+// Until `state` itself compiles on Windows, Windows builds reach this module only
+// through the CLI's local-session paths, which they reject before any call.
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(unix)]
+mod tmux;
+
+use super::Result;
+use crate::cli::{Error, Result as CliResult};
+use crate::platform::LOCAL_SESSIONS_UNSUPPORTED as UNSUPPORTED;
+
+/// What a command acts on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Target<'a> {
+    /// The session with exactly this name.
+    Name(&'a str),
+    /// An immutable session ID, `$N`.
+    Session(&'a str),
+    /// A pane ID, `%N`.
+    Pane(&'a str),
+}
+
+/// A listed client terminal and the session it shows.
+pub(crate) struct ClientRow {
+    pub session: String,
+    pub terminal: String,
+}
+
+/// A listed session. Counts that cannot be read are 0.
+pub(crate) struct SessionRow {
+    pub name: String,
+    pub attached: u64,
+    pub created: u64,
+    pub launch_id: String,
+}
+
+/// The `hgs ls --json` view of the terminal: clients, then sessions.
+pub(crate) struct Listing {
+    pub clients: Vec<ClientRow>,
+    pub sessions: Vec<SessionRow>,
+}
+
+/// A live pane's identity: `dead` is "1" once its process has exited and
+/// `run_marker` is the run ID its supervisor set ("" when untracked).
+pub(crate) struct PaneRow {
+    pub session: String,
+    pub pane: String,
+    pub dead: String,
+    pub run_marker: String,
+}
+
+/// A pane's reported current directory (passive metadata only).
+pub(crate) struct PanePath {
+    pub session: String,
+    pub active_window: bool,
+    pub active_pane: bool,
+    pub path: String,
+}
+
+/// One fact about a pane, as the terminal reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneField {
+    SessionId,
+    SessionName,
+    PaneId,
+    /// The terminal server's process ID.
+    ServerPid,
+    /// The pane's root process: the `hgs --run` supervisor.
+    PanePid,
+    Width,
+    Height,
+    /// In cells.
+    CursorX,
+    CursorY,
+    /// "0" unless a copy or view mode holds the pane.
+    InMode,
+    CurrentCommand,
+    Dead,
+    RunMarker,
+    /// "1" when the application enabled bracketed paste.
+    BracketedPaste,
+    Tty,
+}
+
+/// The requested pane facts in request order, as reported.
+pub(crate) struct PaneInfo {
+    text: String,
+}
+impl PaneInfo {
+    pub(crate) fn new(text: String) -> Self {
+        Self { text }
+    }
+    /// The answer to a one-field request, without surrounding whitespace.
+    pub(crate) fn value(&self) -> &str {
+        self.text.trim()
+    }
+    /// Every requested field. A value that holds a tab makes the count differ.
+    pub(crate) fn fields(&self) -> Vec<&str> {
+        self.text.trim_end_matches('\n').split('\t').collect()
+    }
+    /// The answer to a two-field request.
+    pub(crate) fn pair(&self) -> Option<(&str, &str)> {
+        self.text.trim().split_once('\t')
+    }
+}
+
+/// The visible screen, one line per row with trailing spaces trimmed. `Styled`
+/// keeps SGR attributes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Capture {
+    Plain,
+    Styled,
+}
+
+/// Input for a pane: a named key (`Enter`, `Up`, `C-u`, `M-s`) or literal text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Key<'a> {
+    Named(&'a str),
+    Literal(&'a str),
+}
+
+/// How staged text is pasted. Line feeds are kept in both forms.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Paste {
+    /// An agent composer: inside bracketed-paste markers when the application
+    /// enabled them.
+    Composer,
+    /// Raw Terminal input: markers only when the caller saw bracketed paste on.
+    Terminal { bracketed: bool },
+}
+
+/// The pinned agent that should own a pane's input.
+pub(crate) struct InputClaim<'a> {
+    pub pane: &'a str,
+    pub name: &'a str,
+    pub run_id: &'a str,
+    pub agent: &'a str,
+    pub pid: Option<u64>,
+}
+
+/// A pane whose agent owns its input now; the cursor is in cells, as reported.
+pub(crate) struct InputState {
+    pub cursor_x: String,
+    pub cursor_y: String,
+}
+
+/// A new session. `env` holds `KEY=VALUE` overrides and `command` the words of
+/// the pane's command line, which the tmux backend runs through the shell.
+pub(crate) struct LaunchSpec {
+    pub name: String,
+    pub cwd: String,
+    pub env: Vec<String>,
+    pub command: Vec<String>,
+    /// For a CLI launch: return at once instead of attaching this terminal.
+    pub detached: bool,
+}
+
+/// How an interactive client ended: its exit code, and whether the terminal
+/// server died (the terminal is then already restored and the user told).
+pub(crate) struct ClientExit {
+    pub code: i32,
+    pub server_died: bool,
+}
+
+/// What a `--dry-run` would have done.
+pub(crate) enum DryRun<'a> {
+    ListJson,
+    List,
+    Attach {
+        session: &'a str,
+        client: &'a str,
+    },
+    AttachExisting {
+        session: &'a str,
+        run_id: Option<&'a str>,
+    },
+    Kill {
+        session: &'a str,
+    },
+    /// A session started from the CLI.
+    Launch(&'a LaunchSpec),
+    /// A saved session relaunched detached (resume, restore, fresh, fork).
+    Start(&'a LaunchSpec),
+}
+
+/// The session terminal. Without a server there are no sessions: listings come
+/// back empty. Methods returning a `CliResult` serve an interactive CLI command
+/// and leave the terminal's own messages on the user's terminal.
+pub(crate) trait TerminalBackend: Sync {
+    /// Whether the terminal server runs.
+    fn server_running(&self) -> bool {
+        false
+    }
+    /// Whether this process runs inside a session pane.
+    fn inside(&self) -> bool {
+        false
+    }
+    /// The name of the session this process runs in ("" when unknown).
+    fn enclosing_session(&self) -> String {
+        String::new()
+    }
+    /// The pane a `--run` supervisor was started in.
+    fn own_pane(&self) -> Result<String> {
+        Err(UNSUPPORTED.into())
+    }
+
+    fn listing(&self) -> Listing {
+        Listing {
+            clients: Vec::new(),
+            sessions: Vec::new(),
+        }
+    }
+    /// `(name, attached clients)` for `hgs ls`; None without sessions.
+    fn attached_counts(&self) -> Option<Vec<(String, String)>> {
+        None
+    }
+    fn panes(&self) -> Result<Vec<PaneRow>> {
+        Err(UNSUPPORTED.into())
+    }
+    fn pane_paths(&self) -> Result<Vec<PanePath>> {
+        Err(UNSUPPORTED.into())
+    }
+
+    fn session_exists(&self, _name: &str) -> bool {
+        false
+    }
+    /// The current name of session `$N`, None when it no longer exists.
+    fn session_name(&self, _id: &str) -> Result<Option<String>> {
+        Err(UNSUPPORTED.into())
+    }
+    fn pane_info(&self, _target: Target, _fields: &[PaneField]) -> Result<PaneInfo> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Start a detached session.
+    fn start(&self, _spec: &LaunchSpec) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Mark session `name` with the run ID of the supervisor in its pane.
+    fn set_run_marker(&self, _name: &str, _run_id: &str) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Rename session `$N`.
+    fn rename(&self, _id: &str, _name: &str) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    fn kill_session(&self, _target: Target) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Remove an exited pane.
+    fn kill_pane(&self, _pane: &str) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+
+    /// Check that the claimed agent owns the pane's input now: the pane shows its
+    /// run, is in normal mode with bracketed paste on, the terminal is raw and
+    /// the agent, not a shell, is in the foreground.
+    fn input_state(&self, _claim: &InputClaim) -> Result<InputState> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Whether process `pid` runs on `tty`, a pane's reported `Tty`.
+    fn on_terminal(&self, _pid: &str, _tty: &str) -> Result<bool> {
+        Err(UNSUPPORTED.into())
+    }
+    fn capture(&self, _pane: &str, _mode: Capture) -> Result<Vec<u8>> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Send keys in order. An empty list still checks that the pane exists.
+    fn send(&self, _pane: &str, _keys: &[Key]) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Stage text under a unique name without placing it on argv. Err when the
+    /// terminal could not be run, false when it did not take the text.
+    fn stage(&self, _buffer: &str, _text: &[u8]) -> Result<bool> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Paste and release staged text.
+    fn paste(&self, _buffer: &str, _pane: &str, _mode: Paste) -> Result<()> {
+        Err(UNSUPPORTED.into())
+    }
+    /// Release staged text if it is still there.
+    fn discard(&self, _buffer: &str) {}
+
+    /// Start a session from the CLI, attached unless `spec.detached`.
+    fn launch(&self, _spec: &LaunchSpec) -> CliResult<ClientExit> {
+        Err(Error::new(2, UNSUPPORTED))
+    }
+    /// Record which peer views the session, for `hgs paste`.
+    fn set_client(&self, _target: Target, _client: &str) {}
+    fn attach(&self, _target: Target) -> CliResult<ClientExit> {
+        Err(Error::new(2, UNSUPPORTED))
+    }
+    /// `hgs kill`: end the session named exactly `name`; the exit code.
+    fn kill(&self, _name: &str) -> CliResult<i32> {
+        Err(Error::new(2, UNSUPPORTED))
+    }
+    /// Retitle the terminals attached to session `name` after a rename.
+    fn refresh_titles(&self, _name: &str) -> CliResult<()> {
+        Ok(())
+    }
+    /// The viewing peer recorded by `set_client`, as stored.
+    fn viewer(&self, _name: &str) -> String {
+        String::new()
+    }
+    /// Show a short message on a client terminal.
+    fn notify(&self, _client: &str, _text: &str) {}
+    /// Hand a key to the pane whatever happened before (the paste binding).
+    fn forward_key(&self, _pane: &str, _key: &str) {}
+    fn describe(&self, _operation: &DryRun) -> String {
+        UNSUPPORTED.into()
+    }
+}
+
+/// No local sessions on this computer.
+#[cfg(not(unix))]
+struct Unavailable;
+#[cfg(not(unix))]
+impl TerminalBackend for Unavailable {}
+
+#[cfg(unix)]
+static BACKEND: tmux::Tmux = tmux::Tmux;
+#[cfg(not(unix))]
+static BACKEND: Unavailable = Unavailable;
+
+#[cfg(test)]
+thread_local! {
+    static FAKE: std::cell::Cell<Option<&'static dyn TerminalBackend>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// This computer's session terminal.
+pub(crate) fn current() -> &'static dyn TerminalBackend {
+    #[cfg(test)]
+    if let Some(fake) = FAKE.with(std::cell::Cell::get) {
+        return fake;
+    }
+    &BACKEND
+}
+
+/// Run `body` with `fake` as this thread's backend.
+#[cfg(test)]
+pub(crate) fn with_fake<T>(fake: &'static dyn TerminalBackend, body: impl FnOnce() -> T) -> T {
+    struct Reset(Option<&'static dyn TerminalBackend>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAKE.with(|cell| cell.set(self.0));
+        }
+    }
+    let _reset = Reset(FAKE.with(|cell| cell.replace(Some(fake))));
+    body()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::state::{storage, workspace};
+    use serde_json::json;
+
+    struct Fake;
+    impl TerminalBackend for Fake {
+        fn panes(&self) -> Result<Vec<PaneRow>> {
+            let row = |session: &str, pane: &str, dead: &str, run: &str| PaneRow {
+                session: session.into(),
+                pane: pane.into(),
+                dead: dead.into(),
+                run_marker: run.into(),
+            };
+            Ok(vec![
+                row("claude/p/a", "%1", "0", "run-a"),
+                row("codex/p/b", "%2", "0", "run-b"),
+                row("codex/p/b", "%3", "1", ""),
+            ])
+        }
+        fn pane_paths(&self) -> Result<Vec<PanePath>> {
+            let path = |active_window: bool, active_pane: bool, path: &str| PanePath {
+                session: "codex/p/b".into(),
+                active_window,
+                active_pane,
+                path: path.into(),
+            };
+            Ok(vec![
+                path(false, true, "/inactive-window"),
+                path(true, true, "/active"),
+                path(true, false, "/inactive-pane"),
+                path(true, true, "relative"),
+            ])
+        }
+    }
+
+    #[test]
+    fn session_state_reads_the_current_backend() {
+        with_fake(&Fake, || {
+            let snapshot = storage::live().unwrap();
+            let record = json!({"pane": "%1", "run_id": "run-a"});
+            assert!(storage::matches(&record, snapshot.get("claude/p/a")));
+            // One session holds exactly one pane.
+            let record = json!({"pane": "%2", "run_id": "run-b"});
+            assert!(!storage::matches(&record, snapshot.get("codex/p/b")));
+            assert_eq!(workspace::pane_cwds()["codex/p/b"], "/active");
+        });
+        struct Empty;
+        impl TerminalBackend for Empty {}
+        with_fake(&Empty, || {
+            assert_eq!(storage::live().unwrap_err(), UNSUPPORTED);
+            assert!(workspace::pane_cwds().is_empty());
+            assert!(!current().session_exists("claude/p/a"));
+        });
+    }
+}

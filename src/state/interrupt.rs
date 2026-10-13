@@ -48,7 +48,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if current["agent"]=="claude" {seen=kimi_tui_choice::capture(&current).ok().map(|screen|interruptions(&screen));}
         compact_context::observe(&mut current,&json!({"hook_event_name":"Interrupt"}));
         write(&mut current)?;
-        tmux(&["send-keys","-t",string(&current,"pane"),"Escape"].map(str::to_owned),true)
+        backend::current().send(string(&current,"pane"),&[backend::Key::Named("Escape")])
             .map_err(|e|format!("Interrupt delivery uncertain: {e}. Check Terminal before retrying"))?;
     }
     let mut receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
@@ -120,9 +120,9 @@ fn claude_input(screen:&str)->Option<(usize,Vec<String>)> {
 }
 
 fn cursor(record:&Value)->Option<(usize,usize)> {
-    let out=tmux(&["display-message","-p","-t",string(record,"pane"),"#{cursor_x}\t#{cursor_y}"].map(str::to_owned),true).ok()?;
-    let text=String::from_utf8_lossy(&out.stdout);
-    let (x,y)=text.trim_end().split_once('\t')?;
+    let cursor=backend::current().pane_info(backend::Target::Pane(string(record,"pane")),
+        &[backend::PaneField::CursorX,backend::PaneField::CursorY]).ok()?;
+    let (x,y)=cursor.pair()?;
     Some((x.parse().ok()?,y.parse().ok()?))
 }
 
@@ -138,8 +138,8 @@ fn take_rewound_prompt(record:&Value)->bool {
     let mut last:Option<usize>=None;
     loop {
         let Some((x,y))=cursor(record) else {return false};
-        let Ok(styled)=tmux(&["capture-pane","-p","-e","-t",pane].map(str::to_owned),true) else {return false};
-        if last.is_some() && input::composer_empty("claude",&String::from_utf8_lossy(&styled.stdout),x,y) {return true;}
+        let Ok(styled)=backend::current().capture(pane,backend::Capture::Styled) else {return false};
+        if last.is_some() && input::composer_empty("claude",&String::from_utf8_lossy(&styled),x,y) {return true;}
         let Some((start,rows))=kimi_tui_choice::capture(record).ok().and_then(|screen|claude_input(&screen)) else {return false};
         let now=squash(&rows.concat());
         if !target.starts_with(&now) || last.is_some_and(|last|left(&rows)>=last) {return false;}
@@ -151,7 +151,7 @@ fn take_rewound_prompt(record:&Value)->bool {
         }
         last=Some(left(&rows));
         let key=if x<=2 {"BSpace"} else {"C-u"};
-        if tmux(&["send-keys","-t",pane,key].map(str::to_owned),true).is_err() {return false;}
+        if backend::current().send(pane,&[backend::Key::Named(key)]).is_err() {return false;}
         // Wait for Claude to redraw the input before the next step.
         let deadline=std::time::Instant::now()+std::time::Duration::from_millis(600);
         while std::time::Instant::now()<deadline {

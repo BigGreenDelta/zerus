@@ -15,6 +15,7 @@ mod compact_context;
 mod cache_hint;
 mod claude_approval;
 mod attempts;
+pub(crate) mod backend;
 pub(crate) mod dsh;
 mod effort;
 mod external_agents;

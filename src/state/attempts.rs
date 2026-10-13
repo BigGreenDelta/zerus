@@ -140,17 +140,9 @@ pub(super) fn prepare_replacement(
             "{name}: session changed while preparing a new launch"
         ));
     }
-    let output = tmux(
-        &[
-            "display-message".into(),
-            "-p".into(),
-            "-t".into(),
-            pane.into(),
-            "#{pane_pid}".into(),
-        ],
-        true,
-    )?;
-    if String::from_utf8_lossy(&output.stdout).trim() != std::process::id().to_string() {
+    let info = backend::current()
+        .pane_info(backend::Target::Pane(pane), &[backend::PaneField::PanePid])?;
+    if info.value() != std::process::id().to_string() {
         return Err(format!("{name}: launch does not own the new terminal pane"));
     }
     let retry = retryable(record, None) || requested.is_some_and(|id| retryable(record, Some(id)));

@@ -67,7 +67,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     write(&mut record)?;
     atomic(&path, &json!({"status":"in_progress"}).to_string())?;
     let result: Result<()> = (|| {
-        tmux(&["send-keys","-t",string(&record,"pane"),"-l","/compact"].map(str::to_owned), true)?;
+        backend::current().send(string(&record,"pane"), &[backend::Key::Literal("/compact")])?;
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let current = kimi_tui_choice::identity(&record)?;
@@ -80,7 +80,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current, false)?;
         if !clear_context::ready(&current, "/compact")? { return Err("The native input changed before /compact".into()); }
-        tmux(&["send-keys","-t",string(&current,"pane"),"Enter"].map(str::to_owned), true)?;
+        backend::current().send(string(&current,"pane"), &[backend::Key::Named("Enter")])?;
         Ok(())
     })();
     if let Err(error) = result {

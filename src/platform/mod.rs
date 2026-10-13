@@ -40,6 +40,9 @@ pub fn capture(program: &str, args: &[&str]) -> Option<String> {
         None
     }
 }
+// Its callers (the tmux backend, the recovery and voice workers) are Unix-only
+// until `state` compiles on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn silent(program: &str, args: &[&str]) -> bool {
     Command::new(program)
         .args(args)
@@ -304,15 +307,6 @@ pub fn restore_terminal() {
     if io::stdout().is_terminal() && virtual_terminal() {
         print!("\x1b[r\x1b(B\x1b[m\x1b[?1l\x1b>\x1b[0 q\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l\x1b[?2004l\x1b[?1004l\x1b[>4m\x1b[?69l\x1b[?2031l\x1b[?1049l");
         let _ = io::stdout().flush();
-    }
-}
-pub fn client_done(rc: i32) -> bool {
-    if rc != 0 && !silent("tmux", &["list-sessions"]) {
-        restore_terminal();
-        eprintln!("hgs: the tmux server died; terminal restored, sessions on this box are gone");
-        true
-    } else {
-        false
     }
 }
 

@@ -587,10 +587,6 @@ pub(super) fn virtual_terminal() -> bool {
 pub fn gui_env() -> Vec<String> {
     Vec::new()
 }
-/// Saved terminal titles belong to local tmux sessions, which Windows does not run.
-pub fn refresh_session_title(_: &str) -> Result<()> {
-    Ok(())
-}
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// The console delivers Ctrl+C and Ctrl+Break to every attached process. The

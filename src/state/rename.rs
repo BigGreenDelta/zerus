@@ -49,17 +49,13 @@ fn validate(old: &str, new: &str) -> Result<()> {
 }
 
 fn session_id(name: &str) -> Result<String> {
-    let output = tmux(
-        &[
-            "display-message".into(),
-            "-p".into(),
-            "-t".into(),
-            format!("={name}:"),
-            "#{session_id}".into(),
-        ],
-        true,
-    )?;
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let id = backend::current()
+        .pane_info(
+            backend::Target::Name(name),
+            &[backend::PaneField::SessionId],
+        )?
+        .value()
+        .to_owned();
     if !id.starts_with('$') || !id[1..].chars().all(|c| c.is_ascii_digit()) {
         return Err("invalid tmux session identity".into());
     }
@@ -67,20 +63,7 @@ fn session_id(name: &str) -> Result<String> {
 }
 
 fn current_session_name(id: &str) -> Result<Option<String>> {
-    let output = tmux(
-        &[
-            "display-message".into(),
-            "-p".into(),
-            "-t".into(),
-            id.into(),
-            "#{session_name}".into(),
-        ],
-        false,
-    )?;
-    Ok(output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+    backend::current().session_name(id)
 }
 
 pub(super) fn dispatch(args: &[String], dry: bool) -> Result<i32> { dispatch_scoped(args,dry,None) }
@@ -160,10 +143,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             if let Some(scope)=scope {scope.changing();}
             atomic(&path, &format!("{transaction}\n"))?;
             if let Some(id) = id {
-                if let Err(error) = tmux(
-                    &["rename-session".into(), "-t".into(), id, new.into()],
-                    true,
-                ) {
+                if let Err(error) = backend::current().rename(&id, new) {
                     remove(&path)?;
                     return Err(error);
                 }

@@ -275,18 +275,16 @@ pub(super) fn start_scoped(
         environment.insert(key, String::new());
     }
     environment.insert(home_var(agent)?, string(&record, "agent_home").into());
-    let mut arguments = vec![
-        "new-session".into(),
-        "-d".into(),
-        "-s".into(),
-        target.clone(),
-        "-c".into(),
-        string(&record, "launch_dir").into(),
-    ];
-    for (key, value) in environment {
-        arguments.extend(["-e".into(), format!("{key}={value}")]);
-    }
-    arguments.push(join_command(&launch));
+    let spec = backend::LaunchSpec {
+        name: target.clone(),
+        cwd: string(&record, "launch_dir").into(),
+        env: environment
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        command: launch,
+        detached: true,
+    };
     if dry {
         if agent == "kimi" {
             println!(
@@ -299,12 +297,10 @@ pub(super) fn start_scoped(
                 ])
             );
         }
-        let mut display = vec!["tmux".into()];
-        display.extend(arguments);
-        println!("{}", join_command(&display));
+        println!("{}", backend::current().describe(&backend::DryRun::Start(&spec)));
     } else {
         if let Some(scope)=scope {scope.changing();}
-        if let Err(error) = tmux(&arguments, true) {
+        if let Err(error) = backend::current().start(&spec) {
         return Err(if let Some(id) = &new_id {
             format!("{error}; Kimi fork {id} is saved and can be opened explicitly")
         } else {

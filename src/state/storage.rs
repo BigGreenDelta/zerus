@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::process::{Command, Output};
+use std::process::Command;
 
 pub(super) fn root() -> PathBuf {
     nonempty_env("HGS_STATE_DIR")
@@ -203,46 +203,17 @@ pub(super) fn records() -> Result<Vec<Value>> {
     Ok(result)
 }
 
-pub(super) fn tmux(args: &[String], check: bool) -> Result<Output> {
-    let output = Command::new("tmux")
-        .args(args)
-        .output()
-        .map_err(|e| format!("tmux: {e}"))?;
-    if check && !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if error.is_empty() {
-            "tmux command failed".into()
-        } else {
-            error
-        });
-    }
-    Ok(output)
-}
-
 pub(super) type Pane = (String, String, String);
 pub(super) type Snapshot = BTreeMap<String, Vec<Pane>>;
 
+/// Each live session's panes as (pane, dead, run marker). No server means none.
 pub(super) fn live() -> Result<Snapshot> {
-    let output = tmux(
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_id}\t#{pane_dead}\t#{@hgs_run}",
-        ]
-        .map(str::to_owned),
-        false,
-    )?;
     let mut result: Snapshot = BTreeMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let fields: Vec<&str> = line.splitn(4, '\t').collect();
-        if fields.len() == 4 {
-            result.entry(fields[0].to_owned()).or_default().push((
-                fields[1].into(),
-                fields[2].into(),
-                fields[3].into(),
-            ));
-        }
+    for row in backend::current().panes()? {
+        result
+            .entry(row.session)
+            .or_default()
+            .push((row.pane, row.dead, row.run_marker));
     }
     Ok(result)
 }
