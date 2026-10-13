@@ -23,6 +23,20 @@ struct Fixture {
     paired: Value,
 }
 
+#[test]
+fn opencode_launch_model_is_native_account_scoped_and_bounded() {
+    let id=Uuid::new_v4().to_string();
+    let value=json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"launch","session":"", "payload":{"request_id":id,"agent":"opencode","directory":"/workspace/orbit","tag":"local","account_id":"native-opencode","model":"ollama/qwen3-coder:30b"}});
+    protocol::request(&value).unwrap();
+    let mut default=value.clone();
+    default["payload"].as_object_mut().unwrap().remove("model");
+    protocol::request(&default).unwrap();
+    for (key,replacement) in [("agent",json!("codex")),("account_id",json!("native-codex")),("model",json!("local")),("model",json!("/local")),("model",json!("ollama/")),("model",json!("ollama/with space")),("model",json!("ollama/local\n")),("model",json!(format!("ollama/{}","a".repeat(257))))] {
+        let mut bad=value.clone();bad["payload"][key]=replacement;
+        assert!(protocol::request(&bad).is_err(),"accepted invalid model route {key}");
+    }
+}
+
 fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
     let id = Uuid::new_v4().to_string();
     let mut payload =

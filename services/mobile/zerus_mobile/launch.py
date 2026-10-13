@@ -1,12 +1,14 @@
 """Allowlisted native session creation and privacy-minimal local catalogs."""
+import json
 import re
 from pathlib import PurePosixPath
 from .context import bounded
 from .projects import normalize
 from . import worktrees
+from .accounts import MAX_CATALOG_BYTES, model_options
 
 OPERATIONS = frozenset({'catalog','dirs','launch'}) | worktrees.OPERATIONS
-AGENTS = frozenset({'codex','claude','kimi','dsh'})
+AGENTS = frozenset({'codex','claude','kimi','dsh','opencode'})
 
 
 def validate(operation, payload, request_id):
@@ -14,7 +16,7 @@ def validate(operation, payload, request_id):
         return worktrees.validate(operation, payload, request_id)
     fields = {'catalog': {'request_id'}, 'dirs': {'request_id','path'},
               'launch': {'request_id','agent','directory','tag'}}[operation]
-    extras = {'account_id','swarm_id','project_id','project_folder_id','add_folder','worktree_folder_id','worktree_common_dir'} if operation=='launch' else set()
+    extras = {'account_id','model','swarm_id','project_id','project_folder_id','add_folder','worktree_folder_id','worktree_common_dir'} if operation=='launch' else set()
     if not isinstance(payload, dict) or not fields <= set(payload) or set(payload)-fields-extras or payload.get('request_id')!=request_id:
         raise ValueError('invalid scoped catalog/launch fields')
     if operation=='dirs':
@@ -29,6 +31,14 @@ def validate(operation, payload, request_id):
         if 'account_id' in payload:
             value=bounded(payload['account_id'],80)
             if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*',value): raise ValueError('invalid native account identifier')
+        if 'model' in payload:
+            model = bounded(payload['model'],256)
+            provider, separator, identity = model.partition('/')
+            if (payload['agent'] != 'opencode' or payload.get('account_id') != 'native-opencode'
+                    or len(model.encode('utf-8')) > 256 or not separator or not identity
+                    or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}',provider)
+                    or any(c.isspace() for c in model)):
+                raise ValueError('model selection requires the native OpenCode account and provider/model')
         if {'worktree_folder_id','worktree_common_dir'} & set(payload):
             if not {'swarm_id','project_id','add_folder','worktree_folder_id','worktree_common_dir'} <= set(payload) or payload['add_folder'] is not False or 'project_folder_id' in payload:
                 raise ValueError('worktree placement requires a distinct current project anchor')
@@ -61,9 +71,14 @@ def catalog(raw):
         if status not in ('signed_in','signed_out'):
             status = cached.get('status')
         account['auth_status'] = status if status in ('signed_in','signed_out','expired','credentials_locked','desktop_session_unavailable','credentials_unavailable') else 'unknown'
+        if row['provider'] == 'opencode':
+            account['model_options'] = model_options(row)
         accounts.append(account)
         if row.get('installed') is True: agents.add(row['provider'])
-    return {'accounts':accounts,'agents':sorted(agents)}
+    result = {'accounts':accounts,'agents':sorted(agents)}
+    if len(json.dumps(result,ensure_ascii=True).encode()) > MAX_CATALOG_BYTES:
+        raise ValueError('native launch account projection exceeds size limit')
+    return result
 
 
 def projects(raw):

@@ -13,7 +13,7 @@ REFRESH_SECONDS = 300
 CATALOG_SECONDS = 30
 MAX_ACCOUNTS = 100
 MAX_CATALOG_BYTES = 128 * 1024
-PROVIDERS = {"codex", "claude", "kimi", "dsh"}
+PROVIDERS = {"codex", "claude", "kimi", "dsh", "opencode"}
 STATUSES = {"loading", "ok", "unavailable", "offline", "configured", "expired", "signed_out",
             "credentials_locked", "desktop_session_unavailable", "credentials_unavailable"}
 
@@ -42,6 +42,27 @@ def member(value, choices):
     return isinstance(value, str) and value in choices
 
 
+def model_options(profile):
+    """Project configured IDs and labels; never provider URLs or credentials."""
+    rows = profile.get("model_options")
+    result, seen = [], set()
+    for row in (rows if isinstance(rows, list) else [])[:256]:
+        if not isinstance(row, dict):
+            continue
+        value = row.get("value")
+        if (not isinstance(value, str) or len(value.encode("utf-8")) > 256
+                or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)):
+            continue
+        provider, separator, model = value.partition("/")
+        if (not separator or not model or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}", provider)
+                or value in seen):
+            continue
+        seen.add(value)
+        result.append({"value": value, "label": text(row.get("label"), 160) or value,
+                       "provider": provider})
+    return result
+
+
 def usage(raw):
     """Never forward native errors, paths, auth fingerprints or arbitrary fields."""
     raw = raw if isinstance(raw, dict) else {}
@@ -53,7 +74,7 @@ def usage(raw):
             result["identity"][field] = value
     if member(raw.get("auth_status"), {"signed_in", "signed_out", "unknown"}):
         result["auth_status"] = raw["auth_status"]
-    if member(raw.get("source"), {"Codex App Server", "Claude Code", "Kimi Code", "DeepSeek Harness"}):
+    if member(raw.get("source"), {"Codex App Server", "Claude Code", "Kimi Code", "DeepSeek Harness", "OpenCode"}):
         result["source"] = raw["source"]
     checked = number(raw.get("checked_at"))
     if checked is not None:
@@ -113,6 +134,8 @@ def catalog(raw):
         public = {"id": identity, "provider": profile["provider"], "label": text(profile.get("label"), 160) or identity}
         for key in ("native", "installed", "is_default"):
             public[key] = profile.get(key) is True
+        if profile["provider"] == "opencode":
+            public["model_options"] = model_options(profile)
         # These values stay local and are discarded with this in-memory cache.
         seed = usage(profile.get("account_status"))
         auth_revision = profile.get("auth_revision")
