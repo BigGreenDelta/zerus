@@ -61,4 +61,44 @@ class ConversationViewportTest {
         val waiting = ConversationFollowState()
         assertEquals(ConversationScroll(waiting), ConversationViewport.content(waiting, emptyList(), "new", "new"))
     }
+    @Test fun completedExplicitLatestReadScrollsEvenWhenTheLoadedKeysDidNotChange() {
+        val reading = ConversationFollowState(opened = true, following = false, ownSendId = "retained-send",
+            anchor = ConversationAnchor("event:first", 42, false))
+        assertNull(ConversationViewport.content(reading, keys, reading.ownSendId, null).index)
+        val result = ConversationViewport.loadedLatest(reading, keys, false, "")
+        assertEquals(keys.lastIndex, result.index)
+        assertTrue(result.state.opened)
+        assertTrue(result.state.following)
+        assertNull(result.state.anchor)
+        assertEquals("retained-send", result.state.ownSendId)
+        assertEquals("", result.failure)
+    }
+    @Test fun cachedMiddlePageDoesNotPretendItReachedLatestOrDiscardReadingAnchor() {
+        val reading = ConversationFollowState(opened = true, following = false,
+            anchor = ConversationAnchor("event:first", 42, false))
+        val result = ConversationViewport.loadedLatest(reading, keys, true, "")
+        assertNull(result.index)
+        assertEquals(reading, result.state)
+        assertTrue(result.failure.contains("latest messages"))
+        assertTrue(result.failure.contains("Refresh"))
+    }
+    @Test fun failedExplicitLatestReadKeepsItsSpecificFailureAndReadingPosition() {
+        val reading = ConversationFollowState(opened = true, following = false,
+            anchor = ConversationAnchor("event:first", 42, false))
+        val failure = "Message history is still indexing. Try again shortly."
+        val result = ConversationViewport.loadedLatest(reading, keys, true, failure)
+        assertNull(result.index)
+        assertEquals(reading, result.state)
+        assertTrue(result.failure.endsWith(failure))
+        val retried = ConversationViewport.loadedLatest(result.state, keys + "new-tail", false, "")
+        assertEquals(keys.size, retried.index)
+        assertTrue(retried.state.following)
+    }
+    @Test fun emptyLatestResultRemainsAnActionableFailureRatherThanConsumingOpening() {
+        val unopened = ConversationFollowState()
+        val result = ConversationViewport.loadedLatest(unopened, emptyList(), false, "")
+        assertEquals(unopened, result.state)
+        assertNull(result.index)
+        assertTrue(result.failure.contains("No messages"))
+    }
 }

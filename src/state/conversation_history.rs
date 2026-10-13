@@ -20,7 +20,7 @@ const PUBLIC: &[&str] = &[
 ];
 const BUDGET: usize = 2 * 1024 * 1024;
 const ROW_BYTES: usize = 32 * 1024;
-const RECONCILE_VERSION: &str = "2";
+const RECONCILE_VERSION: &str = "3";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -204,7 +204,8 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
  CREATE INDEX IF NOT EXISTS message_candidates ON messages(role,at);
  CREATE TABLE IF NOT EXISTS aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS reconcile_work(id TEXT PRIMARY KEY);").map_err(|e|e.to_string())?;
+ CREATE TABLE IF NOT EXISTS reconcile_work(id TEXT PRIMARY KEY);
+ CREATE INDEX IF NOT EXISTS attachment_candidates ON messages(role,json_extract(body,'$.native_match_hash'));").map_err(|e|e.to_string())?;
     if get(&db, "schema")?.as_deref() != Some("2") {
         let has = db
             .prepare("PRAGMA table_info(messages)")
@@ -285,6 +286,9 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         return Ok(());
     }
     let detail = string(&row, "detail").to_owned();
+    let native_match_hash = if stream != "attachment" && stream != "voice"
+        && ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted"].contains(&string(&row, "type"))
+    { Some(hash(&detail)) } else { None };
     if detail.len() > ROW_BYTES {
         let mut end = ROW_BYTES;
         while !detail.is_char_boundary(end) {
@@ -320,6 +324,9 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         }
     }
     row = public;
+    if let Some(digest) = native_match_hash {
+        row["native_match_hash"] = json!(digest);
+    }
     if string(&row, "message_id").len() > 256 {
         row.as_object_mut().unwrap().remove("message_id");
     }
@@ -333,11 +340,11 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         .optional()
         .map_err(|e| e.to_string())?;
     if let Some(id) = existing {
-        // Native provenance aliases can point at a permanent voice card. A
-        // subsequent provider refresh must not replace it with a text-only row.
+        // Native provenance aliases can point at a permanent media card. A
+        // provider refresh must not replace its receipt with a text-only row.
         let owner: String = db.query_row("SELECT stream FROM messages WHERE id=?", [&id], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if owner == "voice" && stream != "voice" { return Ok(()); }
+        if (owner == "voice" && stream != "voice") || (owner == "attachment" && stream != "attachment") { return Ok(()); }
         if stream == "provider" || stream == "attachment" || stream == "voice" {
             let old: usize = db
                 .query_row(
@@ -420,6 +427,13 @@ fn queue(db: &Connection, id: &str, at: f64) -> Result<()> {
     db.execute("INSERT OR IGNORE INTO reconcile_work(id) VALUES(?)", [id])
         .map_err(|e| e.to_string())?;
     db.execute("INSERT OR IGNORE INTO reconcile_work(id) SELECT id FROM messages WHERE stream IN ('provider','attachment') AND at BETWEEN ? AND ?",params![at-10.,at+10.]).map_err(|e|e.to_string())?;
+    // A queued native acknowledgement may arrive minutes after terminal input.
+    // The receipt's exact expanded text includes its immutable staged paths.
+    queue_attachment(db, id)?;
+    Ok(())
+}
+fn queue_attachment(db: &Connection, id: &str) -> Result<()> {
+    db.execute("INSERT OR IGNORE INTO reconcile_work(id) SELECT candidate.id FROM messages candidate JOIN messages added ON added.id=? WHERE candidate.role='outgoing' AND candidate.stream='attachment' AND candidate.id<>added.id AND json_extract(candidate.body,'$.native_match_hash')=json_extract(added.body,'$.native_match_hash')", [id]).map_err(|e|e.to_string())?;
     Ok(())
 }
 fn paths(record: &Value) -> Result<Vec<PathBuf>> {
@@ -829,9 +843,10 @@ fn merge_row(db: &Connection, first: &str, second: &str, body: &str, kind: &str)
         set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
         set(db, "order_reset", "canonical_merge")?;
     }
+    let attachment = serde_json::from_str::<Value>(body).ok().is_some_and(|row| row["source"] == "hgs_delivery");
     db.execute(
-        "UPDATE messages SET body=?,kind=? WHERE id=?",
-        params![body, kind, keep],
+        "UPDATE messages SET body=?,kind=?,stream=CASE WHEN ? THEN 'attachment' ELSE stream END WHERE id=?",
+        params![body, kind, attachment, keep],
     )
     .map_err(|e| e.to_string())?;
     db.execute("UPDATE aliases SET id=? WHERE id=?", params![keep, remove])
@@ -845,6 +860,7 @@ fn merge_row(db: &Connection, first: &str, second: &str, body: &str, kind: &str)
         .map_err(|e| e.to_string())?;
     db.execute("DELETE FROM reconcile_work WHERE id=?", [remove])
         .map_err(|e| e.to_string())?;
+    queue_attachment(db, keep)?;
     Ok(())
 }
 /// Hook detail() uses journal::clipped(...,journal::REPLY_LIMIT), and 1200 in
@@ -871,7 +887,7 @@ fn advance_reconcile_upgrade(db: &Connection) -> Result<bool> {
     }
     let offset = get(db, "reconcile_upgrade_after")?.unwrap_or_default();
     let mut query = db
-        .prepare("SELECT id,role,stream FROM messages WHERE id>? ORDER BY id LIMIT 256")
+        .prepare("SELECT id,role,stream,body FROM messages WHERE id>? ORDER BY id LIMIT 256")
         .map_err(|e| e.to_string())?;
     let rows = query
         .query_map([offset], |r| {
@@ -879,18 +895,29 @@ fn advance_reconcile_upgrade(db: &Connection) -> Result<bool> {
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    for (id, role, stream) in &rows {
-        if role == "incoming" && stream == "provider" {
+    for (id, role, stream, body) in &rows {
+        let mut row: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+        if role == "outgoing" && !["attachment", "voice"].contains(&stream.as_str()) {
+            if row["source"] == "hgs_delivery" {
+                db.execute("UPDATE messages SET stream='attachment' WHERE id=?", [id]).map_err(|e|e.to_string())?;
+            } else if string(&row, "native_match_hash").is_empty() {
+                row["native_match_hash"] = json!(hash(string(&row, "detail")));
+                db.execute("UPDATE messages SET body=? WHERE id=?", params![row.to_string(),id]).map_err(|e|e.to_string())?;
+            }
+        }
+        if role == "outgoing" { queue_attachment(db, id)?; }
+        if (role == "incoming" && stream == "provider") || (role == "outgoing" && row["source"] == "hgs_delivery") {
             db.execute("INSERT OR IGNORE INTO reconcile_work(id) VALUES(?)", [id])
                 .map_err(|e| e.to_string())?;
         }
     }
-    if let Some((id, _, _)) = rows.last() {
+    if let Some((id, _, _, _)) = rows.last() {
         set(db, "reconcile_upgrade_after", id)?;
     }
     Ok(rows.len() < 256)
@@ -911,6 +938,27 @@ fn finish_reconcile_upgrade(db: &Connection, scan_done: bool) -> Result<bool> {
     }
     Ok(!pending)
 }
+/// Expanded attachment text is receipt-specific, so delayed acknowledgements
+/// use its exact digest rather than a timestamp or a user-text prefix. Ambiguous
+/// native copies/receipts stay separate until their provenance is resolved.
+fn reconcile_attachment(db: &Connection, id: &str, value: &Value, body: &str) -> Result<()> {
+    let digest = string(value, "native_match_hash");
+    if digest.is_empty() { return Ok(()); }
+    let mut query = db.prepare("SELECT id,stream,kind FROM messages WHERE role='outgoing' AND json_extract(body,'$.native_match_hash')=? LIMIT 33").map_err(|e|e.to_string())?;
+    let candidates = query.query_map([digest], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
+        .map_err(|e|e.to_string())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    if candidates.len() > 32 { return Ok(()); }
+    let receipts = candidates.iter().filter(|(_,stream,_)| stream == "attachment").count();
+    let native: Vec<_> = candidates.iter().filter(|(other,stream,kind)| other != id && !["attachment","voice"].contains(&stream.as_str())
+        && ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&kind.as_str())).collect();
+    if receipts == 1 {
+        if let [native] = native.as_slice() {
+            merge_row(db, &native.0, id, body, string(value,"type"))?;
+        }
+    }
+    Ok(())
+}
+
 fn reconcile(db: &Connection) -> Result<()> {
     // A work queue handles either arrival order, body revisions and deleted-ID
     // reuse. Candidate uniqueness is checked across the full canonical index.
@@ -932,7 +980,12 @@ fn reconcile(db: &Connection) -> Result<()> {
         if let (Some(at), Some(role), Some(stream), Some(body)) = (at, role, stream, body) {
             if ["provider", "attachment"].contains(&stream.as_str()) {
                 let value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
-                let radius = if stream == "attachment" { 10. } else { 3. };
+                if stream == "attachment" {
+                    reconcile_attachment(db, id, &value, body)?;
+                    db.execute("DELETE FROM reconcile_work WHERE id=?", [id]).map_err(|e|e.to_string())?;
+                    continue;
+                }
+                let radius = 3.;
                 let count:i64=db.query_row("SELECT count(*) FROM (SELECT 1 FROM messages WHERE role=? AND at BETWEEN ? AND ? LIMIT 33)",params![role,at-radius,at+radius],|r|r.get(0)).map_err(|e|e.to_string())?;
                 if count <= 32 {
                     let mut near=db.prepare("SELECT id,stream,kind,body FROM messages WHERE role=? AND at BETWEEN ? AND ?").map_err(|e|e.to_string())?;
@@ -949,9 +1002,7 @@ fn reconcile(db: &Connection) -> Result<()> {
                         .collect::<std::result::Result<Vec<_>, _>>()
                         .map_err(|e| e.to_string())?;
                     let matches = |text: &str| {
-                        if stream == "attachment" {
-                            hash(text) == string(&value, "native_match_hash")
-                        } else if role == "incoming" {
+                        if role == "incoming" {
                             stop_excerpt_matches(string(&value, "detail"), text)
                         } else {
                             text == string(&value, "detail")
@@ -961,28 +1012,11 @@ fn reconcile(db: &Connection) -> Result<()> {
                         .iter()
                         .filter(|(other, source, kind, text)| {
                             other != id
-                                && if stream == "attachment" {
-                                    source != "attachment" && source != "voice"
-                                        && [
-                                            "UserPromptSubmit",
-                                            "UserPromptQueued",
-                                            "UserMessage",
-                                            "TurnStarted",
-                                        ]
-                                        .contains(&kind.as_str())
+                                && source == "journal"
+                                && if role == "incoming" {
+                                    kind == "Stop"
                                 } else {
-                                    source == "journal"
-                                        && if role == "incoming" {
-                                            kind == "Stop"
-                                        } else {
-                                            [
-                                                "UserPromptSubmit",
-                                                "UserPromptQueued",
-                                                "UserMessage",
-                                                "TurnStarted",
-                                            ]
-                                            .contains(&kind.as_str())
-                                        }
+                                    ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted"].contains(&kind.as_str())
                                 }
                                 && serde_json::from_str::<Value>(text)
                                     .ok()
@@ -997,10 +1031,7 @@ fn reconcile(db: &Connection) -> Result<()> {
                             .filter(|(_, source, _, text)| {
                                 source == stream
                                     && serde_json::from_str::<Value>(text).ok().is_some_and(|row| {
-                                        if stream == "attachment" {
-                                            string(&row, "native_match_hash")
-                                                == string(&value, "native_match_hash")
-                                        } else if role == "incoming" {
+                                        if role == "incoming" {
                                             stop_excerpt_matches(
                                                 string(&row, "detail"),
                                                 string(&hook_value, "detail"),
@@ -1676,6 +1707,108 @@ mod tests {
             first_rows[0]["at"].as_f64().unwrap()
         );
     }
+    fn attachment_row(id: &str, submitted: &str, at: f64) -> Value {
+        json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":id,"at":at,
+            "detail":"Compare images","submitted_text":"Compare images","native_match_hash":hash(submitted),
+            "attachments":[{"request_id":id,"index":0,"name":"image.png","mime":"image/png","bytes":120}]})
+    }
+    #[test]
+    fn delayed_attachment_native_acknowledgements_merge_in_either_order_and_survive_refresh() {
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        for native_first in [false, true] {
+            let db = database();
+            if native_first {
+                add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+                reconcile(&db).unwrap();
+            }
+            add(&db,"scope",attachment_row("receipt",submitted,100.),"attachment").unwrap();
+            reconcile(&db).unwrap();
+            if !native_first {
+                add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+                reconcile(&db).unwrap();
+            }
+            let result = page(&db,&request(),true,Some(0),json!({})).unwrap();
+            assert_eq!(result["events"].as_array().unwrap().len(),1);
+            assert_eq!(result["events"][0]["detail"],"Compare images");
+            assert!(result["events"][0]["original_ids"].as_array().unwrap().len()>=2);
+            add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+            reconcile(&db).unwrap();
+            let refreshed = page(&db,&request(),true,Some(0),json!({})).unwrap();
+            assert_eq!(refreshed["events"][0]["detail"],"Compare images");
+            assert!(!refreshed.to_string().contains("/synthetic/"));
+        }
+    }
+    #[test]
+    fn delayed_attachment_retries_after_provider_and_journal_acknowledgements_reconcile() {
+        let db = database();
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+        add(&db,"scope",row("UserPromptSubmit","hook",submitted,203.),"journal").unwrap();
+        add(&db,"scope",attachment_row("receipt",submitted,100.),"attachment").unwrap();
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        let result = page(&db,&request(),true,Some(0),json!({})).unwrap();
+        assert_eq!(result["events"].as_array().unwrap().len(),1);
+        assert_eq!(result["events"][0]["detail"],"Compare images");
+        assert!(!result.to_string().contains("/synthetic/"));
+        assert_eq!(result["events"][0]["original_ids"].as_array().unwrap().iter()
+            .filter(|value| value.as_str().is_some_and(|id| id.starts_with("provider:") || id.starts_with("journal:") || id.starts_with("attachment:"))).count(),3);
+    }
+
+    #[test]
+    fn delayed_attachment_hash_uses_full_native_text_before_public_row_clipping() {
+        let db = database();
+        let submitted = "Ж".repeat(ROW_BYTES) + "\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        add(&db,"scope",row("UserMessage","native",&submitted,202.),"provider").unwrap();
+        let body: String = db.query_row("SELECT body FROM messages",[],|r|r.get(0)).unwrap();
+        let native: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(native["detail_truncated"],true);
+        assert_eq!(native["native_match_hash"],hash(&submitted));
+        // An upgrade in progress must not replace an already-complete hash
+        // with the digest of the clipped public display text.
+        advance_reconcile_upgrade(&db).unwrap();
+        add(&db,"scope",attachment_row("receipt",&submitted,100.),"attachment").unwrap();
+        reconcile(&db).unwrap();
+        let result = page(&db,&request(),true,Some(0),json!({})).unwrap();
+        assert_eq!(result["events"].as_array().unwrap().len(),1);
+        assert_eq!(result["events"][0]["detail"],"Compare images");
+        assert!(!result.to_string().contains("/synthetic/"));
+    }
+
+    #[test]
+    fn delayed_attachment_matching_preserves_ambiguous_and_independent_sends() {
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        for duplicate in ["native", "receipt", "independent"] {
+            let db = database();
+            add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+            add(&db,"scope",attachment_row("receipt",submitted,100.),"attachment").unwrap();
+            match duplicate {
+                "native" => add(&db,"scope",row("UserMessage","other",submitted,203.),"provider").unwrap(),
+                "receipt" => add(&db,"scope",attachment_row("other",submitted,99.),"attachment").unwrap(),
+                _ => add(&db,"scope",row("UserMessage","other",&submitted.replace("request-one","request-two"),203.),"provider").unwrap(),
+            }
+            reconcile(&db).unwrap();
+            let count: i64 = db.query_row("SELECT count(*) FROM messages",[],|r|r.get(0)).unwrap();
+            assert_eq!(count,if duplicate=="independent" {2} else {3},"{duplicate}");
+        }
+    }
+    #[test]
+    fn cached_delayed_attachment_pairs_upgrade_without_resetting_read_epoch() {
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        let db = database();
+        add(&db,"scope",row("UserMessage","native",submitted,202.),"provider").unwrap();
+        add(&db,"scope",attachment_row("receipt",submitted,100.),"attachment").unwrap();
+        // Previous schema had no exact hash on native outgoing rows.
+        db.execute("UPDATE messages SET body=json_remove(body,'$.native_match_hash') WHERE stream='provider'",[]).unwrap();
+        db.execute("DELETE FROM reconcile_work",[]).unwrap();
+        set(&db,"reconcile_version","2").unwrap();
+        let epoch = get(&db,"epoch").unwrap();
+        let scan = advance_reconcile_upgrade(&db).unwrap();
+        reconcile(&db).unwrap();
+        assert!(finish_reconcile_upgrade(&db,scan).unwrap());
+        assert_eq!(get(&db,"epoch").unwrap(),epoch);
+        assert_eq!(db.query_row("SELECT count(*) FROM messages",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+
     #[test]
     fn hook_clipping_recognizes_unicode_scalar_limit_only() {
         for prefix in ["x".repeat(1200), "🧭Ж🙂α".repeat(300), "Ж".repeat(journal::REPLY_LIMIT)] {

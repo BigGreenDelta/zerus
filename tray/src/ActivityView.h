@@ -119,7 +119,7 @@ private:
     QJsonArray m_events, m_localMessages;
     QHash<QString, bool> m_expanded;
     QHash<QString, QString> m_fileLinks;
-    QHash<QString, QString> m_deliveryKeys;
+    QHash<QString, QString> m_deliveryKeys, m_attachmentBindings;
     QHash<QString, QJsonObject> m_attachmentLinks;
     QHash<QString, QJsonObject> m_voiceLinks;
     QMediaPlayer *m_voicePlayer = nullptr;

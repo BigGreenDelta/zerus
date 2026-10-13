@@ -88,6 +88,32 @@ class RollingConversationHistoryTest {
         val unrelated = previous.single().copy(at = 20.0)
         assertEquals(2, RollingConversationHistory.merge(target, target, listOf(unrelated), incoming).events.size)
     }
+    @Test fun delayedAttachmentAcknowledgementUsesExactExpandedPathsAndPreservesIndependentSends() {
+        val text = "Compare images"
+        val submitted = text + "\n\nInspect the attached image at \"/synthetic/request-one/image.png\""
+        val prompt = JSONObject().put("type", "UserPromptSubmit").put("seq", 1).put("at", 202).put("detail", submitted)
+        val receipt = JSONObject().put("type", "UserPromptSubmit").put("source", "hgs_delivery").put("message_id", "receipt").put("at", 100)
+            .put("submitted_text", submitted).put("detail", text)
+            .put("attachments", JSONArray().put(JSONObject().put("name", "image.png").put("mime", "image/png").put("bytes", 120)))
+        val previous = NativeParser.events(JSONObject().put("events", JSONArray().put(prompt)))
+        val incoming = NativeParser.events(JSONObject().put("attachment_messages", JSONArray().put(receipt)))
+        val rolling = RollingConversationHistory.merge(target,target,previous,incoming)
+        assertEquals(listOf(text),rolling.events.map { it.text })
+        assertEquals(mapOf(previous.single().id to incoming.single().id),rolling.supersededIds)
+        val joint = NativeParser.events(JSONObject().put("events",JSONArray().put(prompt)).put("attachment_messages",JSONArray().put(receipt)))
+        assertEquals(listOf(text),joint.map { it.text })
+        assertEquals(listOf(previous.single().id),joint.single().originalIds)
+        assertEquals(202.0,joint.single().at,0.0)
+        assertEquals(1,RollingConversationHistory.merge(target,target,previous,joint).events.size)
+        val independent = previous.single().copy(id="journal:other",text=submitted.replace("request-one","request-two"),at=203.0)
+        assertEquals(2,RollingConversationHistory.merge(target,target,previous+independent,incoming).events.size)
+        val ambiguous = previous.single().copy(id="journal:other")
+        assertEquals(3,RollingConversationHistory.merge(target,target,previous+ambiguous,incoming).events.size)
+        val otherReceipt = JSONObject(receipt.toString()).put("message_id","other-receipt")
+        assertEquals(3,NativeParser.events(JSONObject().put("events",JSONArray().put(prompt))
+            .put("attachment_messages",JSONArray().put(receipt).put(otherReceipt))).size)
+    }
+
     @Test fun uniqueProviderSupersessionExportsReadIdentityButAmbiguousRepliesDoNot() {
         val target = Target("computer", "session", "run", "conversation", "workspace")
         val hook = Event("journal:hook:Stop", "AgentMessage", "Excerpt", "", 2.0, nativeType = "Stop")

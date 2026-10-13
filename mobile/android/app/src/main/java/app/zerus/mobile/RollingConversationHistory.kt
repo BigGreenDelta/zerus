@@ -51,10 +51,10 @@ object RollingConversationHistory {
         reconciled.filter { it.source == "hgs_delivery" && it.role == "You" && it.requestId.isNotBlank() && it.submittedText.isNotBlank() }.forEach { receipt ->
             val candidates = reconciled.filter { it.id !in replaced && it.role == "You" && it.requestId.isBlank() &&
                 it.nativeType in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
-                it.text.trim() == receipt.submittedText.trim() && kotlin.math.abs(it.at - receipt.at) <= 10 }
+                AttachmentReceiptMatch.matches(receipt, it) }
             val candidate = candidates.singleOrNull()
             val competing = reconciled.count { other -> other.source == "hgs_delivery" && other.role == "You" && other.requestId.isNotBlank() &&
-                other.submittedText.trim() == receipt.submittedText.trim() && candidate != null && kotlin.math.abs(other.at - candidate.at) <= 10 }
+                candidate != null && AttachmentReceiptMatch.matches(other, candidate) }
             if (candidate != null && competing == 1) {
                 replaced += candidate.id
                 superseded[candidate.id] = receipt.id
@@ -78,6 +78,21 @@ object RollingConversationHistory {
         val events = retained.toList()
         val kept = events.map { it.id }.toSet()
         return Result(events, truncated, superseded.filterValues { it in kept }.toMap())
+    }
+}
+
+/** Match the exact transport expansion, never strip attachment-looking user text. */
+internal object AttachmentReceiptMatch {
+    private val instruction = Regex("""(?:Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)+")""")
+    fun matches(receipt: Event, native: Event): Boolean {
+        val submitted = receipt.submittedText.trim()
+        if (submitted.isBlank() || native.text.trim() != submitted) return false
+        if (kotlin.math.abs(native.at - receipt.at) <= 10) return true
+        // Full expansions contain distinct immutable staged paths; a queued
+        // acknowledgement can occur long after its accepted terminal input.
+        val paths = instruction.findAll(submitted).map { it.groupValues[1] }.toList()
+        return receipt.attachments.isNotEmpty() && submitted != receipt.text.trim() &&
+            paths.size >= receipt.attachments.size && paths.distinct().size == paths.size
     }
 }
 

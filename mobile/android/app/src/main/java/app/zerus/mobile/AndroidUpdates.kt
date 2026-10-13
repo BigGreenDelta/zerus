@@ -23,7 +23,8 @@ import java.util.concurrent.TimeUnit
 
 data class UpdateState(val status: String = "loading", val available: AndroidUpdate? = null,
     val downloaded: AndroidUpdate? = null, val lastCheck: Long = 0, val sessionId: Int = -1,
-    val nonce: String = "", val error: String = "", val bytes: Long = 0, val channel: String = "dev")
+    val nonce: String = "", val error: String = "", val bytes: Long = 0, val channel: String = "dev",
+    val installProgress: Float? = null)
 
 class AndroidUpdates private constructor(private val context: Context) {
     companion object {
@@ -86,8 +87,15 @@ class AndroidUpdates private constructor(private val context: Context) {
         if(current.available != null && version >= current.available.versionCode) { current=current.copy(available=null);save(current) }
         if(current.downloaded != null && installed().versionCode >= current.downloaded.versionCode) {
             save(current.copy(status="installed",available=current.available?.takeIf { it.versionCode>version },downloaded=null,sessionId=-1,nonce="",error=""));apk.delete();confirmation=null
-        } else if(current.sessionId >= 0 && installer.getSessionInfo(current.sessionId) == null) {
-            save(current.copy(status=if(current.downloaded != null) "downloaded" else "idle",sessionId=-1,nonce="",error="Android ended the previous install session. No update was repeated."));confirmation=null
+        } else if(current.sessionId >= 0) {
+            val session=installer.getSessionInfo(current.sessionId)
+            if(session == null && current.status=="awaiting_result") {
+                // Session removal can precede the observable replacement package or its callback.
+                // Keep the accepted installation pending until exact outcome or explicit cancellation.
+                state.value=current.copy(installProgress=null)
+            } else if(session == null) {
+                save(current.copy(status=if(current.downloaded != null) "downloaded" else "idle",sessionId=-1,nonce="",error="Android ended the previous install session. No update was repeated.",installProgress=null));confirmation=null
+            } else state.value=current.copy(installProgress=session.progress.takeIf { it.isFinite() }?.coerceIn(0f,1f))
         }
     } }
     suspend fun check(manual: Boolean = false) = withContext(Dispatchers.IO) { mutex.withLock {
@@ -177,13 +185,28 @@ class AndroidUpdates private constructor(private val context: Context) {
         }
         id
     } }
+    /** Consume the exact prompt before launching it, so a second tap or callback cannot reopen it. */
+    suspend fun openConfirmation(sessionId: Int, onOpen: (Intent) -> Unit): Boolean = withContext(Dispatchers.IO) { mutex.withLock {
+        load();val old=state.value;val intent=confirmation
+        if(!UpdateInstallGuard.canOpenConfirmation(sessionId,old.sessionId,old.status,intent != null)) return@withLock false
+        // Persist before the external Activity: interruption keeps this session pending, never recommits it.
+        save(old.copy(status="awaiting_result",error=""))
+        var opened=false
+        try { withContext(Dispatchers.Main.immediate) { onOpen(checkNotNull(intent));opened=true;confirmation=null } }
+        catch(e:Exception) {
+            // Cancellation on the return to IO cannot revive a prompt Android already accepted.
+            if(!opened) save(state.value.copy(status="confirmation"))
+            throw e
+        }
+        true
+    } }
     suspend fun cancelInstall() = withContext(Dispatchers.IO) { mutex.withLock {
         load();val old=state.value
         if(old.downloaded != null && installed().versionCode>=old.downloaded.versionCode) {
             save(old.copy(status="installed",available=null,downloaded=null,sessionId=-1,nonce="",error=""));apk.delete();confirmation=null;return@withLock
         }
-        if(old.sessionId >= 0) try { installer.abandonSession(old.sessionId) } catch(e:Exception) {
-            if(old.downloaded == null || installed().versionCode<old.downloaded.versionCode) throw e
+        if(old.sessionId >= 0 && installer.getSessionInfo(old.sessionId) != null) try { installer.abandonSession(old.sessionId) } catch(e:Exception) {
+            if(installer.getSessionInfo(old.sessionId) != null && (old.downloaded == null || installed().versionCode<old.downloaded.versionCode)) throw e
         }
         if(old.downloaded != null && installed().versionCode>=old.downloaded.versionCode) {
             save(old.copy(status="installed",available=null,downloaded=null,sessionId=-1,nonce="",error=""));apk.delete();confirmation=null;return@withLock
@@ -195,6 +218,7 @@ class AndroidUpdates private constructor(private val context: Context) {
         if(!UpdateInstallGuard.ownsCallback(old.sessionId,old.nonce,intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID,-1),intent.getStringExtra("nonce"))) return@withLock
         when(intent.getIntExtra(PackageInstaller.EXTRA_STATUS,PackageInstaller.STATUS_FAILURE)) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                if(old.status=="awaiting_result") return@withLock
                 @Suppress("DEPRECATION") val action=intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                 confirmation=action
                 save(old.copy(status="confirmation",error=""))

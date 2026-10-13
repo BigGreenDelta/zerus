@@ -482,7 +482,7 @@ struct ActivityRenderResult {
     QJsonObject m_details, m_searchResult;
     QJsonArray m_events, m_localMessages;
     QHash<QString, bool> m_expanded;
-    QHash<QString, QString> m_fileLinks, m_deliveryKeys, m_copyTexts;
+    QHash<QString, QString> m_fileLinks, m_deliveryKeys, m_attachmentBindings, m_copyTexts;
     QHash<QString, QJsonObject> m_attachmentLinks, m_previewFiles, m_voiceLinks;
     QHash<QString,int> m_voicePositions;
     QString m_voiceError;
@@ -530,7 +530,37 @@ struct ActivityRenderResult {
     for(const auto &value:details.value("attachment_messages").toArray()) {
         const auto receipt=value.toObject();if(receipt.value("source")!="hgs_delivery" || receipt.value("attachments").toArray().isEmpty())continue;
         const auto submitted=receipt.value("submitted_text").toString().trimmed();int match=-1;double nearest=10.;
-        for(int i=0;i<m_events.size();++i) {
+        QList<int> exact;
+        if (!submitted.isEmpty()) for (int i = 0; i < m_events.size(); ++i) {
+            const auto event = m_events[i].toObject();
+            if (event.value("source") != "hgs_voice" && event.value("agent_id").toString().isEmpty()
+                && event.value("attachments").toArray().isEmpty()
+                && QStringList{"UserPromptSubmit", "UserPromptQueued", "TurnStarted"}.contains(event.value("type").toString())
+                && event.value("detail").toString().trimmed() == submitted) exact.append(i);
+        }
+        // Staged attachment paths make the complete submitted text specific to
+        // this receipt, even when a queued native prompt is acknowledged later.
+        int competing = 0;
+        for (const auto &other : details.value("attachment_messages").toArray())
+            if (other.toObject().value("submitted_text").toString().trimmed() == submitted) ++competing;
+        const auto requestId = receipt.value("message_id").toString();
+        if (competing == 1) {
+            const auto bound = m_attachmentBindings.value(requestId);
+            for (const auto candidate : exact)
+                if (!bound.isEmpty() && eventKey(m_events[candidate].toObject()) == bound) match = candidate;
+            if (match < 0 && exact.size() == 1) match = exact.first();
+            // Adjacent submission/turn-start hooks acknowledge one prompt.
+            // Two separate submission IDs are kept independently.
+            if (match < 0 && exact.size() == 2 && exact[1] == exact[0] + 1) {
+                const auto first = m_events[exact[0]].toObject(), second = m_events[exact[1]].toObject();
+                if (QStringList{"UserPromptSubmit", "UserPromptQueued"}.contains(first.value("type").toString())
+                    && second.value("type") == "TurnStarted"
+                    && first.value("seq").toInteger() > 0 && second.value("seq").toInteger() == first.value("seq").toInteger() + 1)
+                    match = exact[0];
+            }
+        }
+        if (match >= 0 && !requestId.isEmpty()) m_attachmentBindings.insert(requestId, eventKey(m_events[match].toObject()));
+        for(int i=0;match < 0 && exact.isEmpty() && i<m_events.size();++i) {
             const auto event=m_events[i].toObject();const auto body=event.value("detail").toString().trimmed();
             const double distance=qAbs(event.value("at").toDouble()-receipt.value("at").toDouble());
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
@@ -588,7 +618,31 @@ struct ActivityRenderResult {
         // Keep the cached file attached to that event, not as a second message.
         int match=-1;double nearest=10.;
         const auto submitted=message.value("submitted_text").toString(message.value("text").toString()).trimmed();
-        if(message.value("status")=="sent")for(int i=0;i<sourceEvents.size();++i) {
+        QList<int> exact;
+        if (message.value("status") == "sent" && !message.value("attachments").toArray().isEmpty()) {
+            for (int i = 0; i < sourceEvents.size(); ++i) {
+                const auto event = sourceEvents[i].toObject();
+                if (event.value("source") != "hgs_voice" && event.value("agent_id").toString().isEmpty()
+                    && event.value("attachments").toArray().isEmpty()
+                    && QStringList{"UserPromptSubmit", "UserPromptQueued", "TurnStarted"}.contains(event.value("type").toString())
+                    && !submitted.isEmpty() && event.value("detail").toString().trimmed() == submitted) exact.append(i);
+            }
+            int competing = 0;
+            for (const auto &other : localMessages) {
+                const auto candidate = other.toObject();
+                if (candidate.value("status") == "sent" && !candidate.value("attachments").toArray().isEmpty()
+                    && candidate.value("submitted_text").toString(candidate.value("text").toString()).trimmed() == submitted) ++competing;
+            }
+            if (competing == 1) {
+                const auto bound = m_attachmentBindings.value(message.value("message_id").toString());
+                for (const auto candidate : exact)
+                    if (!bound.isEmpty() && eventKey(sourceEvents[candidate].toObject()) == bound) match = candidate;
+                if (match < 0 && exact.size() == 1) match = exact.first();
+                if (match >= 0 && !message.value("message_id").toString().isEmpty())
+                    m_attachmentBindings.insert(message.value("message_id").toString(), eventKey(sourceEvents[match].toObject()));
+            }
+        }
+        if(message.value("status")=="sent" && match < 0 && exact.isEmpty())for(int i=0;i<sourceEvents.size();++i) {
             const auto event=sourceEvents[i].toObject();
             if(!event.value("agent_id").toString().isEmpty() || !QStringList{"UserPromptSubmit","UserPromptQueued","TurnStarted"}.contains(event.value("type").toString()))continue;
             const auto body=event.value("detail").toString().trimmed();
@@ -1121,7 +1175,7 @@ void ActivityView::setSessionKey(const QString &key)
     m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
     m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
     m_attachmentLinks.clear();m_fileLinks.clear();
-    m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
+    m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear(); m_attachmentBindings.clear();
     m_messageActions.clear(); m_copyTexts.clear();
     m_localMessages = {}; m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
     m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
@@ -1158,7 +1212,7 @@ void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &eve
         if(m_voicePlayer)m_voicePlayer->stop();
         m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceLinks.clear();m_voicePositions.clear();
         m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
-        m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear();
+        m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear(); m_attachmentBindings.clear();
         m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
         m_fileLinks.clear(); m_attachmentLinks.clear(); m_messageActions.clear(); m_copyTexts.clear();
         clearDocument();
@@ -1630,7 +1684,7 @@ void ActivityView::startRender()
     result->m_details = m_details; result->m_searchResult = m_searchResult;
     result->m_events = m_events; result->m_localMessages = m_localMessages;
     result->m_fallbackPrompt = m_fallbackPrompt;
-    result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys;
+    result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys; result->m_attachmentBindings = m_attachmentBindings;
     result->m_previews = m_previews;
     result->m_voiceError=m_voiceError;
     result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale;
@@ -1772,7 +1826,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     m_knownEvents = result->m_knownEvents; m_html = result->m_html;
     m_fileLinks = result->m_fileLinks; m_attachmentLinks = result->m_attachmentLinks;m_voiceLinks=result->m_voiceLinks;m_voicePositions=result->m_voicePositions;
     m_messageActions = result->m_messageActions; m_copyTexts = result->m_copyTexts;
-    m_expanded = result->m_expanded; m_deliveryKeys = result->m_deliveryKeys;
+    m_expanded = result->m_expanded; m_deliveryKeys = result->m_deliveryKeys; m_attachmentBindings = result->m_attachmentBindings;
     m_toggleKeys = result->m_toggleKeys; m_processLinks = result->m_processLinks;
     QStringList requestPreviews;
     for (auto it = result->m_previewFiles.cbegin(); it != result->m_previewFiles.cend(); ++it)

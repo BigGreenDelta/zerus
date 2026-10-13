@@ -237,12 +237,16 @@ object NativeParser {
         } + providers.mapNotNull { item -> parse(item, "provider") })
             .distinctBy { it.id }.toMutableList()
         val used = mutableSetOf<Int>()
-        raw.optJSONArray("attachment_messages")?.objects().orEmpty().forEach { item ->
-            val metadata = parse(item, "attachment") ?: return@forEach
-            val exact = rows.indices.filter { it !in used && rows[it].role == "You" && rows[it].requestId.isBlank() &&
-                item.string("submitted_text").isNotBlank() && rows[it].text.trim() == item.string("submitted_text").trim() &&
-                kotlin.math.abs(rows[it].at - metadata.at) <= 10 }.singleOrNull()
-            if (exact != null) { used += exact; rows[exact] = metadata.copy(at = rows[exact].at) }
+        val receipts = raw.optJSONArray("attachment_messages")?.objects().orEmpty().mapNotNull { parse(it, "attachment") }
+        receipts.forEach { metadata ->
+            val candidate = rows.indices.filter { it !in used && rows[it].role == "You" && rows[it].requestId.isBlank() &&
+                rows[it].nativeType in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
+                AttachmentReceiptMatch.matches(metadata, rows[it]) }.singleOrNull()
+            val exact = candidate?.takeIf { index -> receipts.count { AttachmentReceiptMatch.matches(it, rows[index]) } == 1 }
+            if (exact != null) {
+                used += exact
+                rows[exact] = metadata.copy(at = rows[exact].at, originalIds = (metadata.originalIds + rows[exact].id).distinct().take(8))
+            }
             else if (rows.none { it.role == "You" && it.requestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
         }
         raw.optJSONArray("voice_messages")?.objects().orEmpty().forEach { item ->

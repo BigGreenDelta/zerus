@@ -88,6 +88,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -541,7 +542,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val counts = SessionFilters.counts(scoped, model.machines, drafts)
     val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
     val groups = SessionFilters.grouped(visible, model.projects)
-    val readAllTargets = scoped.filterNot(SessionFilters::archived).map { it.target }
+    val readAllTargets = scoped.map { it.target }.filter(model::listReadAllCandidate)
     val canReadAll = !model.demo && readAllTargets.any(model::canReadAll)
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
@@ -560,12 +561,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 Text(project?.name ?: "Sessions", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
                 TextButton(onClick = {
                     val capturedTargets = readAllTargets.toList()
-                    val result = model.markAllRead(capturedTargets)
+                    val result = model.markAllRead(capturedTargets,visibleRepliesOnly = true)
                     Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_LONG).show()
                 }, enabled = canReadAll, modifier = Modifier.semantics {
                     contentDescription = if (canReadAll) "Read all conversations in the current project, machine and search scope on this phone"
                         else if (model.demo) "Read all unavailable in preview"
-                        else if (readAllTargets.none(model::readAllPending)) "Read all unavailable. Nothing in the current scope is unread on this phone"
+                        else if (readAllTargets.none(model::readAllPending)) "Read all unavailable. No unread replies or review reminders are shown in the current scope"
                         else "Read all unavailable. The current scope needs verified history or loaded replies on this phone"
                 }) { Text("Read all") }
             }
@@ -687,7 +688,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val readReady = model.readPositionReady || model.demo
     val unread = UnreadPresentation.badge(model.unreadCount(target), model.loadedUnreadCount(target))
     var unavailableSaved by remember(target.key) { mutableStateOf(false) }
-    var latestRequested by remember(target.key) { mutableStateOf(false) }
+    var latestPending by remember(target.key) { mutableStateOf(false) }
     var searchNotice by remember(target.key) { mutableStateOf("") }
     val historyReason = if(model.demo) "" else model.historyReason(target)
     val boundedNotice = if(model.historyEpoch.isNotBlank()) {
@@ -745,7 +746,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     suspend fun jump(index: Int, offset: Int = 0) {
         scrollMutex.withLock {
-            if (target.key != currentHistoryTarget) return@withLock
+            if (target.key != currentHistoryTarget || model.selected?.target != target) return@withLock
             programmatic = true
             try { listState.scrollToItem(index.coerceAtLeast(0), offset.coerceAtLeast(0)) }
             finally { programmatic = false }
@@ -765,6 +766,45 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         onJumpConsumed()
     }
     val latestKeys by rememberUpdatedState(keys)
+    val renderedHistory by rememberUpdatedState(Triple(model.conversationEvents,model.hasOlder,model.hasNewer))
+    fun requestLatest() {
+        if(model.selected?.target != target || latestPending || model.hasNewer && model.olderLoading) return
+        val needsHistory = model.hasNewer
+        val reason = if(needsHistory) model.historyReason(target) else ""
+        if(reason.isNotBlank()) {
+            Toast.makeText(context,"Could not reach the latest messages. $reason",Toast.LENGTH_LONG).show()
+            return
+        }
+        // Await this accepted navigation, rather than hoping a content effect sees
+        // a loading transition. A cached/identical read can finish in one frame.
+        latestPending = true
+        scope.launch {
+            try {
+                if(needsHistory) {
+                    val read = model.jumpToLatest(target)
+                    if(read == null) {
+                        if(currentHistoryTarget == target.key && model.selected?.target == target) Toast.makeText(context,
+                            "Could not load the latest messages. ${model.olderError.ifBlank { "Wait for the current history read, then try again." }}",
+                            Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    read.join()
+                    // The read job prepares presentation off-main; its rows and
+                    // paging flags must be installed before choosing the tail.
+                    snapshotFlow { model.selected?.target != target || currentHistoryTarget != target.key || !model.olderLoading &&
+                        renderedHistory == Triple(model.conversationEvents,model.hasOlder,model.hasNewer) }.first { it }
+                }
+                if(model.selected?.target != target || currentHistoryTarget != target.key) return@launch
+                val request = ConversationViewport.loadedLatest(follow,latestKeys,
+                    needsHistory && model.hasNewer,if(needsHistory) model.olderError else "")
+                if(request.failure.isNotBlank()) Toast.makeText(context,request.failure,Toast.LENGTH_LONG).show()
+                else {
+                    follow = request.state
+                    request.index?.let { jump(it) }
+                }
+            } finally { latestPending = false }
+        }
+    }
     LaunchedEffect(target.key, events, questions, ownSendId, model.activityVerified, warning, boundedNotice,
         queueVisible, unreadBoundary, readReady, model.hasNewer, model.olderLoading) {
         if (events.isEmpty() && questions.isEmpty() && raw == null && !model.demo) return@LaunchedEffect
@@ -780,15 +820,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             unavailableSaved = opening.unavailableSaved
             follow = follow.copy(anchor = opening.anchor, following = opening.anchor?.following ?: true)
         }
-        if(latestRequested && !model.olderLoading) {
-            if(model.olderError.isBlank() && !model.hasNewer) follow = ConversationViewport.latest(follow)
-            latestRequested = false
-        }
         if(model.hasNewer && !explicitSend) follow = follow.copy(following = false)
-        if(explicitSend && model.hasNewer && !latestRequested) {
-            latestRequested = true
-            model.jumpToLatest(target)
-        }
+        if(explicitSend && model.hasNewer && !latestPending) requestLatest()
         val request = ConversationViewport.content(follow, keys, ownSendId, ownKey)
         follow = request.state
         if (explicitSend || firstOpen || !listState.isScrollInProgress || programmatic)
@@ -930,7 +963,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 item(key = "history:newer") {
                     if(model.hasNewer) Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.Center) {
                         TextButton(onClick = { model.loadNewer(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Load newer messages") }
-                        TextButton(onClick = { latestRequested = true;model.jumpToLatest(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Latest") }
+                        TextButton(onClick = ::requestLatest,enabled = !latestPending && !model.olderLoading && historyReason.isBlank()) { Text("Latest") }
                     }
                 }
                 if (queueVisible) item(key = "history:queue") { NativeInputQueue(model,target) }
@@ -945,17 +978,19 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 if (loadStatus.spinner && !obscured) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 Text(loadStatus.text, Modifier.semantics { if (!obscured) liveRegion = LiveRegionMode.Polite }, color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
-            if ((!follow.following || model.hasNewer) && (events.isNotEmpty() || questions.isNotEmpty()) &&
+            if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
                 !(questions.isNotEmpty() && cardVisible))
-                ExtendedFloatingActionButton(onClick = {
-                    if(model.hasNewer) { latestRequested = true;model.jumpToLatest(target) }
-                    else { follow = ConversationViewport.latest(follow);scope.launch { jump(latestKeys.lastIndex) } }
-                }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                    containerColor = Color(0xFF2D4142), contentColor = Mint) {
-                    Icon(Icons.Default.KeyboardArrowDown, null)
-                    Text(unread?.let { "${it.text} unread" } ?: "Latest", Modifier.padding(start = 4.dp).semantics {
-                        contentDescription = unread?.description ?: "Jump to latest messages"
-                    }, style = MaterialTheme.typography.labelMedium)
+                FilledTonalButton(onClick = ::requestLatest,enabled = !latestPending && !(model.hasNewer && model.olderLoading),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).heightIn(min = 48.dp).semantics {
+                        contentDescription = "Jump to latest messages"
+                        stateDescription = if(latestPending) "Loading latest messages" else unread?.description.orEmpty()
+                    }, shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF2D4142),contentColor = Mint,
+                        disabledContainerColor = Color(0xFF2D4142),disabledContentColor = Muted)) {
+                    if(latestPending) CircularProgressIndicator(Modifier.size(18.dp),color = Mint,strokeWidth = 2.dp)
+                    else Icon(Icons.Default.KeyboardArrowDown, null)
+                    Text(if(latestPending) "Loading latest…" else unread?.let { "${it.text} unread" } ?: "Latest",
+                        Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
                 }
         }
         if (archived) {

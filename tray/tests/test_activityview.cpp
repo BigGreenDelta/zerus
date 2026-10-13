@@ -238,6 +238,7 @@ private slots:
     void providerErrorsStayVisibleAndStable_data();
     void attachmentsStayWithTheirMessageAndOpenExactFile();
     void repeatedJournalWindowKeepsOneAttachmentMessage();
+    void delayedAttachmentAcknowledgementKeepsOneMessage();
     void voiceMessageRetainsAudioAndExpandableTranscript();
     void voiceWaveformSeeksWithoutRelayout_data();
     void voiceWaveformSeeksWithoutRelayout();
@@ -1481,6 +1482,41 @@ void TestActivityView::repeatedJournalWindowKeepsOneAttachmentMessage()
     view.setTimeline(details, {prompt, journalEvent(3, "Stop", "Compared"), repeated}, {});
     plain = view.browser()->toPlainText();
     QCOMPARE(plain.count(QString::fromUtf8("Посмотри")), 2);
+}
+
+void TestActivityView::delayedAttachmentAcknowledgementKeepsOneMessage()
+{
+    SettledActivityView view; view.setSessionKey("fixture/delayed-attachment");
+    const QString text = "Compare these images";
+    const QString submitted = text + "\n\nInspect the attached image at \"/synthetic/request-one/one.png\"";
+    const QJsonArray files{QJsonObject{{"request_id", "receipt-one"}, {"index", 0}, {"name", "one.png"}, {"mime", "image/png"}, {"bytes", 120}}};
+    const QJsonObject receipt{{"source", "hgs_delivery"}, {"type", "UserPromptSubmit"},
+        {"message_id", "receipt-one"}, {"at", 1791018000.0}, {"detail", text}, {"submitted_text", submitted}, {"attachments", files}};
+    const QJsonObject details{{"conversation_id", "conversation"}, {"attachment_messages", QJsonArray{receipt}}};
+    auto native = journalEvent(2, "UserPromptSubmit", submitted); native["at"] = 1791018102.0;
+    // A locally acknowledged send precedes durable attachment metadata.
+    const QJsonObject local{{"id", "outgoing"}, {"message_id", "receipt-one"}, {"status", "sent"},
+        {"text", text}, {"submitted_text", submitted}, {"submitted_at", 1791018000.0}, {"attachments", files}};
+    view.setTimeline({{"conversation_id", "conversation"}}, {native}, {local});
+    QCOMPARE(view.browser()->toPlainText().count(text),1);
+    QVERIFY(!view.browser()->toPlainText().contains("/synthetic/"));
+    view.setTimeline(details, {}, {}); // durable send exists while native queues input
+    view.setTimeline(details, {journalEvent(1, "PreToolUse", "Running existing turn"), native}, {});
+    auto plain = view.browser()->toPlainText();
+    QCOMPARE(plain.count(text), 1); QCOMPARE(plain.count("one.png"), 1);
+    QVERIFY(!plain.contains("Inspect the attached image")); QVERIFY(!plain.contains("/synthetic/"));
+    // An independent equal-caption send uses different immutable staged files.
+    auto repeated = journalEvent(3, "UserPromptSubmit", text + "\n\nInspect the attached image at \"/synthetic/request-two/two.png\"");
+    repeated["at"] = 1791018103.0;
+    view.setTimeline(details, {native, repeated}, {});
+    plain = view.browser()->toPlainText();
+    QCOMPARE(plain.count(text), 2); QCOMPARE(plain.count("one.png"), 1);
+    QVERIFY(plain.contains("/synthetic/request-two/two.png"));
+    // A cold ambiguous pair has no retained native binding to disambiguate it.
+    view.setSessionKey("fixture/ambiguous-attachment");
+    auto other = native; other["seq"] = 4; other["at"] = 1791018104.0;
+    view.setTimeline(details, {native, other}, {});
+    QCOMPARE(view.browser()->toPlainText().count(text), 3);
 }
 
 void TestActivityView::attachmentThumbnailArrivesWithoutMovingTranscript()

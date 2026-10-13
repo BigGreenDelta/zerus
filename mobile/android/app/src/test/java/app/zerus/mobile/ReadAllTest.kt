@@ -9,6 +9,47 @@ class ReadAllTest {
     private fun evidence(t:Target=target,head:Long=10)=ReadAttentionEvidence(t,"fingerprint","epoch",head,true,emptySet())
     private fun capture(e:ReadAttentionEvidence)=ReadAllCapture(e.target,e)
     private fun session(t:Target=target,raw:JSONObject=JSONObject().put("reply_id","reply"))=Session(t,"Title","codex","idle","Project","reply",0,raw)
+    @Test fun listReadAllWaitsForIntermediateRepliesInsteadOfUsingHiddenUnreadCounts() {
+        val record=ConversationReadRecord(target,epoch="epoch",headIncoming=10,headComplete=true)
+        assertTrue(ReadAllPolicies.changes(record,evidence(),emptyList()))
+        for(raw in listOf(JSONObject().put("activity","busy").put("phase","busy"),
+            JSONObject().put("activity","idle").put("phase","idle").put("subagent_active_count",1))) {
+            raw.put("mobile_unread_reply",true)
+            val working=session(raw=raw)
+            assertFalse(SessionFilters.needsAttention(working,true))
+            assertFalse(ReadAllPolicies.listCandidate(working,true))
+            assertTrue(ReadAllPolicies.listCandidate(working.copy(raw=JSONObject(raw.toString())
+                .put("activity","idle").put("subagent_active_count",0)),true))
+        }
+    }
+    @Test fun localReviewReminderStaysAvailableDuringWorkAndOfflineButArchiveNeverDoes() {
+        val working=session(raw=JSONObject().put("activity","busy"))
+        assertTrue(ReadAllPolicies.listCandidate(working,true,reviewLater=true))
+        assertTrue(ReadAllPolicies.listCandidate(working,false,reviewLater=true))
+        for(flag in listOf("review_later","mobile_review_later"))
+            assertTrue(ReadAllPolicies.listCandidate(working.copy(raw=JSONObject(working.raw.toString()).put(flag,true)),true))
+        assertFalse(ReadAllPolicies.listCandidate(working.copy(target=target.copy(archiveId="archive")),true,reviewLater=true))
+    }
+    @Test fun exactSharedReadReplyIsHiddenButItsIndependentReminderCanStillBeCleared() {
+        val alreadyRead=session(raw=JSONObject().put("activity","idle").put("reply_id","reply")
+            .put("read",JSONObject().put("conversation_id",target.conversation).put("reply_id","reply")))
+        assertFalse(ReadAllPolicies.listCandidate(alreadyRead,true))
+        assertTrue(ReadAllPolicies.listCandidate(alreadyRead,true,reviewLater=true))
+        val newer=alreadyRead.copy(raw=JSONObject(alreadyRead.raw.toString()).put("reply_id","new-reply"))
+        assertTrue(ReadAllPolicies.listCandidate(newer,true))
+    }
+    @Test fun finishedBackgroundCommandsAndOfflineUnreadBadgesKeepTheirExistingScope() {
+        val finished=session(raw=JSONObject().put("activity","idle").put("phase","idle")
+            .put("process_work",JSONObject().put("count",2)).put("unread_reply",true))
+        assertTrue(SessionFilters.visibleUnreadReply(finished,true))
+        assertTrue(ReadAllPolicies.listCandidate(finished,true))
+        assertTrue(SessionFilters.visibleUnreadReply(finished,false))
+        assertTrue(ReadAllPolicies.listCandidate(finished,false))
+        // Questions remain actionable, but the reply reducer still needs actual unread evidence.
+        val question=finished.copy(raw=JSONObject().put("activity","busy").put("phase","input"))
+        assertTrue(SessionFilters.needsAttention(question,true))
+        assertFalse(ReadAllPolicies.listCandidate(question,true))
+    }
     @Test fun batchScopeDeduplicatesWithoutTouchingOtherConversationsOrViewport() {
         val other=target.copy(conversation="other");val outside=target.copy(connectionId="outside")
         val state=ConversationReadState().head(target,"epoch",10,10,true).review(target,true).viewport(target,"anchor",7)

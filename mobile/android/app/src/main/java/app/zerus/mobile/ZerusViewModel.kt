@@ -297,9 +297,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
         installFrame(head.copy(events=window.events,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
     }
-    private fun loadHistory(target:Target,direction:String,cursor:String="") {
-        if(selected?.target != target || olderLoading) return
-        if(target.run.isBlank() || target.conversation.isBlank() || connections.none { it.id==target.connectionId }) { olderError=historyReason(target);return }
+    private fun loadHistory(target:Target,direction:String,cursor:String="",latest:Boolean=false):Job? {
+        if(selected?.target != target || olderLoading) return null
+        if(target.run.isBlank() || target.conversation.isBlank() || connections.none { it.id==target.connectionId }) { olderError=historyReason(target);return null }
         val navigation=navigationId
         lastHistoryRequest=Triple(target,direction,cursor)
         olderLoading=true;olderError=""
@@ -320,6 +320,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(mode=="" && verifiedPage && !page.complete) {
                     androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                         historyIndexing=page.indexing;historyComplete=false;olderLoading=false;readPositionReady=true
+                        if(latest) olderError=if(page.indexing) "Message history is still indexing. Try again shortly."
+                            else "This computer could not provide the latest message history. Refresh to try again."
                         captureUnreadBoundary(target,conversationEvents)
                     }
                     return@launch
@@ -329,7 +331,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val saved=marker?.viewport
                 val noSavedAnchor=saved==null || saved.epoch!=page.epoch || saved.cursor.isBlank()
                 val unreadBeforePage=page.latestIncoming!=null && marker!=null && page.latestIncoming>marker.readThrough && page.hasBefore && (earliest==null || earliest>marker.readThrough+1)
-                if(mode=="" && verifiedPage && page.complete && marker?.established==true && noSavedAnchor && unreadBeforePage && !unreadBoundaryCaptured) {
+                if(!latest && mode=="" && verifiedPage && page.complete && marker?.established==true && noSavedAnchor && unreadBeforePage && !unreadBoundaryCaptured) {
                     readPositionReady=false
                     val unread=historyOnce(target,"unread",JSONArray(listOf(page.epoch,marker!!.readThrough)).toString())
                     observeHistoryHead(unread)
@@ -345,13 +347,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             catch(e:Exception) { if(selected?.target==target && navigationId==navigation) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
             finally { if(!published && selected?.target==target && navigationId==navigation) { olderLoading=false;if(pendingHistoryPosition!=target.key) readPositionReady=true } }
         }
+        return olderJob
     }
     fun loadOlder(target:Target) {
         val window=historyWindows[target.key]
         if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before)
     }
     fun loadNewer(target:Target) { historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) } }
-    fun jumpToLatest(target:Target) { loadHistory(target,"") }
+    fun jumpToLatest(target:Target):Job? = loadHistory(target,"",latest=true)
     private fun restoreSavedWindow(target:Target,navigation:Long) {
         val saved=readState.record(target)?.viewport ?: return
         if(saved.cursor.isBlank()) return
@@ -446,6 +449,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val record=indexedReadRecord(target)
         return ReadAllPolicies.changes(record,readAllEvidence(target),loadedRows(target).orEmpty(),record==null && readState.records.size>=500)
     }
+    fun listReadAllCandidate(target:Target):Boolean = sessions.find { it.target==target }?.let { row ->
+        ReadAllPolicies.listCandidate(row,SessionFilters.online(row,machines),reviewLater(target))
+    } == true
     /** Whether marking this one conversation would use only loaded replies rather than a fresh complete head. */
     fun readAllPartial(target:Target):Boolean=readAllEvidence(target)?.authoritative!=true
     /** Clears only this phone's reminder; read markers stay and nothing is shared with the computer. */
@@ -455,8 +461,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Opening a session's actions asks the bounded head probe to check that row first. */
     fun prepareReadEvidence(target:Target) { if(!demo) watchHistoryHeads(target) }
-    fun markAllRead(targets:List<Target>):ReadAllResult {
-        val distinct=targets.distinctBy(ConversationReadPolicies::key)
+    fun markAllRead(targets:List<Target>,visibleRepliesOnly:Boolean=false):ReadAllResult {
+        // A list's captured scope can outlive its composition. Recheck visibility
+        // before capturing read evidence; incoming work must not be silently cleared.
+        val distinct=targets.distinctBy(ConversationReadPolicies::key).filter { !visibleRepliesOnly || listReadAllCandidate(it) }
         val captured=distinct.map { ReadAllCapture(it,readAllEvidence(it)) }
         val current=distinct.map { ReadAllCapture(it,readAllEvidence(it)) }
         val writer=readWriter ?: return ReadAllResult(skipped=distinct.size)

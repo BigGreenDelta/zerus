@@ -4,7 +4,8 @@ package app.zerus.mobile
 data class ConversationAnchor(val itemKey: String, val offset: Int, val following: Boolean)
 data class ConversationFollowState(val opened: Boolean = false, val following: Boolean = true,
     val ownSendId: String = "", val anchor: ConversationAnchor? = null)
-data class ConversationScroll(val state: ConversationFollowState, val index: Int? = null, val offset: Int = 0)
+data class ConversationScroll(val state: ConversationFollowState, val index: Int? = null, val offset: Int = 0,
+    val failure: String = "")
 
 object ConversationViewport {
     fun content(state: ConversationFollowState, keys: List<String>, ownSendId: String, ownItemKey: String?): ConversationScroll {
@@ -24,4 +25,12 @@ object ConversationViewport {
     fun settled(state: ConversationFollowState,atEnd: Boolean,hasNewer: Boolean): ConversationFollowState =
         if(state.opened && atEnd && !hasNewer) state.copy(following = true,anchor = null) else state
     fun latest(state: ConversationFollowState) = state.copy(following = true, anchor = null)
+    /** An explicit jump consumes its own read result, even when no message or loading key changed. */
+    fun loadedLatest(state: ConversationFollowState, keys: List<String>, hasNewer: Boolean,
+        error: String): ConversationScroll = when {
+        error.isNotBlank() -> ConversationScroll(state, failure = "Could not reach the latest messages. $error")
+        hasNewer -> ConversationScroll(state, failure = "The latest messages are not available in the loaded history. Refresh to try again.")
+        keys.isEmpty() -> ConversationScroll(state, failure = "No messages are available to jump to. Refresh to try again.")
+        else -> ConversationScroll(latest(state).copy(opened = true), keys.lastIndex)
+    }
 }

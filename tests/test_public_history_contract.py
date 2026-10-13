@@ -328,6 +328,71 @@ class PublicHistoryContract(unittest.TestCase):
         self.assertNotIn(private_path, json.dumps(page))
         self.assertNotIn("PRIVATE BYTES", json.dumps(page))
 
+    def test_delayed_attachment_acknowledgement_is_one_public_message_in_either_order(self):
+        receipts = self.state / "input_receipts"
+        receipts.mkdir(mode=0o700)
+        for native_first in (False, True):
+            request_id = str(uuid.uuid4())
+            private_path = str(self.root / "attachments" / request_id / "synthetic.png")
+            text = f"Compare synthetic images {native_first}"
+            submitted = text + f'\n\nInspect the attached image at "{private_path}"'
+            native = self.message(10 + int(native_first), incoming=False, at=1700000202 + int(native_first), text=submitted)
+            receipt = {"status": "submitted", "request_id": request_id, "run_id": self.run,
+                       "conversation_id": self.conversation, "agent_id": "", "submitted_at": 1700000100,
+                       "text": text, "submitted_text": submitted,
+                       "attachments": [{"name": "synthetic.png", "mime": "image/png", "bytes": 120, "path": private_path}]}
+            if native_first:
+                self.append_source([native]); self.complete()
+            path = receipts / f"{request_id}.json"
+            path.write_text(json.dumps(receipt)); path.chmod(0o600)
+            self.complete()
+            if not native_first:
+                self.append_source([native])
+            page = self.complete()
+            matches = [row for row in page["events"] if row["detail"] == text]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0]["message_id"], request_id)
+            self.assertNotIn(private_path, json.dumps(page))
+            self.assertTrue(any(value.startswith("provider:") for value in matches[0]["original_ids"]))
+        self.assertEqual(len(self.complete()["events"]), 2)
+
+    def test_cached_delayed_attachment_projection_repairs_without_changing_epoch(self):
+        request_id = str(uuid.uuid4())
+        private_path = str(self.root / "attachments" / request_id / "synthetic.png")
+        submitted = f'Compare images\n\nInspect the attached image at "{private_path}"'
+        receipts = self.state / "input_receipts"; receipts.mkdir(mode=0o700)
+        receipt = {"status": "submitted", "request_id": request_id, "run_id": self.run,
+                   "conversation_id": self.conversation, "agent_id": "", "submitted_at": 100,
+                   "text": "Compare images", "submitted_text": submitted,
+                   "attachments": [{"name": "synthetic.png", "mime": "image/png", "bytes": 120, "path": private_path}]}
+        path = receipts / f"{request_id}.json"; path.write_text(json.dumps(receipt)); path.chmod(0o600)
+        before = self.complete()
+        # Recreate an already-indexed v2 native row whose delayed hash was absent.
+        # Its native source is unchanged: only the bounded upgrade can repair it.
+        db_path = next((self.state / "public_history").glob("*.sqlite3"))
+        original = "provider:codex_transcript:You:native:cached-native"
+        native_id = hashlib.sha256(json.dumps([db_path.stem, original], separators=(",", ":")).encode()).hexdigest()
+        native = {"type": "UserMessage", "source": "codex_transcript", "message_id": "cached-native",
+                  "detail": submitted, "at": 202, "source_offset": "0:200"}
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("INSERT INTO messages(id,at,role,stream,kind,ordinal,body) VALUES(?,?,?,?,?,?,?)",
+                       (native_id, 202, "outgoing", "provider", "UserMessage", "1:00000000000000000000:00000000000000000200", json.dumps(native)))
+            db.execute("INSERT INTO aliases(original,id) VALUES(?,?)", (original, native_id))
+            db.execute("UPDATE meta SET value='2' WHERE key='reconcile_version'")
+            db.execute("DELETE FROM reconcile_work")
+        page = self.complete()
+        self.assertEqual(page["history_epoch"], before["history_epoch"])
+        self.assertEqual(len(page["events"]), 1)
+        self.assertNotIn(private_path, json.dumps(page))
+        old_id = page["events"][0]["history_id"]
+        old_epoch = page["history_epoch"]
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("UPDATE meta SET value='2' WHERE key='reconcile_version'")
+        after = self.complete()
+        self.assertEqual(after["history_epoch"], old_epoch)
+        self.assertEqual(after["events"][0]["history_id"], old_id)
+        self.assertEqual(after["head"]["total_incoming"], 0)
+
     def test_partial_text_is_disclosed_and_questions_are_outgoing(self):
         self.write_source([self.message(0, text="Ж" * 20000)])
         self.journal([{"type": "QuestionAnswered", "at": 101, "detail": "literal selected answer", "message_id": str(uuid.uuid4())}])
