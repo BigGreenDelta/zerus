@@ -363,6 +363,36 @@ recordings of one commit differ, never to absorb a difference that the refactor
 introduced. Both test runs must pass: a failing test changes the census. When the
 rules are in doubt, record main twice and compare the two recordings first.
 
+### Terminal backend contract
+
+`tests/test_backend_contract.py` states once what every terminal backend must do,
+for tmux on Unix now and for the Windows session host later. It is a black box at
+the CLI: tests drive only `hgs` commands and observe only their output and JSON
+and the records of the native fake agent (`examples/fake_agent.rs`, linked as
+`claude`), never the backend or the internal Rust `TerminalBackend` trait. It
+covers listing without starting the backend; launches (folder, arguments, launch
+ID, one session per name, untracked commands); `a --existing [--run-id]`
+resolution and attach in a pseudo-terminal (input, client size, several clients,
+`Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of `send` and
+Terminal input (one bracketed paste, then one Enter, no replay, keys in both
+cursor modes); state read from the screen (styled capture, wide glyphs, cursor,
+size, bracketed paste, an echoed draft against a dim placeholder) and raw-mode
+evidence; rename; pause and resume; terminate and kill, with what each does to the
+agent process. Signal expectations accept the Unix signal or the Windows console
+event the Phase 2 design names for each operation.
+
+`HGS_TEST_BACKEND` selects the backend: `tmux` (the default on Linux and macOS: a
+private server and state per test) or `host` (the default on Windows). Only the
+backend classes in the module differ: setup, teardown and `running()`. Until the
+session host exists (M3 to M5), `host` skips with that reason. It will need an
+isolated `HGS_STATE_DIR`, so the pipe name never reaches a live host, `hgs
+session-host install` into a temporary profile, a console client for attach in
+place of `pty`, and a Windows form of the `ps` check that tells whether an agent
+process still runs. The fake agent of a test has one configuration, set before its
+first launch, because a backend may keep the environment of the launch that
+started it. The module runs in the Linux and macOS CLI jobs in about 7 s, skips
+without tmux, and passed 20 runs with 8 in parallel.
+
 ### Windows client, desktop and portable zip
 
 The `windows-desktop` job runs on a standard `windows-2025` runner. It disables
