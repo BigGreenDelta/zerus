@@ -2102,6 +2102,9 @@ else:print('{}')
         {"runtime_state","live"},{"process_state","running"},{"compact_context_supported",true},{"cache_hint",QJsonObject{{"status","cold"},{"tokens",756000}}}};
     {QFile initial(temp.filePath("details.json"));QVERIFY(initial.open(QIODevice::WriteOnly));initial.write(QJsonDocument(details).toJson());}
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession("mac","claude/infra/review");QTest::qWait(100);
+    // A completion that arrives while the held send is still being prepared is
+    // picked up by the next compaction poll, which reads details.json: poll often.
+    constexpr int compactPollMs = 200; window.setCompactPollIntervalForTests(compactPollMs);
     auto *client=window.findChild<HgsClient *>();
     const auto apply=[&]{QFile data(temp.filePath("details.json"));QVERIFY(data.open(QIODevice::WriteOnly));data.write(QJsonDocument(details).toJson());data.close();client->inspectionReady("mac","claude/infra/review",details);};apply();
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep until compacted");
@@ -2124,10 +2127,9 @@ else:print('{}')
     if(outcome=="draft") { window.findChild<QPushButton *>("cancelCompactSend")->click(); setComposerText(composer, "Edited draft"); }
     if(outcome=="identity")details["conversation_id"]="another";
     const bool navigated = outcome.startsWith("navigation") || outcome == "hidden";
-    const QString compactKey = composer->sessionKey(); constexpr int compactPollMs = 200;
+    const QString compactKey = composer->sessionKey();
     if (navigated) {
-        // Only the background compaction poll can now continue the send: poll often.
-        window.setCompactPollIntervalForTests(compactPollMs);
+        // Only the background compaction poll can now continue the send.
         window.showSession({},"codex/hgs/dashboard");
         QVERIFY(!window.findChild<QPushButton *>("cancelCompactSend")->isVisible());
         setComposerText(composer, "Unrelated session draft");
