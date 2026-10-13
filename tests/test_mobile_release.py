@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -35,6 +37,23 @@ class MobileSealTest(unittest.TestCase):
         with self.assertRaises(ValueError):seal.seal(self.apk,self.source,self.root/'candidate','a'*40,'stable',True,Path('a'),Path('b'),self.tool)
         existing=self.root/'existing';existing.mkdir()
         with self.assertRaises(ValueError):seal.seal(self.apk,self.source,existing,'a'*40,'dev',True,Path('a'),Path('b'),self.tool)
+
+    def test_sealer_import_and_metadata_do_not_require_unix_fcntl(self):
+        program = '''import json, runpy, sys
+from pathlib import Path
+sys.modules['fcntl'] = None
+sys.path.insert(0, sys.argv[1])
+module = runpy.run_path(str(Path(sys.argv[1]) / 'prepare-mobile-release.py'))
+badging = "package: name='app.zerus.mobile' versionCode='10295' versionName='0.1.31'\\nminSdkVersion:'26'\\n"
+signature = 'Signer #1 certificate SHA-256 digest: ' + 'b'*64 + '\\n'
+metadata = module['apk_metadata'](Path(sys.argv[2]), Path('aapt2'), Path('apksigner'),
+                                lambda argv: badging if argv[1] == 'dump' else signature)
+print(json.dumps({'metadata': metadata, 'sha256': module['file_hash'](Path(sys.argv[2]))}))
+'''
+        result = json.loads(subprocess.check_output([sys.executable, '-c', program, str(SCRIPTS), str(self.apk)], text=True))
+        self.assertEqual(result['metadata']['version_code'], 10295)
+        self.assertEqual(result['metadata']['package_name'], 'app.zerus.mobile')
+        self.assertEqual(result['sha256'], seal.file_hash(self.apk))
 
     def test_private_exact_mapping_retention_and_mismatch(self):
         mapping=self.root/'mapping.txt';mapping.write_text('# pg_map_id: abcdef0\nfixture -> a:\n')

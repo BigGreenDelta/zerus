@@ -2,7 +2,6 @@
 from __future__ import annotations
 from contextlib import contextmanager
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -423,6 +422,7 @@ def check_android_sequence(root, feed, current_path):
 @contextmanager
 def mirror_lock(root, execute):
     """Serialize publication and inspect existing catalogs under the same lock."""
+    import fcntl  # Only the Unix mirror needs locking; APK sealing is portable.
     require(root.is_absolute() and not root.is_symlink(), 'Dedicated absolute mirror root required')
     if not execute and not root.exists():
         # An absent mirror has no published floor. A dry run creates no root.
