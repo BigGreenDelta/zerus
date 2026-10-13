@@ -65,6 +65,14 @@ locked through a stale inspection or an application restart; checking delivery
 reads the original receipt. Approval review time counts only while its disclosure
 is visible in the focused foreground form.
 
+Conversation messages and the editor use 18 sp text, a 22 sp baseline and natural
+character spacing. Compact bubble padding and a single attachment control leave
+more room for text. The message field grows from one to six lines; **Expand message**
+at the top-right opens a taller scrollable editor without changing its draft or
+selection. Attachment and send/microphone controls stay at the bottom with 48 dp
+touch targets. System font scaling remains available, and long text scrolls within
+the field rather than covering its actions.
+
 The message composer clears after the text and immutable attachment snapshots
 are atomically saved in the private outgoing queue. It stays editable while the
 previous message is sending. Each bubble shows Sending, Sent, Not sent, or

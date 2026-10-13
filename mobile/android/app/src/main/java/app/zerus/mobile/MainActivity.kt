@@ -25,12 +25,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.InputTransformation
-import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
@@ -62,7 +58,6 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -77,8 +72,6 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -987,24 +980,24 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
                 contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
             }) {
-            Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                 if (event.voice != null) {
-                    VoiceMessageContent(model, model.selected?.target, event.voice)
+                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice) }
                 } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         replies.orEmpty().forEach { reply ->
                             Text("Question", color = Muted, style = MaterialTheme.typography.labelSmall)
-                            MarkdownText(reply.question)
+                            ProvideTextStyle(conversationTextStyle()) { MarkdownText(reply.question) }
                             Text("Your answer", color = Mint, style = MaterialTheme.typography.labelSmall)
-                            Text(reply.answer.ifEmpty { "(empty answer)" }, lineHeight = 23.sp)
+                            Text(reply.answer.ifEmpty { "(empty answer)" }, style = conversationTextStyle())
                         }
                     } }
                 } else if (event.text.isNotBlank()) {
-                    if(own) SelectionContainer { Text(event.text, lineHeight = 23.sp, style = MaterialTheme.typography.bodyLarge) }
-                    else ProvideTextStyle(MaterialTheme.typography.bodyLarge.copy(lineHeight=23.sp)) { MarkdownText(event.text) }
+                    if(own) SelectionContainer { Text(event.text, style = conversationTextStyle()) }
+                    else ProvideTextStyle(conversationTextStyle()) { MarkdownText(event.text) }
                 }
                 if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
@@ -1049,8 +1042,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         onDispose { model.unbindSpeechComposer(speechBridge) }
     }
     val currentTarget by rememberUpdatedState(target)
-    var expanded by remember(lane) { mutableStateOf(false) }
-    var visualLines by remember(lane) { mutableIntStateOf(1) }
     var focused by remember(lane) { mutableStateOf(false) }
     var restorePickerFocus by remember(lane) { mutableStateOf(false) }
     var pickerStarted by remember(lane) { mutableStateOf(false) }
@@ -1102,8 +1093,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         model.sendingBlocked(target) -> "Preparing your message. You can write the next message."
         else -> ""
     }
-    Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 8.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Measure the editor and its controls first. A voice preview uses only the
         // remaining height, with its controls reachable by scrolling.
         if (model.speech.recording || model.speech.savingRecording || model.speech.draft != null) {
@@ -1136,53 +1127,36 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
         else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
-        Surface(color = Surface, shape = RoundedCornerShape(26.dp), border = BorderStroke(1.dp, Color(0xFF354449))) {
-            Row(Modifier.fillMaxWidth().padding(start = 2.dp, end = 5.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+        CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
+            readOnly = recording || draft.status != "editing" || model.demo,
+            // Reject IME/paste/drop edits even before the read-only recomposition lands.
+            inputTransformation = InputTransformation { if (model.speech.recording) revertAllChanges() },
+            focusRequester = focusRequester, onFocusChanged = { focused = it },
+            leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
                     enabled = !recording && !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
                 }
-                SpeechComposerButton(model, target) {
-                    if (model.draft(target).text != editor.text.toString()) model.edit(target, editor.text.toString())
-                }
-                BasicTextField(state = editor, modifier = Modifier.weight(1f).padding(horizontal = 3.dp, vertical = 10.dp)
-                    .heightIn(max = if (expanded) 280.dp else 168.dp).focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },
-                    readOnly = recording || draft.status != "editing" || model.demo,
-                    // Reject IME/paste/drop edits even before the read-only recomposition lands.
-                    inputTransformation = InputTransformation { if (model.speech.recording) revertAllChanges() },
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface, lineHeight = 24.sp),
-                    keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Default, capitalization = KeyboardCapitalization.Sentences),
-                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = if (expanded) 14 else 6),
-                    cursorBrush = SolidColor(Mint),
-                    onTextLayout = { result -> result()?.let { visualLines = it.lineCount } },
-                    decorator = { inner -> Box {
-                        if (editor.text.isEmpty()) Text(sendReason.ifBlank { "Message" }, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyLarge)
-                        inner()
-                    } })
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (visualLines > 3 || expanded) IconButton(onClick = { expanded = !expanded },
-                        modifier = Modifier.size(32.dp)) {
-                        Icon(if (expanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
-                            if (expanded) "Collapse message" else "Expand message", tint = Muted, modifier = Modifier.size(19.dp))
+            }, action = {
+                if (recording || (editor.text.isEmpty() && draft.attachments.isEmpty() && model.pickerDraft?.target != target)) {
+                    SpeechComposerButton(model, target) {
+                        if (model.draft(target).text != editor.text.toString()) model.edit(target, editor.text.toString())
                     }
-                    FilledIconButton(onClick = {
-                        if (canSend) {
-                            model.edit(target, editor.text.toString())
-                            val captured = model.draft(target)
-                            if (ContextPresentation.isCold(model.activity)) coldDraft = captured
-                            else model.sendMessage(target, expectedDraft = captured)
-                        } else if (sendReason.isNotBlank()) blockedSendReason = sendReason
-                    }, enabled = !recording && (canSend || sendReason.isNotBlank()), modifier = Modifier.size(44.dp), shape = CircleShape,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
-                            disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted)) {
-                        if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
-                        else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
-                    }
+                } else FilledIconButton(onClick = {
+                    if (canSend) {
+                        model.edit(target, editor.text.toString())
+                        val captured = model.draft(target)
+                        if (ContextPresentation.isCold(model.activity)) coldDraft = captured
+                        else model.sendMessage(target, expectedDraft = captured)
+                    } else if (sendReason.isNotBlank()) blockedSendReason = sendReason
+                }, enabled = !recording && (canSend || sendReason.isNotBlank()), modifier = Modifier.size(48.dp), shape = CircleShape,
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
+                        disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted)) {
+                    if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
+                    else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
                 }
-            }
-        }
+            })
     }
     blockedSendReason?.let { reason -> ZerusAlertDialog(onDismissRequest = { blockedSendReason = null },
         title = { Text("Sending unavailable") }, text = { Text(reason) },
