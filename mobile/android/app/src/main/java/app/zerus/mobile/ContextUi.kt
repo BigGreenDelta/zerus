@@ -130,7 +130,7 @@ import kotlinx.coroutines.delay
     val raw = model.activity
     val recorded = !model.activityVerified || target.archiveId.isNotBlank()
     val view = remember(raw, recorded) { ContextPresentation.from(raw, recorded) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Clear context?") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text("Clear context?") },
         text = { Text("Clear the conversation context in ${target.session} on $computer?\n\nThis runs the agent’s native clear command. Future messages start without the current conversation context. Your unsent draft is kept.") },
         confirmButton = { TextButton(onClick = { beforeClear(); model.clearContext(target); onDismiss() }, enabled = !model.demo && model.storageReady &&
             model.selected?.target == target && model.activityVerified && !model.contextBlocked(target) && !model.sendingBlocked(target) &&
@@ -140,7 +140,7 @@ import kotlinx.coroutines.delay
 
 @Composable internal fun ContextOperationReview(model: ZerusViewModel, operation: ContextOperation, onDismiss: () -> Unit) {
     val current = model.contextOperations.find { it.requestId == operation.requestId }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Review context command") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text("Review context command") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(contextOperationLabel(operation.operation, operation.status))
             Text("The command may already have changed ${operation.target.session}. Check its original receipt and the native conversation before allowing another context command. Reviewing does not repeat the command or send a message.")
@@ -153,7 +153,7 @@ import kotlinx.coroutines.delay
 
 @Composable internal fun ContextDraftRestore(model: ZerusViewModel, draft: Draft, target: Target,
     beforeRestore: () -> Unit = {}, onDismiss: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Restore earlier draft?") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text("Restore earlier draft?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Restore this saved draft into the current conversation in ${target.session}? Your current composition is kept in Saved drafts. This prepares the editor without sending.")
             SelectionContainer { Text(draft.text.ifBlank { "Saved files" }, maxLines = 8, overflow = TextOverflow.Ellipsis) }

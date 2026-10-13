@@ -272,6 +272,14 @@ impl Store {
             for (predicate, threshold) in [
                 ("operation='terminal_snapshot'".into(), at - 120.0),
                 (
+                    format!("operation IN {}", crate::speech_config::READ_SQL),
+                    at - 120.0,
+                ),
+                (
+                    format!("operation IN {}", crate::protocol::SPEECH_READ_SQL),
+                    at - 120.0,
+                ),
+                (
                     format!("operation IN {READ_SQL} AND operation!='terminal_snapshot'"),
                     at - self.db.cfg.retention.min(3600) as f64,
                 ),
@@ -287,6 +295,7 @@ impl Store {
             for op in SHORT_READS {
                 rows.extend(t.all(&format!("SELECT id,workspace_id FROM requests WHERE operation='{op}' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?"),args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
             }
+            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation IN ('speech_submit','voice_submit','speech_profile_upsert','speech_profile_remove','speech_profile_test') AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated,id LIMIT ?",args![batch]).await?);
             rows.sort_by(|a, b| s(a, "id").cmp(s(b, "id")));
             rows.dedup_by(|a, b| a["id"] == b["id"]);
             rows.truncate(batch as usize);
@@ -301,12 +310,17 @@ impl Store {
                 let short = SHORT_READS.contains(&op);
                 let remove = read
                     && (f(&r, "updated")
-                        < at - if op == "terminal_snapshot" {
-                            120.0
-                        } else if short {
-                            ATTACHMENT_RESULT_TTL
-                        } else {
-                            self.db.cfg.retention.min(3600) as f64
+                        < at - match op {
+                            "speech_config"
+                            | "speech_config_status"
+                            | "terminal_snapshot"
+                            | "speech_profiles"
+                            | "speech_stats"
+                            | "speech_status"
+                            | "voice_profiles"
+                            | "voice_status" => 120.0,
+                            _ if short => ATTACHMENT_RESULT_TTL,
+                            _ => self.db.cfg.retention.min(3600) as f64,
                         }
                         || (short
                             && !r["result_read"].is_null()
@@ -321,6 +335,24 @@ impl Store {
                     )
                     .await?;
                     self.db.bytes(&mut t, s(&r, "workspace_id"), -size).await?;
+                } else if [
+                    "speech_submit",
+                    "voice_submit",
+                    "speech_profile_upsert",
+                    "speech_profile_remove",
+                    "speech_profile_test",
+                ]
+                .contains(&s(&r, "operation"))
+                    && i(&r, "body_bytes") > 0
+                {
+                    t.exec(
+                        "UPDATE requests SET body='',body_bytes=0 WHERE id=?",
+                        args![&r["id"]],
+                    )
+                    .await?;
+                    self.db
+                        .bytes(&mut t, s(&r, "workspace_id"), -i(&r, "body_bytes"))
+                        .await?;
                 } else if f(&r, "updated") < at - self.db.cfg.retention as f64
                     && i(&r, "body_bytes") > 0
                 {

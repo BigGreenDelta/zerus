@@ -106,6 +106,11 @@ pub(super) fn event(id: &str, at: f64, detail: &str, source: &str) -> Value {
     error
 }
 
+pub(super) fn failure_id(error: &Value) -> String {
+    if !error.is_object() { return String::new(); }
+    format!("{}:{}:{}", string(error, "source"), string(error, "message_id"), error["at"].as_f64().unwrap_or(0.0))
+}
+
 pub(super) fn apply(output: &mut Value, error: &Value) {
     // Normalize saved failures too; older hooks used the generic rate-limit kind.
     let mut error = error.clone();
@@ -317,6 +322,7 @@ fn codex_transcript(record: &Value) -> Result<(Vec<Value>, f64)> {
             "{} {}",
             failure["codex_error_info"], detail
         )));
+        if !string(payload, "turn_id").is_empty() { error["turn_id"] = payload["turn_id"].clone(); }
         errors.push(error);
     }
     if errors.len() > 8 {
@@ -333,7 +339,7 @@ thread_local! { static TRANSCRIPT_SCANS: std::cell::Cell<usize> = const { std::c
 fn codex_transcript_cached(record: &Value) -> Result<(Vec<Value>, f64)> {
     let path = PathBuf::from(string(record, "transcript"));
     let mut failure = None;
-    let value = scan_cache::cached("codex-provider-errors", &path, string(record, "conversation_id"), || {
+    let value = scan_cache::cached("codex-provider-errors-v2", &path, string(record, "conversation_id"), || {
         codex_transcript(record)
             .map(|(errors, progress)| json!({"errors": errors, "progress": progress}))
             .map_err(|error| failure = Some(error))
@@ -350,24 +356,42 @@ fn codex(record: &Value) -> (Vec<Value>, f64) {
     let mut errors = codex_logs(record).unwrap_or_default();
     let (native_errors, native_progress) = codex_transcript_cached(record).unwrap_or_default();
     errors.extend(native_errors);
+    (correlate_codex_errors(errors, native_progress), native_progress)
+}
+
+fn correlate_codex_errors(mut errors: Vec<Value>, progress: f64) -> Vec<Value> {
+    // Establish native turn anchors first. Identical failures in successive
+    // turns must not share aliases merely because they are close in time.
     errors.sort_by(|a, b| {
+        (a["source"] == "codex_native_log").cmp(&(b["source"] == "codex_native_log")).then_with(||
         a["at"]
             .as_f64()
             .unwrap_or(0.0)
-            .total_cmp(&b["at"].as_f64().unwrap_or(0.0))
+            .total_cmp(&b["at"].as_f64().unwrap_or(0.0)))
     });
-    // Prefer the terminal completion record to a matching earlier log entry.
     let mut unique: Vec<Value> = Vec::new();
-    for error in errors {
-        unique.retain(|previous| {
-            previous["detail"] != error["detail"]
-                || (previous["at"].as_f64().unwrap_or(0.0) - error["at"].as_f64().unwrap_or(0.0))
-                    .abs()
-                    > 3.0
-        });
+    for mut error in errors {
+        let distance = |previous: &Value| (previous["at"].as_f64().unwrap_or(0.0) - error["at"].as_f64().unwrap_or(0.0)).abs();
+        let matching = unique.iter().enumerate().filter(|(_, previous)| {
+            previous["detail"] == error["detail"] && distance(previous) <= 3.0
+                && (previous["at"].as_f64().unwrap_or(0.0) > progress) == (error["at"].as_f64().unwrap_or(0.0) > progress)
+                && (string(previous, "turn_id").is_empty() || string(&error, "turn_id").is_empty()
+                    || previous["turn_id"] == error["turn_id"])
+        }).min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b))).map(|(index, _)| index);
+        if let Some(index) = matching {
+            let previous = unique.remove(index);
+            let turn = if !string(&previous, "turn_id").is_empty() { previous["turn_id"].clone() } else { error["turn_id"].clone() };
+            let mut ids = previous["failure_ids"].as_array().cloned().unwrap_or_else(|| vec![json!(failure_id(&previous))]);
+            ids.push(json!(failure_id(&error))); ids.sort_by(|a, b| a.as_str().cmp(&b.as_str())); ids.dedup();
+            // Preserve the latest native timestamp used by GUI freshness guards.
+            if previous["at"].as_f64().unwrap_or(0.0) > error["at"].as_f64().unwrap_or(0.0) { error = previous; }
+            error["failure_ids"] = json!(ids);
+            if !turn.is_null() { error["turn_id"] = turn; }
+        }
         unique.push(error);
     }
-    (unique, native_progress)
+    unique.sort_by(|a, b| a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0)));
+    unique
 }
 
 pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
@@ -420,6 +444,54 @@ pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upgraded_scan_does_not_reuse_cached_failures_without_native_turn_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("rollout-{conversation}.jsonl"));
+        let header = json!({"type":"session_meta","payload":{"id":conversation}});
+        let failure = json!({"type":"event_msg","timestamp":"2026-10-12T12:00:00.000Z",
+            "payload":{"type":"task_complete","turn_id":"current-turn","error":{"message":"Selected model is at capacity"}}});
+        std::fs::write(&path, format!("{header}\n{failure}\n")).unwrap();
+        let legacy = json!({"errors":[event("legacy-entry", 100.0, "Selected model is at capacity", "codex_native_transcript")],"progress":0.0});
+        assert!(scan_cache::cached("codex-provider-errors", &path, &conversation, ||Some(legacy)).is_some());
+        let (errors, _) = codex_transcript_cached(&json!({"transcript":path,"conversation_id":conversation})).unwrap();
+        assert_eq!(errors[0]["turn_id"], "current-turn");
+    }
+    #[test]
+    fn codex_log_and_completion_keep_both_exact_failure_references() {
+        let mut completion = event("completed-turn", 100.0, "Selected model is at capacity", "codex_native_transcript");
+        completion["turn_id"] = json!("turn-one");
+        let log = event("log-one", 100.000328, "Selected model is at capacity", "codex_native_log");
+        let ids = [json!(failure_id(&completion)), json!(failure_id(&log))];
+        let errors = correlate_codex_errors(vec![log, completion], 90.0);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["turn_id"], "turn-one");
+        assert_eq!(errors[0]["at"], 100.000328);
+        let aliases = errors[0]["failure_ids"].as_array().unwrap();
+        assert!(ids.iter().all(|id| aliases.contains(id)));
+    }
+    #[test]
+    fn repeated_capacity_errors_in_distinct_turns_keep_separate_references() {
+        let native = |turn: &str, at| {
+            let mut e = event(turn, at, "Selected model is at capacity", "codex_native_transcript");
+            e["turn_id"] = json!(turn); e
+        };
+        let log1 = event("log-one", 100.000328, "Selected model is at capacity", "codex_native_log");
+        let log2 = event("log-two", 100.200328, "Selected model is at capacity", "codex_native_log");
+        let errors = correlate_codex_errors(vec![log2.clone(), native("turn-two", 100.2), log1.clone(), native("turn-one", 100.0)], 90.0);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0]["turn_id"], "turn-one");
+        assert_eq!(errors[1]["turn_id"], "turn-two");
+        assert!(errors[0]["failure_ids"].as_array().unwrap().contains(&json!(failure_id(&log1))));
+        assert!(!errors[0]["failure_ids"].as_array().unwrap().contains(&json!(failure_id(&log2))));
+        assert!(!errors[1]["failure_ids"].as_array().unwrap().contains(&json!(failure_id(&log1))));
+        // The old completion can be outside the bounded transcript tail. Its
+        // remaining log still cannot become evidence for the new failed turn.
+        let errors = correlate_codex_errors(vec![log1.clone(), log2, native("turn-two", 100.2)], 100.1);
+        assert_eq!(errors.len(), 2);
+        assert!(!errors[1]["failure_ids"].as_array().unwrap().contains(&json!(failure_id(&log1))));
+    }
     #[test]
     fn native_errors_are_conversation_scoped_and_clear_on_main_progress() {
         let temp = tempfile::tempdir().unwrap();

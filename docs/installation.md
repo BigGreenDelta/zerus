@@ -21,7 +21,7 @@ migration deliberately after saving your sessions. Never kill a live server or
 native agents as part of a Zerus GUI/package update.
 [Official tmux releases](https://github.com/tmux/tmux/releases).
 
-For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets and WebEngine.
+For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets, WebEngine and Multimedia.
 Linux also needs KDE Frameworks 6 KStatusNotifierItem, KWindowSystem and KIdleTime,
 a system tray and user systemd for the standard autostart setup. On macOS, the
 installer uses Qt from Homebrew, and the desktop app requires macOS 14 or later.
@@ -38,7 +38,7 @@ cd zerus
 On macOS, install the dependencies first:
 
 ```sh
-brew install rust python tmux cmake qt qtwebengine
+brew install rust python tmux cmake qt qtwebengine qtmultimedia
 ```
 
 On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-webengine`, `qt6-svg`,

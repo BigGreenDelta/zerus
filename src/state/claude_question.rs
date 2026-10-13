@@ -176,6 +176,29 @@ fn pasted_editor(panel: &Panel, index: usize, count: usize, text: &str) -> bool 
     matches!(panel,Panel::Question{index:i,focused:f,other,empty_other:false,..}
         if *i==index && *f==count && pasted_projection(other,text))
 }
+/// Whether wrapped rows show a preset option: its label rows, then its
+/// description rows. Some(true) when a single choice also carries Claude's
+/// committed-answer mark after the label.
+fn option_shown(rows: &[&str], option: &Value, multi: bool) -> Option<bool> {
+    let (label, description) = (string(option, "label"), string(option, "description"));
+    (1..=rows.len()).find_map(|split| {
+        let (head, tail) = rows.split_at(split);
+        if !question_terminal::wrapped(tail, description) {
+            return None;
+        }
+        if question_terminal::wrapped(head, label) {
+            return Some(false);
+        }
+        let (last, head) = head.split_last()?;
+        let mut head = head.to_vec();
+        match last.strip_suffix(" ✔") {
+            Some(text) => head.push(text),
+            None if *last == "✔" && !head.is_empty() => {}
+            None => return None,
+        }
+        (!multi && question_terminal::wrapped(&head, label)).then_some(true)
+    })
+}
 pub(super) fn same_panel(first: &str, second: &str, card: &Value) -> bool {
     matches!((parse(first,card),parse(second,card)),(Ok(a),Ok(b)) if a==b)
 }
@@ -220,45 +243,40 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
             .iter()
             .position(|r| *r == "Ready to submit your answers?")
             .ok_or("Claude's answer review is incomplete")?;
-        let mut seen: Vec<(String, String)> = Vec::new();
+        // Keep Claude's wrapped rows: each boundary may be a space or a split
+        // word, so only the request's exact text can match them.
+        let mut seen: Vec<(Vec<&str>, Vec<&str>)> = Vec::new();
         let mut in_answer = false;
-        let gutter = rows[title + 1..end]
-            .iter()
-            .find(|row| !row.is_empty())
-            .is_some_and(|row| {
-                row.strip_prefix("│ ")
-                    .is_some_and(|text| text.trim_start().starts_with("● "))
-            });
+        let mut framed = false;
         for row in &rows[title + 1..end] {
-            // The same gutter appears on review question headings and their
-            // wrapped lines. Answer text is not decorated: a literal bar in a
-            // wrapped custom answer must survive the final exact comparison.
-            let unframed = row.strip_prefix("│ ").unwrap_or(row).trim_start();
-            let row = if gutter && (!in_answer || unframed.starts_with("● ")) {
-                unframed
-            } else {
-                row
-            };
-            if let Some(text) = row.strip_prefix("● ") {
-                seen.push((text.into(), String::new()));
+            // Claude frames each question separately: a gutter marks the
+            // heading and wrapped rows of a long one only. Answer text is not
+            // decorated: a literal bar in a wrapped custom answer must survive
+            // the final exact comparison.
+            let unframed = row.strip_prefix("│ ").map(str::trim_start);
+            if let Some(text) = unframed.unwrap_or(row).strip_prefix("● ") {
+                framed = unframed.is_some();
+                seen.push((vec![text], Vec::new()));
                 in_answer = false;
             } else if let Some(text) = row.strip_prefix("→ ") {
-                seen.last_mut().ok_or("Unexpected review answer")?.1 = text.into();
+                seen.last_mut().ok_or("Unexpected review answer")?.1 = vec![text];
                 in_answer = true;
             } else if !row.is_empty() {
                 let item = seen
                     .last_mut()
                     .ok_or("Not all Claude questions have answers")?;
-                let text = if in_answer { &mut item.1 } else { &mut item.0 };
-                text.push(' ');
-                text.push_str(row);
+                let row = match unframed {
+                    Some(text) if framed && !in_answer => text,
+                    _ => row,
+                };
+                if in_answer { &mut item.1 } else { &mut item.0 }.push(row);
             }
         }
         if seen.len() != items.len()
             || seen
                 .iter()
                 .zip(items)
-                .any(|((q, _), item)| norm(q) != norm(string(item, "question")))
+                .any(|((q, _), item)| !question_terminal::wrapped(q, string(item, "question")))
         {
             return Err("Claude's review does not match this question request".into());
         }
@@ -275,44 +293,62 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
             }
         }
         return Ok(Panel::Review {
-            answers: seen.into_iter().map(|(_, a)| norm(&a)).collect(),
+            answers: seen
+                .into_iter()
+                .map(|(_, rows)| {
+                    rows.iter()
+                        .map(|row| norm(row))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect(),
             focused: focus.ok_or("Missing review selection")?,
         });
     }
-    let footer = rows.last().ok_or("Missing Claude controls")?;
-    if !footer.contains("Enter to select")
-        || !footer.contains("Esc to cancel")
-        || !footer.contains("navigate")
+    // Ink wraps the key hints like any other text: they are the last block of
+    // rows, and a narrow terminal can split them anywhere.
+    let footer = rows
+        .iter()
+        .rposition(|row| row.is_empty())
+        .map_or(rows, |blank| &rows[blank + 1..]);
+    let hints: String = footer.concat().split_whitespace().collect();
+    if !["Entertoselect", "Esctocancel", "navigate"]
+        .iter()
+        .all(|hint| hints.contains(hint))
     {
         return Err("Claude's question controls are not fully visible. Enlarge Terminal.".into());
     }
-    let first = rows
-        .iter()
-        .position(|r| numbered(r).is_some())
-        .ok_or("Missing Claude choices")?;
+    let mut starts = (title..rows.len())
+        .filter(|&row| matches!(numbered(rows[row]), Some((0, _, _))))
+        .peekable();
+    if starts.peek().is_none() {
+        return Err("Missing Claude choices".into());
+    }
     // Claude also renders prompts with a dim vertical gutter. It is terminal
     // decoration, not part of the tool's question. Strip it only at the start
     // of prompt lines; the question and every option must still match exactly.
-    let raw_text = norm(&rows[title..first].join(" "));
-    let text = norm(
-        &rows[title..first]
-            .iter()
-            .map(|row| row.strip_prefix("│ ").unwrap_or(row))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    let matching: Vec<_> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            let expected = norm(string(item, "question"));
-            expected == text || expected == raw_text
+    // A wrapped prompt can itself begin a row with "1. ": the choices start
+    // at the first such row above which exactly one question is visible.
+    let (first, index, item) = starts
+        .find_map(|first| {
+            let prompt = &rows[title..first];
+            let unframed: Vec<_> = prompt
+                .iter()
+                .map(|row| row.strip_prefix("│ ").unwrap_or(row))
+                .collect();
+            let matching: Vec<_> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    let expected = string(item, "question");
+                    question_terminal::wrapped(&unframed, expected)
+                        || question_terminal::wrapped(prompt, expected)
+                })
+                .collect();
+            (matching.len() == 1).then(|| (first, matching[0].0, matching[0].1))
         })
-        .collect();
-    if matching.len() != 1 {
-        return Err("The visible Claude question differs from this request".into());
-    }
-    let (index, item) = matching[0];
+        .ok_or("The visible Claude question differs from this request")?;
+    let multi = item["multi_select"] == true;
     let options = item["options"].as_array().ok_or("Missing options")?;
     let end = rows
         .iter()
@@ -321,20 +357,26 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
         .find(|(_, r)| divider(r))
         .map(|(i, _)| i)
         .ok_or("Claude choices are clipped")?;
-    let mut labels: Vec<(String, String)> = Vec::new();
+    let mut labels: Vec<Vec<&str>> = Vec::new();
     let mut other_rows = Vec::new();
     let mut in_other = false;
     let mut focused = None;
     let mut checked = BTreeSet::new();
     for (row, styled) in rows[first..end].iter().zip(&styled[first..end]) {
-        if let Some((number, selected, text)) = numbered(row) {
-            if number != labels.len()
-                || number > options.len()
-                || (selected && focused.replace(number).is_some())
-            {
+        // Only the next number after a completely shown option starts a
+        // choice. A wrapped label or description may also begin "N. ".
+        let next = numbered(row).filter(|(number, _, _)| {
+            *number == labels.len()
+                && *number <= options.len()
+                && labels
+                    .last()
+                    .is_none_or(|shown| option_shown(shown, &options[number - 1], multi).is_some())
+        });
+        if let Some((number, selected, text)) = next {
+            if selected && focused.replace(number).is_some() {
                 return Err("Unknown Claude option order".into());
             }
-            let text = if item["multi_select"] == true {
+            let text = if multi {
                 if let Some(text) = text.strip_prefix("[✔] ") {
                     checked.insert(number);
                     text
@@ -357,15 +399,15 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
                 }
                 other_rows.push(styled[offset..].to_vec());
             }
-            labels.push((text.into(), String::new()));
+            labels.push(vec![text]);
         } else if ["Next", "Submit", "❯ Next", "❯ Submit"].contains(row) {
             in_other = false;
         } else if !row.is_empty() {
-            // Descriptions wrap below their labels. Reject missing/clipped labels
-            // rather than applying an option index to a partial menu.
+            // Labels and descriptions wrap below their first row. Reject
+            // missing/clipped labels rather than applying an option index to
+            // a partial menu.
             let last = labels.last_mut().ok_or("Unexpected option description")?;
-            last.1.push(' ');
-            last.1.push_str(row);
+            last.push(row);
             if in_other {
                 other_rows.push(styled.clone());
             }
@@ -375,25 +417,23 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
             other_rows.push(styled.clone());
         }
     }
+    let shown: Vec<_> = labels
+        .iter()
+        .zip(options)
+        .map(|(rows, option)| option_shown(rows, option, multi))
+        .collect();
+    if shown.contains(&None) {
+        return Err("Claude's visible options differ from this request".into());
+    }
     if labels.len() != options.len() + 1 {
         return Err("Claude choices are clipped. Enlarge Terminal.".into());
     }
-    for (number, ((label, description), option)) in labels.iter().zip(options).enumerate() {
-        let expected = norm(string(option, "label"));
-        let committed = item["multi_select"] != true
-            && label
-                .strip_suffix(" ✔")
-                .is_some_and(|text| norm(text) == expected);
-        if (norm(label) != expected && !committed)
-            || norm(description) != norm(string(option, "description"))
-        {
-            return Err("Claude's visible options differ from this request".into());
-        }
-        if committed {
+    for (number, committed) in shown.into_iter().enumerate() {
+        if committed == Some(true) {
             checked.insert(number);
         }
     }
-    if item["multi_select"] != true && checked.len() > 1 {
+    if !multi && checked.len() > 1 {
         return Err("Claude shows multiple selected answers for a single choice".into());
     }
     let empty_other = empty_hint(&other_rows);
@@ -405,7 +445,7 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
             checked.insert(options.len());
         }
     }
-    if item["multi_select"] != true && checked.len() > 1 {
+    if !multi && checked.len() > 1 {
         return Err("Claude shows multiple selected answers for a single choice".into());
     }
     // Remove exactly the inverse trailing cursor cell, never real spaces.
@@ -760,6 +800,13 @@ fn drive<T: Transport>(io: &mut T, card: &Value, answers: &Value) -> Result<()> 
     goto(io, card, items.len())?;
     submit_review(io, card, &wanted)
 }
+// A review answer keeps Claude's wrapped rows, joined by newlines.
+fn review_shows(actual: &[String], wanted: &[String]) -> bool {
+    actual.len() == wanted.len()
+        && actual.iter().zip(wanted).all(|(rows, text)| {
+            question_terminal::wrapped(&rows.split('\n').collect::<Vec<_>>(), text)
+        })
+}
 fn submit_review<T: Transport>(io: &mut T, card: &Value, wanted: &[String]) -> Result<()> {
     let panel = parse(&io.screen()?, card)?;
     let Panel::Review {
@@ -769,7 +816,7 @@ fn submit_review<T: Transport>(io: &mut T, card: &Value, wanted: &[String]) -> R
     else {
         return Err("Claude's final review is missing".into());
     };
-    if actual != wanted {
+    if !review_shows(&actual, wanted) {
         return Err(
             "Claude's final review differs from your answers; nothing was submitted".into(),
         );
@@ -779,10 +826,10 @@ fn submit_review<T: Transport>(io: &mut T, card: &Value, wanted: &[String]) -> R
         wait(
             io,
             card,
-            |p| matches!(p,Panel::Review{answers,focused:0} if answers.as_slice()==wanted),
+            |p| matches!(p,Panel::Review{answers,focused:0} if review_shows(answers,wanted)),
         )?;
     }
-    if !matches!(parse(&io.screen()?,card)?,Panel::Review{answers,focused:0} if answers.as_slice()==wanted)
+    if !matches!(parse(&io.screen()?,card)?,Panel::Review{answers,focused:0} if review_shows(&answers,wanted))
     {
         return Err("Claude's final review changed".into());
     }
@@ -976,7 +1023,8 @@ mod tests {
         let literal = screen.replace("Привет from Zerus", "Привет from\n       │ Zerus");
         assert!(
             matches!(parse(&literal, &card).unwrap(), Panel::Review { answers, .. }
-            if answers[2] == "Привет from │ Zerus")
+            if answers[2] == "Привет from\n│ Zerus"
+                && !review_shows(&answers[2..], &["Привет from Zerus".into()]))
         );
         assert!(!same_panel(screen, &literal, &card));
         for changed in [
@@ -987,6 +1035,30 @@ mod tests {
         ] {
             assert!(parse(&changed, &card).is_err(), "{changed}");
         }
+    }
+    #[test]
+    fn review_strips_the_gutter_only_from_framed_questions() {
+        // Claude 2.1.296 frames each review question separately: at 87
+        // columns only a long question may carry the gutter.
+        let card = card();
+        let plain = include_str!("../../tests/fixtures/claude-question-review.txt");
+        let expected = parse(plain, &card).unwrap();
+        for framed in [
+            plain.replace(" ● What else", " │ ● What else"),
+            plain.replace(
+                " ● What else should we know?",
+                " │ ● What else should\n │   we know?",
+            ),
+            plain.replace(" ● Which checks", " │ ● Which checks"),
+        ] {
+            assert_eq!(parse(&framed, &card).unwrap(), expected, "{framed}");
+        }
+        // An unframed question keeps a literal bar on its wrapped row.
+        let literal = plain.replace(
+            " ● What else should we know?",
+            " ● What else should\n │ we know?",
+        );
+        assert!(parse(&literal, &card).is_err());
     }
     #[test]
     fn recognizes_committed_single_choices_without_changing_labels() {
@@ -1007,6 +1079,145 @@ mod tests {
             matches!(parse(&chosen.replace("Preview ✔", "Preview ✔ ✔"), &literal).unwrap(),
             Panel::Question { checked, .. } if checked == BTreeSet::from([1]))
         );
+    }
+    // Ink word-wraps each text node to its column. As in Claude 2.1.296, a
+    // word longer than a row continues on the current row and is split at its
+    // end. Continuation rows keep the node's column and the prompt gutter.
+    // Claude truncates its tab row instead of wrapping it.
+    fn ink_wrap(text: &str, width: usize) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut row = String::new();
+        for word in text.split(' ') {
+            let used = row.chars().count();
+            let mut chars: Vec<char> = word.chars().collect();
+            if used > 0 && used + 1 + chars.len() <= width {
+                row.push(' ');
+                row.push_str(word);
+                continue;
+            }
+            if used > 0 && chars.len() > width {
+                row.push(' ');
+                row.extend(chars.drain(..width.saturating_sub(used + 1)));
+            }
+            if used > 0 {
+                rows.push(std::mem::take(&mut row));
+            }
+            while chars.len() > width {
+                rows.push(chars.drain(..width).collect());
+            }
+            row = chars.into_iter().collect();
+        }
+        rows.push(row);
+        rows
+    }
+    fn rewrap(screen: &str, width: usize) -> String {
+        let mut out = Vec::new();
+        for row in screen.lines() {
+            if divider(row.trim()) {
+                out.push("─".repeat(width));
+                continue;
+            }
+            if row.trim_start().starts_with('←') || row.chars().count() <= width {
+                out.push(row.to_owned());
+                continue;
+            }
+            let chars: Vec<char> = row.chars().collect();
+            let column = chars
+                .iter()
+                .take_while(|c| c.is_whitespace() || "❯│●→[]✔.0123456789".contains(**c))
+                .count();
+            let head: String = chars[..column].iter().collect();
+            let next: String = head
+                .chars()
+                .map(|c| if c == '│' { c } else { ' ' })
+                .collect();
+            let text: String = chars[column..].iter().collect();
+            for (i, part) in ink_wrap(text.trim_end(), width - column)
+                .into_iter()
+                .enumerate()
+            {
+                out.push(format!("{}{part}", if i == 0 { &head } else { &next }));
+            }
+        }
+        out.join("\n") + "\n"
+    }
+    #[test]
+    fn recognizes_panels_wrapped_at_any_terminal_width() {
+        // Long tokens force hard splits; numbered-looking text can begin a row.
+        let long = [
+            ("Which release should we prepare?", "Which release should we prepare for the contract in /work/example/projects/a-really-long-directory-name/contracts/template.html after step 1. review?"),
+            ("Use stable build", "Use stable build from the release branch, then step 2. Verify the signed tag"),
+            ("Use preview build", "Use preview build, step 1. Build the package 2. Publish the candidate 0123456789abcdef0123456789abcdef0123456789abcdef"),
+            ("Preview", "Preview build from the nightly channel with verification"),
+            ("Integration checks", "Integration checks across the Linux, Arch, macOS and Windows matrix 1. first 2. second"),
+            ("What else should we know?", "What else should we know before the candidate is verified and published?"),
+        ];
+        let widen = |text: &str| {
+            long.iter().fold(text.to_owned(), |text, (short, long)| {
+                text.replace(short, long)
+            })
+        };
+        let short = card();
+        let card = json!({"questions":questions::normalize(&serde_json::from_str::<Value>(&widen(&items().to_string())).unwrap()).unwrap(),"tool_call_id":"toolu_native_fixture"});
+        let wanted = [
+            "Preview build from the nightly channel with verification",
+            "Unit, UI",
+            "Привет from Zerus",
+        ]
+        .map(str::to_owned);
+        for fixture in [
+            include_str!("../../tests/fixtures/claude-question-single.txt"),
+            include_str!("../../tests/fixtures/claude-question-multi.txt"),
+            include_str!("../../tests/fixtures/claude-question-multi-selected.txt"),
+            include_str!("../../tests/fixtures/claude-question-other.txt"),
+            include_str!("../../tests/fixtures/claude-question-other-filled.txt"),
+            include_str!("../../tests/fixtures/claude-question-review.txt"),
+            // Only the long first review question carries Claude's gutter.
+            &include_str!("../../tests/fixtures/claude-question-review.txt")
+                .replace(" ● Which release", " │ ● Which release"),
+        ] {
+            let screen = widen(fixture);
+            let expected = parse(&screen, &card).unwrap();
+            for width in 32..=160 {
+                let wrapped = rewrap(&screen, width);
+                match parse(&wrapped, &card) {
+                    Ok(Panel::Review { answers, focused }) => assert!(
+                        focused == 0 && review_shows(&answers, &wanted),
+                        "{width}: {answers:?}\n{wrapped}"
+                    ),
+                    Ok(panel) => assert_eq!(panel, expected, "{width}\n{wrapped}"),
+                    Err(error) => panic!("{width}: {error}\n{wrapped}"),
+                }
+            }
+        }
+        // As in Claude 2.1.296 at 87 columns: focusing Other adds a key hint.
+        let other = rewrap(
+            include_str!("../../tests/fixtures/claude-question-other.txt"),
+            87,
+        );
+        assert!(other.ends_with("Esc to\ncancel\n"), "{other}");
+        assert!(parse(&other, &short).is_ok());
+        // Wrapping never hides a changed option, question or review answer.
+        let screen = widen(include_str!(
+            "../../tests/fixtures/claude-question-single.txt"
+        ));
+        for (from, to) in [
+            ("template.html", "template.htm"),
+            ("2. Publish", "2. Publishes"),
+            ("0123456789abcdef0123", "0123456789abcdeX0123"),
+            ("1. Stable", "1. Stable build"),
+            ("Esc to cancel", "Esc for cancel"),
+        ] {
+            for width in [40, 48, 87, 160] {
+                let changed = rewrap(&screen.replace(from, to), width);
+                assert!(parse(&changed, &card).is_err(), "{changed}");
+            }
+        }
+        assert!(!review_shows(
+            &["Preview build from\nthe nightly".into()],
+            &wanted[..1]
+        ));
+        assert!(!review_shows(&["Unit,UI".into()], &["Unit, UI".into()]));
     }
     fn other_screen(text: &str) -> String {
         include_str!("../../tests/fixtures/claude-question-other.txt")

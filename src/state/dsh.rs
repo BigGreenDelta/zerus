@@ -616,6 +616,8 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
         value["native_recovery"] = pending_recovery.clone();
     }
     recovery::enrich(record,&mut value);
+    let process_source = if inspected["jobs"].is_array() || inspected["shellCalls"].is_array() { inspected } else { row };
+    value["process_work"] = processes::dsh_work(record,process_source,alive && value["activity"] == "idle" && value["phase"] == "idle");
     value
 }
 
@@ -760,6 +762,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
     result["cursor"] = json!(0);
     result["events"] = json!(events);
     result["attachment_messages"] = attachments::messages(&record, agent_id.unwrap_or(""));
+    result["voice_messages"] = conversation_history::inspected_voice_messages(&record, &result, agent_id);
     result["replace_events"] = json!(true);
     result["history_truncated"] = inspected["page"]["hasMore"].clone();
     result["host_generation"] = inspected["generation"].clone();

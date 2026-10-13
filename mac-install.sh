@@ -47,8 +47,12 @@ shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/bin ~/.local/src/hgs/.rust-build ~/.config/tmux ~/.config/hgs'
 # Build natively on the Mac. Never copy a Linux target/ or CMake cache across hosts.
-tar czf - -C "$here" Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_state.py tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore \
-  | ssh -o BatchMode=yes "$host" 'tar xzf - -C ~/.local/src/hgs/.rust-build'
+# Replace these entries rather than unpacking over them: a file deleted or moved
+# here (src/platform.rs became src/platform/mod.rs) would otherwise stay on the Mac
+# and break its build. target/ is kept for incremental builds.
+sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_state.py tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore)
+tar czf - -C "$here" "${sources[@]}" \
+  | ssh -o BatchMode=yes "$host" "cd ~/.local/src/hgs/.rust-build && rm -rf ${sources[*]} && tar xzf -"
 ssh -o BatchMode=yes "$host" 'bash -s' <<'BUILD'
 set -eu
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -59,7 +63,9 @@ bash "$HOME/.local/src/hgs/.rust-build/install.sh"
 # Old callbacks and saved launch paths still refer to this checkout. Only publish
 # their entry points after a working native binary exists, using atomic renames.
 cd "$HOME/.local/src/hgs/.rust-build"
-tar cf - Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore | tar xf - -C ..
+copy="Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore"
+(cd .. && rm -rf $copy)
+tar cf - $copy | tar xf - -C ..
 for entry in hgs hgs_state.py; do
   stage="$(mktemp "../.$entry.XXXXXXXX")"
   if [ "$entry" = hgs ]; then mode=0755; else mode=0644; fi
@@ -109,7 +115,8 @@ REMOTE
 # Каталог назначения постоянный (~/.local/src/hgs, как в README для линукса), а не /tmp:
 # там переживает build/, поэтому повторный прогон собирается инкрементально, а install.sh
 # по cdhash бандла видит, что ничего не изменилось, и не дёргает живой LaunchAgent.
-tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' tray \
+# DEV_VERSION sits beside tray/: its CMake reads the Dev base version from there.
+tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' tray DEV_VERSION \
   | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && tar xzf - -C ~/.local/src/hgs'
 # PATH неинтерактивного ssh на маке — без Homebrew; cmake/brew tray/install.sh ищет сам
 # (find_tool в его маковской ветке), поэтому подставлять окружение здесь не нужно.

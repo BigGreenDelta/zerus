@@ -1,12 +1,11 @@
 use super::catalog::{new_id, Catalog, Key};
 use crate::{config::Config, platform};
 use anyhow::{ensure, Context, Result};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -49,7 +48,7 @@ pub struct LockedStore {
     /// not receive the delivery choice. A missing or damaged file means none.
     pub outdated: BTreeMap<String, String>,
     pub path: PathBuf,
-    _lock: File,
+    _lock: platform::FileLock,
     original: Vec<u8>,
     outdated_original: Vec<u8>,
 }
@@ -67,7 +66,7 @@ impl LockedStore {
                 .write(true),
         )
         .open(dir.join("catalog.lock"))?;
-        lock.lock_exclusive()?;
+        let lock = platform::FileLock::exclusive(lock)?;
         let path = dir.join("catalog.json");
         let original = match fs::read(&path) {
             Ok(v) => v,

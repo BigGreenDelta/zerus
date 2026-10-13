@@ -34,9 +34,9 @@ expressions and source repositories are recorded in `docs/rust-dependencies.json
 This inventory is metadata, not a replacement for dependency license texts.
 Cargo downloads the corresponding sources and license files from crates.io.
 
-The GUI links Qt 6 (Widgets, Network and WebEngineWidgets), and on Linux the KDE
-Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These retain their
-own licenses.
+The GUI links Qt 6 (Widgets, Network, WebEngineWidgets and Multimedia), and on
+Linux the KDE Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These
+retain their own licenses.
 Qt WebEngine includes Chromium and additional third-party components. See the
 [Qt WebEngine licensing documentation](https://doc.qt.io/qt-6.8/qtwebengine-licensing.html)
 and the notices supplied by the exact Qt distribution used to build the application.
@@ -51,8 +51,10 @@ the linkage or bundled components change. MIT licensing of Zerus itself does
 not relicense its dependencies.
 
 The Windows portable zip is different: it bundles Qt 6 for MSVC, including Qt
-WebEngine with Chromium, next to the application. These are separate, replaceable
-DLLs used under the GNU LGPL version 3. The zip carries the SPDX documents supplied
+WebEngine with Chromium and Qt Multimedia with its audio runtime, next to the
+application. These are separate, replaceable DLLs. Qt is used under the GNU LGPL
+version 3; its third-party components retain their own licenses. The zip carries
+the SPDX documents supplied
 with the exact Qt installation, which name the license and copyright of each Qt
 module and of the third-party code inside it (libjpeg-turbo, FreeType, HarfBuzz,
 libpng, zlib and others), and `packaging/windows/licenses` with the text of every
@@ -68,8 +70,9 @@ the bundle contains one of those libraries.
 
 The macOS application distributed through the Homebrew cask is different: it
 bundles the official Qt 6.11.2 frameworks and plugins it needs (including Qt
-WebEngine, Qt Quick/QML runtime, Qt SVG, Qt WebChannel and Qt Positioning) as
-unmodified, dynamically linked and replaceable components under LGPL-3.0-only.
+WebEngine, Qt Quick/QML runtime, Qt SVG, Qt WebChannel, Qt Positioning and Qt
+Multimedia) as unmodified, dynamically linked and replaceable Qt components under
+LGPL-3.0-only. Third-party audio components retain their own license notices.
 `Zerus.app/Contents/Resources/licenses/qt` contains the LGPL-3.0 and GPL-3.0
 texts, Qt's official SPDX documents for every bundled module, including the
 third-party components of Qt WebEngine and Chromium, and the location of the

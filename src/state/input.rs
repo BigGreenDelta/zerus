@@ -241,6 +241,9 @@ fn checked_input(
     if codex_update::current(&record).is_some() {
         return Err("Codex is waiting for an update choice. Choose an option in Activity or Terminal before sending a message.".into());
     }
+    if codex_goal_resume::current(&record).is_some() {
+        return Err(codex_goal_resume::WAIT.into());
+    }
     if kimi_trust::current(&record).is_some() {
         return Err("Kimi is waiting for folder trust approval. Choose an option in Activity or Terminal before sending a message.".into());
     }
@@ -691,10 +694,11 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         );
     }
     let text = attachments::terminal_text(request.text.trim(), &paths);
-    // Claude treats a trailing backslash plus the next Enter as line continuation.
-    // Paste a final newline with the literal text so our single Enter submits it;
-    // never retry Enter, which could answer a subsequently opened dialog.
-    let pasted = if string(&record, "agent") == "claude" && text.ends_with('\\') {
+    // Claude and Kimi treat a trailing backslash plus the next Enter as line
+    // continuation. Paste a final newline with the literal text so our single
+    // Enter submits it; never retry Enter, which could answer a subsequently
+    // opened dialog.
+    let pasted = if matches!(string(&record, "agent"), "claude" | "kimi") && text.ends_with('\\') {
         format!("{text}\n")
     } else {
         text.clone()

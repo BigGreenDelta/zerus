@@ -55,6 +55,7 @@ fn sampled_cpu(root: &Path, mut current: CpuSample) -> std::io::Result<(Option<f
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        let _lock = crate::platform::FileLock::held(lock);
         let path = directory.join("cpu.json");
         let previous: Option<CpuSample> = fs::metadata(&path)
             .ok()
@@ -364,7 +365,8 @@ mod tests {
         holder.lock_exclusive().unwrap();
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(60));
-            drop(holder);
+            // Like a listing: closing alone may release the lock late on Windows.
+            FileExt::unlock(&holder).unwrap();
         });
         assert_eq!(
             sampled_cpu(root.path(), cpu(200, 90, 102.)).unwrap(),

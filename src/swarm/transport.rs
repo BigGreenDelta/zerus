@@ -465,6 +465,7 @@ pub fn worker() -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+    let _lock = crate::platform::FileLock::held(lock);
     if let Err(error) = service::record(&config) {
         eprintln!("hgs swarm: record the worker version: {error:#}");
     }

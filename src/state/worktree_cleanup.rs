@@ -782,6 +782,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    let lock = crate::platform::FileLock::held(guard);
 
     let data = review(
         &common,
@@ -858,7 +859,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             }
         }
     }
-    let _ = FileExt::unlock(&guard);
+    drop(lock);
     Ok(json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
         "branch_deleted":deleted,"branch_error":branch_error,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":data["machine"]}))

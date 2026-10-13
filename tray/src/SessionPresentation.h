@@ -4,6 +4,7 @@
 #include "QuestionReply.h"
 #include <QObject>
 #include <QDateTime>
+#include <QRegularExpression>
 
 namespace SessionPresentation {
 inline QString childState(const QJsonObject &child) {
@@ -44,6 +45,15 @@ inline QJsonObject gitStatus(const SessionInfo &s, QJsonObject snapshot, bool on
 }
 inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
 {
+    const auto work = details.value("process_work").toObject();
+    if (s.state == "running" && !s.runId.isEmpty() && details.value("tracked").toBool()
+        && details.value("run_id").toString() == s.runId && details.value("conversation_id").toString() == s.conversationId
+        && work.value("sampled_at").toDouble() > s.backgroundObservedAt) {
+        s.backgroundProcesses = work.value("count").toInt(-1);
+        s.backgroundStarted = work.value("started_at").toDouble();
+        s.backgroundObservedAt = work.value("sampled_at").toDouble();
+        s.backgroundCommand = work.value("command").toString();
+    }
     // A selected-session inspection can discover failure before the fleet poll.
     // Never apply another run/conversation or older hook evidence to its row.
     if (s.state != "running" || s.runId.isEmpty() || !details.value("tracked").toBool()
@@ -84,6 +94,10 @@ inline bool scheduledIdle(const SessionInfo &s)
 {
     return s.activity == "idle" && s.phase == "idle" && s.scheduledJobs > 0;
 }
+inline bool backgroundIdle(const SessionInfo &s)
+{
+    return s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses > 0;
+}
 // The next run as a time of day, "due" once it has passed, or empty if unknown.
 inline QString nextScheduledRun(const SessionInfo &s, const QDateTime &now = QDateTime::currentDateTime())
 {
@@ -118,6 +132,7 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "starting") return QObject::tr("Starting");
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
+    if (backgroundIdle(s)) return QObject::tr("Background");
     if (scheduledIdle(s)) {
         const auto next = nextScheduledRun(s);
         return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
@@ -148,13 +163,51 @@ inline QString branchContext(const SessionInfo &s)
     return s.gitDetached ? QObject::tr("detached HEAD") : QString();
 }
 
+// Path components of a local or remote path, whichever separator its machine uses.
+inline QStringList pathParts(const QString &path)
+{
+    static const QRegularExpression separators(QStringLiteral("[/\\\\]+"));
+    return path.split(separators, Qt::SkipEmptyParts);
+}
+
+// The folder people know a checkout by. A linked worktree names its main
+// checkout (`zerus` rather than `zerus-work-1a2b`); a bare `repo.git` names itself.
+inline QString checkoutFolder(const SessionInfo &s)
+{
+    if (s.gitWorktree && !s.gitCommonDir.isEmpty()) {
+        auto parts = pathParts(s.gitCommonDir);
+        if (parts.size() > 1 && parts.last().startsWith('.')) parts.removeLast();
+        QString name = parts.isEmpty() ? QString() : parts.last();
+        if (name.size() > 4 && name.endsWith(QStringLiteral(".git"))) name.chop(4);
+        if (!name.isEmpty()) return name;
+    }
+    const auto parts = pathParts(!s.gitRoot.isEmpty() ? s.gitRoot : !s.cwd.isEmpty() ? s.cwd : s.canonicalCwd);
+    return parts.isEmpty() ? QString() : parts.last();
+}
+
+// The card's checkout line: folder / branch (or detached HEAD); an ordinary folder shows its name.
+inline QString checkoutLine(const SessionInfo &s)
+{
+    const QString folder = checkoutFolder(s), branch = branchContext(s);
+    if (folder.isEmpty() || branch.isEmpty()) return folder.isEmpty() ? branch : folder;
+    return folder + QStringLiteral(" / ") + branch;
+}
+
+// The workspace icon beside checkoutLine.
+inline QString checkoutIcon(const SessionInfo &s)
+{
+    if (!branchContext(s).isEmpty()) return QStringLiteral("git-branch");
+    return checkoutFolder(s).isEmpty() ? QString() : QStringLiteral("folder");
+}
+
+// The opened header and Details: the card line plus a linked-worktree mark.
+// The worktree folder itself stays in the path shown beside it.
 inline QString projectContext(const SessionInfo &s)
 {
-    QStringList parts{s.project.isEmpty() ? s.name.section('/', 1, 1) : s.project};
-    const QString branch = branchContext(s);
-    if (!branch.isEmpty()) parts << branch;
-    if (s.gitWorktree) parts << (s.gitWorktreeName.isEmpty() ? QObject::tr("worktree") : QObject::tr("worktree: %1").arg(s.gitWorktreeName));
-    return parts.join(QStringLiteral(" / "));
+    QString context = checkoutLine(s);
+    if (context.isEmpty()) context = s.project.isEmpty() ? s.name.section('/', 1, 1) : s.project;
+    if (s.gitWorktree) context += QObject::tr(" · worktree");
+    return context;
 }
 
 inline bool currentActivity(const SessionInfo &s, bool online = true)
@@ -165,12 +218,12 @@ inline bool currentActivity(const SessionInfo &s, bool online = true)
 
 inline bool working(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && s.activity == "busy" && !s.needsAction();
+    return currentActivity(s, online) && (s.activity == "busy" || backgroundIdle(s)) && !s.needsAction();
 }
 
 inline bool scheduled(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && !s.needsAction() && scheduledIdle(s);
+    return currentActivity(s, online) && !s.needsAction() && !backgroundIdle(s) && scheduledIdle(s);
 }
 
 inline bool needsAttention(const SessionInfo &s, bool online = true)
@@ -191,7 +244,8 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
 
 inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
 {
-    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online));
+    return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online)
+        || (online && s.replyInProgress() && s.activity == "idle" && s.phase == "idle"));
 }
 
 inline QString promptPreview(const QString &text)
@@ -223,8 +277,10 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
         const QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s.prompt);
         return status(s) + (detail.isEmpty() ? QString() : QStringLiteral(": ") + detail);
     }
-    if (s.unreadReply && s.activity != "busy" && !s.needsAction()) return status(s, online);
+    if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);
     if (!currentActivity(s, online)) return status(s, online);
+    if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 running command") : QObject::tr("%1 running commands").arg(s.backgroundProcesses))
+        + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);
     if (scheduled(s, online)) {
         const auto now = QDateTime::currentDateTime();
         if (s.nextScheduledAt <= 0) return QObject::tr("Waiting for its next scheduled run");

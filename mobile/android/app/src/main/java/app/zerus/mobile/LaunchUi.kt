@@ -53,7 +53,7 @@ private val Amber = Color(0xFFFFCB7D)
     IconButton(onClick = { choosing = true },enabled = !model.demo && model.connections.isNotEmpty()) { Icon(Icons.Default.Add,"New session") }
     if(choosing) {
         ObscureConversation()
-        AlertDialog(onDismissRequest = { choosing = false },title = { Text("New session on which machine?") },text = {
+        ZerusAlertDialog(onDismissRequest = { choosing = false },title = { Text("New session on which machine?") },text = {
             Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 model.machines.forEach { machine ->
                     val key = MachineKey(machine.connectionId,machine.id)
@@ -330,7 +330,7 @@ private val Amber = Color(0xFFFFCB7D)
         // Navigation replaced the verified folder; check the kept selection again so it stays usable.
         if(folder.isNotBlank() && !LaunchPresentation.selectedFolder(model.launchDirectoryState,folder)) model.browseLaunchDirectory(machine,folder)
     }
-    if(discarding) AlertDialog(onDismissRequest = { discarding = false },title = { Text("Discard new session?") },text = {
+    if(discarding) ZerusAlertDialog(onDismissRequest = { discarding = false },title = { Text("Discard new session?") },text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your choices for this session will be lost.")
             createdWorktree?.let { Text("The created worktree and its branch stay on $computer: ${it.resultPath}",style = MaterialTheme.typography.bodySmall) }
@@ -461,7 +461,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
 }
 
 @Composable private fun WorktreeChooserDialog(entries: List<LaunchWorktree>,selected: String,onChoose: (String) -> Unit,onDismiss: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Choose an existing worktree") },text = {
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Choose an existing worktree") },text = {
         Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             entries.forEach { entry ->
                 val chosen = entry.path == selected
@@ -486,7 +486,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
     val home = raw?.string("home").orEmpty()
     var typedPath by remember(machine) { mutableStateOf(path) }
     val folders = remember(raw) { LaunchPresentation.folders(raw) }
-    AlertDialog(onDismissRequest = onDismiss,title = { Text("Choose folder on machine") },text = {
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Choose folder on machine") },text = {
         Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if(model.launchDirectoryLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
             SelectionContainer { Text(path.ifBlank { "Loading native folders…" },style = MaterialTheme.typography.bodySmall) }
@@ -515,7 +515,7 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
     var destination by rememberSaveable(repository) { mutableStateOf(WorktreePresentation.destination(evidence,suggestedBranch)) }
     val problem = WorktreePresentation.createError(branch,base,destination)
     val submitting = model.worktreeSubmitting
-    AlertDialog(onDismissRequest = onDismiss,properties = DialogProperties(dismissOnClickOutside = false),title = { Text("Create worktree") },text = {
+    ZerusAlertDialog(onDismissRequest = onDismiss,properties = DialogProperties(dismissOnClickOutside = false),title = { Text("Create worktree") },text = {
         Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Creates a new branch and working folder on this computer. It remains there if you cancel or cannot start the session.",style = MaterialTheme.typography.bodySmall)
             SelectionContainer { Text(evidence.string("path"),style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant) }

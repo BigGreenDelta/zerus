@@ -30,12 +30,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix="zerus-package-test-") as home:
         env = {key: value for key, value in os.environ.items() if not key.startswith("HGS_")}
         env.update(HOME=home, HGS_STATE_DIR=home+"/state", HGS_CONFIG_DIR=home+"/config")
-        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + manifest["version"]}
+        desktop = manifest.get("desktop_build", {})
+        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + desktop.get("versionName", manifest["version"])}
         for name, version in expected.items():
             result = subprocess.run([str(root / "usr/bin" / name), "--version"], env=env,
                                     capture_output=True, text=True, timeout=20, check=True)
             if result.stdout.strip() != version:
                 raise SystemExit(f"Wrong {name} version: {result.stdout.strip()}")
+        if desktop:
+            actual = json.loads(subprocess.check_output([str(root / "usr/bin/hgs-tray"), "--build-info"], env=env, text=True, timeout=20))
+            if actual != desktop:
+                raise SystemExit("GUI embedded build identity does not match the package manifest")
     subprocess.run(["desktop-file-validate", str(root / "usr/share/applications/hgs-tray.desktop")], check=True)
     inventory = json.loads((root / f"usr/share/licenses/{args.package_name}/rust/inventory.json").read_text())
     if not inventory["packages"]:

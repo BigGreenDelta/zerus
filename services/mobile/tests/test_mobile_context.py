@@ -13,6 +13,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from zerus_mobile.connector import Connector, ConnectorError
 from zerus_mobile.context import GATEWAY_OPERATIONS, OPERATIONS
+from zerus_mobile.speech import OPERATIONS as SPEECH_OPERATIONS
+from zerus_mobile.speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS
+from zerus_mobile.voice import OPERATIONS as VOICE_OPERATIONS
 from zerus_mobile.server import Config, create_app
 from zerus_mobile.store import Store
 
@@ -271,8 +274,9 @@ class ContextFixtureTests(unittest.IsolatedAsyncioTestCase):
         hint = {"status": "cold", "source": "native_footer", "tokens": 60000}
         self.config(all_states=True, session_usage=usage, cache_hint=hint)
         snapshot = await self.connector.snapshot()
-        # The fixture hgs predates the mobile Overmind ABI, so the gateway withholds its operations.
-        self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]), OPERATIONS - GATEWAY_OPERATIONS)
+        # This retained fixture deliberately has neither the speech ABI nor the mobile
+        # Overmind ABI in its CLI help, so the gateway withholds their operations.
+        self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]), OPERATIONS - GATEWAY_OPERATIONS - SPEECH_OPERATIONS - SPEECH_CONFIG_OPERATIONS - VOICE_OPERATIONS)
         self.assertNotIn("mobile_overmind", snapshot)
         self.assertEqual(len(snapshot["sessions"]), 7)
         inspect = await self.connector.native(["inspect", NAME])

@@ -14,12 +14,14 @@
 #include "WorkspaceIcons.h"
 #include "MessageBoxIcons.h"
 #include <QDir>
+#include <algorithm>
 
 class ListProbe : public SessionList { public: using SessionList::mimeData; using SessionList::initViewItemOption; };
 class TestWorkspace : public QObject {
     Q_OBJECT
 private slots:
     void durableIdentityAndMissingSessions();
+    void observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership();
     void orderingAndRemoval();
     void invalidDataAndMoves();
     void nativeDropPlacement();
@@ -37,6 +39,10 @@ private slots:
     void shortIdentityLabelsFitWithoutElision();
     void workspaceIconsAreReused();
     void darkQuestionBoxesShowLightGlyph();
+    void confirmationCancelIsRightmost_data();
+    void confirmationCancelIsRightmost();
+    void dialogDismissalStaysRightmostAcrossChanges_data();
+    void dialogDismissalStaysRightmostAcrossChanges();
     void draftStatusSitsBetweenWorkAndReplies();
     void gitStatusSeparatesEvidenceAndExpires();
     void gitStatusCardsKeepMetadataAndMachineReadable();
@@ -108,8 +114,8 @@ void TestWorkspace::gitStatusCardsKeepMetadataAndMachineReadable()
         list.setFrameShape(QFrame::NoFrame); list.setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         for (int i = 0; i < titles.size(); ++i) {
             auto *item = new QListWidgetItem(&list);
-            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "main");
-            item->setData(SessionRoles::BranchIcon, true);
+            item->setData(SessionRoles::Title, titles[i]); item->setData(SessionRoles::Meta, "zerus / main");
+            item->setData(SessionRoles::MetaIcon, "git-branch");
             item->setData(SessionRoles::Host, "arch"); item->setData(SessionRoles::MachineName, "arch");
             item->setData(SessionRoles::Agent, "codex"); item->setData(SessionRoles::Status, "Ready");
             item->setData(SessionRoles::Detail, "Git status follows this checkout and branch");
@@ -174,6 +180,84 @@ void TestWorkspace::darkQuestionBoxesShowLightGlyph()
     QCOMPARE(question.icon(), QMessageBox::Question);
     question.setPalette(dark);
     QTRY_COMPARE(image(question), lightGlyph);
+}
+
+void TestWorkspace::confirmationCancelIsRightmost_data()
+{
+    QTest::addColumn<bool>("extraActions");
+    QTest::newRow("submit") << false;
+    QTest::newRow("send-compact-clear") << true;
+}
+
+void TestWorkspace::confirmationCancelIsRightmost()
+{
+    QFETCH(bool, extraActions);
+    MessageBoxIcons::install();
+    QMessageBox box(QMessageBox::Warning, "Cold cache", "Choose how to continue.");
+    // Exercise the Mac order even on Linux. The per-box policy must override it.
+    box.setStyleSheet("QDialogButtonBox { button-layout: 1; }");
+    auto *proceed = box.addButton("Continue", QMessageBox::AcceptRole);
+    if (extraActions) {
+        box.addButton("Compact and continue", QMessageBox::ActionRole);
+        box.addButton("Clear context", QMessageBox::ActionRole);
+    }
+    auto *cancel = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(cancel); box.setEscapeButton(cancel);
+    box.show(); QVERIFY(QTest::qWaitForWindowExposed(&box));
+    QVERIFY(!box.testAttribute(Qt::WA_DontShowOnScreen));
+    for (auto *button : box.buttons()) if (button != cancel)
+        QVERIFY2(button->geometry().right() < cancel->geometry().left(), qPrintable(button->text()));
+    QCOMPARE(box.defaultButton(), cancel); QCOMPARE(box.escapeButton(), cancel);
+    QCOMPARE(box.buttonRole(proceed), QMessageBox::AcceptRole);
+    QTest::keyClick(&box, Qt::Key_Escape);
+    QTRY_COMPARE(box.clickedButton(), cancel);
+}
+
+void TestWorkspace::dialogDismissalStaysRightmostAcrossChanges_data()
+{
+    QTest::addColumn<int>("kind");
+    QTest::newRow("save-cancel") << 0;
+    QTest::newRow("apply-cancel") << 1;
+    QTest::newRow("review-remove-close") << 2;
+}
+
+void TestWorkspace::dialogDismissalStaysRightmostAcrossChanges()
+{
+    QFETCH(int, kind); MessageBoxIcons::install();
+    QDialog dialog; auto *layout = new QVBoxLayout(&dialog);
+    auto *buttons = new QDialogButtonBox(kind == 0 ? QDialogButtonBox::Save | QDialogButtonBox::Cancel
+        : kind == 1 ? QDialogButtonBox::Apply | QDialogButtonBox::Cancel : QDialogButtonBox::Close);
+    if (kind == 2) {
+        buttons->addButton("Review again", QDialogButtonBox::ResetRole);
+        buttons->addButton("Remove selected…", QDialogButtonBox::ActionRole);
+    }
+    layout->addWidget(buttons);
+    auto *dismiss = buttons->button(kind == 2 ? QDialogButtonBox::Close : QDialogButtonBox::Cancel);
+    dismiss->setDefault(true);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    const auto ordered = [&] {
+        for (auto *button : buttons->buttons()) if (button != dismiss && button->isVisible())
+            if (button->geometry().right() >= dismiss->geometry().left()) return false;
+        return true;
+    };
+    QTRY_VERIFY(ordered());
+    // Adding actions and changing appearance recreates Qt's internal layout.
+    auto *help = buttons->addButton(QDialogButtonBox::Help);
+    buttons->setStyleSheet("QDialogButtonBox { button-layout: 1; }");
+    QTRY_VERIFY(ordered());
+    help->setText("Help for this operation"); QTRY_VERIFY(ordered());
+    auto visual = buttons->buttons();
+    std::sort(visual.begin(), visual.end(), [](const QAbstractButton *a, const QAbstractButton *b) { return a->geometry().left() < b->geometry().left(); });
+    for (int index = 0; index + 1 < visual.size(); ++index) {
+        auto *next = visual[index]->nextInFocusChain();
+        for (int skipped = 0; !visual.contains(qobject_cast<QAbstractButton *>(next)) && skipped < 100; ++skipped) next = next->nextInFocusChain();
+        QCOMPARE(next, visual[index+1]);
+    }
+    for (auto *button : buttons->buttons()) if (button != dismiss) button->setEnabled(false);
+    QTRY_VERIFY(ordered()); QVERIFY(dismiss->isEnabled()); QVERIFY(dismiss->isDefault());
+    QTest::keyClick(&dialog, Qt::Key_Return); QTRY_VERIFY(!dialog.isVisible());
+    QCOMPARE(dialog.result(), int(QDialog::Rejected));
 }
 
 void TestWorkspace::shortIdentityLabelsFitWithoutElision()
@@ -250,6 +334,35 @@ void TestWorkspace::durableIdentityAndMissingSessions()
     QVERIFY(archive != renamed); QCOMPARE(reloaded.groupFor(archive), QString("ungrouped"));
     QCOMPARE(reloaded.observe("arch", "codex/project/renamed-archive", "run-2", "archive-1"), archive);
     QCOMPARE(SessionOrganization(reloaded.toJson()).toJson(), reloaded.toJson());
+}
+
+void TestWorkspace::observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership()
+{
+    SessionOrganization model;
+    const auto one = model.observe("arch", "codex/example/one", "run-one");
+    const auto two = model.observe("arch", "codex/example/two", "run-two");
+    const auto archive = model.observe("arch", "codex/example/one", "run-one", "archive-one");
+    model = SessionOrganization(model.toJson());
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({one, two, archive}));
+    QCOMPARE(model.toJson()["unassigned_sessions"].toArray().size(), 3);
+    model.moveSession(one, "missing"); // Rejected moves do not create intent.
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(one));
+    model.moveSession(two, "ungrouped", one); // Explicit same-project ordering.
+    QCOMPARE(model.group("ungrouped")->sessions, QStringList({two, one, archive}));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(two));
+    const auto renamed = model.observe("arch", "codex/example/renamed", "run-one");
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(renamed));
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(one));
+    // A catalog assignment may arrive for the new name before a fleet refresh.
+    const auto work = model.createGroup("Work");
+    model.moveSession("arch\ncodex/example/final", work);
+    const auto finalName = model.observe("arch", "codex/example/final", "run-one");
+    QCOMPARE(model.groupFor(finalName), work);
+    QVERIFY(!model.toJson()["unassigned_sessions"].toArray().contains(finalName));
+    QVERIFY(!model.group("ungrouped")->sessions.contains(renamed));
+    QCOMPARE(model.observe("arch", "codex/example/final", "run-one", "archive-one"), archive);
+    QVERIFY(model.toJson()["unassigned_sessions"].toArray().contains(archive));
+    QCOMPARE(SessionOrganization(model.toJson()).toJson(), model.toJson());
 }
 
 void TestWorkspace::orderingAndRemoval()
@@ -503,7 +616,9 @@ void TestWorkspace::draftStatusSitsBetweenWorkAndReplies()
     item->setData(SessionRoles::Unread, true);
     QCOMPARE(status().kind, SessionStatusBadge::Draft); QVERIFY(status().additionalUnread);
     item->setData(SessionRoles::Working, 1);
-    QCOMPARE(status().kind, SessionStatusBadge::Working);
+    QCOMPARE(status().kind, SessionStatusBadge::Working); QVERIFY(!status().additionalUnread);
+    QVERIFY(!status().unread); QCOMPARE(status().emphasis, IdentityBadges::Normal);
+    QVERIFY(item->data(SessionRoles::Unread).toBool()); // Presentation never consumes the read identity.
     item->setData(SessionRoles::Working, 0); item->setData(SessionRoles::Attention, true);
     QCOMPARE(status().kind, SessionStatusBadge::Attention);
     item->setData(SessionRoles::Attention, false); item->setData(SessionRoles::Unread, false); item->setData(SessionRoles::Status, "Paused");

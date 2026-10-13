@@ -127,6 +127,84 @@ class Swarm(unittest.TestCase):
         self.join('a', 'b')
         self.assertEqual(len(self.call('a', 'get')['organization']['projects']), 2)
 
+    def test_observation_cannot_race_launch_but_explicit_inbox_choices_can_conflict(self):
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['projects'].append(dict(id='ungrouped', name='Inbox', color='#123456', folders=[], sessions=[]))
+        self.patch('a', before, desired)
+        self.join('a', 'b'); self.join('b', 'a')
+
+        def sync():
+            for node in ('a', 'b', 'a'):
+                self.call(node, 'sync')
+            snapshots = [self.call(node, 'get') for node in ('a', 'b')]
+            self.assertEqual(snapshots[0]['digest'], snapshots[1]['digest'])
+            return snapshots
+
+        def assignment(snapshot, session, project_id):
+            desired = copy.deepcopy(snapshot['organization'])
+            desired['session_assignments_explicit'] = True
+            for project in desired['projects']:
+                project['sessions'] = [s for s in project['sessions'] if s != session]
+                if project['id'] == project_id:
+                    project['sessions'].append(session)
+            return desired
+
+        # Qt's firstObservationDoesNotRaceAnotherDesktopAssignment verifies
+        # that real GUI initialize/apply payloads omit passive memberships.
+        # Replay that contract through isolated CLI nodes in both write orders.
+        for observer_first in (True, False):
+            a, b = sync()
+            session = f'a\ncodex/example/launch-{int(observer_first)}'
+            observed = copy.deepcopy(a['organization'])
+            observed['session_assignments_explicit'] = True
+            observed['runs'] = {'a\nrun-one': session}  # Local presentation only.
+            launched = assignment(b, session, 'b')
+            for node, base, desired in ([('a', a, observed), ('b', b, launched)] if observer_first
+                                        else [('b', b, launched), ('a', a, observed)]):
+                result = self.patch(node, base, desired)
+                if node == 'a':
+                    self.assertEqual(result['written'], {})
+            for snapshot in sync():
+                self.assertEqual(snapshot['conflicts'], [])
+                self.assertIn(session, next(p for p in snapshot['organization']['projects'] if p['id'] == 'b')['sessions'])
+
+        # A deliberate first choice is different: even when another assignment
+        # reached the local CLI before the GUI saw it, keep both real choices.
+        a, b = sync(); session = 'a\ncodex/example/explicit-choice'
+        self.patch('b', b, assignment(b, session, 'b'))
+        sync()
+        self.patch('a', a, assignment(a, session, 'ungrouped'))
+        a, b = sync()
+        conflict = next(c for c in a['conflicts'] if c['field'].get('session') == session.split('\n', 1)[1])
+        self.assertEqual({v['value'] for v in conflict['variants']}, {'b', 'ungrouped'})
+        self.call('a', 'resolve', data=dict(key=conflict['key'], versions=[v['id'] for v in conflict['variants']], value='ungrouped'))
+        for snapshot in sync():
+            self.assertEqual(snapshot['conflicts'], [])
+            self.assertIn(session, next(p for p in snapshot['organization']['projects'] if p['id'] == 'ungrouped')['sessions'])
+        # Neither the local fallback marker nor the additive intent hint is a
+        # new shared operation or stored catalog field for resident peers.
+        exported = json.dumps(self.call('a', 'export'))
+        self.assertNotIn('unassigned_sessions', exported)
+        self.assertNotIn('session_assignments_explicit', exported)
+
+    def test_additive_assignment_hint_keeps_legacy_catalog_operations(self):
+        # Also run this contract against a retained pre-fix hgs binary: the hint
+        # is organization metadata, not a new Patch field or operation kind.
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['session_assignments_explicit'] = True
+        desired['projects'].append(dict(id='ungrouped', name='Inbox', color='#123456', folders=[], sessions=[]))
+        desired['projects'][0]['sessions'] = ['a\ncodex/example/review']
+        saved = self.patch('a', before, desired)
+        desired = copy.deepcopy(saved['organization']); desired['session_assignments_explicit'] = True
+        for project in desired['projects']:
+            project['sessions'] = ['a\ncodex/example/review'] if project['id'] == 'ungrouped' else []
+        saved = self.patch('a', saved, desired)
+        self.assertEqual(saved['conflicts'], [])
+        self.assertEqual(next(p for p in saved['organization']['projects'] if p['id'] == 'ungrouped')['sessions'], ['a\ncodex/example/review'])
+        exported = json.dumps(self.call('a', 'export'))
+        self.assertNotIn('session_assignments_explicit', exported)
+        self.assertNotIn('unassigned_sessions', exported)
+
     def test_explicit_initial_mapping_preserves_both_folder_locations_and_backup(self):
         self.join('a', 'b', {'a': 'b'})
         projects = self.call('a', 'get')['organization']['projects']

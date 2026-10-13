@@ -327,25 +327,26 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
                 .mode(0o600)
                 .open(cache.with_extension("lock"))
                 .ok();
-            if let Some(guard) = &guard {
-                while guard.try_lock_exclusive().is_err() {
-                    if Instant::now() >= deadline {
-                        return Err(error("timeout", "Catalog is being refreshed"));
+            let _lock = match guard {
+                Some(guard) => {
+                    while guard.try_lock_exclusive().is_err() {
+                        if Instant::now() >= deadline {
+                            return Err(error("timeout", "Catalog is being refreshed"));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
                     }
-                    std::thread::sleep(Duration::from_millis(10));
+                    if !refresh {
+                        snapshot = load(&cache);
+                    }
+                    Some(crate::platform::FileLock::held(guard))
                 }
-                if !refresh {
-                    snapshot = load(&cache);
-                }
-            }
+                None => None,
+            };
             if refresh || !snapshot.as_ref().is_some_and(fresh) {
                 let (trees, partial) = list(&path, &common, deadline)?;
                 let value = json!({"state":"ok","common_dir":common,"worktrees":trees,"partial":partial,"sampled_at":now()});
                 let _ = atomic(&cache, &value.to_string());
                 snapshot = Some(value);
-            }
-            if let Some(guard) = guard {
-                let _ = FileExt::unlock(&guard);
             }
         }
         let mut snapshot =
@@ -547,6 +548,7 @@ fn create(args: &[String]) -> Result<Value> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    let _lock = crate::platform::FileLock::held(guard);
     // Atomic reservation rejects simultaneous creators and existing/symlinked
     // destinations. Git accepts this empty directory but never overwrites files.
     if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }

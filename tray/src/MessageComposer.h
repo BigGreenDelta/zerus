@@ -35,6 +35,8 @@ public:
     ~MessageComposer() override;
     void setSessionKey(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
+    // Independent of delivery/loading locks; keeps the existing draft selectable.
+    void setRecording(bool recording);
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
@@ -51,9 +53,15 @@ public:
                           bool enabled, const QString &reason, const QString &pendingModel = {},
                           const QString &pendingEffort = {}, const QString &applyWhen = {});
     void setSettingsTerminalAvailable(bool available);
+    // Only a successful callback permits transport; pending work locks this exact draft.
+    void prepareSendingAsync(const QString &key, bool preserveDraft, std::function<void(bool)> done);
+    bool isPreparingSending(const QString &key) const { return m_preparingKeys.contains(key); }
+    bool isDraftLoading(const QString &key) const { return m_loadingKeys.contains(key); }
+    // UI convenience: acceptance is asynchronous. Transport owners use prepareSendingAsync.
     bool setSending(const QString &key, bool preserveDraft = false);
     // A later send awaits startup/compaction. Keep its payload visible and
     // selectable, while locking edits. A restart restores an ordinary draft.
+    void prepareWaitingToSendAsync(const QString &key, const QString &reason, std::function<void(bool)> done);
     bool setWaitingToSend(const QString &key, const QString &reason);
     bool isWaitingToSend(const QString &key) const { return m_waitingSends.contains(key); }
     bool draftMatches(const QString &key, const QString &text, const QList<MessageAttachment> &attachments) const;
@@ -64,7 +72,7 @@ public:
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
-    bool canAttachFiles() const { return !m_key.isEmpty() && !isSending(m_key) && !isWaitingToSend(m_key) && !isAddingTask(m_key); }
+    bool canAttachFiles() const { return !m_recording && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key) && !isAddingTask(m_key); }
     QString sessionKey() const { return m_key; }
     void attachDroppedFiles(const QStringList &paths);
     QPlainTextEdit *editor() const { return m_editor; }
@@ -73,6 +81,11 @@ public:
     // A required question replaces the field and its actions; the toolbar stays.
     void setInputVisible(bool visible);
     bool isInputVisible() const;
+    struct VoiceTarget { QString key; quint64 revision = 0, navigation = 0; };
+    VoiceTarget voiceTarget() const { return {m_key, m_saveRevision.value(m_key), m_navigationRevision}; }
+    // Append only to an unchanged, still selected editable draft. A successful
+    // callback means the inserted text is durable; it never submits a message.
+    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
 
@@ -97,6 +110,7 @@ signals:
     void sendRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
+    void controlsChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -104,7 +118,7 @@ protected:
 
 private:
     using Draft = ComposerDraft;
-    bool saveDraft(const QString &key, bool asynchronous = false);
+    bool saveDraft(const QString &key);
     void send();
     void addTask(TaskDestination destination);
     // A button's reason to stay disabled, under the field where Enter would act.
@@ -132,14 +146,18 @@ private:
     QHash<QString, Draft> m_preservedDrafts;
     QHash<QString, QString> m_waitingSends;
     QSet<QString> m_unsent;   // keys whose last reported hasDraft() was true
-    mutable QSet<QString> m_storedDrafts;
-    mutable bool m_draftsIndexed = false;
+    QSet<QString> m_loadingKeys;
+    QSet<QString> m_preparingKeys;
+    QSet<QString> m_preparingWaiting;
+    QSet<QString> m_renamingKeys;
+    QSet<QString> m_storedDrafts;
     ComposerDraftStore m_draftStore;
     QHash<QString, quint64> m_saveRevision;
+    quint64 m_navigationRevision = 0;
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
-    bool m_available = false, m_loading = false, m_dark = true;
+    bool m_available = false, m_loading = false, m_dark = true, m_recording = false;
     double m_scale = 1.0;
     QPlainTextEdit *m_editor;
     QLabel *m_status;
@@ -158,7 +176,7 @@ private:
     QWidget *m_addTaskGroup;
     QPushButton *m_addTask, *m_addTaskMenu;
     QSet<QString> m_addingTasks;   // keys whose draft is being added as a task
-    QHash<QString, QString> m_renamedTasks;   // a renamed session's old key -> new key, until its answer
+    QHash<QString, QString> m_taskOutcomes;   // the last added task's notice per key; shown while it is the draft's notice
     bool m_taskActions = true, m_taskAvailable = true, m_taskQueueAvailable = true;
     QString m_taskReason, m_taskQueueReason;
     ComposerToolbar *m_toolbar;

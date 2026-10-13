@@ -16,6 +16,8 @@ belong to your terminal emulator; tmux provides the persistent session.
 hgs claude sample-project           # attach if present; otherwise start Claude
 hgs @mac claude sample-project      # the same operation over SSH
 hgs ls                             # local and peer sessions
+hgs status                         # version, sessions and services here and on peers
+hgs version                        # this hgs version (also hgs --version)
 hgs a claude/sample-project/review  # attach by full name
 hgs kill claude/sample-project      # remove the hgs binding; keep native history
 hgs pause --all                     # pause verified idle sessions
@@ -245,8 +247,12 @@ including remote or renamed sessions. Overmind tasks waiting in Your Call
 notify as well and open their card ([Overmind on the
 desktop](#overmind-desktop)). Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
-the session is idle and has no reported active children; intermediate replies
-remain unread in Activity while work continues. Routine replies from a turn the
+the session is idle and has no reported active children. While native agent work,
+live background commands or active subagents continue, intermediate replies remain
+unread in Activity but show no new-reply badge or reply-only attention count on
+desktop or Android. The pending reply becomes visible when work finishes; this
+never marks it as read. Explicit questions, approvals, errors and review reminders
+remain actionable. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -276,6 +282,63 @@ online machines, CPU, memory and load, plus account limits. Counts open the matc
 filter, sessions open Activity, and machine settings lead to Machines. Native
 account quotas are grouped by verified identity instead of adding machine usage.
 
+**About** is the final Settings section, after **Voice input**.
+
+**Settings → Voice input** selects the speech computer, its recognition profile
+and the local microphone. The speech computer is independent of the agent's
+computer: a laptop can record locally and use a configured GPU peer over SSH.
+The provider manager creates, edits, tests and removes profiles on the selected
+processing computer. Choose **Local GigaAM** (model and CPU/GPU) or an
+**OpenAI-compatible server** (API base URL, model, language and optional API key).
+An empty language lets the server detect it; an explicit language uses a two-letter
+code such as `ru`. Keys remain on the processing computer and are never shown
+again; Keep, Replace and Remove are explicit choices. Test checks the saved
+profile with synthetic audio and cannot send input to an agent. Removing a
+profile requires confirmation. Choosing a default is separate from browsing or
+editing profiles. Configuration is available even when inference is not running.
+See [provider management](speech-providers.md) and
+[host installation](../services/speech/README.md). Local GigaAM starts with the
+Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
+download a model and never falls back to another provider.
+
+Use **Voice** in the message toolbar, allow microphone access, then stop recording
+to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+are limited to two minutes and remain separate from the typed draft. Capture
+opens the local microphone without waiting for speech computers or providers.
+Provider discovery runs in the background. If it fails, the recording remains
+available for playback; refresh providers in the preview before sending.
+An unavailable selected provider stays selected until you explicitly change it.
+A retained recording also pins a versioned provider's configuration revision;
+editing that profile requires explicit reselection before sending the recording.
+During capture, the typed draft stays visible and read-only, and ordinary message
+submission and attachment changes are blocked. History remains readable.
+**Space** or **Escape** stops recording into the retained preview; neither sends
+nor discards it. Recording takes priority over Escape's agent-interruption
+action. Holding either key stops capture only once, and editing resumes after
+capture ends unless another delivery lock applies. Android supports the same
+controls with a hardware keyboard; its touch Stop control remains available.
+The preview lists speech profiles reachable from the conversation computer. Explicit Send
+stores the original there, starts recognition and delivers recognized text to
+the pinned agent conversation. One history card retains the playable original,
+expandable transcript and processing or delivery errors across devices. Its
+circular play/pause control sits beside the recording's amplitude waveform;
+the played portion is highlighted, and selecting a point on the waveform seeks
+within the recording and keeps paused audio paused. The time display follows
+playback. Older recordings gain their waveform in the background without
+recognition or delivery being repeated.
+Clients recover interrupted requests by the original message UUID without blindly
+uploading or sending again. Hiding the composer stops unsubmitted capture.
+See [persistent voice messages](voice-messages.md) for storage and delivery details.
+Voice settings also show the selected computer's
+90-day counters; [analytics](analytics.md) documents their meaning and the planned
+cross-computer agent statistics.
+
+If microphone access is denied, Voice shows a permission explanation with
+**Open microphone settings** on macOS and Windows. On macOS this opens
+**System Settings → Privacy & Security → Microphone**. Allow Zerus, return to
+the conversation and press **Voice** again; opening settings does not start a
+recording. If settings cannot open, the dialog keeps the manual navigation path.
+
 Session rows show provider, machine, current action, model, effort and Git context.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
@@ -297,8 +360,18 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. Working
-and compacting timers use native start evidence and update locally without extra
+**Ready** means a reply ended, not that a long-running task is complete. An idle
+agent with confirmed live shell commands shows **Background**, with the
+command preview and elapsed time. Open **Processes** to follow output or inspect
+the running commands. The session remains in **Active** and still accepts new
+messages. Input/approval requests take precedence; ordinary agent work takes
+precedence over background work, followed by Scheduled and Ready. Offline and
+historical/unconfirmed process records never establish background work. The CLI's
+additive `process_work` summary uses current owned OS trees (one process-table
+sample per fleet listing) or the native DeepSeek job registry; it does not scan
+native transcripts on each fleet poll.
+
+Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
 `CronCreate`) is **Scheduled**: its badge and detail show the next run time
 instead of a timer, or "due" once that time has passed. A question, approval or
@@ -319,6 +392,18 @@ width** in the same menu restores the default column. Narrower panes use their
 full width, and Terminal, Processes and Native UI are not affected. A reset icon
 appears beside an Appearance slider's value once it differs from the default and
 restores that default.
+**Settings → Appearance → Usage limit indicator** sets how the account usage in the
+status bar and on Overview account cards shows each limit window. The default, **Usage and elapsed time bars**, draws usage above a gray
+bar for the elapsed part of the window; a longer usage bar means a faster than
+even pace. **Pace marker** shows elapsed time as a mark on the usage bar, and
+usage beyond the mark takes the warning color. **Pace marker and reset
+countdown** adds an hourglass with the time until reset, such as `26h` or `6d`;
+compact Overview cards omit the countdown. Colors follow the average pace since
+the window started: green when the limit lasts until reset, orange when it would
+run out in the second half of the remaining time or 90% is used, and red when it
+would run out sooner or is exhausted. The first 8% of a window, and windows
+without a reported length or reset time, keep the fixed 70%/90% thresholds. The
+tooltip adds the time until reset and the pace forecast.
 **Settings → Appearance → Keep Zerus above other windows** keeps the Zerus window
 over other applications on X11, macOS and KDE Plasma 6 on Wayland. On KDE Wayland,
 Zerus uses temporary KWin scripts scoped to its own window and confirms the
@@ -467,10 +552,10 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
-For Claude messages ending in a literal backslash, the paste includes a final
-newline so the single Enter submits the unchanged message instead of activating
-Claude's backslash-Enter line continuation. This is verified against native
-history; no second Enter is sent as an automatic retry.
+For Claude and Kimi messages ending in a literal backslash, the paste includes a
+final newline so the single Enter submits the unchanged message instead of
+activating the agent's backslash-Enter line continuation. This is verified
+against native history; no second Enter is sent as an automatic retry.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue
@@ -481,15 +566,21 @@ unless its native UI offers the supported promotion operation.
 **Stop** interrupts the current turn and cancels recovery without terminating the
 session; Escape anywhere in the workspace except Terminal does the same while
 the selected session's turn is working, after first clearing a search being
-typed. Once the turn is interrupted, its prompt returns to an empty message field
-for editing; a started draft is kept. Claude, Codex and Kimi use verified native
+typed. While recording voice, Escape stops the recording instead and preserves
+its preview. Once the turn is interrupted, its prompt returns to an empty message
+field for editing; a started draft is kept. Claude, Codex and Kimi use verified native
 Escape; Claude sends no event for it, so HGS records the interruption once
 Claude shows it. Stopped before its first reply, Claude rewinds the turn and
 puts the prompt back into its own input instead; HGS then moves exactly that
 text from Terminal to the message field (Ctrl+Y in Terminal brings it back) and
 leaves any other input untouched. Supported DeepSeek hosts use native cancel.
 Native queue behavior still applies: Codex Escape may start a queued follow-up.
-Uncertain interruption is not repeated.
+Uncertain interruption is not repeated. Stop notices name the original session
+and computer even if you navigate away. If the turn has already ended or is
+waiting for input, no interruption is sent and no action is needed; Zerus refreshes
+the status and briefly shows that outcome. Other failures retain the diagnostic
+and ask you to refresh status or check Terminal before trying again. The status
+bar's **Dismiss notification** button clears a notice without changing the session.
 
 When Claude suggests your next message after a turn, Activity shows it as the
 empty message field's placeholder, as Claude's terminal does; Tab inserts it.
@@ -499,11 +590,44 @@ nor shown in Activity.
 
 File links retain their visible path and source position. Relative references
 resolve against that session's folder. Local references can open the file or its
-parent folder; remote references identify the host and offer an SSH terminal
-instead of treating the remote path as local. Display alone downloads or launches
+parent folder; remote references identify the host and offer **Download…** and
+**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
+use that machine's configured SSH profile and SFTP, stream directly to disk and
+replace the chosen destination only after a successful transfer. Errors remain
+in the dialog; a saved copy can be opened with **Open local copy**. Offline or
+unresolved relative references explain why downloading is unavailable. The
+download continues if its dialog is closed, with a completion or error notice;
+an explicitly requested open still happens after successful saving. The
+120-second transfer deadline leaves an existing destination unchanged on failure.
+`hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
+transfer from the CLI, including empty files and paths starting with `~/`.
+Display alone downloads or launches
 nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is
 destroyed so Wayland activation does not depend on a disappearing window.
+
+Zerus opens files the way a browser treats downloads. Conversation attachments,
+draft attachments, downloaded copies, local file references and their folders
+open in their default application. Anything that would run a program is selected
+in the file manager instead, with a notice that says why. That includes:
+- file types that run programs, scripts or installers, such as `.exe`, `.bat`,
+  `.ps1`, `.url`, `.app`, `.command`, `.pkg`, `.dmg`, `.desktop`, `.sh`, `.jar`
+  and `.py`, plus types Windows itself rates as dangerous;
+- macOS bundles;
+- on Windows, names without an extension;
+- on Linux and macOS, executable files without one, and programs or `#!/…`
+  scripts recognized by their content.
+
+A link is judged by its target. On Linux, when no file manager answers, Zerus
+opens the folder instead of selecting the file.
+
+Files from other machines carry the system's downloaded-file marker. These are
+attachment copies opened from Activity, and every completed download as soon as
+it is saved. The marker is Mark of the Web for the Internet zone on Windows and
+quarantine on macOS, which keeps an earlier approval. SmartScreen, Office
+Protected View and Gatekeeper therefore still apply when such a file is opened
+later. Windows skips the marker when policy disables zone information. Linux has
+no such marker, and cached attachment copies there are never executable.
 
 ### Questions and approvals
 
@@ -539,8 +663,25 @@ estimated lifetime has expired. Resuming with the full conversation can increase
 token usage, cost or subscription usage. **Cancel** keeps the form answers.
 Compaction or clearing can invalidate the pending question, so this confirmation
 offers neither action. A changed question, session or draft cancels consent.
+Kimi's native cold-cache chooser already provides the explicit cost and context
+choices. Its selected row is submitted directly, without a second full-context
+confirmation; the same identity and durable delivery checks still apply.
+App-owned desktop and Android dialog action rows place **Cancel**, **Close** or
+the equivalent dismissal at the far right, after the available actions. Long
+Android rows wrap, keeping dismissal last and visible with larger text. Destructive
+and full-context desktop confirmations default to Cancel; Android dialogs focus
+their dismissal after the dialog window gains focus. Enter on a valid desktop
+editing form may save or create; Escape/Back dismisses without submitting.
+Accepted operations that cannot safely be abandoned keep their existing pending
+locks; closing a review never repeats an uncertain command. Destructive buttons
+name their action and the dialog identifies its original target. System file,
+permission and installation prompts follow the operating system's own layout.
 
 Unsupported or truncated native prompts remain in Terminal.
+Claude wraps prompts, options, review answers, key hints and Bash commands to
+the terminal width and splits words longer than a row. Zerus matches the wrapped
+rows against the exact request at any width; only a clipped panel needs a
+larger Terminal.
 
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the
@@ -600,6 +741,14 @@ then exits and the session needs an explicit resume. **Skip** and **Skip until
 next version** continue startup, and Codex records the dismissal itself. Only
 reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
 recognized; other or clipped commands stay in Terminal.
+After a resume, Codex asks **Resume paused goal?** when the conversation's goal
+is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
+database once the centered dialog over the transcript shows the same goal and
+both choices; the session waits for this choice instead of Restoring
+conversation. **Resume goal** marks the goal active, and Codex continues it by
+itself when idle. **Leave paused** keeps it paused and the conversation waits
+for your message. A dialog too narrow to read, or for another goal, stays in
+Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
 Queue arrows navigate optional requests from newest to oldest while retaining
@@ -625,6 +774,8 @@ account's native catalog. Before the first message, verified empty native input
 can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Claude controls and unverified states fall back to Terminal with an explanation.
+A choice that the agent's status line already shows is confirmed without typing
+anything into Terminal.
 
 Busy-session choices remain **Pending** until the agent is ready, including after
 navigation away. A message sent before application uses the current model.
@@ -725,6 +876,14 @@ membership. Drag sessions between projects without moving folders or replacing
 agent processes. Drag headers, use the context menu or Alt-Up/Down to change local
 order. Empty-project visibility, collapse state and default project are local.
 **All swarm projects** explicitly shows the full shared catalog.
+
+A newly discovered session appears in the local default project until a shared
+assignment arrives. Discovery alone does not publish that fallback as a project
+assignment, so another desktop can launch the session into its chosen project
+without racing an automatic Inbox assignment. Launching or explicitly moving a
+session publishes its project choice, including a deliberate move to Inbox.
+Update the desktops that observe sessions to receive this behavior; existing
+catalog assignments and unresolved conflicts remain available for review.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
@@ -876,10 +1035,13 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Worktrees and ordinary folders
 
-Session cards show only the Git branch, or **detached HEAD**, in their checkout
-line, preceded by a small Git branch icon. The opened session's header and
-**Details** retain the worktree name and folder path. Ordinary folders without
-Git metadata have no branch label.
+Session cards show a checkout line of the form `folder / branch`, such as
+`zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
+replaces a missing branch. A linked worktree names its main checkout folder
+rather than its own generated folder. Ordinary folders without Git metadata
+show only their name, preceded by a folder icon. The opened session's header and
+**Details** show the same line, marked `· worktree` for a linked worktree; the
+full folder path stays in the header tooltip and **Details**.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
@@ -1136,6 +1298,12 @@ Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
 and quoted error examples cannot change the session state. New native progress
 clears the failure; changing the account counter alone does not.
+Matching Codex log and completion records retain their exact failure references,
+so delayed duplicate evidence keeps the same recovery episode, deadline and
+attempt budget. Separate native turns remain separate even for identical errors.
+A previous cancellation caused by switching those sources can resume only with
+confirmed matching native evidence and zero delivery attempts; user cancellation,
+new input, interruption, changed identity and uncertain delivery still stop recovery.
 
 A chip in the toolbar above the message field shows the countdown; its popover
 shows the attempt number, **Attempts**, **Retry now** and **Cancel retry**. Retry now respects a known Retry-After and the reset deadline in reset mode. Policy edits apply to new
@@ -1148,6 +1316,9 @@ GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live o
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
+On Linux, client policy refreshes start the configured user service without
+restarting an active executor. A detached worker remains the fallback when no
+installed service or usable user manager is available.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
@@ -1161,6 +1332,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
+The small **Background** summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. A
+background session's context menu offers **Show running commands** when Processes
+is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal
@@ -1305,6 +1480,16 @@ same explicit flag wins again.
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+
+`hgs status` only reads. For this computer and each peer it shows the hgs
+version, live sessions by what they need (working, needing attention, ready),
+stopped and archived sessions, and whether the desktop app, swarm worker,
+recovery worker and mobile connector are running. This computer also shows the
+running `hgs` executable. A peer whose hgs predates `status` still reports its
+version and sessions; update it to see its services. `--local` limits the report
+to this computer, `@host status` to one peer, and `--json` prints the same data
+for scripts. `hgs version` and `hgs @host version` print `hgs X.Y.Z`, like
+`--version`.
 Configurations are data assignments, not executable shell scripts:
 
 ```sh
@@ -1323,7 +1508,19 @@ variables and application/service IDs stay compatible with existing installation
 [third-party notices](../THIRD_PARTY_NOTICES.md) for dependency licensing.
 
 The GUI installer updates only Zerus and its desktop integration. It never
-restarts native agents, tmux servers or DeepSeek hosts. Use
+restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces a
+running Zerus through `tray/update-installed.py`, the only supported live update:
+Zerus quits as its Quit action does, so drafts are saved, then starts again through
+systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
+hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
+restores it when the new GUI does not start, and confirms the running image,
+unchanged nonempty drafts and native agent and tmux processes. It records the
+installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
+`.zerus-*` staging folders left beside the GUI by earlier hand-made updates once
+they are an hour old, hold only installer copies and no process uses them. A
+failed check leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
+gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
+is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 

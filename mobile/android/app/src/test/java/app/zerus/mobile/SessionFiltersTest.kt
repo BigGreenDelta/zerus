@@ -6,6 +6,43 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionFiltersTest {
+    @Test fun intermediateRepliesKeepTheirIdentityAndReappearWhenAllWorkFinishes() {
+        for (readFlag in listOf("unread_reply", "mobile_unread_reply")) {
+            for (work in listOf("""{"activity":"busy","phase":"working"}""",
+                """{"activity":"idle","phase":"idle","process_work":{"count":1}}""",
+                """{"activity":"idle","phase":"idle","subagent_active_count":1}""",
+                """{"activity":"idle","phase":"idle","subagent_count":1}""")) {
+                val raw = JSONObject(work).put(readFlag, true).put("reply_id", "progress")
+                val item = session(raw.toString())
+                assertFalse(SessionFilters.visibleUnreadReply(item, true))
+                assertFalse(SessionFilters.needsAttention(item, true))
+                assertTrue(SessionFilters.active(item, true))
+                assertTrue(item.raw.optBoolean(readFlag)); assertEquals("progress", item.raw.string("reply_id"))
+                val finished = item.copy(raw = JSONObject(item.raw.toString()).put("activity", "idle").put("phase", "idle")
+                    .put("process_work", JSONObject().put("count", 0)).put("subagent_active_count", 0).put("subagent_count", 0))
+                assertTrue(SessionFilters.visibleUnreadReply(finished, true))
+                assertTrue(SessionFilters.needsAttention(finished, true))
+                assertEquals("progress", finished.raw.string("reply_id"))
+                for (phase in listOf("input", "approval", "error")) {
+                    assertTrue(SessionFilters.needsAttention(item.copy(raw = JSONObject(item.raw.toString()).put("phase", phase)), true))
+                }
+                assertTrue(SessionFilters.needsAttention(item.copy(raw = JSONObject(item.raw.toString()).put("mobile_review_later", true)), true))
+            }
+        }
+    }
+
+    @Test fun liveShellWorkIsActiveAndOutranksScheduleWhileNativeInputStaysIdle() {
+        val item = session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"schedules":{"count":1}}""")
+        assertEquals("Background",SessionFilters.status(item,true))
+        assertTrue(SessionFilters.working(item,true))
+        assertTrue(SessionFilters.active(item,true))
+        assertFalse(SessionFilters.scheduled(item,true))
+        assertFalse(SessionFilters.needsAction(item))
+        assertFalse(SessionFilters.working(item,false))
+        val finished=item.copy(raw=JSONObject(item.raw.toString()).put("process_work",JSONObject().put("count",0)).put("schedules",JSONObject().put("count",0)))
+        assertEquals("Ready",SessionFilters.status(finished,true))
+        assertFalse(SessionFilters.active(finished,true))
+    }
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
     private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =
         Session(Target("same", name, "run", "conversation", connection, archive), "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, JSONObject(raw))

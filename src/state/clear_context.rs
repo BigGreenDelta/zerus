@@ -190,10 +190,18 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
     match agent {
         "codex" => before.trim()==format!("› {command}") && after.trim().is_empty(),
         "claude" => [format!("❯ {command}"),format!("> {command}")].iter().any(|prompt|prompt==before.replace('\u{a0}'," ").trim()) && after.trim().is_empty(),
-        "kimi" => before.trim()==format!("│ > {command}") && after.trim()=="│",
+        // Kimi 2.1 shows an argument hint such as <instruction> after the command.
+        "kimi" => before.trim()==format!("│ > {command}") && after.trim().strip_suffix('│').is_some_and(|hint|{
+            let hint=hint.trim();
+            hint.is_empty() || (hint.len()<=40 && hint.starts_with('<') && hint.ends_with('>')
+                && !hint[1..hint.len()-1].contains(['<','>']))
+        }),
         _ => false,
     }
 }
+/// Kimi 2.1 turns an Enter that follows typed text within about 0.1 s into a
+/// newline. Wait this long after a typed command, then recheck it and press Enter.
+pub(super) const COMMAND_SETTLE: Duration = Duration::from_millis(250);
 pub(super) fn ready(record: &Value, command: &str) -> Result<bool> {
     let output=tmux(&["display-message","-p","-t",string(record,"pane"),"#{cursor_x}\t#{cursor_y}"].map(str::to_owned),true)?;
     let cursor=String::from_utf8_lossy(&output.stdout);
@@ -251,6 +259,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             if Instant::now()>=deadline {return Err("Native /clear input could not be verified".into());}
             std::thread::sleep(Duration::from_millis(40));
         }
+        std::thread::sleep(COMMAND_SETTLE);
         let current=if dismiss {kimi_tui_choice::identity(&record)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
@@ -424,6 +433,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(command_row("codex","› /clear",8,"/clear"));
         assert!(command_row("claude","❯\u{a0}/clear",8,"/clear"));
         assert!(command_row("kimi"," │ > /clear       │",11,"/clear"));
+        assert!(command_row("kimi"," │ > /compact  <instruction>          │",13,"/compact"));
+        for row in [" │ > /compact extra  │"," │ > /compact  <a> <b> │"," │ > /compact  <instruction"] {assert!(!command_row("kimi",row,13,"/compact"));}
         for row in ["› /clear extra","› draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
     }
 }

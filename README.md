@@ -94,12 +94,33 @@ continues in its own native conversation. The same inspection and message
 interfaces serve the desktop and other clients.
 [CLI protocol and delivery guarantees](docs/reference.md#json-and-external-clients).
 
+### Voice control across agents and devices
+
+Speak a task to **Claude Code, Codex, Kimi Code or DeepSeek Harness** from the
+desktop or Android app. Record, review and send: Zerus transcribes the recording
+and delivers the text to the selected agent's native conversation, including on
+another connected computer. Your message stays in Activity as a **playable voice
+message with a waveform and expandable transcript**, so you can compare what you
+said with what the agent received.
+
+Choose the processing computer and manage its recognition profiles in
+**Settings → Voice input**. Use **local GigaAM v3 for Russian**, including GPU
+inference, or an **OpenAI-compatible transcription server** at your own URL.
+Your phone reaches the processing computer through the relay; it does not need
+to run the model. Agent choice and speech provider choice are independent.
+
+[Set up a speech provider](docs/speech-setup.md) |
+[Voice messages and delivery](docs/voice-messages.md)
+
 ### Your fleet from your phone
 
 The **Android app** brings your projects and agents to your phone:
 
 - **Conversations and tasks.** Read replies, follow goals, task lists and subagents,
   answer questions and approvals, and send messages with files and images.
+- **Voice control.** Send recorded tasks to any supported agent, play your voice
+  messages back and view their transcripts. Choose recognition profiles on a
+  connected computer, including local models and remote transcription servers.
 - **Remote controls.** Create sessions with the computer's native agent and account;
   change models, clear or compact context, inspect processes and open the native
   terminal where supported.
@@ -173,6 +194,7 @@ The same sessions are available from your terminal:
 hgs codex /workspace/orbit -n api       # local agent in tmux
 hgs @build-01 claude /workspace/orbit   # agent on another machine
 hgs ls                                # sessions here and on connected machines
+hgs status                            # versions and running services here and there
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 

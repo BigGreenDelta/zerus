@@ -41,9 +41,14 @@ def candidate(base, platform='desktop', number=1):
     source.mkdir()
     (source / 'zerus-source.tar.gz').write_bytes(b'Exact synthetic source')
     (source / 'VERSION').write_text('0.39.0')
+    (source / 'DEV_VERSION').write_text('0.39.1')
     apk = None
     if platform == 'desktop':
         (source / 'zerus-0.39.0-1-x86_64.pkg.tar.zst').write_bytes(b'Synthetic checked package')
+        (source / 'desktop-build-info.json').write_text(json.dumps({
+            'source_commit': COMMIT, 'version': '0.39.0', 'desktop_build': {
+                'version': '0.39.0', 'versionName': f'0.39.1-dev.{number}',
+                'devBuildNumber': number, 'sourceCommit': COMMIT, 'sourceDirty': False}}))
     else:
         (source / 'zerus.apk').write_bytes(b'Synthetic signed APK')
         apk = {'version_name': f'0.1.28-dev.{number}', 'version_code': 10000+number,
@@ -78,6 +83,23 @@ class DevUpdateTests(unittest.TestCase):
         self.temp.cleanup()
     def sync(self, execute=False, platform='desktop'):
         return publisher.synchronize(self.client, self.root, [platform], execute)
+    def test_dev_version_and_package_identity_are_pinned_to_the_checked_run(self):
+        self.assertEqual(self.client.info['versionName'], '0.39.1-dev.1')
+        for key, wrong in [('devBuildNumber', 2), ('sourceCommit', 'd'*40),
+                           ('sourceDirty', True), ('versionName', '0.39.1-dev.2')]:
+            with self.subTest(key=key):
+                info, _ = candidate(self.base, number=9)
+                source = self.base / 'input-desktop-9'
+                path = source / 'desktop-build-info.json'
+                manifest = json.loads(path.read_text());manifest['desktop_build'][key] = wrong
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    dev.seal(source, self.base/'mismatched', 'desktop', 109, 9, COMMIT, NOW.isoformat())
+                shutil.rmtree(source);shutil.rmtree(self.base/'candidate-desktop-9')
+        older = copy.deepcopy(self.client.info);older['versionName'] = '0.39.0'
+        dev.validate(older, self.client.path, self.client.run)
+        wrong = copy.deepcopy(self.client.info);wrong['versionName'] = '0.39.1-dev.2'
+        with self.assertRaises(ValueError):dev.validate(wrong, self.client.path, self.client.run)
     def test_dry_run_has_no_mirror_or_release_side_effects(self):
         self.assertEqual(self.sync()[0]['buildId'], 101)
         self.assertFalse(self.root.exists())
@@ -415,6 +437,8 @@ class DevUpdateTests(unittest.TestCase):
         for name in ('zerus-source.tar.gz', 'zerus-0.39.0-1-x86_64.pkg.tar.zst', 'zerus-0.39.0-windows-x86_64.zip'):
             (source / name).write_bytes(b'Synthetic ' + name.encode())
         (source / 'VERSION').write_text('0.39.0')
+        shutil.copyfile(self.base/'input-desktop-1/DEV_VERSION', source/'DEV_VERSION')
+        shutil.copyfile(self.base/'input-desktop-1/desktop-build-info.json', source/'desktop-build-info.json')
         with self.assertRaisesRegex(ValueError, 'Invalid desktop package'):
             dev.seal(source, self.base / 'sealed-windows', 'desktop', 101, 1, COMMIT, NOW.isoformat())
         self.assertFalse((self.base / 'sealed-windows').exists())

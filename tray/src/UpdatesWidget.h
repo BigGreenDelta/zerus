@@ -49,7 +49,7 @@ public:
         versions->setHorizontalSpacing(20);
         versions->setVerticalSpacing(6);
         versions->setRowWrapPolicy(QFormLayout::WrapLongRows);
-        auto *version = label(QCoreApplication::applicationVersion());
+        auto *version = label(UpdateController::installedVersion());
         auto *released = label();
         auto addVersion = [&](const QString &caption, QLabel *value) {
             auto *name = label(caption);

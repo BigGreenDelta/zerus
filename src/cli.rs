@@ -41,10 +41,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin)
+       hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
+       Speech profile management v1
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
        hgs [@host] ls                 sessions here and on peers
        hgs ls --json --local          this box as JSON (for the tray; no ssh)
+       hgs [@host] status [--json] [--local]   version, sessions and background services here and on peers
+       hgs [@host] version            this hgs version (also --version)
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
@@ -60,6 +65,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] clear-context <session> --json   clear the idle agent context using its native command
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
+       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
@@ -225,6 +231,11 @@ fn nested_guard(dry: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn usage() -> &'static str {
+    USAGE
+}
+
 pub fn dispatch(args: Vec<String>) -> Result<i32> {
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
@@ -278,13 +289,17 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     let args = &args[index + 1..];
     match command.as_str() {
         "-h" | "--help" | "help" => {
+            // Capability probes for a selected computer must inspect that
+            // computer's installed CLI, including retained older versions.
+            if !target.is_empty() && !config.is_self(&target) {
+                return remote(&config, &target, "--help", args, dry);
+            }
             print!("{USAGE}");
             return Ok(0);
         }
-        "--version" => {
-            println!("hgs {}", env!("CARGO_PKG_VERSION"));
-            return Ok(0);
-        }
+        "--version" | "version" => return crate::status::version(&config, &target, args),
+        // Read-only on every machine; never routed as an agent launch.
+        "status" => return crate::status::run(&config, &target, args, dry),
         _ => {}
     }
     if args.first().is_some_and(|value| value.starts_with("zerus://")) {
@@ -331,6 +346,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     if command == "a" && args.first().is_some_and(|v| v.starts_with("dsh/")) {
         return crate::native_ui::open(&config, &target, &args[0], dry);
     }
+    if command == "download" {
+        return crate::download::dispatch(&config, &target, args, dry);
+    }
     if !target.is_empty() && !config.is_self(&target) {
         // A session environment is never a person, and the remote side cannot verify it.
         if command == "overmind"
@@ -346,10 +364,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech") {
         local_sessions()?;
     }
     match command.as_str() {
+        "speech" => crate::speech::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
             let url = state::dsh::native_ui_url(require(args, 0, "Choose a native session")?)
                 .map_err(|e| Error::new(1, e))?;
@@ -372,11 +391,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "recovery" => {
+        | "attachment" | "recovery" | "voice" => {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -611,7 +630,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "overmind" | "read" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "overmind" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -686,7 +705,7 @@ fn remote(
     Ok(rc)
 }
 
-fn local_json(config: &Config) -> Result<Value> {
+pub(crate) fn local_json(config: &Config) -> Result<Value> {
     if !platform::LOCAL_SESSIONS {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.

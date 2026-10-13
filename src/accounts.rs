@@ -207,7 +207,7 @@ fn private_dir(path: &Path) -> Result<()> {
     platform::restrict_dir(path)?;
     Ok(())
 }
-fn locked(config: &Config) -> Result<fs::File> {
+fn locked(config: &Config) -> Result<platform::FileLock> {
     fs::create_dir_all(&config.dir)?;
     let f = fs::OpenOptions::new()
         .create(true)
@@ -230,7 +230,7 @@ fn locked(config: &Config) -> Result<fs::File> {
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(f)
+    Ok(platform::FileLock::held(f))
 }
 fn save(config: &Config, catalog: &Catalog) -> Result<()> {
     let mut f = tempfile::NamedTempFile::new_in(&config.dir)?;

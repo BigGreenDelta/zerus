@@ -313,6 +313,7 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         "submitted_text",
         "source_offset",
         "native_match_hash",
+        "voice",
     ] {
         if let Some(v) = row.get(field) {
             public[field] = v.clone();
@@ -332,7 +333,12 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         .optional()
         .map_err(|e| e.to_string())?;
     if let Some(id) = existing {
-        if stream == "provider" || stream == "attachment" {
+        // Native provenance aliases can point at a permanent voice card. A
+        // subsequent provider refresh must not replace it with a text-only row.
+        let owner: String = db.query_row("SELECT stream FROM messages WHERE id=?", [&id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if owner == "voice" && stream != "voice" { return Ok(()); }
+        if stream == "provider" || stream == "attachment" || stream == "voice" {
             let old: usize = db
                 .query_row(
                     "SELECT length(CAST(body AS BLOB)) FROM messages WHERE id=?",
@@ -956,7 +962,7 @@ fn reconcile(db: &Connection) -> Result<()> {
                         .filter(|(other, source, kind, text)| {
                             other != id
                                 && if stream == "attachment" {
-                                    source != "attachment"
+                                    source != "attachment" && source != "voice"
                                         && [
                                             "UserPromptSubmit",
                                             "UserPromptQueued",
@@ -1029,6 +1035,145 @@ fn ascii_wire_size(value: &Value) -> usize {
         .chars()
         .map(|c| if c.is_ascii() { 1 } else { 6 * c.len_utf16() })
         .sum()
+}
+
+/// A native row is eligible only within the source boundary persisted before
+/// delivery. Text is checked separately, and both sides must have one candidate.
+fn voice_after_boundary(row: &Value, correlation: &Value, sources: &Value) -> bool {
+    if correlation["native_receipt_status"] != "submitted" { return false; }
+    let boundary = &correlation["boundary"];
+    let Some(at) = correlation["native_submitted_at"].as_f64() else { return false; };
+    if at_of(row) < at - 1. || at_of(row) > at + 30. { return false; }
+    if let Some((file, byte)) = string(row, "source_offset").split_once(':') {
+        let (Ok(file), Ok(byte)) = (file.parse::<usize>(), byte.parse::<u64>()) else { return false; };
+        let source = &sources[file];
+        return source[0] == boundary["transcript"] && !source[0].is_null()
+            && source[1] == boundary["source_device"] && !source[1].is_null()
+            && source[2] == boundary["source_inode"] && !source[2].is_null()
+            && boundary["source_bytes"].as_u64().is_some_and(|start| byte >= start);
+    }
+    row["seq"].as_i64().zip(boundary["journal_seq"].as_i64())
+        .is_some_and(|(seq, start)| seq > start)
+}
+
+fn voice_binding_matches(row: &Value, binding: &Value, correlation: &Value, sources: &Value) -> bool {
+    (!string(binding,"provider_message_id").is_empty()
+        && row["message_id"] == binding["provider_message_id"]
+        && row["source"] == binding["provider_source"])
+    // Offsets are identities only inside the original source file. Never
+    // replace an explicit provider ID with another message at its old offset.
+    || (string(binding,"provider_message_id").is_empty()
+        && !string(binding,"provider_source_offset").is_empty()
+        && row["source_offset"] == binding["provider_source_offset"]
+        && row["source"] == binding["provider_source"]
+        && voice_after_boundary(row,correlation,sources))
+    || binding["journal_seq"].as_i64().is_some_and(|seq| row["seq"].as_i64() == Some(seq)
+        || row["original_ids"].as_array().into_iter().flatten().filter_map(Value::as_str)
+            .any(|id| id.starts_with("journal:") && id.ends_with(&format!(":native:{seq}"))))
+}
+
+/// Desktop inspection has a bounded journal window even before the paged
+/// history index is opened. Resolve its exact post-delivery journal sequence
+/// so the same voice card works when no phone has requested history yet.
+pub(super) fn inspected_voice_messages(record: &Value, detail: &Value, agent: Option<&str>) -> Value {
+    let mut voices = voice::messages(record, agent);
+    let events: Vec<_> = detail["message_events"].as_array().into_iter().flatten()
+        .chain(detail["events"].as_array().into_iter().flatten())
+        .filter(|event| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(event,"type"))
+            && ["","main"].contains(&string(event,"agent_id")))
+        .collect();
+    let mut candidates = Vec::new();
+    for (index,row) in voices.iter().enumerate() {
+        let Some(correlation) = voice::correlation(record,string(row,"message_id")) else { continue; };
+        if correlation["state"] != "submitted" || correlation["native_binding"].is_object() { continue; }
+        let mut found: Vec<_> = events.iter().filter(|event|
+            !string(row,"detail").trim().is_empty() && string(event,"detail").trim() == string(row,"detail").trim()
+                && voice_after_boundary(event,&correlation,&json!([])))
+            .filter_map(|event| event["seq"].as_i64()).collect();
+        found.sort_unstable(); found.dedup();
+        if let [seq] = found.as_slice() { candidates.push((index,*seq)); }
+    }
+    for (index,seq) in &candidates {
+        if candidates.iter().filter(|(_,other)| other == seq).count() != 1 { continue; }
+        let row = &mut voices[*index];
+        let binding = json!({"journal_seq":seq});
+        if voice::bind_native(record,string(row,"message_id"),&binding).unwrap_or(false) {
+            row["voice"]["native_binding"] = binding;
+        }
+    }
+    json!(voices)
+}
+
+fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result<()> {
+    if request.agent_id.as_deref().is_some_and(|id| !id.is_empty()) { return Ok(()); }
+    let sources: Value = get(db,"sources")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!([]));
+    let voices = voice::messages(parent, None);
+    let mut possible = Vec::new();
+    for row in voices {
+        let message_id = string(&row,"message_id");
+        let Some(correlation) = voice::correlation(parent,message_id) else { continue; };
+        if correlation["state"] != "submitted" { continue; }
+        let binding = &correlation["native_binding"];
+        let Some(at) = correlation["native_submitted_at"].as_f64() else { continue; };
+        let mut query = db.prepare("SELECT id,body FROM messages WHERE role='outgoing' AND stream!='voice' AND at BETWEEN ? AND ? ORDER BY at,ordinal,id LIMIT 65")
+            .map_err(|e|e.to_string())?;
+        let rows = query.query_map(params![at-1.,at+30.], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+            .map_err(|e|e.to_string())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        if rows.len() > 64 { continue; }
+        let mut rows: Vec<_> = rows.into_iter().filter_map(|(id,body)| serde_json::from_str::<Value>(&body).ok().map(|v|(id,v)))
+            .filter(|(_,row)| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(row,"type"))).collect();
+        for (id,row) in &mut rows {
+            let mut aliases = db.prepare("SELECT original FROM aliases WHERE id=? ORDER BY original LIMIT 8").map_err(|e|e.to_string())?;
+            let ids = aliases.query_map([id.as_str()],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?
+                .collect::<std::result::Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+            row["original_ids"] = json!(ids);
+        }
+        let mut native_rows: Vec<(String,Value)> = rows.iter().filter(|(_,native)|
+            !string(&row,"detail").trim().is_empty()
+            && string(native,"detail").trim() == string(&row,"detail").trim()
+            && voice_binding_matches(native,binding,&correlation,&sources)).cloned().collect();
+        let eligible: Vec<_> = rows.iter().filter(|(_,native)| !string(&row,"detail").trim().is_empty()
+            && string(native,"detail").trim() == string(&row,"detail").trim()
+            && voice_after_boundary(native,&correlation,&sources)).collect();
+        let providers: Vec<_> = eligible.iter().filter(|(_,native)| !string(native,"source_offset").is_empty()).collect();
+        let journals: Vec<_> = eligible.iter().filter(|(_,native)| native["seq"].as_i64().is_some()).collect();
+        let mut proposed = if binding.is_object() {binding.clone()} else {json!({})};
+        if let [provider] = providers.as_slice() {
+            let compatible = string(binding,"provider_source_offset").is_empty()
+                || voice_binding_matches(&provider.1,binding,&correlation,&sources);
+            if compatible {
+                for (from,to) in [("message_id","provider_message_id"),("source_offset","provider_source_offset"),("source","provider_source")] {
+                    if let Some(value) = provider.1.get(from).filter(|value| value.as_str().is_some_and(|text| !text.is_empty())) {
+                        proposed[to] = value.clone();
+                    }
+                }
+                native_rows.push((provider.0.clone(),provider.1.clone()));
+            }
+        }
+        if let [journal] = journals.as_slice() {
+            if binding["journal_seq"].is_null() || journal.1["seq"] == binding["journal_seq"] {
+                proposed["journal_seq"] = journal.1["seq"].clone();
+                native_rows.push((journal.0.clone(),journal.1.clone()));
+            }
+        }
+        native_rows.sort_by(|a,b|a.0.cmp(&b.0));native_rows.dedup_by(|a,b|a.0==b.0);
+        if !native_rows.is_empty() {possible.push((row,native_rows,proposed));}
+    }
+    for (voice_row, native_rows, binding) in &possible {
+        if native_rows.iter().any(|(id,_)| possible.iter().filter(|(_,others,_)|others.iter().any(|(other,_)|other==id)).count()!=1) {continue;}
+        let mut row = voice_row.clone();
+        let message_id = string(&row,"message_id").to_owned();
+        if !voice::bind_native(parent,&message_id,binding)? {continue;}
+        row["voice"]["native_binding"] = binding.clone();
+        let origin = original(&row,"voice").ok_or("Voice row lacks provenance")?;
+        let id: String = db.query_row("SELECT id FROM aliases WHERE original=?",[&origin],|r|r.get(0))
+            .map_err(|e|e.to_string())?;
+        for (native_id,native) in native_rows {
+            merge_row(db,&id,native_id,&row.to_string(),"UserMessage")?;
+            queue(db,&id,at_of(native))?;
+        }
+    }
+    Ok(())
 }
 fn page(
     db: &Connection,
@@ -1223,9 +1368,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         journal(&db, &parent, &request)?
     };
     let receipts_complete = receipts(&db, &parent, &request)?;
-    let source_complete = provider_complete && journal_complete && receipts_complete;
+    let voice_after = get(&db,"voice_seq")?.and_then(|seq|seq.parse::<i64>().ok()).unwrap_or(0);
+    let (voice_rows,voice_seq,voice_complete) = voice::history_page(&parent,request.agent_id.as_deref(),voice_after)?;
+    for row in voice_rows {
+        add(&db, &key(&parent, &request), row, "voice")?;
+    }
+    set(&db,"voice_seq",&voice_seq.to_string())?;
+    status["voice"] = json!(if voice_complete {"complete"} else {"indexing"});
+    let source_complete = provider_complete && journal_complete && receipts_complete && voice_complete;
     let upgrade_scan_done = advance_reconcile_upgrade(&db)?;
     if source_complete {
+        reconcile(&db)?;
+        reconcile_voice(&db, &parent, &request)?;
         reconcile(&db)?;
     }
     let upgrade_done = finish_reconcile_upgrade(&db, upgrade_scan_done)?;
@@ -1309,6 +1463,68 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_matching_requires_source_boundary_and_keeps_exact_journal_alias() {
+        let sources = json!([["/synthetic/transcript.jsonl",7,8,"header"]]);
+        let correlation = json!({"native_receipt_status":"submitted","native_submitted_at":100.,
+            "boundary":{"transcript":"/synthetic/transcript.jsonl","source_device":7,
+                "source_inode":8,"source_bytes":200,"journal_seq":40}});
+        let mut native = json!({"source_offset":"0:200","at":101.});
+        assert!(voice_after_boundary(&native,&correlation,&sources));
+        native["source_offset"] = json!("0:199");
+        assert!(!voice_after_boundary(&native,&correlation,&sources));
+        native["source_offset"] = json!("0:200");
+        assert!(!voice_after_boundary(&native,&correlation,&json!([["/synthetic/transcript.jsonl",7,9,"header"]])));
+        assert!(!voice_after_boundary(&json!({"seq":40,"at":101.}),&correlation,&sources));
+        assert!(voice_after_boundary(&json!({"seq":41,"at":101.}),&correlation,&sources));
+        assert!(!voice_after_boundary(&json!({"seq":41,"at":500.}),&correlation,&sources));
+        assert!(voice_binding_matches(&json!({"original_ids":["journal:codex:You:native:41"]}),&json!({"journal_seq":41}),&correlation,&sources));
+        assert!(!voice_binding_matches(&json!({"original_ids":["journal:codex:You:native:141"]}),&json!({"journal_seq":41}),&correlation,&sources));
+    }
+
+    #[test]
+    fn voice_offset_binding_rejects_replaced_sources_and_conflicting_native_ids() {
+        let sources = json!([["/synthetic/transcript.jsonl",7,8,"header"]]);
+        let replacement = json!([["/synthetic/transcript.jsonl",7,9,"header"]]);
+        let correlation = json!({"native_receipt_status":"submitted","native_submitted_at":100.,
+            "boundary":{"transcript":"/synthetic/transcript.jsonl","source_device":7,
+                "source_inode":8,"source_bytes":200,"journal_seq":40}});
+        let mut native = json!({"source":"codex_transcript","source_offset":"0:200","at":101.});
+        let mut binding = json!({"provider_source":"codex_transcript","provider_source_offset":"0:200"});
+        assert!(voice_binding_matches(&native,&binding,&correlation,&sources));
+        assert!(!voice_binding_matches(&native,&binding,&correlation,&replacement));
+        binding["provider_message_id"] = json!("original-id");
+        native["message_id"] = json!("another-id");
+        assert!(!voice_binding_matches(&native,&binding,&correlation,&sources));
+        native["message_id"] = json!("original-id");
+        assert!(voice_binding_matches(&native,&binding,&correlation,&replacement));
+    }
+
+    #[test]
+    fn voice_card_survives_native_refresh_and_state_revisions() {
+        let db = database();
+        let mut voice = row("UserMessage","voice-id","",1.);
+        voice["source"] = json!("hgs_voice");
+        voice["attachments"] = json!([{"request_id":"voice-id","index":0,"mime":"audio/wav"}]);
+        voice["voice"] = json!({"id":"voice-id","state":"transcribing","revision":2});
+        add(&db,"conversation",voice.clone(),"voice").unwrap();
+        let native = row("UserMessage","native-id","Synthetic voice",2.);
+        add(&db,"conversation",native.clone(),"provider").unwrap();
+        let id = |origin:&str| db.query_row("SELECT id FROM aliases WHERE original=?",[origin],|r|r.get::<_,String>(0)).unwrap();
+        let voice_id = id(&original(&voice,"voice").unwrap());
+        let native_id = id(&original(&native,"provider").unwrap());
+        merge_row(&db,&voice_id,&native_id,&voice.to_string(),"UserMessage").unwrap();
+        add(&db,"conversation",native,"provider").unwrap();
+        voice["detail"] = json!("Synthetic voice");
+        voice["voice"]["state"] = json!("submitted");
+        voice["voice"]["revision"] = json!(3);
+        add(&db,"conversation",voice,"voice").unwrap();
+        let (count,body):(i64,String) = db.query_row("SELECT count(*),body FROM messages",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let body:Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(count,1);
+        assert_eq!(body["voice"]["state"],"submitted");
+        assert_eq!(body["source"],"hgs_voice");
+    }
     fn database() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE messages(id TEXT PRIMARY KEY,at REAL NOT NULL,role TEXT NOT NULL,stream TEXT NOT NULL,kind TEXT NOT NULL,ordinal TEXT NOT NULL,body TEXT NOT NULL,incoming INTEGER); CREATE TABLE aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL); CREATE TABLE reconcile_work(id TEXT PRIMARY KEY); CREATE TABLE receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);").unwrap();

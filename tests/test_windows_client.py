@@ -191,6 +191,43 @@ class WindowsClient(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('usage: hgs', result.stderr)
 
+    def test_local_speech_discovery_is_gracefully_unavailable(self):
+        for prefix in ([], ['@win-client']):
+            with self.subTest(prefix=prefix):
+                reply = self.json(*prefix, 'speech', '--json', input='{"action":"providers"}')
+                self.assertEqual({key: reply[key] for key in ('schema', 'profiles', 'available')},
+                                 dict(schema=1, profiles=[], available=False))
+                self.assertIn('remote computer', reply['reason'])
+        self.assertEqual(self.calls(), [])
+
+    def test_remote_speech_preserves_json_stdin_and_noninteractive_streams(self):
+        received, streams = self.root / 'speech-input.json', self.root / 'speech-streams.jsonl'
+        identity = '11111111-2222-4333-8444-555555555555'
+        # Cross the pipe buffer boundary without a microphone or real SSH peer.
+        payload = json.dumps(dict(action='submit', request_id=identity, profile_id='gigaam-ru',
+                                  audio=dict(format='pcm_s16le', sample_rate=16000, channels=1,
+                                             data_base64='AAAA' * 16000)))
+        reply = dict(schema=1, job_id=identity, state='queued')
+        result = self.json('@peer', 'speech', '--json', input=payload,
+                           FAKE_SSH_STDIN=str(received), FAKE_SSH_STREAMS=str(streams),
+                           **self.canned(stdout=json.dumps(reply)))
+        self.assertEqual(result, reply)
+        self.assertEqual(received.read_bytes(), payload.encode())
+        self.assertEqual(json.loads(streams.read_text()), dict(stdin='pipe', stdout='pipe', stderr='pipe'))
+        self.assertEqual(self.calls(), [['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+                                        'peer', '~/.local/bin/hgs speech --json']])
+
+    def test_targeted_help_reads_the_remote_speech_capability(self):
+        legacy = 'usage: hgs [@host] ls\n'
+        for command in ('--help', '-h', 'help'):
+            with self.subTest(command=command):
+                self.assertEqual(self.ok('@peer', command, **self.canned(stdout=legacy)).stdout, legacy)
+                self.assertEqual(self.calls()[-1], ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+                                                   'peer', '~/.local/bin/hgs --help'])
+        self.assertIn('speech --json', self.ok('help').stdout)
+        self.assertIn('speech --json', self.ok('@win-client', '--help').stdout)
+        self.assertEqual(len(self.calls()), 3)
+
     def test_local_session_commands_exit_with_code_2(self):
         for args in (['a', 'claude/p'], ['kill', 'claude/p'], ['send', 'claude/p', '--json'],
                      ['inspect', 'claude/p'], ['history', 'claude/p', '--json'], ['claude'],

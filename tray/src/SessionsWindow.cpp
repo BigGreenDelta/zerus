@@ -2,6 +2,8 @@
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
+#include "ExternalFile.h"
+#include "LocalFile.h"
 #include "SessionPresentation.h"
 #include "AccountUsage.h"
 #include "SessionUsage.h"
@@ -25,6 +27,7 @@
 #include "AttachmentViewer.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
+#include "speech/SpeechComposer.h"
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
 #include "SettingsPage.h"
@@ -55,6 +58,9 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QProgressBar>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QComboBox>
@@ -124,6 +130,24 @@ QString taskTitle(const QString &prompt, const QList<MessageAttachment> &attachm
     return {};
 }
 
+QJsonObject sendEvidence(const QJsonObject &data)
+{
+    QJsonObject result;
+    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint"})
+        result.insert(QString::fromLatin1(field), data.value(QString::fromLatin1(field)));
+    result.insert("session_usage", QJsonObject{{"prompt_cache", data.value("session_usage").toObject().value("prompt_cache")}});
+    return result;
+}
+
+bool observedIdentityMatches(const SessionInfo &current, const SessionInfo &original,
+                             const QString &run, const QString &conversation)
+{
+    // Inspection is authoritative and may precede the next fleet refresh.
+    // Accept that refresh catching up, while refusing a third incarnation.
+    return (current.runId == original.runId && current.conversationId == original.conversationId)
+        || (current.runId == run && current.conversationId == conversation);
+}
+
 enum Roles { KeyRole = SessionRoles::Key, TitleRole, MetaRole, StatusRole, DetailRole, AgentRole, HostRole, ChildrenRole };
 
 class SessionIdentityLabel : public QLabel {
@@ -156,7 +180,7 @@ QColor tone(const QString &status, bool dark)
 {
     if (status == "Needs approval" || status == "Needs input" || status == "Sign in") return QColor(dark ? "#f0c77b" : "#885400");
     if (status == "Error") return QColor(dark ? "#ff9298" : "#b52b3d");
-    if (status == "Working" || status == "Using a tool" || status == "Compacting") return QColor(dark ? "#55e39a" : "#12834e");
+    if (status == "Working" || status == "Using a tool" || status == "Compacting" || status == "Background") return QColor(dark ? "#55e39a" : "#12834e");
     if (status == "Ready") return QColor(dark ? "#78dabb" : "#11775d");
     if (status == "Paused") return QColor(dark ? "#b9a5ed" : "#7051a4");
     return QColor(dark ? "#9aa4b2" : "#646f7e");
@@ -576,15 +600,34 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     auto *activityPage = new QWidget; auto *activityLayout = new QVBoxLayout(activityPage);
     activityLayout->setContentsMargins(0, 0, 0, 0); activityLayout->setSpacing(0);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
+    auto *voice = new SpeechComposer(hgsPath, m_composer, [this] {
+        SpeechComposer::Target target;
+        const auto *entry = selected();
+        if (!entry || m_details.isEmpty()) return target;
+        target.key=entry->key;target.host=entry->host;target.session=entry->session.name;
+        target.run=m_details.value("run_id").toString();target.conversation=m_details.value("conversation_id").toString();
+        target.available=entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        if(CacheStatus::expired(m_details))target.warning=CacheStatus::warning(m_details)+tr("\n\nSend this voice message with the full conversation context?");
+        return target;
+    });
+    connect(voice,&SpeechComposer::messageChanged,this,[this](const QString &key,const QJsonObject &message){
+        auto &rows=m_localMessages[key];const auto id=message.value("id").toString();
+        for(qsizetype i=rows.size();i-->0;)if(rows[i].toObject().value("message_id")==id)rows.removeAt(i);
+        rows.append(QJsonObject{{"id","voice-"+id},{"message_id",id},{"request_id",id},{"source","hgs_voice"},{"type","UserMessage"},
+            {"voice",message},{"text",message.value("transcript")},{"status","sent"},{"run_id",message.value("run_id")},
+            {"conversation_id",message.value("conversation_id")},{"submitted_at",message.value("created_at")},{"attachments",QJsonArray{message.value("audio")}}});
+        if(key==m_selectedKey){reconcileMessages();renderDetails();m_activityView->jumpToLatest();inspect();}
+    });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
         const QString host = entry->host, machine = entry->machine;
-        const bool local = host.isEmpty();
+        const bool local = host.isEmpty(), online = entry->online;
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
-        QUrl desktopTarget;
+        // Files open after the dialog closes; folders open as they are.
+        QUrl desktopTarget; bool desktopFile = false;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
-        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(560, 210);
+        dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(local ? 560 : 650, 230);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
         auto *source = new QLabel(local ? tr("File on this machine") : tr("File on %1").arg(machine));
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
@@ -601,14 +644,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("This path belongs to %1. Copy it and open the machine's SSH terminal to access the file.").arg(machine));
+            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+        hint->setObjectName("sessionFileHint");
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
         auto *buttons = new QDialogButtonBox; layout->addWidget(buttons);
+        QString savedPath;
+        quint64 pending = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
-            connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget] {
+            connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget, &desktopFile] {
                 if (!QFileInfo::exists(path)) { hint->setText(tr("This file is no longer available at this path.")); return; }
-                desktopTarget = QUrl::fromLocalFile(path);
+                desktopTarget = QUrl::fromLocalFile(path); desktopFile = true;
                 dialog.accept();
             });
             auto *folder = buttons->addButton(tr("Open folder"), QDialogButtonBox::ActionRole); folder->setObjectName("openSessionFileFolder");
@@ -619,8 +666,69 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
                 dialog.accept();
             });
         } else if (!local) {
+            auto *progress = new QProgressBar; progress->setObjectName("sessionFileProgress");
+            progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
+            progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
+            auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
+            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
+            const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
+            const bool downloadable = online && !remotePath.isEmpty();
+            download->setEnabled(downloadable); open->setEnabled(downloadable);
+            if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
+            else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
+            auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
+                if (pending) return;
+                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                const auto destination = save.selectedFiles().first();
+                download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
+                progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
+                openAfterDownload = opening;
+                pending = m_client.downloadFile(host, remotePath, destination);
+                auto *completion = new QObject(this);
+                const QPointer<QDialog> shownDialog(&dialog);
+                const auto request = pending;
+                connect(&m_client, &HgsClient::fileDownloaded, completion, [this, completion, shownDialog, request, opening](quint64 id, const QString &localPath) {
+                    if (id != request) return;
+                    // Like a browser download, the copy is marked as coming from another machine.
+                    ExternalFile::markDownloaded(localPath);
+                    if (!shownDialog) {
+                        if (opening) QTimer::singleShot(0, this, [this, localPath] { openExternalFile(localPath, true); });
+                        else showNotice(tr("Downloaded to %1").arg(localPath));
+                    }
+                    completion->deleteLater();
+                });
+                connect(&m_client, &HgsClient::fileDownloadFailed, completion, [this, completion, shownDialog, request](quint64 id, const QString &error) {
+                    if (id != request) return;
+                    if (!shownDialog) showNotice(tr("Download failed: %1").arg(error), true);
+                    completion->deleteLater();
+                });
+            };
+            connect(download, &QPushButton::clicked, &dialog, [startDownload] { startDownload(false); });
+            connect(open, &QPushButton::clicked, &dialog, [startDownload] { startDownload(true); });
+            connect(&m_client, &HgsClient::fileDownloadFailed, &dialog, [&, progress, download, open, downloadable](quint64 request, const QString &error) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Download failed: %1").arg(error));
+            });
+            connect(&m_client, &HgsClient::fileDownloaded, &dialog, [&, progress, download, open, savedOpen, downloadable](quint64 request, const QString &destination) {
+                if (!pending || request != pending) return;
+                pending = 0; progress->hide(); savedPath = destination;
+                download->setEnabled(downloadable); open->setEnabled(downloadable);
+                hint->setText(tr("Saved on this computer: %1").arg(destination)); open->hide(); savedOpen->show();
+                if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); desktopFile = true; dialog.accept(); }
+            });
+            connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
+                if (!LocalFile::readable(QFileInfo(savedPath))) { hint->setText(tr("The local copy is no longer available.")); return; }
+                desktopTarget = QUrl::fromLocalFile(savedPath); desktopFile = true; dialog.accept();
+            });
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");
             connect(ssh, &QPushButton::clicked, &dialog, [this, host, &dialog] { emit machineSshRequested(host); dialog.accept(); });
+            auto *close = buttons->addButton(QDialogButtonBox::Close);
+            close->setAutoDefault(false);
         }
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         dialog.exec();
@@ -628,9 +736,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
             // Wayland defers launch until the focused window receives an
             // activation token. Destroying that window cancels the callback.
             // Dispatch after the modal has gone, using the persistent workspace.
-            QTimer::singleShot(0, this, [this, desktopTarget] {
-                if (!QDesktopServices::openUrl(desktopTarget))
-                    showNotice(tr("Could not open %1 with its default application. You can copy the path.").arg(desktopTarget.toLocalFile()), true);
+            // Folders take the same path: a macOS bundle folder would launch.
+            QTimer::singleShot(0, this, [this, desktopTarget, desktopFile, local] {
+                openExternalFile(desktopTarget.toLocalFile(), desktopFile && !local);
             });
         }
     };
@@ -775,6 +883,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_subagentView = new ActivityView; m_subagentView->setObjectName("subagentActivity"); m_subagentView->browser()->setObjectName("subagentJournal"); subagentLayout->addWidget(m_subagentView, 1);
     m_subagentComposer = new MessageComposer; m_subagentComposer->setObjectName("subagentComposer"); m_subagentComposer->setInputVisible(false);
     m_subagentComposer->setTaskActionsVisible(false);   // tasks belong to sessions, not to their subagents
+    // Voice delivery is scoped to a main conversation until the durable voice
+    // protocol supports an exact child identity; never route a child to its parent.
     m_subagentContextUsage=new SessionUsage::ContextButton;m_subagentContextUsage->setObjectName("subagentContext");
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);
@@ -784,10 +894,27 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
             const auto *entry = selected();
             if (!entry || m_subagentId.isEmpty() || key != childKey(*entry, m_subagentId)
                 || !entry->online || !m_subagentDetails.value("send_supported").toBool() || m_subagentComposer->isSending(key)) return;
-            if (!m_subagentComposer->setSending(key)) return;
-            const auto request = m_client.requestSendMessage(entry->host, entry->session.name, text, files,
-                m_details.value("run_id").toString(), m_subagentConversation, m_subagentId);
-            m_childMessages.insert(request, key);
+            const Entry target = *entry;
+            const QString run = m_details.value("run_id").toString(), parentConversation = m_details.value("conversation_id").toString();
+            const QString conversation = m_subagentConversation, agent = m_subagentId;
+            beginSendEvidence(target.key, m_details);
+            m_subagentComposer->prepareSendingAsync(key, false, [this, target, key, text, files, run, parentConversation, conversation, agent](bool okay) {
+                if (!okay) { finishSendEvidence(target.key); return; }
+                const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == target.key; });
+                const auto evidence = m_pendingSendEvidence.value(target.key);
+                finishSendEvidence(target.key);
+                const bool inspectingChild = m_selectedKey == target.key && m_subagentId == agent;
+                if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                    || current->session.created != target.session.created
+                    || !observedIdentityMatches(current->session, target.session, run, parentConversation) || !current->online || isTerminating(*current)
+                    || m_pending || !m_renameKey.isEmpty()
+                    || (!evidence.isEmpty() && (evidence.value("run_id").toString() != run || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"))
+                    || (inspectingChild && (m_subagentConversation != conversation || !m_subagentDetails.value("send_supported").toBool()))) {
+                    m_subagentComposer->deliveryFinished(key, false, tr("The agent changed. Your draft was kept without sending.")); return;
+                }
+                const auto request = m_client.requestSendMessage(target.host, target.session.name, text, files, run, conversation, agent);
+                m_childMessages.insert(request, key);
+            });
         });
     connect(m_subagentView, &ActivityView::fileReferenceActivated, this, openFileReference);
     auto *attachments=new AttachmentLoader(&m_client,this);
@@ -797,7 +924,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
             showNotice(tr("Opening attachment…"));
             attachments->open(entry->host,entry->session.name,m_details.value("conversation_id").toString(),
                 entry->session.archiveId,view==m_subagentView?m_subagentId:QString(),file,
-                [this](const QString &,const QString &error){showNotice(error,!error.isEmpty());});
+                [this](const QString &,const QString &error,const QString &notice){
+                    // A plain success leaves "Opening attachment…" to expire on its own.
+                    if(!error.isEmpty())showNotice(error,true);else if(!notice.isEmpty())showNotice(notice);
+                });
+        });
+        connect(view,&ActivityView::voicePlaybackRequested,this,[this,view,attachments](const QString &key,const QJsonObject &file){
+            const auto *entry=selected();if(!entry)return;
+            attachments->fetch(entry->host,entry->session.name,m_details.value("conversation_id").toString(),entry->session.archiveId,
+                view==m_subagentView?m_subagentId:QString(),file,[view,key](const QString &path,const QString &error){view->playVoice(key,path,error);},true);
         });
         connect(view,&ActivityView::attachmentPreviewRequested,this,[this,view,attachments](const QString &key,const QJsonObject &file){
             const auto *entry=selected();if(!entry)return;
@@ -863,6 +998,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
         cancelCompactContinuation(m_selectedKey, tr("Interrupted. Your draft was kept without sending."));
         if (m_startSend.key == m_selectedKey) cancelStartContinuation(tr("Interrupted. Your draft was kept without sending."));
         m_interruptKey=key;
+        m_interruptName=entry->session.name; m_interruptMachine=entry->machine;
         // As in Terminal, the prompt of an interrupted turn returns to the message field.
         const QString prompt=interruptedPrompt(key);
         if(prompt.isEmpty())m_interruptPrompts.remove(key);
@@ -875,10 +1011,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
         if(id!=m_interruptRequest)return;
         m_interruptRequest=0;
         if(!ok)m_interruptPrompts.remove(m_interruptKey);
-        showNotice(ok?tr("Interrupt sent. Waiting for the agent to stop…"):error,!ok);
+        const auto target = tr("%1 (%2)").arg(m_interruptName, m_interruptMachine);
+        const bool alreadyStopped = error.trimmed() == "hgs: This turn is no longer working"
+            || error.trimmed() == "This turn is no longer working";
+        if (ok) showNotice(tr("Interrupt sent to %1. Waiting for the agent to stop…").arg(target));
+        else if (alreadyStopped) showNotice(tr("Stop %1: the turn already ended or is waiting for input. No action needed.").arg(target));
+        else showNotice(tr("Stop %1 failed: %2\nRefresh status or open Terminal to check the agent before trying again.").arg(target, error), true);
         if(m_selectedKey==m_interruptKey)inspect();
+        emit refreshRequested();
         renderDetails();
     });
+    connect(m_question, &QuestionCard::draftRestored, this, [this] { renderDetails(); });
     connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key,const QString &text,const QList<MessageAttachment> &files){sendMessage(key,text,files);});
     // An unsent draft becomes the row's status (see SessionDelegate::statusOf).
     const auto draftChanged = [this](const QString &key) {
@@ -1121,7 +1264,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_settingsPage->appearanceChanged=[this]{
         m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
         m_sessionDock->setStripWidth(SessionStrip::width(m_sessions->property("compact").toBool()));
-        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());applyTheme();rebuild();
+        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
+        const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
+        applyTheme();rebuild();
     };
     m_settingsPage->contentScaleChanged=[this]{applyContentScale();};
     m_settingsPage->activityWidthChanged=[this]{applyActivityWidth();};
@@ -1192,6 +1337,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent, Overmind
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
     m_notice = new StatusMessage; m_notice->hide(); statusLayout->addWidget(m_notice, 1);
+    m_noticeDismiss = new QPushButton; m_noticeDismiss->setObjectName("dismissNotice");
+    m_noticeDismiss->setProperty("glyph", "close"); m_noticeDismiss->setIconSize(QSize(14, 14));
+    m_noticeDismiss->setFixedSize(20, 20); m_noticeDismiss->setFlat(true);
+    m_noticeDismiss->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    m_noticeDismiss->setToolTip(tr("Dismiss notification")); m_noticeDismiss->setAccessibleName(m_noticeDismiss->toolTip());
+    m_noticeDismiss->hide(); statusLayout->addWidget(m_noticeDismiss);
+    connect(m_noticeDismiss, &QPushButton::clicked, this, &SessionsWindow::clearNotice);
     m_worktreeCleanup = new QPushButton(tr("Clean up worktree…")); m_worktreeCleanup->setObjectName("archivedWorktreeCleanup");
     m_worktreeCleanup->setFlat(true); m_worktreeCleanup->hide(); statusLayout->addWidget(m_worktreeCleanup);
     connect(m_worktreeCleanup, &QPushButton::clicked, this, &SessionsWindow::cleanUpArchivedWorktree);
@@ -1374,7 +1526,7 @@ void SessionsWindow::applyTheme()
     const QString hover = m_dark ? "#2b3540" : "#edf2f5";
     const QString selected = m_dark ? "#233d35" : "#e0f0e9";
     setStyleSheet(QString(R"(
-        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog { background:%1; color:%2; }
+        QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QWidget { font-size:13px; }
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
@@ -1414,7 +1566,13 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
+        QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
+        QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
+        QDialog#speechProfileEditor QScrollBar::handle:horizontal { background:%4; border-radius:4px; min-width:24px; }
+        QDialog#speechProfileEditor QScrollBar::add-line, QDialog#speechProfileEditor QScrollBar::sub-line { width:0; height:0; }
+        QDialog#speechProfileEditor QScrollBar::add-page, QDialog#speechProfileEditor QScrollBar::sub-page { background:transparent; }
         QPushButton#railButton:checked { background:%10; border-color:%4; }
         QPushButton#sessionFilter { padding:4px 2px; min-height:22px; font-size:11px; background:transparent; border-color:transparent; }
         QPushButton#sessionFilter:checked { background:%10; border-color:%4; color:%5; }
@@ -1457,10 +1615,10 @@ void SessionsWindow::applyTheme()
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
         QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
-        QListWidget#machineProfiles, QListWidget#accountProfiles { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
-        QListWidget#machineProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
+        QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
+        QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
-        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected { background:%10; color:%2; }
+        QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected { background:%10; color:%2; }
         QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
         QPushButton#machineFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }
@@ -1487,6 +1645,8 @@ void SessionsWindow::applyTheme()
         QLabel#notice { color:%6; font-size:11px; }
         QLabel#workspaceConnectionStatus { color:%12; font-size:11px; }
         QPushButton#connectionRetry { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
+        QPushButton#dismissNotice { background:transparent; border:0; padding:0; min-height:0; }
+        QPushButton#dismissNotice:hover { background:%7; border-radius:4px; }
         QPushButton#updatesAvailable, QPushButton#restartToUpdate { color:%5; background:%10; border:1px solid %5; border-radius:5px; padding:0 7px; min-height:18px; max-height:18px; font-size:11px; }
         QPushButton#updatesAvailable:hover, QPushButton#restartToUpdate:hover { background:%7; }
         QLabel#notice[error="true"] { color:%12; }
@@ -2420,7 +2580,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Scheduled, false);
         item->setData(SessionRoles::Queue, 0); item->setData(SessionRoles::YourCall, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
-        item->setData(SessionRoles::BranchIcon, false);
+        item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
@@ -2446,8 +2606,8 @@ void SessionsWindow::rebuild()
             // Attention remains visible even when a search or state filter hides a member.
             for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == row.group) {
                 if (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e)))) ++alerts;
-                if (e.session.unreadReply) ++unread;
-                if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++busy;
+                if (e.session.visibleUnreadReply(e.online)) ++unread;
+                if (SessionPresentation::working(e.session, e.online)) ++busy;
             }
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled | Qt::ItemIsDragEnabled);
             item->setData(TitleRole, group->name);
@@ -2491,8 +2651,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
         item->setData(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
         item->setData(TitleRole, sessionLabel(s)); item->setData(AgentRole, s.cmd);
-        QString meta = SessionPresentation::branchContext(s);
-        item->setData(SessionRoles::BranchIcon, !meta.isEmpty());
+        QString meta = SessionPresentation::checkoutLine(s);
+        item->setData(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
         if (s.state == "archived" && s.archivedAt > 0) {
             if (!meta.isEmpty()) meta += QStringLiteral(" / ");
             meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
@@ -2508,9 +2668,9 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::ReviewLater, s.reviewLater);
         item->setData(SessionRoles::Failure, s.phase=="error");
         item->setData(SessionRoles::Draft, m_composer->hasDraft(e.key));
-        item->setData(SessionRoles::Unread, !terminating && s.unreadReply);
-        item->setData(SessionRoles::Working, !isTerminating(e) && currentActivity(s, e.online) && s.activity == "busy" && !s.needsAction());
-        item->setData(SessionRoles::WorkingSince, s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+        item->setData(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
+        item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
+        item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
         // Overmind: a session whose computer is not known shows no queue rather than a guess.
         QString overmind; const bool known = m_overmind && s.state != "archived" && overmindKnown(e, &overmind);
@@ -2523,10 +2683,10 @@ void SessionsWindow::rebuild()
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
-            accessibleFields << tr("%1 since %2").arg(s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
+            accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
-        if (s.unreadReply) accessibleFields << tr("New reply (not viewed yet)");
+        if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
         if (queue > 0) accessibleFields << tr("Tasks in its queue: %1").arg(queue);
         if (yourCall) accessibleFields << tr("A task waits for your call");
@@ -2557,7 +2717,7 @@ void SessionsWindow::rebuild()
     int visibleWorking = 0, visibleAttention = 0;
     for (const auto &e : visible) {
         if (entryNeedsAttention(e)) ++visibleAttention;
-        if (currentActivity(e.session, e.online) && e.session.activity == "busy" && !e.session.needsAction()) ++visibleWorking;
+        if (SessionPresentation::working(e.session, e.online)) ++visibleWorking;
     }
     m_count->setText(visible.isEmpty() ? tr("No matching sessions") : tr("%1 shown, %2 working, %3 attention").arg(visible.size()).arg(visibleWorking).arg(visibleAttention));
     const int starting = std::count_if(rows.cbegin(), rows.cend(), [](const Row &row) { return !row.launch.isEmpty(); });
@@ -2740,9 +2900,27 @@ void SessionsWindow::closeSubagent()
     if (wasOpen && !m_rebuilding) QTimer::singleShot(0, this, [this]{ rebuild(); });
 }
 
+void SessionsWindow::beginSendEvidence(const QString &key, const QJsonObject &data)
+{
+    ++m_pendingEvidenceUsers[key];
+    if (!data.isEmpty()) m_pendingSendEvidence.insert(key, sendEvidence(data));
+    else if (!m_pendingSendEvidence.contains(key)) m_pendingSendEvidence.insert(key, {});
+}
+
+void SessionsWindow::finishSendEvidence(const QString &key)
+{
+    if (--m_pendingEvidenceUsers[key] > 0) return;
+    m_pendingEvidenceUsers.remove(key); m_pendingSendEvidence.remove(key);
+}
+
 void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId)
 {
-    if (archiveId.isEmpty()) { continueAfterCompact(host, name, data); continueAfterStart(host, name, data); }
+    if (archiveId.isEmpty()) {
+        for (const auto &entry : m_entries)
+            if (entry.host == host && entry.session.name == name && entry.session.archiveId.isEmpty())
+                if (m_pendingSendEvidence.contains(entry.key)) m_pendingSendEvidence.insert(entry.key, sendEvidence(data));
+        continueAfterCompact(host, name, data); continueAfterStart(host, name, data);
+    }
     if (!m_pending && !m_renameKey.isEmpty()) return;
     const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
     // A confirmed clear continues the same Activity timeline, and its global
@@ -3061,6 +3239,7 @@ void SessionsWindow::renderDetails()
     s.gitBranch = m_details.value("git_branch").toString(s.gitBranch);
     s.gitWorktree = m_details.value("git_worktree").toBool(s.gitWorktree);
     s.gitWorktreeName = m_details.value("git_worktree_name").toString(s.gitWorktreeName);
+    s.gitCommonDir = m_details.value("git_common_dir").toString(s.gitCommonDir);
     s.gitDetached = m_details.value("git_detached").toBool(s.gitDetached);
     const bool terminating=isTerminating(*entry);
     const QString state = terminating?tr("Terminating…"):status(s, entry->online);
@@ -3080,6 +3259,7 @@ void SessionsWindow::renderDetails()
     m_badge->setText(state); const auto color = tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
+    m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
     s.model = m_details.value("model").toString(s.model); s.effort = m_details.value("effort").toString(s.effort);
     const QString modelText = s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort);
     // Details render on every poll; elide again only when the text or font changes.
@@ -3130,6 +3310,10 @@ void SessionsWindow::renderDetails()
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
+    else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
+        ? tr("The agent has replied, but a command is still running.") : tr("The agent has replied, but %1 commands are still running.").arg(s.backgroundProcesses))
+        + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."))
+        + QStringLiteral(" ") + tr("You can send another message.");
     else if (s.activity != "idle") hint = tr("Waiting for the agent to confirm its state. Open its terminal if it needs attention.");
     else hint = tr("Ready for your next message. Finishing a response does not mark the task complete.");
     m_hint->setText(hint);
@@ -3493,22 +3677,50 @@ void SessionsWindow::messageAction(const QString &id,const QString &action)
         if(action!="retry" || message.value("uncertain").toBool() || m_composer->isSending(m_selectedKey))return;
         if(message.value("run_id")!=m_details.value("run_id") || message.value("conversation_id")!=m_details.value("conversation_id"))return;
         const auto reason=messageBlockReason(*entry);if(!reason.isEmpty()){showNotice(reason,true);return;}
-        QList<MessageAttachment> files;
-        for(const auto &value:message.value("attachments").toArray()) {
-            const auto metadata=value.toObject();const auto path=AttachmentFiles::cached(metadata);QFile file(path);
-            if(path.isEmpty() || !file.open(QIODevice::ReadOnly)){showNotice(tr("An attachment is no longer available. Attach it again before retrying."),true);return;}
-            const auto bytes=file.readAll();if(bytes.size()!=metadata.value("bytes").toInteger()
-                || QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex()!=QFileInfo(path).dir().dirName().toLatin1()){
-                showNotice(tr("An attachment changed. Attach it again before retrying."),true);return;
-            }
-            files.append({metadata.value("name").toString(),metadata.value("mime").toString(),bytes,metadata.value("reference").toString()});
-        }
-        sendMessage(m_selectedKey,message.value("text").toString(),files,id);return;
+        const QString key = m_selectedKey;
+        if (m_retryReads.contains(key)) return;
+        const Entry target = *entry;
+        const QString run = message.value("run_id").toString();
+        const QString conversation = message.value("conversation_id").toString();
+        const auto cacheEvidence = sendEvidence(m_details);
+        m_retryReads.insert(key);
+        beginSendEvidence(key, cacheEvidence);
+        AttachmentFiles::readAsync(message.value("attachments").toArray(), this,
+            [this, key, target, message, id, run, conversation, cacheEvidence](const QList<MessageAttachment> &files, const QString &error) {
+                m_retryReads.remove(key);
+                const auto evidence = m_pendingSendEvidence.value(key, cacheEvidence);
+                finishSendEvidence(key);
+                if (!error.isEmpty()) { showNotice(error, true); return; }
+                const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+                if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                    || current->session.created != target.session.created || m_composer->isSending(key)
+                    || !observedIdentityMatches(current->session, target.session, run, conversation)
+                    || !current->online || isTerminating(*current)
+                    || evidence.value("run_id").toString() != run || evidence.value("conversation_id").toString() != conversation
+                    || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"
+                    || m_pending || !m_renameKey.isEmpty() || m_startSend.key == key || m_compacts.contains(key)
+                    || (key == m_clearKey && m_clearRequest) || (key == m_settingsKey && m_settingsRequest)) return;
+                bool retained = false;
+                for (const auto &value : m_localMessages.value(key)) if (value.toObject() == message) { retained = true; break; }
+                if (!retained) return;
+                if (key == m_selectedKey) {
+                    if (m_details.value("run_id").toString() != run || m_details.value("conversation_id").toString() != conversation) return;
+                    sendMessage(key, message.value("text").toString(), files, id);
+                } else {
+                    // An accepted warm retry stays with its original session.
+                    // A cold retry still needs the foreground consent dialog.
+                    if (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)) return;
+                    deliverMessage(key, target.host, target.session.name, run, conversation,
+                                   message.value("text").toString(), files, id, {}, false, evidence);
+                }
+            });
+        return;
     }
 }
 
 void SessionsWindow::cancelCompactContinuation(const QString &key, const QString &reason)
 {
+    m_waitingPreparations.remove(key);
     if (!m_compacts.remove(key)) return;
     if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key,false,reason);
@@ -3517,14 +3729,31 @@ void SessionsWindow::cancelCompactContinuation(const QString &key, const QString
 void SessionsWindow::compactToSend(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
                                  const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId)
 {
-    if (m_compacts.contains(key) || !m_composer->draftMatches(key,text,attachments)
-        || !m_composer->setWaitingToSend(key, tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."))) return;
+    if (m_compacts.contains(key) || !m_composer->draftMatches(key, text, attachments)) return;
     CompactContinuation pending;
     pending.key=key; pending.host=host; pending.name=name; pending.run=run; pending.conversation=conversation;
     pending.text=text; pending.attachments=attachments; pending.retryId=retryId;
     pending.started=QDateTime::currentMSecsSinceEpoch();
-    pending.request=m_client.requestCompactContext(host,name,run,conversation);
     m_compacts.insert(key,pending); m_compactTimer.start();
+    const auto serial = ++m_waitingPreparationSerial; m_waitingPreparations.insert(key, serial);
+    beginSendEvidence(key, key == m_selectedKey ? m_details : QJsonObject());
+    m_composer->prepareWaitingToSendAsync(key,
+        tr("Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit."),
+        [this, key, host, name, run, conversation, serial](bool okay) {
+            const auto evidence = key == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(key);
+            finishSendEvidence(key);
+            if (m_waitingPreparations.value(key) != serial || !m_compacts.contains(key)) return;
+            m_waitingPreparations.remove(key);
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+            if (!okay || entry == m_entries.cend() || entry->host != host || entry->session.name != name
+                || !entry->online || isTerminating(*entry) || m_pending || !m_renameKey.isEmpty()
+                || (!evidence.isEmpty() && (evidence.value("run_id").toString() != run || evidence.value("conversation_id").toString() != conversation))
+                || (key == m_selectedKey && (m_details.value("run_id").toString() != run || m_details.value("conversation_id").toString() != conversation))) {
+                cancelCompactContinuation(key, tr("Compaction was cancelled. Your draft was kept without sending.")); return;
+            }
+            m_compacts[key].request = m_client.requestCompactContext(host, name, run, conversation);
+            if (key == m_selectedKey) renderDetails();
+        });
 }
 
 void SessionsWindow::pollCompactContinuations()
@@ -3556,6 +3785,7 @@ void SessionsWindow::pollCompactContinuations()
 void SessionsWindow::continueAfterCompact(const QString &host, const QString &name, const QJsonObject &data)
 {
     for (const auto &key : m_compacts.keys()) {
+        if (m_waitingPreparations.contains(key)) continue;
         const auto pending = m_compacts.value(key);
         if (pending.host != host || pending.name != name) continue;
         if (data.value("run_id") != pending.run || data.value("conversation_id") != pending.conversation) {
@@ -3583,7 +3813,7 @@ void SessionsWindow::continueAfterCompact(const QString &host, const QString &na
         // never submit it twice. The CLI also verifies the compaction UUID.
         m_compacts.remove(key);
         if (m_compacts.isEmpty() && m_startSend.key.isEmpty()) m_compactTimer.stop();
-        deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId);
+        deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId,true,data);
         return;
     }
 }
@@ -3684,22 +3914,41 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
         showNotice(tr("The session changed. Your draft was kept without sending."), true); return;
     }
     if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
-    if (!m_composer->setWaitingToSend(key, compactFirst
-        ? tr("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit.")
-        : tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."))) return;
     m_startSend = {key, entry->host, entry->session.name, entry->session.runId, entry->session.conversationId,
         text, attachments, startFresh, compactFirst, QDateTime::currentMSecsSinceEpoch()};
     m_compactTimer.start();
-    m_pending = true; m_restoreKey.clear();
-    if (startFresh) m_client.startFreshSession(entry->host, entry->session.name, entry->session.runId);
-    else m_client.resumeSession(entry->host, entry->session.name);
+    const Entry target = *entry;
+    const auto serial = ++m_waitingPreparationSerial; m_waitingPreparations.insert(key, serial);
+    beginSendEvidence(key, m_details);
+    m_composer->prepareWaitingToSendAsync(key, compactFirst
+        ? tr("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit.")
+        : tr("Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."),
+        [this, key, target, startFresh, serial](bool okay) {
+            const auto evidence = key == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(key);
+            finishSendEvidence(key);
+            if (m_waitingPreparations.value(key) != serial || m_startSend.key != key) return;
+            m_waitingPreparations.remove(key);
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == key; });
+            if (!okay || current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                || current->session.created != target.session.created || current->session.runId != target.session.runId
+                || current->session.conversationId != target.session.conversationId || !current->online || isTerminating(*current)
+                || (!evidence.isEmpty() && (evidence.value("run_id").toString() != target.session.runId
+                    || evidence.value("conversation_id").toString() != target.session.conversationId))
+                || current->session.state == "running" || m_pending || !m_renameKey.isEmpty()) {
+                cancelStartContinuation(tr("Starting was cancelled. Your draft was kept without sending.")); return;
+            }
+            m_pending = true; m_restoreKey.clear();
+            if (startFresh) m_client.startFreshSession(target.host, target.session.name, target.session.runId);
+            else m_client.resumeSession(target.host, target.session.name);
+            renderDetails();
+        });
     renderDetails();
 }
 
 void SessionsWindow::cancelStartContinuation(const QString &reason)
 {
     if (m_startSend.key.isEmpty()) return;
-    const auto key = m_startSend.key; m_startSend = {};
+    const auto key = m_startSend.key; m_startSend = {}; m_waitingPreparations.remove(key);
     if (m_compacts.isEmpty()) m_compactTimer.stop();
     m_composer->deliveryFinished(key, false, reason);
 }
@@ -3708,6 +3957,7 @@ void SessionsWindow::cancelStartContinuation(const QString &reason)
 // its conversation; a fresh start must never reopen the replaced one.
 void SessionsWindow::continueAfterStart(const QString &host, const QString &name, const QJsonObject &data)
 {
+    if (m_waitingPreparations.contains(m_startSend.key)) return;
     if (m_startSend.key.isEmpty() || m_startSend.host != host || m_startSend.name != name) return;
     if (!m_composer->draftMatches(m_startSend.key, m_startSend.text, m_startSend.attachments)) {
         cancelStartContinuation(tr("Draft changed. Send it when you are ready.")); return;
@@ -3730,7 +3980,7 @@ void SessionsWindow::continueAfterStart(const QString &host, const QString &name
     if (pending.compact && (conversation.isEmpty() || !data.value("compact_context_supported").toBool())) return;
     m_startSend = {};
     if (pending.compact) compactToSend(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments);
-    else deliverMessage(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments,{},{});
+    else deliverMessage(pending.key,pending.host,pending.name,run,conversation,pending.text,pending.attachments,{},{},true,data);
     if (m_compacts.isEmpty()) m_compactTimer.stop();
 }
 
@@ -3743,6 +3993,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
     if (!reason.isEmpty()) { m_composer->deliveryFinished(key, false, reason); return; }
     const QString runId = m_details.value("run_id").toString();
     const QString conversationId = m_details.value("conversation_id").toString();
+    bool fullContextConsent = contextChosen || !compactionId.isEmpty();
     // Resume and send already chose the full saved context.
     if(compactionId.isEmpty() && !contextChosen && CacheStatus::expired(m_details)) {
         const auto host=entry->host,name=entry->session.name;
@@ -3754,7 +4005,7 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         compact->setToolTip(tr("Run native /compact, then send this draft only after successful completion."));
         auto *clear=dialog.addButton(tr("Clear context"),QMessageBox::ActionRole);
         clear->setEnabled(m_details.value("clear_context_supported").toBool() && !m_clearRequest);
-        auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.exec();
+        auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=proceed && dialog.clickedButton()!=clear && dialog.clickedButton()!=compact)return;
         entry=selected();
         if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=runId||m_details.value("conversation_id")!=conversationId)return;
@@ -3764,31 +4015,80 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
             compactToSend(key,host,name,runId,conversationId,text,attachments,retryId);
             renderDetails(); return;
         }
+        fullContextConsent = true;
         const auto currentProblem=messageBlockReason(*entry);if(!currentProblem.isEmpty()){showNotice(currentProblem,true);return;}
     }
-    deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId);
+    deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId,fullContextConsent);
 }
 
 void SessionsWindow::deliverMessage(const QString &key, const QString &host, const QString &name, const QString &runId, const QString &conversationId,
-                                   const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId)
+                                   const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId, bool fullContextConsent, const QJsonObject &inspectionEvidence)
 {
-    if (m_composer->isSending(key) || !m_composer->setSending(key,!retryId.isEmpty() && !m_composer->draftMatches(key,text,attachments))) return;
-    const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
-    m_pendingMessages.insert(request, {key, runId, conversationId});
-    QJsonArray files;
-    for (const auto &file : attachments) files.append(QJsonObject{{"name",file.name},{"mime",file.mime},{"bytes",file.data.size()},{"reference",file.reference},
-        {"local_path",AttachmentFiles::store(file.name,file.data)}});
-    auto &messages = m_localMessages[key];
-    for(int i=messages.size();i-- >0;) {
-        const auto previous=messages[i].toObject();
-        if(previous.value("status")=="error" && (previous.value("id").toString()==retryId
-            || (previous.value("text").toString()==text && previous.value("attachments").toArray()==files)))messages.removeAt(i);
+    if (m_composer->isSending(key)) return;
+    const auto original = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) { return entry.key == key && entry.host == host && entry.session.name == name; });
+    if (original == m_entries.cend()) return;
+    const Entry target = *original;
+    QJsonObject retryMessage;
+    if (!retryId.isEmpty()) {
+        for (const auto &value : m_localMessages.value(key)) {
+            const auto message = value.toObject();
+            if (message.value("id").toString() == retryId && message.value("status") == "error" && !message.value("uncertain").toBool()) {
+                retryMessage = message; break;
+            }
+        }
+        if (retryMessage.isEmpty()) return;
     }
-    messages.append(QJsonObject{{"id", QString::number(request)}, {"text", text}, {"status", "sending"},
-        {"attachments", files}, {"run_id", runId}, {"conversation_id", conversationId},
-        {"submitted_at", QDateTime::currentMSecsSinceEpoch() / 1000.0}});
-    while (messages.size() > 50) messages.removeFirst();
-    if (key == m_selectedKey) { renderDetails(); m_activityView->jumpToLatest(); }
+    const QJsonObject cacheEvidence = !inspectionEvidence.isEmpty() ? sendEvidence(inspectionEvidence)
+        : key == m_selectedKey ? sendEvidence(m_details) : QJsonObject();
+    beginSendEvidence(key, cacheEvidence);
+    const bool preserve = !retryId.isEmpty() && !m_composer->draftMatches(key, text, attachments);
+    m_composer->prepareSendingAsync(key, preserve, [this, target, key, host, name, runId, conversationId, text, attachments, retryId, retryMessage, compactionId, fullContextConsent, cacheEvidence](bool okay) {
+        if (!okay) { finishSendEvidence(key); return; }
+        const auto stillValid = [this, target, key, host, name, runId, conversationId, retryId, retryMessage, fullContextConsent, cacheEvidence] {
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) { return entry.key == key; });
+            const auto evidence = m_pendingSendEvidence.value(key, cacheEvidence);
+            if (!fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence))) return false;
+            if (current == m_entries.cend() || current->host != host || current->session.name != name
+                || current->session.created != target.session.created
+                || !observedIdentityMatches(current->session, target.session, runId, conversationId)
+                || !current->online || isTerminating(*current)) return false;
+            if (!evidence.isEmpty() && (evidence.value("run_id").toString() != runId
+                || evidence.value("conversation_id").toString() != conversationId
+                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running")) return false;
+            if (m_pending || !m_renameKey.isEmpty() || (key == m_clearKey && m_clearRequest)
+                || (key == m_settingsKey && m_settingsRequest)) return false;
+            if (!retryId.isEmpty()) {
+                bool retained = false;
+                for (const auto &value : m_localMessages.value(key)) if (value.toObject() == retryMessage) { retained = true; break; }
+                if (!retained) return false;
+            }
+            if (key == m_selectedKey && (m_details.value("run_id").toString() != runId
+                || m_details.value("conversation_id").toString() != conversationId || !messageBlockReason(*current).isEmpty()
+                || (CacheStatus::expired(m_details) && !fullContextConsent))) return false;
+            return true;
+        };
+        if (!stillValid()) { finishSendEvidence(key); m_composer->deliveryFinished(key, false, tr("The session changed. Your draft was kept without sending.")); return; }
+        AttachmentFiles::prepareAsync(attachments, this,
+            [this, stillValid, key, host, name, runId, conversationId, text, attachments, retryId, compactionId](const QJsonArray &files, const QString &error) {
+                const bool valid = stillValid(); finishSendEvidence(key);
+                if (!error.isEmpty() || !valid || !m_composer->isSending(key)) {
+                    m_composer->deliveryFinished(key, false, error.isEmpty() ? tr("The session changed. Your draft was kept without sending.") : error); return;
+                }
+                const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
+                m_pendingMessages.insert(request, {key, runId, conversationId});
+                auto &messages = m_localMessages[key];
+                for(int i=messages.size();i-- >0;) {
+                    const auto previous=messages[i].toObject();
+                    if(previous.value("status")=="error" && (previous.value("id").toString()==retryId
+                        || (previous.value("text").toString()==text && previous.value("attachments").toArray()==files)))messages.removeAt(i);
+                }
+                messages.append(QJsonObject{{"id", QString::number(request)}, {"text", text}, {"status", "sending"},
+                    {"attachments", files}, {"run_id", runId}, {"conversation_id", conversationId},
+                    {"submitted_at", QDateTime::currentMSecsSinceEpoch() / 1000.0}});
+                while (messages.size() > 50) messages.removeFirst();
+                if (key == m_selectedKey) { renderDetails(); m_activityView->jumpToLatest(); }
+            });
+    });
 }
 
 void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error, bool uncertain)
@@ -3833,6 +4133,11 @@ void SessionsWindow::reconcileMessages()
         if ((!runId.isEmpty() && message.value("run_id").toString() != runId)
             || (!conversationId.isEmpty() && message.value("conversation_id").toString() != conversationId)) {
             messages.removeAt(i); continue;
+        }
+        if(message.value("source")=="hgs_voice") {
+            for(const auto &value:m_details.value("voice_messages").toArray())
+                if(value.toObject().value("message_id")==message.value("message_id")){messages.removeAt(i);break;}
+            continue;
         }
         const bool failed=message.value("status")=="error";
         if (!failed && message.value("status") != "sent") continue;
@@ -3963,7 +4268,12 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
     };
     const auto question = actionableQuestion(true);
     if (question.isEmpty()) return;
-    if (CacheStatus::expired(m_details)) {
+    // This reviewed native panel already asks the user how to handle its cold
+    // cache. Deliver the chosen row, without asking to resume with full context.
+    const bool nativeCacheChoice = question.value("source") == "kimi_cache_hint"
+        && question.value("answer_transport") == "kimi_tui";
+    bool fullContextConsent = false;
+    if (!nativeCacheChoice && CacheStatus::expired(m_details)) {
         const Entry original = *selected();
         const auto run = m_details.value("run_id"), conversation = m_details.value("conversation_id");
         const auto draft = m_question->submissionSnapshot(targetKey, targetQuestionId);
@@ -3990,12 +4300,40 @@ void SessionsWindow::answerQuestion(const QString &key, const QString &questionI
             showNotice(tr("The question or your answers changed. Your draft was kept; review it before submitting again."), true);
             return;
         }
+        fullContextConsent = true;
     }
     const auto *entry = selected();
-    if (!entry || !m_question->setSending(targetKey, targetQuestionId)) return;
-    const auto request = m_client.requestAnswerQuestion(entry->host, entry->session.name, question, requestedAnswers);
-    m_pendingAnswers.insert(request, {targetKey, targetQuestionId, question.value("question_hash").toString()});
-    renderDetails();
+    if (!entry) return;
+    const Entry target = *entry;
+    const auto pinnedIdentity = consentIdentity(question);
+    const QJsonObject cacheEvidence = sendEvidence(m_details);
+    beginSendEvidence(targetKey, cacheEvidence);
+    m_question->prepareSendingAsync(targetKey, targetQuestionId,
+        [this, target, targetKey, targetQuestionId, question, requestedAnswers, pinnedIdentity, skipping, consentIdentity, nativeCacheChoice, fullContextConsent, cacheEvidence](bool okay) {
+            if (!okay) { finishSendEvidence(targetKey); return; }
+            const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == targetKey; });
+            const auto evidence = targetKey == m_selectedKey ? sendEvidence(m_details) : m_pendingSendEvidence.value(targetKey, cacheEvidence);
+            finishSendEvidence(targetKey);
+            QJsonObject refreshed;
+            for (const auto &value : evidence.value("pending_questions").toArray())
+                if (value.toObject().value("question_id").toString() == targetQuestionId) { refreshed = value.toObject(); break; }
+            if (current == m_entries.cend() || current->host != target.host || current->session.name != target.session.name
+                || current->session.created != target.session.created
+                || !observedIdentityMatches(current->session, target.session, question.value("run_id").toString(), question.value("conversation_id").toString())
+                || !current->online || current->session.state != "running" || isTerminating(*current)
+                || m_pending || !m_renameKey.isEmpty() || (targetKey == m_selectedKey && !m_inspectError.isEmpty())
+                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"
+                || evidence.value("run_id") != question.value("run_id") || evidence.value("conversation_id") != question.value("conversation_id")
+                || consentIdentity(refreshed) != pinnedIdentity
+                || (!nativeCacheChoice && !fullContextConsent && (CacheStatus::expired(cacheEvidence) || CacheStatus::expired(evidence)))
+                || !(skipping ? refreshed.value("can_skip").toBool() : refreshed.value("can_answer").toBool())
+                || m_question->hasSubmittedAnswer(targetKey, refreshed)) {
+                m_question->setError(targetKey, targetQuestionId, tr("The question changed. Your answers were kept without submitting.")); return;
+            }
+            const auto request = m_client.requestAnswerQuestion(target.host, target.session.name, question, requestedAnswers);
+            m_pendingAnswers.insert(request, {targetKey, targetQuestionId, question.value("question_hash").toString()});
+            renderDetails();
+        });
 }
 
 void SessionsWindow::finishQuestion(quint64 request, bool ok, const QString &error, bool uncertain, bool submitted)
@@ -4009,18 +4347,36 @@ void SessionsWindow::finishQuestion(quint64 request, bool ok, const QString &err
     emit refreshRequested();
 }
 
+void SessionsWindow::openExternalFile(const QString &path, bool otherMachine)
+{
+    switch (ExternalFile::open(path, otherMachine ? ExternalFile::Origin::OtherMachine : ExternalFile::Origin::ThisComputer)) {
+    case ExternalFile::Outcome::Opened: return;
+    case ExternalFile::Outcome::Revealed: showNotice(ExternalFile::revealedNotice(path)); return;
+    case ExternalFile::Outcome::RevealFailed: showNotice(ExternalFile::revealFailedNotice(path), true); return;
+    case ExternalFile::Outcome::OpenFailed:
+        showNotice(tr("Could not open %1 with its default application. You can copy the path.").arg(path), true); return;
+    }
+}
+
 void SessionsWindow::showNotice(const QString &message, bool error)
 {
     m_notice->show();
+    m_noticeDismiss->show();
     m_notice->setText(message.isEmpty() ? tr("Operation failed. Open the terminal for details.") : message);
     m_notice->setToolTip(Qt::convertFromPlainText(m_notice->text()));
     m_notice->setProperty("error", error);
     m_notice->style()->unpolish(m_notice); m_notice->style()->polish(m_notice); m_notice->update();
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
-    if (!error) QTimer::singleShot(5000, m_notice, [notice=m_notice,revision] {
-        if (notice->property("noticeRevision").toInt()==revision) { notice->clear(); notice->setToolTip({}); notice->hide(); }
+    if (!error) QTimer::singleShot(5000, this, [this,revision] {
+        if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
+}
+
+void SessionsWindow::clearNotice()
+{
+    m_notice->setProperty("noticeRevision", m_notice->property("noticeRevision").toInt() + 1);
+    m_notice->clear(); m_notice->setToolTip({}); m_notice->hide(); m_noticeDismiss->hide();
 }
 
 bool SessionsWindow::selectSessionEntry(const Entry &original)
@@ -4091,6 +4447,9 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
     if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available);
+    if (!archived && SessionPresentation::backgroundIdle(original.session))
+        add(tr("Show running commands"), "contextOpenProcesses", SessionMenuAction::OpenProcesses, original.online && ProcessSettings::enabled(),
+            ProcessSettings::enabled() ? tr("Follow this session's background work in Processes") : tr("Enable Settings > Processes to inspect running commands"));
     const bool localFolder = original.host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -4205,6 +4564,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
     }
     switch (action) {
+    case SessionMenuAction::OpenProcesses:
+        if (entry->online && ProcessSettings::enabled()) m_detailTabs->setCurrentWidget(m_processes);
+        return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
         if (entry->online && m_open->isEnabled() && entry->session.state != "archived")
@@ -4383,11 +4745,16 @@ void SessionsWindow::terminateSession()
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
     const bool live = e->session.state == "running", archived = e->session.state == "archived";
     const bool keepArchive = live && e->session.tracked && QStringList{"codex","claude","kimi"}.contains(e->session.cmd);
-    const auto answer = QMessageBox::question(this, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
+    QMessageBox confirm(QMessageBox::Warning, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
         live ? (keepArchive ? tr("Stop %1 and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept.").arg(name) : tr("Terminate %1? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept.").arg(name))
              : archived ? tr("Remove this archived instance of %1 from HGS? Other sessions with this name and the agent’s native conversation history are kept.").arg(name)
-             : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (answer != QMessageBox::Yes || !selectSessionEntry(original)) return;
+             : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
+    confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
+    confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
+    confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
+        : archived ? tr("Forget archived session") : tr("Forget saved session"));
+    confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
+    if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();
     if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty()) return;
     if ((current->session.state == "running") != live) {

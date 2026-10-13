@@ -34,6 +34,9 @@ struct SessionInfo {
     bool replyScheduled = false;
     int scheduledJobs = -1, recurringSchedules = -1;
     double nextScheduledAt = 0;
+    int backgroundProcesses = -1;
+    double backgroundStarted = 0, backgroundObservedAt = 0;
+    QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
@@ -54,8 +57,17 @@ struct SessionInfo {
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
     int subagentCount = 0;
+    bool replyInProgress() const {
+        return state == QLatin1String("running") && processState != QLatin1String("exited")
+            && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
+            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
+    }
+    // Intermediate replies remain unread; only their notification presentation waits.
+    bool visibleUnreadReply(bool online = true) const {
+        return state != QLatin1String("archived") && unreadReply && (!online || !replyInProgress());
+    }
     bool needsAttention() const { return (needsAction() && !attentionAcknowledged)
-        || (state != QLatin1String("archived") && (unreadReply || reviewLater)); }
+        || (state != QLatin1String("archived") && (visibleUnreadReply() || reviewLater)); }
     bool needsAction() const {
         const auto recoveryState = recovery.value("state").toString();
         const bool recovering = recoveryState == "waiting" || recoveryState == "dispatching" || recoveryState == "retrying";
@@ -165,6 +177,7 @@ public:
     quint64 requestSearch(const QString &host, const QString &query);
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
+    quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -217,6 +230,8 @@ signals:
     void sessionActionFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void recoveryFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
+    void fileDownloaded(quint64 request, const QString &destination);
+    void fileDownloadFailed(quint64 request, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -305,6 +320,7 @@ private:
     quint64 m_nativeUiRequest = 0;
     quint64 m_searchRequest = 0;
     quint64 m_attachmentRequest = 0;
+    quint64 m_fileDownloadRequest = 0;
     quint64 m_effortRequest = 0;
     quint64 m_settingsRequest = 0;
     quint64 m_recoveryRequest = 0;

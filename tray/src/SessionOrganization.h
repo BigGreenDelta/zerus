@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QList>
 #include <QStringList>
+#include <QSet>
 
 // Logical projects own membership and named folders across machines.
 // Moving a session changes its project, never its working directory or process.
@@ -35,6 +36,7 @@ public:
     void markImported(const QString &machine) { if (!m_imported.contains(machine)) m_imported.append(machine); }
     void renameSession(const QString &oldId, const QString &newId);
     // A run token recognizes an external rename; machine/name survives pause/resume.
+    // First observation gives a local fallback row, not a shared assignment.
     QString observe(const QString &machine, const QString &name, const QString &run,
                     const QString &archive = {});
     QJsonObject toJson() const;
@@ -44,4 +46,5 @@ private:
     QJsonObject m_runs;
     QStringList m_imported;
     QString m_default;
+    QSet<QString> m_unassigned;
 };

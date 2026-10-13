@@ -320,9 +320,11 @@ glyphs reuse the desktop drawing geometry.
 
 `SessionCardPresentation` ports the desktop card rules from
 `SessionPresentation.h` and the session tree in `SessionsWindow.cpp`. The
-checkout line is `branchContext` (branch or detached HEAD, none for `not_repo`),
-with the desktop Git branch glyph. `checkout` keeps the `projectContext`
-worktree suffix for headers, Details and spoken descriptions. The counter is
+checkout line is `checkoutLine`: `checkoutFolder` (a linked worktree's main
+checkout from `git_common_dir`) and `branchContext` (branch or detached HEAD,
+none for `not_repo`), with the desktop Git branch glyph, or the folder glyph for
+an ordinary folder. `checkout` adds the `projectContext` worktree mark for
+headers and Details; the spoken description keeps the worktree's own folder. The counter is
 `childCount` without completed children. Rows come only from the snapshot
 `subagents` roster, never previews, and never for `hook_profiles`. They use
 `childStatus`, `Recorded` without current activity, and the `showChild`
@@ -700,6 +702,53 @@ full-screen preview with zoom, Open with and Share; other types open through
 no app can open the type. Rows show progress and errors; a failed read is never
 retried automatically. Without the operation on the relay and the computer, the
 row says "Update Zerus on this computer to open attachments."
+
+### Voice input
+
+The provider manager targets an explicitly selected authorized processing
+computer, independently of the open conversation. It creates, edits, tests and
+removes Local GigaAM or OpenAI-compatible HTTP profiles through the
+[speech management API](speech-providers.md). Profile credentials stay on the
+processing host; Android seals replacement keys before the durable relay queue.
+Forms pin host and configuration revision, keep key entry only in memory, and
+retain ambiguous operation identities for status checks without resubmission.
+Provider management does not alter a captured voice preview or select a default.
+
+Voice creates a persistent audio message. Record, stop, and review the separate
+voice draft with Play, Discard or **Send voice**. The typed draft is preserved.
+The phone encrypts the retained WAV and request UUID before sending. Closing or
+restarting the client preserves the stopped preview and any uncertain outbox
+entry; an interrupted upload is checked by its original identity, never blindly
+replayed. Capture remains bounded to two minutes of mono 16 kHz PCM.
+
+The conversation computer stores the original audio and owns recognition and
+native text delivery. Its reachable speech computers and profiles are selected
+by stable machine UUID, so the phone can use a model on another configured
+computer without interpreting that computer's SSH aliases. Provider discovery is
+scoped to the selected live conversation. Child and archived conversations do not
+accept new voice recordings in the initial implementation.
+
+After explicit Send voice, one synchronized history card shows processing,
+delivery or error state, the playable original and expandable transcript. The
+native agent receives recognized text. The original remains available even when
+recognition fails or delivery is cancelled. Unknown native delivery is shown as
+unconfirmed and is never automatically repeated. Archive playback uses the same
+exact conversation authorization as other attachments.
+
+The additive relay operations are `voice_profiles`, `voice_submit`, `voice_status`
+and `voice_cancel`, targeting the conversation `computer_id` and exact `session`.
+Existing `attachment_read` serves bounded audio chunks. Read receipts and relay
+uploads remain short-lived; the conversation host retains the original audio.
+Audio travels through the trusted relay, which can read it; this is not end-to-end
+encrypted. Models, credentials and inference stay on the processing computer.
+See [voice messages](voice-messages.md) for the wire contract and
+[the speech service](../services/speech/README.md) for model setup.
+
+Existing `speech_stats` reports processing-host aggregate counts and audio
+minutes without counting retries as new audio. Voice metadata is not sent to
+Firebase analytics. Broader local and fleet measurements are described in
+[analytics](analytics.md); the [Android README](../mobile/android/README.md#voice-input)
+covers client behavior and the isolated microphone smoke test.
 
 ## Overmind tasks
 
@@ -1123,7 +1172,8 @@ sends requests to client-supplied URLs. Restore it from Git history if needed.
 
 The main Android toolbar orders New session, Refresh and Settings. Settings is
 a full-window screen with its own Back action; it retains the underlying tab,
-project, filters, scroll position and drafts. It contains telemetry controls,
+project, filters, scroll position and drafts. It contains voice host/profile
+selection and local speech counters, telemetry controls,
 the application version, a direct GitHub repository link, update controls and
 an offline third-party notices page. Back from notices returns to Settings;
 Back from Settings returns to the previous workspace view.

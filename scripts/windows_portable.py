@@ -17,18 +17,20 @@ MANIFEST_LIMIT = 64 * 1024
 # Standard SPDX license and exception identifiers named by the SPDX documents
 # of the bundled Qt modules; packaging/windows/licenses holds a <ID>.txt for each.
 QT_LICENSE_TEXTS = (
-    "AFL-2.1", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "BSL-1.0", "CC0-1.0", "FTL",
-    "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "HPND", "HPND-sell-variant", "IJG", "Imlib2",
-    "LGPL-3.0-only", "LLVM-exception", "Libpng", "Linux-syscall-note", "MIT", "MIT-open-group", "MPL-2.0",
-    "Qt-GPL-exception-1.0", "Unicode-3.0", "X11", "Zlib", "blessing", "libpng-2.0",
+    "AFL-2.1", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "BSD-Source-Code", "BSL-1.0", "CC0-1.0", "FTL",
+    "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "HPND", "HPND-sell-variant", "IJG", "ISC", "Imlib2",
+    "LGPL-2.1-or-later", "LGPL-3.0-only", "LLVM-exception", "Libpng", "Linux-syscall-note", "MIT", "MIT-0", "MIT-open-group", "MPL-2.0",
+    "Qt-GPL-exception-1.0", "Unicode-3.0", "Unlicense", "X11", "Zlib", "blessing", "libpng-2.0",
 )
 # The tested executables, the Qt/WebEngine runtime windeployqt must deploy, the
 # app-local MSVC runtime and the notices that make the bundle redistributable.
 REQUIRED = (
     "hgs.exe", "hgs-tray.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
-    "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll",
+    "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll", "Qt6Multimedia.dll",
     "Qt6WebEngineCore.dll", "Qt6WebEngineWidgets.dll", "QtWebEngineProcess.exe",
     "platforms/qwindows.dll", "imageformats/qsvg.dll", "iconengines/qsvgicon.dll",
+    "multimedia/ffmpegmediaplugin.dll", "multimedia/windowsmediaplugin.dll",
+    "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swresample-5.dll", "swscale-8.dll",
     "resources/icudtl.dat", "resources/qtwebengine_resources.pak", "resources/v8_context_snapshot.bin",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
     "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/rust/inventory.json",

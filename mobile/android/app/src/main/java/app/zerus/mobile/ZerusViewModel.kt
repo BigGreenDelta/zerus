@@ -28,6 +28,76 @@ import org.json.JSONObject
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
+    internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
+    internal val speechConfiguration by lazy { SpeechConfigurationController(application, this, viewModelScope, api) }
+    internal fun speechConfigurationReason(host: SpeechConfigHost): String = when {
+        demo || !storageReady -> "Connect a computer to manage its speech providers."
+        updateInstallPreparing -> "Finish the app update first."
+        connections.none { it.id == host.key.connectionId } -> "The workspace is disconnected."
+        machines.none { it.connectionId == host.key.connectionId && it.id == host.key.computerId &&
+            it.machineId == host.machineId && it.online && !it.lastKnown } -> "The selected computer is unavailable or its identity changed."
+        !AttachmentPolicy.validId(host.machineId) -> "Refresh to verify this computer's identity."
+        !relayOperations[host.key.connectionId].orEmpty().containsAll(SpeechConfigProtocol.operations) -> "Update this gateway to manage speech providers."
+        !machineOperations[host.key].orEmpty().containsAll(SpeechConfigProtocol.operations) -> "Update Zerus on this computer to manage speech providers."
+        else -> ""
+    }
+    internal val speechNavigation get() = navigationId
+    internal fun voiceHostReason(target: Target): String = when {
+        demo -> "Connect a computer to send voice messages."
+        connections.none { it.id == target.connectionId } -> "The voice workspace is disconnected."
+        machines.none { it.connectionId == target.connectionId && it.id == target.computerId && it.online && !it.lastKnown } -> "The conversation computer is offline."
+        !relayOperations[target.connectionId].orEmpty().containsAll(VoiceProtocol.operations) -> "Update this gateway to send voice messages."
+        !machineOperations[MachineKey(target.connectionId, target.computerId)].orEmpty().containsAll(VoiceProtocol.operations) -> "Update Zerus on the conversation computer to send voice messages."
+        else -> ""
+    }
+    internal fun voiceSendReason(target: Target): String = when {
+        !storageReady || updateInstallPreparing -> "Private storage is not ready."
+        target.agentId.isNotBlank() || target.archiveId.isNotBlank() -> "Voice messages are available in live parent conversations."
+        voiceHostReason(target).isNotBlank() -> voiceHostReason(target)
+        !fresh(target) -> "Open and refresh the original conversation before sending."
+        NativeParser.messageBlockReason(activity).isNotBlank() -> NativeParser.messageBlockReason(activity)
+        sendingBlocked(target) -> "Resolve the pending delivery before sending this recording."
+        else -> ""
+    }
+    internal fun voiceColdCache() = ContextPresentation.isCold(activity)
+    internal fun voiceSent(target: Target, id: String) { lastOwnSend = target to id }
+    internal fun speechHostReason(host: MachineKey): String = when {
+        demo -> "Connect a computer to use voice input."
+        connections.none { it.id == host.connectionId } -> "The voice workspace is disconnected."
+        machines.none { it.connectionId == host.connectionId && it.id == host.computerId && it.online && !it.lastKnown } -> "The selected voice computer is offline."
+        !relayOperations[host.connectionId].orEmpty().containsAll(SpeechProtocol.operations) -> "This gateway does not support voice input yet."
+        !machineOperations[host].orEmpty().containsAll(SpeechProtocol.operations) -> "This computer does not support voice input yet."
+        else -> ""
+    }
+    internal fun supportsSpeechStats(host: MachineKey) = "speech_stats" in relayOperations[host.connectionId].orEmpty() &&
+        "speech_stats" in machineOperations[host].orEmpty()
+    internal var speechComposer: SpeechComposerBridge? = null; private set
+    internal fun bindSpeechComposer(bridge: SpeechComposerBridge) { speechComposer = bridge }
+    internal fun unbindSpeechComposer(bridge: SpeechComposerBridge) {
+        if (speechComposer === bridge) speechComposer = null
+    }
+    internal suspend fun insertSpeech(attempt: SpeechAttempt, explicit: Boolean) {
+        check(storageReady && !updateInstallPreparing) { "Private storage is not ready." }
+        if (attempt.id in messageState.speechAppliedIds) { persistence!!.flush(); return }
+        check(selected?.target == attempt.origin.target) { "Open the original conversation to insert this transcription, or copy it." }
+        val bridge = speechComposer
+        check(bridge != null && bridge.isCurrent(draft(attempt.origin.target))) {
+            "Wait for the original draft to open, then insert the transcription."
+        }
+        // The actual editor can be ahead of its snapshotFlow mirror. Reconcile without yielding
+        // before checking the captured revision, including when insertion was explicitly reviewed.
+        val editorText = bridge.editor.text.toString()
+        if (draft(attempt.origin.target).text != editorText) edit(attempt.origin.target, editorText)
+        val current = draft(attempt.origin.target)
+        check(current.text == editorText) { "Could not save the latest draft. Copy the transcription instead." }
+        check(explicit || SpeechDrafts.unchanged(attempt, current)) { "The draft changed. Review the transcription before inserting it." }
+        if (continuation?.draft?.target == current.target) cancelCompactContinuation("Draft changed. Your message will not be sent automatically.")
+        editState { SpeechDrafts.insert(it, attempt, current) }
+        // Advance the real editor and its reconciliation generation in this same main-loop turn.
+        // An IME edit during the persistence barrier must not be replaced by a later UI effect.
+        bridge.apply(draft(current.target))
+        persistence!!.flush()
+    }
     var connections by mutableStateOf<List<Connection>>(emptyList()); private set
     var machines by mutableStateOf<List<Machine>>(emptyList()); private set
     var sessions by mutableStateOf<List<Session>>(emptyList()); private set
@@ -560,6 +630,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Why the composer's draft cannot be added as a task now, or "". */
     fun addTaskReason(target: Target): String {
+        // Voice capture locks the typed draft, so it cannot become a task until capture stops.
+        if (speech.recording) return "Finish the voice recording first."
         val draft = draft(target)
         return OvermindRequests.addReason(draft.text, draft.attachments, target.key in tasks.adding, overmindWrites.any {
             it.action == "create" && it.pending && runCatching { JSONObject(it.request).optString("prompt") }.getOrNull() == draft.text })
@@ -746,7 +818,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync() }
     var updateInstallPreparing by mutableStateOf(false); private set
-    fun updateInstallReason(): String = UpdateInstallGuard.reason(messageState,storageReady,
+    fun updateInstallReason(): String = if (speech.busy || speechConfiguration.busy) "Finish the voice operation before installing." else UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),
         deliveryFlights.isNotEmpty() || contextFlights.isNotEmpty() || actionFlights.isNotEmpty() || overmindFlights.isNotEmpty(),compactContinuationActive)
     suspend fun prepareUpdateInstall() {
@@ -821,7 +893,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val window=historyWindows[frame.target.key]
                 if(window?.atHead==true && !olderLoading && frame.observedAt>0 && frame.observedAt!=lastHistoryObservation) {
                     lastHistoryObservation=frame.observedAt
-                    window.events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor?.takeIf { it.isNotBlank() }?.let { loadHistory(frame.target,"after",it) }
+                    HistoryRequests.refreshAtHead(window)?.let { (direction,cursor) -> loadHistory(frame.target,direction,cursor) }
                 }
             }
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
@@ -2107,7 +2179,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         answerFlights[sending.key]=sending.requestId;preparingTargets+=target.key
         try {
             save(sending);persistence!!.flush()
-            if (consent == null && ContextPresentation.isCold(activity)) {
+            if (consent == null && QuestionSendPolicies.requiresCacheConsent(native, ContextPresentation.isCold(activity))) {
                 durable({ state -> intent.restoreAfterExpiry(state, sending.requestId) })
                 refuseQuestionSend(intent, "The prompt cache expired before sending. Review your answer and confirm full context; nothing was sent.")
                 return@launch
@@ -2142,7 +2214,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             preparingTargets-=target.key
         }
     }
-    fun sendingBlocked(target: Target) = contextBlocked(target) || target.key in preparingTargets || outgoing.any { it.belongsTo(target) && it.blocksSending } || pickerDraft?.target == target
+    fun sendingBlocked(target: Target) = speech.recording || contextBlocked(target) || target.key in preparingTargets || outgoing.any { it.belongsTo(target) && it.blocksSending } || pickerDraft?.target == target
     fun sendMessage(target: Target, expectedDraft: Draft? = null, expectedCompactionId: String = "", allowColdCache: Boolean = false) =
         sendMessageInternal(target, expectedDraft, expectedCompactionId, allowColdCache, "")
     private fun sendMessageInternal(target: Target, expectedDraft: Draft?, expectedCompactionId: String, allowColdCache: Boolean, continuationId: String) = viewModelScope.launch {
@@ -2220,7 +2292,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
     fun beginAttachmentPick(target: Target, onReady: (String) -> Unit) {
-        if (target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
+        if (speech.recording || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
         if (continuation?.draft?.target == target) cancelCompactContinuation("Selecting files canceled the automatic continuation. Your composition is preserved.")
         val origin = draft(target); if (origin.status != "editing") return
         val id = UUID.randomUUID().toString()
@@ -2269,9 +2341,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         importJob?.cancel()
         try { editState { it.copy(pickerDraft = null, pickerId = "") }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
-    private fun protectedAttachmentIds(): Set<String> = messageState.attachmentIds() + persistence?.durableState?.attachmentIds().orEmpty()
+    private fun protectedAttachmentIds(): Set<String> = messageState.attachmentIds() + persistence?.durableState?.attachmentIds().orEmpty() + speech.protectedAudioIds()
     fun removeAttachment(target: Target, id: String) = viewModelScope.launch {
-        if (target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch
+        if (speech.recording || target.archiveId.isNotBlank() || pickerDraft?.target == target) return@launch
         if (continuation?.draft?.target == target) cancelCompactContinuation()
         val current = draft(target); if (current.status != "editing") return@launch
         try {

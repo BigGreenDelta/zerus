@@ -47,6 +47,14 @@ the supported server CLI. `zerus-mobile` delegates administration/serving to
 
 ## Boundaries
 
+The additive `voice_profiles`, `voice_submit`, `voice_status` and `voice_cancel`
+operations target an exact conversation computer and session. Its native worker
+owns retained audio, recognition and delivery; the relay acknowledges acceptance
+and immediately clears completed upload bodies, retaining only the request
+identity receipt. Voice history and playback are shared by authorized devices
+through existing conversation and `attachment_read` access, independent of which
+device submitted the voice message. See [the contract](../../../docs/voice-messages.md).
+
 - `http.rs` owns authentication before ingestion, separate anonymous,
   authenticated and long-poll admission, trusted proxy parsing, request/body
   deadlines, disconnect cleanup and bounded response spools.
@@ -293,6 +301,64 @@ passed the full Linux, Arch and macOS suite, including Rust relay contracts,
 released HTTP/connector compatibility, PostgreSQL recovery and repeated 256 MiB
 container workloads. An unchanged GUI clear-context fixture passed on rerun;
 its timing instability is tracked separately in `zerus-wvl`.
+
+## Speech transport
+
+The optional speech host adds capability-gated `speech_profiles`, `speech_stats`,
+`speech_submit`, `speech_status` and `speech_cancel`, all scoped to a computer
+with an empty session. Both the relay and the selected computer must advertise
+the operation. The connector returns a job receipt promptly; inference runs in
+the separate host service and never occupies its native command queue.
+
+Submit accepts at most 120 seconds of mono 16 kHz PCM16LE, inside a bounded
+6 MiB JSON envelope. Its request UUID also identifies the host job. Status and
+cancel require the original submit receipt, bound to the same device, workspace,
+computer and native machine identity. A guessed job ID or a different phone
+cannot retrieve its text. Submit and cancel receipts omit transcripts; only
+status returns text. Uncertain jobs are recovered by status, never by uploading
+audio again.
+
+The relay removes submitted audio on the connector result acknowledgement and
+scrubs terminal expired/revoked submissions during maintenance. It preserves
+the fingerprint and mutation identity. Speech reads expire after 120 seconds,
+independently of the existing persisted read-history predicate. Two additive
+partial indexes support bounded cleanup; schema version remains 1. Replace
+both PostgreSQL workers together so either accepts the new operations. Existing
+phones and connectors remain compatible, and discovery does not load models.
+The first index creation scans request metadata; use the normal backup, drain
+and code-only update procedure above.
+
+Host installation and adapters are documented in
+[services/speech](../../speech/README.md). Local content-free counters and the
+planned fleet analytics architecture are described in
+[analytics](../../../docs/analytics.md). API v1 remains trusted TLS transport;
+the relay can see audio and status responses in transit.
+
+## Speech provider management
+
+The additive computer-scoped operations `speech_config`, `speech_profile_upsert`,
+`speech_profile_remove`, `speech_profile_test` and `speech_config_status` manage
+profiles independently of conversation selection. They require both relay and
+target capabilities; the connector probes the distinct native help marker
+`Speech profile management v1`. Exact machine identity and configuration revision
+are checked by the host. Status is additionally bound to the original device,
+workspace and physical computer route.
+
+Mobile replacement credentials must use the host's sealed P256/HKDF/AES-GCM
+envelope; plaintext replacement keys are rejected before persistence. The
+connector validates redacted responses and removes CLI/SSH stderr from management
+errors. Completed mutation bodies are erased while their hashes and receipts
+prevent replay; management reads expire after 120 seconds. Two additive indexes
+cover management reads and body cleanup on both storage backends. Update all
+PostgreSQL workers together through the existing backup/drain procedure.
+
+The complete [profile and credential contract](../../../docs/speech-providers.md)
+also defines explicit synthetic tests and optional voice/ASR `profile_revision`
+pinning. Qualification runs `test_mobile_speech_config.py` against both released
+HTTP implementations, plus local Rust and isolated PostgreSQL cross-worker
+contracts. It covers real connector/CLI configuration without an inference
+runtime, malformed and plaintext keys, identity conflicts, response redaction,
+status ownership, short retention and exact payload accounting.
 
 ## Capacity evidence
 

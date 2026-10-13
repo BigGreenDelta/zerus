@@ -186,7 +186,7 @@ pub(super) fn inherit(provider: &str, home: &Path, profile: &Path) -> Result<()>
         return Err(Error::new(1, "Managed agent configuration is a symlink; MCP servers were not inherited."));
     }
     let guard = platform::private_open(fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)).open(profile.join(LOCK))?;
-    guard.lock_exclusive()?;
+    let _guard = platform::FileLock::exclusive(guard)?;
     let native = parse(&layout, read_text(&source)?.as_deref(), &source)?;
     let inherited = servers(&native, layout.key);
     let baseline = profile.join(BASELINE);

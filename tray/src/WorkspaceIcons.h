@@ -128,6 +128,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.drawPath(left); p.drawPath(right);
             if (name == "connect") p.drawLine(8, 12, 16, 12);
             else { p.drawLine(11, 3, 13, 6); p.drawLine(11, 18, 13, 21); }
+        } else if (name == "microphone") {
+            p.drawRoundedRect(QRectF(9, 3, 6, 12), 3, 3);
+            p.drawArc(QRectF(6, 8, 12, 11), 180 * 16, 180 * 16);
+            p.drawLine(12, 19, 12, 22); p.drawLine(8, 22, 16, 22);
         } else if (name == "attachment") {
             QPainterPath path; path.moveTo(9, 16); path.lineTo(16, 9);
             path.cubicTo(19, 6, 15, 2, 12, 5); path.lineTo(5, 12);

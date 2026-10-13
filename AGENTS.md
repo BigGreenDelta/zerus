@@ -49,7 +49,13 @@ and service identifiers compatible. A repository rename must not reset accounts,
 project catalogs, native agent processes or saved conversations.
 
 Never restart or kill native agents, tmux servers or DeepSeek hosts as part of a
-GUI update. Test tmux operations with an existing isolated socket directory.
+GUI update. Update local installations only with `install.sh`, `tray/install.sh`
+and `mac-install.sh`; a running GUI is replaced through `tray/update-installed.py`,
+which saves drafts and keeps one rollback copy. Never stage GUI copies in
+`~/Applications` or `~/.local/bin` by hand. Another session may be testing its own
+build: check the running GUI's `--build-info` and
+`~/.local/share/hgs/build-provenance.json`, and coordinate before replacing it.
+Test tmux operations with an existing isolated socket directory.
 Do not hot-reload a DeepSeek bridge that owns live agents: its disposal closes
 them. Use the native API compatibility path for resident adapters and keep
 unconfirmed permission setup blocked until an explicit resume verifies it.
@@ -93,7 +99,12 @@ review manifest migrations explicitly and retain Rust 1.85 compatibility.
 Keep security alerts and security updates enabled separately. Never auto-merge.
 AUR packages are `zerus` (stable source), `zerus-git` (upstream main),
 `zerus-ade-bin` (stable binary) and `zerus-ade-nightly-bin` (verified nightly binary),
-with x86_64 support. Stable publication remains owner-triggered. Daily nightlies
+with x86_64 support. Stable fixes increment patch; Dev builds use the next planned
+stable base from `DEV_VERSION` (Android: `mobile/android/DEV_VERSION`) plus the
+growing verified CI sequence, `next-version-dev.N`. Keep installed build identity
+independent of selected channels and retain all published asset versions. See the
+version rule in `docs/public-distribution.md`.
+Stable publication remains owner-triggered. Daily nightlies
 publish automatically only after full CI and package checks succeed. Publication
 credentials remain confined to trusted main in the release environment, never PR
 code. Nightly tags/assets are immutable and never become the latest stable release.

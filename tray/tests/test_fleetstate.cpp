@@ -1,5 +1,6 @@
 #include <QtTest>
 #include "FleetState.h"
+#include "SessionPresentation.h"
 
 static BoxState box(const QString &host, bool ok, int sessions)
 {
@@ -45,7 +46,79 @@ private slots:
     void olderHostsKeepLocalReadStateAndQueueNothing();
     void recoveryAttentionWithoutSignatureStaysLocal();
     void controlOnlyComputerHasNoLocalCount();
+    void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
+    void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
+    void intermediateRepliesStayUnreadUntilWorkFinishes();
 };
+
+void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
+{
+    for (const bool sharedRead : {false, true}) {
+        BoxState box; box.ok = true; box.host = "computer"; box.sessions = {shared()};
+        auto &s = box.sessions[0]; s.sharedRead = sharedRead; s.tracked = true;
+        s.activity = "busy"; s.phase = "working";
+        FleetState fleet;
+        const auto waiting = [&] {
+            fleet.setLocal(box, 0);
+            const auto &observed = fleet.local().sessions[0];
+            QVERIFY(observed.unreadReply); QVERIFY(!observed.visibleUnreadReply());
+            QVERIFY(!observed.needsAttention()); QCOMPARE(fleet.attentionSessions(0), 0);
+            QVERIFY(SessionPresentation::active(observed));
+            QCOMPARE(observed.replyId, s.replyId); QVERIFY(observed.readReplyId.isEmpty());
+            QVERIFY(fleet.readReplies().isEmpty()); QVERIFY(fleet.takeNewReadMarks().isEmpty());
+        };
+        waiting();
+        s.activity = "idle"; s.phase = "idle"; s.backgroundProcesses = 1; waiting();
+        s.backgroundProcesses = 0; s.subagentActiveCount = 1; waiting();
+        s.reviewLater = true; QVERIFY(s.needsAttention()); s.reviewLater = false;
+        s.phase = "approval"; QVERIFY(s.needsAttention()); s.phase = "idle";
+        s.subagentActiveCount = 0; fleet.setLocal(box, 1);
+        QVERIFY(fleet.local().sessions[0].unreadReply);
+        QVERIFY(fleet.local().sessions[0].visibleUnreadReply()); QCOMPARE(fleet.attentionSessions(1), 1);
+        QCOMPARE(fleet.local().sessions[0].replyId, s.replyId);
+        QVERIFY(fleet.markReplyRead({}, s.name, s.conversationId, s.replyId));
+        QVERIFY(!fleet.local().sessions[0].visibleUnreadReply());
+    }
+}
+
+void TestFleetState::idleShellWorkKeepsActiveAndPreservesInputAndAttention()
+{
+    auto s = shared(); s.tracked = true; s.activity = "idle"; s.phase = "idle";
+    s.processState = "running"; s.backgroundProcesses = 1; s.backgroundStarted = 100;
+    s.backgroundCommand = "build --wait"; s.scheduledJobs = 1;
+    QCOMPARE(SessionPresentation::status(s), QString("Background"));
+    QVERIFY(SessionPresentation::working(s)); QVERIFY(SessionPresentation::active(s));
+    QVERIFY(!SessionPresentation::scheduled(s)); QVERIFY(!s.needsAction());
+    QVERIFY(SessionPresentation::currentAction(s).contains("build --wait"));
+    QVERIFY(!SessionPresentation::working(s, false)); QVERIFY(!SessionPresentation::active(s, false));
+    QCOMPARE(SessionPresentation::status(s, false), QString("Offline"));
+    s.phase = "approval";
+    QCOMPARE(SessionPresentation::status(s), QString("Needs approval"));
+    QVERIFY(!SessionPresentation::working(s));
+    s.phase = "working"; s.activity = "busy";
+    QCOMPARE(SessionPresentation::status(s), QString("Working"));
+    s.phase = "idle"; s.activity = "idle"; s.backgroundProcesses = 0;
+    QVERIFY(SessionPresentation::scheduled(s));
+    s.scheduledJobs = 0;
+    QCOMPARE(SessionPresentation::status(s), QString("Ready"));
+    s.backgroundProcesses = -1;
+    QVERIFY(!SessionPresentation::working(s));
+}
+
+void TestFleetState::processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns()
+{
+    auto s = shared(); s.lastEventAt = 100; s.backgroundObservedAt = 100;
+    QJsonObject inspection{{"tracked", true}, {"run_id", s.runId}, {"conversation_id", s.conversationId},
+        {"last_event_at", 100}, {"process_work", QJsonObject{{"count", 1}, {"sampled_at", 101}, {"command", "build"}}}};
+    auto current = SessionPresentation::inspected(s, inspection);
+    QCOMPARE(current.backgroundProcesses, 1);
+    QCOMPARE(current.lastEventAt, 100.0);
+    inspection["run_id"] = "another-run";
+    QCOMPARE(SessionPresentation::inspected(s, inspection).backgroundProcesses, -1);
+    inspection["run_id"] = s.runId;
+    inspection["process_work"] = QJsonObject{{"count", 0}, {"sampled_at", 99}};
+    QCOMPARE(SessionPresentation::inspected(current, inspection).backgroundProcesses, 1);
+}
 
 void TestFleetState::attentionMarksFollowConversationAndRejectStaleActions()
 {

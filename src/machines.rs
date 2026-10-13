@@ -4,7 +4,6 @@ use crate::{
     config::Config,
     platform,
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -183,7 +182,7 @@ fn write_profile(
         .read(true)
         .write(true)
         .open(config.dir.join("machines.lock"))?;
-    lock.lock_exclusive()?;
+    let _lock = platform::FileLock::exclusive(lock)?;
     let bytes = read(&config.dir)?;
     if expected.is_some_and(|value| value != revision(&bytes)) {
         return Err(Error::new(

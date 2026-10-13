@@ -182,6 +182,9 @@ private:
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
     void showNotice(const QString &message, bool error = false);
+    void clearNotice();
+    // Opens a session file like a browser download; see ExternalFile.h.
+    void openExternalFile(const QString &path, bool otherMachine);
     void jumpToLatestActivity(QListWidgetItem *item);
     void openSession();
     void changeSession();
@@ -222,7 +225,7 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
-    enum class SessionMenuAction { OpenTerminal, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh };
+    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
     void clearContext();
@@ -256,6 +259,7 @@ private:
     QString m_clearKey;
     quint64 m_interruptRequest = 0;
     QString m_interruptKey;
+    QString m_interruptName, m_interruptMachine;
     quint64 m_queueSendRequest = 0;
     QString m_queueSendKey;
     void runSessionMenuAction(const Entry &original, SessionMenuAction action);
@@ -275,7 +279,7 @@ private:
     void applyQueuedModelSettings();
     void sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {}, const QString &compactionId = {}, bool contextChosen = false);
     void deliverMessage(const QString &key, const QString &host, const QString &name, const QString &run, const QString &conversation,
-                        const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId);
+                        const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId, const QString &compactionId, bool fullContextConsent = false, const QJsonObject &evidence = {});
     void messageAction(const QString &id, const QString &action);
     void finishMessage(quint64 request, bool ok, const QJsonObject &receipt, const QString &error = {}, bool uncertain = false);
     void reconcileMessages();
@@ -319,6 +323,9 @@ private:
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
+    QSet<QString> m_retryReads;
+    QHash<QString, quint64> m_waitingPreparations;
+    quint64 m_waitingPreparationSerial = 0;
     bool m_draftRefreshPending = false;
     int m_tick = 0;
     QTimer m_timer;
@@ -341,6 +348,7 @@ private:
     QLabel *m_heading, *m_count, *m_title, *m_meta, *m_badge, *m_model, *m_hint, *m_notice;
     QString m_modelElision;
     QLabel *m_connectionStatus;
+    QPushButton *m_noticeDismiss;
     QPushButton *m_connectionRetry;
     QSet<QString> m_pollingHosts;
     void updateConnectionStatus();
@@ -417,6 +425,10 @@ private:
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;
     QHash<QString, QJsonArray> m_localMessages;
+    QHash<QString, QJsonObject> m_pendingSendEvidence;
+    QHash<QString, int> m_pendingEvidenceUsers;
+    void beginSendEvidence(const QString &key, const QJsonObject &data);
+    void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
     bool m_confirmingQuestionCache = false;

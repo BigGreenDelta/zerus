@@ -13,6 +13,32 @@ to GitHub/AUR, dispatch hosted CI, or install anything on a client.
 
 ## Verified main dev channel
 
+### Version rule
+
+Stable bug-fix releases increment the patch version (`0.42.1`, `0.42.2`);
+feature releases increment the minor version. Dev names the **next planned
+stable release** plus the growing upstream CI sequence: `0.42.1-dev.215`,
+`0.42.1-dev.216`. `DEV_VERSION` commits the next desktop release base;
+`mobile/android/DEV_VERSION` does the same for the independently versioned
+Android app. Each must stay newer than its stable version. Advance the Dev base
+when preparing a stable release, never bump the product version for each CI run.
+
+The checked Arch package embeds its Dev identity during trusted main CI, before
+qualification and sealing. About, Installed in Updates and update notices show
+that identity. `hgs-tray --build-info` exposes the embedded product version,
+full Dev version, build sequence, source commit and dirty state. Ordinary local
+builds show their source revision (and local changes) without inventing a CI
+sequence. Selecting a channel never changes the installed identity.
+
+Android follows the same `next-version-dev.N` convention with its existing
+package and signer. `versionCode` must increase across both Stable and Dev,
+independently of the visible version; switching channels never permits a
+downgrade. Existing published assets and seals retain their original versions.
+Stable publication remains an explicit owner action; each verified Dev build
+advances the existing tag/catalog without creating another GitHub Release.
+
+### Publication and discovery
+
 Dev is a channel in the existing application, with the same Android package ID
 and signing certificate as stable. Settings selects Stable or Dev on Android,
 and Stable, Nightly or Dev on desktop. Changing channels never installs another
@@ -63,6 +89,15 @@ above distributed dev codes. `-PzerusDevBuildNumber=N` adds a dev display suffix
 channel with an older version leaves the current app/data installed until a newer
 compatible APK is published. Do not reset the version-code sequence when changing
 workflow names or channels.
+
+Preview APKs share this same version-code sequence. Before distributing one,
+compare its code with the live Dev catalog and the next main CI sequence; avoid
+reserving codes ahead of normal publication. Returning from a preview to Dev
+requires a verified main candidate whose code is strictly greater than every
+distributed preview. An equal code is not an update, even when its display name
+or source differs. Keep the preview immutable, publish a newer main candidate,
+and verify an in-place upgrade with the original signer and retained local data.
+Rerunning an existing CI run does not increase its sequence or version code.
 
 Automatic dev discovery is throttled to fifteen minutes. Android WorkManager
 checks remain subject to system scheduling and battery restrictions; checks do not

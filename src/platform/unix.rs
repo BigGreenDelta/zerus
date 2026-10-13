@@ -192,7 +192,7 @@ pub fn process_start_time(pid: u32) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_started_at(pid: u32) -> Option<Option<u64>> {
+pub(crate) fn process_started_at(pid: u32) -> Option<Option<u64>> {
     // The kinfo_proc that ps reads, which also covers other users' processes.
     // Its extern_proc begins with p_starttime, a timeval whose seconds come first.
     let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid as libc::c_int];
@@ -209,7 +209,7 @@ fn process_started_at(pid: u32) -> Option<Option<u64>> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_started_at(pid: u32) -> Option<Option<u64>> {
+pub(crate) fn process_started_at(pid: u32) -> Option<Option<u64>> {
     use std::sync::OnceLock;
     // procps: boot time from /proc/stat plus the start in clock ticks, truncated.
     static BOOT: OnceLock<Option<u64>> = OnceLock::new();

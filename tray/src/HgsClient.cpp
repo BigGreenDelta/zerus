@@ -1,5 +1,6 @@
 #include "HgsClient.h"
 #include "ProcessRunner.h"
+#include "LocalFile.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -99,6 +100,11 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    const auto work = obj.value("process_work").toObject();
+    s.backgroundProcesses = work.value("count").toInt(-1);
+    s.backgroundStarted = work.value("started_at").toDouble();
+    s.backgroundObservedAt = work.value("sampled_at").toDouble();
+    s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
@@ -620,6 +626,26 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
                emit inspectionFailed(host, name, detail, archiveId);
            });
     return true;
+}
+
+quint64 HgsClient::downloadFile(const QString &host, const QString &path, const QString &destination)
+{
+    const auto id = ++m_fileDownloadRequest;
+    runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
+        [this, id, host, path, destination](const QByteArray &out) {
+            if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
+            const auto object = QJsonDocument::fromJson(out).object();
+            const QFileInfo saved(destination);
+            if (object.value("host").toString() != host || object.value("path").toString() != path
+                || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
+                || !LocalFile::readable(saved) || object.value("bytes").toDouble() != LocalFile::size(saved)) {
+                emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
+            }
+            emit fileDownloaded(id, destination);
+        }, [this, id](const QString &, const QString &error) {
+            emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
+        });
+    return id;
 }
 
 quint64 HgsClient::requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
@@ -1336,7 +1362,8 @@ quint64 HgsClient::requestStageFiles(const QString &host, const QString &name, c
     for (const auto &path : paths) {
         QFile file(path); const QFileInfo info(path);
         if (!error.isEmpty()) break;
-        if (!info.isFile() || info.size() <= 0 || info.size() > MaximumAttachmentBytes || !file.open(QIODevice::ReadOnly)) {
+        const auto size = LocalFile::size(info);
+        if (!LocalFile::readable(info) || size <= 0 || size > MaximumAttachmentBytes || !file.open(QIODevice::ReadOnly)) {
             error = tr("Each file must be readable, nonempty, and at most 10 MiB."); break;
         }
         const auto bytes = file.read(MaximumAttachmentBytes + 1); total += bytes.size();

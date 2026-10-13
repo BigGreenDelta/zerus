@@ -1,0 +1,476 @@
+<title>Темп до резета</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one 1160px column. Thesis pair, pace chart, controls, then a grid of variant cards;
+   each card is a scenario × real-scale footer matrix rendered with the app's own colors. */
+:root{
+  --bg:#edf1f3; --surface:#ffffff; --fg:#16212a; --muted:#5a6977; --line:#d4dde3;
+  --accent:#1d7a60; --accent-soft:#dcefe7; --c-over:rgba(206,61,71,.07); --c-grid:#dbe3e8;
+  --body:"Golos Text",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --app:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  /* Footer colors from tray/src/AccountUsage.h, light theme */
+  --a-bg:#f7f9fb; --a-line:#d7e0e6; --a-fg:#24313c; --a-muted:#647386; --a-track:#d7e0e6; --a-time:#7f90a1;
+  --a-ok:#237a62; --a-warn:#bd6519; --a-bad:#ce3d47;
+  --a-chip-ok:rgba(35,122,98,.12); --a-chip-warn:rgba(189,101,25,.13); --a-chip-bad:rgba(206,61,71,.12);
+  --a-tip-bg:#ffffff; --a-tip-line:#cfd9e0;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1317; --surface:#151c22; --fg:#e3e9ef; --muted:#93a2b0; --line:#27323b;
+    --accent:#8bdfc0; --accent-soft:#1b3630; --c-over:rgba(240,120,120,.07); --c-grid:#25303a;
+    --a-bg:#12181d; --a-line:#2a343d; --a-fg:#dce4eb; --a-muted:#a1adbb; --a-track:#36434e; --a-time:#8395a5;
+    --a-ok:#72cdb2; --a-warn:#f0a35b; --a-bad:#f07878;
+    --a-chip-ok:rgba(114,205,178,.13); --a-chip-warn:rgba(240,163,91,.15); --a-chip-bad:rgba(240,120,120,.15);
+    --a-tip-bg:#1d252c; --a-tip-line:#33414c;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1317; --surface:#151c22; --fg:#e3e9ef; --muted:#93a2b0; --line:#27323b;
+  --accent:#8bdfc0; --accent-soft:#1b3630; --c-over:rgba(240,120,120,.07); --c-grid:#25303a;
+  --a-bg:#12181d; --a-line:#2a343d; --a-fg:#dce4eb; --a-muted:#a1adbb; --a-track:#36434e; --a-time:#8395a5;
+  --a-ok:#72cdb2; --a-warn:#f0a35b; --a-bad:#f07878;
+  --a-chip-ok:rgba(114,205,178,.13); --a-chip-warn:rgba(240,163,91,.15); --a-chip-bad:rgba(240,120,120,.15);
+  --a-tip-bg:#1d252c; --a-tip-line:#33414c;
+  color-scheme:dark;
+}
+/* Explicit app-theme override for the footer mocks, independent of the page theme */
+.app-dark{
+  --a-bg:#12181d; --a-line:#2a343d; --a-fg:#dce4eb; --a-muted:#a1adbb; --a-track:#36434e; --a-time:#8395a5;
+  --a-ok:#72cdb2; --a-warn:#f0a35b; --a-bad:#f07878;
+  --a-chip-ok:rgba(114,205,178,.13); --a-chip-warn:rgba(240,163,91,.15); --a-chip-bad:rgba(240,120,120,.15);
+  --a-tip-bg:#1d252c; --a-tip-line:#33414c;
+}
+.app-light{
+  --a-bg:#f7f9fb; --a-line:#d7e0e6; --a-fg:#24313c; --a-muted:#647386; --a-track:#d7e0e6; --a-time:#7f90a1;
+  --a-ok:#237a62; --a-warn:#bd6519; --a-bad:#ce3d47;
+  --a-chip-ok:rgba(35,122,98,.12); --a-chip-warn:rgba(189,101,25,.13); --a-chip-bad:rgba(206,61,71,.12);
+  --a-tip-bg:#ffffff; --a-tip-line:#cfd9e0;
+}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 var(--body)}
+.wrap{max-width:1160px;margin:0 auto;padding-inline:clamp(16px,4vw,40px);padding-block:40px 72px;display:flex;flex-direction:column;gap:48px}
+section{display:flex;flex-direction:column;gap:16px;min-width:0}
+.eyebrow{font:500 11px/1 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--accent)}
+h1{font:700 clamp(27px,3.6vw,38px)/1.12 var(--body);letter-spacing:-.015em;margin:0;text-wrap:balance}
+h2{font:600 22px/1.25 var(--body);margin:0;text-wrap:balance}
+h3{margin:0}
+p{margin:0}
+.lead{max-width:62ch;font-size:17px;color:var(--muted)}
+.prose{max-width:68ch;color:var(--muted)}
+.prose strong{color:var(--fg);font-weight:600}
+code,.mono{font-family:var(--mono);font-size:.88em}
+
+/* Footer strip: a faithful 22px slice of the composer footer */
+.strip{display:inline-flex;align-items:center;gap:16px;height:22px;padding:0 8px;border-radius:6px;background:var(--a-bg);box-shadow:inset 0 0 0 1px var(--a-line);font:11px/1 var(--app);color:var(--a-fg);white-space:nowrap;cursor:default;vertical-align:middle}
+.ind{display:inline-flex;align-items:center;gap:6px}
+.m{color:var(--a-muted);display:inline-flex;align-items:center;gap:3px}
+.hg{display:block;flex:none}
+.bar{position:relative;display:inline-block;height:4px;flex:none}
+.track{position:absolute;inset:0;background:var(--a-track);border-radius:2px;overflow:hidden}
+.track i{position:absolute;top:0;bottom:0}
+.tick{position:absolute;top:-3px;bottom:-3px;width:1.5px;margin-left:-.75px;background:var(--a-fg);border-radius:1px}
+.twin{display:inline-flex;flex-direction:column;gap:2px;flex:none}
+.rail{position:relative;height:3px;background:var(--a-track);border-radius:2px;overflow:hidden}
+.rail.r2{height:2px}
+.rail i{position:absolute;left:0;top:0;bottom:0;border-radius:2px}
+.rail.r2 i{background:var(--a-time)}
+.chip{display:inline-flex;align-items:center;gap:3px;height:15px;padding:0 5px;border-radius:4px;font-size:10.5px}
+.clock{display:block;flex:none}
+
+/* Thesis pair */
+.pair{display:flex;flex-wrap:wrap;gap:16px}
+.duo{flex:1 1 340px;min-width:0;margin:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px}
+.duo figcaption{font-weight:600}
+.duo-row{display:grid;grid-template-columns:4.6em minmax(0,1fr);align-items:center;gap:12px}
+.duo .strip{zoom:1.4}
+.tag{font:500 12px/1 var(--mono);color:var(--muted)}
+.tag.rec{color:var(--accent)}
+.sw{overflow-x:auto;min-width:0;padding-block:3px}
+
+/* Pace chart */
+.chart-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:28px;align-items:center}
+.chart{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}
+.chart svg{display:block;width:100%;height:auto}
+.chart .gl{stroke:var(--c-grid);stroke-width:1}
+.chart .over{fill:var(--c-over)}
+.chart .diag{stroke:var(--muted);stroke-width:1.2;stroke-dasharray:4 4;fill:none}
+.chart .ax{fill:var(--muted);font:10.5px var(--mono)}
+.chart .lbl{fill:var(--fg);font:500 11.5px var(--body)}
+.chart .lbl-m{fill:var(--muted);font:11px var(--body)}
+.chart .ok{fill:var(--a-ok)} .chart .bad{fill:var(--a-bad)}
+.chart .proj-ok{stroke:var(--a-ok);stroke-width:1.5;stroke-dasharray:3 3;fill:none}
+.chart .proj-bad{stroke:var(--a-bad);stroke-width:1.5;stroke-dasharray:3 3;fill:none}
+.chart .idle{stroke:var(--a-bad);stroke-width:2;stroke-dasharray:1 4;stroke-linecap:round;fill:none;opacity:.7}
+.chart .pt-ring{fill:var(--surface)}
+.chart-text{display:flex;flex-direction:column;gap:12px}
+
+/* Controls */
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:22px 36px}
+.panel h3{font:600 14px/1.3 var(--body);margin-bottom:10px}
+.legend{border-collapse:collapse;width:100%;font:12px/1.4 var(--mono);font-variant-numeric:tabular-nums}
+.legend th{text-align:left;font-weight:500;color:var(--muted);padding:0 10px 6px 0}
+.legend td{padding:5px 10px 5px 0;border-top:1px solid var(--line);vertical-align:top}
+.legend td:first-child{font-family:var(--body);font-size:13px}
+.legend-scroll{overflow-x:auto}
+.sliders{display:flex;flex-direction:column;gap:8px}
+.slider{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5em;align-items:center;gap:10px;font-size:13px}
+.slider output{font:12px var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+.slider label{color:var(--muted)}
+input[type=range]{accent-color:var(--accent);width:100%;margin:0}
+.toggles{display:flex;flex-wrap:wrap;gap:16px 24px;margin-top:14px;align-items:center}
+.toggle{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{font:500 13px/1 var(--body);padding:7px 11px;background:transparent;color:var(--fg);border:0;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Variant cards */
+.variants{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr));gap:20px}
+.variants[data-zoom="2"]{grid-template-columns:minmax(0,1fr)}
+.variants[data-zoom="2"] .rows .strip{zoom:2}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.card.rec{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.card header{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.code{font:600 12px/1 var(--mono);padding:5px 7px;border-radius:5px;background:var(--accent-soft);color:var(--accent);flex:none}
+.card h3{font:600 17px/1.3 var(--body);flex:1;min-width:10em}
+.wbadge{font:12px/1 var(--mono);color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.recmark{font:500 11px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
+.idea{font-size:14.5px}
+.rows{display:grid;grid-template-columns:8.8em minmax(0,1fr);gap:4px 14px;align-items:center}
+.sc{font:12px/1.3 var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.sc.custom{color:var(--accent)}
+.pc{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;font-size:14px;color:var(--muted)}
+.pc li{display:grid;grid-template-columns:1.1em minmax(0,1fr)}
+.pc li::before{font:600 13px/1.5 var(--mono)}
+.pc .plus::before{content:"+";color:var(--accent)}
+.pc .minus::before{content:"−";color:var(--a-bad)}
+.tipwrap{display:flex;flex-direction:column;gap:6px}
+.tiplabel{font:12px var(--mono);color:var(--muted)}
+.tipmock{align-self:flex-start;max-width:100%;background:var(--a-tip-bg);border:1px solid var(--a-tip-line);border-radius:6px;padding:8px 10px;font:12px/1.5 var(--app);color:var(--a-fg);white-space:pre-line;box-shadow:0 8px 22px rgba(10,20,30,.14)}
+
+/* Recommendation */
+.rec-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;align-items:start}
+.rules{width:100%;border-collapse:collapse;font-size:14px}
+.rules td{padding:9px 12px 9px 0;border-top:1px solid var(--line);vertical-align:top}
+.rules td:first-child{white-space:nowrap;font-weight:500}
+.sw-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px}
+.formula{font:13px/1.6 var(--mono);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;color:var(--fg)}
+.qs{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:8px;color:var(--muted);max-width:72ch}
+.qs strong{color:var(--fg);font-weight:600}
+#measure{position:absolute;left:-10000px;top:0;visibility:hidden;display:flex;flex-direction:column;align-items:flex-start}
+
+@media (max-width:860px){
+  .chart-grid,.rec-grid{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:480px){
+  .rows{grid-template-columns:minmax(0,1fr);gap:2px}
+  .rows .sc{margin-top:8px}
+  .duo-row{grid-template-columns:minmax(0,1fr);gap:4px}
+  .duo .strip{zoom:1.2}
+  .slider{grid-template-columns:minmax(0,1fr) 4.6em}
+  .slider input{grid-column:1 / -1;grid-row:2}
+}
+</style>
+
+<div class="wrap">
+  <section class="hero">
+    <span class="eyebrow">Zerus · футер аккаунта · 5h и 7d лимиты</span>
+    <h1>Сколько осталось до резета</h1>
+    <p class="lead">48% недельного лимита за день до резета и за шесть дней до него — разные ситуации. В первой можно не экономить, во второй лимит кончится послезавтра. Сейчас футер рисует их одинаково.</p>
+    <div class="pair app-scope">
+      <figure class="duo">
+        <figcaption>7d · 48% · резет завтра</figcaption>
+        <div class="duo-row"><span class="tag">Сейчас</span><div class="sw" data-v="cur" data-s="tomorrow"></div></div>
+        <div class="duo-row"><span class="tag rec">G</span><div class="sw" data-v="g" data-s="tomorrow"></div></div>
+      </figure>
+      <figure class="duo">
+        <figcaption>7d · 48% · резет через 6 дней</figcaption>
+        <div class="duo-row"><span class="tag">Сейчас</span><div class="sw" data-v="cur" data-s="sixdays"></div></div>
+        <div class="duo-row"><span class="tag rec">G</span><div class="sw" data-v="g" data-s="sixdays"></div></div>
+      </figure>
+    </div>
+    <p class="prose">Строки увеличены в 1,4×. В карточках ниже — реальный масштаб: высота 22 px, шрифт 11 px, полоса 34×4 px, цвета из <code>AccountUsage.h</code>. Наведите курсор на строку, чтобы увидеть полную подсказку.</p>
+  </section>
+
+  <section>
+    <span class="eyebrow">Идея</span>
+    <h2>Процент без времени ничего не говорит</h2>
+    <div class="chart-grid">
+      <div class="chart">
+        <svg viewBox="0 0 560 238" role="img" aria-label="График расхода 7d окна: обе точки на 48%, одна ниже линии ровного темпа, другая выше">
+          <polygon class="over" points="40,206 540,16 40,16"/>
+          <line class="gl" x1="40" y1="16" x2="540" y2="16"/>
+          <line class="gl" x1="40" y1="63.5" x2="540" y2="63.5"/>
+          <line class="gl" x1="40" y1="111" x2="540" y2="111"/>
+          <line class="gl" x1="40" y1="158.5" x2="540" y2="158.5"/>
+          <line class="gl" x1="40" y1="206" x2="540" y2="206"/>
+          <text class="ax" x="34" y="20" text-anchor="end">100%</text>
+          <text class="ax" x="34" y="115" text-anchor="end">50%</text>
+          <text class="ax" x="34" y="210" text-anchor="end">0</text>
+          <text class="ax" x="40" y="226">старт</text>
+          <text class="ax" x="111.4" y="226" text-anchor="middle">1д</text>
+          <text class="ax" x="182.9" y="226" text-anchor="middle">2д</text>
+          <text class="ax" x="254.3" y="226" text-anchor="middle">3д</text>
+          <text class="ax" x="325.7" y="226" text-anchor="middle">4д</text>
+          <text class="ax" x="397.1" y="226" text-anchor="middle">5д</text>
+          <text class="ax" x="468.6" y="226" text-anchor="middle">6д</text>
+          <text class="ax" x="540" y="226" text-anchor="end">резет</text>
+          <line class="diag" x1="40" y1="206" x2="540" y2="16"/>
+          <text class="lbl-m" x="300" y="100" transform="rotate(-20.8 300 100)">ровный темп</text>
+          <text class="lbl-m" x="48" y="32">перерасход</text>
+          <text class="lbl-m" x="532" y="196" text-anchor="end">запас</text>
+          <!-- Reset tomorrow: 142h elapsed, 48% -->
+          <line class="proj-ok" x1="462.6" y1="114.8" x2="540" y2="98.1"/>
+          <text class="lbl" x="536" y="88" text-anchor="end">≈57% к резету</text>
+          <circle class="pt-ring" cx="462.6" cy="114.8" r="6.5"/>
+          <circle class="ok" cx="462.6" cy="114.8" r="4.5"/>
+          <text class="lbl" x="462.6" y="136" text-anchor="middle">резет завтра</text>
+          <!-- Reset in 6 days: 23h elapsed, 48% -->
+          <line class="proj-bad" x1="108.5" y1="114.8" x2="182.6" y2="16"/>
+          <line class="idle" x1="182.6" y1="16" x2="540" y2="16"/>
+          <text class="lbl" x="192" y="34">кончится ≈ через сутки, потом 5 дней ожидания</text>
+          <circle class="pt-ring" cx="108.5" cy="114.8" r="6.5"/>
+          <circle class="bad" cx="108.5" cy="114.8" r="4.5"/>
+          <text class="lbl" x="108.5" y="136" text-anchor="middle">резет через 6 дн.</text>
+        </svg>
+      </div>
+      <div class="chart-text">
+        <p class="prose">По горизонтали — время 7d окна, по вертикали — расход. Пунктирная диагональ — ровный темп: при нём к резету уходит ровно 100%.</p>
+        <p class="prose">Обе точки — 48%. <strong>«Резет завтра»</strong> ниже линии: тем же темпом к резету наберётся около 57%. <strong>«Через 6 дней»</strong> выше линии: тем же темпом лимит кончится примерно через сутки, и потом пять дней придётся ждать.</p>
+        <p class="prose">Футеру нужно показать одно: с какой стороны от линии вы сейчас и насколько далеко. Варианты ниже делают это по-разному — текстом, меткой на полосе, прогнозом или множителем.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Стенд</span>
+    <h2>Сценарии и настройки</h2>
+    <div class="panel">
+      <div>
+        <h3>Сценарии в карточках</h3>
+        <div class="legend-scroll"><table class="legend" id="legend"></table></div>
+      </div>
+      <div>
+        <h3>Свой сценарий — последняя строка каждой карточки</h3>
+        <div class="sliders">
+          <div class="slider"><label for="s7u">7d расход</label><input type="range" id="s7u" min="0" max="100" step="1" value="70"><output id="o7u" for="s7u"></output></div>
+          <div class="slider"><label for="s7r">7d до резета</label><input type="range" id="s7r" min="1" max="168" step="1" value="50"><output id="o7r" for="s7r"></output></div>
+          <div class="slider"><label for="s5u">5h расход</label><input type="range" id="s5u" min="0" max="100" step="1" value="60"><output id="o5u" for="s5u"></output></div>
+          <div class="slider"><label for="s5r">5h до резета</label><input type="range" id="s5r" min="5" max="300" step="5" value="90"><output id="o5r" for="s5r"></output></div>
+        </div>
+        <div class="toggles">
+          <div class="toggle"><span>Масштаб</span><span class="seg" id="zoomSeg"><button type="button" id="z1" data-zoom="1" aria-pressed="true">1×</button><button type="button" id="z2" data-zoom="2" aria-pressed="false">2×</button></span></div>
+          <div class="toggle"><span>Тема футера</span><span class="seg" id="themeSeg"><button type="button" id="tp" data-app="" aria-pressed="true">Как страница</button><button type="button" id="td" data-app="app-dark" aria-pressed="false">Тёмная</button><button type="button" id="tl" data-app="app-light" aria-pressed="false">Светлая</button></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Прототипы</span>
+    <h2>Восемь вариантов на одних и тех же данных</h2>
+    <p class="prose">Ширина в углу карточки — самая широкая строка из пяти сценариев, рядом разница с текущим футером. Во всех вариантах, кроме текущего, цвет считается от прогноза темпа, а не от процента; правила — в конце страницы.</p>
+    <div class="variants app-scope" id="variants" data-zoom="1"></div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Вывод</span>
+    <h2>Что предлагаю</h2>
+    <div class="rec-grid">
+      <div class="chart-text">
+        <p class="prose"><strong>G: метка темпа на полосе плюс короткий отсчёт.</strong> Полоса отвечает, опережаете ли вы график, текст — когда резет. Ширина растёт примерно на 25 px на окно; в компактном режиме (полоса 20 px, без провайдера) отсчёт скрывается, метка остаётся. Полная фраза с датой и прогнозом уходит в подсказку и в accessible name.</p>
+        <p class="prose">Если ширина критична, <strong>B</strong> даёт то же без единого лишнего пикселя, но метку придётся один раз объяснить. <strong>E</strong> хорош как дополнение к G: чип «lasts ~1d» появляется только при реальном риске.</p>
+        <div class="formula">темп = расход ÷ прошедшее время окна<br>хватит на = (100% − расход) ÷ темп<br>метка = прошедшее время ÷ длина окна</div>
+      </div>
+      <div>
+        <table class="rules" aria-label="Правила цвета">
+          <tr><td><span class="sw-dot" style="background:var(--a-ok)"></span>Зелёный</td><td>При текущем темпе лимита хватит до резета.</td></tr>
+          <tr><td><span class="sw-dot" style="background:var(--a-warn)"></span>Оранжевый</td><td>Кончится раньше резета, но не раньше середины оставшегося времени. Или уже потрачено 90% и больше.</td></tr>
+          <tr><td><span class="sw-dot" style="background:var(--a-bad)"></span>Красный</td><td>Кончится раньше середины оставшегося времени, или лимит исчерпан.</td></tr>
+          <tr><td><span class="sw-dot" style="background:var(--a-muted)"></span>Пороги 70/90%</td><td>Первые 8% окна: около 13 ч для 7d и 24 мин для 5h. Прогноз по паре часов слишком шумный.</td></tr>
+        </table>
+      </div>
+    </div>
+    <h3 style="font:600 16px/1.3 var(--body);margin-top:8px">Открытые вопросы</h3>
+    <ol class="qs">
+      <li><strong>Какой темп брать.</strong> Средний с начала окна стабилен, но не замечает, что вы час назад остановились. Недавний темп по 5-минутным обновлениям точнее, но цвет начнёт дёргаться.</li>
+      <li><strong>Отсчёт всегда или по условию.</strong> Можно показывать его, только когда до резета меньше суток или прогноз плохой. Это экономит ширину, но время резета пропадает как раз тогда, когда всё спокойно.</li>
+      <li><strong>Использовано или осталось.</strong> 48% в футере — это <code>used_percent</code>, то есть потрачено. Если естественнее читать остаток, полосу можно перевернуть как батарейку; на метку темпа это не влияет.</li>
+      <li><strong>Связь с Android.</strong> Там отсчёт уже показан с песочными часами. A и G переносят ту же иконку на десктоп.</li>
+    </ol>
+  </section>
+</div>
+<div id="measure" aria-hidden="true"></div>
+
+<script>
+(function(){
+  const PRESETS=[
+    {id:'tomorrow',short:'48% · завтра',label:'48%, резет завтра',w5:[10,200],w7:[48,26*60]},
+    {id:'sixdays',short:'48% · через 6д',label:'48%, резет через 6 дней',w5:[10,200],w7:[48,145*60]},
+    {id:'late',short:'92% · через 3ч',label:'92%, резет через 3 часа',w5:[35,120],w7:[92,180]},
+    {id:'out5',short:'5h на нуле',label:'5h исчерпан',w5:[100,47],w7:[61,76*60]},
+    {id:'fresh',short:'старт недели',label:'Неделя только началась',w5:[15,250],w7:[6,165*60]}
+  ];
+  const custom={w5:[60,90],w7:[70,50*60]};
+  const ROWS=[...PRESETS.map(p=>p.id),'custom'];
+
+  function dur(min){min=Math.max(0,Math.floor(min));if(min<60)return min+'m';if(min<2880)return Math.floor(min/60)+'h';return Math.floor(min/1440)+'d';}
+  function long(min){min=Math.max(0,Math.round(min));const d=Math.floor(min/1440),h=Math.floor(min%1440/60),m=min%60;if(d)return h?d+'d '+h+'h':d+'d';if(h)return m?h+'h '+m+'m':h+'h';return m+'m';}
+  function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\n/g,'&#10;');}
+
+  // Pace model: average rate since the window started, projected to the reset.
+  function model(u,r,W){
+    u=Math.max(0,Math.min(100,u));r=Math.max(0,Math.min(W,r));
+    const elapsed=W-r,e=elapsed/W,early=e<0.08;
+    const tte=u>0&&elapsed>0?(100-u)*elapsed/u:Infinity;
+    let st;
+    if(u>=100)st='out';
+    else if(early)st=u>=90?'bad':u>=70?'warn':'ok';
+    else{st=tte>=r?'ok':tte>=r/2?'warn':'bad';if(u>=90&&st==='ok')st='warn';}
+    const mult=r>0?(100-u)/(100*r/W):Infinity;
+    return {u,r,W,e,early,tte,st,mult,proj:e>0?u/e:Infinity};
+  }
+  const col=s=>s==='out'?'bad':s;
+  const absCol=u=>u>=90?'bad':u>=70?'warn':'ok';
+
+  const HG='<svg class="hg" viewBox="0 0 8 10" width="7" height="9" aria-hidden="true"><path d="M1 .75h6M1 9.25h6M1.6 .75C1.6 3.4 4 3.6 4 5S1.6 6.6 1.6 9.25M6.4 .75C6.4 3.4 4 3.6 4 5s2.4 1.6 2.4 4.25" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
+
+  function bar(segs,w,tick){
+    w=w||34;let h='<span class="bar" style="width:'+w+'px"><span class="track">';
+    for(const [a,b,c] of segs){if(b-a<=0)continue;h+='<i style="left:'+(a/100*w).toFixed(2)+'px;width:'+((b-a)/100*w).toFixed(2)+'px;background:var(--a-'+c+')"></i>';}
+    h+='</span>';
+    if(tick!=null)h+='<b class="tick" style="left:'+(tick/100*w).toFixed(2)+'px"></b>';
+    return h+'</span>';
+  }
+  function paceBar(m){
+    const e100=m.e*100;let segs;
+    if(m.st==='out')segs=[[0,100,'bad']];
+    else if(!m.early&&m.u>e100)segs=[[0,e100,'ok'],[e100,m.u,col(m.st)]];
+    else segs=[[0,m.u,col(m.st)]];
+    return bar(segs,34,e100);
+  }
+  function twin(m){
+    const w=34,c=col(m.st);
+    return '<span class="twin" style="width:'+w+'px"><span class="rail r1"><i style="width:'+(m.u/100*w).toFixed(2)+'px;background:var(--a-'+c+')"></i></span><span class="rail r2"><i style="width:'+(m.e*w).toFixed(2)+'px"></i></span></span>';
+  }
+  function clock(m){
+    const c=col(m.st),p=Math.min(1,m.u/100),R=6;let sector='';
+    if(p>=1)sector='<circle cx="7" cy="7" r="'+R+'" style="fill:var(--a-'+c+')"/>';
+    else if(p>0){const a=p*2*Math.PI,x=7+R*Math.sin(a),y=7-R*Math.cos(a);sector='<path d="M7 7L7 '+(7-R)+'A'+R+' '+R+' 0 '+(p>.5?1:0)+' 1 '+x.toFixed(2)+' '+y.toFixed(2)+'Z" style="fill:var(--a-'+c+')"/>';}
+    const ha=m.e*2*Math.PI,hx=7+6.3*Math.sin(ha),hy=7-6.3*Math.cos(ha);
+    return '<svg class="clock" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="'+R+'" style="fill:var(--a-track)"/>'+sector+'<line x1="7" y1="7" x2="'+hx.toFixed(2)+'" y2="'+hy.toFixed(2)+'" style="stroke:var(--a-fg)" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="7" r="1.2" style="fill:var(--a-fg)"/></svg>';
+  }
+  const chip=(c,html)=>'<span class="chip" style="color:var(--a-'+c+');background:var(--a-chip-'+c+')">'+html+'</span>';
+  const label=(n,m,c,extra)=>'<span style="color:var(--a-'+c+')">'+n+' '+Math.round(m.u)+'%'+(extra||'')+'</span>';
+  const countdown=m=>'<span class="m">'+HG+dur(m.r)+'</span>';
+  const outSuffix=m=>m.st==='out'?' ('+dur(m.r)+')':'';
+  function multTxt(m){const x=m.mult;if(!isFinite(x)||x>=10)return '×10+';return '×'+x.toFixed(1).replace(/\.0$/,'');}
+
+  const V=[
+    {id:'cur',code:'Сейчас',name:'Текущий футер',
+     idea:'Полоса и процент. Время до резета появляется только при 100%, цвет зависит от порогов 70 и 90%.',
+     plus:['Самый узкий и уже знакомый.'],
+     minus:['48% выглядит одинаково и за день, и за шесть дней до резета.','92% за три часа до резета красный, хотя лимита хватит.'],
+     ind:(n,m)=>bar([[0,m.u,absCol(m.u)]])+label(n,m,absCol(m.u),m.u>=100?' ('+dur(m.r)+')':'')},
+    {id:'a',code:'A',name:'Отсчёт до резета',
+     idea:'Рядом с процентом приглушённый отсчёт с песочными часами: 26h, 6d, 47m. Цвет — по прогнозу.',
+     plus:['Понятно без объяснений.','Та же иконка, что уже есть на Android.'],
+     minus:['Сопоставлять процент и время приходится в голове.'],
+     ind:(n,m)=>bar([[0,m.u,col(m.st)]])+label(n,m,col(m.st))+countdown(m)},
+    {id:'b',code:'B',name:'Метка темпа на полосе',
+     idea:'Вертикальная черта показывает, какая часть окна уже прошла. Всё, что залито правее черты, — перерасход, и оно окрашено тревожным цветом.',
+     plus:['Ширина не меняется.','Перерасход видно, не читая цифры.'],
+     minus:['Метку нужно один раз объяснить.','На полосе 34×4 px деталь мелкая.'],
+     ind:(n,m)=>paceBar(m)+label(n,m,col(m.st),outSuffix(m))},
+    {id:'c',code:'C',name:'Две дорожки',
+     idea:'Верхняя дорожка — расход, нижняя серая — прошедшее время окна. Верхняя длиннее нижней — вы опережаете график.',
+     plus:['Сравнить две длины проще, чем найти метку.','Ширина не меняется.'],
+     minus:['Линии по 2–3 px в 22-пиксельной строке легко слить в одну.'],
+     ind:(n,m)=>twin(m)+label(n,m,col(m.st),outSuffix(m))},
+    {id:'d',code:'D',name:'Запас темпа ×N',
+     idea:'Множитель: во сколько раз быстрее среднего ещё можно тратить до резета. ×3.4 — можно не экономить, ×0.6 — пора притормозить.',
+     plus:['Одно число отвечает на вопрос «можно ли сейчас жечь».'],
+     minus:['Абстрактно: без подсказки ×0.6 непонятен.','Рядом с процентом второе число того же размера.'],
+     ind:(n,m)=>bar([[0,m.u,col(m.st)]])+label(n,m,col(m.st))+(m.st==='out'?chip('bad',HG+dur(m.r)):chip(col(m.st),multTxt(m)))},
+    {id:'e',code:'E',name:'Прогноз «хватит на…»',
+     idea:'Пока всё в порядке, футер выглядит как сейчас. Если тем же темпом лимит кончится раньше резета, появляется чип «lasts ~1d».',
+     plus:['Молчит, когда всё хорошо, и говорит ровно тогда, когда нужно действовать.'],
+     minus:['Прогноз по среднему темпу искажают ночи и выходные.','Время резета не видно, пока всё спокойно.'],
+     ind:(n,m)=>bar([[0,m.u,col(m.st)]])+label(n,m,col(m.st))+(m.st==='out'?chip('bad',HG+dur(m.r)):(!m.early&&m.tte<m.r)?chip(col(m.st),'lasts ~'+dur(m.tte)):'')},
+    {id:'f',code:'F',name:'Циферблат',
+     idea:'Вместо полосы кружок 14 px: сектор — расход, стрелка — прошедшее время окна. Сектор зашёл за стрелку — перерасход.',
+     plus:['Уже текущей полосы.','Метафора часов знакома.'],
+     minus:['На 14 px сектор и стрелку трудно различить.','Малые проценты почти не видны.'],
+     ind:(n,m)=>clock(m)+label(n,m,col(m.st),outSuffix(m))},
+    {id:'g',code:'G',name:'Метка темпа и отсчёт',rec:true,
+     idea:'B плюс A: полоса показывает, опережаете ли вы график, текст — когда резет. В компактном режиме отсчёт скрывается, метка остаётся.',
+     plus:['Отвечает на три вопроса: сколько потрачено, опережаю ли я график, когда резет.'],
+     minus:['Шире текущего примерно на 25 px на каждое окно.'],
+     ind:(n,m)=>paceBar(m)+label(n,m,col(m.st))+countdown(m)}
+  ];
+
+  const fmtAt=min=>new Date(Date.now()+min*60000).toLocaleString('en-GB',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  function tipLines(n,m){
+    const L=[n+': '+Math.round(m.u)+'% used','Resets '+fmtAt(m.r)+' (in '+long(m.r)+')'];
+    if(m.st==='out')L.push('Limit reached');
+    else if(m.early)L.push('Too early in the window to forecast');
+    else if(m.tte<m.r)L.push('At the current pace, runs out in about '+long(m.tte));
+    else L.push('At the current pace, about '+Math.min(100,Math.round(m.proj))+'% by reset');
+    return L;
+  }
+  const scen=id=>id==='custom'?{id:'custom',short:'свой',w5:custom.w5,w7:custom.w7}:PRESETS.find(p=>p.id===id);
+  const variant=id=>V.find(v=>v.id===id);
+  function strip(v,id){
+    const s=scen(id),m5=model(s.w5[0],s.w5[1],300),m7=model(s.w7[0],s.w7[1],10080);
+    const t=tipLines('5h',m5).concat([''],tipLines('7d',m7)).join('\n');
+    return '<span class="strip" role="img" aria-label="'+esc(t)+'" title="'+esc(t)+'"><span class="ind">'+v.ind('5h',m5)+'</span><span class="ind">'+v.ind('7d',m7)+'</span></span>';
+  }
+
+  function card(v){
+    let h='<article class="card'+(v.rec?' rec':'')+'" id="v-'+v.id+'"><header><span class="code">'+v.code+'</span><h3>'+v.name+'</h3>'+(v.rec?'<span class="recmark">рекомендую</span>':'')+'<span class="wbadge" data-w="'+v.id+'"></span></header>';
+    h+='<p class="idea">'+v.idea+'</p><div class="rows">';
+    for(const id of ROWS)h+='<span class="sc'+(id==='custom'?' custom':'')+'">'+scen(id).short+'</span><div class="sw" data-v="'+v.id+'" data-s="'+id+'"></div>';
+    h+='</div>';
+    if(v.rec){const s=scen('sixdays');h+='<div class="tipwrap"><span class="tiplabel">Подсказка при наведении · 48% · через 6д</span><div class="tipmock">'+esc(tipLines('7d',model(s.w7[0],s.w7[1],10080)).join('\n')).replace(/&#10;/g,'\n')+'</div></div>';}
+    h+='<ul class="pc">'+v.plus.map(t=>'<li class="plus">'+t+'</li>').join('')+v.minus.map(t=>'<li class="minus">'+t+'</li>').join('')+'</ul></article>';
+    return h;
+  }
+
+  document.getElementById('variants').innerHTML=V.map(card).join('');
+  document.getElementById('legend').innerHTML='<tr><th>Сценарий</th><th>5h</th><th>7d</th></tr>'+PRESETS.map(p=>'<tr><td>'+p.label+'</td><td>'+p.w5[0]+'% · '+long(p.w5[1])+'</td><td>'+p.w7[0]+'% · '+long(p.w7[1])+'</td></tr>').join('');
+
+  function renderCells(sel){document.querySelectorAll(sel).forEach(el=>{el.innerHTML=strip(variant(el.dataset.v),el.dataset.s);});}
+  renderCells('.sw[data-v]');
+
+  function measure(){
+    const box=document.getElementById('measure'),res={};
+    for(const v of V){box.innerHTML=PRESETS.map(p=>strip(v,p.id)).join('');res[v.id]=Math.max.apply(null,Array.from(box.children).map(c=>c.getBoundingClientRect().width));}
+    box.innerHTML='';
+    const base=res.cur;
+    for(const v of V){
+      const el=document.querySelector('[data-w="'+v.id+'"]');if(!el)continue;
+      const w=Math.round(res[v.id]),d=Math.round(res[v.id]-base);
+      el.textContent=v.id==='cur'?'≈'+w+' px':'≈'+w+' px · '+(d>2?'+'+d:d<-2?'−'+(-d):'±0');
+    }
+  }
+  measure();
+
+  const sliders={s7u:v=>{custom.w7=[v,custom.w7[1]];return v+'%';},s7r:v=>{custom.w7=[custom.w7[0],v*60];return long(v*60);},s5u:v=>{custom.w5=[v,custom.w5[1]];return v+'%';},s5r:v=>{custom.w5=[custom.w5[0],v];return long(v);}};
+  function syncSliders(){for(const id in sliders){const v=+document.getElementById(id).value;document.getElementById('o'+id.slice(1)).textContent=sliders[id](v);}renderCells('.sw[data-s="custom"]');}
+  for(const id in sliders)document.getElementById(id).addEventListener('input',syncSliders);
+  syncSliders();
+
+  document.getElementById('zoomSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+    document.getElementById('variants').dataset.zoom=b.dataset.zoom;
+    document.querySelectorAll('#zoomSeg button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));});
+  document.getElementById('themeSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+    document.querySelectorAll('.app-scope').forEach(el=>{el.classList.remove('app-dark','app-light');if(b.dataset.app)el.classList.add(b.dataset.app);});
+    document.querySelectorAll('#themeSeg button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));});
+})();
+</script>

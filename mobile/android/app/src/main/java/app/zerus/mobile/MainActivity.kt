@@ -1,9 +1,11 @@
 package app.zerus.mobile
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -108,6 +111,14 @@ private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, sec
 
 class MainActivity : ComponentActivity() {
     private val model: ZerusViewModel by viewModels()
+    // Public Activity callback; AndroidX's inherited core bridge has a class-level restriction.
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean = when (model.speech.recordingKeys.handle(
+        event.keyCode, event.deviceId, event.action, event.repeatCount, model.speech.recording, event.modifiers != 0)) {
+        RecordingKeys.Result.Stop -> { model.speech.stop(); true }
+        RecordingKeys.Result.Consume -> true
+        RecordingKeys.Result.Pass -> super.dispatchKeyEvent(event)
+    }
     private var invitation by mutableStateOf<PairingInvite?>(null)
     private var updateRequest by mutableIntStateOf(0)
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -119,6 +130,7 @@ class MainActivity : ComponentActivity() {
             model.finishAttachmentPick(uris, selectionId)
         }
     }
+    override fun onStop() { model.speech.background(); model.attachments.stopAudio(); super.onStop() }
     override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
@@ -298,7 +310,7 @@ class MainActivity : ComponentActivity() {
         }
     }
     LaunchSessionDialog(model)
-    if (pairing) AlertDialog(onDismissRequest = { if (!model.busy) { pairing = false;code = "" } }, title = { Text("Pair a workspace") },
+    if (pairing) ZerusAlertDialog(onDismissRequest = { if (!model.busy) { pairing = false;code = "" } }, title = { Text("Pair a workspace") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Scan an invitation from your machine, or enter its code. Review the gateway before pairing.", color = Muted)
             ScanPairingButton(enabled = !model.busy) { invite -> server = invite.server;code = invite.code }
@@ -308,18 +320,20 @@ class MainActivity : ComponentActivity() {
         } }, confirmButton = { TextButton(enabled = !model.busy && model.storageReady && code.isNotBlank() && server.isNotBlank(),
             onClick = { model.pair(server, code) { pairing = false; code = ""; onNotifications() } }) { Text("Pair") } },
         dismissButton = { TextButton(onClick = { pairing = false;code = "" }, enabled = !model.busy) { Text("Cancel") } })
-    disconnect?.let { connection -> AlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
+    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
         text = { Text("This removes the gateway credential from this phone. Saved drafts remain available.") },
         confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text("Disconnect") } },
         dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Cancel") } }) }
-    review?.let { draft -> AlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
+    review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Your message may already have reached ${draft.target.session}. Check its conversation and receipt before preparing another send.")
             SelectionContainer { Text(draft.text.ifBlank { draft.answers }, maxLines = 8, overflow = TextOverflow.Ellipsis) }
             Text("Preparing again keeps the draft. Sending remains a separate action.", color = Muted, style = MaterialTheme.typography.bodySmall)
-        } }, confirmButton = { TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") } },
-        dismissButton = { TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") } }) }
-    reviewOutgoing?.let { message -> AlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
+        } }, confirmButton = {
+            TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") }
+            TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") }
+        }, dismissButton = { TextButton(onClick = { review = null }) { Text("Cancel") } }) }
+    reviewOutgoing?.let { message -> ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation before preparing another send."
                 else "This message was not accepted. Review it before trying again.")
@@ -327,14 +341,15 @@ class MainActivity : ComponentActivity() {
             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
             Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
         } }, confirmButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
-            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") } },
-        dismissButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
-            onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") } }) }
-    discard?.let { draft -> AlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
+            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
+            TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
+                onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") }
+        }, dismissButton = { TextButton(onClick = { reviewOutgoing = null }) { Text("Cancel") } }) }
+    discard?.let { draft -> ZerusAlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
         text = { Text("This removes the private draft for ${draft.target.session} from this phone.") },
         confirmButton = { TextButton(onClick = { model.discard(draft); discard = null }) { Text("Discard") } },
         dismissButton = { TextButton(onClick = { discard = null }) { Text("Cancel") } }) }
-    stopRequest?.let { (session, turn) -> AlertDialog(onDismissRequest = { stopRequest = null }, title = { Text("Stop this turn?") },
+    stopRequest?.let { (session, turn) -> ZerusAlertDialog(onDismissRequest = { stopRequest = null }, title = { Text("Stop this turn?") },
         text = { Text("Interrupt the current turn in " + session.title + ". The session remains available.") },
         confirmButton = { TextButton(onClick = { model.interrupt(session.target, turn); stopRequest = null }) { Text("Stop turn") } },
         dismissButton = { TextButton(onClick = { stopRequest = null }) { Text("Cancel") } }) }
@@ -609,8 +624,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             ProviderBadge(session.agent, Modifier.size(24.dp))
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             // A reply read on another device needs no badge here.
-                            (if (SharedReadPolicies.replyRead(session)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
-                                session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply")))?.let { unread ->
+                            (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
+                                SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
                                 Surface(color = Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
                                     Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Background,
                                         style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
@@ -638,7 +653,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (visible.isEmpty()) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
-    if (machineDialog) AlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
+    if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { model.allMachines() }) { Text("All machines") }
             model.machines.forEach { machine ->
@@ -658,7 +673,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val target = session.target
     val raw = model.activity
     val archived = target.archiveId.isNotBlank()
-    val events = if (model.demo) Demo.events else model.conversationEvents
+    val events = if (model.demo) Demo.events else VoiceHistory.merge(target, model.conversationEvents, model.speech.outgoing)
+    LaunchedEffect(target, model.speech.ready) { if (!model.demo && model.speech.ready) model.speech.refreshProfiles() }
+    LaunchedEffect(target, model.conversationEvents, model.speech.ready, model.activityVerified) {
+        if (!model.demo && model.activityVerified) model.speech.observe(target, model.conversationEvents)
+    }
     val questions = if (archived || model.demo) emptyList() else model.conversationQuestions
     var savedQuestionDisplay by rememberSaveable(stateSaver = Saver< QuestionDisplayState, String>(
         save = { it.encode() }, restore = { QuestionDisplayState.decode(it) })) { mutableStateOf(QuestionDisplayState(target.key)) }
@@ -976,7 +995,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
-                if (replies != null) {
+                if (event.voice != null) {
+                    VoiceMessageContent(model, model.selected?.target, event.voice)
+                } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         replies.orEmpty().forEach { reply ->
@@ -990,7 +1011,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     if(own) SelectionContainer { Text(event.text, lineHeight = 23.sp, style = MaterialTheme.typography.bodyLarge) }
                     else ProvideTextStyle(MaterialTheme.typography.bodyLarge.copy(lineHeight=23.sp)) { MarkdownText(event.text) }
                 }
-                AttachmentRows(event.attachments, model.selected?.target, model)
+                if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
                 if (event.delivery.isNotBlank() || event.at > 0) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
@@ -1020,10 +1041,18 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     onReview: (Draft) -> Unit, onAttach: (Target) -> Unit) {
     val target = session.target
     val draft = model.draft(target)
+    val recording = model.speech.recording
     // Exclude the initial conversation ID promotion from the editor identity.
     val lane = ComposerIdentity.lane(target)
     val editor = remember(lane) { TextFieldState(initialText = draft.text, initialSelection = TextRange(draft.text.length)) }
     var sync by remember(editor) { mutableStateOf(ComposerSync(draft.generation)) }
+    val speechBridge = remember(editor, target) {
+        SpeechComposerBridge(target, editor, { sync.generation }) { sync = ComposerSync(it) }
+    }
+    DisposableEffect(speechBridge) {
+        model.bindSpeechComposer(speechBridge)
+        onDispose { model.unbindSpeechComposer(speechBridge) }
+    }
     val currentTarget by rememberUpdatedState(target)
     var expanded by remember(lane) { mutableStateOf(false) }
     var visualLines by remember(lane) { mutableIntStateOf(1) }
@@ -1036,6 +1065,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     if(coldDraft != null || coldClearTarget != null || blockedSendReason != null) ObscureConversation()
     val focusRequester = remember(lane) { FocusRequester() }
     LaunchedEffect(editor, draft.generation) {
+        if (model.draft(currentTarget).generation != draft.generation) return@LaunchedEffect
         val update = ComposerReconciler.external(sync, draft.generation, draft.text)
         sync = update.sync
         update.replacement?.let { text -> editor.edit {
@@ -1063,6 +1093,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         draft.status == "editing" && !model.demo && online && target.run.isNotBlank() && model.storageReady && blockReason.isBlank()
     val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.status in listOf("sending", "uncertain") }
     val sendReason = when {
+        recording -> "Stop recording before sending a message. Your typed draft is kept."
         model.demo -> "Pair to send a message."
         !model.storageReady -> "Private storage is not ready. Sending is unavailable."
         draft.status == "submitting" -> "Sending the saved draft. Wait for its result."
@@ -1078,6 +1109,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Measure the editor and its controls first. A voice preview uses only the
+        // remaining height, with its controls reachable by scrolling.
+        if (model.speech.recording || model.speech.savingRecording || model.speech.draft != null) {
+            Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
+                .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
+        }
         ContextFooter(model, session) {
             model.edit(target, editor.text.toString())
             model.draft(target)
@@ -1092,7 +1129,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp), tint = Muted)
                     Text(attachment.name, Modifier.widthIn(max = 150.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     IconButton(onClick = { model.removeAttachment(target, attachment.id) },
-                    enabled = model.pickerDraft?.target != target && draft.status == "editing", modifier = Modifier.size(24.dp)) {
+                    enabled = !recording && model.pickerDraft?.target != target && draft.status == "editing", modifier = Modifier.size(24.dp)) {
                     Icon(Icons.Default.Close, "Remove " + attachment.name, Modifier.size(16.dp))
                     }
                 }
@@ -1108,13 +1145,18 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         Surface(color = Surface, shape = RoundedCornerShape(26.dp), border = BorderStroke(1.dp, Color(0xFF354449))) {
             Row(Modifier.fillMaxWidth().padding(start = 2.dp, end = 5.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", tint = Muted)
+                }
+                SpeechComposerButton(model, target) {
+                    if (model.draft(target).text != editor.text.toString()) model.edit(target, editor.text.toString())
                 }
                 OvermindAddAsTask(model, session) { model.edit(target, editor.text.toString()) }
                 BasicTextField(state = editor, modifier = Modifier.weight(1f).padding(horizontal = 3.dp, vertical = 10.dp)
                     .heightIn(max = if (expanded) 280.dp else 168.dp).focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },
-                    readOnly = draft.status != "editing" || model.demo,
+                    readOnly = recording || draft.status != "editing" || model.demo,
+                    // Reject IME/paste/drop edits even before the read-only recomposition lands.
+                    inputTransformation = InputTransformation { if (model.speech.recording) revertAllChanges() },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface, lineHeight = 24.sp),
                     keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Default, capitalization = KeyboardCapitalization.Sentences),
                     lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = if (expanded) 14 else 6),
@@ -1138,18 +1180,18 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             if (ContextPresentation.isCold(model.activity)) coldDraft = captured
                             else model.sendMessage(target, expectedDraft = captured)
                         } else if (sendReason.isNotBlank()) blockedSendReason = sendReason
-                    }, enabled = canSend || sendReason.isNotBlank(), modifier = Modifier.size(44.dp), shape = CircleShape,
+                    }, enabled = !recording && (canSend || sendReason.isNotBlank()), modifier = Modifier.size(44.dp), shape = CircleShape,
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
                             disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted)) {
-                        if (!canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
+                        if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
                         else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
                     }
                 }
             }
         }
     }
-    blockedSendReason?.let { reason -> AlertDialog(onDismissRequest = { blockedSendReason = null },
+    blockedSendReason?.let { reason -> ZerusAlertDialog(onDismissRequest = { blockedSendReason = null },
         title = { Text("Sending unavailable") }, text = { Text(reason) },
         confirmButton = { TextButton(onClick = { blockedSendReason = null }) { Text("Close") } }) }
     coldDraft?.let { captured ->
@@ -1161,7 +1203,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         val context = remember(model.activity, model.activityVerified) { ContextPresentation.from(model.activity, !model.activityVerified) }
         val compactReason = model.contextActionReason(captured.target, "compact_context").ifBlank { context.compactReason }
         val clearReason = model.contextActionReason(captured.target, "clear_context").ifBlank { context.clearReason }
-        AlertDialog(onDismissRequest = { coldDraft = null }, title = { Text("Continue with a cold cache?") },
+        ZerusAlertDialog(onDismissRequest = { coldDraft = null }, title = { Text("Continue with a cold cache?") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("The next message may process the full conversation again, increasing token use or cost. Send with full context, compact it into a summary first, or clear it and keep your draft. Compaction uses tokens and may omit details.")
                 if (!sameDraft) Text("The draft changed. Cancel and review the current composition.", color = Amber)
@@ -1189,6 +1231,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Saved drafts", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold) }
         item { Text("Private to this phone. Kept for the exact machine, session, run, and conversation.", color = Muted) }
+        if (model.speech.draft != null || model.speech.outgoing.isNotEmpty()) item { VoiceSavedMessages(model) }
         if(model.actionResultNotice.isNotBlank()) item { Text(model.actionResultNotice,color = Amber,style = MaterialTheme.typography.bodySmall) }
         items(unsent.sortedByDescending { it.updatedAt }, key = { it.key }) { draft ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

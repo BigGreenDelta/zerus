@@ -129,6 +129,11 @@ class AttachmentStore(context: Context) {
         FILE_LOCK.withLock { files.wire(attachment) { ensureActive() } }
     }
 
+    /** App-captured recordings use the same authenticated durable store as selected files. */
+    internal suspend fun importRecording(wav: ByteArray): Attachment = withContext(Dispatchers.IO) {
+        FILE_LOCK.withLock { wav.inputStream().use { files.copyFrom(it, "voice.wav", "audio/wav", emptyList()) { ensureActive() } } }
+    }
+
     suspend fun payload(attachments: List<Attachment>): JSONArray = withContext(Dispatchers.IO) {
         FILE_LOCK.withLock {
             AttachmentPolicy.selection(attachments)

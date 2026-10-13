@@ -93,7 +93,10 @@ fn held(dir: &Path) -> bool {
         return false;
     };
     match fs2::FileExt::try_lock_shared(&file) {
-        Ok(()) => false,
+        Ok(()) => {
+            drop(crate::platform::FileLock::held(file));
+            false
+        }
         Err(error) => error.raw_os_error() == fs2::lock_contended_error().raw_os_error(),
     }
 }

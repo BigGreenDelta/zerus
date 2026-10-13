@@ -176,7 +176,6 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_skip->setToolTip(tr("Dismiss this optional question without sending an answer. The agent can continue."));
     connect(m_skip,&QPushButton::clicked,this,[this]{
         if(!m_skip->isEnabled())return;
-        if(!saveDraft(m_key)) { updateControls(); return; }
         QJsonArray result;for(const auto &form:m_forms)result.append(QJsonObject{{"question_id",form.id},{"skip",true}});
         emit answerRequested(m_session,m_id,result);
     });
@@ -186,7 +185,6 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     footer->addWidget(m_deny);footer->addWidget(m_approve);
     for(auto *button:{m_approve,m_deny})connect(button,&QPushButton::clicked,this,[this,button]{
         if(!button->isEnabled()||!m_question.value("approval").toBool())return;
-        if(!saveDraft(m_key)) { updateControls(); return; }
         const auto question=m_question.value("questions").toArray().first().toObject();
         emit answerRequested(m_session,m_id,QJsonArray{QJsonObject{{"question_id",question.value("id")},
             {"selected_option_ids",QJsonArray{button==m_approve?"allow":"deny"}},{"text",""}}});
@@ -205,7 +203,9 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     connect(m_submit, &QPushButton::clicked, this, &QuestionCard::submit);
     connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
         m_pages->setCurrentIndex(index);
-        if (!m_loading && !m_key.isEmpty()) { m_drafts[m_key].page = index; saveDraft(m_key, true); }
+        if (!m_loading && !m_key.isEmpty() && !m_drafts.value(m_key).sending
+            && !m_drafts.value(m_key).submitted && !m_drafts.value(m_key).answered
+            && !m_sendingKeys.contains(identity(m_session, m_id))) { m_drafts[m_key].page = index; saveDraft(m_key, true); }
         updateControls();
     });
     connect(m_retry, &QPushButton::clicked, this, [this] {
@@ -236,11 +236,31 @@ QString QuestionCard::draftIdentity(const QString &sessionKey, const QJsonObject
 
 void QuestionCard::ensureDraft(const QString &key, const QString &sessionKey)
 {
-    if (!key.isEmpty() && !m_drafts.contains(key)) {
-        auto draft = loadDraft(key);
-        draft.label = tr("%1 (question answer)").arg(QString(sessionKey).replace('\n', " / "));
-        m_drafts.insert(key, draft);
-    }
+    if (key.isEmpty() || m_drafts.contains(key)) return;
+    Draft draft; draft.label = tr("%1 (question answer)").arg(QString(sessionKey).replace('\n', " / "));
+    m_drafts.insert(key, draft); m_loadingKeys.insert(key);
+    const auto revision = m_saveRevision.value(key);
+    m_draftStore.loadAsync("question\n" + key, this, [this, key, revision](const ComposerDraft &saved) {
+        if (!m_loadingKeys.contains(key) || m_saveRevision.value(key) != revision) return;
+        m_loadingKeys.remove(key);
+        const auto label = m_drafts[key].label; m_drafts[key] = restoredDraft(saved); m_drafts[key].label = label;
+        if (m_key == key) {
+            auto *focus = QApplication::focusWidget();
+            const bool hadFormFocus = focus && m_pages->isAncestorOf(focus);
+            const auto name = hadFormFocus ? focus->objectName() : QString();
+            const auto questionId = hadFormFocus ? focus->property("questionId") : QVariant();
+            const auto optionId = hadFormFocus ? focus->property("optionId") : QVariant();
+            rebuild(); updateControls();
+            if (hadFormFocus) {
+                for (auto *control : m_pages->findChildren<QWidget *>())
+                    if (control->objectName() == name && control->property("questionId") == questionId
+                        && control->property("optionId") == optionId && control->isEnabled()) {
+                        control->setFocus(Qt::OtherFocusReason); break;
+                    }
+            }
+        }
+        emit draftRestored();
+    });
 }
 
 bool QuestionCard::restoreSubmittedAnswer(const QString &key, const QJsonObject &question)
@@ -253,6 +273,7 @@ bool QuestionCard::restoreSubmittedAnswer(const QString &key, const QJsonObject 
         && delivery.value("question_hash") == question.value("question_hash")
         && delivery.value("run_id") == question.value("run_id")
         && delivery.value("conversation_id") == question.value("conversation_id")) {
+        m_loadingKeys.remove(key);
         auto &draft = m_drafts[key];
         if (!draft.submitted) {
             draft.answers.clear();
@@ -266,7 +287,7 @@ bool QuestionCard::restoreSubmittedAnswer(const QString &key, const QJsonObject 
         }
         draft.submitted = true; draft.sending = false; draft.error = false; draft.uncertain = false;
         draft.notice = tr("Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.");
-        saveDraft(key);
+        if (changed) saveDraft(key);
     }
     return changed;
 }
@@ -346,14 +367,35 @@ QString QuestionCard::callbackKey(const QString &sessionKey, const QString &ques
 
 bool QuestionCard::setSending(const QString &sessionKey, const QString &questionId, bool sending)
 {
+    if (!sending) {
+        const auto key = callbackKey(sessionKey, questionId);
+        if (key.isEmpty()) return false;
+        m_drafts[key].sending = false; m_sendingKeys.remove(identity(sessionKey, questionId)); saveDraft(key); updateControls(); return true;
+    }
+    const auto key = callbackKey(sessionKey, questionId);
+    if (key.isEmpty() || m_loadingKeys.contains(key) || m_drafts.value(key).sending
+        || m_drafts.value(key).submitted || m_drafts.value(key).answered || m_drafts.value(key).uncertain
+        || m_sendingKeys.contains(identity(sessionKey, questionId))) return false;
+    prepareSendingAsync(sessionKey, questionId, [](bool) {}); return true;
+}
+
+void QuestionCard::prepareSendingAsync(const QString &sessionKey, const QString &questionId, std::function<void(bool)> done)
+{
     const QString pair = identity(sessionKey, questionId), key = callbackKey(sessionKey, questionId);
-    if (key.isEmpty()) return false;
-    auto &draft = m_drafts[key]; draft.sending = sending; draft.error = false;
-    draft.notice = sending ? tr("Submitting your answer…") : QString();
-    if (!saveDraft(key)) { draft.sending = false; draft.notice.clear(); updateControls(); return false; }
-    if (sending) m_sendingKeys.insert(pair, key); else m_sendingKeys.remove(pair);
-    updateControls();
-    return true;
+    if (key.isEmpty() || m_loadingKeys.contains(key)) { done(false); return; }
+    auto &draft = m_drafts[key];
+    if (draft.sending || draft.submitted || draft.answered || draft.uncertain || m_sendingKeys.contains(pair)) { done(false); return; }
+    draft.sending = true; draft.error = false; draft.notice = tr("Saving before submitting…");
+    m_sendingKeys.insert(pair, key); updateControls();
+    saveDraft(key, false, [this, key, pair, done = std::move(done)](bool okay) {
+        if (!okay) {
+            if (!m_drafts[key].submitted && !m_drafts[key].answered) {
+                m_drafts[key].sending = false; m_drafts[key].notice.clear();
+            }
+            if (m_sendingKeys.value(pair) == key) m_sendingKeys.remove(pair);
+        }
+        if (key == m_key) updateControls(); done(okay);
+    });
 }
 
 void QuestionCard::setError(const QString &sessionKey, const QString &questionId, const QString &detail, bool uncertain)
@@ -361,7 +403,7 @@ void QuestionCard::setError(const QString &sessionKey, const QString &questionId
     const QString key = callbackKey(sessionKey, questionId);
     if (key.isEmpty()) return;
     auto &draft = m_drafts[key];
-    if (draft.submitted) {
+    if (draft.submitted || draft.answered) {
         draft.sending = false; saveDraft(key); m_sendingKeys.remove(identity(sessionKey, questionId)); updateControls(); return;
     }
     draft.sending = false; draft.error = true; draft.uncertain = uncertain;
@@ -517,11 +559,13 @@ void QuestionCard::activateLink(const QUrl &url)
     else if (webLink(url)) emit externalLinkActivated(url);
 }
 
-QuestionCard::~QuestionCard() { ComposerDraftStore::flushWrites(); }
+QuestionCard::~QuestionCard() = default;
 
 void QuestionCard::capture()
 {
-    if (m_loading || m_key.isEmpty()) return;
+    if (m_loading || m_key.isEmpty() || m_loadingKeys.contains(m_key)) return;
+    if (m_drafts.value(m_key).sending || m_drafts.value(m_key).submitted || m_drafts.value(m_key).answered
+        || m_sendingKeys.contains(identity(m_session, m_id))) return;
     auto &draft = m_drafts[m_key]; draft.confirm.clear();
     for (const auto &form : m_forms) {
         auto &answer = draft.answers[form.id]; answer.options.clear();
@@ -532,9 +576,9 @@ void QuestionCard::capture()
     saveDraft(m_key, true); updateControls();
 }
 
-QuestionCard::Draft QuestionCard::loadDraft(const QString &key) const
+QuestionCard::Draft QuestionCard::restoredDraft(const ComposerDraft &saved) const
 {
-    const auto saved = m_draftStore.load("question\n" + key); Draft draft;
+    Draft draft;
     draft.storageError = saved.storageError; draft.uncertain = saved.uncertain; draft.error = saved.uncertain;
     draft.notice = saved.notice;
     draft.page = saved.formState.value("page").toInt();
@@ -550,10 +594,12 @@ QuestionCard::Draft QuestionCard::loadDraft(const QString &key) const
     return draft;
 }
 
-bool QuestionCard::saveDraft(const QString &key, bool asynchronous)
+bool QuestionCard::saveDraft(const QString &key, bool asynchronous, std::function<void(bool)> done)
 {
-    if (key.isEmpty()) return true;
-    auto &draft = m_drafts[key]; ComposerDraft saved;
+    if (key.isEmpty() || m_loadingKeys.contains(key)) { if (done) done(false); return false; }
+    auto &draft = m_drafts[key];
+    if (asynchronous && draft.sending) return false;
+    ComposerDraft saved;
     saved.label = draft.label; saved.sending = draft.sending; saved.uncertain = draft.uncertain;
     QJsonArray answers; QStringList text;
     auto ids = draft.answers.keys(); ids.sort();
@@ -566,18 +612,16 @@ bool QuestionCard::saveDraft(const QString &key, bool asynchronous)
     if (!draft.answered && !draft.submitted) saved.text = text.join('\n');
     saved.formState = {{"answers", draft.answered ? QJsonArray() : answers}, {"page", draft.page}, {"answered", draft.answered}, {"submitted", draft.submitted}};
     const auto revision = ++m_saveRevision[key];
-    if (asynchronous) {
-        m_draftStore.saveAsync("question\n" + key, saved, this, [this, key, revision](bool okay, const ComposerDraft &written) {
-            if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) return;
-            m_drafts[key].storageError = written.storageError;
-            if (okay) m_failedSaves.remove(key); else m_failedSaves.insert(key);
-            if (key == m_key) updateControls();
-        });
-        return true;
-    }
-    const bool ok = m_draftStore.save("question\n" + key, saved); draft.storageError = saved.storageError;
-    if (ok) m_failedSaves.remove(key); else m_failedSaves.insert(key);
-    return ok;
+    const auto completed = [this, key, revision, done = std::move(done)](bool okay, const ComposerDraft &written) {
+        if (m_saveRevision.value(key) != revision || !m_drafts.contains(key)) { if (done) done(false); return; }
+        m_drafts[key].storageError = written.storageError;
+        if (okay) m_failedSaves.remove(key); else m_failedSaves.insert(key);
+        if (key == m_key) updateControls();
+        if (done) done(okay);
+    };
+    if (asynchronous) m_draftStore.saveAsync("question\n" + key, saved, this, completed);
+    else m_draftStore.saveDurableAsync("question\n" + key, saved, this, completed);
+    return true;
 }
 
 QJsonArray QuestionCard::answers(bool *valid) const
@@ -607,7 +651,7 @@ void QuestionCard::updateControls()
 {
     const auto draft = m_drafts.value(m_key);
     const bool inFlight = m_sendingKeys.contains(identity(m_session, m_id));
-    const bool locked = draft.sending || inFlight || draft.submitted || draft.answered;
+    const bool locked = draft.sending || inFlight || draft.submitted || draft.answered || m_loadingKeys.contains(m_key);
     // Disabling the focused answer control would move Qt focus out to the
     // context button. Hold it here until the card resolves or the user moves it.
     auto *focus = QApplication::focusWidget();
@@ -741,7 +785,6 @@ void QuestionCard::submit()
     if (!broader.isEmpty() && m_drafts[m_key].confirm != broader) {
         m_drafts[m_key].confirm = broader; updateControls(); return;
     }
-    if (!saveDraft(m_key)) { updateControls(); return; }
     emit answerRequested(m_session, m_id, result);
 }
 

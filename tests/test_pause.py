@@ -221,9 +221,10 @@ class Harness(unittest.TestCase):
         # Compare every durable field and job, allowing only its sampling clock.
         actual, expected = json.loads(json.dumps(actual)), json.loads(json.dumps(expected))
         for value in (actual, expected):
-            if isinstance(value.get("processes"), dict):
-                sampled = value["processes"].pop("sampled_at", None)
-                self.assertIsInstance(sampled, (int, float))
+            for key in ("processes", "process_work"):
+                if isinstance(value.get(key), dict):
+                    sampled = value[key].pop("sampled_at", None)
+                    self.assertIsInstance(sampled, (int, float))
         self.assertEqual(actual, expected)
 
     def wait(self, predicate):

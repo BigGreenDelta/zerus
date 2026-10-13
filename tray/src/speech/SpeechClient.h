@@ -1,0 +1,26 @@
+#pragma once
+#include <QObject>
+#include <QJsonObject>
+#include <QSet>
+#include <functional>
+
+// Every operation is bounded and launched on ProcessRunner's worker. Probe the
+// exact host before calling speech: old hgs versions treat unknown verbs as sessions.
+class SpeechClient : public QObject {
+    Q_OBJECT
+public:
+    using Reply = std::function<void(const QJsonObject &, const QString &)>;
+    explicit SpeechClient(QString executable, QObject *parent = nullptr);
+    void request(const QString &host, const QJsonObject &payload, Reply done);
+    void requestVoice(const QString &host, const QString &session, const QJsonObject &payload, Reply done);
+signals:
+    // Emitted after the logical request callback, including capability errors.
+    void requestFinished();
+private:
+    Reply reportCompletion(Reply done);
+    void dispatch(const QString &host, const QJsonObject &payload, Reply done, const QString &session = {});
+    QString m_executable;
+    QSet<QString> m_supported;
+    QSet<QString> m_managementSupported;
+    QSet<QString> m_voiceSupported;
+};

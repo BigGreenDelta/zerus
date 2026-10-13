@@ -75,6 +75,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             if Instant::now() >= deadline { return Err("Native /compact input could not be verified".into()); }
             std::thread::sleep(Duration::from_millis(40));
         }
+        std::thread::sleep(clear_context::COMMAND_SETTLE);
         let current = input::checked_ready(name, &request.expected_run_id, &request.expected_conversation_id)?;
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current, false)?;

@@ -28,7 +28,7 @@ if(MSVC)
     add_compile_definitions(NOMINMAX)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets Multimedia)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -51,9 +51,26 @@ if(LINUX)
     target_link_libraries(hgs-window-layer PRIVATE Qt6::DBus)
 endif()
 
+# Opening session files like browser downloads (see ExternalFile.h).
+add_library(hgs-external-file STATIC src/ExternalFile.cpp)
+target_include_directories(hgs-external-file PUBLIC src)
+target_link_libraries(hgs-external-file PUBLIC Qt6::Gui)
+if(LINUX)
+    target_link_libraries(hgs-external-file PRIVATE Qt6::DBus)
+elseif(WIN32)
+    target_link_libraries(hgs-external-file PRIVATE shlwapi)
+elseif(APPLE)
+    target_link_libraries(hgs-external-file PRIVATE "-framework CoreFoundation" "-framework CoreServices")
+endif()
+
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+
+add_library(hgs-speech STATIC src/speech/SpeechClient.cpp src/speech/SpeechRecorder.cpp
+    src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
+target_include_directories(hgs-speech PUBLIC src)
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -63,13 +80,22 @@ execute_process(COMMAND git status --porcelain --untracked-files=normal
                 OUTPUT_VARIABLE ZERUS_SOURCE_CHANGES RESULT_VARIABLE ZERUS_GIT_STATUS ERROR_QUIET)
 get_filename_component(ZERUS_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
 string(LENGTH "${ZERUS_SOURCE_COMMIT}" ZERUS_SOURCE_COMMIT_LENGTH)
+set(ZERUS_CLEAN_SOURCE FALSE)
 if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUAL 40
-   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0
-   AND ZERUS_SOURCE_CHANGES STREQUAL "")
-    target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+   AND ZERUS_GIT_ROOT STREQUAL ZERUS_PROJECT_ROOT AND ZERUS_GIT_STATUS EQUAL 0)
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_BUILD_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}")
+    if(ZERUS_SOURCE_CHANGES STREQUAL "")
+        set(ZERUS_CLEAN_SOURCE TRUE)
+        target_compile_definitions(hgs-updates PRIVATE ZERUS_SOURCE_COMMIT="${ZERUS_SOURCE_COMMIT}" ZERUS_BUILD_SOURCE_DIRTY=0)
+    else()
+        target_compile_definitions(hgs-updates PRIVATE ZERUS_BUILD_SOURCE_DIRTY=1)
+    endif()
 endif()
+include(cmake/BuildVersion.cmake)
 
-add_executable(hgs-tray
+# Qt finalization imports macOS permission plugins selected by our Info.plist.
+# A plain add_executable silently leaves QMicrophonePermission without a backend.
+qt_add_executable(hgs-tray MANUAL_FINALIZATION
     resources.qrc
     src/main.cpp
     src/AppConfig.cpp
@@ -160,6 +186,9 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/hgs-tray.rc" packaging/windows/hgs-tray.manifest)
     # A GUI program: no console window opens with it (see attachParentConsole in main.cpp).
     set_target_properties(hgs-tray PROPERTIES WIN32_EXECUTABLE TRUE)
+else()
+    # Service stops and terminal signals quit like the tray menu (main.cpp).
+    target_sources(hgs-tray PRIVATE src/TerminationSignals.cpp)
 endif()
 if(APPLE)
     # Тот же принцип, что и для Konsole: osascript и Terminal.app существуют только на маке.
@@ -183,7 +212,8 @@ if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
 endif()
 
-target_link_libraries(hgs-tray PRIVATE hgs-updates)
+target_link_libraries(hgs-tray PRIVATE hgs-updates hgs-speech hgs-external-file)
+qt_finalize_executable(hgs-tray)
 
 include(CTest)
 if(BUILD_TESTING)

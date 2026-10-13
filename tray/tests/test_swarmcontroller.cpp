@@ -6,6 +6,7 @@
 #include <QTemporaryDir>
 #include "FakeCli.h"
 #include "SwarmController.h"
+#include "SessionOrganization.h"
 #include "SwarmDialog.h"
 #include "SwarmConflictReview.h"
 #include "FleetState.h"
@@ -80,6 +81,89 @@ print(json.dumps(result))
         auto remote=organization("Renamed");project=remote["projects"].toArray()[0].toObject();project["sessions"]=QJsonArray{"a","new","b"};remote["projects"]=QJsonArray{project};
         const auto result=SwarmController::presentation(remote,local);const auto p=result["projects"].toArray()[0].toObject();
         QCOMPARE(p["name"].toString(),"Renamed");QVERIFY(p["collapsed"].toBool());QCOMPARE(p["sessions"].toArray(),QJsonArray({"b","a","new"}));QCOMPARE(result["runs"],local["runs"]);
+    }
+    void firstObservationDoesNotRaceAnotherDesktopAssignment() {
+        // Both desktops start from the same catalog before either sees this
+        // session. Only the launching desktop makes a project assignment.
+        SessionOrganization observer(conflictSnapshot()["organization"].toObject());
+        observer.setDefaultProject("ungrouped");
+        auto launcher = observer;
+        const auto session = observer.observe("arch", "codex/example/review", "run-one");
+        const auto sibling = observer.observe("arch", "codex/example/other", "run-two");
+        launcher.moveSession(launcher.observe("arch", "codex/example/review", "run-one"), "p");
+        QCOMPARE(observer.groupFor(session), QString("ungrouped"));
+        QCOMPARE(observer.group("ungrouped")->sessions, QStringList({session, sibling}));
+        // A restart must retain the distinction, including local row order.
+        observer = SessionOrganization(observer.toJson());
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        controller.start(observer.toJson()); QTRY_VERIFY(controller.settled());
+        const auto initial = requests().first().toObject()["input"].toObject();
+        for (const auto &project : initial["projects"].toArray())
+            QVERIFY(project.toObject()["sessions"].toArray().isEmpty());
+        QVERIFY(!initial.contains("unassigned_sessions"));
+        QCOMPARE(initial["session_assignments_explicit"],QJsonValue(true));
+        // Catalog refreshes and unrelated edits must not promote observations.
+        observer = SessionOrganization(SwarmController::presentation(initial, observer.toJson()));
+        observer.renameGroup("p", "Renamed"); controller.edit(observer.toJson());
+        QTRY_COMPARE(requests().size(), 2); QTRY_VERIFY(controller.settled());
+        const auto patch = requests().last().toObject()["input"].toObject();
+        for (const auto *field : {"base", "desired"})
+            for (const auto &project : patch[field].toObject()["projects"].toArray())
+                QVERIFY(project.toObject()["sessions"].toArray().isEmpty());
+        const auto merged = SwarmController::presentation(launcher.toJson(), observer.toJson());
+        SessionOrganization converged(merged);
+        QCOMPARE(converged.groupFor(session), QString("p"));
+        QCOMPARE(converged.groupFor(sibling), QString("ungrouped"));
+        QCOMPARE(converged.group("ungrouped")->sessions, QStringList{sibling});
+        QCOMPARE(merged["unassigned_sessions"].toArray(), QJsonArray{sibling});
+    }
+    void explicitInboxChoiceSurvivesRefreshAndRestart() {
+        SessionOrganization local(conflictSnapshot()["organization"].toObject());
+        local.setDefaultProject("ungrouped");
+        const auto session = local.observe("arch", "codex/example/review", "run-one");
+        local.moveSession(session, "ungrouped"); // Explicit even though already shown here.
+        local = SessionOrganization(local.toJson());
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        controller.start(local.toJson()); QTRY_VERIFY(controller.settled());
+        const auto initial = requests().first().toObject()["input"].toObject();
+        QCOMPARE(SessionOrganization(initial).group("ungrouped")->sessions, QStringList{session});
+        // An unmarked cache from an older desktop is historical assignment
+        // evidence. Never guess which of its memberships used to be automatic.
+        auto legacy = local.toJson(); legacy.remove("unassigned_sessions");
+        QCOMPARE(SessionOrganization(legacy).group("ungrouped")->sessions, QStringList{session});
+    }
+    void explicitMoveAfterObservationPublishesEvenToTheSameDefault() {
+        SessionOrganization local(organization("Original"));
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){local=SessionOrganization(value);});
+        controller.start(local.toJson()); QTRY_VERIFY(controller.settled());
+        const auto session=local.observe("arch","codex/example/review","run-one");
+        controller.edit(local.toJson());QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
+        QCOMPARE(local.group("p")->sessions,QStringList{session});
+        QVERIFY(local.toJson()["unassigned_sessions"].toArray().contains(session));
+        local.moveSession(session,"p");controller.edit(local.toJson());
+        QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
+        const auto patch=requests().last().toObject()["input"].toObject();
+        QCOMPARE(patch["desired"].toObject()["session_assignments_explicit"],QJsonValue(true));
+        QVERIFY(SessionOrganization(patch["base"].toObject()).group("p")->sessions.isEmpty());
+        QCOMPARE(SessionOrganization(patch["desired"].toObject()).group("p")->sessions,QStringList{session});
+        QVERIFY(local.toJson()["unassigned_sessions"].toArray().isEmpty());
+    }
+    void unchangedRefreshDoesNotRewriteSettings() {
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        controller.start(organization("Original")); QTRY_VERIFY(controller.settled());
+        const auto settingsPath = QSettings().fileName();
+        const auto checkpoint = QDateTime::fromSecsSinceEpoch(946684800, QTimeZone::UTC);
+        QFile settingsFile(settingsPath); QVERIFY(settingsFile.open(QIODevice::ReadWrite));
+        QVERIFY(settingsFile.setFileTime(checkpoint, QFileDevice::FileModificationTime)); settingsFile.close();
+        controller.refresh(); QTRY_COMPARE(requests().size(), 2); QTRY_VERIFY(controller.settled());
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(QFileInfo(settingsPath).lastModified(), checkpoint);
+        response("Changed catalog"); controller.refresh();
+        QTRY_COMPARE(requests().size(), 3); QTRY_VERIFY(controller.settled());
+        QVERIFY(QFileInfo(settingsPath).lastModified() > checkpoint);
+        const auto saved = QJsonDocument::fromJson(QSettings().value("swarm/observedOrganization").toByteArray()).object();
+        QCOMPARE(saved["projects"].toArray()[0].toObject()["name"].toString(), "Changed catalog");
     }
     void editDuringRefreshUsesVersionsTheUserSaw() {
         HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());

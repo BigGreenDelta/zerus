@@ -4,7 +4,6 @@ use crate::{
     cli::{Error, Result},
     platform,
 };
-use fs2::FileExt;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -189,7 +188,7 @@ impl Config {
             .truncate(false)
             .write(true)
             .open(self.dir.join("projects.lock"))?;
-        lock.lock_exclusive()?;
+        let _lock = crate::platform::FileLock::exclusive(lock)?;
         let existing = self.projects()?.into_iter().find(|p| p.name == name);
         if add_only {
             if let Some(project) = existing.as_ref() {

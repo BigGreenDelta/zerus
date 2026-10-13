@@ -11,7 +11,7 @@ from macos_release import cask_for, require_template_cask, validate_macos_info
 
 REPOSITORY = "ufna/zerus"
 PACKAGES = ("zerus", "zerus-ade-bin", "zerus-git")
-BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-svg", "kstatusnotifieritem",
+BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
                    "kwindowsystem", "kidletime", "libgcc", "libstdc++", "glibc")
 MAINTAINER = "# Maintainer: Vladimir Alyamkin <ufna@ufna.dev>"
 DESCRIPTION_UPDATES = (

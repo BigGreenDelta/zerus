@@ -1,6 +1,9 @@
 """Fixed context-control transport; native hgs remains the final authority."""
 import uuid
 import re
+from .speech import OPERATIONS as SPEECH_OPERATIONS, READS as SPEECH_READS
+from .speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS, READS as SPEECH_CONFIG_READS
+from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
 
 CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clear-context"}
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
@@ -11,9 +14,9 @@ MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
 # Gateway-scoped: no session; served only by the gateway computer's own connector.
 GATEWAY_OPERATIONS = frozenset({"overmind_read", "overmind_write"})
-OPERATIONS = LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | GATEWAY_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+OPERATIONS = SPEECH_CONFIG_OPERATIONS | VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | GATEWAY_OPERATIONS | frozenset({"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "overmind_read"})
+READ_OPERATIONS = SPEECH_CONFIG_READS | VOICE_READS | SPEECH_READS | frozenset({"inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "overmind_read"})
 # Predicate of the persisted read_history_v3 index and the one-hour read class.
 # attachment_read and overmind_read are reads with their own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"

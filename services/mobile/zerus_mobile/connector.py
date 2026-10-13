@@ -28,6 +28,7 @@ import aiohttp
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
+from . import speech, speech_config, voice
 from . import attachment_reads
 from .recovery import validate_recovery
 from .history import validate_history
@@ -201,6 +202,9 @@ class Journal:
         now = time.time() if now is None else now
         with self.db:
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            self.db.execute(f"DELETE FROM requests WHERE operation IN {speech_config.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            self.db.execute(f"DELETE FROM requests WHERE operation IN {voice.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             # Delivered attachment chunks and Overmind reads are never kept beyond the same short window.
             for operation in SHORT_READS:
                 self.db.execute(f"DELETE FROM requests WHERE operation='{operation}' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
@@ -316,6 +320,9 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.speech_supported = False
+        self.speech_config_supported = False
+        self.voice_supported = False
         self.attachment_reads = attachment_reads.AttachmentReads()
         self.overmind_supported = False
         self.overmind_digest = None  # Latest known gateway digest; None until a first read succeeds.
@@ -473,6 +480,11 @@ class Connector:
         # the relay's unchanged-snapshot shortcut.
         presence = snapshot.pop("desktop_presence", None)
         self.presence = presence if isinstance(presence, dict) else None
+        # Observation clocks are control freshness evidence, not a change in
+        # the background work itself. Preserve semantic snapshot deduplication.
+        for row in snapshot["sessions"]:
+            if isinstance(row, dict) and isinstance(row.get("process_work"), dict):
+                row["process_work"].pop("sampled_at", None)
         self.sessions = {row["name"] for row in snapshot["sessions"]
                          if isinstance(row, dict) and isinstance(row.get("name"), str)
                          and not is_archived(row)}
@@ -486,7 +498,7 @@ class Connector:
         await self.probe_capabilities()
         gateway = getattr(self, "fleet", None) is not None
         await self.enrich_overmind(snapshot)
-        operations = (OPERATIONS - (set() if self.overmind_supported and gateway else GATEWAY_OPERATIONS) - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and gateway else COMPUTER_OPERATIONS)
+        operations = (OPERATIONS - (set() if self.overmind_supported and gateway else GATEWAY_OPERATIONS) - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and gateway else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -520,6 +532,9 @@ class Connector:
             self.read_supported = "read <session> --json" in text
             self.preference_supported = "swarm preference set mobile_delivery" in text
             self.attachment_read_supported = attachment_reads.HELP_MARKER in text
+            self.speech_supported = speech.HELP_MARKER in text
+            self.voice_supported = voice.HELP_MARKER in text
+            self.speech_config_supported = speech_config.HELP_MARKER in text
             self.overmind_supported = overmind_supported
             if getattr(self, "fleet", None):
                 self.fleet.supported = all(marker in text for marker in ("mobile-peers --json", "mobile-peer --json"))
@@ -629,6 +644,16 @@ class Connector:
             try: validate_launch(operation,request.get("payload"),request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
             return operation,session,request["payload"]
+        if operation in speech_config.OPERATIONS:
+            if session != "": raise ConnectorError("speech configuration uses no session target")
+            try: speech_config.validate(operation, request.get("payload"), request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
+        if operation in speech.OPERATIONS:
+            if session != "": raise ConnectorError("speech uses no session target")
+            try: speech.validate(operation, request.get("payload"), request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
         if operation in COMPUTER_OPERATIONS:
             if session != "": raise ConnectorError("the delivery setting uses no session target")
             try: validate_mobile_delivery(request.get("payload"))
@@ -691,6 +716,9 @@ class Connector:
             raise ConnectorError("expected_run_id is required")
         if operation == "recovery_action":
             try: validate_recovery(payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation in voice.OPERATIONS:
+            try: voice.validate(operation, payload, request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
@@ -920,6 +948,12 @@ class Connector:
                         raise ConnectorError("native Terminal binding or input support changed")
                     if deadline <= time.time():
                         raise ConnectorError("terminal input expired before native delivery")
+            if operation in voice.OPERATIONS and not self.voice_supported:
+                raise ConnectorError("native voice message ABI is unavailable")
+            if operation in speech_config.OPERATIONS and not self.speech_config_supported:
+                raise ConnectorError("native speech profile management ABI is unavailable")
+            if operation in speech.OPERATIONS and not self.speech_supported:
+                raise ConnectorError("native speech ABI is unavailable")
             if operation in LAUNCH_OPERATIONS and not self.launch_supported:
                 raise ConnectorError("native exact launch-ID ABI is unavailable")
             if operation in COMPUTER_OPERATIONS and (not self.preference_supported or getattr(self, "fleet", None) is None):
@@ -1157,6 +1191,25 @@ class Connector:
                     self.sessions.add(target["name"])
                     if operation == "rename" and target["name"] != session:
                         self.sessions.discard(session)
+            elif operation in voice.OPERATIONS:
+                result = await self.native(["voice", session, "--json"], {"action": voice.ACTIONS[operation], **payload}, timeout=30)
+                if not voice.result_valid(operation, result, payload):
+                    raise ConnectorError("native voice acknowledgement did not match")
+            elif operation in speech_config.OPERATIONS:
+                try:
+                    result = await self.native(["speech", "--json"], {"action": speech_config.ACTIONS[operation], **payload}, timeout=35, failure_json=True)
+                except ConnectorError:
+                    # CLI/SSH stderr can contain provider configuration. Keep
+                    # it out of durable relay/connector receipts and UI errors.
+                    raise ConnectorError("speech configuration outcome could not be confirmed; check operation status") from None
+                if not speech_config.result_valid(operation, result, payload):
+                    raise ConnectorError("native speech configuration acknowledgement did not match")
+            elif operation in speech.OPERATIONS:
+                result = await self.native(["speech", "--json"], {"action": speech.ACTIONS[operation], **payload}, timeout=10)
+                if not speech.result_valid(operation, result, payload):
+                    raise ConnectorError("native speech acknowledgement did not match")
+                if operation in {"speech_submit", "speech_cancel"}:
+                    result = {key: value for key, value in result.items() if key != "text"}
             elif operation == "set_mobile_delivery":
                 result = await self.native(["swarm", "preference", "set", "mobile_delivery", payload["value"], "--json"], timeout=10)
                 if not isinstance(result, dict) or result.get("ok") is not True or result.get("mobile_delivery") != payload["value"]:

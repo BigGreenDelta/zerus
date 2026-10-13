@@ -8,10 +8,30 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStyleOptionButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
 namespace {
+class MachineChoice final : public QCheckBox {
+public:
+    MachineChoice(const QString &text, bool dark) : QCheckBox(text), m_ink(dark ? "#10231b" : "#ffffff") {}
+protected:
+    void paintEvent(QPaintEvent *event) override {
+        QCheckBox::paintEvent(event);
+        if (!isChecked()) return;
+        QStyleOptionButton option; initStyleOption(&option);
+        const QRectF indicator = style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, this);
+        QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(m_ink, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        QPainterPath tick; tick.moveTo(indicator.left() + indicator.width()*.25, indicator.top() + indicator.height()*.52);
+        tick.lineTo(indicator.left() + indicator.width()*.44, indicator.top() + indicator.height()*.70);
+        tick.lineTo(indicator.left() + indicator.width()*.77, indicator.top() + indicator.height()*.31);
+        painter.drawPath(tick);
+    }
+private:
+    QColor m_ink;
+};
 class ChipFlow final : public QLayout {
 public:
     explicit ChipFlow(QWidget *parent) : QLayout(parent) { setContentsMargins(0,0,0,0); setSpacing(5); }
@@ -45,6 +65,7 @@ MachineFilter::MachineFilter(QWidget *parent) : QWidget(parent)
     setObjectName("machineFilterChips"); setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
     m_flow = new ChipFlow(this);
     m_button = new QPushButton; m_button->setObjectName("machineFilter"); m_button->setFixedHeight(30); m_button->setMinimumWidth(28);
+    m_button->setAttribute(Qt::WA_LayoutUsesWidgetRect);
     m_button->setIconSize(QSize(16,16)); m_button->setAccessibleName(tr("Filter sessions by machines"));
     m_menu = new QMenu(m_button); m_menu->setObjectName("machineFilterMenu"); m_button->setMenu(m_menu);
     connect(m_menu,&QMenu::aboutToShow,this,&MachineFilter::rebuildMenu);
@@ -76,6 +97,7 @@ void MachineFilter::rebuildChips() {
     while (auto *item=m_flow->takeAt(0)) { item->widget()->deleteLater(); item->widget()->hide(); delete item; }
     for (const auto &id:ids) {
         auto *chip=new QPushButton; chip->setObjectName("machineFilterChip"); chip->setProperty("host",id);
+        chip->setAttribute(Qt::WA_LayoutUsesWidgetRect);
         const QString label=name(id); chip->setText(chip->fontMetrics().elidedText(label,Qt::ElideMiddle,160)+"  ×"); chip->setFixedHeight(27);
         chip->setIcon(MachineAppearance::icon(label)); chip->setIconSize(QSize(14,14));
         chip->setToolTip(tr("Remove %1 from machine filter").arg(label)); chip->setAccessibleName(chip->toolTip());
@@ -90,15 +112,20 @@ void MachineFilter::rebuildMenu() {
     m_menu->clear(); auto *panel=new QWidget; auto *layout=new QVBoxLayout(panel); layout->setContentsMargins(10,8,10,8); layout->setSpacing(4);
     auto *caption=new QLabel(tr("Choose machines")); caption->setStyleSheet("font-size:11px; padding:2px 6px;"); layout->addWidget(caption);
     auto *all=new QPushButton(tr("All machines")); all->setObjectName("allMachineFilters"); all->setCheckable(true); all->setChecked(m_selection.isEmpty()); layout->addWidget(all);
+    all->setAttribute(Qt::WA_LayoutUsesWidgetRect);
     connect(all,&QPushButton::clicked,this,[this,all] {
         setSelection({}); all->setChecked(true);
         for (auto *check:m_menu->findChildren<QCheckBox *>()) { const QSignalBlocker blocker(check); check->setChecked(false); }
     });
     QStringList ids; if (m_fleet.local().localSessions) ids << "@local"; ids.append(m_fleet.peerNames());
     for (const auto &id:ids) {
-        auto *check=new QCheckBox(name(id)+(id=="@local" ? tr(" (this machine)") : QString())); check->setObjectName("machineFilterChoice");
+        auto *check=new MachineChoice(name(id)+(id=="@local" ? tr(" (this machine)") : QString()),m_dark); check->setObjectName("machineFilterChoice");
+        check->setAttribute(Qt::WA_LayoutUsesWidgetRect);
         check->setProperty("host",id); check->setIcon(MachineAppearance::icon(name(id))); check->setChecked(m_selection.contains(id)); check->setMinimumHeight(32);
-        check->setStyleSheet("QCheckBox { padding:2px 6px; spacing:8px; }"); layout->addWidget(check);
+        // Paint the indicator through the stylesheet: QMacStyle's native
+        // checkbox on Liquid Glass draws above the supplied indicator rectangle.
+        check->setStyleSheet(QString("QCheckBox { padding:2px 6px; spacing:8px; } QCheckBox::indicator { width:14px; height:14px; border:1px solid %1; border-radius:4px; background:%2; } QCheckBox::indicator:checked { background:%3; border-color:%3; } QCheckBox::indicator:hover, QCheckBox::indicator:focus { border-color:%3; }")
+            .arg(m_dark ? "#a2adbc" : "#627082",m_dark ? "#1c2229" : "#ffffff",m_dark ? "#8bdfc0" : "#167357")); layout->addWidget(check);
         connect(check,&QCheckBox::toggled,this,[this,id](bool selected){toggle(id,selected);});
     }
     auto *hint=new QLabel(tr("Changes apply immediately")); hint->setStyleSheet("font-size:10px; padding:4px 6px;"); layout->addWidget(hint);

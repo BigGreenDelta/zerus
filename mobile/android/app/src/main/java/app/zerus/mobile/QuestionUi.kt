@@ -89,7 +89,7 @@ import org.json.JSONObject
         true, {}, { onDisplay { it.close() } }, onReview)
     else {
         ObscureConversation()
-        AlertDialog(onDismissRequest = { onDisplay { it.close() } }, title = { Text("Question unavailable") },
+        ZerusAlertDialog(onDismissRequest = { onDisplay { it.close() } }, title = { Text("Question unavailable") },
             text = { Text("This exact request is not in the loaded activity. Refresh the conversation to verify it. Your saved answer is kept.") },
             confirmButton = { TextButton(onClick = { onDisplay { it.close() } }) { Text("Close") } })
     }

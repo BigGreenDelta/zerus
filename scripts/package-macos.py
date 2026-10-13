@@ -20,7 +20,7 @@ MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
                  "install-swarm-service.py", "launchd_agent.py")
-QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtwebengine",
+QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtmultimedia", "qtwebengine",
               "qtwebengine-chromium-webengine")
 SOURCE_NOTE = """# Qt in Zerus.app
 

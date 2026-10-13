@@ -39,6 +39,10 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
         for (const auto &g : m_groups) if (g.id != "pinned") { m_default = g.id; break; }
     }
     m_runs = data.value("runs").toObject();
+    // Older caches have no marker: preserve their recorded assignments rather
+    // than guessing which were implicit. Only newly observed rows are local.
+    for (const auto &value : data.value("unassigned_sessions").toArray())
+        if (sessions.contains(value.toString())) m_unassigned.insert(value.toString());
     const auto beforePin = data.value("before_pin").toObject();
     for (const auto &v : data.value("imported_machines").toArray()) if (!v.toString().isEmpty()) m_imported.append(v.toString());
     // Pinning used to move a session out of its group. Restore its real project
@@ -114,6 +118,7 @@ void SessionOrganization::moveSession(const QString &session, const QString &id,
     const auto *target = group(id);
     if (session.isEmpty() || !target || session == before || (!before.isEmpty() && !target->sessions.contains(before))) return;
 
+    m_unassigned.remove(session);
     for (auto &g : m_groups) g.sessions.removeAll(session);
     for (auto &g : m_groups) if (g.id == id) {
         const int position = g.sessions.indexOf(before);
@@ -127,8 +132,18 @@ void SessionOrganization::renameSession(const QString &oldId, const QString &new
     bool exists = false;
     for (const auto &g : m_groups) exists |= g.sessions.contains(oldId);
     if (!exists) return;
-    for (auto &g : m_groups) g.sessions.removeAll(newId);
-    for (auto &g : m_groups) for (auto &session : g.sessions) if (session == oldId) session = newId;
+    const bool implicit = m_unassigned.remove(oldId);
+    bool assignedTarget = false;
+    for (const auto &g : m_groups) assignedTarget |= g.sessions.contains(newId) && !m_unassigned.contains(newId);
+    if (implicit && assignedTarget) {
+        // A remote assignment for the new name outranks our old fallback row.
+        for (auto &g : m_groups) g.sessions.removeAll(oldId);
+    } else {
+        for (auto &g : m_groups) g.sessions.removeAll(newId);
+        for (auto &g : m_groups) for (auto &session : g.sessions) if (session == oldId) session = newId;
+        m_unassigned.remove(newId);
+        if (implicit) m_unassigned.insert(newId);
+    }
     for (auto it = m_runs.begin(); it != m_runs.end(); ++it) if (it.value().toString() == oldId) it.value() = newId;
 }
 
@@ -143,7 +158,7 @@ QString SessionOrganization::observe(const QString &machine, const QString &name
     }
     bool known = false;
     for (const auto &g : m_groups) known |= g.sessions.contains(id);
-    if (!known) moveSession(id, m_default);
+    if (!known) { moveSession(id, m_default); m_unassigned.insert(id); }
     return id;
 }
 
@@ -230,5 +245,7 @@ QJsonObject SessionOrganization::toJson() const
         projects.append(QJsonObject{{"id", g.id}, {"name", g.name}, {"color",g.color}, {"vivid",g.vivid}, {"folders",folders},
             {"collapsed", g.collapsed}, {"accessible",g.accessible}, {"sessions", QJsonArray::fromStringList(g.sessions)}});
     }
-    return {{"version", 2}, {"default_project", m_default}, {"projects", projects}, {"runs", m_runs}, {"imported_machines",QJsonArray::fromStringList(m_imported)}};
+    QStringList unassigned(m_unassigned.cbegin(), m_unassigned.cend()); unassigned.sort();
+    return {{"version", 2}, {"default_project", m_default}, {"projects", projects}, {"runs", m_runs},
+        {"imported_machines",QJsonArray::fromStringList(m_imported)}, {"unassigned_sessions",QJsonArray::fromStringList(unassigned)}};
 }

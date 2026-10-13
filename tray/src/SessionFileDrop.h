@@ -1,5 +1,6 @@
 #pragma once
 #include "MessageComposer.h"
+#include "LocalFile.h"
 #include <QApplication>
 #include <QDragEnterEvent>
 #include <QFileInfo>
@@ -43,7 +44,7 @@ protected:
         auto *drop=static_cast<QDropEvent *>(event);const auto *mime=drop->mimeData();
         QStringList paths;
         for(const auto &url:mime->urls()) {
-            if(!url.isLocalFile()||!QFileInfo(url.toLocalFile()).isFile()){paths.clear();break;}
+            if(!url.isLocalFile()||!LocalFile::readable(QFileInfo(url.toLocalFile()))){paths.clear();break;}
             paths<<url.toLocalFile();
         }
         const auto terminalKey=m_terminalTarget?m_terminalTarget():QString();

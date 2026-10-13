@@ -91,7 +91,7 @@ class ComposerToolbar : public QWidget {
 public:
     // Leading zone up to CompactionCancel; the trailing zone starts with the
     // session's Tasks chip.
-    enum class Slot { Attachments, MarkRead, Compaction, CompactionCancel, Tasks, UsageLimit, Recovery, Cache, Context };
+    enum class Slot { Attachments, Voice, VoiceCancel, VoiceResult, MarkRead, Compaction, CompactionCancel, Tasks, UsageLimit, Recovery, Cache, Context };
     static constexpr int RowHeight = 34;
     explicit ComposerToolbar(QWidget *parent = nullptr);
     void add(Slot slot, QWidget *item);

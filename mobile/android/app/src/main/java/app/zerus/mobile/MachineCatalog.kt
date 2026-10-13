@@ -24,7 +24,8 @@ object MachineCatalog {
         hgsVersion = (raw.optJSONObject("snapshot")?.opt("hgs_version") as? String)
             ?.takeIf { it.length <= 128 && versionFormat.matches(it) }.orEmpty(),
         mobileDelivery = MobileDelivery.parse(raw.optJSONObject("snapshot")),
-        lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }, nodeId = nodeId(raw))
+        lastSeenAt = (raw.opt("last_seen_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }, nodeId = nodeId(raw),
+        machineId = canonicalUuid(raw.opt("machine_id")).orEmpty())
 
     /** The relay's verified machine UUID, else the native catalog's node: Overmind names sessions by it. */
     fun nodeId(raw: JSONObject): String = listOf(raw.opt("machine_id"), raw.optJSONObject("snapshot")?.optJSONObject("mobile_projects")?.opt("node_id"))

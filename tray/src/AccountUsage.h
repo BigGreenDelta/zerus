@@ -10,7 +10,10 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QLocale>
+#include <QPainterPath>
+#include <QSettings>
 #include <cmath>
+#include <optional>
 #include <QTimer>
 #include "IdentityBadge.h"
 #include "WorkspaceIcons.h"
@@ -40,10 +43,75 @@ inline QString remaining(const QDateTime &at) {
     if(minutes>=60)return QObject::tr("%1h %2m").arg(minutes/60).arg(minutes%60);
     return QObject::tr("%1m").arg(minutes);
 }
-inline QString windowText(const QJsonObject &w) {
+// Footer countdown: only the largest whole unit fits next to the percentage.
+inline QString countdown(qint64 seconds) {
+    const qint64 minutes=qMax<qint64>(1,(seconds+59)/60);
+    if(minutes<60)return QObject::tr("%1m").arg(minutes);
+    if(minutes<2880)return QObject::tr("%1h").arg(minutes/60);
+    return QObject::tr("%1d").arg(minutes/1440);
+}
+inline QString approximately(qint64 seconds) {
+    const qint64 minutes=qMax<qint64>(1,seconds/60),days=minutes/1440,hours=minutes%1440/60,rest=minutes%60;
+    if(days)return hours?QObject::tr("%1d %2h").arg(days).arg(hours):QObject::tr("%1d").arg(days);
+    if(hours)return rest?QObject::tr("%1h %2m").arg(hours).arg(rest):QObject::tr("%1h").arg(hours);
+    return QObject::tr("%1m").arg(minutes);
+}
+enum class Tone { Normal, Warning, Critical };
+inline Tone thresholdTone(double used) {return used>=90?Tone::Critical:used>=70?Tone::Warning:Tone::Normal;}
+inline QColor toneColor(Tone tone,bool dark) {
+    return QColor(tone==Tone::Critical ? (dark?"#f07878":"#ce3d47") : tone==Tone::Warning ? (dark?"#f0a35b":"#bd6519") : (dark?"#72cdb2":"#237a62"));
+}
+// Pace compares used quota with the share of the limit window that has passed.
+// Spending faster than that share exhausts the limit before it resets.
+struct Pace {
+    bool known=false;      // the window length and a future reset time are reported
+    bool early=false;      // the first 8% of a window is too short to extrapolate
+    double used=0;
+    double elapsed=0;      // share of the window that has passed, 0..1
+    qint64 secondsLeft=-1;
+    qint64 runsOutIn=-1;   // seconds until 100% at the average pace; -1 when it lasts until reset
+    double projected=-1;   // percent at reset at the average pace
+    Tone tone=Tone::Normal;
+};
+inline Pace pace(const QJsonObject &w,const QDateTime &now=QDateTime::currentDateTime()) {
+    Pace result;result.used=qBound(0.,w.value("used_percent").toDouble(),100.);result.tone=thresholdTone(result.used);
+    const qint64 length=qint64(w.value("window_minutes").toInt())*60;const auto at=reset(w.value("resets_at"));
+    if(length<=0 || !at.isValid() || at<=now)return result;
+    result.known=true;result.secondsLeft=now.secsTo(at);
+    const qint64 passed=qMax<qint64>(0,length-result.secondsLeft);
+    result.elapsed=double(passed)/length;result.early=result.elapsed<0.08;
+    // Exhausted and fresh windows keep the fixed 70/90% thresholds.
+    if(result.used>=100 || result.early)return result;
+    result.projected=result.used/result.elapsed;
+    if(result.projected>100)result.runsOutIn=qint64((100-result.used)*passed/result.used);
+    result.tone=result.runsOutIn<0 ? Tone::Normal : result.runsOutIn>=result.secondsLeft/2 ? Tone::Warning : Tone::Critical;
+    if(result.used>=90 && result.tone==Tone::Normal)result.tone=Tone::Warning;
+    return result;
+}
+inline QColor paceColor(const Pace &pace,bool dark) {return toneColor(pace.tone,dark);}
+// The most urgent current window, or nothing when no window reports current usage.
+inline std::optional<Tone> severest(const QJsonObject &data) {
+    std::optional<Tone> tone;
+    for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())tone=qMax(tone.value_or(Tone::Normal),pace(w).tone);}
+    return tone;
+}
+inline QString forecast(const QJsonObject &w) {
+    if(!current(w))return {};
+    const auto p=pace(w);
+    if(!p.known || p.early || p.used>=100)return {};
+    return p.runsOutIn>=0 ? QObject::tr("At the current pace, the limit runs out in about %1").arg(approximately(p.runsOutIn))
+        : QObject::tr("At the current pace, about %1% by reset").arg(qRound(p.projected));
+}
+// Footer indicator chosen in Settings → Appearance.
+enum class Indicator { Rails, Marker, MarkerCountdown };
+inline Indicator indicator() {
+    const auto value=QSettings().value("workspace/usageIndicator").toString();
+    return value=="marker" ? Indicator::Marker : value=="marker-countdown" ? Indicator::MarkerCountdown : Indicator::Rails;
+}
+inline QString windowText(const QJsonObject &w,bool withReset=true) {
     if(!current(w))return period(w)+QObject::tr(" refresh");
     const double used=w.value("used_percent").toDouble();
-    return period(w)+" "+QString::number(used,'f',0)+"%"+(used>=100?" ("+remaining(reset(w.value("resets_at")))+")":QString());
+    return period(w)+" "+QString::number(used,'f',0)+"%"+(withReset&&used>=100?" ("+remaining(reset(w.value("resets_at")))+")":QString());
 }
 inline double highest(const QJsonObject &data) {
     double used=-1;for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())used=qMax(used,w.value("used_percent").toDouble());}return used;
@@ -72,7 +140,7 @@ inline QString exhaustedSummary(const QJsonObject &data) {
     if(reached)return nearest.isValid()?QObject::tr("Limit reached · %1").arg(remaining(nearest)):QObject::tr("Limit reached");
     return ended?QObject::tr("Refresh usage"):QString();
 }
-inline QColor color(double value,bool dark) {return QColor(value>=90 ? (dark?"#f07878":"#ce3d47") : value>=70 ? (dark?"#f0a35b":"#bd6519") : (dark?"#72cdb2":"#237a62"));}
+inline QColor color(double value,bool dark) {return toneColor(thresholdTone(value),dark);}
 inline QString state(const QJsonObject &data) {
     return data.isEmpty() || data.value("status")=="loading" ? QObject::tr("Loading account details…")
         : data.value("status")=="configured" ? QObject::tr("API key configured. Usage is available in the DeepSeek console.")
@@ -95,7 +163,8 @@ inline QString tooltip(const QJsonObject &data) {
     for(const auto &value:data.value("windows").toArray()) {
         const auto w=value.toObject();const auto at=reset(w.value("resets_at"));
         lines<<QObject::tr("%1: %2% used").arg(period(w)).arg(w.value("used_percent").toDouble(),0,'f',0);
-        if(at.isValid())lines<<QObject::tr("Resets %1").arg(at.toString("d MMM HH:mm"));
+        if(at.isValid())lines<<QObject::tr("Resets %1").arg(at.toString("d MMM HH:mm"))+(current(w)?QObject::tr(" (in %1)").arg(remaining(at)):QString());
+        if(const auto line=forecast(w);!line.isEmpty())lines<<line;
     }
     for(const auto &value:data.value("balances").toArray()) {const auto b=value.toObject();lines<<b.value("kind").toString()+": "+b.value("balance").toString()+" "+b.value("currency").toString();}
     if(data.value("checked_at").isDouble())lines<<QObject::tr("Updated %1").arg(QDateTime::fromSecsSinceEpoch(qint64(data.value("checked_at").toDouble())).toString("HH:mm"));
@@ -136,13 +205,15 @@ public:
     explicit Button(QWidget *parent=nullptr):QPushButton(parent) {
         setObjectName("sessionAccountUsage");setFixedHeight(22);setSizePolicy(QSizePolicy::Fixed,QSizePolicy::Fixed);
         setStyleSheet("QPushButton{padding:0;min-height:20px;border:0;background:transparent;text-align:right;}");
-        setFixedWidth(contentWidth());
+        m_indicator=AccountUsage::indicator();setFixedWidth(contentWidth());
         auto *timer=new QTimer(this);timer->setInterval(30000);connect(timer,&QTimer::timeout,this,[this]{if(!isVisible())return;setFixedWidth(contentWidth());setToolTip(tooltip(m_data));setAccessibleName(tr("Account usage")+"\n"+exhausted(m_data)+"\n"+toolTip());update();});timer->start();
     }
     void setData(const QJsonObject &data) {if(m_data==data)return;m_data=data;setFixedWidth(contentWidth());setToolTip(tooltip(data));setAccessibleName(QObject::tr("Account usage")+"\n"+exhausted(data)+"\n"+toolTip());update();}
     void setTheme(bool dark) {m_dark=dark;update();}
     void setShowProvider(bool show) {m_showProvider=show;setFixedWidth(contentWidth());update();}
     void setCompact(bool compact) {m_compact=compact;setFixedWidth(contentWidth());update();}
+    void setIndicator(Indicator indicator) {if(m_indicator==indicator)return;m_indicator=indicator;setFixedWidth(contentWidth());update();}
+    Indicator indicator() const {return m_indicator;}
     QSize sizeHint() const override {return {contentWidth(),22};}
 protected:
     void changeEvent(QEvent *event) override {
@@ -159,15 +230,17 @@ protected:
         int x=m_compact?4:6;
         if(provider){IdentityBadges::paint(&p,QRect(x,(height()-18)/2,provider-6,18),IdentityBadges::Provider,m_data.value("provider").toString(),m_dark);x+=provider;}
         for(int i=0;i<slotCount;++i) {
-            const auto w=loading?QJsonObject():windows[i].toObject();const double used=w.value("used_percent").toDouble();const bool fresh=!loading && current(w);
+            const auto w=loading?QJsonObject():windows[i].toObject();const bool fresh=!loading && current(w);
+            const auto state=fresh?pace(w):Pace();
             const int barWidth=m_compact?20:34, textOffset=barWidth+6;
-            const QString text=windowText(w);
+            const bool withCountdown=showsCountdown(w);
+            const QString text=windowText(w,!withCountdown);
             const int textWidth=indicatorTextWidth(w,loading);
-            p.setPen(Qt::NoPen);p.setBrush(QColor(m_dark?"#36434e":"#d7e0e6"));p.drawRoundedRect(QRectF(x,9,barWidth,4),2,2);
-            if(fresh){p.setBrush(color(used,m_dark));p.drawRoundedRect(QRectF(x,9,barWidth*qBound(0.,used,100.)/100.,4),2,2);}
-            if(loading){p.setBrush(QColor(m_dark?"#2b3740":"#e3e8ed"));p.drawRoundedRect(QRectF(x+textOffset,7,textWidth,8),3,3);}
-            else {p.setPen(fresh?color(used,m_dark):muted);p.drawText(QRect(x+textOffset,0,textWidth,height()),Qt::AlignVCenter,p.fontMetrics().elidedText(text,Qt::ElideRight,textWidth));}
-            x+=textOffset+textWidth+(m_compact?10:16);
+            paintMeter(p,x,barWidth,fresh,state);
+            if(loading){p.setPen(Qt::NoPen);p.setBrush(QColor(m_dark?"#2b3740":"#e3e8ed"));p.drawRoundedRect(QRectF(x+textOffset,7,textWidth,8),3,3);}
+            else {p.setPen(fresh?paceColor(state,m_dark):muted);p.drawText(QRect(x+textOffset,0,textWidth,height()),Qt::AlignVCenter,p.fontMetrics().elidedText(text,Qt::ElideRight,textWidth));}
+            if(withCountdown)paintCountdown(p,x+textOffset+textWidth,w,muted);
+            x+=textOffset+textWidth+countdownWidth(w)+(m_compact?10:16);
         }
         if(!slotCount) {
             const int available=width()-x-(m_compact?4:6);
@@ -175,6 +248,43 @@ protected:
         }
     }
 private:
+    // Rails put usage above the elapsed share of the window. The marker shows
+    // that share on the usage bar, and usage beyond it takes the warning color.
+    // Without a window length or reset time both draw the plain usage bar.
+    void paintMeter(QPainter &p,int x,int width,bool fresh,const Pace &state) const {
+        const QColor track(m_dark?"#36434e":"#d7e0e6");p.setPen(Qt::NoPen);
+        if(fresh && state.known && m_indicator==Indicator::Rails) {
+            p.setBrush(track);p.drawRoundedRect(QRectF(x,7,width,3),1.5,1.5);p.drawRoundedRect(QRectF(x,12,width,2),1,1);
+            p.setBrush(paceColor(state,m_dark));p.drawRoundedRect(QRectF(x,7,width*state.used/100.,3),1.5,1.5);
+            p.setBrush(QColor(m_dark?"#8395a5":"#7f90a1"));p.drawRoundedRect(QRectF(x,12,width*state.elapsed,2),1,1);
+            return;
+        }
+        const QRectF bar(x,9,width,4);p.setBrush(track);p.drawRoundedRect(bar,2,2);
+        if(!fresh)return;
+        if(!state.known){p.setBrush(paceColor(state,m_dark));p.drawRoundedRect(QRectF(x,9,width*state.used/100.,4),2,2);return;}
+        QPainterPath clip;clip.addRoundedRect(bar,2,2);p.save();p.setClipPath(clip);
+        const double mark=state.elapsed*100;
+        if(state.used<100 && !state.early && state.used>mark) {
+            p.setBrush(toneColor(Tone::Normal,m_dark));p.drawRect(QRectF(x,9,width*mark/100.,4));
+            p.setBrush(paceColor(state,m_dark));p.drawRect(QRectF(x+width*mark/100.,9,width*(state.used-mark)/100.,4));
+        } else {p.setBrush(paceColor(state,m_dark));p.drawRect(QRectF(x,9,width*state.used/100.,4));}
+        p.restore();
+        p.setBrush(QColor(m_dark?"#e3eaf0":"#2b3946"));p.drawRoundedRect(QRectF(x+width*mark/100.-0.75,6,1.5,10),0.75,0.75);
+    }
+    bool showsCountdown(const QJsonObject &w) const {
+        return m_indicator==Indicator::MarkerCountdown && !m_compact && current(w) && reset(w.value("resets_at")).isValid();
+    }
+    // An hourglass, as on Android, and the time until reset after the percentage.
+    void paintCountdown(QPainter &p,int x,const QJsonObject &w,const QColor &muted) const {
+        const qreal left=x+5;QPen pen(muted,1);pen.setJoinStyle(Qt::RoundJoin);p.setPen(pen);p.setBrush(Qt::NoBrush);
+        p.drawPolygon(QPolygonF({QPointF(left+.5,6.5),QPointF(left+6.5,6.5),QPointF(left+3.5,11),QPointF(left+6.5,15.5),QPointF(left+.5,15.5),QPointF(left+3.5,11)}));
+        p.setPen(muted);p.drawText(QRect(x+15,0,countdownWidth(w)-15,height()),Qt::AlignVCenter,countdown(QDateTime::currentDateTime().secsTo(reset(w.value("resets_at")))));
+    }
+    // Countdowns keep a stable slot like percentages; the hourglass and its gaps take 15 px.
+    int countdownWidth(const QJsonObject &w) const {
+        if(!showsCountdown(w))return 0;
+        return 15+qMax(compactTextWidth(countdown(QDateTime::currentDateTime().secsTo(reset(w.value("resets_at"))))),compactTextWidth("00m"));
+    }
     int compactTextWidth(const QString &text) const {
         QFont f=font();f.setPixelSize(11);
         // Fractional glyph advances can exceed the rounded integer width.
@@ -198,10 +308,10 @@ private:
         int width=(m_compact?8:12)+providerWidth();
         if(!loading&&windows.isEmpty())return width+compactTextWidth(summaryText());
         for(int i=0;i<(loading?2:qMin(2,int(windows.size())));++i)
-            width+=(m_compact?26:40)+indicatorTextWidth(loading?QJsonObject():windows[i].toObject(),loading)+(i?(m_compact?10:16):0);
+            width+=(m_compact?26:40)+indicatorTextWidth(loading?QJsonObject():windows[i].toObject(),loading)+countdownWidth(loading?QJsonObject():windows[i].toObject())+(i?(m_compact?10:16):0);
         return width;
     }
-    QJsonObject m_data;bool m_dark=true,m_showProvider=true,m_compact=false;
+    QJsonObject m_data;bool m_dark=true,m_showProvider=true,m_compact=false;Indicator m_indicator=Indicator::Rails;
 };
 class Panel : public QFrame {
 public:

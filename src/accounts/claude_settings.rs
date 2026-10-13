@@ -87,7 +87,7 @@ pub(super) fn inherit(native: &Path, profile: &Path) -> Result<()> {
     }
     let lock_path = profile.join("settings.json.hgs.lock");
     let guard = platform::private_open(fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)).open(lock_path)?;
-    guard.lock_exclusive()?;
+    let _guard = platform::FileLock::exclusive(guard)?;
     let base = preferences(&read_object(&source)?);
     let metadata = profile.join(".hgs-user-settings.json");
     let previous = read_object(&metadata)?;

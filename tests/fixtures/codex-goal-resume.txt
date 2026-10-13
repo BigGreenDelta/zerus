@@ -1,0 +1,26 @@
+› how do I continue this session?
+• Ran python3 -I -B - <<'PY' …
+  └ CODEX_THREAD_ID 12345678-1234-1234-1234-123456789abc
+    + Show details
+
+• I checked the installed CLI help. The session ID is known, so it can be
+  opened directly.
+• Check
+         Resume paused goal?
+• Searc  Goal: Finish the example export: verify the staging copy, compare
+         row counts with the source, publish the reviewed archive and keep
+• Opene  the previous backup until the replacement is accepted.
+
+  codex
+       › 1. Resume goal   Mark it active and continue when idle                     ted
+  Then   2. Leave paused  Keep it paused; use /goal resume later
+  surfa
+  Next   enter select · esc back
+  HTML-
+  Worked for 1m 21s • Oct 9 at 10:35 PM
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol xhigh · /work/example · … Goal hit usage limits (/goal resume)
+  ? for shortcuts                                            ⚠ 2 warnings · f2 to view

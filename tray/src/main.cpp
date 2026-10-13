@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QLocalServer>
+#include <QJsonDocument>
 #include <QLocalSocket>
 #include <QSettings>
 #include <QStringList>
@@ -20,9 +21,13 @@
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
 #include "SingleInstance.h"
+#ifndef Q_OS_WIN
+#include "TerminationSignals.h"
+#endif
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
 #include "MessageBoxIcons.h"
+#include "speech/SpeechRecorder.h"
 #endif
 
 #include <cstdio>
@@ -140,7 +145,15 @@ int main(int argc, char *argv[])
     if (!parsed) {
         if (parseError == QLatin1String("__help__")) { out << AppConfig::usage(); return 0; }
         if (parseError == QLatin1String("__version__")) {
-            out << QStringLiteral("Zerus %1\n").arg(QLatin1String(HGS_TRAY_VERSION));
+            QCoreApplication app(argc, argv);
+            QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
+            out << QStringLiteral("Zerus %1\n").arg(UpdateController::buildInfo()["versionName"].toString());
+            return 0;
+        }
+        if (parseError == QLatin1String("__build_info__")) {
+            QCoreApplication app(argc, argv);
+            QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
+            out << QJsonDocument(UpdateController::buildInfo()).toJson(QJsonDocument::Compact) << '\n';
             return 0;
         }
         errOut << QStringLiteral("hgs-tray: %1\n\n").arg(parseError) << AppConfig::usage();
@@ -158,6 +171,14 @@ int main(int argc, char *argv[])
 
     if (cfg.selfTest) {
         QCoreApplication app(argc, argv);
+#ifdef Q_OS_MACOS
+        // Package validation checks registration only: never prompt for consent
+        // or open audio hardware from a self-test/startup diagnostic.
+        if (!SpeechRecorder::microphonePermissionBackendAvailable()) {
+            errOut << "hgs-tray: microphone permission backend is missing; update or reinstall Zerus.\n";
+            return 1;
+        }
+#endif
 #ifdef Q_OS_WIN
         cfg.hgsPath = AppConfig::resolveHgsPath(cfg.hgsPath, QCoreApplication::applicationDirPath());
 #endif
@@ -267,6 +288,10 @@ int main(int argc, char *argv[])
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
+#ifndef Q_OS_WIN
+    // A service stop (SIGTERM) quits like the tray menu, so aboutToQuit flushes drafts.
+    TerminationSignals termination([](int) { QCoreApplication::quit(); });
+#endif
 #ifdef Q_OS_MACOS
     MacAppVisibility appVisibility(app);
 #endif

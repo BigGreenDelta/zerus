@@ -19,12 +19,15 @@
 #include <QTimer>
 #include "FakeCli.h"
 #include "MachinesPage.h"
+#include "MessageBoxIcons.h"
 #include "MachineAppearance.h"
 
 class TestMachinesPage : public QObject {
     Q_OBJECT
 private slots:
     void init();
+    void removalRequiresExplicitConfirmationOfSameConnection_data();
+    void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
     void newMachineDraftCancelAndDiscard_data();
     void newMachineDraftCancelAndDiscard();
@@ -50,6 +53,7 @@ private:
 
 void TestMachinesPage::init()
 {
+    MessageBoxIcons::install();
     QVERIFY(m_dir.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir.path());
     QCoreApplication::setOrganizationName("hgs-machines-test"); QCoreApplication::setApplicationName("MachinesPage"); QSettings().clear(); MachineAppearance::invalidate();
@@ -79,6 +83,9 @@ elif command=='set':
  data['revision']='revision-2'
  (root/'data.json').write_text(json.dumps(data))
  print('{"ok":true}')
+elif command=='remove':
+ data=json.loads((root/'data.json').read_text());data['machines']=[r for r in data['machines'] if r['alias']!=args[2]]
+ (root/'data.json').write_text(json.dumps(data));print('{"ok":true}')
 elif command=='check':
  time.sleep(.03)
  if (root/'probe-mode').exists(): print('{"ssh_ok":true,"ok":false,"error":"SSH connected, but no setup report"}')
@@ -92,6 +99,42 @@ else: raise AssertionError(args)
     QFile data(m_dir.filePath("data.json")); QVERIFY(data.open(QIODevice::WriteOnly));
     data.write(R"({"local":"arch","revision":"revision-1","machines":[{"alias":"mac","connection":{"enabled":true},"enabled":true,"source":"config","inherited":true}]})");
 }
+void TestMachinesPage::removalRequiresExplicitConfirmationOfSameConnection_data()
+{
+    QTest::addColumn<QString>("choice");
+    for (const auto *choice : {"cancel", "enter", "escape", "proceed", "selection", "revision"}) QTest::newRow(choice) << QString(choice);
+}
+
+void TestMachinesPage::removalRequiresExplicitConfirmationOfSameConnection()
+{
+    QFETCH(QString, choice);
+    flag("data.json", R"({"local":"arch","revision":"revision-1","machines":[{"alias":"mac","connection":{"enabled":true,"hostname":"mac.example"},"enabled":true,"source":"local"}]})");
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.selectMachine("mac");
+    auto *remove=widget<QPushButton>(page,"removeMachine");QTRY_VERIFY(remove->isEnabled());
+    bool shown=false;
+    QTimer respond;respond.setInterval(5);
+    connect(&respond,&QTimer::timeout,&page,[&] {
+        auto *box=page.findChild<QMessageBox *>("removeMachineConfirm");if(!box||!box->isVisible())return;
+        respond.stop();shown=true;
+        QCOMPARE(box->defaultButton(),qobject_cast<QPushButton *>(box->button(QMessageBox::Cancel)));
+        QCOMPARE(box->escapeButton(),box->button(QMessageBox::Cancel));QVERIFY(box->text().contains("mac"));
+        if(choice=="cancel"){box->button(QMessageBox::Cancel)->click();return;}
+        if(choice=="enter"||choice=="escape"){QTest::keyClick(box,choice=="enter"?Qt::Key_Return:Qt::Key_Escape);return;}
+        if(choice=="selection")page.selectMachine({});
+        if(choice=="revision"){
+            flag("data.json",R"({"local":"arch","revision":"revision-2","machines":[{"alias":"mac","connection":{"enabled":true,"hostname":"mac.example"},"enabled":true,"source":"local"}]})");
+            page.reload();QTRY_VERIFY(remove->isEnabled());
+        }
+        for(auto *button:box->buttons())if(box->buttonRole(button)==QMessageBox::DestructiveRole)button->click();
+    });respond.start();remove->click();respond.stop();QVERIFY(shown);
+    QTest::qWait(150);
+    QJsonArray removals;
+    for(const auto &call:calls())if(call.toArray().at(1)=="remove")removals.append(call);
+    QCOMPARE(removals.size(),choice=="proceed"?1:0);
+    if(choice=="proceed")QCOMPARE(removals.first().toArray(),QJsonArray({"machine","remove","mac","--revision","revision-1"}));
+    if(choice=="selection"||choice=="revision")QVERIFY(widget<QLabel>(page,"machineNotice")->text().contains("connection changed"));
+}
+
 void TestMachinesPage::flag(const QString &name, const QString &text)
 {
     QFile file(m_dir.filePath(name)); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(text.toUtf8());
