@@ -416,6 +416,9 @@ a=sys.argv[1:]
 if a and a[0].startswith('@'):a=a[1:]
 c=a[0] if a else ''
 if False:pass
+elif c=='account' and a[1:2]==['ls']:
+ print(json.dumps({'profiles':[{'id':'native-'+p,'provider':p,'label':'Default account','home':'/profiles/'+p,'native':True,'installed':True,'is_default':True}
+                              for p in ['codex','claude','kimi','dsh','opencode']]}))
 elif c=='inspect':print('{"tracked":true,"conversation_id":"conversation-one","events":[],"cursor":0}')
 elif c=='project':
  if a[1:2]==['ls']:print('[{"name":"infra","dir":"/remote/infra","exists":true,"src":"ansible"}]')
@@ -6405,7 +6408,8 @@ void TestSessionsWindow::launchFoldersFollowProject()
     projects.addFolder(second,"mac","/remote/different");projects.addFolder(second,"arch","/local/second");
     NewSessionDialog dialog(program(),fleet(),"mac","codex");dialog.setGroups(projects,first);QVERIFY(dialog.selectFolder(original));dialog.show();
     auto *project=dialog.findChild<QComboBox *>("launchProject");auto *machine=dialog.findChild<QComboBox *>("launchComputer");auto *folder=dialog.findChild<QComboBox *>("launchProjectFolder");auto *account=dialog.findChild<QListWidget *>("launchAccount");
-    auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(hint);QTRY_VERIFY(account->count()>0);
+    auto *hint=dialog.findChild<QLabel *>("muted");QVERIFY(hint);
+    QTRY_VERIFY(account->currentItem()&&account->currentItem()->data(Qt::UserRole).toString()=="native-codex");
     auto *agent=dialog.findChild<QListWidget *>("launchAccount");QTest::qWait(1);const auto agentTop=agent->geometry().top();
     auto change=[&](const QString &id){project->setCurrentIndex(project->findData(id));};
     folder->setCurrentIndex(folder->findData(alternative));dialog.setFleet(fleet());
@@ -6753,7 +6757,9 @@ void TestSessionsWindow::remoteFolderLaunch()
     QCOMPARE(launched[0][5].toString(), QString("ungrouped"));
     NewSessionDialog second(program(), fleet(), {}, "martty-dsh", "infra");
     QVERIFY(second.findChild<QLineEdit *>("launchName")->text() != name);
-    QCOMPARE(second.findChild<QListWidget *>("launchAccount")->currentItem()->data(Qt::UserRole+1).toString(), QStringLiteral("martty-dsh"));
+    auto *accounts=second.findChild<QListWidget *>("launchAccount");
+    QTRY_VERIFY(accounts->currentItem()&&accounts->currentItem()->data(Qt::UserRole+1).toString()=="codex");
+    for(int row=0;row<accounts->count();++row)QVERIFY(accounts->item(row)->data(Qt::UserRole+1).toString()!="martty-dsh");
 }
 
 void TestSessionsWindow::launchNameFollowsRenameRules()
@@ -7249,7 +7255,9 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         auto *folders=dialog->findChild<QComboBox *>("launchProjectFolder");QCOMPARE(folders->currentData().toString(),remoteId);
         window.setFleet(fleet());QCOMPARE(folders->currentData().toString(),remoteId);
         QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),QString("/remote/work tree"));remoteOpened=true;
-        auto *accounts=dialog->findChild<QListWidget *>("launchAccount");for(int i=0;i<accounts->count();++i)if(accounts->item(i)->data(Qt::UserRole+1).toString()=="claude")accounts->setCurrentRow(i);dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
+        auto *accounts=dialog->findChild<QListWidget *>("launchAccount");
+        const auto claude=[&]{for(int i=0;i<accounts->count();++i)if(accounts->item(i)->data(Qt::UserRole).toString()=="native-claude")return i;return -1;};
+        QTRY_VERIFY_WITH_TIMEOUT(claude()>=0,15000);accounts->setCurrentRow(claude());dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
         const auto preview=qEnvironmentVariable("HGS_PROJECT_LAUNCH_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/launch.png"));}
         auto *start=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(),15000);start->click();});
     launch->trigger();QVERIFY(remoteOpened);QCOMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),QString("mac"));

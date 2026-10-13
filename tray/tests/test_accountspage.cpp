@@ -32,6 +32,9 @@ static int launchAccountRow(const QListWidget *list,const QString &id) {
 static QString selectedLaunchAccount(const QListWidget *list) {
     return list->currentItem()?list->currentItem()->data(Qt::UserRole).toString():QString();
 }
+static QString selectedLaunchProvider(const QListWidget *list) {
+    return list->currentItem()?list->currentItem()->data(Qt::UserRole+1).toString():QString();
+}
 
 class TestAccountsPage : public QObject {
     Q_OBJECT
@@ -388,12 +391,11 @@ void TestAccountsPage::launchCarriesAccountForSelectedMachine()
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/tmp/sample"); projects.addFolder("ungrouped","mac","/tmp/sample");
     dialog.setGroups(projects,"ungrouped"); dialog.show();
     auto *accounts = dialog.findChild<QListWidget *>("launchAccount"); auto *start = dialog.findChild<QPushButton *>("primary");
-    QTRY_COMPARE(accounts->count(), 6); QTRY_VERIFY(start->isEnabled());
+    QTRY_COMPARE(accounts->count(), 5); QTRY_VERIFY(start->isEnabled());
     accounts->setCurrentRow(launchAccountRow(accounts,"work-mac")); QCOMPARE(selectedLaunchAccount(accounts), "work-mac");
     auto *machine = dialog.findChild<QComboBox *>("launchComputer"); QVERIFY(machine);
     machine->setCurrentIndex(machine->findData(QString()));
-    QTRY_COMPARE(accounts->count(), 6); QCOMPARE(accounts->currentRow(), 0);
-    // The six placeholder rows can match the eventual catalog's row count.
+    QTRY_COMPARE(accounts->count(), 5); QCOMPARE(accounts->currentRow(), 0);
     // Wait for the selected computer's real profile before inspecting order.
     QTRY_COMPARE(accounts->item(1)->data(Qt::UserRole).toString(), "work-local");
     accounts->setCurrentRow(launchAccountRow(accounts,"work-local")); QTRY_VERIFY(start->isEnabled());
@@ -414,17 +416,18 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     {
         // Nothing is remembered yet, and cancelling a dialog remembers nothing.
         NewSessionDialog dialog(FakeCli::program(m_script),available,"mac"); dialog.show();
-        QCOMPARE(dialog.findChild<QListWidget *>("launchAccount")->currentItem()->data(Qt::UserRole+1).toString(),QString("codex"));
+        QTRY_COMPARE(selectedLaunchProvider(dialog.findChild<QListWidget *>("launchAccount")),QString("codex"));
         auto *choices=dialog.findChild<QListWidget *>("launchAccount");choices->setCurrentRow(launchAccountRow(choices,"native-kimi")); dialog.reject();
     }
     launch("codex","work-mac"); launch("claude","native-claude");
     NewSessionDialog dialog(FakeCli::program(m_script),available,"mac"); dialog.setGroups(projects,"ungrouped"); dialog.show();
     auto *accounts=dialog.findChild<QListWidget *>("launchAccount");
-    QCOMPARE(accounts->currentItem()->data(Qt::UserRole+1).toString(),QString("claude"));
+    QTRY_COMPARE(selectedLaunchProvider(accounts),QString("claude"));
     QTRY_VERIFY(launchAccountRow(accounts,"work-mac")>=0);accounts->setCurrentRow(launchAccountRow(accounts,"work-mac"));QCOMPARE(selectedLaunchAccount(accounts),QString("work-mac"));
     // Accounts are remembered per machine: arch has its own Work account, but none was chosen there.
     auto *machine=dialog.findChild<QComboBox *>("launchComputer"); machine->setCurrentIndex(machine->findData(QString()));
-    QTRY_COMPARE(accounts->item(1)->data(Qt::UserRole).toString(),QString("work-local")); QCOMPARE(selectedLaunchAccount(accounts),QString("native-codex"));
+    QTRY_VERIFY(launchAccountRow(accounts,"work-local")>=0);
+    QCOMPARE(accounts->item(1)->data(Qt::UserRole).toString(),QString("work-local")); QCOMPARE(selectedLaunchAccount(accounts),QString("native-codex"));
     // A remembered account that disappeared falls back to the default without an error.
     QFile removed(m_dir.filePath("removed-mac"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("work-mac");removed.close();
     NewSessionDialog fallback(FakeCli::program(m_script),available,"mac","codex"); fallback.setGroups(projects,"ungrouped"); fallback.show();
@@ -433,14 +436,14 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     QVERIFY(fallback.findChild<QLabel *>("launchError")->text().isEmpty());
     // An agent requested by the caller wins over the remembered one.
     NewSessionDialog requested(FakeCli::program(m_script),available,"mac","kimi");
-    QCOMPARE(requested.findChild<QListWidget *>("launchAccount")->currentItem()->data(Qt::UserRole+1).toString(),QString("kimi"));
+    QTRY_COMPARE(selectedLaunchProvider(requested.findChild<QListWidget *>("launchAccount")),QString("kimi"));
 }
 void TestAccountsPage::hiddenDefaultIsNotOfferedForNewSessions()
 {
     QFile removed(m_dir.filePath("removed-local"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("native-codex");removed.close();
     NewSessionDialog dialog(FakeCli::program(m_script),fleet(false),{},"codex","/tmp/sample");dialog.show();
     auto *accounts=dialog.findChild<QListWidget *>("launchAccount");
-    QTRY_COMPARE(accounts->count(),5);QTRY_COMPARE(accounts->item(0)->data(Qt::UserRole).toString(),QString("work-local"));
+    QTRY_COMPARE(accounts->count(),4);QTRY_COMPARE(accounts->item(0)->data(Qt::UserRole).toString(),QString("work-local"));
 }
 
 void TestAccountsPage::removeAndReAddNativeAccount()
@@ -788,7 +791,7 @@ void TestAccountsPage::preview()
     QVERIFY(page.grab().save(dir+"/accounts-updating-light.png"));
     QVERIFY(QFile::remove(hold.fileName())); QTRY_VERIFY(refresh->isEnabled());
     QVERIFY(page.grab().save(dir+"/accounts-light.png"));
-    NewSessionDialog dialog(FakeCli::program(m_script), fleet(), "mac", "codex", "", &page); dialog.show(); QTRY_COMPARE(dialog.findChild<QListWidget *>("launchAccount")->count(), 6);
+    NewSessionDialog dialog(FakeCli::program(m_script), fleet(), "mac", "codex", "", &page); dialog.show(); QTRY_COMPARE(dialog.findChild<QListWidget *>("launchAccount")->count(), 5);
     dialog.findChild<QListWidget *>("launchAccount")->setCurrentRow(1); QVERIFY(dialog.grab().save(dir+"/new-session-account.png"));
 }
 QTEST_MAIN(TestAccountsPage)

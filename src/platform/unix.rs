@@ -1516,7 +1516,19 @@ mod tests {
             .current_dir(&folder)
             .spawn()
             .unwrap();
-        let directories = current_directories().unwrap();
+        // spawn() can return before exec renames the child in /proc, so wait
+        // until the child reports its new name.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let directories = loop {
+            let directories = current_directories().unwrap();
+            let renamed = directories
+                .iter()
+                .any(|(pid, _, name)| *pid == child.id() && name == "sleep");
+            if renamed || std::time::Instant::now() >= deadline {
+                break directories;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(directories

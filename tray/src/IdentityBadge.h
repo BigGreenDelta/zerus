@@ -15,6 +15,11 @@ inline QString providerName(const QString &value) {
     return value == "codex" ? QStringLiteral("Codex") : value == "claude" ? QStringLiteral("Claude") :
         value == "kimi" ? QStringLiteral("Kimi") : value == "opencode" ? QStringLiteral("OpenCode") : value == "dsh" ? QStringLiteral("DeepSeek") : value == "sh" ? QStringLiteral("Shell") : value;
 }
+inline QColor providerColor(const QString &value, bool dark) {
+    return value == "claude" ? QColor(dark ? "#e8b29b" : "#956044") :
+        value == "kimi" ? QColor(dark ? "#bac1ff" : "#5657a2") :
+        value == "dsh" ? QColor(dark ? "#8cb9ff" : "#315bb1") : QColor(dark ? "#a6d8c5" : "#38755d");
+}
 inline QFont font(QFont base, Kind kind) {
     base.setPixelSize(11); base.setWeight(kind == Provider ? QFont::Medium : QFont::Normal); return base;
 }
@@ -32,8 +37,7 @@ inline void paint(QPainter *p, const QRect &rect, Kind kind, const QString &valu
     if (!machineColor.isValid() && kind == Machine) machineColor = MachineAppearance::color(value);
     const bool bright = kind == Machine && MachineAppearance::vivid(machineIdentity.isEmpty() ? value : machineIdentity);
     const QColor foreground = kind == Machine ? MachineAppearance::textColor(machineColor, dark, bright) :
-        value == "claude" ? QColor(dark ? "#e8b29b" : "#956044") :
-        value == "kimi" ? QColor(dark ? "#bac1ff" : "#5657a2") : value == "dsh" ? QColor(dark ? "#8cb9ff" : "#315bb1") : QColor(dark ? "#a6d8c5" : "#38755d");
+        providerColor(value, dark);
     p->setPen(Qt::NoPen); p->setBrush(kind == Machine ? MachineAppearance::backgroundColor(machineColor, dark, bright) : QColor(dark ? "#303942" : "#e5ebef"));
     p->drawRoundedRect(rect, 4, 4);
     if (kind == Provider) {

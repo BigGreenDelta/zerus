@@ -114,12 +114,23 @@ inline QString windowText(const QJsonObject &w,bool withReset=true) {
     return period(w)+" "+QString::number(used,'f',0)+"%"+(withReset&&used>=100?" ("+remaining(reset(w.value("resets_at")))+")":QString());
 }
 // New session only presents existing snapshots; unavailable windows add no detail.
-inline QString launchSummary(const QJsonObject &data) {
-    QStringList limits;
+inline QJsonObject launchMeterData(const QJsonObject &data) {
+    QJsonArray windows;
     for(const auto &value:data["windows"].toArray()){
         auto window=value.toObject();
         if(!current(window)||!window["used_percent"].isDouble()||!std::isfinite(window["used_percent"].toDouble()))continue;
+        window["used_percent"]=qBound(0.,window["used_percent"].toDouble(),100.);
         if(window["window_minutes"].toInt()>0)window.remove("label");
+        windows.append(window);
+    }
+    auto result=data;result["windows"]=windows;
+    if(!windows.isEmpty())result["status"]="ok";
+    return result;
+}
+inline QString launchSummary(const QJsonObject &data) {
+    QStringList limits;
+    for(const auto &value:launchMeterData(data)["windows"].toArray()){
+        const auto window=value.toObject();
         limits.append(period(window)+QObject::tr(" %1% used").arg(qRound(qBound(0.,window["used_percent"].toDouble(),100.))));
     }
     for(const auto &value:data["balances"].toArray()){
@@ -236,8 +247,11 @@ protected:
         QPushButton::changeEvent(event);
         if(event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange)setFixedWidth(contentWidth());
     }
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);p.setPen(Qt::NoPen);
+public:
+    // Delegates can use the same widget's paint path without re-rendering its
+    // hidden parent hierarchy or introducing another quota presentation.
+    void paintContents(QPainter &p,const QPoint &position = {}) const {
+        p.save();p.translate(position);p.setRenderHint(QPainter::Antialiasing);p.setPen(Qt::NoPen);
         if(underMouse() || hasFocus()){p.setBrush(QColor(m_dark?"#27313b":"#e8edf3"));p.drawRoundedRect(rect(),5,5);}
         QFont f=font();f.setPixelSize(11);p.setFont(f);const auto muted=QColor(m_dark?"#a1adbb":"#647386");
         const auto windows=m_data.value("windows").toArray();const bool loading=m_data.isEmpty() || m_data.value("status")=="loading";
@@ -262,7 +276,10 @@ protected:
             const int available=width()-x-(m_compact?4:6);
             p.setPen(muted);p.drawText(QRect(x,0,available,height()),Qt::AlignVCenter|Qt::AlignRight,p.fontMetrics().elidedText(summaryText(),Qt::ElideRight,available));
         }
+        p.restore();
     }
+protected:
+    void paintEvent(QPaintEvent *) override {QPainter p(this);paintContents(p);}
 private:
     // Rails put usage above the elapsed share of the window. The marker shows
     // that share on the usage bar, and usage beyond it takes the warning color.

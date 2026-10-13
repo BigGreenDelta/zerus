@@ -652,9 +652,13 @@ Accounts is a read-only viewer grouped by workspace and provider-reported accoun
 
 New session is a full-screen form with Project, Folder, Worktree, Account and
 agent, and Session name sections. Account and agent pairs share one list: a
-large provider logo spans the email and one line of cached limits, or `limits n/a`.
+large colored provider logo spans the email and one line of cached limits, or `limits n/a`.
+Small usage/elapsed rails and pace colors match the desktop status footer.
 Default labels, profile IDs and quota error details stay out of these rows;
-matching emails retain distinct exact profile choices. The chooser reads only
+the list matches Accounts grouping using only the selected computer's bindings.
+Aliases of the same provider account and organization share a row; conflicting
+account IDs, organizations and unidentified profiles stay separate. Launch uses
+the exact selected or default local profile. The chooser reads only
 existing machine/profile snapshots and cached catalog data, without refreshing
 provider quotas. Tapping outside never closes it; Close or
 Back asks before discarding edits and is unavailable while a worktree or session

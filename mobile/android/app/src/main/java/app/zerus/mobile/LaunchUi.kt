@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,6 +28,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -47,6 +51,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.graphics.toColorInt
 import org.json.JSONObject
+import kotlinx.coroutines.delay
 
 private val Amber = Color(0xFFFFCB7D)
 
@@ -108,7 +113,7 @@ private val Amber = Color(0xFFFFCB7D)
     val accounts = remember(catalog,provider) { LaunchPresentation.accounts(catalog,provider) }
     val modelOptions = remember(catalog,provider,account) { LaunchPresentation.models(catalog,provider,account) }
     LaunchedEffect(provider,account,modelOptions) { if(selectedModel.isNotBlank() && modelOptions.none { it.value==selectedModel }) selectedModel="" }
-    val accountChoices = LaunchPresentation.accountChoices(catalog,machine,model.accountCatalogs,System.currentTimeMillis()/1000.0)
+    val accountChoices = LaunchPresentation.accountChoices(catalog,machine,model.accountCatalogs,System.currentTimeMillis()/1000.0,provider,account)
     val projects = remember(catalog) { LaunchPresentation.projects(catalog) }
     val projectSupported = catalog?.opt("project_launch_supported") == true
     val project = projects.find { it.id == projectId }
@@ -373,26 +378,64 @@ private val Amber = Color(0xFFFFCB7D)
     Text(text,modifier,style = MaterialTheme.typography.bodySmall,color = color)
 
 @Composable internal fun LaunchAccountList(choices:List<LaunchAccountChoice>,provider:String,account:String,enabled:Boolean,onChoose:(LaunchAccount)->Unit) {
+    var now by remember { mutableDoubleStateOf(System.currentTimeMillis()/1000.0) }
+    LaunchedEffect(Unit) { while(true) { delay(30_000);now=System.currentTimeMillis()/1000.0 } }
     val logoSize=with(LocalDensity.current) { MaterialTheme.typography.bodyLarge.lineHeight.toDp()+MaterialTheme.typography.bodySmall.lineHeight.toDp() }
     Surface(Modifier.fillMaxWidth(),shape = RoundedCornerShape(12.dp),color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp,MaterialTheme.colorScheme.outline)) {
         Column(Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()).selectableGroup().alpha(if(enabled) 1f else .5f)) {
             choices.forEach { choice -> key(choice.key) {
                 val selected = choice.account.provider == provider && choice.account.id == account
+                val limits=choice.usage?.let { LaunchPresentation.accountLimits(it,now) } ?: choice.limits
                 Surface(color = if(selected) MaterialTheme.colorScheme.primary.copy(alpha = .14f) else Color.Transparent) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).selectable(selected,enabled = enabled,role = Role.RadioButton) { onChoose(choice.account) }
-                        .semantics { contentDescription = "${DesktopIcons.providerName(choice.account.provider)} ${choice.title}, ${choice.limits}" }
+                        .semantics { contentDescription = "${DesktopIcons.providerName(choice.account.provider)} ${choice.title}, $limits" }
                         .padding(horizontal = 14.dp,vertical = 10.dp),verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Icon(DesktopIcons.providerLogo(choice.account.provider),DesktopIcons.providerName(choice.account.provider),Modifier.size(logoSize),
                             tint = DesktopIcons.providerColor(choice.account.provider,MaterialTheme.colorScheme.surface.luminance()<.5f))
                         Column(Modifier.weight(1f)) {
                             Text(choice.title,maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.bodyLarge,fontWeight = FontWeight.SemiBold)
-                            Text(choice.limits,maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            LaunchAccountLimits(choice,now,limits)
                         }
                     }
                 }
             } }
+        }
+    }
+}
+
+@Composable private fun LaunchAccountLimits(choice:LaunchAccountChoice,now:Double,limits:String) {
+    val windows=LaunchPresentation.limitWindows(choice.usage,now).take(2)
+    if(windows.isEmpty()) {
+        Text(limits,maxLines=1,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    val dark=MaterialTheme.colorScheme.surface.luminance()<.5f
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+        windows.forEach { window ->
+            val pace=LaunchPresentation.limitPace(window,now)
+            val color=when(pace.tone) {
+                LaunchLimitTone.Normal -> if(dark) Color(0xFF72CDB2) else Color(0xFF237A62)
+                LaunchLimitTone.Warning -> if(dark) Color(0xFFF0A35B) else Color(0xFFBD6519)
+                LaunchLimitTone.Critical -> if(dark) Color(0xFFF07878) else Color(0xFFCE3D47)
+            }
+            Row(Modifier.weight(1f),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=Alignment.CenterVertically) {
+                Canvas(Modifier.size(20.dp,10.dp)) {
+                    val track=if(dark) Color(0xFF36434E) else Color(0xFFD7E0E6)
+                    val top=if(pace.elapsed==null) 3.dp.toPx() else 1.dp.toPx()
+                    val height=if(pace.elapsed==null) 4.dp.toPx() else 3.dp.toPx()
+                    val radius=CornerRadius(height/2)
+                    drawRoundRect(track,Offset(0f,top),Size(size.width,height),radius)
+                    drawRoundRect(color,Offset(0f,top),Size(size.width*(pace.used/100).toFloat(),height),radius)
+                    pace.elapsed?.let { elapsed ->
+                        val bottom=6.dp.toPx();val rail=2.dp.toPx()
+                        drawRoundRect(track,Offset(0f,bottom),Size(size.width,rail),CornerRadius(rail/2))
+                        drawRoundRect(if(dark) Color(0xFF8395A5) else Color(0xFF7F90A1),Offset(0f,bottom),Size(size.width*elapsed.toFloat(),rail),CornerRadius(rail/2))
+                    }
+                }
+                Text("${AccountPresentation.shortPeriod(window)} ${(pace.used+.5).toInt()}%",maxLines=1,softWrap=false,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.bodySmall,color=color)
+            }
         }
     }
 }
