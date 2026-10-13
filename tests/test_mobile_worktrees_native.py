@@ -27,7 +27,8 @@ class MobileWorktreesNative(unittest.TestCase):
         return [str(HGS),'__state','worktrees','create','--path',str(self.repo),'--common-dir',str((self.repo/'.git').resolve()),'--destination',str(self.root/destination),'--branch','feature','--base','HEAD','--request-id','11111111-1111-4111-8111-111111111111','--json','--mobile']
     def hook(self):
         marker=self.root/'hook.pid';hook=self.repo/'.git/hooks/post-checkout'
-        hook.write_text('#!'+sys.executable+'\nimport os,time\nopen('+repr(str(marker))+',"w").write(str(os.getpid()))\ntime.sleep(60)\n');hook.chmod(0o700)
+        # Written aside and renamed, so the marker never exists without the PID.
+        hook.write_text('#!'+sys.executable+'\nimport os,time\nopen('+repr(str(marker)+'.tmp')+',"w").write(str(os.getpid()))\nos.replace('+repr(str(marker)+'.tmp')+','+repr(str(marker))+')\ntime.sleep(60)\n');hook.chmod(0o700)
         return marker
     def await_hook(self,marker,process):
         deadline=time.monotonic()+5
