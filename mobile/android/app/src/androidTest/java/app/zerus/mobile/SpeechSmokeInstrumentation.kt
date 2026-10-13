@@ -357,13 +357,34 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         // Only an empty composer exposes the microphone. Permission recovery is
         // independent of the retained text/attachment keyboard-lock fixture below.
         permissionRecovery(model, target)
+        // The editor already exists after permission recovery. Enter this fixture
+        // through its real editing action: model.edit deliberately cannot overwrite
+        // an active editor that still owns the same draft generation.
+        fun editable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (root == null) return null
+            root.refresh()
+            if (root.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return root
+            for (index in 0 until root.childCount) editable(root.getChild(index))?.let { return it }
+            return null
+        }
+        waitForIdleSync()
+        check(checkNotNull(editable(uiAutomation.rootInActiveWindow)).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Исходный текст.")
+        }))
+        try {
+            await("retained typed editor") {
+                model.draft(target).text == "Исходный текст." && model.speechComposer?.editor?.text.toString() == "Исходный текст."
+            }
+        } catch (error: IllegalStateException) {
+            throw IllegalStateException(main {
+                "Fixture edit did not synchronize: selected=${model.selected?.target}; draft=${model.draft(target)}; bridge=${model.speechComposer?.target}; editor=${model.speechComposer?.editor?.text}"
+            }, error)
+        }
         val retainedAttachment = runBlocking { AttachmentStore(targetContext).importRecording(VoiceProtocol.wav(ByteArray(6_400))) }
         main {
-            model.edit(target, "Исходный текст.")
             model.javaClass.getDeclaredMethod("save", Draft::class.java).apply { isAccessible = true }
                 .invoke(model, model.draft(target).copy(attachments = listOf(retainedAttachment)))
         }
-        await("retained typed editor") { model.speechComposer?.editor?.text.toString() == "Исходный текст." }
         main { model.speech.start(target) }
         await("microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
         check(main { model.speech.loading && model.speech.selection == SpeechSelection() }) { "Recording waited for provider discovery" }
