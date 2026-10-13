@@ -31,6 +31,36 @@ fn numbered(row:&str)->Option<(bool,usize,String)> {
 fn label(text:&str)->String {text.split_whitespace().collect::<Vec<_>>().join(" ")}
 fn compact(text:&str)->String {text.chars().filter(|c|!c.is_whitespace()).collect()}
 
+fn gutter(row:&str)->&str {row.strip_prefix("│ ").unwrap_or(row)}
+
+// This advisory counts down, then disappears when the user starts navigating.
+// It is not the command's warning or a permission choice. Preserve display
+// text, but exclude only this exact native advisory from the decision identity.
+fn identity_body(panel:&Panel)->Vec<String> {
+    static TIMER:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let timer=TIMER.get_or_init(||regex::Regex::new(r"^⚠ Claude Code will automatically deny this request in [0-9]{1,3}:[0-9]{2}, to avoid blocking progress on an unattended session$").unwrap());
+    let after_fence=panel.body.iter().rposition(|r|rule(r,'╌')||rule(r,'─'))
+        .map_or(if panel.title=="Bash safety confirmation"{0}else{panel.body.len()},|i|i+1);
+    let mut result=Vec::new();let mut index=0;
+    while index<panel.body.len() {
+        if index>=after_fence&&panel.body[index].starts_with("⚠ Claude Code ") {
+            let mut advisory=String::new();let mut end=index;
+            while end<panel.body.len()&&end<index+8 {
+                if !advisory.is_empty(){advisory.push(' ');}
+                advisory.push_str(&panel.body[end]);end+=1;
+                let text=advisory.split_whitespace().collect::<Vec<_>>().join(" ");
+                if timer.is_match(&text) {
+                    index=end;break;
+                }
+            }
+            if index==end {continue;}
+        }
+        result.push(panel.body[index].clone());index+=1;
+    }
+    while result.last().is_some_and(String::is_empty){result.pop();}
+    result
+}
+
 /// Any highlighted numbered choice below Claude's last full-width rule. The
 /// idle composer sits between two rules, so a resolved request has none.
 fn visible(screen:&str)->bool {
@@ -77,7 +107,7 @@ fn parse(screen:&str)->Option<Panel> {
     // A panel taller than the terminal loses its top rule and title.
     let top=rows[..question].iter().rposition(|r|rule(r,'─'))?;
     let title=*rows.get(top+1).filter(|r|top+1<question&&!r.is_empty()&&!rule(r,'╌'))?;
-    let mut body:Vec<String>=rows[top+2..question].iter().map(|r|r.to_string()).collect();
+    let mut body:Vec<String>=rows[top+2..question].iter().map(|r|gutter(r).to_string()).collect();
     while body.last().is_some_and(String::is_empty){body.pop();}
     Some(Panel{title:title.into(),body,question:rows[question].into(),labels,selected})
 }
@@ -157,7 +187,7 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
     };
     let native=panel.as_ref().filter(|_|problem.is_empty());
     let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
-        record["process_start"],tool,request["tool_input"],native.map(|p|json!([p.title,p.body,p.question,p.labels]))]).to_string()));
+        record["process_start"],tool,request["tool_input"],native.map(|p|json!([p.title,identity_body(p),p.question,p.labels]))]).to_string()));
     let (question,body,options)=match native {
         Some(panel) => {
             let content=panel.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n");
@@ -167,7 +197,11 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
             }).collect::<Vec<_>>();
             (panel.question.clone(),format!("{}\n\n{}",panel.title,content.trim()).trim().to_owned(),options)
         }
-        None => (format!("Claude asks to use {tool}"),summary(request),Vec::new()),
+        None => {
+            let warning=screen.and_then(safety_panel).map(|p|p.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+            let body=if warning.is_empty(){summary(request)}else{format!("{}\n\n{}",summary(request),warning.trim())};
+            (format!("Claude asks to use {tool}"),body,Vec::new())
+        },
     };
     let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
     Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_call_id(record,tool),
@@ -175,6 +209,44 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         "can_answer":native.is_some(),"answer_unavailable_reason":problem,"approval":true,"approval_choices":native.is_some(),
         "answer_transport":"claude_tui","created_at":created,
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
+}
+
+/// Native Bash safety checks can be visible while hook state still says
+/// Working. Only the complete native chooser/footer plus a diagnostic gutter
+/// establish this read-only fallback; ordinary output and composer drafts do
+/// not. A clipped viewport cannot establish a command's exact identity.
+fn safety_panel(screen:&str)->Option<Panel> {
+    let rows:Vec<_>=screen.lines().map(str::trim).collect();
+    let (question,labels,selected)=chooser(&rows)?;
+    if rows[question]!="Do you want to proceed?"||labels!=["Yes","No"]
+        ||!rows[question+1..].iter().any(|r|r.starts_with("Esc to cancel · Tab to amend")) {return None;}
+    let fence=rows[..question].iter().rposition(|r|rule(r,'╌')||rule(r,'─'))?;
+    if !rows[fence+1..question].iter().any(|r|r.starts_with("│ ")&&!gutter(r).is_empty()) {return None;}
+    if let Some(panel)=parse(screen).filter(|p|p.title=="Bash command") {return Some(panel);}
+    // The long native panel may have scrolled its title/command out of view.
+    // Its known dangerous-rm diagnostic still needs attention, but cannot be
+    // answered here without the complete hook-backed request and panel.
+    if !rows[fence+1..question].iter().any(|r|r.starts_with("│ Dangerous rm operation ")) {return None;}
+    let start=rows[..fence].iter().position(|r|r.starts_with("│ ")).unwrap_or(fence+1);
+    let body=rows[start..question].iter().map(|r|gutter(r).to_owned()).collect();
+    Some(Panel{title:"Bash safety confirmation".into(),body,question:rows[question].into(),labels,selected})
+}
+
+fn safety_card(record:&Value,screen:&str)->Option<Value> {
+    if record["agent"]!="claude"||!["working","tool","input","approval","unknown"].contains(&string(record,"phase"))
+        ||pause_active(record)||!string(record,"error").is_empty()||string(record,"run_id").is_empty()
+        ||string(record,"conversation_id").is_empty()||record.get("exited_at").is_some()||record.get("session_end").is_some() {return None;}
+    let panel=safety_panel(screen)?;
+    let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],record["process_start"],
+        record["turn_started"],panel.title,identity_body(&panel),panel.question,panel.labels]).to_string()));
+    let body=panel.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n");
+    Some(json!({"question_id":format!("claude-safety:{hash}"),"question_hash":hash,"tool_call_id":"",
+        "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_terminal_safety",
+        "approval":true,"approval_choices":false,"can_answer":false,"answer_transport":"",
+        "answer_unavailable_reason":"Claude requires a safety confirmation. Review the complete command and answer in Terminal; Zerus has no matching native permission request.",
+        "created_at":record["last_event_at"],"questions":[{"id":"safety","question":panel.question,"header":"Bash safety confirmation",
+            "body":format!("{}\n\n{}",panel.title,body.trim()),"multi_select":false,"allow_other":false,
+            "options":panel.labels.iter().enumerate().map(|(i,label)|json!({"id":(i+1).to_string(),"label":label,"scope":"once"})).collect::<Vec<_>>()}]}))
 }
 
 /// The chooser Claude draws at the bottom of its screen: a title under the
@@ -295,9 +367,13 @@ fn snapshot(record:&Value,screen:&str)->Option<(Value,usize)> {
 fn acknowledged(screen:&str)->bool {!screen.trim().is_empty()&&!visible(screen)}
 
 pub(super) fn current(record:&Value)->Option<Value> {
-    if !eligible(record)||request(record).is_none() {return None;}
+    if record["agent"]!="claude"||pause_active(record)||!string(record,"error").is_empty()
+        ||!["working","tool","input","approval","unknown"].contains(&string(record,"phase")) {return None;}
     let screen=kimi_tui_choice::identity(record).and_then(|record|kimi_tui_choice::capture(&record)).ok();
-    build(record,screen.as_deref()).map(|(card,_)|card)
+    if eligible(record)&&request(record).is_some() {
+        return build(record,screen.as_deref()).map(|(card,_)|card);
+    }
+    safety_card(record,screen.as_deref()?)
 }
 pub(super) fn available(record:&Value,question:&Value)->Result<()> {
     let current=current(record).ok_or("The native approval is no longer visible. Open Terminal")?;
@@ -307,10 +383,12 @@ pub(super) fn available(record:&Value,question:&Value)->Result<()> {
 }
 pub(super) fn answer(record:&Value,question:&Value,answers:&Value)->Result<()> {
     available(record,question)?;
-    let panel=parse(&kimi_tui_choice::capture(record)?).ok_or("Approval disappeared")?;
+    let screen=kimi_tui_choice::capture(record)?;
+    let panel=parse(&screen).ok_or("Approval disappeared")?;
     let chosen=answers[0]["selected_option_ids"][0].as_str().and_then(|id|id.parse::<usize>().ok())
         .filter(|n|(1..=panel.labels.len()).contains(n)).ok_or("Choose one of Claude's options")?-1;
-    kimi_tui_choice::answer_queued(record,question,chosen,panel.labels.len(),snapshot,acknowledged)?;
+    let navigation_settle=if safety_panel(&screen).is_some(){std::time::Duration::from_millis(250)}else{std::time::Duration::ZERO};
+    kimi_tui_choice::answer_queued(record,question,chosen,panel.labels.len(),snapshot,acknowledged,navigation_settle)?;
     // A denial ends Claude's turn without another hook. Record it as an
     // interruption so the composer can verify Claude's prompt again.
     let _ = settle(record,&label(&panel.labels[chosen]));
@@ -334,6 +412,7 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
 
 #[cfg(test)] mod tests {
     use super::*;
+    const SAFETY:&str=include_str!("../../tests/fixtures/claude-bash-safety.txt");
     // Captured from Claude Code 2.1.294 at 120 columns; paths are synthetic.
     const BASH:&str="  ⎿  $ printf hi > out.txt\n\n────────────────────────────────────────\n Bash command\n Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below\n Write \"hi\" into out.txt without a trailing newline\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n printf hi > out.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to\n      /work/project from this\n      project\n   3. Yes, and switch to auto mode · auto mode handles these prompts for you\n   4. No\n\n Esc to cancel · Tab to amend\n\n\n\n";
     const WRITE:&str="● Write(new.txt)\n\n────────────────────────────────────────\n Create file\n new.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n  1 x\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to create new.txt?\n ❯ 1. Yes\n   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)\n   3. No\n\n Esc to cancel · Tab to amend\n\n";
@@ -348,6 +427,65 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
     fn card(record:&Value,screen:&str)->Value {build(record,Some(screen)).unwrap().0}
     fn options(card:&Value)->Vec<(String,String)> {
         card["questions"][0]["options"].as_array().unwrap().iter().map(|o|(string(o,"label").to_owned(),string(o,"scope").to_owned())).collect()
+    }
+
+    #[test] fn safety_gutter_matches_exact_command_and_preserves_the_warning() {
+        let r=record("Bash",json!({"command":"T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port"}));
+        let q=card(&r,SAFETY);
+        assert_eq!(q["can_answer"],true);
+        assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation on possibly-empty variable path:"));
+        assert_eq!(options(&q),[("Yes".into(),"once".into()),("No".into(),"once".into())]);
+        assert_eq!(q["question_hash"],card(&r,&SAFETY.replace("in 2:00,","in 1:59,"))["question_hash"]);
+        let advisory="⚠ Claude Code will automatically deny this request in 2:00, to avoid blocking progress on an unattended session";
+        let wrapped=SAFETY.replace(advisory,"⚠ Claude Code will automatically deny this\n request in 2:00, to avoid blocking progress on an\n unattended session");
+        assert_eq!(q["question_hash"],card(&r,&wrapped)["question_hash"]);
+        assert_eq!(q["question_hash"],card(&r,&wrapped.replace("in 2:00,","in 1:59,"))["question_hash"]);
+        assert_eq!(q["question_hash"],card(&r,&SAFETY.replace(advisory,""))["question_hash"]);
+        assert_ne!(q["question_hash"],card(&r,&SAFETY.replace(advisory,&format!("{advisory} Changed warning")))["question_hash"]);
+        let mut command_panel=parse(SAFETY).unwrap();
+        let fence=command_panel.body.iter().rposition(|row|rule(row,'╌')).unwrap();
+        command_panel.body.insert(fence,advisory.into());
+        assert!(identity_body(&command_panel).contains(&advisory.to_owned()));
+        assert_ne!(q["question_hash"],card(&r,&SAFETY.replace("possibly-empty","possibly-wrong"))["question_hash"]);
+        let other=record("Bash",json!({"command":"rm other"}));
+        let other=card(&other,SAFETY);assert_eq!(other["can_answer"],false);
+        assert!(string(&other["questions"][0],"body").contains("Dangerous rm operation"));
+    }
+
+    #[test] fn native_safety_without_permission_hook_is_visible_but_read_only() {
+        let r=json!({"agent":"claude","phase":"working","run_id":"run","conversation_id":"conversation","last_event_at":10});
+        let q=safety_card(&r,SAFETY).unwrap();
+        assert_eq!(q["source"],"claude_terminal_safety");assert_eq!(q["can_answer"],false);
+        assert_eq!(q["approval"],true);assert_eq!(q["questions"][0]["options"].as_array().unwrap().len(),2);
+        assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation"));
+        assert_eq!(q["question_hash"],safety_card(&r,&SAFETY.replace("in 2:00,","in 1:59,")).unwrap()["question_hash"]);
+        let moved=SAFETY.replace(" ❯ 1. Yes","   1. Yes").replace("   2. No"," ❯ 2. No");
+        assert_eq!(q["question_hash"],safety_card(&r,&moved).unwrap()["question_hash"]);
+        for (key,value) in [("run_id",json!("different")),("conversation_id",json!("different")),("turn_started",json!(20))] {
+            let mut other=r.clone();other[key]=value;
+            assert_ne!(q["question_hash"],safety_card(&other,SAFETY).unwrap()["question_hash"]);
+        }
+        for (key,value) in [("phase",json!("idle")),("error",json!("failed")),("exited_at",json!(12))] {
+            let mut other=r.clone();other[key]=value;assert!(safety_card(&other,SAFETY).is_none());
+        }
+    }
+
+    #[test] fn clipped_safety_keeps_the_diagnostic_without_approving_partial_commands() {
+        let first=SAFETY.find(" │ T=$(pwd)").unwrap();let clipped=&SAFETY[first..];
+        assert!(parse(clipped).is_none());
+        let r=record("Bash",json!({"command":"T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port"}));
+        let q=card(&r,clipped);assert_eq!(q["can_answer"],false);
+        assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation"));
+        assert!(safety_card(&r,clipped).is_some());
+        for invalid in [
+            format!("{SAFETY}\n────────────────────────────────────────\n❯ \n────────────────────────────────────────"),
+            SAFETY.replace("Esc to cancel · Tab to amend","Ordinary output"),
+            SAFETY.replace(" ❯ 1. Yes","   1. Yes"),
+            SAFETY.replace("   2. No"," ❯ 2. No"),
+            SAFETY.replace("   2. No","   3. No"),
+            SAFETY.replace("Do you want to proceed?","Quoted question?"),
+            SAFETY.replace("   2. No","   2. Yes, always allow"),
+        ] {assert!(safety_card(&r,&invalid).is_none());}
     }
 
     #[test] fn native_options_are_verbatim_and_broader_ones_are_marked() {

@@ -718,6 +718,15 @@ option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
 plan approval stay visible with **Open Terminal**.
 
+Claude's Bash safety confirmations, including warnings about possibly empty
+paths in `rm` commands, also appear in Activity with the native warning text.
+A visible safety confirmation makes the session **Needs approval** even if
+its permission hook was not recorded, and ordinary message sending waits for
+the decision. Without a matching permission request, or when the full command
+is clipped, the card offers **Open Terminal**. With a complete matching request,
+Activity can submit the native **Yes** or **No** choice. Claude's unattended
+denial countdown stays visible without replacing the request as it ticks.
+
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
 its options verbatim with **Open Terminal** while Terminal still shows them: no

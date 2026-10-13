@@ -460,7 +460,8 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         // Native startup choosers have no hook. A later recognized panel wins;
         // an unrecognized chooser before a conversation stays visible read-only.
         type Current = fn(&Value) -> Option<Value>;
-        let choosers: [(Current, &str, &str); 9] = [
+        let choosers: [(Current, &str, &str); 10] = [
+            (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
             (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
             (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
             (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),

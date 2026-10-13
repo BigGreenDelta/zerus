@@ -1,0 +1,45 @@
+
+           Claude Code v2.1.296
+           Sonnet 4.6 · API Usage Billing
+           ~/work
+
+
+❯ Use the fixture tool.
+
+● Removing owned fixture files after confirmation
+  ⎿  $ T=$(pwd); test "$T" = /workspace/example && rm -f $T/*.jsonl $T/*.port
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Remove owned fixture files after confirmation
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ T=$(pwd); test "$T" = /workspace/example && rm -f $T/*.jsonl $T/*.port
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ Dangerous rm operation on possibly-empty variable path: $T/*.jsonl in `rm -f $T/*.jsonl $T/*.port` (rewrite it as
+ │ "${T:?}"/*.jsonl or use a literal path)
+ ⚠ Claude Code will automatically deny this request in 2:00, to avoid blocking progress on an unattended session
+
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

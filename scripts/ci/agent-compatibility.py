@@ -37,7 +37,7 @@ AGENTS = {
         member='package/claude',
         coverage='input, questions, approvals, trust, resume, clear, compaction and session-only model settings',
         timeout=900,
-        suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native',
+        suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_clear_context_native.NativeClearContext',
                 'test_compact_context_native', 'test_claude_settings_native']),
 }
