@@ -36,6 +36,23 @@ job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 
+A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
+[tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.
+`scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
+macOS.
+
+The CLI script also builds `examples/fake_agent.rs`, a native stand-in agent for
+terminal tests that need a real process rather than a script, such as those that
+will run under the Windows session host. It records every input byte with its
+framing (bracketed paste, ESC, Ctrl+C, Enter) and timing, renders fixture byte
+streams, sets and resets terminal modes, sends terminal queries and records their
+answers, runs hooks with agent-shaped JSON, writes its process ID and start time
+when ready, and follows a configured policy for signals and Windows console
+events; its header lists the options and the record format. Linked or copied under
+an agent's name, it takes its options from `FAKE_AGENT_*` variables and runs the
+hooks in that agent's configuration. `tests/test_fake_agent.py` checks it under a
+private tmux socket; `HGS_TEST_FAKE_AGENT` names another build.
+
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
 build directory; it never installs the package or enables services.

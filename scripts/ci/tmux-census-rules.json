@@ -1,0 +1,69 @@
+{
+ "comment": "Measured nondeterminism for scripts/ci/tmux-census.py compare --rules. Each rule covers a timing loop or teardown race that recordings of one unchanged commit showed; keep them narrow and cite the source. Collapse merges back-to-back repeats of read-only observation calls only, so commands that change state keep their exact order and count.",
+ "replace": [
+  {
+   "key": "^hgs pause ",
+   "calls": "(list-panes -a -F .*\\[exit 1;.*) stderr=\"(?:no current target|no server running on [^\"]*|server exited unexpectedly)\"$",
+   "with": "\\1 stderr=\"<server exiting>\"",
+   "why": "src/state/lifecycle.rs: pause polls panes until the agent exits; the last list-panes reaches tmux either while the empty server is shutting down (no current target) or after it exited (3 of 24 loaded repeats of test_pause on main), or while it exits (server exited unexpectedly: test_pause.Rename in 1 of 2 concurrent full recordings)"
+  },
+  {
+   "key": "^hgs --run \\d+ codex resume <UUID1>$",
+   "job": "^test_pause\\.Archive\\b",
+   "calls": " -t %\\d+ ",
+   "with": " -t %N ",
+   "why": "which resumed supervisor's pane races the test's kill-server (see the any_count rule) varies: %1 completed in one recording of main and raced in the next"
+  }
+ ],
+ "collapse": [
+  {
+   "key": "^hgs answer ",
+   "calls": "(?:list-panes -a -F |display-message -p -t |capture-pane -p (?:-e )?-t |^ps -p <PID\\d+> -o )",
+   "why": "src/state/questions.rs and codex_goal_resume.rs: answer polls the input state and screen (80 ms) until the provider confirms"
+  },
+  {
+   "key": "^hgs (?:clear|compact)-context ",
+   "calls": "(?:list-panes -a -F |display-message -p -t |capture-pane -p (?:-e )?-t |^ps -p <PID\\d+> -o )",
+   "why": "src/state/clear_context.rs and compact_context.rs: poll the chooser and input line every 40 ms until /clear or /compact is ready"
+  },
+  {
+   "key": "^hgs (?:effort|settings) ",
+   "calls": "(?:list-panes -a -F |display-message -p -t |capture-pane -p (?:-e )?-t |^ps -p <PID\\d+> -o )",
+   "why": "src/state/effort.rs: wait_until and the model picker poll the screen every 50 ms until the provider shows the change"
+  },
+  {
+   "key": "^hgs interrupt ",
+   "calls": "(?:list-panes -a -F |display-message -p -t |capture-pane -p (?:-e )?-t |^ps -p <PID\\d+> -o )",
+   "why": "src/state/interrupt.rs: settle_claude captures the screen every 60 ms until Claude shows the interruption"
+  },
+  {
+   "key": "^hgs pause ",
+   "calls": "(?:list-panes -a -F |display-message -p -t |capture-pane -p (?:-e )?-t |^ps -p <PID\\d+> -o )",
+   "why": "src/state/lifecycle.rs: pause lists panes every 100 ms until the agent exits"
+  }
+ ],
+ "optional": [
+  {
+   "key": "^hgs (?:__state hook|--run \\d+ .*)$",
+   "calls": "\\[exit 1;.*stderr=\"(?:no server running on |server exited unexpectedly|lost server)",
+   "why": "an agent's hook or supervisor can still run while the test kills its tmux server; tmux then fails at a timing-dependent call with one of these messages"
+  }
+ ],
+ "any_count": [
+  {
+   "key": "^hgs ls --local --json$",
+   "job": "^test_pause\\.GitContext$",
+   "why": "tests/test_pause.py GitContext polls hgs ls until the branch name changes"
+  },
+  {
+   "key": "^hgs __state hook$",
+   "job": "^(?:test_pause\\.(?:Archive|Lifecycle|Rename)|test_scoped_lifecycle\\.SessionActions)\\b",
+   "why": "the fake agents in these classes report hooks while the test stops them; whether the last hook runs depends on timing (also 303 to 305 hooks in loaded repeats of test_pause Archive and Lifecycle)"
+  },
+  {
+   "key": "^hgs --run \\d+ codex resume <UUID1>$",
+   "job": "^test_pause\\.Archive\\b",
+   "why": "a resumed supervisor either tags its pane before the test kills the server or races that kill (dropped by the optional rule): 10 or 11 complete ones in loaded repeats"
+  }
+ ]
+}

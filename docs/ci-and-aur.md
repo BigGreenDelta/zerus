@@ -289,6 +289,80 @@ coverage changes model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged.
 
+### Unix tmux census
+
+The Windows Phase 2 refactor moves every tmux call site behind a terminal backend
+and must leave Unix behaviour byte-for-byte unchanged. `scripts/ci/tmux-census.py`
+(Python 3, standard library only) records the tmux and `ps` calls that hgs makes
+while the shell and Python suites run, and compares two recordings. It is a local
+check, not a CI job. Record each tree with its own fresh debug build, on the same
+machine, tmux version and `ZERUS_PYTHON_JOBS`, without `HGS_*`, `TMUX` or
+`TMUX_PANE` in the environment:
+
+```sh
+census() {  # census OUT HGS: record both suites with that binary into OUT/
+  HGS_TEST_BIN="$2" python3 scripts/ci/tmux-census.py record --out "$1/shell" -- \
+    bash tests/test_hgs.sh </dev/null
+  HGS_TEST_BIN="$2" ZERUS_PYTHON_JOBS=8 python3 scripts/ci/tmux-census.py record \
+    --out "$1/python" -- python3 scripts/ci/python-tests.py </dev/null
+  python3 scripts/ci/tmux-census.py summarize "$1/shell" "$1/python" --out "$1.json"
+}
+census "$scratch/main" "$main_build/debug/hgs"      # in a checkout of main
+census "$scratch/branch" "$branch_build/debug/hgs"  # in the refactor checkout
+python3 scripts/ci/tmux-census.py compare "$scratch/main.json" "$scratch/branch.json" \
+  --rules scripts/ci/tmux-census-rules.json
+```
+
+`record` puts private `tmux` and `ps` shims first on `PATH`. `ZERUS_TMUX_CENSUS`
+names the record directory, and `ZERUS_TMUX_CENSUS_TMUX` and `ZERUS_TMUX_CENSUS_PS`
+name the real programs, resolved before the shims were added. Each call writes one
+JSON record: argv, working directory, whether `TMUX` and `TMUX_TMPDIR` are set
+(and whether that directory exists), `LC_ALL`, `LC_CTYPE`, `LANG` and `TZ`, what
+stdin, stdout and stderr are connected to (terminal, pipe, `/dev/null`, file), the
+nearest hgs ancestor process, the stdin bytes of `load-buffer ... -`, the exit
+status and stderr. The shim then behaves like the real program, with the same
+argv, environment, stdin, stdout, stderr and exit status; on Linux it undoes the
+`LC_CTYPE` that Python's C-locale coercion would otherwise pass on.
+`attach`, a `new-session` without `-d`, control mode and any call with a terminal
+stdin exec tmux directly instead. No other call has its stdin read. A test's own
+tmux wrapper reaches the shim through the path that the test resolved at import
+(`tests/test_input.py:73`), so each call is recorded once, with the wrapper's
+`-S` and `-f` kept apart from the command. Fakes that never run tmux, such as the
+paste stubs in `tests/test_hgs.sh`, stay outside the census; those tests check
+their own call logs.
+
+`summarize` groups the calls into one operation per hgs process, in call order,
+keyed by the test class and the normalized hgs argv. Temporary and home paths,
+UUIDs, digests, PIDs, timestamps and generated names become placeholders numbered
+within the operation, so equal values stay equal. tmux `%`/`$`/`@` IDs stay as
+they are: every test owns a fresh server, so they repeat between recordings, and a
+placeholder would hide a call that targets another pane. Hooks and supervisors
+started inside a test's tmux server belong to the class that uses that socket.
+Calls without an hgs ancestor, the fixtures' own tmux and `ps` calls, are listed
+apart and compared only with `--include-direct`. `summarize` warns about tmux
+calls that reach the recording user's default server (no `-S`, `-L`, `TMUX` or
+existing `TMUX_TMPDIR`); on 61d051f, `test_dsh_native` makes 32 such read-only
+calls through `hgs ls` and `hgs recovery worker`.
+
+`compare` exits 1 on any difference, and 2 when the two files come from different
+tool versions. It reports operations whose call sequences differ, what differs
+(order, argv, exit status, environment, stdio, stdin, stderr), and call shapes
+present in only one recording, including the calls of operations that an
+`optional` rule drops. `scripts/ci/tmux-census-rules.json`
+lists the nondeterminism measured on an unchanged commit, with the source of
+each rule: back-to-back repeats of read-only observations in timed poll loops
+(`answer`, `clear-context`, `compact-context`, `effort`, `settings`, `interrupt`,
+`pause`), the error of the last `pause` poll when it meets the exiting server,
+hooks and supervisors racing a test's `kill-server`, and tests that poll `hgs ls`
+or emit hooks a timing-dependent number of times. Rule kinds are `replace` (a
+pattern in a call's line), `optional` (drop an operation with a matching call),
+`collapse`, `unordered` and `any_count` (ignore how often a distinct sequence
+occurs); each applies to the operations whose key and test class match. Commands
+that change tmux state keep their exact order and count. Add a rule only after two
+recordings of one commit differ, never to absorb a difference that the refactor
+introduced. Both test runs must pass: a failing test changes the census. When the
+rules are in doubt, record main twice and compare the two recordings first.
+
 ### Windows client, desktop and portable zip
 
 The `windows-desktop` job runs on a standard `windows-2025` runner. It disables
@@ -362,6 +436,13 @@ WebEngine, which made earlier zips about 140 MB (345 MB unpacked), is not part o
 it. Only nightly assembly uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
 waits for this job like every other suite, so a Windows failure also holds back
 Dev, but Dev candidates carry no Windows build.
+
+From Linux or macOS, `scripts/ci/check-windows-target.sh` type-checks all targets
+for `x86_64-pc-windows-msvc` without the MSVC toolchain (`clippy` instead of the
+default `check` runs `cargo +1.85.0 clippy -D warnings`). It needs `rustup target add
+x86_64-pc-windows-msvc` for the toolchains it uses. Build scripts that compile C get a
+stand-in compiler that writes empty objects, since nothing is linked; only the
+Windows job builds and tests the real binary.
 
 On a Windows development PC the same steps run from Git Bash;
 [CONTRIBUTING.md](../CONTRIBUTING.md#windows) lists the requirements and commands.
