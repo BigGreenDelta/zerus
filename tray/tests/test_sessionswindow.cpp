@@ -4384,14 +4384,24 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
 
 void TestSessionsWindow::detailsPollingPreservesReadingPosition()
 {
-    SessionsWindow window(program()); window.resize(1150, 650); window.setFleet(fleet()); window.show();
+    SessionsWindow window(program()); window.resize(1150, 650); window.setFleet(fleet());
+    // The window's own inspections answer with the base fixture's shorter details in
+    // the same conversation. One arriving while the test waits replaces the document
+    // under test, and the kept position is clamped to its end. Inspect only on
+    // selection, then wait for an inspection of the test's own: HgsClient runs one per
+    // session, so once its reply is in, none is pending and no poll follows.
+    window.setDetailsPollForTests(500, 24 * 60 * 60 * 1000); window.show();
     auto *client = window.findChild<HgsClient *>(); QSignalSpy inspections(client, &HgsClient::inspectionReady);
-    window.showSession({}, "codex/hgs/dashboard"); QTRY_VERIFY(!inspections.isEmpty());
+    window.showSession({}, "codex/hgs/dashboard");
     auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
     window.findChild<QPushButton *>("toggleInspector")->setChecked(true); inspector->setCurrentIndex(1);
     auto *info = window.findChild<QTextBrowser *>("sessionInfo");
     auto *scroll = info->verticalScrollBar();
-    QTest::qWait(60); // Drain the fake backend's initial inspection and panel layout.
+    qsizetype issued = -1;
+    QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, "codex/hgs/dashboard") && (issued = inspections.size(), true)));
+    QTRY_VERIFY(std::any_of(inspections.cbegin() + issued, inspections.cend(), [](const QList<QVariant> &reply) {
+        return reply[0].toString().isEmpty() && reply[1].toString() == "codex/hgs/dashboard" && reply[3].toString().isEmpty();
+    }));
     QJsonObject totals{{"total", 4280764}, {"input", 4169472}, {"uncached_input", 64},
         {"cache_read", 3770489}, {"cache_write", 398919}, {"output", 111292},
         {"reasoning", 62310}, {"web_searches", 0}, {"web_fetches", 0}};
