@@ -805,7 +805,9 @@ void TestMessageComposer::modelSettingsFitNarrowColumn()
     composer.deliveryFinished("arch/session", false, "Check terminal before retrying", true); QTest::qWait(20);
     QVERIFY(status(composer)->isVisible()); QVERIFY(button->isHidden());
     const auto *retry = composer.findChild<QPushButton *>("allowMessageRetry"); QVERIFY(retry->isVisible());
-    QCOMPARE(composer.width(), 280); QCOMPARE(retry->geometry().center().y(), attach->geometry().center().y());
+    QCOMPARE(composer.width(), 280);
+    // Native button heights can differ by one pixel; the layout still centers the row.
+    QVERIFY(qAbs(retry->geometry().center().y() - attach->geometry().center().y()) <= 1);
     QVERIFY(retry->geometry().right() < composer.width()); QVERIFY(send->geometry().right() < composer.width());
 }
 
