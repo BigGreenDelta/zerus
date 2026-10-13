@@ -5,7 +5,11 @@
 # On Windows (Git Bash) the build uses MSVC and Ninja: the script re-enters
 # itself in the Visual Studio x64 developer environment, and QT_ROOT_DIR names
 # the Qt installation (the Windows CI job sets it).
+# An optional `build` or `test` argument runs only that half; CI saves its
+# compiler cache in between.
 set -euo pipefail
+phase=${1:-all}
+case "$phase" in all|build|test) ;; *) echo 'Usage: gui.sh [build|test]' >&2; exit 2 ;; esac
 windows=false
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=true ;; esac
 if [ "$windows" = true ] && [ -z "${VCINSTALLDIR:-}" ]; then
@@ -35,8 +39,13 @@ fi
 if command -v ccache >/dev/null 2>&1; then
     cmake_args+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 fi
-cmake "${cmake_args[@]}"
-cmake --build "$gui_build" --parallel "${ZERUS_BUILD_JOBS:-2}"
+if [ "$phase" != test ]; then
+    cmake "${cmake_args[@]}"
+    cmake --build "$gui_build" --parallel "${ZERUS_BUILD_JOBS:-2}"
+fi
+if [ "$phase" = build ]; then
+    exit 0
+fi
 export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
 export QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
 cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)

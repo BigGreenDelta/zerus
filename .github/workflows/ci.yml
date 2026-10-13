@@ -72,6 +72,7 @@ jobs:
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
       run_windows: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
+      save_caches: true
   review:
     name: PR and manual checks
     if: >-

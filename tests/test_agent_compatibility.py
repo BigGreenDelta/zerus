@@ -117,7 +117,7 @@ class AgentCompatibility(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
         self.assertNotIn('pull_request', workflow)
         self.assertNotIn('secrets.', workflow)
-        self.assertNotIn('actions/cache@', workflow)
+        self.assertNotRegex(workflow, r'actions/cache[@/]')
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('retention-days: 3', workflow)
 

@@ -19,16 +19,22 @@ on:
       run_windows:
         type: boolean
         default: false
+      # Only the trusted main checks in ci.yml, whose token can write caches,
+      # pass true. Every other caller restores caches and never saves them.
+      save_caches:
+        description: Save refreshed build caches
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   source:
-    name: Quick checks (source and Rust 1.85)
+    name: Resolve commit
     if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
     outputs:
       commit: ${{ steps.revision.outputs.commit }}
       run_linux: ${{ steps.revision.outputs.run_linux }}
@@ -58,6 +64,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf '### CI coverage\n\nCommit: %s\n\nQuick checks: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n\nWindows client/desktop/portable zip: %s\n' \
             "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
+
+  quick:
+    name: Quick checks (source and Rust 1.85)
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
       - run: python3 scripts/ci/check-source.py
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
@@ -81,14 +98,34 @@ jobs:
         run: JAVA_HOME="$JAVA_HOME_17_X64" "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
 
       - run: rustup toolchain install 1.85.0 --profile minimal
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Rust caches: the compiler identity and a monthly epoch precede the lock
+      # hash. A Cargo.lock change restores the previous target; a new month or
+      # compiler starts afresh, so stale dependency builds cannot accumulate.
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc +1.85.0 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust 1.85 cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: msrv-${{ runner.os }}-1.85-${{ hashFiles('Cargo.lock') }}
+          key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo +1.85.0 test --locked
+      - name: Save Rust 1.85 cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   relay:
     name: Rust relay (v1, PostgreSQL and connector contracts)
@@ -156,7 +193,6 @@ jobs:
     timeout-minutes: 35
     env:
       CARGO_TERM_COLOR: always
-      CARGO_BUILD_JOBS: 2
       HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -179,13 +215,21 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cli-${{ runner.os }}-${{ runner.arch }}-stable-${{ hashFiles('Cargo.lock') }}
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Keyless official DeepSeek contract fixture
         if: runner.os == 'Linux'
         shell: bash
@@ -193,6 +237,15 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
       - run: bash scripts/ci/cli.sh
+      - name: Save Rust cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Keyless native Codex compatibility matrix
         if: runner.os == 'Linux'
         run: python3 scripts/ci/agent-compatibility.py
@@ -204,8 +257,83 @@ jobs:
           path: artifacts/test-results
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
 
+  # Compiler caches use one entry per saving run and restore the newest by
+  # prefix. A save follows a successful build that compiled something, keeping
+  # only the entries this build used. Cache directories stay outside the
+  # workspace, so they never reach packages, the portable zip or artifacts.
   arch:
-    name: Arch desktop and package
+    name: Arch desktop
+    needs: source
+    if: needs.source.outputs.run_arch == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    env:
+      CCACHE_DIR: /home/user/.cache/ccache
+      CCACHE_MAXSIZE: 150M
+      # Ninja starts a suite's own sources while the libraries it links still build.
+      CMAKE_GENERATOR: Ninja
+      ZERUS_BUILD_JOBS: 4
+    steps:
+      - name: Bootstrap Git before checkout
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: Arch dependencies and unprivileged builder
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus
+          useradd -m user
+          chown -R user:user "$GITHUB_WORKSPACE"
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: arch-ccache-v1-${{ github.run_id }}
+          restore-keys: arch-ccache-v1-
+      - name: Reset ccache statistics
+        id: ccache-start
+        run: |
+          chown -R user:user /home/user
+          runuser -u user -- ccache -z
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Desktop build
+        id: build
+        run: runuser -u user -- bash scripts/ci/gui.sh build
+      - name: ccache statistics
+        id: ccache
+        if: ${{ !cancelled() }}
+        env:
+          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
+          STARTED: ${{ steps.ccache-start.outputs.started }}
+        run: |
+          runuser -u user -- ccache -sv
+          misses=$(runuser -u user -- ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
+          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
+            runuser -u user -- ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
+            echo save=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save ccache
+        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+      - name: Offscreen Qt suites
+        run: runuser -u user -- env QTWEBENGINE_DISABLE_SANDBOX=1 bash scripts/ci/gui.sh test
+      - name: Retain desktop test logs
+        if: always() && (github.event_name != 'schedule' || failure())
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arch-desktop-results
+          path: artifacts/test-results
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  arch-package:
+    name: Arch package
     needs: source
     if: needs.source.outputs.run_arch == 'true'
     runs-on: ubuntu-24.04
@@ -214,6 +342,8 @@ jobs:
       image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
     env:
       ZERUS_DEV_BUILD_NUMBER: ${{ github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEV_UPDATES_ENABLED == 'true' && github.run_number || '' }}
+      CCACHE_DIR: /home/user/.cache/ccache
+      CCACHE_MAXSIZE: 100M
     steps:
       - name: Bootstrap Git before checkout
         run: pacman -Syu --noconfirm --needed git
@@ -222,28 +352,79 @@ jobs:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Arch dependencies and unprivileged builder
+      # The makepkg ccache drop-in exists only in this disposable container; the
+      # published recipes are unchanged. Its compiler flags differ from the
+      # desktop build, so it has a cache family of its own.
+      - name: Arch packaging dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache namcap desktop-file-utils
+          grep -qx 'BUILDENV=(!distcc color !ccache check !sign)' /etc/makepkg.conf ||
+            { echo 'The default makepkg BUILDENV changed; review the ccache drop-in.' >&2; exit 1; }
+          echo 'BUILDENV=(!distcc color ccache check !sign)' > /etc/makepkg.conf.d/ccache.conf
           useradd -m user
           chown -R user:user "$GITHUB_WORKSPACE"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cache epoch
+        id: epoch
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /home/user/.cargo/registry
             /home/user/.cargo/git
-            /home/user/.cache/ccache
-          key: arch-${{ hashFiles('Cargo.lock', 'tray/CMakeLists.txt') }}
-      - name: Test desktop and build package
+          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: arch-package-ccache-v1-${{ github.run_id }}
+          restore-keys: arch-package-ccache-v1-
+      - name: Reset ccache statistics
+        id: ccache-start
         run: |
           chown -R user:user /home/user
-          runuser -u user -- env QTWEBENGINE_DISABLE_SANDBOX=1 bash scripts/ci/arch.sh
+          runuser -u user -- ccache -z
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Build and check package
+        id: build
+        run: runuser -u user -- bash scripts/build-arch-package.sh
+      - name: ccache statistics
+        id: ccache
+        if: ${{ !cancelled() }}
+        env:
+          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
+          STARTED: ${{ steps.ccache-start.outputs.started }}
+        run: |
+          runuser -u user -- ccache -sv
+          misses=$(runuser -u user -- ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
+          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
+            runuser -u user -- ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
+            echo save=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save ccache
+        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+      - name: Save Cargo registry
+        if: inputs.save_caches && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /home/user/.cargo/registry
+            /home/user/.cargo/git
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: Verify installed system bundle in disposable home
         shell: bash
         run: |
           set -euo pipefail
           pacman -U --noconfirm artifacts/*.pkg.tar.zst
           runuser -u user -- python3 scripts/check-installed-package.py 2>&1 | tee artifacts/test-results/installed-package.log
+      # Dev, nightly and release assembly download this artifact from the same run.
       - name: Retain Arch package and test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -260,17 +441,51 @@ jobs:
     timeout-minutes: 45
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
+      CCACHE_MAXSIZE: 100M
+      CMAKE_GENERATOR: Ninja
+      ZERUS_BUILD_JOBS: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: brew install cmake qt qtwebengine qtmultimedia ccache
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - run: brew install cmake ninja qt qtwebengine qtmultimedia ccache
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/ccache
-          key: mac-desktop-${{ runner.arch }}-${{ hashFiles('tray/CMakeLists.txt') }}
-      - run: bash scripts/ci/gui.sh
+          key: mac-desktop-ccache-v1-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: mac-desktop-ccache-v1-${{ runner.arch }}-
+      - name: Reset ccache statistics
+        id: ccache-start
+        run: |
+          ccache -z
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Desktop build
+        id: build
+        run: bash scripts/ci/gui.sh build
+      - name: ccache statistics
+        id: ccache
+        if: ${{ !cancelled() }}
+        env:
+          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
+          STARTED: ${{ steps.ccache-start.outputs.started }}
+        run: |
+          ccache -sv
+          misses=$(ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
+          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
+            ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
+            echo save=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save ccache
+        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+      - name: Offscreen Qt suites
+        run: bash scripts/ci/gui.sh test
       - name: Retain desktop test logs
         if: always() && (github.event_name != 'schedule' || failure())
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -294,6 +509,12 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_INCREMENTAL: 0
       ZERUS_BUILD_JOBS: 4
+      # ccache caches MSVC compiles without /Zi, as in Release. Depend mode reads
+      # the includes from Ninja's /showIncludes instead of preprocessing again.
+      # No base_dir: it would make __FILE__ relative, and suites locate their
+      # fixtures from it; the runner's workspace path never changes anyway.
+      CCACHE_DEPEND: 1
+      CCACHE_MAXSIZE: 500M
     steps:
       # Before checkout: the runner's Git converts text files to CRLF by default,
       # which changes fixtures, scripts and embedded text.
@@ -309,13 +530,21 @@ jobs:
         with:
           python-version: '3.13.15'
       - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.85.0 --profile minimal --component clippy
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cli-${{ runner.arch }}-stable-${{ hashFiles('Cargo.lock') }}
+          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       # The runner gives every step a synchronous pipe as stdin. Windows OpenSSH
       # (and the fake client, which refuses it) must never inherit it, so steps
       # that start hgs, ssh or the desktop app read from /dev/null.
@@ -329,17 +558,26 @@ jobs:
           cargo +1.85.0 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
           cargo build --release --locked
           cargo build --locked --example fake_ssh
+      - name: Save Rust cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Windows client integration tests
         run: |
           HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
           HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
           export HGS_TEST_BIN HGS_TEST_FAKE_SSH
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
-      # The cache follows the caller's token: PR and manual runs restore it but
-      # cannot save it. The key covers the Qt release, modules and installer lock.
+      # Only trusted main checks save it; PR, manual and candidate runs restore
+      # it. The key covers the Qt release, modules and installer lock.
       - name: Restore Qt 6.10.3 for MSVC with WebEngine
         id: qt-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/Qt
           key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-${{ hashFiles('scripts/ci/aqt-requirements.txt') }}
@@ -361,8 +599,61 @@ jobs:
           qt=$(cygpath -w "$RUNNER_TEMP/Qt/6.10.3/msvc2022_64")
           test -f "$(cygpath -u "$qt")/bin/windeployqt.exe"
           echo "QT_ROOT_DIR=$qt" >> "$GITHUB_ENV"
-      - name: Desktop build and offscreen Qt suites
-        run: bash scripts/ci/gui.sh </dev/null
+      # The official ccache release, verified like the other downloaded tools
+      # (the digest matches its minisign-signed archive). gui.sh adds the
+      # compiler launcher when ccache is on PATH.
+      - name: Pinned ccache 4.14.1
+        run: |
+          cd "$(cygpath -u "$RUNNER_TEMP")"
+          curl -fsSLO https://github.com/ccache/ccache/releases/download/v4.14.1/ccache-4.14.1-windows-x86_64.zip
+          echo '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4  ccache-4.14.1-windows-x86_64.zip' | sha256sum --check --strict
+          python -m zipfile -e ccache-4.14.1-windows-x86_64.zip .
+          cygpath -w "$PWD/ccache-4.14.1-windows-x86_64" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$(cygpath -w "$RUNNER_TEMP/ccache")" >> "$GITHUB_ENV"
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: windows-ccache-v1-${{ runner.arch }}-qt6.10.3-${{ github.run_id }}
+          restore-keys: windows-ccache-v1-${{ runner.arch }}-qt6.10.3-
+      - name: Reset ccache statistics
+        id: ccache-start
+        run: |
+          ccache -z
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Desktop build
+        id: build
+        run: bash scripts/ci/gui.sh build </dev/null
+      - name: ccache statistics
+        id: ccache
+        if: ${{ !cancelled() }}
+        env:
+          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
+          STARTED: ${{ steps.ccache-start.outputs.started }}
+        run: |
+          ccache -sv
+          misses=$(ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
+          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
+            ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
+            echo save=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save ccache
+        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+      # Saved only after the desktop build has used it, so an incomplete
+      # installation never becomes the exact-key entry every later run restores.
+      - name: Save Qt 6.10.3
+        if: inputs.save_caches && steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
+      - name: Offscreen Qt suites
+        run: bash scripts/ci/gui.sh test </dev/null
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
@@ -382,7 +673,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, relay, cli, arch, mac-desktop, windows-desktop]
+    needs: [source, quick, relay, cli, arch, arch-package, mac-desktop, windows-desktop]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -398,9 +689,11 @@ jobs:
           results = json.loads(os.environ['RESULTS'])
           selected = {
               'source': True,
+              'quick': True,
               'relay': True,
               'cli': json.loads(os.environ['RUN_CLI']),
               'arch': json.loads(os.environ['RUN_ARCH']),
+              'arch-package': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
           }
