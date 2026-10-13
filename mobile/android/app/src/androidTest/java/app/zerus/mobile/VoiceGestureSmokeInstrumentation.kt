@@ -52,7 +52,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             check(runBlocking { preStopped.capture(120_000) { progressCalls++ } }.isEmpty())
             check(progressCalls == 0 && !SpeechMicrophoneAccess.granted(targetContext))
             runGestures()
-            result.putString("stream", "Voice gesture smoke passed: physical hold/release/left cancel, permission grant after release, editor/send/attachment locks, text/attachment action switching, ACTION_CANCEL, keyboard-stop race, navigation and background retention; no uploads or automatic sends.\n")
+            result.putString("stream", "Voice gesture smoke passed: physical hold/release/left cancel, permission grant after release, editor/send/attachment locks, text/attachment action switching, ACTION_CANCEL, keyboard-stop race, navigation/background retention, accessible Record/Stop and focused Enter activation; no uploads or automatic sends.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Voice gesture smoke failed: ${error.stackTraceToString()}\n")
@@ -236,14 +236,27 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             check(!lockedEditor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Must not enter the recording draft")
             }))
-            var attach = node("Attach files")
-            while (attach.isEnabled && !attach.isClickable) attach = checkNotNull(attach.parent)
-            check(!attach.isEnabled) { "Recording left the attachment picker enabled" }
+            screenshot("voice-gesture-holding.png")
+            check(main { model.speech.recording }) {
+                main { "Capture stopped during locked-editor checks: busy=${model.speech.busy}, gesture=${model.speech.gestureCaptureId}, preview=${model.speech.draft != null}, notice=${model.speech.notice}" }
+            }
+            // Compose can expose the icon's click semantics separately from the
+            // disabled IconButton. Follow the entire ownership chain, not merely
+            // the first node with isClickable, to locate the disabled control.
+            var attach: AccessibilityNodeInfo? = node("Attach files")
+            val attachAncestry = mutableListOf<String>()
+            while (attach != null && attach.isEnabled) {
+                attachAncestry += "${attach.className}(description=${attach.contentDescription}, clickable=${attach.isClickable}, enabled=${attach.isEnabled})"
+                attach = attach.parent?.also { it.refresh() }
+            }
+            check(attach != null) {
+                main { "Recording left the attachment picker enabled: $attachAncestry; recording=${model.speech.recording}, busy=${model.speech.busy}, gesture=${model.speech.gestureCaptureId}" }
+            }
+            check(!attach.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Disabled attachment control accepted activation" }
             var pickerOpened = false
             main { model.beginAttachmentPick(target) { pickerOpened = true } }
             runBlocking { main { model.sendMessage(target) }.join() }
             check(!pickerOpened && main { model.pickerDraft == null && !model.attachmentPreparing && model.draft(target).text.isEmpty() })
-            screenshot("voice-gesture-holding.png")
             touch(held, MotionEvent.ACTION_UP)
             val released = preview("release retained preview")
             check(released.machineId.isEmpty() && released.profileId.isEmpty())
@@ -341,6 +354,47 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             node("Voice input")
             check(main { model.speech.draft == pinned && !model.speech.busy && model.draft(target).text.isEmpty() })
             discard()
+
+            // Accessibility activation is explicit start/stop, not an invented hold.
+            val accessibleEditor = editor()
+            tap("Voice input")
+            await("accessible recording") { model.speech.recording && model.speech.seconds >= 1 }
+            check(main { model.speech.gestureCaptureId == null && model.speech.activeCaptureId != null })
+            waitForIdleSync()
+            check(accessibleEditor.refresh() && accessibleEditor.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT })
+            check(uiNode("accessible stop action") { it.contentDescription?.toString() == "Stop recording" }
+                .performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            preview("accessible stop retained preview")
+            discard()
+
+            // Focused hardware activation travels through Android's event dispatcher.
+            // Holding Enter must neither start early nor toggle the new recording off.
+            check(node("Voice input").performAction(AccessibilityNodeInfo.ACTION_FOCUS))
+            uiNode("focused voice action") { it.contentDescription?.toString() == "Voice input" && it.isFocused }
+            val keyboardEditor = editor()
+            fun enter(action: Int, downTime: Long, repeat: Int = 0) {
+                val event = KeyEvent(downTime, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_ENTER,
+                    repeat, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+                check(uiAutomation.injectInputEvent(event, true))
+            }
+            val startKey = SystemClock.uptimeMillis()
+            enter(KeyEvent.ACTION_DOWN, startKey)
+            enter(KeyEvent.ACTION_DOWN, startKey, repeat = 1)
+            check(main { !model.speech.busy })
+            enter(KeyEvent.ACTION_UP, startKey)
+            await("focused Enter recording") { model.speech.recording && model.speech.seconds >= 1 }
+            val keyboardCapture = main { model.speech.activeCaptureId }
+            check(keyboardCapture != null && main { model.speech.gestureCaptureId == null })
+            waitForIdleSync()
+            check(keyboardEditor.refresh() && keyboardEditor.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT })
+            val stopKey = SystemClock.uptimeMillis()
+            enter(KeyEvent.ACTION_DOWN, stopKey)
+            enter(KeyEvent.ACTION_DOWN, stopKey, repeat = 1)
+            check(main { model.speech.recording && model.speech.activeCaptureId == keyboardCapture })
+            enter(KeyEvent.ACTION_UP, stopKey)
+            preview("focused Enter retained preview")
+            discard()
+            check(main { model.draft(target).text.isEmpty() && model.draft(target).attachments.isEmpty() })
             noDelivery()
         } finally {
             profilesGate.countDown()
