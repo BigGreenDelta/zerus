@@ -210,14 +210,23 @@ event (`src/state/hooks.rs:283`).
   `CSI c`, `CSI > c` and OSC 10/11 from its screen model, removes them from the
   stream sent to attached clients, and drops replies coming from clients, so a query
   gets exactly one answer whether zero or several clients are attached.
-- Spike S1 records which queries and mode changes inbox and bundled ConPTY forward
-  and decides whether the bundled pair is required.
+- Spike S1 (Windows 11 25H2, pair 1.25.260930003) found that both backends forward
+  DECSET 2004, 1049, 1 and the mouse modes and add their own `?9001h` and `?1004h`.
+  Inbox ConPTY answers DA1 and DSR CPR itself and never forwards OSC 10/11; the
+  bundled pair forwards DA1, CPR, OSC 10/11, XTVERSION, `CSI ? u` and `CSI ? 996 n`
+  and sends its own DA1 at start. The host therefore answers, from the screen model,
+  exactly the queries tmux answers and stays silent on the rest, as tmux does. The
+  bundled pair stays first: on older inbox builds mode passthrough is missing, and
+  only the pair gives the host every query.
 
 ### D7. Screen model and capture
 
-Each session feeds its pseudoconsole output into a `vt100` 0.16 parser (MIT,
-MSRV 1.70; adds `vte`, `arrayvec`, `unicode-width` to the lockfile). hgs owns the
-serializer that answers what `tmux capture-pane -p` and `-p -e` answer today:
+Each session feeds its pseudoconsole output into hgs's own screen model
+(`src/screen`, merged in M2), which follows tmux's grid, input and reflow logic;
+its only dependency is `unicode-width`. `vt100` 0.16 was evaluated and rejected
+because it cannot store what tmux prints (`31m` versus `38;5;1m`, strikethrough,
+bold with dim, tab cells, a line's allocated length). The model answers what
+`tmux capture-pane -p` and `-p -e` answer today:
 
 - visible screen only, every row, trailing spaces trimmed;
 - one character per wide glyph while the cursor counts cells;
@@ -227,12 +236,13 @@ serializer that answers what `tmux capture-pane -p` and `-p -e` answer today:
 - pane facts: size, cursor, alternate screen, bracketed paste (DECSET 2004),
   application cursor keys, mouse modes.
 
-`vt100`'s own `rows_formatted` is not used: it emits erase and cursor sequences that
-the parsers reject (`src/state/question_terminal.rs:38-80`). A differential test on
-Linux feeds the same byte streams to tmux 3.7 and to the model and compares both
-capture forms byte for byte; it runs in the existing Linux CLI job. The corpus
-includes raw ConPTY streams recorded on Windows in spike S1, so the model is proven on
-the bytes it will actually see. On attach the host repaints the client from the model.
+A differential test (`tests/test_screen_model.py`) feeds the same byte streams to an
+isolated tmux and to the model and compares both capture forms, 22 pane formats and
+query replies byte for byte, plus each stream's repaint; it runs in the CLI jobs on
+tmux 3.7c and Homebrew tmux. The corpus includes the raw ConPTY streams of Claude
+Code, Codex and Kimi recorded on Windows in spike S1
+(`tests/fixtures/screen-streams/`), so the model is proven on the bytes it will
+actually see. On attach the host repaints the client from the model.
 
 ### D8. Launch without a login shell
 
@@ -254,10 +264,13 @@ login PATH applies and the supervisor becomes the pane's root process. On Window
 - `--run` keeps its role: it is the supervisor, the pane's root process (`pane_pid`);
   it installs hooks, writes the record and starts the agent;
 - the supervisor is created suspended, assigned to the session job (D9), then resumed;
-- the environment adds `TERM=xterm-256color` and removes `COLORTERM`, and sets
-  `FORCE_COLOR=2` for Node agents only if spike S1 shows they otherwise emit
-  truecolour: the question parsers match exact 256-colour indices
-  (`src/state/claude_question.rs:140,156`);
+- the environment adds `TERM=xterm-256color` and removes `COLORTERM`. Spike S1
+  showed that Claude Code 2.1.296 and Kimi Code 2.1.1 emit truecolour on Windows
+  even with `FORCE_COLOR=2` (Codex 0.162 emits 256-colour indices), so the host sets
+  no `FORCE_COLOR`. The question parsers match exact 256-colour indices
+  (`src/state/claude_question.rs:140,156`); on Windows they compare colours after
+  mapping truecolour to the xterm-256 index (S1: `#999999` is 246), checked against
+  the S3 dialog fixtures in M4;
 - `HGS_HOST_PANE` and `HGS_HOST_SESSION` replace `TMUX_PANE` and the session name
   lookup (`src/state/lifecycle.rs:95-117`); the nested guard checks them as it
   checks `$TMUX` today.
@@ -317,8 +330,23 @@ bracketed paste on. On Windows the supervisor answers `input_state` with:
 - the tracked agent process alive and inside the session job.
 
 The host adds bracketed paste from its screen model, and the existing agent-specific
-composer checks run unchanged. This evidence is provisional until spike S2 (which
-includes the editor and crashed-agent cases) confirms it.
+composer checks run unchanged.
+
+Spike S2 probes support this evidence on both backends:
+- At an idle composer, line, echo and processed input are off and only the agent is
+  attached (Claude Code and Kimi set `ENABLE_VIRTUAL_TERMINAL_INPUT`, Codex reads
+  console input records without it).
+- An editor that Claude Code opened adds `cmd.exe` and the editor to the process
+  list while the input mode can stay raw.
+- After an agent crash the raw mode lingers and only the supervisor stays
+  attached, so the alive-and-attached check is required.
+- Bracketed paste with LF or CR arrives as one prompt in all three agents, Enter
+  180 ms after a paste submits, and a lone ESC and Ctrl+S are harmless. Ctrl+C
+  clears the composer in Claude Code and Kimi but not in Codex 0.162 (compare
+  with Linux before relying on it).
+
+The exact rule for other attached processes (agent-launched MCP servers) is settled
+with the host prototype after M3.
 
 ### D11. Stopping, pausing and terminating
 
@@ -339,7 +367,10 @@ includes the editor and crashed-agent cases) confirms it.
   pseudoconsole (`CTRL_CLOSE_EVENT` with its 5 s system limit), then terminates the
   session job. The supervisor's close handler blocks for at most about 4 s until its
   completion record is written.
-- Spike S5 records how each agent reacts and that resume works afterwards.
+- Spike S5 probes: `CTRL_BREAK_EVENT` to the supervisor's group ends Claude Code
+  (exit 0), Codex and Kimi (`0xC000013A`) within 60 ms while the supervisor
+  survives; `ClosePseudoConsole` ends them with `0xC000013A` (Claude Code 129, Kimi 1
+  without a supervisor); resume after either keeps the conversation for all three.
 
 ### D12. Hooks on Windows
 
@@ -472,6 +503,13 @@ spike records its results in Beads and adjusts this document.
 | S5 | probe now, confirmed after M3 | Each agent's reaction to `CTRL_BREAK_EVENT` and `CTRL_CLOSE_EVENT`; resume after both. | D11 |
 | S6 | after M3 | Hook forms per agent version: Claude exec form and Git Bash form, Codex Windows command, Kimi command shell; hook latency with real-time scanning. | D12 |
 | S7 | after M3 | Start cost of `hgs.exe` and hooks under real-time scanning; SQLite journal writes within the 5 s hook timeout. | D12, M4 |
+
+Status on 2026-10-13: S1 is done (results in D6, D7, D8). S2 and S5 probes are done
+(results in D10, D11) and are confirmed through the host after M3. S4 is folded into
+the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe` starts
+in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook takes
+about 55 ms; that PC has no real-time scanning, so the scanning half of S7 needs
+another machine. S3 and S6 are pending.
 
 D10, D11 and D12 are provisional until their spikes are confirmed.
 
