@@ -349,6 +349,7 @@ mod native {
             pipe::{self, ConnectError, PipeStream},
             protocol::{
                 self, Done, ErrorBody, ErrorCode, Hello, HelloAnswer, Kind, Op, Response, Role,
+                PROTOCOLS,
             },
             token,
         },
@@ -403,6 +404,14 @@ mod native {
                 Ok(HelloAnswer::Refused(error)) => return Err(error.message),
                 Err(error) => return Err(format!("invalid session host hello: {error}")),
             };
+            // The host chooses from the range this hello offered; any other
+            // major is a host this build cannot talk to.
+            if !(PROTOCOLS.min..=PROTOCOLS.max).contains(&hello.protocol) {
+                return Err(format!(
+                    "the session host chose protocol {}, which hgs {VERSION} does not speak",
+                    hello.protocol
+                ));
+            }
             Ok(Some(Self {
                 stream,
                 hello,
@@ -511,6 +520,8 @@ mod native {
         };
         let pid = connection.hello.pid;
         // Pinned first, so a reused process ID is never mistaken for the host.
+        // The host has just answered, so a process that cannot be pinned is not
+        // known to be gone: its exit is then never reported.
         let pinned = platform::PinnedProcess::pin(pid, &connection.hello.created).ok();
         match connection.call::<Done>(Op::StopHost) {
             Ok(Done {}) => {}
@@ -530,8 +541,9 @@ mod native {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Some(process) => break !process.alive(),
-                // Already gone before it could be pinned.
-                None => break true,
+                // Its identity did not match the hello or it could not be
+                // opened: whether it exited is unknown.
+                None => break false,
             }
         };
         if json {
