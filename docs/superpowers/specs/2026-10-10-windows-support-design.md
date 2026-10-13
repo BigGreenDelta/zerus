@@ -1,8 +1,10 @@
 # Windows support
 
-Status: Phase 1 implemented, pending review, 2026-10-11 (approved direction
-2026-10-10). Tracking: `zerus-ziq3`. Decisions and deviations made during the
-implementation are in [Implementation notes](#implementation-notes-2026-10-11).
+Status: Phase 1 shipped in nightly builds (approved direction 2026-10-10,
+implemented 2026-10-11). Tracking: `zerus-ziq3`. Decisions and deviations made
+during the implementation are in
+[Implementation notes](#implementation-notes-2026-10-11). Phase 2 has its own spec:
+[Windows Phase 2: native session host](2026-10-13-windows-native-host-design.md).
 
 This document is the starting point for Windows support. It records the owner's
 decisions, the verified state of the code on Windows, prior art and an ordered list
@@ -152,8 +154,10 @@ Windows as a first-class platform. Source reviewed at `f307391` (2026-10-09).
   running from the install directory, does not touch it. This matches the Zerus
   rule that GUI updates never restart agents.
 - **Processes started over SSH die with the session.** Windows OpenSSH places
-  session processes in a job. Orca launches long-lived hosts with
-  `CREATE_BREAKAWAY_FROM_JOB` and falls back to WMI process creation.
+  session processes in a job that allows breakaway. Orca launches long-lived hosts
+  with `CREATE_BREAKAWAY_FROM_JOB`. It once fell back to WMI process creation, but
+  removed that: WMI is refused to a standard user's network logon
+  (`stablyai/orca@5e9489c0`, `src/shared/windows-breakaway-launcher.ts`).
 - **Hooks.** Agent hooks post to an HTTP server on `127.0.0.1`. Claude Code on
   Windows runs hooks through Git Bash, so hook commands branch on `$OSTYPE`. Orca
   measured Kaspersky denying `powershell -WindowStyle Hidden -EncodedCommand` at
@@ -305,8 +309,8 @@ already known.
   Process inspection uses Toolhelp32 and process handles. File identity uses
   `GetFileInformationByHandle`.
 - **Survival:**
-  - The host breaks away from the SSH session job (`CREATE_BREAKAWAY_FROM_JOB`,
-    with WMI as a fallback) when started over SSH.
+  - The host breaks away from the SSH session job (`CREATE_BREAKAWAY_FROM_JOB`;
+    WMI is no fallback, see Prior art) when started over SSH.
   - The host executable is staged outside the GUI install directory, so a GUI
     update never stops agents.
   - Like the tmux server today, the host survives GUI restarts.
@@ -394,8 +398,9 @@ refine or change the plan:
   `win64_msvc2022_64` with `aqt install-qt` from a hash-locked closure
   (`scripts/ci/aqt-requirements.txt`) on a pinned CPython 3.13, instead of
   `install-qt-action`.
-- **Minimum Windows 10 1903.** The manifest sets UTF-8 as the process code page,
-  which needs 1903. The pseudoconsole API (1809) is looked up at run time.
+- **Minimum Windows 10 1903.** The `hgs-tray.exe` manifest sets UTF-8 as the
+  process code page, which needs 1903. `hgs.exe` has no manifest yet (Phase 2 adds
+  one). The pseudoconsole API (1809) is looked up at run time.
 - **`local_sessions` key.** The local element of `hgs ls --json` on Windows is a
   control-only box with `"local_sessions": false`, empty `projects` and `sessions`,
   and metrics without load averages. The key is emitted only when false, so Unix
