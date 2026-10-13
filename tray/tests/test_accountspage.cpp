@@ -393,7 +393,9 @@ void TestAccountsPage::launchCarriesAccountForSelectedMachine()
     auto *machine = dialog.findChild<QComboBox *>("launchComputer"); QVERIFY(machine);
     machine->setCurrentIndex(machine->findData(QString()));
     QTRY_COMPARE(accounts->count(), 6); QCOMPARE(accounts->currentRow(), 0);
-    QCOMPARE(accounts->item(1)->data(Qt::UserRole).toString(), "work-local");
+    // The six placeholder rows can match the eventual catalog's row count.
+    // Wait for the selected computer's real profile before inspecting order.
+    QTRY_COMPARE(accounts->item(1)->data(Qt::UserRole).toString(), "work-local");
     accounts->setCurrentRow(launchAccountRow(accounts,"work-local")); QTRY_VERIFY(start->isEnabled());
     QSignalSpy launched(&dialog, &NewSessionDialog::launchRequested); start->click();
     QTRY_COMPARE(launched.size(), 1); QCOMPARE(launched[0][0].toString(), ""); QCOMPARE(launched[0][4].toString(), "work-local");
