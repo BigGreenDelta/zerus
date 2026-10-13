@@ -18,7 +18,10 @@ parallel fresh processes and builds a release binary. Classes larger than twelve
 tests run as several jobs unless they share a class fixture, slowest first. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
 headlessly in parallel; `test_sessionswindow` runs as ten shards of its test
-functions. `ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16
+functions. Tray sources compile once, into the `hgs-tray-*` static libraries that
+the application and the suites link: a new suite links the lowest library that
+covers its code instead of listing `tray/src` files, which fails configuration.
+`ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16
 Python and 8 Qt jobs, never more than the CPU count; `1` runs them one after
 another). Test logs and Python job durations live in ignored
 `artifacts/test-results/`. Set `ZERUS_BUILD_JOBS` to limit desktop build
