@@ -8,19 +8,23 @@
 :root {
   --font: "Ubuntu Sans", "Ubuntu", "Noto Sans", "Cantarell", system-ui, sans-serif;
   --mono: "Ubuntu Sans Mono", "Ubuntu Mono", "DejaVu Sans Mono", ui-monospace, monospace;
-  --dur: 200ms; --ease: cubic-bezier(.2, .7, .2, 1);
+  --dur: 180ms; --ease: cubic-bezier(.2, .7, .2, 1);
 }
 .window, body {
-  --bg: #161b21; --surface: #1c2229; --raised: #222a33; --border: #333c47; --line: #262e37; --fg: #e8edf4; --muted: #a2adbc; --faint: #6f7b8a;
+  --bg: #161b21; --surface: #1c2229; --raised: #222a33; --sunken: #12171c; --border: #333c47; --line: #262e37; --fg: #e8edf4; --muted: #a2adbc; --faint: #6f7b8a;
   --accent: #8bdfc0; --accent-bg: #1f3a30; --accent-line: #3d6b5b; --hover: #2b3540; --selected: #233d35;
   --amber: #ffda76; --amber-bg: #3a3320; --amber-line: #6b5a24; --red: #f4ab9b; --red-bg: #3b2424;
-  --chip: #2b3540; --chip-fg: #c4ccd6; --shadow: 0 18px 44px rgba(0,0,0,.55);
+  --chip: #2b3540; --chip-fg: #c4ccd6; --shadow: 0 22px 60px rgba(0,0,0,.6);
+  --c-Backlog: #8b96a3; --c-Queue: #9cc3ff; --c-Design: #c4a7ff; --c-Build: #8bdfc0; --c-Review: #6fd3e0;
+  --c-YourCall: #ffda76; --c-Done: #7f8c99; --c-Icebox: #6f7b8a;
 }
 .window.light {
-  --bg: #ffffff; --surface: #f4f6f8; --raised: #ffffff; --border: #d5dbe2; --line: #e7ebef; --fg: #1c2229; --muted: #627082; --faint: #8b96a3;
+  --bg: #ffffff; --surface: #f4f6f8; --raised: #ffffff; --sunken: #f7f9fa; --border: #d5dbe2; --line: #e7ebef; --fg: #1c2229; --muted: #627082; --faint: #8b96a3;
   --accent: #167357; --accent-bg: #e7f3ed; --accent-line: #a5c8b8; --hover: #eef2f5; --selected: #e7f3ed;
   --amber: #8a5a00; --amber-bg: #fff5d6; --amber-line: #e6c56a; --red: #a13224; --red-bg: #fbe9e6;
-  --chip: #eef1f4; --chip-fg: #4a5563; --shadow: 0 18px 44px rgba(20,30,40,.18);
+  --chip: #eef1f4; --chip-fg: #4a5563; --shadow: 0 22px 60px rgba(20,30,40,.25);
+  --c-Backlog: #6b7682; --c-Queue: #2d6fd6; --c-Design: #7a4fd1; --c-Build: #167357; --c-Review: #0f8a99;
+  --c-YourCall: #a06a00; --c-Done: #6b7682; --c-Icebox: #8b96a3;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: #0f1317; color: var(--fg); font: 13px/1.35 var(--font); }
@@ -28,9 +32,9 @@ body { padding: 26px 24px 60px; }
 button, input, select { font: inherit; color: inherit; }
 
 /* Page chrome */
-.intro, .notes { max-width: 1600px; margin: 0 auto; }
+.intro, .notes, .sources { max-width: 1600px; margin: 0 auto; }
 h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
-.intro p { color: var(--muted); margin: 0 0 14px; max-width: 1000px; line-height: 1.55; }
+.intro p { color: var(--muted); margin: 0 0 14px; max-width: 1040px; line-height: 1.55; }
 .controls { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin-bottom: 14px; }
 .ctl { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
@@ -38,12 +42,13 @@ h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button[aria-pressed="true"] { background: var(--selected); color: var(--accent); }
 .seg button:hover:not([aria-pressed="true"]) { background: var(--hover); color: var(--fg); }
+.seg.small button { padding: 4px 9px; font-size: 12px; }
 .log { color: var(--muted); font-size: 12px; min-height: 18px; margin: 0 auto 12px; max-width: 1600px; }
 .log b { color: var(--fg); font-weight: 600; }
 .frame { overflow-x: auto; padding-bottom: 8px; }
 
 /* Window */
-.window { margin: 0 auto; height: 820px; display: flex; overflow: hidden; position: relative; background: var(--bg); color: var(--fg);
+.window { margin: 0 auto; height: 840px; display: flex; overflow: hidden; position: relative; background: var(--bg); color: var(--fg);
   border: 1px solid #2a323b; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
 .rail { width: 56px; flex: none; background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; align-items: center; padding: 10px 7px; gap: 8px; }
@@ -79,52 +84,71 @@ h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
 .tabs span { padding: 6px 10px 8px; color: var(--muted); }
 .tabs span.on { color: var(--fg); border-bottom: 2px solid var(--accent); }
 .content { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; position: relative; }
-.row2 { flex: 1; min-height: 0; display: flex; gap: 10px; }
 
 /* Shared pieces */
 .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .sel-proj, .filter { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 6px 10px; }
-.sel-proj { display: inline-flex; align-items: center; gap: 8px; min-width: 140px; }
+.sel-proj { display: inline-flex; align-items: center; gap: 8px; min-width: 130px; }
 .sel-proj .dot { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; }
-.filter { flex: 1; min-width: 120px; max-width: 240px; outline: none; }
+.filter { flex: 1; min-width: 110px; max-width: 220px; outline: none; }
 .filter:focus { border-color: var(--accent-line); }
-.strip { display: inline-flex; align-items: center; gap: 8px; border-radius: 8px; padding: 4px 10px; min-height: 30px; }
+.strip { display: inline-flex; align-items: center; gap: 8px; border-radius: 8px; padding: 4px 10px; min-height: 30px; flex-wrap: wrap; }
 .strip.call { background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber); }
 .strip.queue { background: var(--accent-bg); border: 1px solid var(--accent-line); color: var(--accent); }
 .strip b { font-weight: 650; }
 .link { cursor: pointer; font-weight: 600; }
 .link:hover { text-decoration: underline; }
 .pick { border: 1px solid var(--amber-line); border-radius: 6px; padding: 2px 8px; cursor: pointer; color: var(--fg); background: transparent; }
-.ref { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.ref { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 .chip { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; background: var(--chip); color: var(--chip-fg); white-space: nowrap; }
 .chip.blocked { color: var(--amber); }
 .prio { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; white-space: nowrap; }
 .prio.P0 { background: var(--red-bg); color: var(--red); }
 .prio.P1 { background: var(--amber-bg); color: var(--amber); }
 .prio.P2 { background: var(--chip); color: var(--chip-fg); }
-.mk { font-size: 11px; width: 14px; flex: none; text-align: center; display: inline-block; }
+.mk { font-size: 11px; width: 13px; flex: none; text-align: center; display: inline-block; }
 .mk.working { color: var(--accent); } .mk.reviewed { color: var(--accent); } .mk.rework { color: var(--red); } .mk.conflict { color: var(--amber); } .mk.call { color: var(--amber); font-weight: 700; }
-.sess { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sess::before { content: "●"; margin-right: 4px; font-size: 9px; color: var(--faint); }
 .sess.mine { color: var(--accent); } .sess.mine::before { color: var(--accent); }
-.empty { color: var(--faint); font-size: 12px; padding: 8px 12px; }
+.empty { color: var(--faint); font-size: 12px; padding: 6px 10px; }
 .toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--raised); border: 1px solid var(--amber-line);
-  color: var(--amber); padding: 7px 12px; border-radius: 8px; box-shadow: var(--shadow); z-index: 20; font-size: 12px; white-space: nowrap; }
+  color: var(--amber); padding: 7px 12px; border-radius: 8px; box-shadow: var(--shadow); z-index: 40; font-size: 12px; white-space: nowrap; }
+.tbtn { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 5px 10px; cursor: pointer; color: var(--muted); }
+.tbtn:hover { background: var(--hover); color: var(--fg); }
 
-/* Task card (shared) */
-.detail { width: 360px; flex: none; background: var(--raised); border: 1px solid var(--border); border-radius: 10px;
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.detail.inpanel { width: auto; flex: 1; border: 0; border-radius: 0; background: transparent; }
-.detail.full { width: auto; flex: 1; }
-.dscroll { overflow: auto; padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-.detail.full .dscroll { padding: 16px 22px 20px; max-width: 860px; }
+/* Status icon: a ring filled as far as the stage has come (as in Linear). */
+.si { --c: var(--faint); --p: 0; width: 12px; height: 12px; border-radius: 50%; flex: none; display: inline-block;
+  border: 1.6px solid var(--c); background: conic-gradient(var(--c) calc(var(--p) * 1%), transparent 0); }
+.si.Backlog, .si.Icebox { border-style: dashed; }
+.si.Backlog { --c: var(--c-Backlog); } .si.Queue { --c: var(--c-Queue); } .si.Design { --c: var(--c-Design); --p: 30; }
+.si.Build { --c: var(--c-Build); --p: 60; } .si.Review { --c: var(--c-Review); --p: 82; } .si.YourCall { --c: var(--c-YourCall); --p: 50; }
+.si.Done { --c: var(--c-Done); --p: 100; } .si.Icebox { --c: var(--c-Icebox); }
+
+/* Cards in three sizes (S: one line, M: title and owner, L: everything). */
+.card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; min-width: 0; }
+.card:hover { border-color: var(--accent-line); }
+.card.mine { box-shadow: inset 3px 0 var(--accent); }
+.card.callc { border-color: var(--amber-line); }
+.card .top, .card .bot { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.card .top .grow { flex: 1; }
+.card .t { line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.card.s { flex-direction: row; align-items: center; padding: 4px 8px; gap: 6px; }
+.card.s .t { flex: 1; display: block; white-space: nowrap; text-overflow: ellipsis; -webkit-line-clamp: unset; }
+.card.l .t { -webkit-line-clamp: 4; }
+.cards { display: flex; flex-direction: column; gap: 5px; }
+.cards.s { gap: 3px; }
+.drop { background: var(--selected) !important; outline: 1px dashed var(--accent-line); outline-offset: -2px; }
+
+/* Task card peek: a dialog over the board, never a sidebar */
+.peek { position: absolute; inset: 0; z-index: 30; background: rgba(5, 8, 11, .55); display: grid; place-items: center; padding: 18px; }
+.window.light .peek { background: rgba(30, 40, 50, .28); }
+.peek .dlg { width: min(620px, 100%); max-height: 100%; overflow: auto; background: var(--raised); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 16px 20px 20px; display: flex; flex-direction: column; gap: 10px; }
 .dhead { display: flex; align-items: center; gap: 8px; }
-.dhead .x { margin-left: auto; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 15px; }
-.back { border: 0; background: transparent; color: var(--accent); cursor: pointer; padding: 0; font-weight: 600; align-self: flex-start; }
-.pill { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--accent-bg); color: var(--accent); font-weight: 600; white-space: nowrap; }
-.pill.call { background: var(--amber-bg); color: var(--amber); }
-.detail h3 { margin: 0; font-size: 15px; font-weight: 650; }
-.detail.full h3 { font-size: 18px; }
+.dhead .x { margin-left: auto; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; }
+.pill { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--chip); color: var(--fg); font-weight: 600; white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+.dlg h3 { margin: 0; font-size: 17px; font-weight: 650; }
 .dact { display: flex; gap: 6px; flex-wrap: wrap; }
 .dbtn { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 5px 10px; cursor: pointer; white-space: nowrap; }
 .dbtn:hover { background: var(--hover); }
@@ -135,110 +159,96 @@ h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
 .prompt { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); line-height: 1.5; }
 .question { border: 1px solid var(--amber-line); background: var(--amber-bg); color: var(--fg); border-radius: 8px; padding: 8px 10px; line-height: 1.45; }
 .journal { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
-.journal li { color: var(--muted); }
-.journal li b { color: var(--fg); font-weight: 600; }
-
-/* Activity and composer (D and G) */
-.act { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.feed { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
-.msg .who-l { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
-.msg.user .body { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
-.msg .body { line-height: 1.5; }
-.tool { font-family: var(--mono); font-size: 12px; color: var(--muted); border-left: 2px solid var(--border); padding: 2px 8px; }
-.composer { border: 1px solid var(--border); border-radius: 10px; padding: 8px; display: flex; gap: 8px; align-items: flex-end; background: var(--surface); }
-.composer .in { flex: 1; color: var(--faint); padding: 6px; min-height: 40px; }
+.journal li { color: var(--muted); } .journal li b { color: var(--fg); font-weight: 600; }
 
 /* Now: fixed 244 px columns */
-.now-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
+.now-wrap { flex: 1; min-height: 0; display: flex; }
 .now-board { flex: 1; min-width: 0; display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; }
 .now-col { width: 244px; flex: none; border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; min-height: 0; }
 .now-col.collapsed { width: 44px; }
 .now-col .h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-weight: 650; cursor: pointer; }
 .now-col.collapsed .h { writing-mode: vertical-rl; padding: 12px 10px; }
-.now-col .list { overflow: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 8px; }
-.now-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
-.now-card.mine { border-left: 3px solid var(--accent); }
-.now-card .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.now-wrap .detail { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; box-shadow: var(--shadow); }
-.now-col.drop { background: var(--selected); }
+.now-col .cards { overflow: auto; padding: 0 8px 8px; }
 
-/* D: narrow side panel next to Activity */
-.dpanel { width: 300px; flex: none; border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; min-height: 0; background: var(--bg); overflow: hidden; }
-.dp-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-weight: 650; }
-.dp-head .grow { flex: 1; }
-.dp-body { flex: 1; overflow: auto; padding: 4px 0 8px; display: flex; flex-direction: column; }
-.dp-call { margin: 8px 10px 4px; border: 1px solid var(--amber-line); background: var(--amber-bg); border-radius: 8px; padding: 7px 10px; cursor: pointer; }
-.dp-call .l { color: var(--amber); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
-.dp-call .t { margin-top: 2px; }
-.dp-sec .h { display: flex; gap: 6px; align-items: center; padding: 8px 12px 4px; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); cursor: pointer; user-select: none; }
-.dp-sec .h .c { font-weight: 500; }
-.dp-sec .h .chev { width: 10px; transition: transform var(--dur); }
-.dp-sec.collapsed .h .chev { transform: rotate(-90deg); }
-.dp-sec.collapsed .rows { display: none; }
-.dp-sec .h .act-link { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--accent); font-weight: 600; }
-.dp-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer; border-left: 3px solid transparent; }
-.dp-row:hover { background: var(--hover); }
-.dp-row.mine { border-left-color: var(--accent); }
-.dp-row .ti { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dp-add { border-top: 1px solid var(--border); padding: 8px 10px; }
-.dp-add input { width: 100%; border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 6px 9px; outline: none; }
-.dp-add input:focus { border-color: var(--accent-line); }
-.dp-sec.drop { background: var(--selected); }
+/* H: three column groups with stage sections inside */
+.hboard { flex: 1; min-height: 0; display: flex; gap: 10px; }
+.mcol { flex: 1 1 0; min-width: 0; max-width: 460px; display: flex; flex-direction: column; min-height: 0; border-radius: 12px; background: var(--sunken);
+  border: 1px solid var(--border); border-top: 3px solid var(--tone); }
+.mcol.todo { --tone: var(--c-Queue); } .mcol.prog { --tone: var(--c-Build); } .mcol.fin { --tone: var(--c-Done); }
+.mcol .mh { display: flex; align-items: baseline; gap: 8px; padding: 9px 12px 6px; }
+.mcol .mh b { font-size: 14px; font-weight: 700; }
+.mcol .mh .c { color: var(--muted); font-size: 12px; }
+.mcol .mh .hint { margin-left: auto; color: var(--faint); font-size: 11px; }
+.mcol .mb { flex: 1; overflow: auto; padding: 0 8px 10px; display: flex; flex-direction: column; gap: 10px; }
+.msec { border-radius: 9px; background: var(--bg); border: 1px solid var(--line); }
+.msec .sh { display: flex; align-items: center; gap: 7px; padding: 7px 10px; cursor: pointer; user-select: none; font-weight: 650; font-size: 12.5px; }
+.msec .sh .c { color: var(--muted); font-weight: 500; }
+.msec .sh .chev { margin-left: auto; color: var(--faint); font-size: 11px; transition: transform var(--dur); }
+.msec.collapsed .sh .chev { transform: rotate(-90deg); }
+.msec .cards { padding: 0 7px 8px; }
+.msec.collapsed .cards { display: none; }
+.hrail { width: 40px; flex: none; border: 1px solid var(--border); border-radius: 12px; background: var(--sunken); cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; }
+.hrail:hover { background: var(--hover); }
+.hrail .v { writing-mode: vertical-rl; color: var(--muted); font-weight: 600; }
+.hrail .c { font-size: 11px; color: var(--faint); }
 
-/* E: dense table */
-.tbl { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 10px; container-type: inline-size; }
-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-th { position: sticky; top: 0; z-index: 1; background: var(--surface); text-align: left; font-weight: 600; font-size: 11.5px; color: var(--muted);
-  padding: 6px 8px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; user-select: none; }
-th:hover { color: var(--fg); }
-th .s { color: var(--accent); }
-td { padding: 0 8px; height: 30px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-tr.g td { background: var(--bg); font-weight: 650; height: 30px; cursor: pointer; color: var(--fg); }
-tr.g td .c { color: var(--muted); font-weight: 500; margin-left: 6px; }
-tr.t { cursor: pointer; }
-tr.t:hover td { background: var(--hover); }
-tr.t.open td { background: var(--selected); }
-tr.t.mine td:first-child { box-shadow: inset 3px 0 var(--accent); }
-tr.drop td { background: var(--selected); }
-.stg { border: 1px solid transparent; background: transparent; border-radius: 6px; padding: 2px 4px; color: var(--fg); cursor: pointer; max-width: 100%; }
-.stg:hover { border-color: var(--border); background: var(--surface); }
-.stg option { background: var(--raised); color: var(--fg); }
-@container (max-width: 700px) { .c-lab { display: none; } }
-@container (max-width: 560px) { .c-ses { display: none; } }
+/* I: a swimlane per session over stage columns */
+.iboard { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--sunken); }
+.igrid { display: grid; grid-template-columns: repeat(var(--n), minmax(120px, 1fr)); }
+.ihead { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 1px solid var(--border); }
+.ihead > div { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-weight: 650; font-size: 12.5px; }
+.ihead > div .c { color: var(--muted); font-weight: 500; }
+.ihead > div + div { border-left: 1px solid var(--line); }
+.lane { border-bottom: 6px solid var(--sunken); background: var(--bg); }
+.lane .lh { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; user-select: none; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.lane .lh .chev { width: 10px; color: var(--faint); transition: transform var(--dur); }
+.lane.collapsed .lh .chev { transform: rotate(-90deg); }
+.lane .lh b { font-weight: 700; }
+.lane .lh .c { color: var(--muted); font-size: 12px; }
+.lane .lh .grow { flex: 1; }
+.lane.me { box-shadow: inset 3px 0 var(--accent); }
+.lane.pool .lh b { color: var(--muted); }
+.lane.collapsed .igrid { display: none; }
+.lane .cell { padding: 6px 6px 8px; min-height: 44px; }
+.lane .cell + .cell { border-left: 1px solid var(--line); }
+.lcall { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--amber-line); background: var(--amber-bg); color: var(--fg); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.lcall .mk { color: var(--amber); }
 
-/* F: stages as rows */
-.lanes { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
-.lane { display: grid; grid-template-columns: 92px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
-.lane:last-child { border-bottom: 0; }
-.lane .lh { padding: 8px 10px; display: flex; flex-direction: column; gap: 1px; border-right: 1px solid var(--line); cursor: pointer; user-select: none; }
-.lane .lh b { font-weight: 650; font-size: 12.5px; }
-.lane .lh .c { color: var(--muted); font-size: 11px; }
-.lane .lh:hover { background: var(--hover); }
-.lane .lb { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 8px; align-content: flex-start; min-height: 40px; }
-.lane.call .lh b { color: var(--amber); }
-.lane.drop .lb { background: var(--selected); }
-.lane.collapsed .lb { color: var(--faint); font-size: 12px; align-items: center; cursor: pointer; }
-.pillc { display: inline-flex; align-items: center; gap: 6px; max-width: 250px; border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 4px 8px; cursor: pointer; }
-.pillc:hover { border-color: var(--accent-line); }
-.pillc .ti { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pillc.mine { box-shadow: inset 3px 0 var(--accent); }
-.pillc.open { border-color: var(--accent-line); background: var(--selected); }
-.pillc.callc { border-color: var(--amber-line); }
+/* J: a board with card size and columns that fold into rails */
+.jboard { flex: 1; min-height: 0; display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; }
+.jcol { flex: 1 1 var(--w); min-width: calc(var(--w) * .85); max-width: 340px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; border-radius: 10px; background: var(--sunken); border: 1px solid var(--border); border-top: 3px solid var(--tone); }
+.jcol .h { position: sticky; top: 0; display: flex; align-items: center; gap: 7px; padding: 7px 10px; font-weight: 650; }
+.jcol .h .c { color: var(--muted); font-weight: 500; }
+.jcol .h .fold { margin-left: auto; border: 0; background: transparent; color: var(--faint); cursor: pointer; padding: 0 2px; }
+.jcol .h .fold:hover { color: var(--fg); }
+.jcol .cards { flex: 1; overflow: auto; padding: 0 6px 8px; }
+.jrail { flex: 0 0 34px; border-radius: 10px; background: var(--sunken); border: 1px solid var(--border); border-top: 3px solid var(--tone); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0; }
+.jrail:hover { background: var(--hover); }
+.jrail .v { writing-mode: vertical-rl; color: var(--muted); font-weight: 600; font-size: 12px; }
+.jrail .c { font-size: 11px; color: var(--faint); }
 
-/* G: tasks inside the session list */
-.side.g { width: 330px; }
-.trow { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 22px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
-.trow:hover { background: var(--hover); }
-.trow.open { background: var(--selected); }
-.trow .ti { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.trow.callr .ti { color: var(--amber); }
-.trow .ref { font-size: 10.5px; }
-.pool { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 12px; }
-.pool:hover { background: var(--hover); }
-.pool b { color: var(--fg); font-weight: 600; }
-.srow.drop, .pool.drop { background: var(--selected); }
+/* K: each stage its own container; containers flow into two columns when there is room */
+.kboard { flex: 1; min-height: 0; overflow: auto; container-type: inline-size; padding-right: 2px; }
+.kflow { columns: 1; column-gap: 12px; }
+@container (min-width: 760px) { .kflow { columns: 2; } }
+.kgrp { break-inside: avoid; margin: 0 0 12px; border: 1px solid var(--border); border-left: 4px solid var(--c); border-radius: 10px; background: var(--bg); overflow: hidden; }
+.kgrp .kh { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface); cursor: pointer; user-select: none; }
+.kgrp .kh b { font-weight: 700; }
+.kgrp .kh .c { color: var(--muted); font-size: 12px; }
+.kgrp .kh .role { color: var(--faint); font-size: 11px; margin-left: auto; }
+.kgrp .kh .add { color: var(--faint); border: 0; background: transparent; cursor: pointer; font-size: 15px; padding: 0 2px; }
+.kgrp .kh .add:hover { color: var(--accent); }
+.kgrp.collapsed .krows { display: none; }
+.krow { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 7px 12px; border-top: 1px solid var(--line); cursor: pointer; }
+.krow:hover { background: var(--hover); }
+.krow.mine { box-shadow: inset 3px 0 var(--accent); }
+.krow .ti { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.krow .sub { display: flex; gap: 6px; align-items: center; margin-top: 2px; min-width: 0; }
+.krow .right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.kgrp.YourCall { background: color-mix(in srgb, var(--amber-bg) 45%, var(--bg)); }
 
-/* Notes under the window */
+/* Notes and sources under the window */
 .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px; margin-top: 22px; }
 .note { border: 1px solid #333c47; border-radius: 10px; padding: 12px 14px; background: #161b21; color: #e8edf4; cursor: pointer; }
 .note.on { border-color: #3d6b5b; box-shadow: 0 0 0 1px #3d6b5b inset; }
@@ -246,18 +256,21 @@ tr.drop td { background: var(--selected); }
 .note p { margin: 0 0 6px; color: #a2adbc; line-height: 1.5; }
 .note ul { margin: 0; padding-left: 18px; color: #c4ccd6; line-height: 1.5; }
 .note .plus { color: #8bdfc0; } .note .minus { color: #f4ab9b; }
+.note .from { color: #6f7b8a; font-size: 12px; margin-top: 6px; }
+.sources { margin-top: 18px; color: #a2adbc; font-size: 12px; line-height: 1.7; }
+.sources a { color: #8bdfc0; }
 </style>
 </head>
 <body>
 <div class="intro">
-  <h1>Overmind Tasks: четыре направления</h1>
-  <p>Одни и те же задачи проекта Alpha в окне Zerus. Кликните сессию слева, чтобы сменить выбранную: её задачи отмечены зелёной полосой.
-  Кликайте задачи, сворачивайте группы, перетаскивайте задачи между стадиями (в «G» — на другую сессию или в пул проекта), фильтруйте.
-  Ширина окна меняет место под задачами: у окна 1100 px остаётся около 680 px.</p>
+  <h1>Overmind Tasks: решения из трекеров</h1>
+  <p>Все варианты — в центральной части окна, на вкладке Tasks. Каждый взят из проверенного трекера и держит стадии раздельно:
+  отдельные колонки-группы, дорожки, контейнеры. Карточка задачи открывается окном поверх доски, а не боковой панелью.
+  Кликайте сессии слева, задачи, заголовки групп; перетаскивайте задачи; меняйте ширину окна и тему.</p>
   <div class="controls">
     <span class="ctl">Вариант <span class="seg" id="variant">
-      <button data-v="now">Сейчас</button><button data-v="d">D · Боковая панель</button><button data-v="e">E · Таблица</button>
-      <button data-v="f">F · Стадии строками</button><button data-v="g">G · В списке сессий</button></span></span>
+      <button data-v="now">Сейчас</button><button data-v="h">H · Группы колонок</button><button data-v="i">I · Дорожки по сессиям</button>
+      <button data-v="j">J · Доска с размером карточек</button><button data-v="k">K · Группы-контейнеры</button></span></span>
     <span class="ctl">Окно <span class="seg" id="width">
       <button data-w="1100">1100 px</button><button data-w="1280">1280 px</button><button data-w="1600">1600 px</button></span></span>
     <span class="ctl">Тема <span class="seg" id="theme">
@@ -280,28 +293,44 @@ tr.drop td { background: var(--selected); }
   </div>
 </div>
 <div class="notes" id="notes">
-  <div class="note" data-v="now"><h3>Сейчас</h3><p>Отдельная вкладка: колонки по 244 px, карточка поверх доски.</p>
+  <div class="note" data-v="now"><h3>Сейчас</h3><p>Колонки по 244 px на каждую стадию, карточка накрывает доску справа.</p>
     <ul><li class="minus">В 1280 px видно две-три колонки, дальше горизонтальная прокрутка.</li></ul></div>
-  <div class="note" data-v="d"><h3>D · Боковая панель</h3><p>Вкладки Tasks нет. Справа от Activity узкая панель 300 px: Your Call, задачи этой сессии, затем задачи проекта по стадиям одной строкой. Карточка открывается внутри панели, внизу поле добавления задачи.</p>
-    <ul><li class="plus">Задачи всегда рядом с разговором, не нужно переключать вкладку.</li>
-    <li class="plus">Ширина постоянная и небольшая.</li><li class="minus">Activity уже на 310 px; панель можно было бы скрывать кнопкой.</li></ul></div>
-  <div class="note" data-v="e"><h3>E · Таблица</h3><p>Одна строка на задачу, стадия — значение в столбце (меняется прямо в ячейке). Группировка по стадии, сессии или без неё; сортировка по клику на заголовок.</p>
-    <ul><li class="plus">Самая плотная форма: 25+ задач на экране.</li><li class="plus">На узком окне прячутся метки, потом сессия.</li>
-    <li class="minus">Похоже на трекер, а не на доску.</li></ul></div>
-  <div class="note" data-v="f"><h3>F · Стадии строками</h3><p>Канбан, повёрнутый на 90°: стадия — горизонтальная дорожка, задачи — плашки, которые переносятся по ширине. Перетаскивание между дорожками.</p>
-    <ul><li class="plus">Видна вся доска без горизонтальной прокрутки при любой ширине.</li>
-    <li class="minus">Заголовки обрезаются до ширины плашки (до 250 px).</li></ul></div>
-  <div class="note" data-v="g"><h3>G · В списке сессий</h3><p>Отдельной доски нет. Задачи висят под своими сессиями в левом списке, пул проекта — строкой под проектом. Клик по задаче открывает её карточку на месте Activity.</p>
-    <ul><li class="plus">Ноль дополнительной ширины; видно, кто чем занят.</li>
-    <li class="plus">Перетащите задачу на другую сессию, чтобы отдать её.</li><li class="minus">Список сессий длиннее; обзор всех стадий проекта — только через пул.</li></ul></div>
+  <div class="note" data-v="h"><h3>H · Группы колонок</h3><p>Три крупные колонки: <b>To do</b> (Queue, Backlog), <b>In progress</b> (Design, Build, Review) и свёрнутая <b>Done</b> (Done, Icebox). Стадии внутри колонки — отдельные карточки-секции со своим значком, счётчиком и сворачиванием. Your Call — строкой сверху.</p>
+    <ul><li class="plus">Две колонки вместо пяти; поток слева направо сохраняется.</li><li class="plus">Каждая стадия — отдельный блок, не смешивается с соседними.</li>
+    <li class="minus">Перенос между стадиями внутри одной колонки — вертикальный.</li></ul>
+    <p class="from">Как в Kanbanize/Businessmap (подколонки внутри To do / In progress / Done) и в категориях статусов Linear.</p></div>
+  <div class="note" data-v="i"><h3>I · Дорожки по сессиям</h3><p>Колонки — стадии, строки — сессии. Каждая дорожка — отдельная полоса с заголовком: имя сессии, состояние, вопрос Your Call, «Send next». Последняя дорожка — задачи без сессии (пул проекта).</p>
+    <ul><li class="plus">Сразу видно, кто чем занят и что у кого в очереди.</li><li class="plus">Перетаскивание в ячейку меняет и стадию, и сессию.</li>
+    <li class="minus">Пять колонок; на 1100 px карточки компактные.</li></ul>
+    <p class="from">Как дорожки по исполнителю в Jira и swimlanes в Linear.</p></div>
+  <div class="note" data-v="j"><h3>J · Доска с размером карточек</h3><p>Привычная доска, но с переключателем размера карточек S / M / L: S — одна строка (колонка 180 px), M — заголовок и сессия (220 px), L — всё (260 px). Любую колонку можно свернуть в полоску 34 px; Done и Icebox свёрнуты.</p>
+    <ul><li class="plus">Сохраняется канбан; S помещает пять колонок в узкое окно.</li><li class="plus">Цветная кромка и значок стадии у каждой колонки.</li>
+    <li class="minus">При L и многих колонках снова нужна прокрутка.</li></ul>
+    <p class="from">Как размер карточек в Notion и ползунок Card Size в YouTrack; сворачивание колонок — частый запрос к Jira и Trello.</p></div>
+  <div class="note" data-v="k"><h3>K · Группы-контейнеры</h3><p>Каждая стадия — отдельный контейнер с цветной кромкой, заголовком, счётчиком и «+». Задача — строка в две линии. Когда ширины хватает, контейнеры раскладываются в две колонки.</p>
+    <ul><li class="plus">Сильное разделение: цвет, рамка и промежуток между стадиями.</li><li class="plus">Плотнее доски, при этом группы не сливаются.</li>
+    <li class="minus">Нет потока слева направо, как у канбана.</li></ul>
+    <p class="from">Как сгруппированный по статусу список Linear и ClickUp и цветные группы Monday.</p></div>
 </div>
+<div class="sources">Источники: <a href="https://linear.app/docs/board-layout">Linear — Board layout</a> ·
+  <a href="https://linear.app/docs/display-options">Linear — Display options</a> ·
+  <a href="https://linear.app/docs/configuring-workflows.md">Linear — Issue status</a> ·
+  <a href="https://www.kanbanize.com/kanban-resources/kanban-software/how-to-edit-kanban-workflow">Kanbanize — Kanban workflow</a> ·
+  <a href="https://confluence.atlassian.com/display/JIRASOFTWARECLOUD/Configuring+swimlanes">Jira — Configuring swimlanes</a> ·
+  <a href="https://www.notion.com/en-gb/help/boards">Notion — Board view</a> ·
+  <a href="https://www.jetbrains.com/help/youtrack/cloud/2023.2/agile-board-ui.html">YouTrack — Agile board</a> ·
+  <a href="https://docs.github.com/en/issues/planning-and-tracking-with-projects/customizing-views-in-your-project/customizing-the-board-layout">GitHub Projects — Board layout</a> ·
+  <a href="https://help.clickup.com/hc/en-us/articles/6310202447511-Use-grouping-in-views">ClickUp — Grouping</a> ·
+  <a href="https://community.monday.com/t/tip-of-the-week-1-add-some-colour-to-your-groups/73292">monday.com — group colours</a> ·
+  <a href="https://support.atlassian.com/jira-software-cloud/docs/customize-your-view-of-the-board-and-backlog/">Jira — board and backlog density</a></div>
 
 <script>
 const STAGES = [
   {name: 'Backlog', role: 'backlog'}, {name: 'Queue', role: 'ready'}, {name: 'Design', role: 'active'}, {name: 'Build', role: 'active'},
   {name: 'Review', role: 'review'}, {name: 'Your Call', role: 'needs_human'}, {name: 'Done', role: 'done'}, {name: 'Icebox', role: 'parked'},
 ];
-const ORDER = Object.fromEntries(STAGES.map((s, i) => [s.name, i]));
+const ROLE = Object.fromEntries(STAGES.map(s => [s.name, s.role]));
+const slug = name => name.replace(/\s/g, '');
 const SESSIONS = [
   {key: 'codex/hgs/dashboard', name: 'dashboard', project: 'Alpha', state: 'Working', cls: 'work', detail: 'Bash: ctest --test-dir tray/build'},
   {key: 'codex/hgs/navigation', name: 'navigation', project: 'Alpha', state: 'Paused', cls: '', detail: 'Resume to continue'},
@@ -339,10 +368,9 @@ let tasks = [
   T('om-x5c6v', 'Icebox', 'Voice-created tasks', {labels: ['mobile'], age: 95}),
 ];
 const MARK = {working: ['▶', 'working'], reviewed: ['✓', 'reviewed'], rework: ['✗', 'needs work'], conflict: ['⚠', 'conflict'], call: ['!', 'Your Call']};
-const PRIO = {P0: 0, P1: 1, P2: 2, '': 3};
-const state = {variant: 'd', width: 1280, theme: 'dark', filter: '', open: '', session: 'codex/hgs/dashboard', drag: '',
-  nowCollapsed: {Done: true, Icebox: true}, dCollapsed: {Done: true, Icebox: true}, eGroup: 'stage', eSort: '', eDir: 1,
-  eCollapsed: {Done: true, Icebox: true}, fCollapsed: {Done: true, Icebox: true}, gPool: true};
+const state = {variant: 'h', width: 1280, theme: 'dark', filter: '', open: '', session: 'codex/hgs/dashboard', drag: '',
+  nowCollapsed: {Done: true, Icebox: true}, hCollapsed: {}, hDone: false, iCollapsed: {'codex/hgs/navigation': true}, size: 'm',
+  jRail: {Done: true, Icebox: true}, kCollapsed: {Done: true, Icebox: true}};
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 const visible = t => !state.filter || (t.title + ' ' + t.ref + ' ' + t.labels.join(' ') + ' ' + t.who).toLowerCase().includes(state.filter.toLowerCase());
@@ -351,31 +379,41 @@ const mine = t => t.who === state.session;
 const sessionOf = key => SESSIONS.find(s => s.key === key);
 const current = () => sessionOf(state.session);
 const log = html => { $('#log').innerHTML = html; };
-const marker = t => t.marker ? `<span class="mk ${t.marker}" title="${MARK[t.marker][1]}">${MARK[t.marker][0]}</span>` : '<span class="mk"></span>';
+const si = stage => `<span class="si ${slug(stage)}" title="${stage}"></span>`;
+const marker = t => t.marker ? `<span class="mk ${t.marker}" title="${MARK[t.marker][1]}">${MARK[t.marker][0]}</span>` : '';
 const prio = t => t.prio ? `<span class="prio ${t.prio}">${t.prio}</span>` : '';
 const chips = (t, n = 9) => t.labels.slice(0, n).map(l => `<span class="chip ${l === 'blocked' ? 'blocked' : ''}">${esc(l)}</span>`).join('');
-const who = t => t.who ? `<span class="sess ${mine(t) ? 'mine' : ''}">${esc(t.who)}</span>` : '';
-const calls = () => tasks.filter(t => t.stage === 'Your Call');
+const who = (t, short) => t.who ? `<span class="sess ${mine(t) ? 'mine' : ''}">${esc(short ? sessionOf(t.who).name : t.who)}</span>` : '';
+const calls = () => tasks.filter(t => t.stage === 'Your Call' && visible(t));
 const queueOf = key => tasks.filter(t => t.stage === 'Queue' && t.who === key);
 
+function card(t, size = 'm', o = {}) {
+  const cls = `card ${size} ${mine(t) ? 'mine' : ''} ${t.stage === 'Your Call' ? 'callc' : ''}`;
+  const attrs = `draggable="true" data-ref="${t.ref}" title="${t.ref} · ${esc(t.title)}${t.who ? ' · ' + esc(t.who) : ''}"`;
+  if (size === 's') return `<div class="${cls}" ${attrs}>${marker(t)}<span class="t">${esc(t.title)}</span>${prio(t)}</div>`;
+  const owner = o.noOwner ? '' : who(t, true);
+  const bottom = size === 'l' ? `<div class="bot" style="flex-wrap:wrap">${chips(t)}${who(t)}</div>`
+    : (owner || t.labels.length) ? `<div class="bot">${chips(t, 1)}${owner}</div>` : '';
+  return `<div class="${cls}" ${attrs}><div class="top"><span class="ref">${t.ref}</span>${prio(t)}<span class="grow"></span>${marker(t)}</div>
+    <div class="t">${esc(t.title)}</div>${bottom}</div>`;
+}
 function bar(extra = '') {
   return `<div class="bar"><span class="sel-proj"><span class="dot"></span>Alpha<span style="margin-left:auto;color:var(--muted)">▾</span></span>
     <input class="filter" id="filter" placeholder="Filter tasks" value="${esc(state.filter)}">${extra}</div>`;
 }
-function strips() {
-  const c = calls();
-  const call = c.length ? `<span class="strip call"><b>Your Call (${c.length})</b>${c.map(t => `<button class="pick" data-open="${t.ref}">${t.ref} · ${esc(t.title)}</button>`).join('')}</span>` : '';
-  return `<div class="bar">${call}<span class="strip queue" style="margin-left:auto"><b>This session's queue: ${queueOf(state.session).length}</b> · <span class="link" data-send>Send next</span></span></div>`;
+function strips(queue = true, withCalls = true) {
+  const c = withCalls ? calls() : [];
+  const call = c.length ? `<span class="strip call">${si('Your Call')}<b>Your Call (${c.length})</b>${c.map(t => `<button class="pick" data-open="${t.ref}">${esc(t.title)} · ${esc(sessionOf(t.who).name)}</button>`).join('')}</span>` : '';
+  const q = queue ? `<span class="strip queue" style="margin-left:auto"><b>This session's queue: ${queueOf(state.session).length}</b> · <span class="link" data-send>Send next</span></span>` : '';
+  return call || q ? `<div class="bar">${call}${q}</div>` : '';
 }
-function detail(kind) {
+function peek() {
   const t = tasks.find(x => x.ref === state.open);
   if (!t) return '';
-  const back = kind === 'inpanel' ? '<button class="back" data-close>‹ Tasks</button>' : kind === 'full' ? '<button class="back" data-close>‹ Activity</button>' : '';
   const q = t.question ? `<div class="sect">Question</div><div class="question">${esc(t.question)}</div>
     <div class="dact"><button class="dbtn primary" data-answer>SQLite</button><button class="dbtn" data-answer>JSON files</button><button class="dbtn">Answer…</button></div>` : '';
-  return `<aside class="detail ${kind}"><div class="dscroll">
-    ${back}
-    <div class="dhead"><span class="ref">${t.ref}</span><span class="pill ${t.stage === 'Your Call' ? 'call' : ''}">${t.stage}</span>${prio(t)}${kind ? '' : '<button class="x" data-close>✕</button>'}</div>
+  return `<div class="peek" data-close><div class="dlg" data-stop>
+    <div class="dhead"><span class="ref">${t.ref}</span><span class="pill">${si(t.stage)}${t.stage}</span>${prio(t)}${marker(t)}<button class="x" data-close>✕</button></div>
     <h3>${esc(t.title)}</h3>
     <div class="dact"><button class="dbtn primary">Send to session ▾</button><button class="dbtn">Move to ▾</button><button class="dbtn">Done</button></div>
     ${q}
@@ -388,56 +426,26 @@ function detail(kind) {
     <ul class="journal"><li><b>you</b> created it in Backlog · ${t.age + 2} d</li><li><b>manager</b> moved it to ${t.stage} · 3 h</li>
       ${t.marker === 'working' ? `<li><b>${esc(t.who)}</b> started working · 12 min</li>` : ''}
       ${t.marker === 'rework' ? '<li><b>review</b> asked for changes: the retry must keep the request ID · 40 min</li>' : ''}</ul>
-  </div></aside>`;
+  </div></div>`;
 }
-function activity() {
+function tabs() {
   const s = current();
-  return `<div class="act"><div class="feed">
-    <div class="msg user"><div class="who-l">You · 10:42</div><div class="body">Take the next task from the queue and keep the composer responsive while logs stream.</div></div>
-    <div class="msg"><div class="who-l">${esc(s.name)} · 10:43</div><div class="body">Picking up <span class="ref">om-b3x9m</span> “Add a pause action to Send next”. I will add the action to the queue strip first.</div></div>
-    <div class="tool">Read tray/src/TasksView.cpp</div><div class="tool">Edit tray/src/TasksView.cpp (+38 −4)</div>
-    <div class="tool">Bash: ctest --test-dir tray/build -R tasksview</div>
-    <div class="msg"><div class="body">The pause action works; 24 tests pass. Next I will wire it to the phone board.</div></div>
-  </div><div class="composer"><div class="in">Message ${esc(s.name)}… (Alt+Enter adds it as a task)</div><button class="dbtn">Add as task</button><button class="dbtn primary">Send</button></div></div>`;
-}
-function tabs(on, noTasks) {
-  const s = current();
-  const list = noTasks ? ['Activity', 'Terminal', 'Processes'] : ['Activity', 'Terminal', 'Tasks', 'Processes'];
   return `<div class="mhead"><h2>${s.project} / ${esc(s.name)}</h2><span class="st ${s.cls}">${s.state}</span><span class="grow"></span><span class="ref">gpt-6.1-sol · high</span></div>
-    <div class="tabs">${list.map(x => `<span class="${x === on ? 'on' : ''}">${x}</span>`).join('')}</div>`;
+    <div class="tabs">${['Activity', 'Terminal', 'Tasks', 'Processes'].map(x => `<span class="${x === 'Tasks' ? 'on' : ''}">${x}</span>`).join('')}</div>`;
 }
-
-// Sessions list. G adds each session's tasks and the project pool under it.
 function renderSide() {
-  const side = $('#side');
-  const g = state.variant === 'g';
-  side.className = 'side' + (g ? ' g' : '');
   let html = '<h2>Sessions</h2><div class="search">Search sessions, IDs and messages…</div>';
   for (const project of ['Alpha', 'Beta']) {
     const list = SESSIONS.filter(s => s.project === project);
     html += `<div class="grp ${project}">▾ ${project}<span class="n">${list.length}</span></div>`;
     for (const s of list) {
       const q = queueOf(s.key).length, call = tasks.some(t => t.stage === 'Your Call' && t.who === s.key);
-      const badge = g ? '' : (q || call) ? `<span class="qb ${call ? 'call' : ''}">${q}${call ? ' · !' : ''}</span>` : '';
-      html += `<div class="srow ${s.key === state.session && !(g && state.open) ? 'sel' : ''}" data-session="${s.key}" data-assign="${s.key}">
+      const badge = (q || call) ? `<span class="qb ${call ? 'call' : ''}">${q}${call ? ' · !' : ''}</span>` : '';
+      html += `<div class="srow ${s.key === state.session ? 'sel' : ''}" data-session="${s.key}">
         <div class="t">${esc(s.name)} <span class="st ${s.cls}">${s.state}</span>${badge}</div><div class="d">${esc(s.detail)}</div></div>`;
-      if (g) {
-        const own = tasks.filter(t => t.who === s.key && !['Done', 'Icebox'].includes(t.stage) && visible(t))
-          .sort((a, b) => (b.stage === 'Your Call') - (a.stage === 'Your Call') || ORDER[b.stage] - ORDER[a.stage]);
-        html += own.map(t => `<div class="trow ${t.stage === 'Your Call' ? 'callr' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}" title="${t.stage}: ${esc(t.title)}">
-          ${marker(t)}<span class="ti">${esc(t.title)}</span><span class="ref">${t.stage === 'Queue' ? 'queued' : t.stage === 'Your Call' ? 'asks you' : t.stage.toLowerCase()}</span></div>`).join('');
-      }
-    }
-    if (g && project === 'Alpha') {
-      const pool = tasks.filter(t => !t.who && ['Backlog', 'Queue'].includes(t.stage) && visible(t));
-      const back = pool.filter(t => t.stage === 'Backlog').length, ready = pool.length - back;
-      html += `<div class="pool" data-pool data-assign=""><span>${state.gPool ? '▾' : '▸'}</span><b>Project pool</b><span>Queue ${ready} · Backlog ${back}</span></div>`;
-      if (state.gPool) html += pool.sort((a, b) => ORDER[b.stage] - ORDER[a.stage]).map(t => `<div class="trow ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">
-        ${marker(t)}<span class="ti">${esc(t.title)}</span><span class="ref">${t.stage.toLowerCase()}</span></div>`).join('');
-      html += `<div class="pool" data-showdone><span>▸</span><span>Done ${of('Done').length} · Icebox ${of('Icebox').length}</span></div>`;
     }
   }
-  side.innerHTML = html;
+  $('#side').innerHTML = html;
 }
 
 // Now: the current board.
@@ -446,89 +454,84 @@ function renderNow() {
     const list = of(s.name);
     if (state.nowCollapsed[s.name]) return `<div class="now-col collapsed" data-stage="${s.name}"><div class="h" data-toggle="nowCollapsed:${s.name}">${s.name} <span class="ref">${list.length}</span></div></div>`;
     return `<div class="now-col" data-stage="${s.name}"><div class="h" data-toggle="nowCollapsed:${s.name}">${s.name} <span class="ref">${list.length}</span></div>
-      <div class="list">${list.map(t => `<div class="now-card ${mine(t) ? 'mine' : ''}" draggable="true" data-ref="${t.ref}">
-        <div class="row"><span class="ref">${t.ref}</span>${prio(t)}${marker(t)}</div><div>${esc(t.title)}</div>
-        <div class="row">${chips(t)}${who(t)}</div></div>`).join('') || '<div class="empty">No tasks</div>'}</div></div>`;
+      <div class="cards">${list.map(t => card(t, 'l')).join('') || '<div class="empty">No tasks</div>'}</div></div>`;
   }).join('');
-  return tabs('Tasks') + `<div class="content">${bar()}${strips()}<div class="now-wrap"><div class="now-board">${cols}</div>${detail('')}</div></div>`;
+  return `${bar()}${strips()}<div class="now-wrap"><div class="now-board">${cols}</div></div>`;
 }
 
-// D: a narrow panel beside Activity.
-function renderD() {
-  const s = current();
-  let body = '';
-  if (state.open) body = detail('inpanel');
-  else {
-    body += calls().filter(visible).map(t => `<div class="dp-call" data-ref="${t.ref}"><div class="l">Your Call · ${esc(sessionOf(t.who).name)}</div><div class="t">${esc(t.title)}</div></div>`).join('');
-    const own = tasks.filter(t => t.who === state.session && !['Done', 'Icebox', 'Your Call'].includes(t.stage) && visible(t));
-    const row = t => `<div class="dp-row ${mine(t) ? 'mine' : ''}" draggable="true" data-ref="${t.ref}" title="${esc(t.title)}">${marker(t)}<span class="ti">${esc(t.title)}</span>${prio(t)}</div>`;
-    body += `<div class="dp-sec"><div class="h"><span>${esc(s.name)} · ${own.length}</span><span class="act-link" data-send>Send next</span></div>
-      <div class="rows">${own.map(row).join('') || '<div class="empty">Nothing for this session.</div>'}</div></div>`;
-    for (const st of STAGES.filter(x => x.role !== 'needs_human')) {
-      const list = of(st.name).filter(t => t.who !== state.session || ['Done', 'Icebox'].includes(t.stage));
-      body += `<div class="dp-sec ${state.dCollapsed[st.name] ? 'collapsed' : ''}" data-stage="${st.name}"><div class="h" data-toggle="dCollapsed:${st.name}"><span class="chev">▾</span>${st.name}<span class="c">${list.length}</span></div>
-        <div class="rows">${list.map(row).join('')}</div></div>`;
-    }
-  }
-  const open = tasks.filter(t => !['Done', 'Icebox'].includes(t.stage)).length;
-  const panel = `<aside class="dpanel"><div class="dp-head">Tasks<span class="ref">Alpha</span><span class="grow"></span><span class="ref">${open} open</span></div>
-    ${state.open ? '' : `<div style="padding:8px 10px 0"><input class="filter" id="filter" style="max-width:none;width:100%" placeholder="Filter tasks" value="${esc(state.filter)}"></div>`}
-    <div class="dp-body">${body}</div>
-    <div class="dp-add"><input id="addtask" placeholder="Add a task for ${esc(s.name)}…  ⏎"></div></aside>`;
-  return tabs('Activity', true) + `<div class="content"><div class="row2">${activity()}${panel}</div></div>`;
+// H: column groups with stage sections.
+function renderH() {
+  const section = stage => {
+    const list = of(stage), key = stage;
+    return `<div class="msec ${state.hCollapsed[key] ? 'collapsed' : ''}" data-stage="${stage}">
+      <div class="sh" data-toggle="hCollapsed:${key}">${si(stage)}${stage}<span class="c">${list.length}</span><span class="chev">▾</span></div>
+      <div class="cards">${list.map(t => card(t, 'm')).join('') || '<div class="empty">Drop a task here</div>'}</div></div>`;
+  };
+  const column = (name, tone, stages, hint) => {
+    const n = stages.reduce((a, s) => a + of(s).length, 0);
+    return `<div class="mcol ${tone}"><div class="mh"><b>${name}</b><span class="c">${n}</span><span class="hint">${hint}</span></div>
+      <div class="mb">${stages.map(section).join('')}</div></div>`;
+  };
+  const done = state.hDone
+    ? `<div class="mcol fin" style="max-width:300px"><div class="mh"><b>Done</b><span class="c">${of('Done').length + of('Icebox').length}</span><span class="hint link" data-hdone>hide ⟩</span></div>
+        <div class="mb">${['Done', 'Icebox'].map(section).join('')}</div></div>`
+    : `<div class="hrail" data-hdone title="Done and Icebox"><span class="c">${of('Done').length}</span><span class="v">Done · Icebox</span></div>`;
+  return `${bar()}${strips()}<div class="hboard">${column('To do', 'todo', ['Queue', 'Backlog'], 'ready first')}${column('In progress', 'prog', ['Design', 'Build', 'Review'], 'agents at work')}${done}</div>`;
 }
 
-// E: one row per task.
-function renderE() {
-  const cols = [['', '', '24px'], ['ref', 'Ref', '82px'], ['title', 'Title', ''], ['stage', 'Stage', '112px'], ['who', 'Session', '160px', 'c-ses'],
-    ['prio', 'P', '42px'], ['labels', 'Labels', '128px', 'c-lab'], ['age', 'Age', '52px']];
-  const sortBy = state.eSort, dir = state.eDir;
-  const key = {ref: t => t.ref, title: t => t.title.toLowerCase(), stage: t => ORDER[t.stage], who: t => t.who || '~', prio: t => PRIO[t.prio], labels: t => t.labels.join(), age: t => t.age};
-  const sorted = list => sortBy ? [...list].sort((a, b) => (key[sortBy](a) > key[sortBy](b) ? 1 : key[sortBy](a) < key[sortBy](b) ? -1 : 0) * dir) : list;
-  const head = '<tr>' + cols.map(([k, label, w, cls]) => `<th class="${cls || ''}" ${k ? `data-sort="${k}"` : ''} style="${w ? `width:${w}` : ''}">${label}${sortBy === k && k ? `<span class="s"> ${dir > 0 ? '↑' : '↓'}</span>` : ''}</th>`).join('') + '</tr>';
-  const stageSelect = t => `<select class="stg" data-stage-of="${t.ref}">${STAGES.map(s => `<option ${s.name === t.stage ? 'selected' : ''}>${s.name}</option>`).join('')}</select>`;
-  const row = t => `<tr class="t ${mine(t) ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''}" draggable="true" data-ref="${t.ref}">
-    <td>${marker(t)}</td><td><span class="ref">${t.ref}</span></td><td title="${esc(t.title)}">${esc(t.title)}</td><td>${stageSelect(t)}</td>
-    <td class="c-ses">${who(t) || '<span class="sess">—</span>'}</td><td>${prio(t)}</td><td class="c-lab">${chips(t, 2)}</td><td class="ref">${t.age}d</td></tr>`;
-  let body = '';
-  const all = tasks.filter(visible);
-  if (state.eGroup === 'none') body = sorted(all).map(row).join('');
-  else {
-    const groups = state.eGroup === 'stage' ? STAGES.map(s => [s.name, all.filter(t => t.stage === s.name)])
-      : [...SESSIONS.map(s => [s.key, all.filter(t => t.who === s.key)]), ['', all.filter(t => !t.who)]];
-    for (const [g, list] of groups) {
-      if (!list.length && state.eGroup === 'session') continue;
-      const label = state.eGroup === 'stage' ? g : g ? sessionOf(g).name : 'Not assigned';
-      const id = state.eGroup === 'stage' ? g : 'session:' + g;
-      body += `<tr class="g" ${state.eGroup === 'stage' ? `data-stage="${g}"` : ''} data-toggle="eCollapsed:${id}"><td colspan="${cols.length}">${state.eCollapsed[id] ? '▸' : '▾'} ${esc(label)}<span class="c">${list.length}</span></td></tr>`;
-      if (!state.eCollapsed[id]) body += sorted(list).map(row).join('');
-    }
-  }
-  const group = `<span class="ctl" style="margin-left:auto">Group <span class="seg">${[['stage', 'Stage'], ['session', 'Session'], ['none', 'None']].map(([k, l]) => `<button data-egroup="${k}" aria-pressed="${state.eGroup === k}">${l}</button>`).join('')}</span></span>`;
-  return tabs('Tasks') + `<div class="content">${bar(group)}${strips()}<div class="row2"><div class="tbl"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>${detail('')}</div></div>`;
-}
-
-// F: a lane per stage.
-function renderF() {
-  const lanes = STAGES.map(s => {
-    const list = of(s.name);
-    const collapsed = state.fCollapsed[s.name];
-    const items = collapsed ? `<span data-toggle="fCollapsed:${s.name}">${list.length} tasks · show</span>`
-      : list.map(t => `<span class="pillc ${mine(t) ? 'mine' : ''} ${state.open === t.ref ? 'open' : ''} ${s.role === 'needs_human' ? 'callc' : ''}" draggable="true" data-ref="${t.ref}" title="${t.ref} · ${esc(t.title)}${t.who ? ' · ' + t.who : ''}">
-        ${t.marker ? marker(t) : ''}<span class="ti">${esc(t.title)}</span>${prio(t)}</span>`).join('') || '<span class="empty" style="padding:2px 4px">—</span>';
-    return `<div class="lane ${s.role === 'needs_human' ? 'call' : ''} ${collapsed ? 'collapsed' : ''}" data-stage="${s.name}">
-      <div class="lh" data-toggle="fCollapsed:${s.name}"><b>${s.name}</b><span class="c">${list.length}</span></div><div class="lb">${items}</div></div>`;
+// I: a lane per session.
+function renderI() {
+  const cols = ['Backlog', 'Queue', 'Design', 'Build', 'Review'];
+  const head = `<div class="igrid ihead" style="--n:${cols.length}">${cols.map(s => `<div>${si(s)}${s}<span class="c">${of(s).length}</span></div>`).join('')}</div>`;
+  const keys = [state.session, ...SESSIONS.filter(s => s.project === 'Alpha' && s.key !== state.session).map(s => s.key), ''];
+  const lanes = keys.map(key => {
+    const s = key ? sessionOf(key) : null;
+    const own = tasks.filter(t => t.who === key && visible(t));
+    const active = own.filter(t => cols.includes(t.stage));
+    const ask = own.filter(t => t.stage === 'Your Call');
+    const q = key ? queueOf(key).length : 0;
+    const collapsed = state.iCollapsed[key] ?? (!active.length && !ask.length);
+    const title = s ? `<b>${esc(s.name)}</b><span class="st ${s.cls}">${s.state}</span>` : '<b>Not assigned</b><span class="c">project pool</span>';
+    const extra = ask.map(t => `<span class="lcall" data-open="${t.ref}">${marker(t)}${esc(t.title)}</span>`).join('');
+    const send = q ? `<span class="link" style="color:var(--accent)" data-send-to="${key}">Send next</span>` : '';
+    const cells = cols.map(stage => `<div class="cell" data-cell="${stage}" data-lane="${key}"><div class="cards s">${active.filter(t => t.stage === stage).map(t => card(t, 'm', {noOwner: true})).join('')}</div></div>`).join('');
+    return `<div class="lane ${key === state.session ? 'me' : ''} ${key ? '' : 'pool'} ${collapsed ? 'collapsed' : ''}">
+      <div class="lh" data-toggle="iCollapsed:${key}"><span class="chev">▾</span>${title}<span class="c">${active.length} ${active.length === 1 ? 'task' : 'tasks'}</span>${extra}<span class="grow"></span>${send}</div>
+      <div class="igrid" style="--n:${cols.length}">${cells}</div></div>`;
   }).join('');
-  const queue = `<span class="strip queue" style="margin-left:auto"><b>This session's queue: ${queueOf(state.session).length}</b> · <span class="link" data-send>Send next</span></span>`;
-  return tabs('Tasks') + `<div class="content">${bar(queue)}<div class="row2"><div class="lanes">${lanes}</div>${detail('')}</div></div>`;
+  const done = `<span class="ref" style="margin-left:auto">${si('Done')} Done ${of('Done').length} · Icebox ${of('Icebox').length}</span>`;
+  return `${bar(done)}<div class="iboard">${head}${lanes}</div>`;
 }
 
-// G: no board; the main area shows a task's card in place of Activity.
-function renderG() {
-  const t = tasks.find(x => x.ref === state.open);
-  if (t) return `<div class="mhead"><h2>Alpha / ${t.ref}</h2><span class="pill ${t.stage === 'Your Call' ? 'call' : ''}">${t.stage}</span></div>
-    <div class="content"><div class="row2">${detail('full')}</div></div>`;
-  return tabs('Activity', true) + `<div class="content"><div class="row2">${activity()}</div></div>`;
+// J: board with card sizes and rails.
+function renderJ() {
+  const width = {s: 180, m: 220, l: 260}[state.size];
+  const cols = STAGES.filter(s => s.role !== 'needs_human').map(s => {
+    const list = of(s.name), tone = `var(--c-${slug(s.name)})`;
+    if (state.jRail[s.name]) return `<div class="jrail" style="--tone:${tone}" data-stage="${s.name}" data-unrail="${s.name}" title="${s.name}: ${list.length}"><span class="c">${list.length}</span><span class="v">${s.name}</span></div>`;
+    return `<div class="jcol" style="--w:${width}px;--tone:${tone}" data-stage="${s.name}"><div class="h">${si(s.name)}${s.name}<span class="c">${list.length}</span><button class="fold" data-rail="${s.name}" title="Fold">⟨</button></div>
+      <div class="cards ${state.size}">${list.map(t => card(t, state.size)).join('') || '<div class="empty">No tasks</div>'}</div></div>`;
+  }).join('');
+  const size = `<span class="ctl" style="margin-left:auto">Cards <span class="seg small">${['s', 'm', 'l'].map(k => `<button data-size="${k}" aria-pressed="${state.size === k}">${k.toUpperCase()}</button>`).join('')}</span></span>`;
+  return `${bar(size)}${strips()}<div class="jboard">${cols}</div>`;
+}
+
+// K: stage containers.
+function renderK() {
+  const order = ['Your Call', 'Queue', 'Design', 'Build', 'Review', 'Backlog', 'Done', 'Icebox'];
+  const groups = order.map(stage => {
+    const list = of(stage);
+    if (stage === 'Your Call' && !list.length) return '';
+    const rows = list.map(t => `<div class="krow ${mine(t) ? 'mine' : ''}" draggable="true" data-ref="${t.ref}">
+      ${si(stage)}<div style="min-width:0"><div class="ti">${esc(t.title)}</div><div class="sub"><span class="ref">${t.ref}</span>${chips(t, 2)}</div></div>
+      <div class="right">${prio(t)}${marker(t) || ''}${who(t, true)}</div></div>`).join('') || '<div class="empty">No tasks</div>';
+    return `<div class="kgrp ${slug(stage)} ${state.kCollapsed[stage] ? 'collapsed' : ''}" style="--c:var(--c-${slug(stage)})" data-stage="${stage}">
+      <div class="kh" data-toggle="kCollapsed:${stage}">${si(stage)}<b>${stage}</b><span class="c">${list.length}</span><span class="role">${ROLE[stage].replace('_', ' ')}</span>
+        ${['Your Call', 'Done'].includes(stage) ? '' : `<button class="add" data-add="${stage}" title="Add a task to ${stage}">+</button>`}</div>
+      <div class="krows">${rows}</div></div>`;
+  }).join('');
+  // Your Call is the first container here, so only the queue strip is shown.
+  return `${bar(strips(true, false).replace(/^<div class="bar">|<\/div>$/g, ''))}<div class="kboard"><div class="kflow">${groups}</div></div>`;
 }
 
 function render() {
@@ -536,12 +539,12 @@ function render() {
   win.style.width = state.width + 'px';
   win.classList.toggle('light', state.theme === 'light');
   const active = document.activeElement;
-  const focused = active && ['filter', 'addtask'].includes(active.id) ? active.id : '';
+  const focused = active && active.id === 'filter';
   const caret = focused ? active.selectionStart : 0;
   renderSide();
-  $('#main').innerHTML = {now: renderNow, d: renderD, e: renderE, f: renderF, g: renderG}[state.variant]();
-  const again = focused && document.getElementById(focused);
-  if (again) { again.focus(); again.setSelectionRange(caret, caret); }
+  const body = {now: renderNow, h: renderH, i: renderI, j: renderJ, k: renderK}[state.variant]();
+  $('#main').innerHTML = tabs() + `<div class="content">${body}</div>` + peek();
+  if (focused && $('#filter')) { $('#filter').focus(); $('#filter').setSelectionRange(caret, caret); }
   for (const [id, key, attr] of [['#variant', 'variant', 'v'], ['#width', 'width', 'w'], ['#theme', 'theme', 't']])
     for (const b of document.querySelectorAll(id + ' button')) b.setAttribute('aria-pressed', String(String(state[key]) === b.dataset[attr]));
   for (const n of document.querySelectorAll('.note')) n.classList.toggle('on', n.dataset.v === state.variant);
@@ -550,52 +553,47 @@ function toast(text) {
   const el = document.createElement('div'); el.className = 'toast'; el.textContent = text;
   $('#main').appendChild(el); setTimeout(() => el.remove(), 2200);
 }
+function sendNext(key) {
+  const next = queueOf(key)[0];
+  if (!next) { toast('The queue of this session is empty.'); return false; }
+  next.stage = 'Build'; next.marker = 'working'; log(`Send next: <b>${next.ref}</b> ушла в ${sessionOf(key).name}.`);
+  return true;
+}
 
 document.addEventListener('click', e => {
-  if (e.target.closest('select')) return;
-  const t = e.target.closest('[data-v],[data-w],[data-t],[data-open],[data-ref],[data-close],[data-toggle],[data-send],[data-session],[data-egroup],[data-sort],[data-pool],[data-answer],[data-showdone]');
-  if (!t) return;
+  const stop = e.target.closest('[data-stop]');
+  const t = e.target.closest('[data-v],[data-w],[data-t],[data-open],[data-ref],[data-close],[data-toggle],[data-send],[data-send-to],[data-session],[data-size],[data-rail],[data-unrail],[data-hdone],[data-answer],[data-add]');
+  if (!t || (stop && !stop.contains(t))) return;
+  if (stop && t.dataset.close !== undefined && t === stop.closest('.peek')) return;
   const d = t.dataset;
-  if (d.v) { state.variant = d.v; state.open = ''; log(`Вариант <b>${(t.querySelector('h3') || t).textContent}</b>.`); }
+  if (d.add) { e.stopPropagation(); const ref = 'om-new' + (++seq); tasks.push(T(ref, d.add, 'New task in ' + d.add, {age: 0})); state.open = ref; log(`Создана <b>${ref}</b> в ${d.add}.`); }
+  else if (d.v) { state.variant = d.v; state.open = ''; log(`Вариант <b>${(t.querySelector('h3') || t).textContent}</b>.`); }
   else if (d.w) state.width = +d.w;
   else if (d.t) state.theme = d.t;
-  else if (d.close !== undefined) state.open = '';
   else if (d.answer !== undefined) {
     const task = tasks.find(x => x.ref === state.open); task.stage = 'Build'; task.marker = 'working'; delete task.question;
-    log(`Ответ записан, <b>${task.ref}</b> вернулась агенту.`);
+    log(`Ответ записан, <b>${task.ref}</b> вернулась агенту.`); state.open = '';
   }
-  else if (d.open || d.ref) { state.open = d.open || d.ref; log(`Открыта <b>${state.open}</b>.`); }
-  else if (d.toggle) { const i = d.toggle.indexOf(':'); const bag = d.toggle.slice(0, i), k = d.toggle.slice(i + 1); state[bag][k] = !state[bag][k]; }
-  else if (d.egroup) state.eGroup = d.egroup;
-  else if (d.sort) { if (state.eSort === d.sort) state.eDir = -state.eDir; else { state.eSort = d.sort; state.eDir = 1; } }
-  else if (d.pool !== undefined) state.gPool = !state.gPool;
-  else if (d.showdone !== undefined) { toast('Done and Icebox would open here as a list.'); return; }
-  else if (d.session) { state.session = d.session; if (state.variant === 'g') state.open = ''; log(`Выбрана сессия <b>${sessionOf(d.session).name}</b>.`); }
-  else if (d.send !== undefined) {
-    const next = queueOf(state.session)[0];
-    if (!next) { toast('The queue of this session is empty.'); return; }
-    next.stage = 'Build'; next.marker = 'working'; log(`Send next: <b>${next.ref}</b> ушла в ${sessionOf(state.session).name}.`);
-  }
+  else if (d.close !== undefined) state.open = '';
+  else if (d.open || d.ref) { e.stopPropagation(); state.open = d.open || d.ref; log(`Открыта <b>${state.open}</b>.`); }
+  else if (d.sendTo !== undefined) { e.stopPropagation(); if (!sendNext(d.sendTo)) return; }
+  else if (d.toggle) { const i = d.toggle.indexOf(':'); const bag = d.toggle.slice(0, i), k = d.toggle.slice(i + 1);
+    const lane = state.variant === 'i' && bag === 'iCollapsed';
+    const now = lane ? (state.iCollapsed[k] ?? !tasks.some(x => x.who === k && ['Backlog', 'Queue', 'Design', 'Build', 'Review', 'Your Call'].includes(x.stage))) : state[bag][k];
+    state[bag][k] = !now; }
+  else if (d.size) state.size = d.size;
+  else if (d.rail) state.jRail[d.rail] = true;
+  else if (d.unrail) state.jRail[d.unrail] = false;
+  else if (d.hdone !== undefined) state.hDone = !state.hDone;
+  else if (d.session) { state.session = d.session; log(`Выбрана сессия <b>${sessionOf(d.session).name}</b>.`); }
+  else if (d.send !== undefined) { if (!sendNext(state.session)) return; }
   render();
 });
-document.addEventListener('change', e => {
-  const sel = e.target.closest('[data-stage-of]'); if (!sel) return;
-  const t = tasks.find(x => x.ref === sel.dataset.stageOf);
-  if (sel.value === 'Your Call') { toast('Only an agent puts a task into Your Call.'); render(); return; }
-  t.stage = sel.value; log(`<b>${t.ref}</b> → ${t.stage}.`); render();
-});
 document.addEventListener('input', e => { if (e.target.id === 'filter') { state.filter = e.target.value; render(); } });
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.open) { state.open = ''; render(); }
-  if (e.key === 'Enter' && e.target.id === 'addtask' && e.target.value.trim()) {
-    const ref = 'om-new' + (++seq);
-    tasks.push(T(ref, 'Queue', e.target.value.trim(), {who: state.session, age: 0}));
-    log(`Добавлена <b>${ref}</b> в очередь ${sessionOf(state.session).name}.`); e.target.value = ''; render();
-  }
-});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.open) { state.open = ''; render(); } });
 
-// Drag a task to a stage (section, column, lane, table group) or, in G, to a session or the pool.
-const zone = el => el.closest(state.variant === 'g' ? '[data-assign]' : '[data-stage]');
+// Drag a task to a stage (section, column, container) or, in I, to a cell of a session's lane.
+const zone = el => el.closest('[data-cell],[data-stage]');
 document.addEventListener('dragstart', e => { const r = e.target.closest('[data-ref]'); if (r) { state.drag = r.dataset.ref; e.dataTransfer.effectAllowed = 'move'; } });
 document.addEventListener('dragover', e => {
   const z = zone(e.target); if (!z || !state.drag) return;
@@ -608,24 +606,21 @@ document.addEventListener('drop', e => {
   const z = zone(e.target); if (!z || !state.drag) return;
   e.preventDefault();
   const t = tasks.find(x => x.ref === state.drag); state.drag = '';
-  if (state.variant === 'g') {
-    const to = z.dataset.assign;
-    t.who = to; if (to && t.stage === 'Backlog') t.stage = 'Queue';
-    log(`<b>${t.ref}</b> → ${to ? sessionOf(to).name : 'project pool'}.`);
-  } else {
-    const to = z.dataset.stage;
-    if (to === 'Your Call') { toast('Only an agent puts a task into Your Call.'); render(); return; }
-    if (t.stage !== to) { t.stage = to; if (t.marker === 'working' && !['Design', 'Build'].includes(to)) t.marker = ''; log(`<b>${t.ref}</b> → ${to}.`); }
-  }
+  const to = z.dataset.cell || z.dataset.stage;
+  if (to === 'Your Call') { toast('Only an agent puts a task into Your Call.'); render(); return; }
+  if (z.dataset.cell) t.who = z.dataset.lane;
+  if (t.stage !== to) { t.stage = to; if (t.marker === 'working' && !['Design', 'Build'].includes(to)) t.marker = ''; }
+  log(`<b>${t.ref}</b> → ${to}${z.dataset.cell ? ' · ' + (t.who ? sessionOf(t.who).name : 'pool') : ''}.`);
   render();
 });
 document.addEventListener('dragend', () => { state.drag = ''; for (const el of document.querySelectorAll('.drop')) el.classList.remove('drop'); });
 
-// #v=e&w=1100&t=light&open=om-k3f9x&s=codex/mobile/relay opens a given state (links and screenshots).
+// #v=i&w=1100&t=light&open=om-k3f9x&s=codex/mobile/relay&cs=s opens a given state (links and screenshots).
 const hash = new URLSearchParams(location.hash.slice(1));
-if (['now', 'd', 'e', 'f', 'g'].includes(hash.get('v'))) state.variant = hash.get('v');
+if (['now', 'h', 'i', 'j', 'k'].includes(hash.get('v'))) state.variant = hash.get('v');
 if (['1100', '1280', '1600'].includes(hash.get('w'))) state.width = +hash.get('w');
 if (['dark', 'light'].includes(hash.get('t'))) state.theme = hash.get('t');
+if (['s', 'm', 'l'].includes(hash.get('cs'))) state.size = hash.get('cs');
 if (tasks.some(t => t.ref === hash.get('open'))) state.open = hash.get('open');
 if (SESSIONS.some(s => s.key === hash.get('s'))) state.session = hash.get('s');
 render();
