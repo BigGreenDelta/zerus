@@ -366,16 +366,17 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. A
-session works while its agent's turn is unfinished or a subagent works. When the
-agent finishes its turn, the session is finished: shell commands it left running,
-such as test stands and dev servers that never exit, do not keep it Working, do
-not remove it from Ready and do not postpone its reply badge or notification.
-Open **Processes** to follow their output or stop them. Input/approval requests
-take precedence, followed by Working, Scheduled and Ready. The CLI's additive
-`process_work` summary uses current owned OS trees (one process-table sample per
-fleet listing) or the native DeepSeek job registry; it does not scan native
-transcripts on each fleet poll.
+**Ready** means a reply ended, not that a long-running task is complete. An idle
+agent with confirmed live shell commands shows **Background** in muted blue, with
+the command preview and elapsed time. Open **Processes** to follow output or inspect
+the running commands. The session remains in **Active** and still accepts new
+messages. Green **Working** indicates native agent work. Input/approval requests
+take precedence; ordinary agent work takes precedence over background work,
+followed by Scheduled and Ready. Offline and
+historical/unconfirmed process records never establish background work. The CLI's
+additive `process_work` summary uses current owned OS trees (one process-table
+sample per fleet listing) or the native DeepSeek job registry; it does not scan
+native transcripts on each fleet poll.
 
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
@@ -1381,10 +1382,10 @@ requires Reload. No external cloud service is involved.
 **Processes** is off by default; enable it in **Settings → Processes**. It appears
 beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list,
 count and output are not polled; normal Activity, fleet and account updates continue.
-The small count of commands an agent left running is part of ordinary fleet
-polling even when this tab is disabled; it never changes the session's status.
-Full process history and output remain opt-in. The context menu of a session with
-running commands offers **Show running commands** when Processes is enabled.
+The small **Background** summary is part of ordinary fleet polling even
+when this tab is disabled. Full process history and output remain opt-in. A
+background session's context menu offers **Show running commands** when Processes
+is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
 Recorded tool calls appear separately, with completed history collapsed. Equal

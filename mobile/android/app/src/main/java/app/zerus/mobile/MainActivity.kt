@@ -364,7 +364,7 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 when (badge.kind) {
-                    DesktopBadgeKind.Working -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))
+                    DesktopBadgeKind.Working, DesktopBadgeKind.Background -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))
                     DesktopBadgeKind.Attention, DesktopBadgeKind.Error -> Text("!", color = Color(colors.foreground),
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))

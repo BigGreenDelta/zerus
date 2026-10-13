@@ -65,6 +65,14 @@ only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
+An idle agent with confirmed owned live shell or native jobs shows `Background`,
+remains in Active and accepts new messages. Native work and explicit attention
+take precedence. A native Stop ends a turn; it does not prove those jobs finished.
+Retain unread reply identity and defer reply-only badges/notifications until the
+work completes. Historical, unknown and offline jobs never establish current work.
+Keep this contract aligned across desktop, Android, shared fixtures and docs;
+changes to these status semantics need explicit owner direction.
+
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after
 using a synchronous pipe, so scripts and tests must not pipe it directly.

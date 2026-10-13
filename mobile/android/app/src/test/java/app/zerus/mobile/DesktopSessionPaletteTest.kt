@@ -8,14 +8,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopSessionPaletteTest {
-    @Test fun backgroundCommandsNeverMakeAFinishedSessionWork() {
-        // Commands the agent left running (stands, dev servers) do not count as work.
-        val row=session("""{"activity":"idle","phase":"idle","process_work":{"count":2},"mobile_unread_reply":true}""")
+    @Test fun backgroundWorkRetainsDistinctCaptionWithoutAnIntermediateUnreadMarker() {
+        val row=session("""{"activity":"idle","phase":"idle","process_work":{"count":1},"mobile_unread_reply":true}""")
         val badge=DesktopSessionPalette.badge(row,true)
-        assertEquals(DesktopBadgeKind.Unread,badge.kind)
-        assertNotEquals("Background",badge.caption)
-        val ready=row.copy(raw=JSONObject(row.raw.toString()).put("mobile_unread_reply",false))
-        assertNotEquals(DesktopBadgeKind.Working,DesktopSessionPalette.badge(ready,true).kind)
+        assertEquals("Background",badge.caption)
+        assertEquals(DesktopBadgeKind.Background,badge.kind)
+        assertFalse(badge.additionalUnread)
+        for (dark in listOf(false, true)) {
+            assertNotEquals(DesktopSessionPalette.colors(DesktopBadgeKind.Working, dark),
+                DesktopSessionPalette.colors(badge.kind, dark))
+            assertEquals(DesktopSessionPalette.colors(badge.kind, dark).foreground,
+                DesktopSessionPalette.detailColors(row, true, dark).foreground)
+        }
+        val finished = row.copy(raw = JSONObject(row.raw.toString()).put("process_work", JSONObject().put("count", 0)))
+        assertEquals(DesktopBadgeKind.Unread, DesktopSessionPalette.badge(finished, true).kind)
     }
     private fun session(raw: String = "{}", pending: Int = 0, archive: String = "") = Session(
         Target("computer", "codex/project/task", "run", "conversation", "workspace", archive),
@@ -34,12 +40,12 @@ class DesktopSessionPaletteTest {
             DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0), DesktopBadgeColors(0xFF194D36, 0xFF97F0BA),
             DesktopBadgeColors(0xFFFFDA76, 0xFF392900), DesktopBadgeColors(0xFFFFABB6, 0xFF46202A),
             DesktopBadgeColors(0xFF443654, 0xFFDEC3FF), DesktopBadgeColors(0xFFFFDA76, 0xFF392900),
-            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0))
+            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0), DesktopBadgeColors(0xFF273544, 0xFFAAC0DF))
         val light = listOf(
             DesktopBadgeColors(0xFFE7EDF2, 0xFF566575), DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37),
             DesktopBadgeColors(0xFFF4CE65, 0xFF392900), DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF),
             DesktopBadgeColors(0xFFE8DDF5, 0xFF634187), DesktopBadgeColors(0xFFF4CE65, 0xFF392900),
-            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B))
+            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B), DesktopBadgeColors(0xFFE9F0F8, 0xFF466B99))
         DesktopBadgeKind.entries.forEachIndexed { index, kind ->
             assertEquals(dark[index], DesktopSessionPalette.colors(kind, true))
             assertEquals(light[index], DesktopSessionPalette.colors(kind, false))

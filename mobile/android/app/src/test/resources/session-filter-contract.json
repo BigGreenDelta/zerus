@@ -21,7 +21,7 @@
     {"name":"scheduled-offline", "raw":{"activity":"idle","phase":"idle","schedules":{"count":1,"recurring":1,"next_at":1791744000}}, "online":false, "draft":false, "matches":["all"]},
     {"name":"scheduled-unknown", "raw":{"activity":"idle","phase":"idle","schedules":null}, "online":true, "draft":false, "matches":["all"]},
     {"name":"scheduled-paused", "raw":{"state":"paused","activity":"idle","phase":"idle","schedules":{"count":1,"recurring":0,"next_at":null}}, "online":true, "draft":false, "matches":["all","paused"]},
-    {"name":"background-shell","raw":{"activity":"idle","phase":"idle","process_work":{"count":1}},"online":true,"draft":false,"matches":["all"]},
+    {"name":"background-shell","raw":{"activity":"idle","phase":"idle","process_work":{"count":1}},"online":true,"draft":false,"matches":["all","active"]},
     {"name":"background-finished","raw":{"activity":"idle","phase":"idle","process_work":{"count":0}},"online":true,"draft":false,"matches":["all"]},
     {"name":"background-unknown","raw":{"activity":"idle","phase":"idle","process_work":{"count":null}},"online":true,"draft":false,"matches":["all"]},
     {"name":"background-offline","raw":{"activity":"idle","phase":"idle","process_work":{"count":1}},"online":false,"draft":false,"matches":["all"]},
