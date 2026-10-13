@@ -317,14 +317,19 @@ recording or saving its preview.
 Local capture starts without waiting for provider discovery; discovery refreshes
 in the background. Capture lasts at most two minutes. Releasing the microphone,
 stopping or leaving the conversation never sends a message. The preview is an
-encrypted durable WAV file on this phone; it offers **Play**, **Discard** and **Send voice message**. A process killed before
+encrypted durable WAV file on this phone. A compact **Pending** card contains
+playback and seeking, with Delete and Send icon buttons on the right. All three
+buttons keep 48 dp touch targets and accessible **Play**, **Discard** and **Send
+voice message** names. Discard still asks for confirmation. A process killed before
 capture finishes can lose the unfinished recording. Completed previews survive
 restart and remain accessible in Drafts. Capture and bounded 48 kHz fallback
 conversion run off the main thread.
 
 A preview recorded before choosing a provider remains saved without a fabricated
-selection. Use **Transcription provider** on that preview to choose its computer
-and profile. This dialog always addresses the recording's original conversation.
+selection. A contextual **Transcription provider** action appears when provider
+recovery is needed; the normal ready preview has no settings button or saved
+recording notice. The dialog always addresses the recording's original
+conversation. A preview viewed elsewhere identifies that destination.
 Send requires fresh confirmation of that exact available provider; discovery
 failure or an unavailable selection keeps the audio and never chooses a fallback
 or sends automatically. The conversation must have a confirmed run and conversation
@@ -423,7 +428,12 @@ adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobi
 
 It checks hold/release preview, left-swipe cancellation, interrupted pointers,
 background/navigation stop, permission results after release, preserved drafts
-and zero voice uploads before a separate Send. It also checks inline feedback
+and zero voice uploads before a separate Send. The compact Pending preview checks
+cover action order and touch targets, local playback and seeking, discard
+confirmation and a final explicit Send to the synthetic gateway with the exact
+durable audio identity. The healthy preview has no provider settings action;
+the speech smoke covers contextual recovery after a provider revision changes.
+It also checks inline feedback
 bounds, keyboard retention and input rejection under the overlay, restored editor
 selection/expansion, and capture-scoped calls to the Android haptic API. The emulator
 verifies dispatch and timing; physical vibration still depends on the device and

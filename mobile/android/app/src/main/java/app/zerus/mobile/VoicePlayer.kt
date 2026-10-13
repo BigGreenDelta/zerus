@@ -45,52 +45,84 @@ internal object VoiceWaveform {
 }
 
 /** The slider supplies native keyboard/TalkBack seeking; its track draws only measured bins. */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun VoicePlayer(identity: String, waveform: List<Int>, durationMs: Int,
-    positionMs: Int, playing: Boolean, loading: Boolean, onToggle: () -> Unit, onSeek: (Float) -> Unit) {
+    positionMs: Int, playing: Boolean, loading: Boolean, onToggle: () -> Unit, onSeek: (Float) -> Unit,
+    status: String? = null, trailing: (@Composable () -> Unit)? = null) {
     var seeking by remember(identity, durationMs) { mutableStateOf<Float?>(null) }
     val fraction = seeking ?: VoiceWaveform.progress(positionMs, durationMs)
     val displayedPosition = seeking?.let { VoiceWaveform.seekPosition(it, durationMs) } ?: positionMs
     val bins = remember(waveform) { waveform.takeIf(VoiceWaveform::valid).orEmpty() }
     val played = MaterialTheme.colorScheme.primary
     val unplayed = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .65f)
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        FilledIconButton(onClick = onToggle, enabled = !loading, modifier = Modifier.size(48.dp)) {
+    val time = "${VoiceWaveform.time(displayedPosition)} / ${VoiceWaveform.time(durationMs)}"
+    @Composable fun PlayControl(compact: Boolean) {
+        val content: @Composable () -> Unit = {
             if (loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             else Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                if (playing) "Pause" else "Play", Modifier.size(28.dp))
+                if (playing) "Pause" else "Play", Modifier.size(if (compact) 24.dp else 28.dp))
         }
-        Column(Modifier.weight(1f)) {
+        if (compact) ComposerActionButton(onClick = onToggle, enabled = !loading,
+            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = .12f), contentColor = MaterialTheme.colorScheme.primary,
+            disabledContainerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            content = content)
+        else FilledIconButton(onClick = onToggle, enabled = !loading, modifier = Modifier.size(48.dp), content = content)
+    }
+    @Composable fun Track(modifier: Modifier) {
             Slider(value = fraction, onValueChange = { seeking = it },
                 onValueChangeFinished = { seeking?.let(onSeek); seeking = null },
                 enabled = durationMs > 0,
-                modifier = Modifier.fillMaxWidth().height(48.dp).semantics {
+                modifier = modifier.height(48.dp).semantics {
                     contentDescription = "Recording playback position"
                     stateDescription = "${VoiceWaveform.time(displayedPosition)} of ${VoiceWaveform.time(durationMs)}"
                 }, thumb = {}, track = { state ->
-                    Canvas(Modifier.fillMaxWidth().height(30.dp)) {
-                        fun drawTrack(color: androidx.compose.ui.graphics.Color) {
-                            if (bins.isEmpty()) {
-                                drawLine(color, Offset(0f, size.height / 2), Offset(size.width, size.height / 2),
-                                    strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
-                            } else {
-                                val step = size.width / bins.size
-                                val stroke = (step * .55f).coerceAtMost(3.dp.toPx())
-                                val bottom = size.height - stroke / 2
-                                bins.forEachIndexed { index, bin ->
-                                    val height = (bin / 255f * (size.height - stroke)).coerceAtLeast(stroke)
-                                    val x = (index + .5f) * step
-                                    drawLine(color, Offset(x, bottom), Offset(x, bottom - height), stroke, StrokeCap.Round)
+                    val drawing: @Composable () -> Unit = {
+                        Canvas(Modifier.fillMaxWidth().height(30.dp)) {
+                            fun drawTrack(color: androidx.compose.ui.graphics.Color) {
+                                if (bins.isEmpty()) {
+                                    drawLine(color, Offset(0f, size.height / 2), Offset(size.width, size.height / 2),
+                                        strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+                                } else {
+                                    val step = size.width / bins.size
+                                    val stroke = (step * .55f).coerceAtMost(3.dp.toPx())
+                                    val bottom = size.height - stroke / 2
+                                    bins.forEachIndexed { index, bin ->
+                                        val height = (bin / 255f * (size.height - stroke)).coerceAtLeast(stroke)
+                                        val x = (index + .5f) * step
+                                        drawLine(color, Offset(x, bottom), Offset(x, bottom - height), stroke, StrokeCap.Round)
+                                    }
                                 }
                             }
+                            drawTrack(unplayed)
+                            clipRect(right = size.width * state.value) { drawTrack(played) }
                         }
-                        drawTrack(unplayed)
-                        clipRect(right = size.width * state.value) { drawTrack(played) }
                     }
+                    // Slider's range semantics follow its measured track, not its outer height.
+                    // Keep compact playback as tall as its neighboring 48 dp action targets.
+                    if (trailing != null) Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) { drawing() }
+                    else drawing()
                 })
-            Text("${VoiceWaveform.time(displayedPosition)} / ${VoiceWaveform.time(durationMs)}",
+    }
+    if (trailing != null) Column(Modifier.fillMaxWidth()) {
+        // Metadata has the full card width; large fonts may wrap it without
+        // squeezing the playback, discard, or send interaction targets.
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            status?.let { Text(it, modifier = Modifier.semantics { stateDescription = "Not sent" },
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Text(time, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PlayControl(compact = true)
+            Track(Modifier.weight(1f))
+            trailing()
+        }
+    } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        PlayControl(compact = false)
+        Column(Modifier.weight(1f)) {
+            Track(Modifier.fillMaxWidth())
+            Text(time,
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

@@ -67,7 +67,6 @@ internal class SpeechController(private val context: Context, private val model:
                 value = withContext(Dispatchers.IO) { store.voiceState() }
                 legacyResult = withContext(Dispatchers.IO) { store.speechState().attempt }
                 ready = true
-                if (draft != null) notice = "Your recording is saved. Play it, send it, or discard it."
             } catch (_: Exception) { notice = "Private voice storage could not be opened. Recording is unavailable." }
         }
     }
@@ -206,7 +205,7 @@ internal class SpeechController(private val context: Context, private val model:
                 value = value.copy(draft = VoiceDraft(target, machine, profileId, imported, pcm.size / 32, System.currentTimeMillis() / 1000.0, profileRevision))
                 persist()
                 imported = null
-                notice = "Recording saved. Send it when ready."
+                notice = ""
             } catch (cancelled: CancellationException) { owned.feedback.finish(userInitiated = false); throw cancelled }
             catch (error: Exception) {
                 notice = if (owned.discarded) "Recording discarded." else error.message ?: "Could not save the recording."
@@ -273,7 +272,7 @@ internal class SpeechController(private val context: Context, private val model:
         check(model.voiceHostReason(target).isBlank()) { model.voiceHostReason(target) }
         return checkNotNull(model.connections.find { it.id == target.connectionId }) { "The voice workspace is disconnected." }
     }
-    private fun providerReason(captured: VoiceDraft) = VoiceRoutes.providerReason(captured, profileTarget, loading, computers)
+    fun providerReason(captured: VoiceDraft) = VoiceRoutes.providerReason(captured, profileTarget, loading, computers)
     private fun validateSend(captured: VoiceDraft, allowColdCache: Boolean) {
         check(model.voiceSendReason(captured.target).isBlank()) { "The conversation changed before sending. The recording remains saved." }
         check(providerReason(captured).isBlank()) { providerReason(captured) }

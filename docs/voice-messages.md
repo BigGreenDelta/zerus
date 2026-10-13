@@ -27,9 +27,13 @@ alone never submits the recording.
 
 When the editor has no text or attachments, its trailing Send action becomes a
 microphone. Hold to record, release to retain a preview, or slide left to cancel.
-Release never uploads, transcribes or sends the recording. The saved preview
-provides playback, discard and a separate **Send voice message** action. Text or
-attachments restore the ordinary Send action.
+Release never uploads, transcribes or sends the recording. A compact **Pending**
+card identifies the unsent preview, with playback and seeking followed by Delete
+and Send icon buttons. The buttons retain accessible **Discard** and **Send voice
+message** names and 48 dp touch targets; deletion still requires confirmation.
+Provider settings appear only when the preview needs provider recovery, and a
+recording for a different conversation identifies that original destination.
+Text or attachments restore the ordinary Send action.
 
 Recording keeps the text draft read-only and disables attachment changes. During
 a hold, the empty editor displays a single recording row: a red indicator, a

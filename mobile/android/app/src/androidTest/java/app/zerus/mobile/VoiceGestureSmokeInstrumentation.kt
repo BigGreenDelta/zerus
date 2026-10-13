@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Base64
 import android.view.InputDevice
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -28,6 +29,8 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.ByteArrayOutputStream
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -35,7 +38,8 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Actual pointer dispatch, emulator AudioRecord, encrypted previews, and an in-process gateway.
  * Run only on a fresh isolated emulator with synthetic audio and no microphone permission grant.
- * This runner never clears data, revokes permissions, contacts a relay, or presses Send.
+ * This runner never clears data, revokes permissions or contacts a relay. Its one
+ * final explicit Send is accepted only by the isolated in-process fixture gateway.
  */
 class VoiceGestureSmokeInstrumentation : Instrumentation() {
     private val viewportNotes = mutableListOf<String>()
@@ -60,7 +64,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             check(progressCalls == 0 && startedCalls == 0 && !SpeechMicrophoneAccess.granted(targetContext))
             probePlatformFeedback()
             runGestures()
-            result.putString("stream", "Voice gesture smoke passed: physical hold/release/left cancel, compact inline timer/cancel cue, open-IME and expanded editor/selection restoration, hidden input rejection, permission/lifecycle/late-event ownership, accessibility and Enter; controller lifecycle plus platform View haptic dispatch verified without a physical vibration claim; no uploads or automatic sends.\n")
+            result.putString("stream", "Voice gesture smoke passed: physical hold/release/left cancel, compact inline timer/cancel cue, open-IME and expanded editor/selection restoration, hidden input rejection, permission/lifecycle/late-event ownership, accessibility and Enter; controller lifecycle plus platform View haptic dispatch verified without a physical vibration claim; compact Pending preview, accessible ordered playback/delete/send targets, seek and discard confirmation; zero automatic uploads and one final explicit Send with exact durable audio identity.\n")
             if (viewportNotes.isNotEmpty()) result.putString("stream", result.getString("stream") + viewportNotes.joinToString("\n", postfix = "\n"))
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
@@ -105,6 +109,44 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
         while (value != null && !value.isClickable) value = value.parent
         check(value?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) { "Cannot activate $label" }
     }
+    private fun tapProviderField(label: String) {
+        waitForIdleSync()
+        node("Transcription provider"); node("Done")
+        fun visibleField() = named(label)?.let { it.isVisibleToUser && !Rect().also(it::getBoundsInScreen).isEmpty } == true
+        fun bodySnapshot(root: AccessibilityNodeInfo?): List<String> {
+            if (root == null) return emptyList()
+            root.refresh()
+            val bounds = Rect().also(root::getBoundsInScreen)
+            val own = if (root.isVisibleToUser && (root.text != null || root.contentDescription != null))
+                listOf("${root.text}/${root.contentDescription}:$bounds") else emptyList()
+            return own + (0 until root.childCount).flatMap { bodySnapshot(root.getChild(it)) }
+        }
+        repeat(16) {
+            if (visibleField()) { tap(label); return }
+            // Compose may scroll without TYPE_VIEW_SCROLLED. Actual newly visible
+            // controls or changed text/bounds prove progress without that event.
+            val scroller = find({ it.isVisibleToUser && it.isScrollable })
+            check(scroller != null) { "Provider dialog has no scrollable body to reach $label" }
+            val before = bodySnapshot(scroller)
+            check(scroller.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) { "Provider dialog cannot scroll to $label" }
+            val deadline = SystemClock.elapsedRealtime() + 2_000
+            var previous = before
+            var stableSince = SystemClock.elapsedRealtime()
+            var moved = false
+            while (true) {
+                waitForIdleSync()
+                if (visibleField()) { tap(label); return }
+                val current = bodySnapshot(find({ it.isVisibleToUser && it.isScrollable }))
+                val now = SystemClock.elapsedRealtime()
+                if (current != before) moved = true
+                if (current != previous) { previous = current; stableSince = now }
+                if (moved && now - stableSince >= 200) break
+                check(now < deadline) { "Provider dialog did not visibly scroll toward $label" }
+                SystemClock.sleep(25)
+            }
+        }
+        error("Provider dialog did not reveal $label after bounded scrolling")
+    }
     private fun editor() = uiNode("composer editor") { it.className?.toString() == "android.widget.EditText" }
     private fun replaceText(value: String): Boolean = editor().performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
         putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
@@ -137,6 +179,60 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
         check(find({ it.isVisibleToUser && it.actionList.any { action -> action.id == AccessibilityNodeInfo.ACTION_SET_TEXT } }) == null) {
             "Recording exposed a visible text replacement action"
         }
+    }
+    private fun interactionBounds(label: String, root: AccessibilityNodeInfo?, seek: Boolean = false): Pair<Rect?, String> {
+        val minimum = 48 * targetContext.resources.displayMetrics.density - 2
+        val ancestry = mutableListOf<String>()
+        var current = find({ it.text?.toString() == label || it.contentDescription?.toString() == label }, root)
+        while (current != null) {
+            val bounds = Rect().also(current::getBoundsInScreen)
+            val seeks = current.rangeInfo != null && current.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id }
+            ancestry += "${current.className}(description=${current.contentDescription}, bounds=$bounds, visible=${current.isVisibleToUser}, clickable=${current.isClickable}, enabled=${current.isEnabled}, range=${current.rangeInfo != null}, seeks=$seeks)"
+            if (current.isVisibleToUser && (if (seek) seeks else current.isClickable) && bounds.width() >= minimum && bounds.height() >= minimum)
+                return bounds to ancestry.joinToString(" -> ")
+            current = current.parent?.also { it.refresh() }
+        }
+        return null to "$label: $ancestry"
+    }
+    private fun compactPreviewBounds(): Rect {
+        waitForIdleSync()
+        try { uiAutomation.waitForIdle(100, 1_000) } catch (_: java.util.concurrent.TimeoutException) { /* Bounded geometry polling below still applies. */ }
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        var previous: List<Rect>? = null
+        var stableSince = SystemClock.elapsedRealtime()
+        var stableBounds: List<Rect>
+        var window = Rect()
+        while (true) {
+            val root = uiAutomation.rootInActiveWindow
+            val candidates = listOf(interactionBounds("Play", root), interactionBounds("Recording playback position", root, seek = true),
+                interactionBounds("Discard", root), interactionBounds("Send voice message", root))
+            val bounds = candidates.mapNotNull { it.first }
+            val pendingVisible = find({ it.text?.toString() == "Pending" && it.isVisibleToUser }, root) != null
+            val now = SystemClock.elapsedRealtime()
+            if (bounds.size != 4 || !pendingVisible) {
+                previous = null; stableSince = now
+            } else {
+                if (bounds != previous) { previous = bounds; stableSince = now }
+                if (now - stableSince >= 200) {
+                    stableBounds = bounds
+                    window = Rect().also { root?.getBoundsInScreen(it) }
+                    break
+                }
+            }
+            check(now < deadline) { "Compact preview never exposed stable visible 48dp action/range owners; Pending=$pendingVisible; ${candidates.joinToString("; ") { it.second }}" }
+            SystemClock.sleep(25)
+        }
+        val (play, seek, discard, send) = stableBounds
+        val tolerance = (2 * targetContext.resources.displayMetrics.density).toInt()
+        check(play.right <= seek.left + tolerance && seek.right <= discard.left + tolerance && discard.right <= send.left + tolerance) {
+            "Compact preview action order/targets overlap: Play=$play seek=$seek Discard=$discard Send=$send"
+        }
+        check(listOf(seek, discard, send).all { kotlin.math.abs(it.centerY() - play.centerY()) <= tolerance }) {
+            "Compact preview actions do not share one row"
+        }
+        check(stableBounds.all { window.contains(it) }) { "Compact preview actions extend outside the window" }
+        check(find({ it.text?.toString()?.contains("Recording saved", ignoreCase = true) == true }) == null)
+        return seek
     }
     private fun inlineRecordingBounds(atRest: Boolean = true): Pair<Rect, Rect> {
         val timer = uiNode("inline recording timer") { it.contentDescription?.toString()?.matches(Regex("Recording [0-9]+:[0-9]{2}(\\.[0-9])?")) == true }
@@ -244,6 +340,9 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
         val target = Target("session-host", "gesture-fixture", "fixture-run", "fixture-conversation", "gesture-fixture")
         val session = Session(target, "Gesture fixture", "codex", "idle", "", "", 0, JSONObject())
         val mutations = AtomicInteger()
+        val submissions = AtomicInteger()
+        val authorizedPreview = AtomicReference<VoiceDraft?>()
+        val authorizedPcm = AtomicReference<ByteArray?>()
         val profiles = AtomicInteger()
         val profilesGate = CountDownLatch(1)
         val client = OkHttpClient.Builder().addInterceptor { chain ->
@@ -263,6 +362,31 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                         .put("machine_id", "b4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Fixture computer")
                         .put("profiles", JSONArray().put(JSONObject().put("id", "fixture").put("name", "Fixture profile")
                             .put("available", true).put("max_duration_ms", 120_000)))))
+                }
+                "voice_submit" -> {
+                    // This endpoint is armed only immediately before the final
+                    // explicit UI Send. Any earlier upload remains a hard failure.
+                    mutations.incrementAndGet()
+                    val captured = checkNotNull(authorizedPreview.get()) { "Voice uploaded without explicit fixture Send" }
+                    check(submissions.incrementAndGet() == 1) { "Explicit Send uploaded more than once" }
+                    val id = input.getString("request_id")
+                    check(UUID.fromString(id).toString() == id)
+                    val payload = input.getJSONObject("payload")
+                    check(input.string("computer_id") == target.computerId && input.string("session") == target.session)
+                    check(payload.string("request_id") == id && payload.string("expected_run_id") == target.run &&
+                        payload.string("expected_conversation_id") == target.conversation)
+                    val provider = payload.getJSONObject("speech")
+                    check(provider.string("machine_id") == captured.machineId && provider.string("profile_id") == captured.profileId)
+                    val audio = payload.getJSONObject("audio")
+                    check(audio.string("format") == "pcm_s16le" && audio.getInt("sample_rate") == 16_000 && audio.getInt("channels") == 1)
+                    check(Base64.decode(audio.getString("data_base64"), Base64.NO_WRAP).contentEquals(checkNotNull(authorizedPcm.get())))
+                    val persisted = PrivateStore(targetContext).voiceState()
+                    check(persisted.draft == null && persisted.outgoing.single().let { it.id == id && it.audio == captured.audio && it.target == captured.target })
+                    JSONObject().put("schema", 1).put("message", JSONObject().put("id", id).put("run_id", target.run)
+                        .put("conversation_id", target.conversation).put("created_at", captured.createdAt).put("revision", 1).put("state", "submitted")
+                        .put("transcript", "Synthetic explicit voice message.")
+                        .put("audio", JSONObject().put("request_id", id).put("index", 0).put("name", "voice.wav")
+                            .put("mime", "audio/wav").put("bytes", captured.audio.bytes).put("duration_ms", captured.durationMs)))
                 }
                 else -> {
                     // No delivery/status/attachment request is necessary to record and retain locally.
@@ -310,16 +434,25 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             }
             fun revealPreviewDiscard(allowEmptyViewport: Boolean = false): Boolean {
                 waitForIdleSync()
-                fun discardVisible() = named("Discard")?.let { node ->
-                    node.isVisibleToUser && !Rect().also(node::getBoundsInScreen).isEmpty
-                } == true
-                if (discardVisible()) return true
-                var scrollOwner: AccessibilityNodeInfo? = named("Voice message for ${target.session}")
-                    ?: named("Discard") ?: named("Transcription provider")
-                while (scrollOwner != null && !scrollOwner.isScrollable) scrollOwner = scrollOwner.parent?.also { it.refresh() }
-                val viewport = Rect().also { scrollOwner?.getBoundsInScreen(it) }
-                if (viewport.isEmpty && allowEmptyViewport) return false
-                check(!viewport.isEmpty) { "Preview did not expose a scroll viewport to reach Discard" }
+                try { uiAutomation.waitForIdle(100, 1_000) } catch (_: java.util.concurrent.TimeoutException) { /* Await fresh owners below. */ }
+                fun discardVisible() = interactionBounds("Discard", uiAutomation.rootInActiveWindow).first != null
+                val deadline = SystemClock.elapsedRealtime() + 15_000
+                var scrollOwner: AccessibilityNodeInfo?
+                var viewport: Rect
+                while (true) {
+                    if (discardVisible()) return true
+                    val root = uiAutomation.rootInActiveWindow
+                    scrollOwner = find({ it.text?.toString() in setOf("Pending", "Voice message for ${target.session}") ||
+                        it.contentDescription?.toString() in setOf("Discard", "Transcription provider") }, root)
+                    while (scrollOwner != null && !scrollOwner.isScrollable) scrollOwner = scrollOwner.parent?.also { it.refresh() }
+                    viewport = Rect().also { scrollOwner?.getBoundsInScreen(it) }
+                    if (!viewport.isEmpty) break
+                    if (SystemClock.elapsedRealtime() >= deadline) {
+                        if (allowEmptyViewport) return false
+                        error("Preview did not publish a visible Discard action or scroll viewport")
+                    }
+                    SystemClock.sleep(40)
+                }
                 val scroller = checkNotNull(scrollOwner)
                 var attempts = 0
                 while (!discardVisible() && attempts++ < 32) {
@@ -327,6 +460,10 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                     waitForIdleSync(); SystemClock.sleep(50)
                     scroller.refresh()
                 }
+                // The viewport can finish scrolling before Compose publishes its
+                // replacement virtual action node. Keep the final owner check strict.
+                val publicationDeadline = SystemClock.elapsedRealtime() + 1_000
+                while (!discardVisible() && SystemClock.elapsedRealtime() < publicationDeadline) SystemClock.sleep(25)
                 check(discardVisible()) { "Preview has viewport $viewport but Discard was unreachable after $attempts scroll attempts" }
                 return true
             }
@@ -418,6 +555,8 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             await("discovery completed") { !model.speech.loading && model.speech.computers.size == 1 }
             check(main { model.speech.draft == released }) { "Late discovery changed the preview" }
             noDelivery()
+            compactPreviewBounds()
+            node("Transcription provider")
             screenshot("voice-gesture-preview.png")
 
             // The editor and trailing action recover without a second microphone gesture.
@@ -707,9 +846,28 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             tap("Expand message")
             node("Collapse message")
             fun focusExpandedEditor() {
-                val bounds = Rect().also { editor().getBoundsInScreen(it) }
-                val press = Press(SystemClock.uptimeMillis(), bounds.exactCenterX(), bounds.exactCenterY())
+                // This is setup for the next capture, after the previous restored
+                // selection was asserted. Collapse it before tapping so the native
+                // selection toolbar/handles cannot intercept the refocus gesture.
+                check(editor().performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 0)
+                }))
+                await("collapsed selection before fixture refocus") {
+                    model.speechComposer?.editor?.selection?.let { it.start == 0 && it.end == 0 } == true
+                }
+                val bounds = settledEditorBounds()
+                val inset = 24 * targetContext.resources.displayMetrics.density
+                val press = Press(SystemClock.uptimeMillis(), bounds.left + minOf(inset, bounds.width() / 4f),
+                    bounds.top + minOf(inset, bounds.height() / 4f))
                 touch(press, MotionEvent.ACTION_DOWN); touch(press, MotionEvent.ACTION_UP)
+                await("expanded fixture input connection") {
+                    activity.window.decorView.findFocus()?.onCreateInputConnection(EditorInfo()) != null
+                }
+                // The fixture previously hid IME without removing editor focus.
+                // Refocusing can move its caret without issuing another show;
+                // explicitly establish this cycle's open-keyboard precondition.
+                main { activity.window.insetsController?.show(WindowInsets.Type.ime()) }
                 await("focused expanded editor IME") { activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true }
                 check(main { activity.window.decorView.findFocus()?.onCreateInputConnection(EditorInfo()) != null }) {
                     "Fixture did not focus the expanded text input before recording"
@@ -809,6 +967,65 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             check(replaceText(""))
             await("empty restored fixture") { model.draft(target).text.isEmpty() }
             noDelivery()
+
+            // Keep all gesture paths above strictly upload-free. Only this final
+            // explicit Send arms the fixture gateway, with the exact retained PCM.
+            val sendPress = hold()
+            await("seekable compact preview capture") { model.speech.seconds >= 3 }
+            touch(sendPress, MotionEvent.ACTION_UP)
+            val pending = preview("compact pending send fixture")
+            check(revealPreviewDiscard())
+            compactPreviewBounds()
+            tap("Transcription provider")
+            await("compact preview provider discovery") { !model.speech.loading }
+            tapProviderField("Choose voice computer"); tap("Fixture computer")
+            tapProviderField("Choose voice profile"); tap("Fixture profile"); tap("Done")
+            await("compact preview exact selected route") {
+                model.speech.draft?.machineId == "b4075bf0-9c22-4a67-b768-55af2d2936a4" && model.speech.draft?.profileId == "fixture" &&
+                    model.speech.sendReason().isBlank()
+            }
+            val ready = main { checkNotNull(model.speech.draft) }
+            check(ready.audio == pending.audio && ready.target == pending.target)
+            await("durable selected compact preview") { PrivateStore(targetContext).voiceState().draft == ready }
+            closedKeyboardEditorBounds(activity)
+            compactPreviewBounds()
+            check(named("Transcription provider") == null) { "Healthy preview exposes routine provider settings" }
+            tap("Discard"); node("Discard recording?")
+            check(main { model.speech.draft == ready } && PrivateStore(targetContext).voiceState().draft == ready)
+            tap("Keep recording")
+            closedKeyboardEditorBounds(activity)
+            check(main { model.speech.draft == ready }) { "Keeping the recording changed its identity" }
+            val seek = compactPreviewBounds()
+            val position = node("Recording playback position")
+            check(position.rangeInfo != null && position.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id,
+                Bundle().apply { putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, .25f) }))
+            await("compact preview accessible paused seek") {
+                !model.attachments.playing && model.attachments.audioPositionMs in (ready.durationMs * .20).toInt()..(ready.durationMs * .30).toInt()
+            }
+            val seekPress = Press(SystemClock.uptimeMillis(), seek.left + seek.width() * .6f, seek.exactCenterY())
+            touch(seekPress, MotionEvent.ACTION_DOWN); touch(seekPress, MotionEvent.ACTION_UP)
+            await("compact preview physical seek") {
+                !model.attachments.playing && model.attachments.audioPositionMs in (ready.durationMs * .4).toInt()..(ready.durationMs * .8).toInt()
+            }
+            tap("Play"); await("compact preview playback") { model.attachments.playing }
+            tap("Pause"); await("compact preview paused") { !model.attachments.playing }
+            check(main { model.speech.draft == ready })
+            compactPreviewBounds()
+            screenshot("voice-preview-ready.png")
+            noDelivery()
+            check(main { !model.voiceColdCache() && model.speech.sendReason().isBlank() }) {
+                "Synthetic Send fixture unexpectedly needs additional consent or recovery"
+            }
+            val wav = ByteArrayOutputStream()
+            runBlocking { AttachmentStore(targetContext).decrypt(ready.audio) { wav.write(it) } }
+            authorizedPcm.set(VoiceProtocol.pcm(wav.toByteArray()))
+            authorizedPreview.set(ready)
+            tap("Send voice message")
+            await("one explicit compact Send") {
+                submissions.get() == 1 && model.speech.draft == null && model.speech.outgoing.singleOrNull()?.state == "submitted" && model.speech.activeRequests.isEmpty()
+            }
+            check(mutations.get() == 1 && main { model.outgoing.isEmpty() && model.draft(target).text.isEmpty() })
+            check(PrivateStore(targetContext).voiceState().outgoing.single().audio == ready.audio)
         } catch (error: Throwable) {
             runCatching { screenshot("voice-gesture-failure.png") }
             throw error

@@ -6,17 +6,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -305,6 +308,7 @@ import androidx.compose.ui.unit.dp
 @Composable internal fun SpeechComposerStatus(model: ZerusViewModel) {
     val speech = model.speech
     val draft = speech.draft
+    val sendReason = if (draft != null) speech.sendReason() else ""
     var confirmCold by remember { mutableStateOf<VoiceDraft?>(null) }
     var confirmDiscard by remember { mutableStateOf<VoiceDraft?>(null) }
     var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
@@ -324,29 +328,47 @@ import androidx.compose.ui.unit.dp
             }
             speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
             draft != null -> {
-                Text("Voice message for ${draft.target.session}", style = MaterialTheme.typography.labelMedium)
-                val computer = speech.computers.find { it.id == draft.machineId }
-                Text(if (draft.machineId.isBlank() || draft.profileId.isBlank()) "Choose a transcription provider before sending."
-                    else "Transcription: ${computer?.name ?: draft.machineId} / ${computer?.profiles?.find { it.id == draft.profileId }?.name ?: draft.profileId}", style = MaterialTheme.typography.bodySmall)
-                VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs)
-                val reason = speech.sendReason()
-                FlowRow(Modifier.fillMaxWidth()) {
-                    TextButton(onClick = {
-                        model.attachments.stopAudio()
-                        if (model.voiceColdCache()) confirmCold = draft else speech.submit()
-                    }, enabled = reason.isBlank()) { Text("Send voice message") }
-                    TextButton(onClick = { confirmDiscard = draft }) { Text("Discard") }
-                    IconButton(onClick = { providerSettings = draft }, enabled = !speech.savingRecording) {
-                        Icon(Icons.Default.Settings, "Transcription provider")
+                val providerReason = speech.providerReason(draft)
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                    Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (model.selected?.target != draft.target) Text("For ${draft.target.session}", style = MaterialTheme.typography.labelMedium)
+                        VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs, status = "Pending", trailing = {
+                            Row {
+                                ComposerActionButton(onClick = { confirmDiscard = draft }, enabled = true,
+                                    containerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), contentColor = MaterialTheme.colorScheme.onSurface,
+                                    disabledContainerColor = MaterialTheme.colorScheme.surface, disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
+                                    Icon(Icons.Default.DeleteOutline, "Discard", Modifier.size(22.dp))
+                                }
+                                ComposerActionButton(onClick = {
+                                    if (speech.draft == draft && speech.sendReason().isBlank()) {
+                                        model.attachments.stopAudio()
+                                        if (model.voiceColdCache()) confirmCold = draft else speech.submit()
+                                    }
+                                }, enabled = sendReason.isBlank(),
+                                    containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
+                                    disabledContainerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
+                                    Icon(Icons.AutoMirrored.Filled.Send, "Send voice message", Modifier.size(22.dp))
+                                }
+                            }
+                        })
+                        if (speech.loading) Text("Checking transcription provider…", style = MaterialTheme.typography.bodySmall)
+                        else if (providerReason.isNotBlank()) {
+                            Text(providerReason, style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = { providerSettings = draft },
+                                modifier = Modifier.semantics { contentDescription = "Transcription provider" }) {
+                                Text(if (draft.machineId.isBlank() || draft.profileId.isBlank()) "Choose provider" else "Review provider")
+                            }
+                        }
+                        if (sendReason.isNotBlank() && sendReason != providerReason) Text(sendReason, style = MaterialTheme.typography.bodySmall)
+                        if (model.selected?.target != draft.target) model.sessions.find { it.target == draft.target }?.let { session ->
+                            TextButton(onClick = { model.open(session) }) { Text("Open original conversation") }
+                        }
                     }
-                }
-                if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
-                if (model.selected?.target != draft.target) model.sessions.find { it.target == draft.target }?.let { session ->
-                    TextButton(onClick = { model.open(session) }) { Text("Open original conversation") }
                 }
             }
         }
-        if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
+        if (speech.notice.isNotBlank() && speech.notice != sendReason) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
     }
     providerSettings?.let { captured ->
         ObscureConversation()
@@ -378,7 +400,7 @@ import androidx.compose.ui.unit.dp
 }
 
 @Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int,
-    waveform: List<Int> = emptyList()) {
+    waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, audio)
     val row = viewer.state(target, audio)
@@ -386,7 +408,7 @@ import androidx.compose.ui.unit.dp
     VoicePlayer(key, waveform, durationMs, if (active) viewer.audioPositionMs else 0,
         active && viewer.playing, row?.loading == true,
         onToggle = { viewer.toggleAudio(target, audio) },
-        onSeek = { viewer.seekAudio(target, audio, it, durationMs) })
+        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing)
     row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 }
 
