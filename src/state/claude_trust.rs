@@ -2,6 +2,8 @@
 //! native disclosure and require a fresh, explicit choice for the pinned run.
 //! The frame (rule, title, folder, guide, exact choices and hint) must match;
 //! the disclosure is verbatim identity, so new native wording stays visible.
+//! On Windows the folder row is a drive path (`C:\Users\…`), compared with
+//! the launch directory without case (`shown_path`).
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -34,7 +36,7 @@ fn parse(screen: &str) -> Option<Panel> {
         || !rows[0].chars().all(|c| c == '─')
         || rows[1] != TITLE
         || !rows[2].is_empty()
-        || !rows[3].starts_with('/')
+        || !shown_path::absolute(rows[3])
         || *rows.last()? != HINT
     {
         return None;
@@ -67,12 +69,14 @@ fn parse(screen: &str) -> Option<Panel> {
 }
 
 /// Whether the wrapped rows show exactly this folder. A wrap may drop the
-/// spaces it breaks at; no other difference is accepted.
+/// spaces it breaks at; no other difference is accepted, except letter case
+/// in a Windows drive path.
 fn shows(rows: &[String], folder: &str) -> bool {
+    let windows = shown_path::drive(folder);
     let mut rest = folder;
     for (i, row) in rows.iter().enumerate() {
         if i > 0 { rest = rest.trim_start_matches(' '); }
-        let Some(after) = rest.strip_prefix(row.as_str()) else { return false };
+        let Some(after) = shown_path::strip_prefix(rest, row, windows) else { return false };
         rest = after;
     }
     rest.is_empty()
@@ -221,6 +225,37 @@ mod tests {
             let screen = SCREEN.replace(" /work/example\n", &format!("{shown}\n"));
             assert!(parse(&screen).and_then(|panel| card(&record(), &panel)).is_none(), "{shown}");
         }
+    }
+    // Claude Code 2.1.296 under bundled ConPTY (spike S3), in the normal-screen
+    // layout; the account folder is the synthetic user01.
+    const WINDOWS: &str = include_str!("../../tests/fixtures/claude-folder-trust-windows.txt");
+    const WINDOWS_DIR: &str = r"C:\Users\user01\zerus-dev\p2\s3\homes\claude-trust\work";
+    #[test]
+    fn windows_drive_folder_names_the_launch_directory_in_any_case() {
+        let mut record = record();
+        record["launch_dir"] = json!(WINDOWS_DIR);
+        let panel = parse(WINDOWS).unwrap();
+        assert_eq!((panel.selected, panel.folder.as_slice()), (0, [WINDOWS_DIR.to_owned()].as_slice()));
+        let question = card(&record, &panel).unwrap();
+        let body = string(&question["questions"][0], "body");
+        assert!(body.starts_with(&format!("{WINDOWS_DIR}\n\nQuick safety check")), "{body}");
+        assert!(body.contains("4 tool permissions"));
+        // Windows names ignore case; the identity keeps the exact launch directory.
+        let mut other_case = record.clone();
+        other_case["launch_dir"] = json!(WINDOWS_DIR.to_lowercase());
+        assert!(card(&other_case, &panel).is_some());
+        let wrapped = WINDOWS.replace(r" C:\Users\user01\zerus-dev\p2", " c:\\users\\USER01\\zerus-dev\n \\p2");
+        assert_eq!(card(&record, &parse(&wrapped).unwrap()).unwrap()["question_hash"], question["question_hash"]);
+        for launch in [r"C:\Users\user01\zerus-dev\p2\s3\homes\claude-trust\work2", r"D:\Users\user01\zerus-dev\p2\s3\homes\claude-trust\work", "/work/example"] {
+            record["launch_dir"] = json!(launch);
+            assert!(card(&record, &panel).is_none(), "{launch}");
+        }
+        for shown in [r" \\server\share\work", r" ~\zerus-dev\p2\s3\homes\claude-trust\work", " /c/Users/example/work"] {
+            assert!(parse(&WINDOWS.replace(&format!(" {WINDOWS_DIR}"), shown)).and_then(|panel| card(&other_case, &panel)).is_none(), "{shown}");
+        }
+        // A Unix folder still needs its exact letters.
+        assert!(card(&json!({"agent":"claude","run_id":"run","run_identity_version":1,"supervisor":{},"launch_dir":"/Work/Example"}),
+            &parse(SCREEN).unwrap()).is_none());
     }
     #[test]
     fn binds_folder_run_and_disclosure_independently_of_highlight() {

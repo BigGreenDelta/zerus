@@ -3,6 +3,10 @@
 //! a panel for another folder or unknown launcher output around it. Activity
 //! still shows the wait: the visible panel verbatim, answered in Terminal.
 //! Zerus never sends keys to it.
+//!
+//! One reviewed chooser stays here on purpose: the sandbox setup that Codex
+//! 0.162 on Windows shows after folder trust. Zerus names it but never answers
+//! it (`codex_sandbox`).
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -113,6 +117,31 @@ fn parse(screen: &str) -> Option<Choice> {
     })
 }
 
+// Codex 0.162 on Windows asks how to set up its agent sandbox after folder
+// trust (spike S3, 2026-10-13). Either setup changes this computer: one needs
+// Administrator permissions, and Codex itself calls the other higher risk. It
+// is a known startup choice that Zerus never accepts on anyone's behalf.
+const CODEX_SANDBOX: &str = "Set up the Codex agent sandbox to protect your files and control network access. Learn more <https://developers.openai.com/codex/windows>";
+const CODEX_SANDBOX_OPTIONS: [&str; 3] = [
+    "Set up default sandbox (requires Administrator permissions)",
+    "Use non-admin sandbox (higher risk if prompt injected)",
+    "Quit",
+];
+const CODEX_SANDBOX_REASON: &str = "Zerus never chooses how Codex sets up its sandbox: one option needs Administrator permissions and Codex calls the other higher risk. Answer this in Terminal.";
+
+/// The complete reviewed sandbox chooser below the Codex session header.
+fn codex_sandbox(choice: &Choice) -> bool {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    choice.title.starts_with(">_ OpenAI Codex (v")
+        && choice.title.ends_with(')')
+        && choice.options == CODEX_SANDBOX_OPTIONS
+        && choice
+            .body
+            .rsplit("\n\n")
+            .next()
+            .is_some_and(|prompt| words(prompt) == CODEX_SANDBOX)
+}
+
 fn native_input(name: &str) -> PathBuf {
     root().join("native-input").join(format!("{:x}.lock", Sha256::digest(name.as_bytes())))
 }
@@ -154,13 +183,21 @@ fn card(record: &Value, choice: &Choice) -> Option<Value> {
     }
     let hash = format!("{:x}", Sha256::digest(json!([record["run_id"], record["pane"], record["pid"],
         record["process_start"], record["expected_id"], choice.title, choice.body, choice.options]).to_string()));
-    let question = if choice.title.is_empty() { format!("{} is waiting for a choice", agent_name(record)) } else { choice.title.clone() };
+    let sandbox = string(record, "agent") == "codex" && codex_sandbox(choice);
+    let question = if sandbox {
+        "Set up the Codex agent sandbox?".to_owned()
+    } else if choice.title.is_empty() {
+        format!("{} is waiting for a choice", agent_name(record))
+    } else {
+        choice.title.clone()
+    };
     let options: Vec<_> = choice.options.iter().enumerate()
         .map(|(i, label)| json!({"id":(i + 1).to_string(),"label":label})).collect();
-    Some(json!({"question_id":format!("startup-choice:{hash}"),"question_hash":hash,"tool_call_id":"",
+    Some(json!({"question_id":format!("startup-choice:{hash}"),"question_hash":hash,
+        "tool_call_id":if sandbox { "codex_sandbox_setup" } else { "" },
         "agent_id":"main","run_id":record["run_id"],"conversation_id":record["conversation_id"],"created_at":0,
         "source":"startup_terminal_choice","can_answer":false,"answer_transport":"",
-        "answer_unavailable_reason":"Answer this in Terminal.",
+        "answer_unavailable_reason":if sandbox { CODEX_SANDBOX_REASON } else { "Answer this in Terminal." },
         "questions":[{"id":"terminal","header":"Terminal","question":question,"body":choice.body,
             "multi_select":false,"allow_other":false,"options":options}]}))
 }
@@ -175,7 +212,10 @@ pub(super) fn current(record: &Value) -> Option<Value> {
     card(&record, &parse(&kimi_tui_choice::capture(&record).ok()?)?)
 }
 
-pub(super) fn detail(record: &Value) -> String {
+pub(super) fn detail(record: &Value, question: &Value) -> String {
+    if question["tool_call_id"] == "codex_sandbox_setup" {
+        return "Codex is waiting for its sandbox setup choice in Terminal".to_owned();
+    }
     format!("{} is waiting for a choice in Terminal", agent_name(record))
 }
 
@@ -223,6 +263,59 @@ mod tests {
             CLAUDE_TRUST.replace(" Enter to confirm · Esc to cancel", "")] {
             assert!(parse(&screen).is_none(), "{screen}");
         }
+    }
+    #[test]
+    fn codex_windows_sandbox_setup_is_known_but_never_answered() {
+        // Codex 0.162.0 under bundled ConPTY after folder trust (spike S3).
+        const SANDBOX: &str = include_str!("../../tests/fixtures/codex-sandbox-setup-windows.txt");
+        let choice = parse(SANDBOX).unwrap();
+        assert_eq!(choice.title, ">_ OpenAI Codex (v0.162.0)");
+        assert_eq!(choice.options, CODEX_SANDBOX_OPTIONS);
+        assert!(choice
+            .body
+            .starts_with(r"~\zerus-dev\p2\s3\homes\codex-trust\work"));
+        assert!(codex_sandbox(&choice));
+        let question = card(&record("codex"), &choice).unwrap();
+        let native = &question["questions"][0];
+        assert_eq!(native["question"], "Set up the Codex agent sandbox?");
+        assert_eq!(native["body"], choice.body);
+        assert_eq!(native["options"][1]["label"], CODEX_SANDBOX_OPTIONS[1]);
+        assert_eq!(
+            (
+                question["can_answer"].clone(),
+                question["source"].clone(),
+                question["answer_transport"].clone()
+            ),
+            (json!(false), json!("startup_terminal_choice"), json!(""))
+        );
+        assert_eq!(question["answer_unavailable_reason"], CODEX_SANDBOX_REASON);
+        assert_eq!(
+            detail(&record("codex"), &question),
+            "Codex is waiting for its sandbox setup choice in Terminal"
+        );
+        // Changed wording, options or header are an unreviewed chooser, still read-only.
+        for screen in [
+            SANDBOX.replace("control network access", "control access"),
+            SANDBOX.replace("(higher risk if prompt injected)", "(recommended)"),
+            SANDBOX.replace("  3. Quit", "  3. Quit\n  4. Skip"),
+            SANDBOX.replace(">_ OpenAI Codex (v0.162.0)", "Quoted panel"),
+        ] {
+            let other = parse(&screen).unwrap();
+            assert!(!codex_sandbox(&other), "{screen}");
+            let question = card(&record("codex"), &other).unwrap();
+            assert_eq!(
+                (
+                    question["can_answer"].clone(),
+                    question["tool_call_id"].clone()
+                ),
+                (json!(false), json!(""))
+            );
+            assert_eq!(
+                detail(&record("codex"), &question),
+                "Codex is waiting for a choice in Terminal"
+            );
+        }
+        assert_eq!(card(&record("kimi"), &choice).unwrap()["tool_call_id"], "");
     }
     #[test]
     fn read_only_card_pins_run_and_visible_panel_before_a_conversation() {

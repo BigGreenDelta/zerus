@@ -1,4 +1,7 @@
 //! Explicit native /clear, never a prompt or an automatic cache reaction.
+//! Codex's reset panel names the session folder as Codex prints it: `/…` or
+//! `~/…` on Unix, and on Windows a drive path or `~\…` below the platform home,
+//! both compared without case (`shown_path`).
 use super::*;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -76,7 +79,14 @@ pub(super) fn awaiting_start(record: &Value) -> bool {
 }
 
 fn codex_reset_panel(screen: &str, cwd: &str) -> bool {
-    if !Path::new(cwd).is_absolute() || !screen.lines().any(|line| line.trim_start().starts_with('›')) { return false; }
+    codex_reset_panel_below(screen, cwd, &home())
+}
+
+// Codex prints the folder below the home as `~/…`, or as `~\…` on Windows,
+// where its drive path and that form compare without case (`shown_path`).
+fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
+    let windows = shown_path::drive(cwd);
+    if !(windows || Path::new(cwd).is_absolute()) || !screen.lines().any(|line| line.trim_start().starts_with('›')) { return false; }
     let mut rows: Vec<_> = screen.lines().take_while(|line| !line.trim_start().starts_with('›'))
         .map(str::trim).filter(|line| !line.is_empty()).collect();
     // The released idle screen can include its settled decorative logo. Match
@@ -87,10 +97,13 @@ fn codex_reset_panel(screen: &str, cwd: &str) -> bool {
     if rows.ends_with(&logo) { rows.truncate(rows.len() - logo.len()); }
     if !(2..=6).contains(&rows.len()) || !rows[0].starts_with(">_ OpenAI Codex (v")
         || !rows[0].ends_with(')') { return false; }
-    let short = Path::new(cwd).strip_prefix(home()).ok().map(|path| {
-        if path.as_os_str().is_empty() { "~".to_owned() } else { format!("~/{}",path.display()) }
-    });
-    if rows[1] != cwd && short.as_deref() != Some(rows[1]) { return false; }
+    let short = if windows { home.to_str().and_then(|home| shown_path::home_alias(cwd, home)) } else {
+        Path::new(cwd).strip_prefix(home).ok().map(|path| {
+            if path.as_os_str().is_empty() { "~".to_owned() } else { format!("~/{}",path.display()) }
+        })
+    };
+    if !shown_path::equal(rows[1], cwd, windows)
+        && short.is_none_or(|short| !shown_path::equal(rows[1], &short, windows)) { return false; }
     let tail = if rows.get(2).is_some_and(|row| row.starts_with("permissions: ")) {
         &rows[3..]
     } else { &rows[2..] };
@@ -370,7 +383,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(record["cleared_conversations"].is_null() && record["session_clear"].is_null());
         assert_eq!(earlier_conversations(&record),json!([]));
     }
-    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    // A POSIX working directory, not absolute on Windows; the Windows forms
+    // are covered by windows_reset_panel_names_the_folder_below_the_platform_home.
     #[cfg(unix)]
     #[test] fn only_the_complete_native_empty_reset_header_matches() {
         let panel="\n >_ OpenAI Codex (v0.162.0)\n /fixture\n permissions: YOLO mode\n\n\n› Ask Codex to do anything\n GPT-6.1-Sol default\n ? for shortcuts\n";
@@ -383,7 +397,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&screen,"/fixture"),"{screen}");
         }
     }
-    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    // A POSIX working directory, not absolute on Windows; the Windows forms
+    // are covered by windows_reset_panel_names_the_folder_below_the_platform_home.
     #[cfg(unix)]
     #[test] fn resident_native_greetings_match_without_accepting_other_prose() {
         let header = ">_ OpenAI Codex (v0.160.1)\n/fixture\npermissions: YOLO mode\n\n";
@@ -399,7 +414,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&format!("{header}{prose}{footer}"), "/fixture"), "{prose}");
         }
     }
-    // Codex prints a POSIX working directory; Windows forms come with Phase 2 M4.
+    // A POSIX working directory, not absolute on Windows; the Windows forms
+    // are covered by windows_reset_panel_names_the_folder_below_the_platform_home.
     #[cfg(unix)]
     #[test] fn only_the_complete_released_idle_logo_is_decoration() {
         let header = ">_ OpenAI Codex (v0.162.0)\n/fixture\npermissions: YOLO mode\n\n";
@@ -414,6 +430,28 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel(&format!("{header}{body}{footer}"), "/fixture"), "{body}");
         }
         assert!(!codex_reset_panel(&format!("{header}{logo}{footer}"), "/other"));
+    }
+    #[test] fn windows_reset_panel_names_the_folder_below_the_platform_home() {
+        // Codex 0.162.0 under bundled ConPTY after /clear (spike S3), with its
+        // idle logo; the account folder is the synthetic user01.
+        let panel = include_str!("../../tests/fixtures/codex-clear-result-windows.txt");
+        let cwd = r"C:\Users\user01\zerus-dev\p2\s3\homes\codex-commands\work";
+        let home = Path::new(r"C:\Users\user01");
+        assert!(codex_reset_panel_below(panel, cwd, home));
+        // Windows names ignore case, in the folder and in the home.
+        assert!(codex_reset_panel_below(panel, &cwd.to_lowercase(), home));
+        assert!(codex_reset_panel_below(panel, cwd, Path::new(r"c:\users\USER01\")));
+        let shown = r"~\zerus-dev\p2\s3\homes\codex-commands\work";
+        assert!(codex_reset_panel_below(&panel.replacen(shown, cwd, 1), cwd, home));
+        assert!(codex_reset_panel_below(&panel.replacen(shown, r"C:\USERS\user01\zerus-dev\p2\s3\homes\codex-commands\work", 1), cwd, home));
+        for (cwd, home) in [(r"C:\Users\user01\zerus-dev\p2\s3\homes\codex-commands", r"C:\Users\user01"),
+            (cwd, r"C:\Users\other"), (cwd, r"D:\Users\user01"), (cwd, "/home/example"), ("/fixture", r"C:\Users\user01")] {
+            assert!(!codex_reset_panel_below(panel, cwd, Path::new(home)), "{cwd} {home}");
+        }
+        for row in [r"~/zerus-dev/p2/s3/homes/codex-commands/work", r"~\zerus-dev\p2\s3\homes\codex-commands", "~"] {
+            assert!(!codex_reset_panel_below(&panel.replacen(shown, row, 1), cwd, home), "{row}");
+        }
+        assert!(!codex_reset_panel_below(&panel.replace("› Ask Codex", "Previous answer\n› Ask Codex"), cwd, home));
     }
     #[test] fn only_a_waiting_claude_chooser_can_be_dismissed_for_a_clear() {
         let waiting=json!({"agent":"claude","conversation_id":"conversation","activity":"busy","phase":"input"});
