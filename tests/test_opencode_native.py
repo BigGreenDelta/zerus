@@ -330,3 +330,16 @@ class OpenCodeNative(unittest.TestCase):
             self.assertEqual(Proxy.submissions,1)
         finally:
             file.write_text(original);proxy.shutdown();proxy.server_close();thread.join(5)
+
+    def test_09_inline_config_never_bootstraps_an_unbound_host(self):
+        original=self.env
+        self.env={**original,'HGS_STATE_DIR':str(self.root/'inline-state'),'OPENCODE_CONFIG_CONTENT':json.dumps({'model':'other/invisible','permission':{'*':'allow'},'provider':{'other':{'options':{'apiKey':'INLINE_SECRET_SENTINEL'}}}})}
+        try:
+            account=next(p for p in self.command(['account','ls'])['profiles'] if p['id']=='native-opencode')
+            self.assertEqual(account['model_options'],[])
+            self.assertIn('Inline OpenCode configuration',account['model_catalog_reason'])
+            blocked=self.command(['opencode',str(self.workspace),'--new','-n','inline-blocked','-d','--account','native-opencode','--model','fixture/local'],success=False)
+            self.assertIn('Inline OpenCode configuration',blocked.stderr)
+            self.assertNotIn('INLINE_SECRET_SENTINEL',blocked.stderr+json.dumps(account))
+            self.assertFalse((self.root/'inline-state/opencode').exists())
+        finally:self.env=original

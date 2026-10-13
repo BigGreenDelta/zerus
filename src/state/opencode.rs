@@ -356,6 +356,7 @@ fn endpoint(record: &Value, suffix: &str) -> String {
     format!("/api/session/{}{suffix}", string(record, "conversation_id"))
 }
 fn ensure_host(record: &Value) -> Result<()> {
+    file_configuration_only()?;
     let dir = host_dir(record);
     private_dir(&dir)?;
     let _guard = lock(Some(&dir.join("start.lock")))?;
@@ -433,6 +434,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         .env("OPENCODE_SERVER_PASSWORD", string(&metadata, "password"))
         .env("OPENCODE_CONFIG_DIR", string(record, "agent_home"))
         .env("XDG_DATA_HOME", string(record, "native_data_home"))
+        .env_remove("OPENCODE_CONFIG_CONTENT")
         .env_remove("OPENCODE_CONFIG")
         .current_dir(home())
         .stdin(Stdio::null())
@@ -561,9 +563,18 @@ fn configuration_json(bytes: &[u8]) -> Result<Value> {
     }
     serde_json::from_slice(&clean).map_err(|_| "Native OpenCode configuration is invalid".into())
 }
+fn file_configuration_only() -> Result<()> {
+    if nonempty_env("OPENCODE_CONFIG_CONTENT").is_some() {
+        return Err("Inline OpenCode configuration is not supported by this adapter; use the host opencode.json file".into());
+    }
+    Ok(())
+}
 /// Accounts never start a server or expose provider credentials. Explicitly
 /// configured model IDs are enough for a cold local-model launch picker.
 pub(crate) fn catalog() -> Value {
+    if let Err(reason) = file_configuration_only() {
+        return json!({"model_options":[],"settings_model":"","model_catalog_source":"unavailable","model_catalog_reason":reason});
+    }
     let mut paths = vec![
         config_home().join("opencode.json"),
         config_home().join("opencode.jsonc"),
@@ -640,6 +651,7 @@ pub(crate) fn launch(
     dry: bool,
     new_only: bool,
 ) -> Result<()> {
+    file_configuration_only()?;
     let selected = model.map(offered_model).transpose()?;
     if dry {
         println!("Create native OpenCode session {name} in {cwd}");

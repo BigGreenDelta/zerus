@@ -304,7 +304,7 @@ fn list(config: &Config) -> Result<Value> {
     }
     if platform::available("opencode") || catalog.hidden_profiles.contains("native-opencode") {
         let mut row=json!({"id":"native-opencode","provider":"opencode","label":catalog.native_labels.get("native-opencode").map(String::as_str).unwrap_or(default_label("opencode")),"home":native_home(config,"opencode"),"native":true,"credential_file":false,"auth_status":"native_configuration","portable":false,"installed":platform::available("opencode"),"permission_mode_supported":false});
-        #[cfg(unix)] {let models=crate::state::opencode::catalog();row["model_options"]=models["model_options"].clone();row["settings_model"]=models["settings_model"].clone();}
+        #[cfg(unix)] {let models=crate::state::opencode::catalog();row["model_options"]=models["model_options"].clone();row["settings_model"]=models["settings_model"].clone();row["model_catalog_reason"]=models["model_catalog_reason"].clone();}
         rows.push(row);
     }
     for row in &mut rows {
