@@ -653,6 +653,8 @@ class ScreenModelDifferential(unittest.TestCase):
         row followed by a marker, so a different width shows in the capture.
         """
         chars = sorted({c for case in cases for c in case.stream().decode("utf-8", "ignore") if ord(c) > 0x7f})
+        if not chars:
+            return set()
         stream = b"".join(CSI + b"%d;1H" % (row + 1) + text(c) + CSI + b"%d;4H|" % (row + 1)
                           for row, c in enumerate(chars))
         case = Case("widths", len(chars), 8, [stream])

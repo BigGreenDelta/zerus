@@ -15,12 +15,17 @@ use super::grid::{
 };
 use super::utf8::{self, Decoded, Decoder};
 use super::write::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 const INTERM_MAX: usize = 3;
 const PARAM_MAX: usize = 63;
 const INPUT_MAX: usize = 1 << 20;
 const PARAM_LIST_MAX: usize = 24;
+/// tmux keeps at most this many hyperlinks less one (`MAX_HYPERLINKS`),
+/// forgetting the oldest; tmux counts them per server, the model per pane.
+const MAX_HYPERLINKS: usize = 5000;
+/// Longer URIs (as stored) are not linked (`MAX_HYPERLINK_URI`).
+const MAX_HYPERLINK_URI: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -99,9 +104,12 @@ pub(super) struct Parser {
     last_printed: bool,
     last: Glyph,
     utf8: Option<Decoder>,
+    /// Hyperlinks with an id, by URI and id, to their number.
     links: HashMap<(Vec<u8>, Vec<u8>), u32>,
-    /// URI and id of every hyperlink, by number minus one, as tmux keeps them.
-    targets: Vec<(Vec<u8>, Vec<u8>)>,
+    /// URI and id of the hyperlinks tmux still keeps, oldest first; the first
+    /// is number `first_link`. Numbers are never reused.
+    targets: VecDeque<(Vec<u8>, Vec<u8>)>,
+    first_link: u32,
 }
 
 impl Parser {
@@ -123,7 +131,8 @@ impl Parser {
             last: Glyph::ascii(b' '),
             utf8: None,
             links: HashMap::new(),
-            targets: Vec::new(),
+            targets: VecDeque::new(),
+            first_link: 1,
         }
     }
 
@@ -952,26 +961,49 @@ impl Parser {
             self.pen.cell.link = 0;
             return;
         }
-        // `hyperlinks_put`: links with an id are shared, anonymous ones never.
-        let uri = utf8::stravis(uri);
-        let id = utf8::stravis(&id.unwrap_or_default());
-        let key = (uri.clone(), id.clone());
-        let named = !id.is_empty();
-        if let Some(link) = self.links.get(&key).filter(|_| named) {
-            self.pen.cell.link = *link;
-            return;
-        }
-        self.targets.push((uri, id));
-        let link = self.targets.len() as u32;
-        if named {
-            self.links.insert(key, link);
-        }
-        self.pen.cell.link = link;
+        self.pen.cell.link = self.put_link(uri, &id.unwrap_or_default());
     }
 
-    /// The URI and id of a hyperlink (`hyperlinks_get`).
+    /// `hyperlinks_put`: the number of a hyperlink, 0 for none. Links with an
+    /// id are shared, anonymous ones never; the table is bounded like tmux's,
+    /// so a long session that keeps redrawing links does not grow without end.
+    fn put_link(&mut self, uri: &[u8], id: &[u8]) -> u32 {
+        let uri = utf8::stravis(uri);
+        if uri.len() > MAX_HYPERLINK_URI {
+            return 0;
+        }
+        let id = utf8::stravis(id);
+        let named = !id.is_empty();
+        if named {
+            if let Some(link) = self.links.get(&(uri.clone(), id.clone())) {
+                return *link;
+            }
+        }
+        let link = self.first_link.wrapping_add(self.targets.len() as u32);
+        if named {
+            self.links.insert((uri.clone(), id.clone()), link);
+        }
+        self.targets.push_back((uri, id));
+        if self.targets.len() == MAX_HYPERLINKS {
+            if let Some(oldest) = self.targets.pop_front() {
+                if self.links.get(&oldest) == Some(&self.first_link) {
+                    self.links.remove(&oldest);
+                }
+            }
+            self.first_link = self.first_link.wrapping_add(1);
+        }
+        link
+    }
+
+    /// The URI and id of a hyperlink tmux still keeps (`hyperlinks_get`).
     pub(super) fn link_target(&self, link: u32) -> Option<(&[u8], &[u8])> {
-        let (uri, id) = self.targets.get((link as usize).checked_sub(1)?)?;
+        if link == 0 {
+            return None;
+        }
+        // Numbers below `first_link` wrap far beyond the table.
+        let (uri, id) = self
+            .targets
+            .get(link.wrapping_sub(self.first_link) as usize)?;
         Some((uri, id))
     }
 }

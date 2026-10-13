@@ -110,6 +110,38 @@ fn hyperlinks_are_kept_but_not_printed() {
 }
 
 #[test]
+fn hyperlinks_are_bounded_like_tmux() {
+    // tmux forgets the oldest link once it holds 5000 and never links a
+    // longer URI than 1024 bytes, so redrawn links cannot grow without end.
+    let links = |count: usize| -> Vec<u8> {
+        (0..count)
+            .flat_map(|i| {
+                format!("\x1b]8;;https://example.com/{i}\x1b\\\x1b]8;;\x1b\\").into_bytes()
+            })
+            .collect()
+    };
+    let first = b"\x1b]8;;https://first\x1b\\A\x1b]8;;\x1b\\";
+    let kept = [&first[..], &links(4998), b"B"].concat();
+    assert_eq!(
+        model(2, 10, &kept).capture_with_links(),
+        b"\x1b]8;;https://first\x1b\\A\x1b]8;;\x1b\\B\n\n"
+    );
+    let forgotten = [&first[..], &links(4999), b"B"].concat();
+    assert_eq!(model(2, 10, &forgotten).capture_with_links(), b"AB\n\n");
+    let mut screen = model(2, 10, b"");
+    for _ in 0..20 {
+        screen.process(&links(1000));
+    }
+    // Links 1 to 20000 were made; the newest 4999 remain.
+    assert!(screen.parser.link_target(15001).is_none());
+    assert!(screen.parser.link_target(15002).is_some());
+    assert!(screen.parser.link_target(20000).is_some());
+    assert!(screen.parser.link_target(20001).is_none());
+    let long = [&b"\x1b]8;;"[..], &[b'u'; 1025], b"\x1b\\A"].concat();
+    assert_eq!(model(2, 10, &long).capture_with_links(), b"A\n\n");
+}
+
+#[test]
 fn split_input_gives_the_same_screen() {
     let stream =
         "\x1b[1;38;2;1;2;3mbold\x1b[0m 中文 \x1b]2;title\x07\x1b[?2004h\x1b[3;1Hend".as_bytes();
