@@ -307,7 +307,9 @@ obfuscation by Defender for Endpoint (Orca's evidence) and breaks multi-line
 arguments. Native executables run directly. Windows PATH preparation adds
 `%USERPROFILE%\.local\bin` and `%APPDATA%\npm` when present, the counterpart of
 `platform/unix.rs:22-43`. The `sh` command means PowerShell (`pwsh.exe`, else
-`powershell.exe -NoLogo`) and stays untracked. Process-name checks compare file stems
+`powershell.exe -NoLogo`) and stays untracked; it runs under `--run` like any other
+program, because a root process started as a new process group ignores Ctrl+C and
+only the supervisor turns it back on (D11). Process-name checks compare file stems
 case-insensitively (`node.exe` is `node`; `src/state/external_agents.rs:15`,
 `src/state/input.rs:568`, `src/state/processes/control.rs:267-281`).
 

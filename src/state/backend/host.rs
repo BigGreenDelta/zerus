@@ -27,9 +27,10 @@
 //! refusing host, another protocol) is an error, never an empty listing, which
 //! would show live sessions as stopped and resumable.
 //!
-//! **Launch (D8).** A session's root process is the stable CLI's `hgs.exe --run`
-//! (or PowerShell for `sh`), started with this process's whole environment and
-//! the launch's variables (`session_environment`). This side sets
+//! **Launch (D8).** A session's root process is the stable CLI's `hgs.exe --run`,
+//! which runs the program, PowerShell for `sh`, as its child with Ctrl+C turned
+//! back on (D11). It starts with this process's whole environment and the
+//! launch's variables (`session_environment`). This side sets
 //! `HGS_EXECUTABLE` to the stable CLI, the one hgs.exe that sessions, hooks and
 //! records name; the host sets only what it alone knows (`HGS_HOST_SESSION`,
 //! `HGS_HOST_PANE`) and the terminal type. A launch's `HGS_LAUNCH_ID` is the

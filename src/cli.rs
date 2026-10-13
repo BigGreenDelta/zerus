@@ -1806,7 +1806,11 @@ fn launch(
         }
     }
     let executable = executable_path()?.to_string_lossy().into_owned();
-    let command = if command_name == "sh" {
+    // The Unix login shell is the pane's root process. On Windows PowerShell
+    // runs under `--run` as well: the host starts every root process as a new
+    // process group, which ignores Ctrl+C together with everything it starts,
+    // and only the supervisor turns Ctrl+C back on for its child (spec D11).
+    let command = if command_name == "sh" && cfg!(unix) {
         base
     } else {
         #[cfg(unix)]

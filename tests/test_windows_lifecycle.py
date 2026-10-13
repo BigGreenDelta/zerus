@@ -193,20 +193,29 @@ class Launch(LifecycleCase):
         self.assertIn("already exists", again.stderr)
         self.assertEqual(len(self.events("start")), 1)
 
+    def prompt(self, pane):
+        """Whether PowerShell in `pane` waits at an empty prompt, which may wrap: the screen ends with it."""
+        text = self.backend({"op": "capture", "pane": pane})["text"].rstrip()
+        return "PS " in text and text.endswith(">")
+
     def test_powershell_sessions_get_the_session_environment(self):
         outer = dict(self.env, HGS_SESSION="claude/outer/main", HGS_RUN_ID="outer-run", COLORTERM="truecolor")
-        result = self.hgs("sh", str(self.project), "--new", "-n", "ps", "-d", env=outer)
+        # Neither the user's profile nor their PowerShell history takes part.
+        result = self.hgs("sh", str(self.project), "--new", "-n", "ps", "-d", "--", "-NoProfile", "-NoExit",
+                          "-Command", "try { Set-PSReadLineOption -HistorySaveStyle SaveNothing } catch {}", env=outer)
         name = "sh/project/ps"
         self.assertEqual(result.stdout, f"hgs: started {name}\n")
         self.status()
         pane = self.pane(name)
-        self.assertIn(Path(image_of(pane["pid"])).name.lower(), ("pwsh.exe", "powershell.exe"))
-        self.wait_for("the prompt", lambda: "PS " in self.backend({"op": "capture", "pane": pane["pane"]})["text"])
+        # PowerShell runs under the stable CLI's supervisor, like any program (D8, D11).
+        self.assertTrue(os.path.samefile(image_of(pane["pid"]), self.cli), image_of(pane["pid"]))
+        self.wait_for("the prompt", lambda: self.prompt(pane["pane"]))
         output = self.root / "environment.json"
         command = ("[ordered]@{exe=$env:HGS_EXECUTABLE; pane=$env:HGS_HOST_PANE; host_session=$env:HGS_HOST_SESSION; "
                    "session=$env:HGS_SESSION; run=$env:HGS_RUN_ID; term=$env:TERM; colorterm=$env:COLORTERM; "
-                   "client=$env:HGS_CLIENT; cwd=(Get-Location).Path} | ConvertTo-Json | "
-                   f"Set-Content -Encoding UTF8 -LiteralPath '{output}'")
+                   "client=$env:HGS_CLIENT; cwd=(Get-Location).Path; pid=$PID; "
+                   "parent=(Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ParentProcessId} | "
+                   f"ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath '{output}'")
         self.backend({"op": "send", "pane": pane["pane"], "keys": [{"literal": command}, {"named": "Enter"}]})
         environment = self.wait_for("the environment", lambda: read_json(output))
         self.assertTrue(os.path.samefile(environment["exe"], self.cli), environment)
@@ -214,6 +223,21 @@ class Launch(LifecycleCase):
         self.assertEqual((environment["session"], environment["run"], environment["colorterm"]), (None, None, None))
         self.assertEqual((environment["term"], environment["client"]), ("xterm-256color", "local"))
         self.assertTrue(os.path.samefile(environment["cwd"], self.project), environment)
+        self.assertEqual(environment["parent"], pane["pid"], environment)
+        self.assertIn(Path(image_of(environment["pid"])).name.lower(), ("pwsh.exe", "powershell.exe"))
+
+        # The host starts the root process as a new process group, which ignores
+        # Ctrl+C; the supervisor turns it back on for PowerShell (D11).
+        sleeping, interrupted = self.root / "sleeping.txt", self.root / "interrupted.txt"
+        self.wait_for("the prompt", lambda: self.prompt(pane["pane"]))
+        self.backend({"op": "send", "pane": pane["pane"], "keys": [
+            {"literal": f"Set-Content -LiteralPath '{sleeping}' 1; Start-Sleep -Seconds 600"}, {"named": "Enter"}]})
+        self.wait_for("the sleep", sleeping.exists)
+        self.backend({"op": "send", "pane": pane["pane"], "keys": [{"named": "C-c"}]})
+        self.wait_for("Ctrl+C to stop the sleep", lambda: self.prompt(pane["pane"]))
+        self.backend({"op": "send", "pane": pane["pane"], "keys": [
+            {"literal": f"Set-Content -LiteralPath '{interrupted}' 1"}, {"named": "Enter"}]})
+        self.wait_for("the next command", interrupted.exists)
         self.hgs("kill", name)
         self.wait_for("the end", lambda: name not in self.sessions())
 
