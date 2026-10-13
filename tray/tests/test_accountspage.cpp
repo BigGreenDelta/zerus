@@ -221,7 +221,7 @@ void TestAccountsPage::defaultAccountIsMachineScopedAndUsedForNewSessions()
     QVERIFY(!QFile::exists(m_dir.filePath("default-local")));
     NewSessionDialog dialog(FakeCli::program(m_script),fleet(),"mac","codex");dialog.show();
     auto *accounts=dialog.findChild<QListWidget *>("launchAccount");
-    QTRY_COMPARE(selectedLaunchAccount(accounts),QString("work-mac"));QVERIFY(accounts->currentItem()->text().contains("default"));
+    QTRY_COMPARE(selectedLaunchAccount(accounts),QString("work-mac"));QVERIFY(!accounts->currentItem()->text().contains("(default)"));
     dialog.selectAccount("native-codex");QCOMPARE(selectedLaunchAccount(accounts),QString("native-codex"));
     dialog.findChild<QComboBox *>("launchComputer")->setCurrentIndex(0);
     QTRY_COMPARE(selectedLaunchAccount(accounts),QString("native-codex"));
@@ -429,7 +429,7 @@ void TestAccountsPage::newSessionRemembersAgentAndAccountPerMachine()
     QFile removed(m_dir.filePath("removed-mac"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("work-mac");removed.close();
     NewSessionDialog fallback(FakeCli::program(m_script),available,"mac","codex"); fallback.setGroups(projects,"ungrouped"); fallback.show();
     auto *fallbackAccounts=fallback.findChild<QListWidget *>("launchAccount");
-    QTRY_VERIFY(fallbackAccounts->currentItem()->text().contains("default")); QCOMPARE(selectedLaunchAccount(fallbackAccounts),QString("native-codex"));
+    QTRY_COMPARE(selectedLaunchAccount(fallbackAccounts),QString("native-codex"));QVERIFY(!fallbackAccounts->currentItem()->text().contains("(default)"));
     QVERIFY(fallback.findChild<QLabel *>("launchError")->text().isEmpty());
     // An agent requested by the caller wins over the remembered one.
     NewSessionDialog requested(FakeCli::program(m_script),available,"mac","kimi");

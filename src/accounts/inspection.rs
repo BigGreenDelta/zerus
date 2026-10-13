@@ -480,7 +480,47 @@ pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &P
             identity[field] = json!(value);
         }
     }
-    json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"]})
+    // Reuse only public quota fields from the same credential-validated cache.
+    // Listing accounts never starts a provider probe, including after GUI restart.
+    let rows = |key: &str, fields: &[&str]| {
+        data[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(16)
+            .filter_map(|row| {
+                if !row.is_object() {
+                    return None;
+                }
+                let mut projected = json!({});
+                for field in fields {
+                    let value = &row[*field];
+                    if value.is_number() {
+                        projected[*field] = value.clone();
+                    } else if let Some(value) = value.as_str() {
+                        projected[*field] = json!(value
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(160)
+                            .collect::<String>());
+                    }
+                }
+                Some(projected)
+            })
+            .collect::<Vec<Value>>()
+    };
+    let mut credits = json!({});
+    if let Some(balance) = data["credits"]["balance"].as_str() {
+        if balance.parse::<f64>().is_ok_and(f64::is_finite) {
+            credits["balance"] = json!(balance);
+        }
+    }
+    if let Some(unlimited) = data["credits"]["unlimited"].as_bool() {
+        credits["unlimited"] = json!(unlimited);
+    }
+    json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"],
+        "windows":rows("windows",&["id","label","used_percent","window_minutes","resets_at"]),
+        "balances":rows("balances",&["kind","balance","currency"]),"credits":credits})
 }
 
 // Quota and identity requests can succeed independently. A partial response

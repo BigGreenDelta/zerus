@@ -33,7 +33,7 @@ class LaunchAccountDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
     QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
-        return {260,16+option.fontMetrics.lineSpacing()*(2+int(index.data(UsageTextRole).toString().count('\n')))};
+        return {260,16+option.fontMetrics.lineSpacing()*2};
     }
     void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
         auto background=option;initStyleOption(&background,index);background.text.clear();background.icon={};
@@ -44,7 +44,8 @@ public:
         const bool dark=widget&&widget->property("hgsDark").toBool();
         const QColor color(dark?"#e8edf4":"#1a2733");
         auto rect=option.rect.adjusted(10,8,-10,-8);
-        index.data(Qt::DecorationRole).value<QIcon>().paint(p,QRect(rect.x(),rect.y(),18,18));rect.adjust(26,0,0,0);
+        const int logo=option.fontMetrics.lineSpacing()*2;
+        index.data(Qt::DecorationRole).value<QIcon>().paint(p,QRect(rect.x(),rect.y(),logo,logo));rect.adjust(logo+12,0,0,0);
         auto font=option.font;font.setWeight(QFont::DemiBold);p->setFont(font);p->setPen(color);
         p->drawText(QRect(rect.x(),rect.y(),rect.width(),option.fontMetrics.lineSpacing()),Qt::AlignVCenter,
             QFontMetrics(font).elidedText(index.data().toString(),Qt::ElideRight,rect.width()));
@@ -133,7 +134,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *accountStatusRow=new QHBoxLayout;
     m_accountStatus=plainLabel();m_accountStatus->setObjectName("launchAccountStatus");accountStatusRow->addWidget(m_accountStatus,1);
     m_refreshAccounts=new QPushButton(workspaceIcon("refresh",iconColor),tr("Refresh"));m_refreshAccounts->setObjectName("refreshLaunchAccounts");m_refreshAccounts->setAutoDefault(false);
-    m_refreshAccounts->setAccessibleName(tr("Refresh accounts and limits"));accountStatusRow->addWidget(m_refreshAccounts);
+    m_refreshAccounts->setAccessibleName(tr("Refresh accounts"));accountStatusRow->addWidget(m_refreshAccounts);
     accountField->addLayout(accountStatusRow);form->addRow(tr("Account and agent"),accountField);
     m_model=new QComboBox;m_model->setObjectName("launchModel");m_model->setAccessibleName(tr("Model"));m_model->setMinimumContentsLength(18);m_model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_modelLabel=plainLabel(tr("Model"));form->addRow(m_modelLabel,m_model);
@@ -160,7 +161,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{loadAccounts(true);});
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){updateUsage();});
     auto *usageTimer=new QTimer(this);usageTimer->setInterval(60000);
-    connect(usageTimer,&QTimer::timeout,this,[this]{updateUsage();for(int row=0;row<m_account->count();++row){const auto profile=m_account->item(row)->data(ProfileRole).toJsonObject();if(!profile.isEmpty())m_usageStore->ensure(AccountUsageRef::profile(profile));}});usageTimer->start();
+    connect(usageTimer,&QTimer::timeout,this,&NewSessionDialog::updateUsage);usageTimer->start();
     connect(m_name,&QLineEdit::textChanged,this,&NewSessionDialog::updateForm);
     connect(&m_client,&HgsClient::directoriesReady,this,[this](quint64 request,const QString &machine,const QJsonObject &data){
         if(!m_validation||request!=m_validation||machine!=host())return;
@@ -419,10 +420,6 @@ void NewSessionDialog::loadAccounts(bool refresh)
     }
     m_accountHost=host();m_accountStatus->setText(tr("Loading accounts…"));
     m_accountRequest=m_client.requestAccounts(host(),{"ls"});updateAccounts();
-    if(refresh)for(int row=0;row<m_account->count();++row){
-        const auto profile=m_account->item(row)->data(ProfileRole).toJsonObject();
-        if(!profile.isEmpty())m_usageStore->ensure(AccountUsageRef::profile(profile),true);
-    }
 }
 void NewSessionDialog::updateAccounts()
 {
@@ -474,8 +471,6 @@ void NewSessionDialog::updateAccounts()
     // fall back to the provider's default when the old profile no longer exists.
     m_account->setCurrentRow(m_accountPreset?explicitIndex:lastIndex>=0?lastIndex:defaultIndex>=0?defaultIndex:0);
     updateUsage();updateModels();updateForm();
-    for(const auto &profile:profiles)if(m_accountCatalogLoaded&&(!profile.contains("installed")||profile["installed"].toBool()))
-        m_usageStore->ensure(AccountUsageRef::profile(profile));
 }
 
 void NewSessionDialog::selectAccount(const QString &account)
@@ -490,46 +485,24 @@ void NewSessionDialog::updateUsage()
         auto *item=m_account->item(row);const auto profile=item->data(ProfileRole).toJsonObject();
         if(profile.isEmpty())continue;
         auto usage=m_usageStore->data(AccountUsageRef::profile(profile));
-        const auto cached=profile["usage"].toObject();
-        if(usage["status"]=="loading"&&!cached.isEmpty()){
-            const auto pending=usage["refreshing"];usage=cached;usage["refreshing"]=pending;
+        const auto cached=profile["account_status"].toObject();
+        if(!cached.isEmpty()&&(usage["status"]=="loading"||usage["status"]=="offline"
+            ||cached["checked_at"].toDouble()>usage["checked_at"].toDouble())){
+            usage=cached;
         }
-        QString name=profile["label"].toString();
-        if(name.isEmpty()||name=="Default account"||name=="Native account")
-            name=usage["identity"].toObject()["email"].toString(tr("Native account"));
-        int duplicates=0;
-        for(const auto &value:m_accounts){const auto other=value.toObject();if(other["label"]==profile["label"]&&other["provider"]==profile["provider"])++duplicates;}
-        if(duplicates>1)name+=" ("+profile["id"].toString()+")";
-        name+=" ("+IdentityBadges::providerName(profile["provider"].toString())+")";
-        if(profile["is_default"].toBool())name+=tr(" (default)");
-        QStringList lines;
-        for(const auto &value:usage["windows"].toArray()){
-            const auto window=value.toObject();QString line=AccountUsage::period(window)+"  ";
-            if(!AccountUsage::current(window))line+=tr("Window ended; refresh usage");
-            else if(!window["used_percent"].isDouble()||!std::isfinite(window["used_percent"].toDouble()))line+=tr("Usage unavailable");
-            else {
-                const auto reset=AccountUsage::reset(window["resets_at"]);
-                line+=tr("%1% used").arg(qBound(0.,window["used_percent"].toDouble(),100.),0,'f',0)
-                    +(reset.isValid()?tr("  Reset in %1").arg(AccountUsage::remaining(reset)):tr("  Reset time unavailable"));
-            }
-            lines.append(line);
-        }
-        for(const auto &value:usage["balances"].toArray()){
-            const auto balance=value.toObject();lines.append(tr("Balance: %1 %2").arg(balance["balance"].toString(),balance["currency"].toString()));
-        }
-        if(lines.isEmpty())lines.append(!profile["installed"].toBool(true)?tr("Agent is not installed on this computer"):
-            usage["status"]=="loading"?tr("Loading limits…"):AccountUsage::state(usage));
-        if(usage["offline"].toBool())lines.prepend(tr("Offline (last reported limits)"));
-        else if(usage["refresh_error"].toBool())lines.prepend(tr("Update failed (last reported limits)"));
-        else if(usage["refreshing"].toBool()&&usage["status"]!="loading")lines.prepend(tr("Updating limits…"));
-        const auto summary=lines.join('\n');
+        auto name=usage["identity"].toObject()["email"].toString();
+        if(name.isEmpty())name=cached["identity"].toObject()["email"].toString();
+        if(name.isEmpty())name=profile["label"].toString();
+        if(name.isEmpty()||name=="Default account"||name=="Native account")name=tr("Account n/a");
+        const auto summary=AccountUsage::launchSummary(usage);
         const auto tone=AccountUsage::severest(usage);
         const bool historical=usage["offline"].toBool()||usage["refresh_error"].toBool();
         item->setData(UsageColorRole,!historical&&tone&&*tone!=AccountUsage::Tone::Normal
             ?AccountUsage::toneColor(*tone,m_account->property("hgsDark").toBool()):QColor());
         if(item->text()!=name)item->setText(name);
         if(item->data(UsageTextRole).toString()!=summary)item->setData(UsageTextRole,summary);
-        item->setToolTip(name+'\n'+summary);item->setData(Qt::AccessibleTextRole,name+'\n'+summary);
+        item->setToolTip(name+'\n'+summary);
+        item->setData(Qt::AccessibleTextRole,IdentityBadges::providerName(profile["provider"].toString())+' '+name+'\n'+summary);
     }
 }
 

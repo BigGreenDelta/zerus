@@ -650,8 +650,13 @@ Accounts is a read-only viewer grouped by workspace and provider-reported accoun
 
 ## Project and account selection
 
-New session is a full-screen form with Project, Folder, Worktree, Agent and
-account, and Session name sections. Tapping outside never closes it; Close or
+New session is a full-screen form with Project, Folder, Worktree, Account and
+agent, and Session name sections. Account and agent pairs share one list: a
+large provider logo spans the email and one line of cached limits, or `limits n/a`.
+Default labels, profile IDs and quota error details stay out of these rows;
+matching emails retain distinct exact profile choices. The chooser reads only
+existing machine/profile snapshots and cached catalog data, without refreshing
+provider quotas. Tapping outside never closes it; Close or
 Back asks before discarding edits and is unavailable while a worktree or session
 is being created. A disabled **Create session** button shows one reason.
 A `work-` name with eight hexadecimal digits is generated once per form; it is

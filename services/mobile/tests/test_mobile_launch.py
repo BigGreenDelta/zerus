@@ -1,5 +1,6 @@
 """Safe fixed-argument creation, exact launch UUID and minimal account projection."""
 import os
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -103,7 +104,7 @@ class LaunchTransport(unittest.IsolatedAsyncioTestCase):
             self.connector.hgs=str(Path(__file__).with_name('fixture_hgs.py').resolve())
             catalog=await self.connector.execute(self.request('catalog'))
             self.assertEqual(catalog['state'],'completed')
-            self.assertEqual(set(catalog['result']['accounts'][0]),{'id','provider','label','native','installed','is_default','auth_status'})
+            self.assertEqual(set(catalog['result']['accounts'][0]),{'id','provider','label','native','installed','is_default','auth_status','usage'})
             result=await self.connector.execute(self.request())
             self.assertEqual(result['state'],'completed',result)
             target=result['result']['result_target']
@@ -125,6 +126,15 @@ class CatalogPrivacy(unittest.TestCase):
         self.assertNotIn('OPENCODE_CONFIG',value)
         self.assertNotIn('OPENCODE_CONFIG_CONTENT',value)
         self.assertEqual(value['HGS_STATE_DIR'],'/private/fixture-state')
+    def test_cached_limits_are_projected_without_native_errors_or_credentials(self):
+        value=catalog({'profiles':[{'id':'native-codex','provider':'codex','label':'Alias','installed':True,
+            'account_status':{'status':'ok','identity':{'email':'account@example.invalid','token':'private'},
+                'windows':[{'window_minutes':300,'used_percent':17,'resets_at':1900000000,'secret':'private'}],
+                'error':'private','auth_revision':'private','home':'/private'}}]})
+        usage=value['accounts'][0]['usage']
+        self.assertEqual(usage['identity'],{'email':'account@example.invalid'})
+        self.assertEqual(usage['windows'],[{'window_minutes':300,'used_percent':17,'resets_at':1900000000}])
+        self.assertNotIn('private',json.dumps(value))
 
     def test_only_selected_public_fields_are_forwarded(self):
         value=catalog({'profiles':[{'id':'native-codex','provider':'codex','label':'Synthetic','installed':True,'home':'/private','credentials':{'secret':'private'}}],'defaults':{'private':'secret'}})

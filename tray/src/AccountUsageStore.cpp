@@ -16,6 +16,7 @@ bool AccountUsageStore::online(const QString &host) const
 QJsonObject AccountUsageStore::data(const AccountUsageRef &ref) const
 {
     const auto entry=m_entries.value(ref.key());auto data=entry.data;
+    if(!ref.authRevision.isEmpty()&&ref.authRevision!=entry.ref.authRevision)data={};
     if(data.isEmpty())data={{"status",online(ref.host)?"loading":"offline"},{"provider",ref.provider},{"id",ref.id}};
     if(!ref.label.isEmpty())data["label"]=ref.label;
     data["refreshing"]=entry.pending;data["refresh_error"]=entry.failed;data["offline"]=!online(ref.host);

@@ -167,6 +167,8 @@ for line in sys.stdin:
         self.assertEqual((home/'probes').read_text(),'1')
         catalog=self.ls(); row=next(p for p in catalog['profiles'] if p['id']=='work')
         self.assertEqual(row['account_status']['identity']['email'],'work@example.test')
+        self.assertEqual(row['account_status']['windows'][0]['used_percent'],72)
+        self.assertEqual(row['account_status']['windows'][0]['window_minutes'],300)
         self.assertEqual((home/'probes').read_text(),'1') # listing never contacts the provider
         self.assertNotIn('DO-NOT-EXPOSE',json.dumps(catalog))
         (home/'auth.json').write_text('{"tokens":{"access_token":"CHANGED"}}')

@@ -1195,10 +1195,12 @@ hosts. Limits use one current account snapshot, never the sum of machine usage.
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. **New session**
 shows one list of **Account and agent** pairs for the chosen computer on desktop
-(including macOS). Each row reports the account's usage windows and time until
-reset, or explains why limits are unavailable. **Refresh** updates accounts and
-limits; ended windows and failed/offline refreshes remain explicit. Profiles with
-the same label stay separate and include their IDs. **Run shell** is a single
+(including macOS) and Android. A large provider logo spans two text lines: the
+account email and compact cached limits, or **limits n/a**. Default labels, profile
+IDs and quota error details are omitted from these rows. Exact profile identities
+remain separate even when their emails match. Opening the chooser, changing a
+selection and refreshing its account catalog never probe providers for limits;
+existing shared or credential-validated native caches supply them. **Run shell** is a single desktop
 separate choice. The last successfully launched agent and account per computer
 remain remembered. **Make default on…** sets
 the default for new sessions; explicit `--account` wins, and attach, resume and fork

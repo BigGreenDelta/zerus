@@ -5,7 +5,7 @@ from pathlib import PurePosixPath
 from .context import bounded
 from .projects import normalize
 from . import worktrees
-from .accounts import MAX_CATALOG_BYTES, model_options
+from .accounts import MAX_CATALOG_BYTES, model_options, usage
 
 OPERATIONS = frozenset({'catalog','dirs','launch'}) | worktrees.OPERATIONS
 AGENTS = frozenset({'codex','claude','kimi','dsh','opencode'})
@@ -73,6 +73,8 @@ def catalog(raw):
         account['auth_status'] = status if status in ('signed_in','signed_out','expired','credentials_locked','desktop_session_unavailable','credentials_unavailable') else 'unknown'
         if row['provider'] == 'opencode':
             account['model_options'] = model_options(row)
+        if cached:
+            account['usage'] = usage(cached)
         accounts.append(account)
         if row.get('installed') is True: agents.add(row['provider'])
     result = {'accounts':accounts,'agents':sorted(agents)}

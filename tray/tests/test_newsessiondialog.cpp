@@ -34,7 +34,7 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -45,8 +45,16 @@ if a[:2]==['account','ls']:
  profiles=[{'id':i,'provider':p,'label':label,'home':'/profiles/'+i,'installed':True,'is_default':i=='other'}
            for i,p,label in [('work','codex','Work'),('other','codex','Work'),('claude','claude','Review'),('native-dsh','dsh','DeepSeek')]
            if not ((root/'removed').exists() and i=='work')]
+ for profile in profiles:
+  window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
+  weekly={'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}
+  if (root/'missing').exists():window.pop('used_percent');weekly.pop('used_percent')
+  if (root/'ended').exists():window['resets_at']=weekly['resets_at']=int(time.time())-60
+  profile['account_status']={'status':'signed_out' if profile['provider']=='dsh' else 'ok','identity':{'email':'shared@example.invalid'},
+                             'windows':[] if profile['provider']=='dsh' else [window,weekly]}
  print(json.dumps({'profiles':profiles,'removed_profiles':[{'id':'native-kimi','provider':'kimi'}]}))
 elif a[:2]==['account','inspect']:
+ (root/'quota-probes').touch()
  i=a[2];p='claude' if i=='claude' else 'dsh' if i=='native-dsh' else 'codex'
  if host=='mac' and i=='work' and (root/'slow-mac').exists():
   (root/'mac-started').touch()
@@ -58,7 +66,7 @@ elif a[:2]==['account','inspect']:
  if (root/'missing').exists():window.pop('used_percent')
  if (root/'ended').exists():window['resets_at']=int(time.time())-60
  print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,'status':'signed_out' if p=='dsh' else 'ok',
-                   'windows':[] if p=='dsh' else [window,{'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}]}))
+                   'identity':{'email':'shared@example.invalid'},'windows':[] if p=='dsh' else [window,{'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}]}))
 elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
@@ -77,10 +85,12 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         auto *list=choices(dialog);QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),5);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
         QTRY_VERIFY(list->item(row(dialog,"work"))->toolTip().contains(host.isEmpty()?"17% used":"91% used"));
         const auto tooltip=list->item(row(dialog,"work"))->toolTip();
-        QVERIFY(tooltip.contains("5h"));QVERIFY(tooltip.contains("7d"));QVERIFY(tooltip.contains("Reset in"));
-        QVERIFY(list->item(row(dialog,"work"))->text().contains("work"));QVERIFY(list->item(row(dialog,"other"))->text().contains("other"));
+        QVERIFY(tooltip.contains("5h"));QVERIFY(tooltip.contains("7d"));QVERIFY(!tooltip.contains("Reset in"));
+        QCOMPARE(list->item(row(dialog,"work"))->text(),QString("shared@example.invalid"));
+        QCOMPARE(list->item(row(dialog,"other"))->text(),QString("shared@example.invalid"));
+        QVERIFY(!tooltip.contains("default"));QCOMPARE(tooltip.count('\n'),1);
         QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("other"));
-        QTRY_VERIFY(list->item(row(dialog,"native-dsh"))->toolTip().contains("signed out"));
+        QTRY_COMPARE(list->item(row(dialog,"native-dsh"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
         QCOMPARE(list->item(list->count()-1)->text(),QString("Run shell"));
         list->setCurrentRow(row(dialog,"work"));
         const auto preview=qEnvironmentVariable("ZERUS_LAUNCH_PREVIEW");
@@ -90,6 +100,7 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void rememberedAndExplicitMissingAccounts() {
         QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
@@ -112,13 +123,18 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         list->setCurrentRow(row(dialog,"work"));QPersistentModelIndex index=list->currentIndex();
         dialog.setFleet(fleet());QCOMPARE(list->currentIndex(),QModelIndex(index));
         const auto scroll=list->verticalScrollBar()->value();flag("fail");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
-        QTRY_VERIFY(list->currentItem()->toolTip().contains("Update failed (last reported limits)"));
+        QTRY_VERIFY(dialog.findChild<QLabel *>("launchAccountStatus")->text().contains("Could not load accounts"));
+        QVERIFY(!list->currentItem()->toolTip().contains("failed"));
         QVERIFY(list->currentItem()->toolTip().contains("17% used"));QCOMPARE(list->currentIndex(),QModelIndex(index));
         QCOMPARE(list->verticalScrollBar()->value(),scroll);QCOMPARE(list->count(),5);
+        for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
+        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void lateUsageCannotRetargetAnotherComputer() {
         flag("slow-mac");flag("mac-started",false);
-        NewSessionDialog dialog(program(),fleet(),"mac","codex");dialog.show();
+        AccountUsageStore store(program());store.setFleet(fleet());
+        store.ensure({"mac","work","codex","/profiles/work"});
+        NewSessionDialog dialog(program(),fleet(),"mac","codex",{},nullptr,&store);dialog.show();
         QTRY_VERIFY(QFile::exists(m_fixture.filePath("mac-started")));
         auto *computer=dialog.findChild<QComboBox *>("launchComputer");computer->setCurrentIndex(computer->findData(QString()));
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(choices(dialog)->count(),5);choices(dialog)->setCurrentRow(row(dialog,"work"));flag("released");
@@ -126,13 +142,14 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QVERIFY(!choices(dialog)->currentItem()->toolTip().contains("91% used"));
         QTest::qWait(100);QVERIFY(!choices(dialog)->currentItem()->toolTip().contains("91% used"));
     }
-    void unknownAndEndedWindowsAreExplicit() {
+    void unknownAndEndedWindowsStayUnavailable() {
         flag("missing");NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.show();
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(choices(dialog)->count(),5);
-        QTRY_VERIFY(choices(dialog)->item(row(dialog,"work"))->toolTip().contains("Usage unavailable"));
+        QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
         QVERIFY(!choices(dialog)->item(row(dialog,"work"))->toolTip().contains("0% used"));
         flag("missing",false);flag("ended");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
-        QTRY_VERIFY(choices(dialog)->item(row(dialog,"work"))->toolTip().contains("Window ended; refresh usage"));
+        QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
+        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
 };
 QTEST_MAIN(TestNewSessionDialog)
