@@ -105,12 +105,13 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
-  cmd      claude | codex | kimi (know --resume) | sh (login shell) | any command
+  cmd      claude | codex | kimi (know --resume) | opencode (native API) | sh (login shell) | any command
   project  name from ~/.config/hgs/projects, a path, or omitted = current dir
   -c       resume the dir's last conversation (claude/kimi -c, codex resume --last)
   -c ID    resume this exact conversation UUID; --resume=ID is also accepted
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
+  --model PROVIDER/MODEL   OpenCode native model for a new session
   --new    always create a separate session; generate a name unless -n is given
   -d       start detached (do not attach)      --fresh  explicitly replace a saved conversation
   --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh launcher
@@ -127,6 +128,7 @@ Claude/Codex/Kimi install tracking hooks; Codex hooks need trust in /hooks.
 pause refuses untracked/busy sessions. Saved sessions survive reboot; a opens them again.
 Archive holds completed conversations; only explicit resume --archive restores them.
 terminate stops a tracked session and preserves it in Archive; kill explicitly forgets it.
+pause/resume --all covers tracked terminal agents; OpenCode uses exact per-session controls.
 resume --all excludes Archive. kill --archive forgets only that archived entry.
 rename changes the session label while preserving its agent/project, process and conversation.
 "#;
@@ -616,7 +618,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "opencode" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -817,6 +819,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
+    if state::opencode::exists(session) {return Err(Error::new(1,"OpenCode uses Activity; this adapter has no tmux Terminal"));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1150,7 +1153,7 @@ fn pause_resume(
     }
     env::set_var("HGS_CLIENT", client);
     let rc = state_command(if fresh { "fresh" } else { command }, &state_args)?;
-    if rc != 0 || dry || command != "resume" || detached || state::dsh::exists(session) {
+    if rc != 0 || dry || command != "resume" || detached || state::dsh::exists(session) || state::opencode::exists(session) {
         return Ok(rc);
     }
     attach(config, session, client, false)
@@ -1329,6 +1332,7 @@ fn absolute_directory(path: &str) -> std::io::Result<PathBuf> {
 #[derive(Default)]
 struct LaunchOptions {
     account: Option<String>,
+    model: Option<String>,
     launch_id: Option<String>,
     project: String,
     tag: String,
@@ -1364,6 +1368,7 @@ impl LaunchOptions {
                     options.tag = require(args, i + 1, "-n needs a tag")?.into();
                     i += 1;
                 }
+                "--model" => { options.model=Some(require(args,i+1,"--model needs provider/model")?.into()); i+=1; }
                 "--account" => {
                     options.account =
                         Some(require(args, i + 1, "--account needs a profile ID")?.into());
@@ -1521,6 +1526,15 @@ fn launch(
     let mut options = LaunchOptions::parse(args, global_dry)?;
     let (directory, project) = resolve_project(config, command, &options)?;
     let command_name = basename(command);
+    if command_name=="opencode" {
+        if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
+        if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
+        let project=if project=="/" {"root".into()}else{sanitize(&project)};
+        let tag=if options.tag.is_empty(){"main"}else{&options.tag};let name=format!("opencode/{project}/{tag}");
+        state::opencode::launch(&name,&directory,options.launch_id.as_deref(),options.model.as_deref(),options.dry,options.new_only).map_err(|e|Error::new(1,e))?;
+        if !options.dry {println!("OpenCode session ready: {name}\nOpen this session in Zerus.");}return Ok(0);
+    }
+    if options.model.is_some() {return Err(Error::new(1,"--model is an OpenCode launch option; other agent flags go after --"));}
     if command_name == "dsh" {
         if options
             .account

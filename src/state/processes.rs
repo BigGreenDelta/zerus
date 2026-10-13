@@ -507,6 +507,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if output.is_some() && stop.is_some() {
         return Err("Choose output or stop".into());
     }
+    if opencode::exists(name) {
+        if output.is_some() || stop.is_some() || archive.is_some() {return Err("OpenCode process controls are not yet supported".into());}
+        println!("{}",opencode::inspect(name,None)?["processes"]);return Ok(0);
+    }
     if dsh::exists(name) && archive.is_none() {
         return dsh::processes(name, output, stop, run, conversation, generation);
     }

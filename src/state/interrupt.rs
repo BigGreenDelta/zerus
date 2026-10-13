@@ -23,8 +23,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let guard=lock(None)?;
-    let name=&args[0];let native=dsh::exists(name);
-    let record=if native {dsh::inspect(name,None)?} else {read(name)?};
+    let name=&args[0];let open_native=opencode::exists(name);let native=dsh::exists(name) || open_native;
+    let record=if open_native {opencode::inspect(name,None)?} else if native {dsh::inspect(name,None)?} else {read(name)?};
     if request.expected_run_id.is_empty() || record["run_id"]!=request.expected_run_id
         || record["conversation_id"]!=request.expected_conversation_id
         || record["turn_started"].as_f64().unwrap_or(0.0)!=request.expected_turn_started {
@@ -41,7 +41,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     recovery::cancel_for_input(name)?;
     atomic(&path,&json!({"status":"in_progress"}).to_string())?;
     let mut seen=None;
-    if native { dsh::interrupt(&record)?; }
+    if open_native {opencode::interrupt(&record)?;}
+    else if native { dsh::interrupt(&record)?; }
     else {
         let mut current=kimi_tui_choice::identity(&record)?;
         if !eligible(&current) || current["turn_started"]!=record["turn_started"] {return Err("The turn changed before interruption".into());}

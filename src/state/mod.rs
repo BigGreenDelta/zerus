@@ -16,6 +16,7 @@ mod cache_hint;
 mod claude_approval;
 mod attempts;
 pub(crate) mod dsh;
+pub(crate) mod opencode;
 mod effort;
 mod external_agents;
 mod fork;
@@ -87,6 +88,7 @@ pub(crate) fn recovery_worker_running() -> Option<bool> {
 }
 
 pub(crate) fn account_context(name: &str) -> Result<Value> {
+    if opencode::exists(name) { return opencode::account_context(name); }
     if dsh::exists(name) {
         return dsh::account_context(name);
     }
@@ -284,11 +286,13 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
+    sessions.extend(opencode::snapshots()?);
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
-            read_marks::enrich(session, &marks, &owner, Some(&[]));
+            let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
+            read_marks::enrich(session, &marks, &owner, Some(&questions));
         }
     }
 
@@ -406,6 +410,7 @@ pub fn fork_session(
 }
 
 pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Result<Value> {
+    if opencode::exists(name) { if !archive.is_empty() {return Err("OpenCode archives are unavailable".into());} return opencode::inspect(name, if agent.is_empty() {None} else {Some(agent)}); }
     if dsh::exists(name) {
         if !archive.is_empty() { return Err("DeepSeek archives are unavailable".into()); }
         return dsh::inspect(name, if agent.is_empty() { None } else { Some(agent) });
@@ -426,7 +431,7 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
     let name = {
         let _guard = lock(None)?;
         let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
-        if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); }
+        if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); candidates.extend(opencode::snapshots()?); }
         let mut matching = candidates.iter().filter(|record| matches_reference(record));
         let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
         if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
@@ -489,6 +494,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "clear-context" { return clear_context::dispatch(args); }
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
+    if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(&command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(&command, args);
     }

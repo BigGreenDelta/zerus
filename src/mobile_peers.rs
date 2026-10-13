@@ -496,9 +496,9 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 no_payload()?;
             }
         }
-        "claude" | "codex" | "kimi" | "dsh" => {
+        "claude" | "codex" | "kimi" | "dsh" | "opencode" => {
             ensure!(
-                rest.len() == 7 || rest.len() == 9,
+                rest.len() == 7 || rest.len() == 9 || (op=="opencode" && rest.len()==11),
                 "native launch shape is not allowed"
             );
             ensure!(
@@ -511,12 +511,13 @@ fn validate(request: &LocalRequest) -> Result<()> {
                     && uuid(&rest[6]),
                 "native launch shape is not allowed"
             );
-            if rest.len() == 9 {
+            if rest.len() >= 9 {
                 ensure!(
                     rest[7] == "--account" && session(&rest[8]),
                     "native launch account is invalid"
                 );
             }
+            if rest.len()==11 {ensure!(rest[9]=="--model" && rest[10].split_once('/').is_some_and(|(provider,model)|!provider.is_empty() && !model.is_empty()) && text(&rest[10],256,true),"invalid OpenCode model");}
             no_payload()?;
         }
         _ => bail!("native operation is not allowed"),
@@ -1107,6 +1108,14 @@ mod tests {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
     }
 
+    #[test]
+    fn opencode_native_launch_admits_only_its_fixed_model_and_account_shape() {
+        let valid=["opencode","/fixture/project","--new","-n","fixture","-d","--launch-id",ID,"--account","native-opencode","--model","ollama/qwen3-coder:30b"];
+        assert!(validate(&request(&valid,None)).is_ok());
+        for agent in ["codex","dsh","sh"] {let mut wrong=valid;wrong[0]=agent;assert!(validate(&request(&wrong,None)).is_err());}
+        let mut wrong=valid;wrong[10]="--hostname";assert!(validate(&request(&wrong,None)).is_err());
+        let mut wrong=valid;wrong[11]="invalid";assert!(validate(&request(&wrong,None)).is_err());
+    }
     #[test]
     fn supports_existing_connector_shapes_without_global_dispatch() {
         for argv in [

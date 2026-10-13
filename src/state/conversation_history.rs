@@ -105,7 +105,9 @@ fn validate(r: &Request) -> Result<()> {
     Ok(())
 }
 fn record(name: &str, r: &Request) -> Result<Value> {
-    let value = if dsh::exists(name) {
+    let value = if opencode::exists(name) {
+        if r.archive_id.is_some() {return Err("OpenCode has no archive history".into());} opencode::binding(name)?
+    } else if dsh::exists(name) {
         if r.archive_id.is_some() {
             return Err("DeepSeek has no archive history".into());
         }
@@ -1372,7 +1374,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let (db, _guard) = index(&parent, &request)?;
     db.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| e.to_string())?;
-    let (provider_complete, mut status) = if string(&parent, "agent") == "dsh" {
+    let (provider_complete, mut status) = if string(&parent,"agent")=="opencode" {
+        let detail=opencode::inspect(name,request.agent_id.as_deref())?;
+        if detail["run_id"]!=parent["run_id"] || detail["conversation_id"]!=parent["conversation_id"] {return Err("OpenCode history identity changed".into());}
+        for row in detail["events"].as_array().into_iter().flatten() { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
+        (detail["history_truncated"]==false,json!({"provider":"complete"}))
+    } else if string(&parent, "agent") == "dsh" {
         let detail = dsh::inspect(name, request.agent_id.as_deref())?;
         if detail["run_id"] != parent["run_id"]
             || detail
@@ -1393,7 +1400,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         sources(&db, &parent, &request, &native)?
     };
-    let journal_complete = if string(&parent, "agent") == "dsh" {
+    let journal_complete = if ["dsh","opencode"].contains(&string(&parent,"agent")) {
         true
     } else {
         journal(&db, &parent, &request)?

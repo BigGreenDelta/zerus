@@ -55,6 +55,12 @@ pub fn dispatch(_: &[String]) -> Result<i32> {
     Err(UNSUPPORTED.into())
 }
 
+pub(crate) mod opencode {
+    use super::{Result,UNSUPPORTED};
+    pub(crate) fn exists(_: &str)->bool {false}
+    pub(crate) fn launch(_: &str,_:&str,_:Option<&str>,_:Option<&str>,_:bool,_:bool)->Result<()> {Err(UNSUPPORTED.into())}
+}
+
 pub(crate) mod dsh {
     use super::{Result, UNSUPPORTED};
     use std::path::Path;

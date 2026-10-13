@@ -159,15 +159,13 @@ fn reference(record: &Value) -> Reference {
 }
 
 fn deepseek_bindings() -> Vec<Reference> {
-    let Ok(files) = fs::read_dir(root().join("dsh/bindings")) else {
-        return Vec::new();
-    };
+    let files=["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory|fs::read_dir(root().join(directory)).into_iter().flatten());
     files
         .flatten()
         .take(5000)
         .filter(|file| file.path().extension().is_some_and(|e| e == "json"))
         .filter_map(|file| serde_json::from_slice::<Value>(&fs::read(file.path()).ok()?).ok())
-        .filter(|record| record["backend"] == "dsh")
+        .filter(|record| ["dsh","opencode"].contains(&string(record,"backend")))
         .map(|record| reference(&record))
         .collect()
 }

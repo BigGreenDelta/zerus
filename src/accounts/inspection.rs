@@ -552,6 +552,7 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
             "claude" => claude(&home, native),
             "kimi" => kimi(&home),
             "dsh" => dsh(&home),
+            "opencode"=>json!({"status":"configured","source":"OpenCode","identity":{},"windows":[],"reason":"OpenCode uses its native inference-provider configuration; quota inspection is not available"}),
             _ => Value::Null,
         };
         retain_cached_identity(&mut data, &cached, &signature);
