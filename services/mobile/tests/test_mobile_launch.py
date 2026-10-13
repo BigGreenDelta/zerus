@@ -92,9 +92,10 @@ class LaunchTransport(unittest.IsolatedAsyncioTestCase):
     async def test_model_route_is_bounded_and_specific_to_native_opencode(self):
         valid={'agent':'opencode','account_id':'native-opencode','model':'ollama/qwen3-coder:30b'}
         validate_request(self.request(**valid))
+        validate_request(self.request(**{**valid,'model':'ollama/' + ('界' * 83)}))  # 256 UTF-8 bytes
         for delta in ({'agent':'codex'},{'account_id':'native-codex'},{'model':'local'},
                       {'model':'/local'},{'model':'ollama/'},{'model':'ollama/with space'},
-                      {'model':'ollama/'+('a'*257)},{'model':'ollama/local\n'}):
+                      {'model':'ollama/'+('a'*257)},{'model':'ollama/'+('界'*84)},{'model':'ollama/local\n'}):
             with self.assertRaises(Exception):validate_request(self.request(**{**valid,**delta}))
 
     async def test_fixture_catalog_launch_then_inspect_and_send_new_exact_target(self):
@@ -118,10 +119,11 @@ class LaunchTransport(unittest.IsolatedAsyncioTestCase):
 
 class CatalogPrivacy(unittest.TestCase):
     def test_inherited_opencode_configuration_cannot_retarget_connector_calls(self):
-        with patch.dict(os.environ,{'OPENCODE_CONFIG_DIR':'/private/foreign-agent','OPENCODE_CONFIG':'/private/foreign.json','HGS_STATE_DIR':'/private/fixture-state'}):
+        with patch.dict(os.environ,{'OPENCODE_CONFIG_DIR':'/private/foreign-agent','OPENCODE_CONFIG':'/private/foreign.json','OPENCODE_CONFIG_CONTENT':'{"provider":{"foreign":{}}}','HGS_STATE_DIR':'/private/fixture-state'}):
             value=native_environment()
         self.assertNotIn('OPENCODE_CONFIG_DIR',value)
         self.assertNotIn('OPENCODE_CONFIG',value)
+        self.assertNotIn('OPENCODE_CONFIG_CONTENT',value)
         self.assertEqual(value['HGS_STATE_DIR'],'/private/fixture-state')
 
     def test_only_selected_public_fields_are_forwarded(self):

@@ -639,10 +639,18 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
             if let Some(v) = p.get("model") {
                 let model = text(v, 256, false)?;
                 let (provider, identity) = model.split_once('/').ok_or(Error::BAD)?;
-                if p["agent"] != "opencode" || p["account_id"] != "native-opencode"
-                    || provider.is_empty() || provider.len() > 80 || identity.is_empty()
+                if p["agent"] != "opencode"
+                    || p["account_id"] != "native-opencode"
+                    || model.len() > 256
+                    || provider.is_empty()
+                    || provider.len() > 80
+                    || identity.is_empty()
                     || model.chars().any(char::is_whitespace)
-                    || !provider.bytes().enumerate().all(|(i,c)| c.is_ascii_alphanumeric() || c == b'_' || (i > 0 && [b'.',b'-'].contains(&c)))
+                    || !provider.bytes().enumerate().all(|(i, c)| {
+                        c.is_ascii_alphanumeric()
+                            || c == b'_'
+                            || (i > 0 && [b'.', b'-'].contains(&c))
+                    })
                 {
                     return Err(Error::BAD);
                 }

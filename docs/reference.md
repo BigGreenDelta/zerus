@@ -91,8 +91,9 @@ hgs @mac pause --all
 
 Pause preserves an exact native conversation binding. It does not preserve open
 network connections, child processes or an unsent native terminal draft. Supported
-integrations include Claude Code, Codex, Kimi Code and the official DeepSeek Harness;
-the latter uses its native engine instead of a terminal-agent process.
+integrations include Claude Code, Codex, Kimi Code, the official DeepSeek Harness
+and OpenCode. DeepSeek and OpenCode use their native engines instead of a
+terminal-agent process. [OpenCode controls and limits](opencode.md).
 
 For terminal agents, pause verifies the live pane, run and conversation identity,
 native history, supported resume arguments and an idle state. It sends SIGTERM only
@@ -1252,6 +1253,22 @@ inspection or launch. It passes system session authority, not passwords or token
 starts on demand and exits after a minute idle. A logged-in desktop session is
 required; screen lock differs from logout. If Keychain is actually locked in that
 session, unlock it there. Authentication diagnostics distinguish these cases.
+
+<a id="local-models"></a>
+
+## Local models and OpenCode
+
+Ollama runs model inference on the chosen agent computer. The native harness
+owns tools, permissions and conversation state. Codex can use a local Ollama
+model with its existing adapter; see the [qualified local-model example](local-models.md).
+
+Choose **OpenCode** in New session to use its separate native API adapter.
+Select its native account and an offered `provider/model`, or retain the native
+model default. The initial adapter supports text/voice conversations, native
+questions and permissions, status/history, Stop, model selection, pause/resume,
+rename and forgetting a saved binding. Terminal, attachments, children,
+archive/fork and context reset/compaction remain unavailable with explicit
+capabilities. See [OpenCode setup and reviewed version](opencode.md).
 
 <a id="deepseek"></a>
 

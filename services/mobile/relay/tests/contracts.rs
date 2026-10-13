@@ -25,15 +25,32 @@ struct Fixture {
 
 #[test]
 fn opencode_launch_model_is_native_account_scoped_and_bounded() {
-    let id=Uuid::new_v4().to_string();
-    let value=json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"launch","session":"", "payload":{"request_id":id,"agent":"opencode","directory":"/workspace/orbit","tag":"local","account_id":"native-opencode","model":"ollama/qwen3-coder:30b"}});
+    let id = Uuid::new_v4().to_string();
+    let value = json!({"request_id":id,"computer_id":Uuid::new_v4().to_string(),"operation":"launch","session":"", "payload":{"request_id":id,"agent":"opencode","directory":"/workspace/orbit","tag":"local","account_id":"native-opencode","model":"ollama/qwen3-coder:30b"}});
     protocol::request(&value).unwrap();
-    let mut default=value.clone();
+    let mut unicode_boundary = value.clone();
+    unicode_boundary["payload"]["model"] = json!(format!("ollama/{}", "界".repeat(83)));
+    protocol::request(&unicode_boundary).unwrap();
+    let mut default = value.clone();
     default["payload"].as_object_mut().unwrap().remove("model");
     protocol::request(&default).unwrap();
-    for (key,replacement) in [("agent",json!("codex")),("account_id",json!("native-codex")),("model",json!("local")),("model",json!("/local")),("model",json!("ollama/")),("model",json!("ollama/with space")),("model",json!("ollama/local\n")),("model",json!(format!("ollama/{}","a".repeat(257))))] {
-        let mut bad=value.clone();bad["payload"][key]=replacement;
-        assert!(protocol::request(&bad).is_err(),"accepted invalid model route {key}");
+    for (key, replacement) in [
+        ("agent", json!("codex")),
+        ("account_id", json!("native-codex")),
+        ("model", json!("local")),
+        ("model", json!("/local")),
+        ("model", json!("ollama/")),
+        ("model", json!("ollama/with space")),
+        ("model", json!("ollama/local\n")),
+        ("model", json!(format!("ollama/{}", "a".repeat(257)))),
+        ("model", json!(format!("ollama/{}", "界".repeat(84)))),
+    ] {
+        let mut bad = value.clone();
+        bad["payload"][key] = replacement;
+        assert!(
+            protocol::request(&bad).is_err(),
+            "accepted invalid model route {key}"
+        );
     }
 }
 
