@@ -413,6 +413,43 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
 /// multiline draft can continue underneath it. Scan until the provider's input
 /// boundary, preserving ANSI state across rows as tmux capture-pane does.
 pub(super) fn composer_empty(agent: &str, screen: &str, cursor_x: usize, cursor_y: usize) -> bool {
+    composer_empty_for_model(agent, screen, cursor_x, cursor_y, None)
+}
+
+// A local model has no GPT prefix. Accept its native footer only when the
+// model/effort label matches this exact session's confirmed or launch model.
+fn codex_model_footer(footer: &str, model: Option<&str>) -> bool {
+    let Some(model) = model.filter(|model| !model.is_empty()) else { return false; };
+    let label = footer.trim_start().split(" · ").next().unwrap_or("");
+    let mut words = label.split_whitespace();
+    words.next().is_some_and(|word| word.eq_ignore_ascii_case(model))
+        && words.next().is_some_and(|effort| {
+            ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].contains(&effort)
+        })
+        && words.next().is_none()
+}
+
+fn codex_footer_model(record: &Value) -> Option<&str> {
+    if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
+        return Some(model);
+    }
+    // SessionStart can be deferred until the first turn. In that case the
+    // saved native launch argv, not an unrelated account/model, is evidence.
+    let args = record["base"].as_array()?;
+    let mut model = None;
+    for (index, arg) in args.iter().enumerate() {
+        let Some(arg) = arg.as_str() else { continue; };
+        if arg == "--" { break; }
+        if ["-m", "--model"].contains(&arg) {
+            model = args.get(index + 1).and_then(Value::as_str);
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value);
+        }
+    }
+    model
+}
+
+fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y: usize, model: Option<&str>) -> bool {
     let lines: Vec<_> = screen.lines().collect();
     let Some(row) = lines.get(cursor_y) else {
         return false;
@@ -489,7 +526,8 @@ pub(super) fn composer_empty(agent: &str, screen: &str, cursor_x: usize, cursor_
             // Unknown layouts fail closed instead of treating arbitrary text
             // as status. A configured footer can always use the Terminal tab.
             let footer = plain.to_ascii_lowercase();
-            if ["gpt-", "context", "tokens", "? for shortcuts", "%"]
+            let exact_model = codex_model_footer(&plain, model);
+            if exact_model || ["gpt-", "context", "tokens", "? for shortcuts", "%"]
                 .iter()
                 .any(|token| footer.contains(token))
             {
@@ -502,7 +540,7 @@ pub(super) fn composer_empty(agent: &str, screen: &str, cursor_x: usize, cursor_
                 // model/path shape; drafts never retain that placeholder.
                 let single_line_footer = placeholder
                     && lines[index + 1..].iter().all(|line| line.trim().is_empty())
-                    && footer.trim_start().starts_with("gpt-")
+                    && (exact_model || footer.trim_start().starts_with("gpt-"))
                     && footer.split_once(" · ").is_some_and(|(_, path)| path.starts_with('/') || path.starts_with("~/"));
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
@@ -581,7 +619,7 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
         let screen = String::from_utf8_lossy(&screen.stdout);
         let cursor_y: usize = fields[2].parse().map_err(|_| "invalid terminal cursor")?;
         let cursor_x: usize = fields[1].parse().map_err(|_| "invalid terminal cursor")?;
-        if !composer_empty(string(record, "agent"), &screen, cursor_x, cursor_y) {
+        if !composer_empty_for_model(string(record, "agent"), &screen, cursor_x, cursor_y, codex_footer_model(record)) {
             return Err("terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into());
         }
     }
@@ -889,6 +927,35 @@ mod tests {
         }
         assert!(!composer_empty("codex", &screen.replace("gpt-5.6-sol default", "Approve command?"), 2, 2));
         assert!(!composer_empty("codex", &(screen.to_owned() + "  more input"), 2, 2));
+    }
+    #[test]
+    fn codex_local_model_footer_uses_exact_session_model() {
+        // Released Codex 0.162.1 with an Ollama model, dim empty placeholder,
+        // unshaded composer and its ordinary model/path footer.
+        let screen = "Ready\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  \x1b[38;2;246;226;183mqwen3-coder:30b default\x1b[39m · \x1b[38;2;171;223;167m/project\x1b[39m\n  \x1b[1m?\x1b[0m for shortcuts";
+        let model = Some("qwen3-coder:30b");
+        assert!(composer_empty_for_model("codex", screen, 2, 2, model));
+        let single = screen.replace("\n  \x1b[1m?\x1b[0m for shortcuts", "\n");
+        assert!(composer_empty_for_model("codex", &single, 2, 2, model));
+        assert!(!composer_empty_for_model("codex", screen, 2, 2, None));
+        assert!(!composer_empty_for_model("codex", screen, 2, 2, Some("another-model")));
+        for replacement in ["", "my draft", "\n  qwen3-coder:30b default · /project"] {
+            assert!(!composer_empty_for_model("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", replacement), 2, 2, model));
+        }
+        for footer in ["Approve command?", "qwen3-coder:30b approve", "qwen3-coder:30b default trailing draft"] {
+            assert!(!composer_empty_for_model("codex", &screen.replace("qwen3-coder:30b default", footer), 2, 2, model));
+        }
+        assert!(!composer_empty_for_model("codex", &single.replace("/project", "arbitrary text"), 2, 2, model));
+        assert!(!composer_empty_for_model("codex", &(screen.to_owned() + "\n  more input"), 2, 2, model));
+        assert!(!composer_empty_for_model("codex", screen, 3, 2, model));
+    }
+    #[test]
+    fn codex_footer_model_tracks_native_identity_or_launch_model() {
+        assert_eq!(codex_footer_model(&json!({"model":"confirmed", "base":["codex","-m","launch"]})), Some("confirmed"));
+        assert_eq!(codex_footer_model(&json!({"base":["codex","--oss","--local-provider","ollama","-m","qwen3-coder:30b"]})), Some("qwen3-coder:30b"));
+        assert_eq!(codex_footer_model(&json!({"base":["codex","--model=first","--model","last"]})), Some("last"));
+        assert_eq!(codex_footer_model(&json!({"base":["codex","--","--model=prompt"]})), None);
+        assert_eq!(codex_footer_model(&json!({"base":["codex","--model"]})), None);
     }
     #[test]
     fn malicious_terminal_input_and_attachment_paths_are_rejected() {
