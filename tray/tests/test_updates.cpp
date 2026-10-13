@@ -1,5 +1,6 @@
 #include "UpdateController.h"
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -298,9 +299,12 @@ private slots:
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
-        tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport os,sys,json\nif sys.argv[1]=='-Qqo':\n open(os.environ['ZERUS_TEST_LOG'],'w').write(json.dumps(sys.argv[2:]))\n print('zerus-ade-nightly-bin')\nelse: print('zerus-ade-nightly-bin 0.37.0.r100.gaaaaaaa.n1-1')\n");
+        // The owner query answers only after the test has seen it start, which a probe
+        // that held the event loop would prevent until its deadline failed the query.
+        tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport os,sys,json,time\nif sys.argv[1]=='-Qqo':\n open(os.environ['ZERUS_TEST_LOG'],'w').write(json.dumps(sys.argv[2:]))\n start=time.time()\n while not os.path.exists(os.environ['ZERUS_TEST_LOG']+'.release') and time.time()-start<20: time.sleep(0.01)\n print('zerus-ade-nightly-bin')\nelse: print('zerus-ade-nightly-bin 0.37.0.r100.gaaaaaaa.n1-1')\n");
         QFile binary(dir.path()+"/actual-gui");QVERIFY(binary.open(QIODevice::WriteOnly));binary.close();QVERIFY(QFile::link(binary.fileName(),dir.path()+"/gui-link"));
-        UpdateController controller(nullptr,dir.path()+"/gui-link");QSignalSpy changes(&controller,&UpdateController::changed);QVERIFY(changes.wait(2000));QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),2000);QCOMPARE(controller.installation().package,QString("zerus-ade-nightly-bin"));QCOMPARE(controller.channel(),QString("nightly"));
+        UpdateController controller(nullptr,dir.path()+"/gui-link");QSignalSpy changes(&controller,&UpdateController::changed);
+        QTRY_VERIFY(QFileInfo::exists(dir.path()+"/args.json"));QCOMPARE(controller.installation().kind,QString("checking"));QFile release(dir.path()+"/args.json.release");QVERIFY(release.open(QIODevice::WriteOnly));release.close();QVERIFY(changes.wait(2000));QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),2000);QCOMPARE(controller.installation().package,QString("zerus-ade-nightly-bin"));QCOMPARE(controller.channel(),QString("nightly"));
         QFile log(dir.path()+"/args.json");QVERIFY(log.open(QIODevice::ReadOnly));auto args=QJsonDocument::fromJson(log.readAll()).array();QCOMPARE(args.last().toString(),QFileInfo(binary).canonicalFilePath());QCOMPARE(args.first().toString(),QString("--"));qputenv("PATH",oldPath);qunsetenv("ZERUS_TEST_LOG");
 #endif
     }
@@ -361,9 +365,17 @@ private slots:
     }
     void subprocessTimeoutLeavesEventLoopResponsive(){
 #ifdef Q_OS_LINUX
-        // A 1.5 s deadline instead of 5 s still outlasts the 1 s wait for the tick.
-        UpdateController::setCommandTimeoutForTests(1500);const auto restoreTimeout=qScopeGuard([]{UpdateController::setCommandTimeoutForTests(0);});
-        QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport time\ntime.sleep(20)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());bool tick=false;QTimer::singleShot(30,[&]{tick=true;});QTRY_VERIFY_WITH_TIMEOUT(tick,1000);QTRY_COMPARE_WITH_TIMEOUT(controller.installation().kind,QString("unknown"),3000);qputenv("PATH",oldPath);
+        // pacman never answers, so only the deadline ends the probe. A probe that waited
+        // synchronously would stop every timer for that deadline, and a QTRY on a tick
+        // still passes once the loop resumes: measure the longest pause between 20 ms
+        // ticks from before the controller exists (a probe run from its constructor
+        // counts too) until the probe times out. 1 s allows for a loaded runner and
+        // stays well below the 1.5 s a blocking probe takes.
+        constexpr int deadline=1500;UpdateController::setCommandTimeoutForTests(deadline);const auto restoreTimeout=qScopeGuard([]{UpdateController::setCommandTimeoutForTests(0);});
+        QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport time\ntime.sleep(20)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
+        QElapsedTimer clock;clock.start();qint64 last=0,longest=0;const auto beat=[&]{const qint64 now=clock.elapsed();longest=qMax(longest,now-last);last=now;};QTimer ticker;connect(&ticker,&QTimer::timeout,beat);ticker.start(20);
+        UpdateController controller(nullptr,executable.fileName());
+        QTRY_COMPARE_WITH_TIMEOUT(controller.installation().kind,QString("unknown"),2*deadline);beat();QVERIFY2(longest<1000,qPrintable(QString("The event loop stopped for %1 ms").arg(longest)));qputenv("PATH",oldPath);
 #endif
     }
 private:
