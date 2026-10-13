@@ -152,7 +152,7 @@ pub(super) fn nonempty_env(name: &str) -> Option<String> {
 }
 
 pub(super) fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/".into()))
+    crate::platform::home_dir().unwrap_or_else(|| "/".into())
 }
 
 fn directories(path: &str, hidden: bool) -> Result<Value> {
@@ -166,9 +166,7 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     } else {
         PathBuf::from(path)
     };
-    let directory = expanded
-        .canonicalize()
-        .map_err(|e| format!("{path}: {e}"))?;
+    let directory = crate::platform::canonical(&expanded).map_err(|e| format!("{path}: {e}"))?;
     if !directory.is_dir() {
         return Err(format!("not a directory: {path}"));
     }

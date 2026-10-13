@@ -187,7 +187,7 @@ pub(super) fn wire_paths(record: &Value) -> Result<Vec<PathBuf>> {
         return Ok(vec![]);
     }
     let sessions = kimi_home(record).join("sessions");
-    let Ok(root) = sessions.canonicalize() else {
+    let Ok(root) = crate::platform::canonical(&sessions) else {
         return Ok(vec![]);
     };
     let directories = fs::read_dir(&root).map_err(|error| error.to_string())?;
@@ -197,7 +197,7 @@ pub(super) fn wire_paths(record: &Value) -> Result<Vec<PathBuf>> {
             .path()
             .join(session)
             .join("agents/main/wire.jsonl");
-        if let Ok(resolved) = path.canonicalize() {
+        if let Ok(resolved) = crate::platform::canonical(&path) {
             if resolved.starts_with(&root) && resolved.is_file() {
                 paths.push(resolved);
             }

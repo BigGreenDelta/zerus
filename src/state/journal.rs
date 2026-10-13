@@ -1,7 +1,6 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
 use std::sync::OnceLock;
 
 /// Final replies are the conversation itself, not an excerpt: Activity reads
@@ -201,14 +200,11 @@ fn detail(event: &Value) -> String {
 pub(super) fn event_db() -> Result<Connection> {
     private_dir(&root())?;
     let path = root().join("events.sqlite3");
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+    crate::platform::private_open(
+        OpenOptions::new().create(true).truncate(false).read(true).write(true),
+    )
+    .open(&path)
+    .map_err(|e| e.to_string())?;
     let db = Connection::open(path).map_err(|e| e.to_string())?;
     db.busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|e| e.to_string())?;

@@ -3,8 +3,7 @@
 use super::*;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -1054,12 +1053,7 @@ fn recover_interrupted_jobs() -> Result<()> {
 }
 fn worker() -> Result<i32> {
     private_dir(&root().join("recovery"))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(root().join("recovery/worker.lock"))
-        .map_err(|e| e.to_string())?;
+    let file = lock_file(&root().join("recovery/worker.lock"))?;
     if file.try_lock_exclusive().is_err() {
         return Ok(0);
     }
@@ -1087,21 +1081,12 @@ fn ensure_worker() -> Result<()> {
     }
     // Detached from both SSH and GUI lifetime; service installation additionally
     // restarts the worker after login. The worker lock handles competing GUIs.
-    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     cmd.args(["recovery", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn().map_err(|e| e.to_string())?;
+    crate::platform::spawn_detached(&mut cmd).map_err(|e| e.to_string())?;
     Ok(())
 }
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {

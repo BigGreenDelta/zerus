@@ -28,7 +28,7 @@ pub(super) fn missing_login_status(home: &Path, native: bool) -> &'static str {
 
 pub(super) fn saved_identity(home: &Path, native: bool) -> Value {
     let path = if native && env::var("CLAUDE_CONFIG_DIR").ok().is_none_or(|v|v.is_empty()) {
-        PathBuf::from(env::var("HOME").unwrap_or_default()).join(".claude.json")
+        PathBuf::from(crate::platform::home().unwrap_or_default()).join(".claude.json")
     } else { home.join(".claude.json") };
     let account = fs::File::open(path).ok()
         .and_then(|f| serde_json::from_reader::<_,Value>(f.take(1024*1024)).ok())

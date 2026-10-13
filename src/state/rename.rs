@@ -1,11 +1,10 @@
 //! Rename mutable labels without changing run identity or restarting the agent.
 use super::*;
-use std::fs::{self, File};
+use std::fs;
 
 fn remove(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => File::open(path.parent().ok_or("invalid state path")?)
-            .and_then(|file| file.sync_all())
+        Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid state path")?)
             .map_err(|e| e.to_string()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),

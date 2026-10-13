@@ -10,7 +10,7 @@ use std::{
     fs::File,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
 };
 
 #[cfg(unix)]
@@ -150,6 +150,115 @@ impl Drop for FileLock {
         // Rust 1.89+ File::unlock would shadow the trait method; name fs2 explicitly.
         let _ = fs2::FileExt::unlock(&self.0);
     }
+}
+
+// The process, file and control types below serve `state`, which compiles
+// only on Unix for now.
+/// Whether a process ID belongs to a running process, as far as this user can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum Presence {
+    /// No process has this ID.
+    Gone,
+    /// A process that this user may signal or open has this ID.
+    Present,
+    /// The ID cannot be checked here, for example because another user's
+    /// process has it. Never treat it as gone.
+    Unknown,
+}
+
+/// How a child ended, in Unix terms: its exit code, or the signal that ended it.
+/// Windows has no signals; its crash statuses (NTSTATUS) are reported as the
+/// signal of the same meaning, so a crash never looks like an ordinary failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitInfo {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl ExitInfo {
+    pub fn of(status: ExitStatus) -> Self {
+        exit_info(status)
+    }
+
+    /// The shell's convention: the exit code, or 128 plus the signal.
+    pub fn exit_code(self) -> i32 {
+        self.code.unwrap_or_else(|| 128 + self.signal.unwrap_or(1))
+    }
+}
+
+/// One row of the system process table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct ProcessRow {
+    pub pid: u32,
+    pub parent: u32,
+    /// The process group; Windows has none.
+    pub group: Option<u32>,
+}
+
+/// A process of this user, as the system reports it now. Other users' and
+/// exited (zombie) processes have none.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct ProcessIdentity {
+    pub parent: u32,
+    /// The process group; Windows has none.
+    pub group: Option<u32>,
+    /// What tells this process from a later one with the same ID: start clock
+    /// ticks on Linux, `seconds:microseconds` on macOS and the creation time in
+    /// 100 ns ticks on Windows.
+    pub birth: String,
+    /// When it started, in Unix seconds.
+    pub started: f64,
+}
+
+/// The executable and arguments of a process, read from the kernel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct ProcessImage {
+    pub executable: String,
+    /// None when only the executable could be read.
+    pub argv: Option<Vec<String>>,
+}
+
+/// Distinguishes a file from a different one later found at the same path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    /// Modification time in Unix seconds and the nanoseconds within that second.
+    pub modified: i64,
+    pub modified_nanos: i64,
+}
+
+/// What `verify_private` expects at a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum Private {
+    Directory,
+    /// A regular file with a single link.
+    File,
+}
+
+/// Why a bounded child process gave no result.
+#[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum RunError {
+    /// The child could not be started.
+    Spawn(io::Error),
+    /// Waiting for the child or reading its output failed.
+    Io(io::Error),
+    /// The child wrote more output than allowed.
+    TooLarge,
+    /// The deadline passed or the caller cancelled the run.
+    Stopped,
+    /// The child reported a failure.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Failed,
+    /// This computer cannot answer the question.
+    #[cfg_attr(unix, allow(dead_code))]
+    Unsupported,
 }
 
 pub fn quote(word: &str) -> String {

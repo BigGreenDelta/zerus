@@ -1,22 +1,29 @@
 //! Unix (Linux and macOS) process, terminal, clipboard and file primitives.
-use super::{available, capture, silent};
+use super::{
+    available, capture, silent, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity,
+    ProcessImage, ProcessRow, RunError,
+};
 use crate::{
     cli::{Error, Result},
     config::Config,
 };
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     fs,
-    io::{self, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::{CommandExt, ExitStatusExt},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+            process::{CommandExt, ExitStatusExt},
+        },
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::atomic::{AtomicI32, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub fn prepare_environment() {
@@ -42,9 +49,13 @@ pub fn prepare_environment() {
     }
 }
 pub fn code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+    ExitInfo::of(status).exit_code()
+}
+pub(super) fn exit_info(status: ExitStatus) -> ExitInfo {
+    ExitInfo {
+        code: status.code(),
+        signal: status.signal(),
+    }
 }
 pub fn executable(path: impl AsRef<Path>) -> bool {
     fs::metadata(path)
@@ -95,6 +106,18 @@ pub fn ssh_status(command: &mut Command, input: fs::File) -> io::Result<ExitStat
 pub fn home() -> Option<String> {
     env::var("HOME").ok()
 }
+/// HOME byte for byte, which need not be UTF-8.
+pub fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME").map(PathBuf::from)
+}
+/// The canonical form of `path`, as stored and compared in state files.
+pub fn canonical(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    fs::canonicalize(path)
+}
+/// The name a program goes by in process names and command lines: the file name.
+pub fn program_name(path: &Path) -> Option<String> {
+    path.file_name()?.to_str().map(str::to_owned)
+}
 /// `relative`, written with '/', below `base`.
 pub fn below(base: &str, relative: &str) -> String {
     format!("{base}/{relative}")
@@ -114,6 +137,30 @@ pub fn make_private(file: &fs::File) -> io::Result<()> {
 pub fn restrict_dir(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
+/// Create a directory and its missing parents, each new one owner-only.
+pub fn private_dir(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+}
+/// Whether `path` itself (a final symbolic link is not followed) is the
+/// expected kind of entry, owned by this user, closed to everyone else and,
+/// for a file, linked once.
+pub fn verify_private(path: &Path, kind: Private) -> io::Result<bool> {
+    Ok(private_metadata(&fs::symlink_metadata(path)?, kind))
+}
+/// `verify_private` for a file this process has open.
+pub fn verify_private_file(file: &fs::File) -> io::Result<bool> {
+    Ok(private_metadata(&file.metadata()?, Private::File))
+}
+fn private_metadata(metadata: &fs::Metadata, kind: Private) -> bool {
+    (match kind {
+        Private::Directory => metadata.is_dir(),
+        Private::File => metadata.is_file() && metadata.nlink() == 1,
+    }) && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o077 == 0
+}
 /// Create files owner-only.
 pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.mode(0o600)
@@ -121,6 +168,10 @@ pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
 /// Refuse a symbolic link as the final component and never block on a FIFO.
 pub fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+}
+/// Refuse a symbolic link as the final component.
+pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    options.custom_flags(libc::O_NOFOLLOW)
 }
 /// Make a completed rename in `dir` durable.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -149,22 +200,702 @@ pub fn process_alive(pid: u32) -> bool {
         && (unsafe { libc::kill(pid, 0) } == 0
             || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
-/// Distinguishes a file from a different one later found at the same path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub modified: i64,
-    pub modified_nanos: i64,
-}
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        modified: metadata.mtime(),
-        modified_nanos: metadata.mtime_nsec(),
+    FileIdentity::at(path).ok().map(|(identity, _)| identity)
+}
+impl FileIdentity {
+    /// The identity of a file this process has open. (Unix callers need its
+    /// metadata as well and use `with_metadata`.)
+    #[allow(dead_code)]
+    pub fn of(file: &fs::File) -> io::Result<Self> {
+        Ok(Self::with_metadata(file)?.0)
+    }
+    /// The identity and metadata of an open file, read at the same moment.
+    pub fn with_metadata(file: &fs::File) -> io::Result<(Self, fs::Metadata)> {
+        let metadata = file.metadata()?;
+        Ok((Self::from_metadata(&metadata), metadata))
+    }
+    /// The identity and metadata of the file `path` names, following links.
+    pub fn at(path: &Path) -> io::Result<(Self, fs::Metadata)> {
+        let metadata = fs::metadata(path)?;
+        Ok((Self::from_metadata(&metadata), metadata))
+    }
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            modified: metadata.mtime(),
+            modified_nanos: metadata.mtime_nsec(),
+        }
+    }
+}
+/// The modification time as Unix seconds and the nanoseconds within that second.
+pub fn modified(metadata: &fs::Metadata) -> (i64, i64) {
+    (metadata.mtime(), metadata.mtime_nsec())
+}
+
+/// Signal 0 probes a process without touching it. EPERM means another user's
+/// process, which is never treated as gone.
+pub fn presence(pid: u32) -> Presence {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Presence::Unknown;
+    };
+    if pid <= 0 {
+        return Presence::Unknown;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        Presence::Present
+    } else if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        Presence::Gone
+    } else {
+        Presence::Unknown
+    }
+}
+
+/// ps's own start time: `Some` with its (possibly empty) output when ps ran
+/// successfully. For processes whose start `process_start_time` cannot read.
+pub fn process_start_fallback(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let path = PathBuf::from(format!("/proc/{pid}"));
+    if fs::metadata(&path).ok()?.uid() != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let stat = fs::read_to_string(path.join("stat")).ok()?;
+    let (_, tail) = stat.rsplit_once(')')?;
+    let fields: Vec<_> = tail.split_whitespace().collect();
+    if fields.len() < 20 || matches!(fields[0], "Z" | "X") {
+        return None;
+    }
+    let started = process_started_at(pid)?? as f64;
+    Some(ProcessIdentity {
+        parent: fields[1].parse().ok()?,
+        group: Some(fields[2].parse().ok()?),
+        birth: fields[19].into(),
+        started,
     })
+}
+#[cfg(target_os = "macos")]
+pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if read != size
+        || info.pbi_pid != pid
+        || info.pbi_uid != unsafe { libc::geteuid() }
+        || info.pbi_status == 5
+    {
+        return None;
+    }
+    Some(ProcessIdentity {
+        parent: info.pbi_ppid,
+        group: Some(info.pbi_pgid),
+        birth: format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+        started: info.pbi_start_tvsec as f64 + info.pbi_start_tvusec as f64 / 1_000_000.,
+    })
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_identity(_: u32) -> Option<ProcessIdentity> {
+    None
+}
+
+// Read executable/argv from the kernel, not newline-delimited `ps` command text.
+// A command containing newlines must not spoof a different process row or helper.
+#[cfg(target_os = "linux")]
+pub fn describe(pid: u32) -> Option<ProcessImage> {
+    let executable = fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let mut bytes = Vec::new();
+    fs::File::open(format!("/proc/{pid}/cmdline"))
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let argv = bytes
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    Some(ProcessImage {
+        executable,
+        argv: Some(argv),
+    })
+}
+#[cfg(target_os = "macos")]
+pub fn describe(pid: u32) -> Option<ProcessImage> {
+    let mut path = vec![0u8; 4096];
+    let n = unsafe {
+        libc::proc_pidpath(
+            pid as i32,
+            path.as_mut_ptr() as *mut libc::c_void,
+            path.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    let executable =
+        String::from_utf8_lossy(&path[..path.iter().position(|b| *b == 0).unwrap_or(path.len())])
+            .into_owned();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
+    let mut bytes = vec![0u8; 1024 * 1024];
+    let mut size = bytes.len();
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            bytes.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size < 4 {
+        return Some(ProcessImage {
+            executable,
+            argv: None,
+        });
+    }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes[..4].try_into().ok()?)
+        .max(0)
+        .min(4096) as usize;
+    let mut rest = &bytes[4..];
+    rest = &rest[rest.iter().position(|b| *b == 0)? + 1..];
+    while rest.first() == Some(&0) {
+        rest = &rest[1..];
+    }
+    let argv = rest
+        .split(|b| *b == 0)
+        .take(argc)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    Some(ProcessImage {
+        executable,
+        argv: Some(argv),
+    })
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn describe(_: u32) -> Option<ProcessImage> {
+    None
+}
+
+/// Every process with its parent and process group, as ps lists them.
+pub fn process_table() -> std::result::Result<BTreeMap<u32, ProcessRow>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pgid="])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Live process inspection is unavailable".into());
+    }
+    let mut rows = BTreeMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let numbers: Vec<u32> = line
+            .split_whitespace()
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        if numbers.len() != 3 {
+            continue;
+        }
+        rows.insert(
+            numbers[0],
+            ProcessRow {
+                pid: numbers[0],
+                parent: numbers[1],
+                group: Some(numbers[2]),
+            },
+        );
+    }
+    Ok(rows)
+}
+
+/// The parent and the arguments of `pid`.
+#[cfg(target_os = "linux")]
+pub fn parent_and_argv(pid: u32) -> Option<(u32, Vec<String>)> {
+    let path = PathBuf::from(format!("/proc/{pid}"));
+    let stat = fs::read_to_string(path.join("stat")).ok()?;
+    let parent = stat[stat.rfind(')')? + 2..]
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    let bytes = fs::read(path.join("cmdline")).ok()?;
+    let argv = bytes
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    Some((parent, argv))
+}
+#[cfg(not(target_os = "linux"))]
+pub fn parent_and_argv(pid: u32) -> Option<(u32, Vec<String>)> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "command="])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    let (parent, command) = line.trim().split_once(char::is_whitespace)?;
+    Some((
+        parent.parse().ok()?,
+        shell_words::split(command.trim()).ok()?,
+    ))
+}
+pub fn parent_process_id() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+/// The parent and command name of `pid` as ps prints them, each None when absent.
+pub fn parent_and_name(pid: u32) -> io::Result<(Option<u32>, Option<String>)> {
+    let process = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid=,comm="])
+        .output()?;
+    let process = String::from_utf8_lossy(&process.stdout);
+    let mut fields = process.split_whitespace();
+    Ok((
+        fields.next().and_then(|n| n.parse().ok()),
+        fields.next().map(str::to_owned),
+    ))
+}
+
+/// Every other process's current directory and command name.
+#[cfg(target_os = "linux")]
+pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    let own = std::process::id();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            if pid == own {
+                return None;
+            }
+            let cwd = fs::read_link(entry.path().join("cwd")).ok()?;
+            let name = fs::read_to_string(entry.path().join("comm"))
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default();
+            Some((pid, cwd, name))
+        })
+        .collect())
+}
+#[cfg(target_os = "macos")]
+pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let own = std::process::id();
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut pids = vec![0 as libc::c_int; count as usize + 64];
+    let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
+    if found <= 0 {
+        return Ok(Vec::new());
+    }
+    pids.truncate((found as usize).min(pids.len()));
+    Ok(pids
+        .into_iter()
+        .filter(|pid| *pid > 0 && *pid as u32 != own)
+        .filter_map(|pid| {
+            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as libc::c_int;
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDVNODEPATHINFO,
+                    0,
+                    &mut info as *mut _ as *mut libc::c_void,
+                    size,
+                )
+            };
+            if read != size {
+                return None;
+            }
+            let path = &info.pvi_cdir.vip_path;
+            let bytes = unsafe {
+                std::slice::from_raw_parts(path.as_ptr() as *const u8, std::mem::size_of_val(path))
+            };
+            let end = bytes.iter().position(|b| *b == 0)?;
+            if end == 0 {
+                return None;
+            }
+            let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
+            let mut name = [0u8; 256];
+            let length = unsafe {
+                libc::proc_name(
+                    pid,
+                    name.as_mut_ptr() as *mut libc::c_void,
+                    name.len() as u32,
+                )
+            };
+            let name = String::from_utf8_lossy(&name[..length.clamp(0, 256) as usize]).into_owned();
+            Some((pid as u32, cwd, name))
+        })
+        .collect())
+}
+/// Without a way to read other processes' directories, nothing may count as unused.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    Err("Running processes cannot be inspected on this computer".into())
+}
+
+/// The files `pid` has open, as the kernel names them (macOS: lsof).
+pub fn open_files(pid: u32) -> std::result::Result<Vec<PathBuf>, RunError> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(fs::read_dir(format!("/proc/{pid}/fd"))
+            .map_err(RunError::Io)?
+            .flatten()
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .collect())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = output_until(
+            Command::new("/usr/sbin/lsof").args(["-a", "-p", &pid.to_string(), "-Fn"]),
+            Duration::from_secs(2),
+        )?;
+        if !output.status.success() {
+            return Err(RunError::Failed);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix('n').map(PathBuf::from))
+            .collect())
+    }
+}
+/// Whether `pid` has the file at `path` open; `path` is compared as the kernel names it.
+pub fn holds_open(pid: u32, path: &Path) -> std::result::Result<bool, RunError> {
+    Ok(open_files(pid)?.iter().any(|file| file == path))
+}
+
+/// A process to stop, pinned to its identity. Linux holds a PID file
+/// descriptor, which never reaches a later process with the same ID; elsewhere
+/// the identity is checked again before every signal.
+pub struct PinnedProcess {
+    pid: u32,
+    birth: String,
+    #[cfg(target_os = "linux")]
+    handle: fs::File,
+}
+impl PinnedProcess {
+    pub fn pin(pid: u32, birth: &str) -> std::result::Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+            if fd < 0 {
+                return Err("Process changed or this kernel lacks PID handle support".into());
+            }
+            let handle = unsafe { fs::File::from_raw_fd(fd) };
+            if process_identity(pid).is_none_or(|p| p.birth != birth) {
+                return Err("Process identity changed".into());
+            }
+            Ok(Self {
+                pid,
+                birth: birth.into(),
+                handle,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {
+                pid,
+                birth: birth.into(),
+            })
+        }
+    }
+    pub fn alive(&self) -> bool {
+        process_identity(self.pid).is_some_and(|p| p.birth == self.birth)
+    }
+    /// Ask the process to exit (SIGTERM).
+    pub fn terminate(&self) -> std::result::Result<(), String> {
+        self.signal(libc::SIGTERM)
+    }
+    /// End the process at once (SIGKILL).
+    pub fn kill(&self) -> std::result::Result<(), String> {
+        self.signal(libc::SIGKILL)
+    }
+    fn signal(&self, signal: i32) -> std::result::Result<(), String> {
+        if !self.alive() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        let result = {
+            (unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.handle.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            }) as i32
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = unsafe { libc::kill(self.pid as i32, signal) };
+        if result != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            return Err(format!(
+                "Could not stop PID {}: {}",
+                self.pid,
+                io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+static SHUTDOWN_CHILD: AtomicI32 = AtomicI32::new(0);
+static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
+extern "C" fn shutdown_handler(signal: i32) {
+    // Ctrl-C is an agent interaction, often just interrupting its current turn.
+    // A handler (not SIG_IGN) resets to default in exec'd children.
+    if signal == libc::SIGINT {
+        return;
+    }
+    SHUTDOWN_SIGNAL.store(signal, Ordering::SeqCst);
+    let pid = SHUTDOWN_CHILD.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, signal);
+        }
+    }
+}
+/// A supervisor's stop handling until it is dropped. Interrupts (SIGINT)
+/// belong to the agent; a stop request (SIGTERM, SIGHUP) is recorded for
+/// `shutdown_signal` and passed to the child named by `forward_shutdown`.
+pub struct ShutdownGuard(Vec<(i32, libc::sigaction)>);
+impl ShutdownGuard {
+    pub fn install() -> io::Result<Self> {
+        SHUTDOWN_SIGNAL.store(0, Ordering::SeqCst);
+        let mut guard = Self(Vec::new());
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = shutdown_handler as *const () as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            unsafe {
+                libc::sigemptyset(&mut action.sa_mask);
+            }
+            if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            guard.0.push((signal, previous));
+        }
+        Ok(guard)
+    }
+}
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        SHUTDOWN_CHILD.store(0, Ordering::SeqCst);
+        for (signal, previous) in &self.0 {
+            unsafe {
+                libc::sigaction(*signal, previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
+/// The stop request received since `ShutdownGuard::install` as a signal number, or 0.
+pub fn shutdown_signal() -> i32 {
+    SHUTDOWN_SIGNAL.load(Ordering::SeqCst)
+}
+/// Pass stop requests to `child` from now on, and one that arrived while it started.
+pub fn forward_shutdown(child: &Child) {
+    SHUTDOWN_CHILD.store(child.id() as i32, Ordering::SeqCst);
+    let signal = SHUTDOWN_SIGNAL.load(Ordering::SeqCst);
+    if signal != 0 {
+        unsafe {
+            libc::kill(child.id() as i32, signal);
+        }
+    }
+}
+/// Stop passing requests on: the child has exited.
+pub fn shutdown_child_exited() {
+    SHUTDOWN_CHILD.store(0, Ordering::SeqCst);
+}
+
+/// Start `command` in a session of its own, so the end of the terminal, SSH
+/// connection or desktop app that started it does not stop it.
+pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+/// Run `command` without input in a process group of its own, collecting at
+/// most `limits` bytes of standard output and errors, until it exits and both
+/// streams end. When the output is too large, `deadline` passes, `cancelled`
+/// says so or the child fails, the whole group is killed; a child that
+/// succeeds may leave helpers running.
+pub fn run_bounded(
+    command: &mut Command,
+    limits: [usize; 2],
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+    command
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+        // Both pipes must be drained while the child runs, including large outputs.
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut status = None;
+    let result = loop {
+        let mut eof = true;
+        for (pipe, buffer, limit) in [
+            (&mut stdout as &mut dyn Read, &mut out, limits[0]),
+            (&mut stderr as &mut dyn Read, &mut err, limits[1]),
+        ] {
+            loop {
+                let mut chunk = [0; 4096];
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
+                        if buffer.len() > limit {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        eof = false;
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        eof = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if out.len() > limits[0] || err.len() > limits[1] {
+            break Err(RunError::TooLarge);
+        }
+        if status.is_none() {
+            status = child.try_wait().map_err(RunError::Io)?;
+        }
+        if let Some(status) = status {
+            if eof {
+                break Ok(status);
+            }
+        }
+        if cancelled() || Instant::now() >= deadline {
+            break Err(RunError::Stopped);
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    };
+    if !result.as_ref().is_ok_and(ExitStatus::success) {
+        // A hook or filter can outlive the child. Stop the whole operation on
+        // timeout instead of leaving it writing after an error was reported.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    result.map(|status| (status, out, err))
+}
+
+/// `Command::output` with a time limit and closed input. Output goes to
+/// regular files, so a child writing much before it exits never blocks on a
+/// pipe and no reader thread outlives the call. A child still running at the
+/// limit is killed.
+pub fn output_until(
+    command: &mut Command,
+    duration: Duration,
+) -> std::result::Result<Output, RunError> {
+    let mut stdout = tempfile::tempfile().map_err(RunError::Io)?;
+    let mut stderr = tempfile::tempfile().map_err(RunError::Io)?;
+    command.stdout(Stdio::from(stdout.try_clone().map_err(RunError::Io)?));
+    command.stderr(Stdio::from(stderr.try_clone().map_err(RunError::Io)?));
+    command.stdin(Stdio::null());
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let deadline = Instant::now() + duration;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(RunError::Io)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunError::Stopped);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    stdout.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
+    stderr.seek(SeekFrom::Start(0)).map_err(RunError::Io)?;
+    let mut output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    stdout
+        .read_to_end(&mut output.stdout)
+        .map_err(RunError::Io)?;
+    stderr
+        .read_to_end(&mut output.stderr)
+        .map_err(RunError::Io)?;
+    Ok(output)
+}
+
+/// Keep Git from asking for credentials: a read-only check fails instead of
+/// waiting for a prompt nobody sees.
+pub fn git_noninteractive(command: &mut Command) -> &mut Command {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("SSH_ASKPASS", "/bin/false")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=2",
+        )
 }
 /// The temporary directory of an interactive link's marker file.
 pub fn link_marker_dir() -> io::Result<tempfile::TempDir> {
@@ -192,7 +923,7 @@ pub fn process_start_time(pid: u32) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn process_started_at(pid: u32) -> Option<Option<u64>> {
+fn process_started_at(pid: u32) -> Option<Option<u64>> {
     // The kinfo_proc that ps reads, which also covers other users' processes.
     // Its extern_proc begins with p_starttime, a timeval whose seconds come first.
     let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid as libc::c_int];
@@ -209,7 +940,7 @@ pub(crate) fn process_started_at(pid: u32) -> Option<Option<u64>> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn process_started_at(pid: u32) -> Option<Option<u64>> {
+fn process_started_at(pid: u32) -> Option<Option<u64>> {
     use std::sync::OnceLock;
     // procps: boot time from /proc/stat plus the start in clock ticks, truncated.
     static BOOT: OnceLock<Option<u64>> = OnceLock::new();
@@ -626,5 +1357,392 @@ mod tests {
         }
         assert!(differ.is_empty(), "{checked} matched; differ: {differ:#?}");
         assert!(checked > 10);
+    }
+    #[test]
+    fn exit_information_keeps_record_values() {
+        // Wait statuses: exit code 3, then death by SIGKILL and by SIGTERM.
+        let exited = ExitInfo::of(ExitStatus::from_raw(3 << 8));
+        assert_eq!(
+            exited,
+            ExitInfo {
+                code: Some(3),
+                signal: None
+            }
+        );
+        assert_eq!(exited.exit_code(), 3);
+        let killed = ExitInfo::of(ExitStatus::from_raw(libc::SIGKILL));
+        assert_eq!(
+            killed,
+            ExitInfo {
+                code: None,
+                signal: Some(libc::SIGKILL)
+            }
+        );
+        assert_eq!(killed.exit_code(), 128 + libc::SIGKILL);
+        assert_eq!(
+            code(ExitStatus::from_raw(libc::SIGTERM)),
+            128 + libc::SIGTERM
+        );
+    }
+
+    #[test]
+    fn presence_never_calls_a_foreign_process_gone() {
+        assert_eq!(presence(std::process::id()), Presence::Present);
+        assert_eq!(presence(0), Presence::Unknown);
+        assert_eq!(presence(u32::MAX), Presence::Unknown);
+        // Another user's process (init, unless the tests run as root).
+        if unsafe { libc::kill(1, 0) } != 0 {
+            assert_eq!(presence(1), Presence::Unknown);
+        }
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        // A reaped ID is free unless the system has already reused it.
+        assert_ne!(presence(pid), Presence::Unknown);
+    }
+
+    #[test]
+    fn process_identities_match_the_kernel() {
+        let own = std::process::id();
+        let identity = process_identity(own).expect("own identity");
+        assert_eq!(identity.parent, unsafe { libc::getppid() } as u32);
+        assert_eq!(identity.group, Some(unsafe { libc::getpgrp() } as u32));
+        assert_eq!(parent_process_id(), identity.parent);
+        // Job IDs hash this text: Linux start ticks, macOS seconds:microseconds.
+        #[cfg(target_os = "linux")]
+        assert!(
+            !identity.birth.is_empty() && identity.birth.bytes().all(|b| b.is_ascii_digit()),
+            "{}",
+            identity.birth
+        );
+        #[cfg(target_os = "macos")]
+        assert!(identity
+            .birth
+            .split_once(':')
+            .is_some_and(
+                |(seconds, micros)| seconds.parse::<u64>().is_ok() && micros.parse::<u64>().is_ok()
+            ));
+        assert_eq!(
+            Some(lstart_text(identity.started as u64)),
+            process_start_time(own)
+        );
+        assert_eq!(
+            process_table().unwrap()[&own],
+            ProcessRow {
+                pid: own,
+                parent: identity.parent,
+                group: identity.group,
+            }
+        );
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (parent, name) = parent_and_name(child.id()).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(parent, Some(own));
+        assert_eq!(
+            name.and_then(|name| program_name(Path::new(&name)))
+                .as_deref(),
+            Some("sleep")
+        );
+        assert!(process_identity(child.id()).is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_images_and_ancestry_read_argv_from_the_kernel() {
+        let own = std::process::id();
+        let image = describe(own).expect("own image");
+        assert_eq!(Path::new(&image.executable), env::current_exe().unwrap());
+        assert_eq!(image.argv, Some(env::args().collect::<Vec<_>>()));
+        assert_eq!(
+            parent_and_argv(own),
+            Some((parent_process_id(), env::args().collect()))
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn open_files_and_current_directories_name_what_a_process_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = fs::canonicalize(dir.path()).unwrap();
+        let path = folder.join("held");
+        let file = fs::File::create(&path).unwrap();
+        let own = std::process::id();
+        assert!(holds_open(own, &path).unwrap());
+        assert!(open_files(own).unwrap().contains(&path));
+        drop(file);
+        assert!(!holds_open(own, &path).unwrap());
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .current_dir(&folder)
+            .spawn()
+            .unwrap();
+        let directories = current_directories().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(directories
+            .iter()
+            .any(|(pid, cwd, name)| *pid == child.id() && *cwd == folder && name == "sleep"));
+        assert!(directories.iter().all(|(pid, _, _)| *pid != own));
+    }
+
+    #[test]
+    fn pinned_processes_signal_only_their_identity() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let birth = process_identity(child.id()).unwrap().birth;
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            PinnedProcess::pin(child.id(), "another birth")
+                .err()
+                .as_deref(),
+            Some("Process identity changed")
+        );
+        let pinned = PinnedProcess::pin(child.id(), &birth).unwrap();
+        assert!(pinned.alive());
+        pinned.terminate().unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(!pinned.alive());
+        // Gone: no signal reaches whatever has the ID now.
+        pinned.kill().unwrap();
+    }
+
+    #[test]
+    fn shutdown_requests_reach_the_child_and_interrupts_do_not() {
+        let installed = |signal| unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(signal, std::ptr::null(), &mut current);
+            current.sa_sigaction
+        };
+        let handler = shutdown_handler as *const () as libc::sighandler_t;
+        let guard = ShutdownGuard::install().unwrap();
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            assert_eq!(installed(signal), handler);
+        }
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        forward_shutdown(&child);
+        // The handler as the signals would run it, without signalling the test process.
+        shutdown_handler(libc::SIGINT);
+        assert_eq!(shutdown_signal(), 0);
+        shutdown_handler(libc::SIGTERM);
+        assert_eq!(shutdown_signal(), libc::SIGTERM);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        shutdown_child_exited();
+        // A request that arrived first reaches a child started afterwards.
+        let mut late = Command::new("sleep").arg("30").spawn().unwrap();
+        forward_shutdown(&late);
+        assert_eq!(late.wait().unwrap().signal(), Some(libc::SIGTERM));
+        drop(guard);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            assert_ne!(installed(signal), handler);
+        }
+    }
+
+    #[test]
+    fn detached_children_lead_their_own_session() {
+        let mut child = spawn_detached(Command::new("sleep").arg("30")).unwrap();
+        let session = unsafe { libc::getsid(child.id() as i32) };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(session, child.id() as i32);
+    }
+
+    #[test]
+    fn bounded_runs_collect_output_and_stop_their_whole_group() {
+        let never = || false;
+        let far = Instant::now() + Duration::from_secs(30);
+        let (status, out, err) = run_bounded(
+            Command::new("sh").args(["-c", "printf out; printf err >&2; exit 3"]),
+            [16, 16],
+            far,
+            &never,
+        )
+        .unwrap();
+        assert_eq!(
+            (status.code(), out.as_slice(), err.as_slice()),
+            (Some(3), &b"out"[..], &b"err"[..])
+        );
+        assert!(matches!(
+            run_bounded(
+                Command::new("sh").args(["-c", "printf 12345"]),
+                [4, 16],
+                far,
+                &never
+            ),
+            Err(RunError::TooLarge)
+        ));
+        assert!(matches!(
+            run_bounded(&mut Command::new("hgs-no-such-program"), [4, 4], far, &never),
+            Err(RunError::Spawn(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert!(matches!(
+            run_bounded(Command::new("sleep").arg("30"), [4, 4], far, &|| true),
+            Err(RunError::Stopped)
+        ));
+        // A helper that outlives the shell holds the output open until the
+        // deadline, which then stops the whole group, helper included.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper");
+        let started = Instant::now();
+        let result = run_bounded(
+            Command::new("sh").arg("-c").arg(format!(
+                "sleep 30 & echo $! > {}; exit 0",
+                super::super::quote(&marker.to_string_lossy())
+            )),
+            [16, 16],
+            Instant::now() + Duration::from_millis(300),
+            &never,
+        );
+        assert!(matches!(result, Err(RunError::Stopped)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let ended = |helper: u32| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while process_identity(helper).is_some() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            process_identity(helper).is_none()
+        };
+        assert!(ended(
+            fs::read_to_string(&marker).unwrap().trim().parse().unwrap()
+        ));
+        // A failed child's helpers end with it too; a successful child's stay.
+        for (exit, survives) in [(1, false), (0, true)] {
+            let (status, _, _) = run_bounded(
+                Command::new("sh").arg("-c").arg(format!(
+                    "sleep 30 >/dev/null 2>&1 & echo $! > {}; exit {exit}",
+                    super::super::quote(&marker.to_string_lossy())
+                )),
+                [16, 16],
+                far,
+                &never,
+            )
+            .unwrap();
+            assert_eq!(status.code(), Some(exit));
+            let helper: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+            if survives {
+                assert!(process_identity(helper).is_some());
+                unsafe {
+                    libc::kill(helper as i32, libc::SIGKILL);
+                }
+            } else {
+                assert!(ended(helper));
+            }
+        }
+    }
+
+    #[test]
+    fn timed_output_goes_through_files_and_stops_at_the_limit() {
+        let output = output_until(
+            Command::new("sh").args(["-c", "printf out; printf err >&2"]),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            (output.stdout.as_slice(), output.stderr.as_slice()),
+            (&b"out"[..], &b"err"[..])
+        );
+        let started = Instant::now();
+        assert!(matches!(
+            output_until(Command::new("sleep").arg("30"), Duration::from_millis(100)),
+            Err(RunError::Stopped)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn private_entries_are_owned_closed_and_linked_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("private");
+        private_dir(&folder).unwrap();
+        assert_eq!(fs::metadata(&folder).unwrap().mode() & 0o777, 0o700);
+        assert!(verify_private(&folder, Private::Directory).unwrap());
+        assert!(!verify_private(&folder, Private::File).unwrap());
+        let file = folder.join("store");
+        let handle = private_open(fs::OpenOptions::new().create_new(true).write(true))
+            .open(&file)
+            .unwrap();
+        assert!(verify_private(&file, Private::File).unwrap());
+        assert!(verify_private_file(&handle).unwrap());
+        fs::hard_link(&file, folder.join("second")).unwrap();
+        assert!(!verify_private(&file, Private::File).unwrap());
+        assert!(!verify_private_file(&handle).unwrap());
+        fs::remove_file(folder.join("second")).unwrap();
+        std::os::unix::fs::symlink(&file, folder.join("link")).unwrap();
+        assert!(!verify_private(&folder.join("link"), Private::File).unwrap());
+        assert!(refuse_link(fs::OpenOptions::new().read(true))
+            .open(folder.join("link"))
+            .is_err());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(!verify_private(&file, Private::File).unwrap());
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(!verify_private(&folder, Private::Directory).unwrap());
+        assert!(verify_private(&folder.join("missing"), Private::File).is_err());
+    }
+
+    #[test]
+    fn file_identities_read_one_moment_of_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"one").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let (identity, metadata) = FileIdentity::with_metadata(&file).unwrap();
+        assert_eq!(FileIdentity::of(&file).unwrap(), identity);
+        assert_eq!(FileIdentity::at(&path).unwrap().0, identity);
+        assert_eq!(file_identity(&path), Some(identity));
+        // Caches and receipts store these values as they are.
+        assert_eq!(
+            (identity.device, identity.inode),
+            (metadata.dev(), metadata.ino())
+        );
+        assert_eq!(
+            (identity.modified, identity.modified_nanos),
+            (metadata.mtime(), metadata.mtime_nsec())
+        );
+        assert_eq!(
+            modified(&metadata),
+            (metadata.mtime(), metadata.mtime_nsec())
+        );
+    }
+
+    #[test]
+    fn names_paths_and_git_settings_keep_their_unix_forms() {
+        assert_eq!(
+            program_name(Path::new("/usr/bin/node")).as_deref(),
+            Some("node")
+        );
+        assert_eq!(
+            program_name(Path::new("bin/codex.js")).as_deref(),
+            Some("codex.js")
+        );
+        assert_eq!(
+            program_name(Path::new("Python3.12")).as_deref(),
+            Some("Python3.12")
+        );
+        assert_eq!(program_name(Path::new("/")), None);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            canonical(dir.path()).unwrap(),
+            fs::canonicalize(dir.path()).unwrap()
+        );
+        assert_eq!(home_dir(), env::var_os("HOME").map(PathBuf::from));
+        let mut git = Command::new("git");
+        git_noninteractive(&mut git);
+        let environment: Vec<_> = git
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.and_then(|v| v.to_str())))
+            .collect();
+        assert_eq!(
+            environment,
+            [
+                ("GIT_ASKPASS", Some("/bin/false")),
+                (
+                    "GIT_SSH_COMMAND",
+                    Some("ssh -o BatchMode=yes -o ConnectTimeout=2")
+                ),
+                ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("SSH_ASKPASS", Some("/bin/false")),
+            ]
+        );
     }
 }

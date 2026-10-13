@@ -168,8 +168,8 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
         }
         _ => return Ok(None),
     };
-    let path = path.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(native_home.canonicalize().map_err(|e| e.to_string())?) {
+    let path = crate::platform::canonical(&path).map_err(|e| e.to_string())?;
+    if !path.starts_with(crate::platform::canonical(&native_home).map_err(|e| e.to_string())?) {
         return Err("Native history is outside the selected account".into());
     }
     let mut file = File::open(path).map_err(|e| e.to_string())?;

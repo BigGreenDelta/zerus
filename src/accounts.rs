@@ -376,7 +376,7 @@ pub fn prepare_claude_settings() -> Result<()> {
     if account.is_empty() || account.starts_with("native-") { return Ok(()); }
     let profile = env::var("CLAUDE_CONFIG_DIR").ok().filter(|v|!v.is_empty())
         .ok_or_else(||Error::new(1,"Managed Claude profile directory is missing."))?;
-    let home = env::var("HOME").map_err(|_|Error::new(1,"User home is missing."))?;
+    let home = platform::home().ok_or_else(||Error::new(1,"User home is missing."))?;
     claude_settings::inherit(&Path::new(&home).join(".claude"),Path::new(&profile))
 }
 /// Managed profiles use the user's MCP servers; provider logins stay separate.
@@ -387,7 +387,7 @@ pub fn prepare_mcp_servers(agent: &str) -> Result<()> {
     let Ok(key) = home_var(agent) else { return Ok(()) };
     let profile = env::var(key).ok().filter(|v|!v.is_empty())
         .ok_or_else(||Error::new(1,"Managed agent profile directory is missing."))?;
-    let home = env::var("HOME").map_err(|_|Error::new(1,"User home is missing."))?;
+    let home = platform::home().ok_or_else(||Error::new(1,"User home is missing."))?;
     mcp_servers::inherit(agent,Path::new(&home),Path::new(&profile))
 }
 pub fn select(config: &Config, id: &str, provider: &str) -> Result<Vec<String>> {
@@ -575,13 +575,13 @@ struct Transfer {
 }
 fn safe_file(home: &Path, name: &str) -> Result<Vec<u8>> {
     let path = home.join(name);
-    let canonical = path.canonicalize().map_err(|_| {
+    let canonical = platform::canonical(&path).map_err(|_| {
         Error::new(
             1,
             "Credential file is unavailable. Sign in on the destination machine.",
         )
     })?;
-    if !canonical.starts_with(home.canonicalize()?)
+    if !canonical.starts_with(platform::canonical(home)?)
         || !fs::metadata(&canonical)?.is_file()
         || fs::metadata(&canonical)?.len() > MAX_TRANSFER as u64
     {

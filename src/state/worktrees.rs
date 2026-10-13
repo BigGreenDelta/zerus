@@ -3,10 +3,7 @@ use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const MAX_OUTPUT: usize = 1024 * 1024;
@@ -44,13 +41,9 @@ pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::
     if mobile_stopped() || Instant::now() >= deadline { return Err(error("timeout", "Git operation cancelled or timed out")); }
     let mut command = Command::new("git");
     command
-        .process_group(0)
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
         .arg(cwd)
         .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env("LC_ALL", "C")
         .env("GIT_OPTIONAL_LOCKS", "0");
     for key in [
@@ -66,107 +59,41 @@ pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::
     }
     if args.contains(&"ls-remote") {
         // Read-only publication checks must never open a credential prompt.
-        command.env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_ASKPASS", "/bin/false")
-            .env("SSH_ASKPASS", "/bin/false")
-            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=2");
+        crate::platform::git_noninteractive(&mut command);
     }
-    let mut child = command.spawn().map_err(|e| {
-        error(
-            if e.kind() == io::ErrorKind::NotFound {
-                "git_unavailable"
+    // Both pipes are drained while Git runs, including large catalogs. A
+    // checkout hook or filter can outlive Git: on timeout the whole operation
+    // stops instead of writing on after an error was reported.
+    let (status, out, err) =
+        crate::platform::run_bounded(&mut command, [MAX_OUTPUT, 8192], deadline, &mobile_stopped)
+            .map_err(|failure| match failure {
+                crate::platform::RunError::Spawn(e) => error(
+                    if e.kind() == io::ErrorKind::NotFound {
+                        "git_unavailable"
+                    } else {
+                        "metadata_error"
+                    },
+                    e.to_string(),
+                ),
+                crate::platform::RunError::TooLarge => {
+                    error("too_large", "Git operation exceeded the output limit")
+                }
+                crate::platform::RunError::Io(e) => error("metadata_error", e.to_string()),
+                _ => error("timeout", "Git operation cancelled or timed out"),
+            })?;
+    if status.success() {
+        Ok(out)
+    } else {
+        let detail = String::from_utf8_lossy(&err).trim().to_owned();
+        Err(error(
+            if detail.contains("not a git repository") {
+                "not_repo"
             } else {
                 "metadata_error"
             },
-            e.to_string(),
-        )
-    })?;
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
-        // Both pipes must be drained while Git runs, including large catalogs.
-        unsafe {
-            libc::fcntl(
-                fd,
-                libc::F_SETFL,
-                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
-            );
-        }
+            detail,
+        ))
     }
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let mut status = None;
-    let result = loop {
-        let mut eof = true;
-        for (pipe, buffer, limit) in [
-            (&mut stdout as &mut dyn Read, &mut out, MAX_OUTPUT),
-            (&mut stderr as &mut dyn Read, &mut err, 8192),
-        ] {
-            loop {
-                let mut chunk = [0; 4096];
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buffer.extend_from_slice(&chunk[..n]);
-                        if buffer.len() > limit {
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        eof = false;
-                        break;
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => {
-                        eof = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if out.len() > MAX_OUTPUT || err.len() > 8192 {
-            break Err(error(
-                "too_large",
-                "Git operation exceeded the output limit",
-            ));
-        }
-        if status.is_none() {
-            status = child
-                .try_wait()
-                .map_err(|e| error("metadata_error", e.to_string()))?;
-        }
-        if let Some(status) = status {
-            if eof {
-                break if status.success() {
-                    Ok(out)
-                } else {
-                    let detail = String::from_utf8_lossy(&err).trim().to_owned();
-                    Err(error(
-                        if detail.contains("not a git repository") {
-                            "not_repo"
-                        } else {
-                            "metadata_error"
-                        },
-                        detail,
-                    ))
-                };
-            }
-        }
-        if mobile_stopped() || Instant::now() >= deadline {
-            break Err(error("timeout", "Git operation cancelled or timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(3));
-    };
-    if result.is_err() {
-        // A checkout hook/filter can outlive Git. Stop the whole operation on
-        // timeout instead of leaving it writing after an error was reported.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    result
 }
 
 pub(super) fn cache_file(kind: &str, identity: &str) -> PathBuf {
@@ -183,7 +110,7 @@ fn load(path: &Path) -> Option<Value> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 pub(super) fn canonical(path: &str) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+    crate::platform::canonical(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 
 fn parse(bytes: &[u8]) -> std::result::Result<(Vec<Value>, bool), GitError> {
@@ -294,7 +221,7 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
     let requested = path.to_string_lossy();
     let path_cache = cache_file("path", &requested);
     let previous = load(&path_cache);
-    let path = match fs::canonicalize(path) {
+    let path = match crate::platform::canonical(path) {
         Ok(p) if p.is_dir() => p,
         _ => {
             return json!({"path":requested,"state":"folder_unavailable","detail":"Folder is missing or inaccessible","worktrees":[],"sampled_at":now()})
@@ -311,7 +238,7 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
             .map_err(|_| error("metadata_error", "Invalid repository path"))?
             .trim_end_matches('\n');
         let common =
-            fs::canonicalize(common).map_err(|e| error("metadata_error", e.to_string()))?;
+            crate::platform::canonical(common).map_err(|e| error("metadata_error", e.to_string()))?;
         let identity = common.to_string_lossy();
         let cache = cache_file("repo", &identity);
         let mut snapshot = load(&cache);
@@ -321,12 +248,7 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
         };
         if refresh || !snapshot.as_ref().is_some_and(fresh) {
             let _ = private_dir(cache.parent().unwrap());
-            let guard = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(cache.with_extension("lock"))
-                .ok();
+            let guard = lock_file(&cache.with_extension("lock")).ok();
             let _lock = match guard {
                 Some(guard) => {
                     while guard.try_lock_exclusive().is_err() {
@@ -470,8 +392,8 @@ fn create(args: &[String]) -> Result<Value> {
     if !source.is_absolute() || !destination.is_absolute() {
         return Err("Repository and destination must be absolute folder paths".into());
     }
-    let source = fs::canonicalize(source).map_err(|e| format!("Repository: {e}"))?;
-    let parent = fs::canonicalize(destination.parent().ok_or("Choose a destination folder")?)
+    let source = crate::platform::canonical(source).map_err(|e| format!("Repository: {e}"))?;
+    let parent = crate::platform::canonical(destination.parent().ok_or("Choose a destination folder")?)
         .map_err(|e| format!("Destination parent must already exist: {e}"))?;
     let destination = parent.join(
         destination
@@ -487,14 +409,14 @@ fn create(args: &[String]) -> Result<Value> {
             .map(|s| s.trim_end_matches('\n').to_owned())
             .map_err(|e| e.to_string())
     };
-    let common = fs::canonicalize(read(&[
+    let common = crate::platform::canonical(read(&[
         "rev-parse",
         "--path-format=absolute",
         "--git-common-dir",
     ])?)
     .map_err(|e| e.to_string())?;
     if let Some(expected) = options.get("--common-dir") {
-        if fs::canonicalize(expected).ok().as_ref() != Some(&common) {
+        if crate::platform::canonical(expected).ok().as_ref() != Some(&common) {
             return Err("Repository changed. Refresh its worktrees before creating one.".into());
         }
     }
@@ -532,14 +454,11 @@ fn create(args: &[String]) -> Result<Value> {
     let upstream = inherited_upstream(&read, base);
     let cache = cache_file("repo", &common.to_string_lossy());
     fs::create_dir_all(cache.parent().unwrap()).map_err(|e| e.to_string())?;
-    let guard = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(cache.with_extension("lock"))
-        .map_err(|e| e.to_string())?;
+    let guard = crate::platform::private_open(
+        OpenOptions::new().create(true).truncate(false).read(true).write(true),
+    )
+    .open(cache.with_extension("lock"))
+    .map_err(|e| e.to_string())?;
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= deadline {
             return Err(
@@ -578,7 +497,7 @@ fn create(args: &[String]) -> Result<Value> {
         deadline,
     )
     .map_err(|e| e.detail)?;
-    let actual = fs::canonicalize(String::from_utf8_lossy(&actual).trim_end_matches('\n'))
+    let actual = crate::platform::canonical(String::from_utf8_lossy(&actual).trim_end_matches('\n'))
         .map_err(|e| e.to_string())?;
     let actual_branch =
         git(&destination, &["symbolic-ref", "--quiet", "HEAD"], deadline).map_err(|e| e.detail)?;

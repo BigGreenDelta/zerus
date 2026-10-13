@@ -116,7 +116,7 @@ fn inspect_git(cwd: &str, deadline: Instant) -> Value {
         } else {
             Path::new(cwd).join(path)
         };
-        path.canonicalize().unwrap_or(path)
+        crate::platform::canonical(&path).unwrap_or(path)
     };
     let root = absolute(lines[0]);
     let worktree = absolute(lines[1]) != absolute(lines[2]);
@@ -172,7 +172,7 @@ pub(super) fn enrich(rows: &mut [Value], live_cwds: &BTreeMap<String, String>) {
             }
         }
         let cwd = string(row, "cwd").to_owned();
-        row["cwd_canonical"] = json!(fs::canonicalize(&cwd).ok());
+        row["cwd_canonical"] = json!(crate::platform::canonical(&cwd).ok());
         let value = values
             .entry(cwd.clone())
             .or_insert_with(|| cached(&cwd, deadline));

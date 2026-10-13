@@ -7,7 +7,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::time::Duration;
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -615,17 +614,13 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         .prefix("message-")
         .tempdir_in(attachments_root)
         .map_err(|e| e.to_string())?;
-    fs::set_permissions(attachments.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
+    crate::platform::restrict_dir(attachments.path()).map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
     for (index, (attachment, bytes)) in request.attachments.iter().zip(files.iter()).enumerate() {
         let path = attachments
             .path()
             .join(safe_filename(&attachment.name, index));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
+        let mut file = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(&path)
             .map_err(|e| e.to_string())?;
         file.write_all(bytes).map_err(|e| e.to_string())?;

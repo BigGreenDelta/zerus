@@ -85,7 +85,7 @@ pub(super) fn inspect(path: &Path) -> Value {
     let deadline = Instant::now() + Duration::from_secs(3);
     let local_deadline = Instant::now() + Duration::from_millis(700);
     let mut data = json!({"state":"unavailable","path":path,"sampled_at":now(),"remote_state":"unknown"});
-    let Some(path) = path.canonicalize().ok().filter(|p| p.is_dir()) else {
+    let Some(path) = crate::platform::canonical(path).ok().filter(|p| p.is_dir()) else {
         data["state"] = json!("folder_unavailable"); return data;
     };
     data["path"] = json!(path);

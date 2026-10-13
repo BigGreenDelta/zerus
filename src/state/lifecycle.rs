@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::process::ExitStatusExt;
+use crate::platform::ExitInfo;
 use std::time::{Duration, Instant};
 
 fn required_env(name: &str) -> Result<String> {
@@ -90,7 +90,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
-    let _signals = supervisor::Signals::install()?;
+    let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -239,14 +239,12 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             .map_err(|_| "invalid HGS_FALLBACK_SECS")?;
         if status.success()
             || supervisor::shutdown_requested()
-            || status.signal().is_some()
+            || ExitInfo::of(status).signal.is_some()
             || confirmed
             || started.elapsed().as_secs_f64() >= fallback
         {
             supervisor::finish(&name, &token, child_id, status)?;
-            return Ok(status
-                .code()
-                .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)));
+            return Ok(ExitInfo::of(status).exit_code());
         }
         eprintln!("hgs: nothing to resume — starting fresh");
         {
@@ -267,9 +265,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let child_id = child.id();
     let status = supervisor::wait(&mut child)?;
     supervisor::finish(&name, &token, child_id, status)?;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
+    Ok(ExitInfo::of(status).exit_code())
 }
 
 fn nonempty_value(record: &Value, key: &str) -> Option<String> {

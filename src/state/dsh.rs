@@ -4,7 +4,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::{fs::OpenOptionsExt, net::UnixStream, process::CommandExt};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -124,11 +124,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         &json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
             .to_string(),
     )?;
-    let log = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
+    let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
         .map_err(|e| e.to_string())?;
     let mut command = Command::new("dsh");
@@ -175,15 +171,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         .stderr(log);
     // Detach only the dedicated native host. Closing its launching terminal or
     // HGS process must not stop conversations.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
     atomic(&dir.join("host.pid"), &child.id().to_string())?;
     let deadline = Instant::now() + Duration::from_secs(35);
     while Instant::now() < deadline {
@@ -353,9 +341,7 @@ pub(crate) fn launch(
         save(&record)?;
         return Ok(());
     }
-    let cwd = PathBuf::from(cwd)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});

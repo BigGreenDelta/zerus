@@ -7,7 +7,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const PUBLIC: &[&str] = &[
     "UserPromptSubmit",
@@ -167,30 +166,20 @@ fn key(parent: &Value, r: &Request) -> String {
 fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
     let directory = absolute_root()?.join("public_history");
     private_dir(&directory)?;
-    let info = directory.symlink_metadata().map_err(|e| e.to_string())?;
-    if !info.is_dir()
-        || info.permissions().mode() & 0o077 != 0
-        || info.uid() != unsafe { libc::geteuid() }
+    if !crate::platform::verify_private(&directory, crate::platform::Private::Directory)
+        .map_err(|e| e.to_string())?
     {
         return Err("Public history index directory must be private".into());
     }
     let key = key(parent, r);
     let guard = lock(Some(&directory.join(format!("{key}.lock"))))?;
     let path = directory.join(format!("{key}.sqlite3"));
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.permissions().mode() & 0o077 != 0
-        || meta.nlink() != 1
-    {
+    let file = crate::platform::refuse_link(crate::platform::private_open(
+        OpenOptions::new().create(true).read(true).write(true),
+    ))
+    .open(&path)
+    .map_err(|e| e.to_string())?;
+    if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
         return Err("Public history index file must be private".into());
     }
     drop(file);
@@ -465,7 +454,8 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
             Ok(file) => file,
             Err(_) => return Ok((false, json!({"provider":"unavailable"}))),
         };
-        let meta = file.metadata().map_err(|e| e.to_string())?;
+        let (identity, meta) =
+            crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
         let mut first = Vec::new();
         BufReader::new((&mut file).take(256 * 1024))
             .read_until(b'\n', &mut first)
@@ -481,14 +471,14 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         }
         descriptors.push(json!([
             path,
-            meta.dev(),
-            meta.ino(),
+            identity.device,
+            identity.inode,
             hash(&String::from_utf8_lossy(&first))
         ]));
         files.push((
             file,
             meta.len(),
-            format!("{}:{}", meta.mtime(), meta.mtime_nsec()),
+            format!("{}:{}", identity.modified, identity.modified_nanos),
         ));
     }
     let descriptor = json!(descriptors).to_string();
@@ -702,12 +692,8 @@ fn receipts(db: &Connection, parent: &Value, r: &Request) -> Result<bool> {
         }
         count += 1;
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
-        let stamp = format!(
-            "{}:{}:{}",
-            metadata.len(),
-            metadata.mtime(),
-            metadata.mtime_nsec()
-        );
+        let (modified, nanos) = crate::platform::modified(&metadata);
+        let stamp = format!("{}:{}:{}", metadata.len(), modified, nanos);
         if seen.get(&name) != Some(&stamp) {
             paths.push((name, stamp, entry.path()));
         }

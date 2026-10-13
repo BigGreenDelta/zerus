@@ -12,14 +12,18 @@ fn identity_gone(identity: &Value, start_key: &str) -> bool {
     };
     // Distinguish a missing process from an unavailable ps command. Inability
     // to inspect a process must not authorize replacing a possibly live run.
-    if unsafe { libc::kill(pid, 0) } != 0 {
-        return io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    match crate::platform::presence(pid as u32) {
+        crate::platform::Presence::Gone => return true,
+        crate::platform::Presence::Unknown => return false,
+        crate::platform::Presence::Present => {}
     }
     let expected = string(identity, start_key);
     if expected.is_empty() {
         return false;
     }
-    let Some(actual) = crate::platform::process_start_time(pid as u32).or_else(|| ps_process_start(pid as u32)) else {
+    let Some(actual) = crate::platform::process_start_time(pid as u32)
+        .or_else(|| crate::platform::process_start_fallback(pid as u32))
+    else {
         return false;
     };
     !actual.is_empty() && actual != expected
@@ -177,7 +181,7 @@ pub(super) fn agent_home_matches(record: &Value, agent: &str) -> Result<bool> {
         } else {
             base.join(path)
         };
-        absolute.canonicalize().unwrap_or(absolute)
+        crate::platform::canonical(&absolute).unwrap_or(absolute)
     };
     let current = nonempty_env(home_var(agent)?);
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;

@@ -7,7 +7,6 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -84,39 +83,29 @@ struct Store {
 impl Store {
     fn open_at(directory: &Path) -> Result<Self> {
         private_dir(directory)?;
-        let info = fs::symlink_metadata(directory).map_err(err)?;
-        if !info.is_dir()
-            || info.uid() != unsafe { libc::geteuid() }
-            || info.permissions().mode() & 0o077 != 0
+        if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+            .map_err(err)?
         {
             return Err("Voice storage must be private to this user".into());
         }
         // SQLite NOFOLLOW rejects symlinks in every path component, including
         // macOS's ordinary /var -> /private/var parent. Resolve the verified
         // directory only; keep refusing a symlink at the database itself.
-        let path = directory
-            .canonicalize()
+        let path = crate::platform::canonical(directory)
             .map_err(err)?
             .join("messages.sqlite3");
         if !path.try_exists().map_err(err)? {
-            match OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
+            match crate::platform::refuse_link(crate::platform::private_open(
+                OpenOptions::new().create_new(true).write(true),
+            ))
+            .open(&path)
             {
                 Ok(file) => drop(file),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
                 Err(error) => return Err(err(error)),
             }
         }
-        let info = fs::symlink_metadata(&path).map_err(err)?;
-        if !info.is_file()
-            || info.uid() != unsafe { libc::geteuid() }
-            || info.permissions().mode() & 0o077 != 0
-            || info.nlink() != 1
-        {
+        if !crate::platform::verify_private(&path, crate::platform::Private::File).map_err(err)? {
             return Err("Voice database must be a private regular file".into());
         }
         // Never open/close a raw descriptor for an existing SQLite inode: that
@@ -728,8 +717,8 @@ fn boundary(record: &Value) -> Value {
         })
         .ok();
     let path = string(record, "transcript");
-    let metadata = fs::metadata(path).ok();
-    json!({"journal_seq":seq,"transcript":path,"source_bytes":metadata.as_ref().map(|m|m.len()),"source_device":metadata.as_ref().map(|m|m.dev()),"source_inode":metadata.as_ref().map(|m|m.ino()),"at":now()})
+    let source = crate::platform::FileIdentity::at(Path::new(path)).ok();
+    json!({"journal_seq":seq,"transcript":path,"source_bytes":source.as_ref().map(|(_, m)|m.len()),"source_device":source.as_ref().map(|(i, _)|i.device),"source_inode":source.as_ref().map(|(i, _)|i.inode),"at":now()})
 }
 fn receipt(job: &Value) -> Result<Option<Value>> {
     let directory = if job["backend"] == "dsh" || job["agent"] == "dsh" {
@@ -740,11 +729,7 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     let path = root()
         .join(directory)
         .join(format!("{}.json", string(job, "id")));
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
+    let file = match crate::platform::refuse_link(OpenOptions::new().read(true)).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(err(e)),
@@ -1031,21 +1016,19 @@ fn native_refusal(error: &str) -> (&'static str, &'static str) {
 }
 fn worker() -> Result<i32> {
     let store = Store::open()?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(root().join("voice/worker.lock"))
-        .map_err(err)?;
+    let lock = crate::platform::refuse_link(crate::platform::private_open(
+        OpenOptions::new().create(true).truncate(false).write(true),
+    ))
+    .open(root().join("voice/worker.lock"))
+    .map_err(err)?;
     if lock.try_lock_exclusive().is_err() {
         return Ok(0);
     }
     let executable = std::env::current_exe().map_err(err)?;
-    let original = fs::metadata(&executable).ok().map(|m| (m.dev(), m.ino()));
+    let identity = |path: &Path| crate::platform::file_identity(path).map(|i| (i.device, i.inode));
+    let original = identity(&executable);
     loop {
-        if fs::metadata(&executable).ok().map(|m| (m.dev(), m.ino())) != original {
+        if identity(&executable) != original {
             return Ok(0);
         }
         let config = crate::config::Config::load().map_err(|e| e.message)?;
@@ -1083,22 +1066,12 @@ fn ensure_worker() -> Result<()> {
     {
         return Ok(());
     }
-    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(std::env::current_exe().map_err(err)?);
     cmd.args(["voice", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    cmd.spawn().map_err(err)?;
+    crate::platform::spawn_detached(&mut cmd).map_err(err)?;
     Ok(())
 }
 

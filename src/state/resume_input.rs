@@ -18,34 +18,20 @@ pub(super) fn fork_pending(record: &Value) -> bool {
         && string(record, "requested_id").is_empty()
 }
 
-fn open_files(pid: u64) -> Result<Vec<PathBuf>> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(fs::read_dir(format!("/proc/{pid}/fd"))
-            .map_err(|e| e.to_string())?
-            .flatten()
-            .filter_map(|entry| fs::read_link(entry.path()).ok())
-            .collect())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let output = recipes::output_timeout(
-            std::process::Command::new("/usr/sbin/lsof").args([
-                "-a",
-                "-p",
-                &pid.to_string(),
-                "-Fn",
-            ]),
-            std::time::Duration::from_secs(2),
-        )?;
-        if !output.status.success() {
-            return Err("Cannot verify the Codex process's open history files".into());
+/// The answer a Codex launch check gives when the open files cannot be listed.
+fn open_files_error(error: crate::platform::RunError) -> String {
+    use crate::platform::RunError;
+    match error {
+        RunError::Spawn(error) | RunError::Io(error) => error.to_string(),
+        RunError::Stopped => "timed out verifying agent history".into(),
+        RunError::TooLarge | RunError::Failed | RunError::Unsupported => {
+            "Cannot verify the Codex process's open history files".into()
         }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.strip_prefix('n').map(PathBuf::from))
-            .collect())
     }
+}
+
+fn agent_pid(pid: u64) -> Result<u32> {
+    u32::try_from(pid).map_err(|_| "The tracked agent process is not the supervised Codex".into())
 }
 
 fn history_meta(path: &Path) -> Result<Value> {
@@ -80,7 +66,7 @@ fn fork_directory(record: &Value) -> Result<PathBuf> {
         }
         index += 1;
     }
-    cwd.canonicalize()
+    crate::platform::canonical(cwd)
         .map_err(|_| "The fork's working directory is unavailable".into())
 }
 
@@ -100,8 +86,7 @@ pub(super) fn pending(record: &Value) -> bool {
 }
 
 fn owns_rollout(record: &Value) -> Result<()> {
-    let path = Path::new(string(record, "transcript"))
-        .canonicalize()
+    let path = crate::platform::canonical(string(record, "transcript"))
         .map_err(|_| "Saved conversation history is unavailable")?;
     if !path.is_file() {
         return Err("Saved conversation history is not a file".into());
@@ -111,7 +96,7 @@ fn owns_rollout(record: &Value) -> Result<()> {
         return Err("Saved conversation history has a different identity".into());
     }
     let pid = record["pid"].as_u64().ok_or("Missing agent process")?;
-    if !open_files(pid)?.contains(&path) {
+    if !crate::platform::holds_open(agent_pid(pid)?, &path).map_err(open_files_error)? {
         return Err("Codex has not opened the saved conversation yet".into());
     }
     Ok(())
@@ -132,17 +117,12 @@ fn checked_process(record: &Value) -> Result<u64> {
         return Err("The tracked session supervisor has changed".into());
     }
     let pid = record["pid"].as_u64().ok_or("Missing agent process")?;
-    let process = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "ppid=,comm="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let process = String::from_utf8_lossy(&process.stdout);
-    let mut fields = process.split_whitespace();
-    if fields.next().and_then(|n| n.parse::<u64>().ok()) != Some(parent)
-        || fields
-            .next()
-            .and_then(|p| Path::new(p).file_name())
-            .is_none_or(|n| n != "codex")
+    let (actual_parent, name) =
+        crate::platform::parent_and_name(agent_pid(pid)?).map_err(|e| e.to_string())?;
+    if actual_parent.map(u64::from) != Some(parent)
+        || name
+            .and_then(|name| crate::platform::program_name(Path::new(&name)))
+            .is_none_or(|name| name != "codex")
     {
         return Err("The tracked agent process is not the supervised Codex".into());
     }
@@ -161,13 +141,11 @@ pub(super) fn fork_ready(record: &Value) -> Result<()> {
     } else {
         PathBuf::from(string(record, "agent_home"))
     };
-    let sessions = agent_home
-        .join("sessions")
-        .canonicalize()
+    let sessions = crate::platform::canonical(agent_home.join("sessions"))
         .map_err(|_| "Forked conversation history is unavailable")?;
     let cwd = fork_directory(record)?;
     let mut children = std::collections::BTreeSet::new();
-    for path in open_files(pid)? {
+    for path in crate::platform::open_files(agent_pid(pid)?).map_err(open_files_error)? {
         if !path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
@@ -177,7 +155,7 @@ pub(super) fn fork_ready(record: &Value) -> Result<()> {
         {
             continue;
         }
-        let Ok(path) = path.canonicalize() else {
+        let Ok(path) = crate::platform::canonical(&path) else {
             continue;
         };
         if !path.starts_with(&sessions) {
@@ -192,8 +170,7 @@ pub(super) fn fork_ready(record: &Value) -> Result<()> {
             && id != string(record, "fork_parent_id")
             && meta["payload"]["forked_from_id"] == record["fork_parent_id"]
             && meta["payload"]["source"] == "cli"
-            && Path::new(string(&meta["payload"], "cwd"))
-                .canonicalize()
+            && crate::platform::canonical(string(&meta["payload"], "cwd"))
                 .is_ok_and(|path| path == cwd)
         {
             children.insert((path, id.to_owned()));

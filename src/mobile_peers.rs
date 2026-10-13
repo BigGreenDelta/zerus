@@ -583,7 +583,7 @@ fn capture_control(
     } = mode
     {
         ensure!(
-            unsafe { libc::getppid() } as u32 == parent_pid
+            crate::platform::parent_process_id() == parent_pid
                 && !TRANSPORT_STOP.load(Ordering::Relaxed)
                 && monotonic_ms()? < deadline_ms,
             "mobile transport parent changed"
@@ -613,7 +613,7 @@ fn capture_control(
             {
                 ensure!(
                     !TRANSPORT_STOP.load(Ordering::Relaxed)
-                        && unsafe { libc::getppid() } as u32 == parent_pid,
+                        && crate::platform::parent_process_id() == parent_pid,
                     "mobile transport cancelled; delivery may be uncertain"
                 );
                 ensure!(
@@ -719,7 +719,7 @@ fn supervise() -> Result<i32> {
     ensure!(
         envelope.schema == 1
             && envelope.parent_pid > 1
-            && unsafe { libc::getppid() } as u32 == envelope.parent_pid
+            && crate::platform::parent_process_id() == envelope.parent_pid
             && !TRANSPORT_STOP.load(Ordering::Relaxed),
         "mobile transport parent changed"
     );
@@ -767,7 +767,7 @@ fn supervise() -> Result<i32> {
         }
     };
     ensure!(
-        unsafe { libc::getppid() } as u32 == envelope.parent_pid
+        crate::platform::parent_process_id() == envelope.parent_pid
             && !TRANSPORT_STOP.load(Ordering::Relaxed),
         "mobile transport parent changed"
     );
@@ -904,7 +904,7 @@ fn remember(
     // closes it; wait for moments, then let a long-held lock postpone the write.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while let Err(error) = lock.try_lock_exclusive() {
-        if error.kind() != std::io::ErrorKind::WouldBlock {
+        if !crate::platform::lock_contended(&error) {
             return Err(error.into());
         }
         if std::time::Instant::now() >= deadline {

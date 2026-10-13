@@ -5,7 +5,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
 fn codex_goal(path: &Path, conversation: &str) -> rusqlite::Result<Option<Value>> {
@@ -119,13 +118,14 @@ fn replay_goal(path: &Path, source: &str) -> Result<Value> {
 }
 fn replay_goal_at(path: &Path, source: &str, cache_path: &Path) -> Result<Value> {
     let mut reader = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
-    let metadata = reader.get_ref().metadata().map_err(|e| e.to_string())?;
+    let (file, metadata) =
+        crate::platform::FileIdentity::with_metadata(reader.get_ref()).map_err(|e| e.to_string())?;
     let _lock = lock(Some(&cache_path.with_extension("lock")))?;
     let mut cache: Value = fs::read(&cache_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(json!({}));
-    let identity = json!([metadata.dev(), metadata.ino()]);
+    let identity = json!([file.device, file.inode]);
     let mut offset = cache["offset"].as_u64().unwrap_or(0);
     let prefix_len = cache["prefix_len"]
         .as_u64()

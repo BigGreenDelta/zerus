@@ -1,7 +1,6 @@
 use super::*;
-use std::io::{Read, Seek, SeekFrom};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 pub(super) fn argv(record: &Value) -> Result<Vec<String>> {
     let values = record["base"]
@@ -197,38 +196,10 @@ pub(super) fn fresh_argv(agent: &str, argv: &[String]) -> Result<Vec<String>> {
 pub(super) fn output_timeout(command: &mut Command, duration: Duration) -> Result<Output> {
     // Regular files avoid a blocked pipe when an agent writes substantial
     // diagnostics before it exits, without an unbounded reader-thread join.
-    let mut stdout = tempfile::tempfile().map_err(|e| e.to_string())?;
-    let mut stderr = tempfile::tempfile().map_err(|e| e.to_string())?;
-    command.stdout(Stdio::from(stdout.try_clone().map_err(|e| e.to_string())?));
-    command.stderr(Stdio::from(stderr.try_clone().map_err(|e| e.to_string())?));
-    command.stdin(Stdio::null());
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + duration;
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("timed out verifying agent history".into());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    stdout.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    stderr.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    let mut output = Output {
-        status,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-    };
-    stdout
-        .read_to_end(&mut output.stdout)
-        .map_err(|e| e.to_string())?;
-    stderr
-        .read_to_end(&mut output.stderr)
-        .map_err(|e| e.to_string())?;
-    Ok(output)
+    crate::platform::output_until(command, duration).map_err(|error| match error {
+        crate::platform::RunError::Spawn(e) | crate::platform::RunError::Io(e) => e.to_string(),
+        _ => "timed out verifying agent history".into(),
+    })
 }
 
 pub(super) fn verify_history(record: &Value, allow_error: bool) -> Result<()> {

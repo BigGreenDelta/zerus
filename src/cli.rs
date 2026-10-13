@@ -1252,7 +1252,7 @@ fn logical_cwd() -> std::io::Result<PathBuf> {
     Ok(env::var("PWD")
         .ok()
         .filter(|p| {
-            Path::new(p).is_absolute() && fs::canonicalize(p).ok().as_ref() == Some(&actual)
+            Path::new(p).is_absolute() && platform::canonical(p).ok().as_ref() == Some(&actual)
         })
         .map(PathBuf::from)
         .unwrap_or(actual))

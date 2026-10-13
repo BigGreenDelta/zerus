@@ -333,7 +333,7 @@ fn descendants(record: &Value) -> BTreeMap<u32, f64> {
     result
 }
 fn read_json(path: &Path, root: &Path) -> Option<Value> {
-    let path = path.canonicalize().ok()?;
+    let path = crate::platform::canonical(path).ok()?;
     if !path.starts_with(root) {
         return None;
     }
@@ -356,7 +356,7 @@ fn kimi(record: &Value, jobs: &mut Jobs, live: bool) -> Result<()> {
         let Some(session) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
             continue;
         };
-        let session = session.canonicalize().map_err(|e| e.to_string())?;
+        let session = crate::platform::canonical(session).map_err(|e| e.to_string())?;
         let mut owners = vec![("main".to_owned(), session.clone())];
         for entry in fs::read_dir(session.join("agents"))
             .into_iter()
@@ -486,8 +486,7 @@ pub(super) fn output_path(record: &Value, job: &Value) -> Result<Option<PathBuf>
     if !candidate.is_absolute() {
         return Ok(None);
     }
-    let path = candidate
-        .canonicalize()
+    let path = crate::platform::canonical(&candidate)
         .map_err(|_| "The native process log is no longer available".to_owned())?;
     let allowed = match string(record, "agent") {
         "kimi" => questions::wire_paths(record)?
@@ -511,7 +510,7 @@ pub(super) fn output_path(record: &Value, job: &Value) -> Result<Option<PathBuf>
             }
             roots
                 .iter()
-                .any(|root| root.canonicalize().is_ok_and(|root| path.starts_with(root)))
+                .any(|root| crate::platform::canonical(root).is_ok_and(|root| path.starts_with(root)))
         }
         _ => false,
     };
