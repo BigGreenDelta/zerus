@@ -19,6 +19,7 @@
 #include <QFutureWatcher>
 #include <QPromise>
 #include <QRunnable>
+#include <QThread>
 #include <QThreadPool>
 #include <QMutex>
 #include <QMutexLocker>
@@ -63,9 +64,18 @@ inline QString storeAt(const QString &cacheRoot, const QString &name, const QByt
         && existing.size()==bytes.size() && existing.read(bytes.size()+1)==bytes)return path;
     // QSaveFile writes through links, shortcuts and aliases, so remove the entry itself.
     if(entry.isSymLink() && !QFile::remove(path))return {};
-    QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
-    file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
-    if(file.write(bytes)!=bytes.size() || !file.commit())return {};return path;
+    // Windows also refuses the replacement while another process, such as a virus
+    // scanner, the search indexer or a viewer, briefly holds the old copy open:
+    // this worker retries for a while before it gives up.
+    for(int attempt=0;;++attempt) {
+        QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return {};
+        file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
+        if(file.write(bytes)==bytes.size() && file.commit())return path;
+#ifdef Q_OS_WIN
+        if(attempt<40) { QThread::msleep(50); continue; }
+#endif
+        return {};
+    }
 }
 inline QString store(const QString &name,const QByteArray &bytes) { return storeAt(root(),name,bytes); }
 inline QString cachedAt(const QString &cacheRoot, const QJsonObject &file) {

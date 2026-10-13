@@ -183,8 +183,17 @@ private slots:
         QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(unchanged());
         {QFile damaged(path);QVERIFY(damaged.open(QIODevice::WriteOnly|QIODevice::Truncate));QCOMPARE(damaged.write(QByteArray(bytes.size(),'x')),qint64(bytes.size()));}
         QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(unchanged());
-        QFile restored(path);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),bytes);
-#ifndef Q_OS_WIN
+        QFile restored(path);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),bytes);restored.close();
+#ifdef Q_OS_WIN
+        // Windows refuses to replace a file another process holds open, as a virus
+        // scanner or the indexer briefly does: the store waits instead of failing.
+        {QFile damaged(path);QVERIFY(damaged.open(QIODevice::WriteOnly|QIODevice::Truncate));QCOMPARE(damaged.write(QByteArray(bytes.size(),'y')),qint64(bytes.size()));}
+        QSemaphore held;std::unique_ptr<QThread> holder(QThread::create([&]{
+            QFile copy(path);const bool open=copy.open(QIODevice::ReadOnly);held.release();if(open)QThread::msleep(300);}));
+        holder->start();held.acquire();
+        QCOMPARE(AttachmentFiles::store("document.lnk",bytes),path);QVERIFY(holder->wait(5000));
+        QFile replaced(path);QVERIFY(replaced.open(QIODevice::ReadOnly));QCOMPARE(replaced.readAll(),bytes);
+#else
         // A symbolic link planted in the cache is replaced as an entry, never followed.
         const auto planted=AttachmentFiles::store("planted.txt","planted bytes");QVERIFY(!planted.isEmpty());
         auto unplant=qScopeGuard([&]{QFile::remove(planted);});
