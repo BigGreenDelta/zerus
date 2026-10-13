@@ -516,12 +516,14 @@ endif()
 add_test(NAME windowsdesktop COMMAND test_windowsdesktop)
 set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# Long tests start first in a fresh build directory. CTest never replaces a COST
-# with its measured times, so a directory where ctest has run (it then has
-# Testing/Temporary/CTestCostData.txt) keeps the measured order from its next
-# configuration on. Seconds on the Windows runner, the slowest (main runs
-# 38299237683 and 38313090634).
-if(NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
+# On Windows, long tests start first in a fresh build directory. CTest never
+# replaces a COST with its measured times, so a directory where ctest has run (it
+# then has Testing/Temporary/CTestCostData.txt) keeps the measured order from its
+# next configuration on. Seconds on the Windows runner, the slowest (main runs
+# 38299237683 and 38313090634). Elsewhere the default order stays: on the 3-vCPU
+# macOS runner, starting every sessionswindow shard at once saved 18 s but made
+# timing-sensitive suites fail (zerus-niu8).
+if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
     foreach(shard RANGE 9)
         list(GET shard_costs ${shard} cost)
         set_tests_properties(sessionswindow-${shard} PROPERTIES COST ${cost})
