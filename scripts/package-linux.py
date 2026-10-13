@@ -23,6 +23,9 @@ def main():
     parser.add_argument("--destdir", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--gui", type=Path, required=True)
+    # The optional embedded DeepSeek native UI; it alone links Qt WebEngine,
+    # which the package lists as an optional dependency.
+    parser.add_argument("--native-ui-plugin", type=Path)
     parser.add_argument("--licenses", type=Path, required=True)
     parser.add_argument("--package-name", default="zerus-git")
     args = parser.parse_args()
@@ -33,6 +36,10 @@ def main():
         if not source.is_file():
             parser.error(f"build output missing: {source}")
         install(source, destination / "usr/bin" / name, 0o755)
+    if args.native_ui_plugin:
+        if not args.native_ui_plugin.is_file():
+            parser.error(f"build output missing: {args.native_ui_plugin}")
+        install(args.native_ui_plugin, destination / "usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so", 0o755)
     for name, source in (("hgs_state.py", ROOT / "hgs_state.py"), ("zerus-setup", ROOT / "packaging/linux/zerus-setup")):
         installed = destination / "usr/bin" / name
         install(source, installed, 0o755)
@@ -75,7 +82,8 @@ def main():
     manifest["desktop_build"] = identity
     install_info = documentation / "build-info.json"
     install_info.write_text(json.dumps(manifest, indent=2) + "\n")
-    print("Staged CLI, desktop, user service definitions, icons, documentation and dependency notices.")
+    print("Staged CLI, desktop" + (", native UI plugin" if args.native_ui_plugin else "")
+          + ", user service definitions, icons, documentation and dependency notices.")
 
 
 if __name__ == "__main__":

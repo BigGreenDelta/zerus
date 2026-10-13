@@ -68,6 +68,8 @@
 #include "DirectoryDialog.h"
 #include "ProjectsDialog.h"
 #include "MessageComposer.h"
+#include "NativeBrowser.h"
+#include "NativeBrowserPlugin.h"
 #include "MessageBoxIcons.h"
 #include "ComposerToolbar.h"
 #include "SessionList.h"
@@ -296,6 +298,7 @@ private slots:
     void nativeLaunchStaysInWorkspace_data();
     void nativeLaunchStaysInWorkspace();
     void nativeSignInPreservesDraftAndUnblocks();
+    void nativeUiOpensBrowserWithoutPlugin();
     void newSessionGroupFollowsLaunchIdentity_data();
     void newSessionGroupFollowsLaunchIdentity();
     void folderBrowserIgnoresStaleResponses();
@@ -6743,8 +6746,23 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     QVERIFY(statusBar->isVisible()); QCOMPARE(bounds(), originalBounds);
 }
 
+namespace {
+// Stands in for the optional embedded native UI plugin (NativeBrowserPlugin.h).
+struct FakeNativeBrowsers final : NativeBrowserFactory {
+    struct Browser final : NativeBrowser {
+        QWidget *widget() override { return &view; }
+        void load(const QUrl &) override {}
+        QWidget view;
+    };
+    NativeBrowser *create(const QString &, const QColor &, QWidget *) override { ++created; return new Browser; }
+    int created = 0;
+};
+}
+
 void TestSessionsWindow::nativeSignInPreservesDraftAndUnblocks()
 {
+    FakeNativeBrowsers plugin; NativeBrowserPlugin::setFactoryForTesting(&plugin);
+    const auto restore = qScopeGuard([] { NativeBrowserPlugin::setFactoryForTesting(nullptr); });
     auto state = fleet(); auto box = state.local();
     SessionInfo session; session.name = "dsh/infra/new"; session.cmd = "dsh"; session.project = "infra"; session.tag = "new";
     session.tracked = true; session.resumable = true; session.state = "running"; session.runtimeState = "live"; session.processState = "running";
@@ -6783,6 +6801,44 @@ else: print('{}')
     client->inspectionReady({}, session.name, details);
     QVERIFY(!banner->isVisible()); QVERIFY(send->isEnabled()); QCOMPARE(editor->toPlainText(), QString("Keep this first message"));
     QTRY_VERIFY2(activity->toPlainText().contains("Ready for your first message"),qPrintable(activity->toPlainText()));
+}
+
+void TestSessionsWindow::nativeUiOpensBrowserWithoutPlugin()
+{
+    // This suite's directory has no plugin: no Native UI tab, and the routes to
+    // it hand the native UI to the system browser.
+    QVERIFY(!NativeBrowserPlugin::factory());
+    auto state = fleet(); auto box = state.local();
+    SessionInfo session; session.name = "dsh/infra/new"; session.cmd = "dsh"; session.project = "infra"; session.tag = "new";
+    session.tracked = true; session.resumable = true; session.state = "running"; session.runtimeState = "live"; session.processState = "running";
+    box.sessions = {session}; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    QTemporaryDir fixtureDir; const auto script = fixtureDir.filePath("hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+with open(__file__+'.calls','a') as calls: calls.write(json.dumps(sys.argv[1:])+'\n')
+if 'inspect' in sys.argv: print((root/'details.json').read_text())
+else: print('{}')
+)PY"));
+    const QJsonObject details{{"backend", "dsh"}, {"tracked", true}, {"conversation_id", "conversation-one"}, {"run_id", "native-run"},
+        {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "input"}, {"activity", "attention"},
+        {"activity_summary", "Sign in required"}, {"auth_required", true}, {"replace_events", true}, {"events", QJsonArray{}}};
+    QVERIFY(FakeCli::replace(fixtureDir.filePath("details.json"), QJsonDocument(details).toJson()));
+    SessionsWindow window(FakeCli::program(script)); window.setFleet(state); window.show(); window.showSession({}, session.name);
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
+    QTRY_VERIFY(!inspected.isEmpty());
+    client->inspectionReady({}, session.name, details);
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
+    QVERIFY(!tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2));
+    QSignalSpy written(client, &HgsClient::writeDone);
+    window.findChild<QPushButton *>("nativeSignInButton")->click();
+    QTRY_COMPARE(written.size(), 1); QCOMPARE(tabs->currentIndex(), 0);
+    QFile calls(script + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly)); bool browser = false;
+    for (const auto &line : calls.readAll().split('\n')) {
+        const auto call = QJsonDocument::fromJson(line).array();
+        if (call.contains(QJsonValue("native-ui"))) { browser = true; QVERIFY(!call.contains(QJsonValue("--json"))); }
+    }
+    QVERIFY(browser);
 }
 
 void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity_data()

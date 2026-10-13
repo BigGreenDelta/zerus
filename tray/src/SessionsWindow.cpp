@@ -23,6 +23,7 @@
 #include "ActivityView.h"
 #include "ProcessView.h"
 #include "AttachmentViewer.h"
+#include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
 #include "speech/SpeechComposer.h"
@@ -727,7 +728,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(signInButton, &QPushButton::clicked, this, [this] {
         const auto *entry = selected();
         if (entry && entry->online && entry->session.cmd == "dsh" && m_details.value("auth_required").toBool())
-            m_detailTabs->setCurrentWidget(m_nativeUi);
+            showNativeUi(*entry);
     });
     // Activity's transcript keeps the full pane for its scroll bar. The content
     // around it shares the transcript's centered reading column.
@@ -758,8 +759,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_recovery->openTerminal = [this] {
         m_recoveryChip->closePopover();
         const auto *entry=selected();if(!entry || !entry->online)return;
-        m_detailTabs->setCurrentWidget(entry->session.cmd=="dsh"?static_cast<QWidget *>(m_nativeUi):m_terminal);
-        if(entry->session.cmd!="dsh")m_terminal->connectSession();
+        if(entry->session.cmd=="dsh"){showNativeUi(*entry);return;}
+        m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();
     };
     m_recovery->refreshUsage = [this] { refreshAccountUsage();inspect();emit refreshRequested(); };
     m_recovery->openSettings = [this] {
@@ -936,7 +937,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(const auto *entry=selected())renderQuestion(*entry,direction);
     });
     connect(m_question, &QuestionCard::openTerminalRequested, this, [this] {
-        if (const auto *entry=selected(); entry && entry->session.cmd=="dsh") {m_detailTabs->setCurrentWidget(m_nativeUi);return;}
+        if (const auto *entry=selected(); entry && entry->session.cmd=="dsh") {showNativeUi(*entry);return;}
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
@@ -1063,7 +1064,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
-    m_nativeUi = new NativeUiView(&m_client); tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
+    m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
+    tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
     for(auto *view:{m_activityView,m_subagentView})connect(view,&ActivityView::processRequested,this,[this](const QString &id){if(!ProcessSettings::enabled())return;m_detailTabs->setCurrentWidget(m_processes);m_processes->selectProcess(id);});
@@ -3088,11 +3090,12 @@ void SessionsWindow::renderDetails()
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());
     m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
     const bool terminalTab = s.cmd != "dsh" && m_subagentId.isEmpty();
-    const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty();
+    // Loads the optional plugin on the first DeepSeek session, not at startup.
+    const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty() && NativeBrowserPlugin::factory();
     if (m_detailTabs->isTabVisible(1) != terminalTab) m_detailTabs->setTabVisible(1, terminalTab);
     if (m_detailTabs->isTabVisible(2) != nativeTab) m_detailTabs->setTabVisible(2, nativeTab);
     if (s.cmd == "dsh" && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
-    if (s.cmd != "dsh" && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
+    if (!nativeTab && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
     m_terminal->setAvailable(entry->online && s.state == "running" && s.cmd != "dsh",
         !entry->online ? tr("Machine unavailable. Reconnect when it is online.") :
         tr("Resume this session before opening its terminal."));
@@ -3392,7 +3395,7 @@ void SessionsWindow::messageAction(const QString &id,const QString &action)
         if(message.value("id").toString()!=id || message.value("status")!="error")continue;
         if(action=="delete"){messages.removeAt(i);renderDetails();return;}
         if(action=="inspect"){
-            if(entry->session.cmd=="dsh")m_detailTabs->setCurrentWidget(m_nativeUi);
+            if(entry->session.cmd=="dsh")showNativeUi(*entry);
             else {m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();}
             return;
         }
@@ -4292,7 +4295,7 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         if (entry->online && ProcessSettings::enabled()) m_detailTabs->setCurrentWidget(m_processes);
         return;
     case SessionMenuAction::OpenTerminal:
-        if (entry->session.cmd == "dsh") { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
+        if (entry->session.cmd == "dsh") { showNativeUi(*entry); return; }
         if (entry->online && m_open->isEnabled() && entry->session.state != "archived")
             emit terminalOpenRequested(entry->host, entry->session.name,
                 entry->host.isEmpty() && entry->session.attached && !entry->session.clients.isEmpty() ? entry->session.clients.first() : QString());
@@ -4317,6 +4320,12 @@ void SessionsWindow::jumpToLatestActivity(QListWidgetItem *item)
     if (!item || item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::LaunchId).toString().isEmpty()) return;
     m_detailTabs->setCurrentIndex(0);
     (m_subagentId.isEmpty() ? m_activityView : m_subagentView)->jumpToLatest();
+}
+
+void SessionsWindow::showNativeUi(const Entry &entry)
+{
+    if (NativeBrowserPlugin::factory()) { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
+    if (entry.online) m_client.openNativeUi(entry.host, entry.session.name);
 }
 
 void SessionsWindow::openSession()

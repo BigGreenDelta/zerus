@@ -266,19 +266,40 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(json.loads((snapshot / 'kept/draft.json').read_text())['text'], 'unsent text')
         self.assertEqual(snapshot.stat().st_mode & 0o777, 0o700)
 
-    def test_installer_replaces_a_running_gui_through_the_updater(self):
+    def installer(self, build, plugin=None):
+        """A copy of tray/install.sh whose cmake builds `build` and, given bytes, the native UI plugin."""
         tray = self.root / 'tray'
-        for name in ('install.sh', 'update-installed.py', 'packaging/hgs-tray.service', 'packaging/hgs-tray.desktop'):
-            (tray / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(REPO / 'tray' / name, tray / name)
-        shutil.copytree(REPO / 'tray/resources/icons', tray / 'resources/icons')
-        build = self.build('second')
-        self.script(self.bin / 'cmake', f'#!/bin/sh\nif [ "$1" = --build ]; then mkdir -p "$2" && cp "{build}" "$2/hgs-tray"; fi\n')
-        self.script(self.bin / 'uname', '#!/bin/sh\necho Linux\n')
-        for tool in ('gtk-update-icon-cache', 'kbuildsycoca6'):
-            self.script(self.bin / tool, '#!/bin/sh\nexit 0\n')
+        if not tray.exists():
+            for name in ('install.sh', 'update-installed.py', 'packaging/hgs-tray.service', 'packaging/hgs-tray.desktop'):
+                (tray / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO / 'tray' / name, tray / name)
+            shutil.copytree(REPO / 'tray/resources/icons', tray / 'resources/icons')
+            self.script(self.bin / 'uname', '#!/bin/sh\necho Linux\n')
+            for tool in ('gtk-update-icon-cache', 'kbuildsycoca6'):
+                self.script(self.bin / tool, '#!/bin/sh\nexit 0\n')
+        source = self.root / 'plugin.so'
+        # Like CMakeLists.txt: a configuration without the plugin removes an old one.
+        step = f'cp "{source}" "$2/plugins/libhgs-tray-native-ui.so"' if plugin else 'rm -f "$2/plugins/libhgs-tray-native-ui.so"'
+        if plugin:
+            source.write_bytes(plugin)
+        self.script(self.bin / 'cmake', f'#!/bin/sh\nif [ "$1" = --build ]; then mkdir -p "$2/plugins" && cp "{build}" "$2/hgs-tray" && {step}; fi\n')
+        return tray / 'install.sh'
+
+    def test_installer_places_and_removes_the_native_ui_plugin(self):
+        installed = self.home / '.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
+        build = self.build('first', self.installed)
+        for plugin, expected in ((b'first plugin', b'first plugin'), (b'second plugin', b'second plugin'), (None, None)):
+            result = subprocess.run(['bash', str(self.installer(build, plugin))], env=self.env, capture_output=True,
+                                    text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('Installed hgs-tray.', result.stdout)
+            self.assertEqual(installed.read_bytes() if installed.exists() else None, expected)
+            self.assertFalse(installed.with_name(installed.name + '.new').exists())
+
+    def test_installer_replaces_a_running_gui_through_the_updater(self):
+        install = self.installer(self.build('second'))
         self.launch('first')
-        result = subprocess.run(['bash', str(tray / 'install.sh')], env=self.env, capture_output=True,
+        result = subprocess.run(['bash', str(install)], env=self.env, capture_output=True,
                                 text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Installed hgs-tray.', result.stdout)

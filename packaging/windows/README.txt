@@ -40,16 +40,15 @@ zip with SHA256SUMS of its GitHub release, for example:
 Licenses
 Zerus is licensed under the MIT license in LICENSE; THIRD_PARTY_NOTICES.md
 describes the components it uses. The folder also contains:
-- Qt @QT_VERSION@ libraries and plugins, including Qt WebEngine, used under the
-  GNU LGPL version 3 (licenses\qt). They are separate DLLs that can be replaced
-  with compatible builds. Their source code is available from
+- Qt @QT_VERSION@ libraries and plugins, used under the GNU LGPL version 3
+  (licenses\qt). They are separate DLLs that can be replaced with compatible
+  builds. Their source code is available from
   https://download.qt.io/official_releases/qt/ for this exact version.
 - SPDX documents supplied with Qt (licenses\qt\sbom) that name the license
   and copyright of each Qt module and of the third-party code inside it.
   licenses\qt holds the text of every standard license and exception they
-  name; the documents for the Chromium components in Qt WebEngine carry their
-  own license texts. This software is based in part on the work of the
-  Independent JPEG Group and of the FreeType Team (https://freetype.org).
+  name. This software is based in part on the work of the Independent JPEG
+  Group and of the FreeType Team (https://freetype.org).
 - The Microsoft Visual C++ runtime DLLs, redistributed with the application.
 - License texts of the Rust crates in hgs.exe (licenses\rust) and of libvterm
   and md4c, which hgs-tray.exe contains (licenses).

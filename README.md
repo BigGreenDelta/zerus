@@ -13,7 +13,7 @@
   <a href="#features">Features</a> &nbsp; | &nbsp;
   <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
-  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows (TBD) &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
+  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows (preview) &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
 </p>
 
 <p align="center">
@@ -180,9 +180,8 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
-On Apple Silicon Macs, install with `brew install --cask ufna/zerus/zerus` (daily
-builds: `ufna/zerus/zerus@nightly`) and run `zerus-setup`
-([macOS installation](docs/installation.md#macos-homebrew)).
+On macOS and other Linux distributions, [build from source](docs/installation.md#local-installation);
+see [other platforms](#other-platforms).
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
 choose an agent, machine, project and folder. Ordinary folders without Git work
@@ -204,14 +203,21 @@ then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
 
 ## Other platforms
 
-Ready-made packages currently exist only for Arch Linux x86_64. Other Linux
-distributions and macOS [build from source](docs/installation.md#local-installation)
-with the same installer. Zerus is open source: Homebrew, apt, dnf and other
-packages are welcome as pull requests.
+Prebuilt Linux packages currently exist only for Arch Linux x86_64. Other Linux
+distributions [build from source](docs/installation.md#local-installation) with
+the same installer. Zerus is open source: apt, dnf and other packages are welcome
+as pull requests.
 
-**Windows** is not supported yet, but it has an approved plan: first a native
-control console for your Linux and macOS machines, then a native session host on
-ConPTY, without WSL. Contributions that follow the plan are welcome.
+**macOS** builds from source with the same installer. A signed and notarized
+Apple Silicon app will be distributed through the
+[Homebrew tap](docs/installation.md#macos-homebrew) once the first signed build
+is published.
+
+**Windows** has a preview: nightly releases include a portable x86_64
+[control console](docs/installation.md#windows) that manages agents on your
+Linux and macOS machines over SSH. Agents do not run on Windows itself yet; a
+native session host on ConPTY, without WSL, is the next phase. Stable and Dev
+releases have no Windows build. Contributions that follow the plan are welcome.
 
 [Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 

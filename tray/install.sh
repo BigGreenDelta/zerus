@@ -183,6 +183,24 @@ if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
     CHANGED=1
 fi
 
+# The optional embedded DeepSeek native UI: the build makes it when Qt WebEngine
+# is installed (HGS_NATIVE_UI_PLUGIN in CMakeLists.txt). It is placed before the
+# GUI is replaced; a running GUI keeps the copy it already loaded. Without it the
+# native UI opens in the browser, and an older plugin is removed so that it never
+# runs with a newer GUI.
+PLUGIN_BUILD="${SCRIPT_DIR}/build/plugins/libhgs-tray-native-ui.so"
+PLUGIN_DEST="${HOME}/.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
+if [ -f "${PLUGIN_BUILD}" ]; then
+    if ! cmp -s "${PLUGIN_BUILD}" "${PLUGIN_DEST}" 2>/dev/null; then
+        install -Dm755 "${PLUGIN_BUILD}" "${PLUGIN_DEST}.new"
+        mv -f "${PLUGIN_DEST}.new" "${PLUGIN_DEST}"
+        CHANGED=1
+    fi
+elif [ -e "${PLUGIN_DEST}" ]; then
+    rm -f "${PLUGIN_DEST}"
+    CHANGED=1
+fi
+
 # --- 3. systemd --user unit + autostart .desktop -------------------------------
 echo "[3/4] Installing the systemd --user unit and the .desktop launcher..."
 ICON_ROOT="${HOME}/.local/share/icons/hicolor"

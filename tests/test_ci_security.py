@@ -285,9 +285,11 @@ class WorkflowSecurityTests(unittest.TestCase):
                       '--only-binary :all: \\\n            -r scripts/ci/aqt-requirements.txt </dev/null', windows)
         self.assertIn('python -m venv "$RUNNER_TEMP/aqt"', windows)
         self.assertIn('"$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \\\n'
-                      '            -m qtwebengine qtwebchannel qtpositioning qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
+                      '            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
+        # Qt WebEngine is an optional Linux plugin; the Windows bundle never ships it.
+        self.assertNotIn("qtwebengine", windows)
         self.assertIn("if: steps.qt-cache.outputs.cache-hit != 'true'", windows)
-        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-"
+        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
                       "${{ hashFiles('scripts/ci/aqt-requirements.txt') }}", windows)
         # A new stable Rust release must not fail an unchanged commit.
         self.assertIn("cargo +1.85.0 clippy --locked --all-targets -- -D warnings", windows)
@@ -840,7 +842,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         exec(compile(inline_python(job(self.ci, "cache-trim")), "workflow-cache-trim", "exec"), namespace)
         def entry(number, key, created, ref="refs/heads/main"):
             return {"id": number, "key": key, "ref": ref, "created_at": created, "size_in_bytes": 1}
-        qt = "windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-"
+        qt = "windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
         caches = [
             entry(1, "arch-ccache-v1-100", "2026-10-12T10:00:00.123456Z"),
             entry(2, "arch-ccache-v1-101", "2026-10-12T11:00:00Z"),

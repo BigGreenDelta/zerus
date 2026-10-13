@@ -92,7 +92,7 @@ class NightlyTests(unittest.TestCase):
             f"pkgbase = {nightly.PACKAGE}\n\tpkgver = {version}\n\tpkgrel = 1\n\tarch = x86_64\n"
             f"\tsource = https://github.com/ufna/zerus/releases/download/nightly-123/{binary.name}\n"
             f"\tsha256sums = {digest}\n" +
-            "".join(f"\tdepends = {name}>=1.2.3\n" for name in common.BINARY_LIBRARIES) +
+            "".join(f"\tdepends = {name}>=1.2.3\n" for name in self.info["binary_dependencies"]) +
             "".join(f"\tdepends = {name}\n" for name in ("tmux>=3.7", "openssh", "python", "curl", "procps-ng", "hicolor-icon-theme", "bash", "tar")) +
             "".join(f"\tconflicts = {name}\n" for name in ("zerus", "zerus-git", "zerus-ade-bin")) +
             f"\tprovides = zerus={version}\n\tprovides = hgs\n\tprovides = hgs-tray\npkgname = {nightly.PACKAGE}\n")
@@ -261,6 +261,21 @@ class NightlyTests(unittest.TestCase):
             common.finish_candidate(directory, nightly.PACKAGES)
             with self.assertRaisesRegex(ValueError, "trusted binary template"):
                 nightly.validate_nightly(directory)
+
+    def test_legacy_nightly_with_required_qt_webengine_still_validates(self):
+        # Sealed before Qt WebEngine became optional: the exact earlier recipe.
+        self.info["binary_dependencies"] = {name: "1.2.3" for name in common.LEGACY_BINARY_LIBRARIES}
+        directory = self.candidate()
+        recipe = (directory / "aur" / nightly.PACKAGE / "PKGBUILD").read_text()
+        self.assertIn("'qt6-base>=1.2.3' 'qt6-webengine>=1.2.3' 'qt6-multimedia>=1.2.3'", recipe)
+        self.assertNotIn(common.OPTIONAL_WEBENGINE, recipe)
+        nightly.validate_nightly(directory, COMMIT, 123, 7)
+
+    def test_current_nightly_lists_qt_webengine_only_as_optional(self):
+        recipe = nightly.render_recipe(self.info, "0" * 64)
+        self.assertIn(common.OPTIONAL_WEBENGINE, recipe)
+        self.assertNotIn("'qt6-webengine>=", recipe)
+        nightly.validate_nightly(self.candidate(), COMMIT, 123, 7)
 
     def test_moving_url_missing_floors_and_extra_files_are_rejected(self):
         directory = self.candidate()

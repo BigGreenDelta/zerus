@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Bundle the tested hgs.exe and hgs-tray.exe into the Windows portable zip.
 
-windeployqt adds the Qt and Qt WebEngine runtime, vswhere locates the app-local
-MSVC runtime, and the notices that make the bundle redistributable are copied
-next to them. Nothing is compiled here: the executables are the exact files
+windeployqt adds the Qt runtime, vswhere locates the app-local MSVC runtime,
+and the notices that make the bundle redistributable are copied next to them. Nothing is compiled here: the executables are the exact files
 the Windows CI job has just tested.
 """
 import argparse
@@ -131,14 +130,13 @@ def main():
         stage = Path(temporary) / TOP
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
-        # Qt libraries, plugins, translations and the Qt WebEngine process with its
-        # resources. The SVG image and icon plugins are loaded at run time only,
-        # so windeployqt cannot infer them from imports. QML debugging and TUIO
-        # touch plugins are not used; the NMEA position plugin needs Qt Serial
-        # Port, which is not shipped. The compiler runtime is copied as DLLs
-        # below instead of windeployqt's vc_redist installer. Qt Quick and Qt
-        # WebEngine render through Direct3D, so the Mesa software OpenGL
-        # fallback, which the bundled notices do not cover, is left out.
+        # Qt libraries, plugins and translations. The SVG image and icon plugins
+        # are loaded at run time only, so windeployqt cannot infer them from
+        # imports. QML debugging and TUIO touch plugins are not used; the NMEA
+        # position plugin needs Qt Serial Port, which is not shipped. The compiler
+        # runtime is copied as DLLs below instead of windeployqt's vc_redist
+        # installer. The Mesa software OpenGL fallback, which the bundled notices
+        # do not cover, is left out.
         # Microsoft's Direct3D shader compilers stay out as well: Windows 10 1903
         # and later include D3DCompiler_47.dll, and the notices do not cover the
         # Windows SDK's DXC (dxcompiler.dll, dxil.dll) either.
@@ -171,14 +169,11 @@ def main():
                            cwd=ROOT, check=True)
         for text in sorted((ROOT / "packaging/windows/licenses").glob("*.txt")):
             copy(text, licenses / "qt" / text.name)
-        # Qt ships SPDX documents per module; Qt WebEngine's includes the notices
-        # of the Chromium components it contains. Source SBOMs are not needed.
+        # Qt ships SPDX documents per module. Source SBOMs are not needed.
         sboms = sorted(path for path in (qt_root / "sbom").glob("*.spdx") if not path.name.endswith(".source.spdx"))
         names = {path.name for path in sboms}
         require(f"qtbase-{manifest['qt_version']}.spdx" in names and
-                f"qtmultimedia-{manifest['qt_version']}.spdx" in names and
-                f"qtwebengine-{manifest['qt_version']}.spdx" in names and
-                any(name.startswith("qtwebengine-chromium-") for name in names),
+                f"qtmultimedia-{manifest['qt_version']}.spdx" in names,
                 "The Qt installation lacks its SBOM notices; review Qt licensing before distribution.")
         for sbom in sboms:
             copy(sbom, licenses / "qt" / "sbom" / sbom.name)

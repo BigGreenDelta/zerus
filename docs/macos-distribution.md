@@ -58,9 +58,12 @@ only logs, saved window state and the four Zerus LaunchAgents.
 
 ## Pinned Qt
 
-`packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtdeclarative`,
-`qtsvg`, `qtwebchannel`, `qtpositioning`, `qtwebengine`) by archive size and
-SHA-256. `scripts/install-qt-macos.py` downloads the archives from
+`packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
+`qtmultimedia`) by archive size and SHA-256. Qt WebEngine and the modules only it
+needs (`qtdeclarative`, `qtwebchannel`, `qtpositioning`) are not part of the
+bundle: the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
+Native UI opens in the browser. `check-macos-bundle.py` rejects any Qt WebEngine
+file. `scripts/install-qt-macos.py` downloads the archives from
 `download.qt.io` (mirrors may serve them), verifies every archive before any
 extraction and extracts them with the system `bsdtar`. The official Qt is
 relocatable and needs no path patching.
@@ -110,11 +113,10 @@ three jobs after full CI:
    checks on `/Applications/Zerus.app`, runs `zerus-setup` and `--remove` in a
    scratch home and uninstalls the cask.
 
-Only entitlements with a concrete need are granted: `QtWebEngineProcess` gets
-`com.apple.security.cs.allow-jit` for V8, and the application gets
+Only entitlements with a concrete need are granted, and only to the application:
 `com.apple.security.automation.apple-events` with `NSAppleEventsUsageDescription`
 because Terminal integration runs `osascript`, whose Apple Events TCC attributes
-to Zerus.
+to Zerus. Without Qt WebEngine there is no helper process that would need JIT.
 
 The Arch assembly job then adds the signed zip and the rendered cask through
 `prepare-release.py --macos` (`homebrew/zerus.rb`) or `prepare-nightly.py --macos`
@@ -213,7 +215,7 @@ release:
 
 - Notarization, Gatekeeper acceptance and launch under library validation with
   one Team ID (an ad-hoc signature cannot satisfy it by design).
-- A WebEngine view and Terminal automation in the signed application.
+- Terminal automation in the signed application.
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
 - `brew style` of both casks and the channel switch between them (CI runs the

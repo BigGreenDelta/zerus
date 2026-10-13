@@ -10,6 +10,7 @@ license=('MIT')
 depends=(@BINARY_LIBRARY_DEPENDS@
          'tmux>=3.7' 'openssh' 'python' 'curl' 'procps-ng' 'hicolor-icon-theme' 'bash' 'tar')
 optdepends=('konsole: external KDE terminal integration'
+            'qt6-webengine: embedded DeepSeek Native UI'
             'wl-clipboard: clipboard transfers on Wayland'
             'xclip: clipboard transfers on X11'
             'nodejs: separately installed native agents and DeepSeek Harness'

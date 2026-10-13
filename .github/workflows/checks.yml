@@ -517,7 +517,7 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: brew install cmake ninja qt qtwebengine qtmultimedia ccache
+      - run: brew install cmake ninja qt qtmultimedia ccache
       - name: Restore ccache
         id: ccache-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -643,12 +643,12 @@ jobs:
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt release, modules and installer lock.
-      - name: Restore Qt 6.10.3 for MSVC with WebEngine
+      - name: Restore Qt 6.10.3 for MSVC
         id: qt-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/Qt
-          key: windows-qt-6.10.3-win64_msvc2022_64-qtwebengine-qtwebchannel-qtpositioning-qtmultimedia-${{ hashFiles('scripts/ci/aqt-requirements.txt') }}
+          key: windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-${{ hashFiles('scripts/ci/aqt-requirements.txt') }}
       # aqtinstall 3.3.0 cannot resolve the split repository layout of Qt 6.11+
       # for Windows yet. It and its dependencies come only from the hash-locked
       # wheels, in an environment of their own that later steps never use.
@@ -660,7 +660,7 @@ jobs:
           "$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes --only-binary :all: \
             -r scripts/ci/aqt-requirements.txt </dev/null
           "$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
-            -m qtwebengine qtwebchannel qtpositioning qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null
+            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null
           rm -rf "$(cygpath -u "$RUNNER_TEMP/aqt")"
       - name: Use Qt 6.10.3
         run: |

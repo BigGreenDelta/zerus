@@ -201,6 +201,8 @@ int main(int argc, char *argv[])
         return rc;
     }
 
+    // Qt WebEngine can only start from the optional native UI plugin, loaded
+    // long after this point, when the attribute was set before QApplication.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QApplication app(argc, argv);
 #ifdef Q_OS_WIN

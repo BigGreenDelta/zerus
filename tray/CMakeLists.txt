@@ -33,7 +33,7 @@ if(MSVC)
     add_compile_definitions(NOMINMAX)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network WebEngineWidgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -106,7 +106,7 @@ include(cmake/BuildVersion.cmake)
 # Tray sources compile once, into static libraries that hgs-tray and the Qt suites
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
-# covering its code keeps its QTEST_MAIN application type and gains no WebEngine.
+# covering its code keeps its QTEST_MAIN application type.
 add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
@@ -143,9 +143,42 @@ add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
 target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
 
-add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionSelection.cpp src/NativeUiView.cpp)
-target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity Qt6::WebEngineWidgets
+add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+    src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
+target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)
+
+# The embedded DeepSeek native UI is an optional Qt plugin: hgs-tray never links
+# Qt WebEngine. Linux only; AUTO builds it when Qt WebEngine is installed.
+# Without the plugin the native UI opens in the system browser.
+set(HGS_NATIVE_UI_PLUGIN AUTO CACHE STRING "Build the embedded native UI plugin: AUTO, ON or OFF (Linux only)")
+set_property(CACHE HGS_NATIVE_UI_PLUGIN PROPERTY STRINGS AUTO ON OFF)
+if(NOT HGS_NATIVE_UI_PLUGIN MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "HGS_NATIVE_UI_PLUGIN must be AUTO, ON or OFF")
+endif()
+if(NOT LINUX AND HGS_NATIVE_UI_PLUGIN STREQUAL "ON")
+    message(FATAL_ERROR "The embedded native UI plugin is built only on Linux")
+endif()
+if(LINUX AND NOT HGS_NATIVE_UI_PLUGIN STREQUAL "OFF")
+    if(HGS_NATIVE_UI_PLUGIN STREQUAL "ON")
+        find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets)
+    else()
+        find_package(Qt6 QUIET OPTIONAL_COMPONENTS WebEngineWidgets)
+    endif()
+endif()
+if(LINUX AND NOT HGS_NATIVE_UI_PLUGIN STREQUAL "OFF" AND TARGET Qt6::WebEngineWidgets)
+    # The GUI looks for it in <bin>/plugins (this build tree) and <bin>/../lib/hgs-tray/plugins.
+    add_library(hgs-tray-native-ui MODULE plugins/NativeUiPlugin.cpp src/NativeBrowser.h)
+    target_include_directories(hgs-tray-native-ui PRIVATE src)
+    target_link_libraries(hgs-tray-native-ui PRIVATE Qt6::Widgets Qt6::WebEngineWidgets)
+    set_target_properties(hgs-tray-native-ui PROPERTIES PREFIX "lib" OUTPUT_NAME "hgs-tray-native-ui"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins")
+    message(STATUS "Embedded native UI plugin: enabled")
+else()
+    # A plugin left by an earlier configuration must not be installed with this GUI.
+    file(REMOVE "${CMAKE_BINARY_DIR}/plugins/libhgs-tray-native-ui.so")
+    message(STATUS "Embedded native UI plugin: disabled (the native UI opens in the browser)")
+endif()
 
 # Platform integration, each where it applies. The Windows pieces have portable
 # logic that a suite checks everywhere; other systems build them only for it.
@@ -225,7 +258,7 @@ endif()
 target_compile_definitions(hgs-tray PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
 # QLocalServer/QLocalSocket (single-instance guard in main.cpp) live in QtNetwork, not
 # QtWidgets — the plan's dependency list missed this; noted in the Task 1 report.
-target_link_libraries(hgs-tray PRIVATE hgs-tray-views hgs-tray-gui Qt6::Widgets Qt6::Network Qt6::WebEngineWidgets
+target_link_libraries(hgs-tray PRIVATE hgs-tray-views hgs-tray-gui Qt6::Widgets Qt6::Network
     Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
 if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)
@@ -247,6 +280,9 @@ if(APPLE)
     install(TARGETS hgs-tray BUNDLE DESTINATION .)
 else()
     install(TARGETS hgs-tray RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(TARGET hgs-tray-native-ui)
+    install(TARGETS hgs-tray-native-ui LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/hgs-tray/plugins)
 endif()
 
 # Regenerate the monochrome window/Linux icon sizes from the same blade geometry.

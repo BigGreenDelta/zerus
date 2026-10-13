@@ -35,7 +35,7 @@ function(zerus_test_support target)
         # Programs with Qt GUI get the Windows UI font.
         get_target_property(libraries ${target} LINK_LIBRARIES)
         foreach(library IN LISTS libraries)
-            if(library MATCHES "^(Qt6::(Gui|Widgets|WebEngineWidgets)|hgs-(markdown|terminal|window-layer|updates|speech|tray-(gui|ui|activity|views|windows)))$")
+            if(library MATCHES "^(Qt6::(Gui|Widgets)|hgs-(markdown|terminal|window-layer|updates|speech|tray-(gui|ui|activity|views|windows)))$")
                 target_link_libraries(${target} PRIVATE zerus-test-fonts)
                 break()
             endif()
@@ -369,7 +369,7 @@ endif()
 add_executable(test_sessionswindow test_sessionswindow.cpp ../resources.qrc)
 target_include_directories(test_sessionswindow PRIVATE ../src)
 target_compile_definitions(test_sessionswindow PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
-target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file
+target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file
     hgs-tray-views)
 # The longest suite runs as parallel shards of its test functions and of the data
 # rows of its slowest functions, balanced by qt-shard-durations.txt. COST: see the
@@ -381,14 +381,26 @@ foreach(shard RANGE 9)
     set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endforeach()
 
+# A plugin for another interface: the native browser loader must reject it.
+add_library(zerus-test-other-plugin MODULE support/OtherPlugin.cpp)
+target_link_libraries(zerus-test-other-plugin PRIVATE Qt6::Core)
 add_executable(test_nativeuiview test_nativeuiview.cpp)
 target_include_directories(test_nativeuiview PRIVATE ../src)
-target_link_libraries(test_nativeuiview PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-tray-views)
-# The DeepSeek native UI needs SSH ControlPersist, which Windows OpenSSH lacks; it
-# is not offered from Windows in Phase 1. The program is still built there.
-if(NOT WIN32)
-    zerus_add_test(nativeuiview test_nativeuiview)
-    set_tests_properties(nativeuiview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
+target_compile_definitions(test_nativeuiview PRIVATE ZERUS_OTHER_PLUGIN="$<TARGET_FILE:zerus-test-other-plugin>")
+target_link_libraries(test_nativeuiview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-views)
+add_dependencies(test_nativeuiview zerus-test-other-plugin)
+zerus_add_test(nativeuiview test_nativeuiview)
+set_tests_properties(nativeuiview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The optional embedded native UI (Linux, when Qt WebEngine is installed).
+if(TARGET hgs-tray-native-ui)
+    add_executable(test_nativeuiplugin test_nativeuiplugin.cpp)
+    target_include_directories(test_nativeuiplugin PRIVATE ../src)
+    target_compile_definitions(test_nativeuiplugin PRIVATE ZERUS_NATIVE_UI_PLUGIN="$<TARGET_FILE:hgs-tray-native-ui>")
+    target_link_libraries(test_nativeuiplugin PRIVATE Qt6::Test Qt6::Widgets Qt6::WebEngineWidgets hgs-tray-views)
+    add_dependencies(test_nativeuiplugin hgs-tray-native-ui)
+    zerus_add_test(nativeuiplugin test_nativeuiplugin)
+    set_tests_properties(nativeuiplugin PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
 endif()
 
 add_executable(test_activityview test_activityview.cpp)

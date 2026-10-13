@@ -20,8 +20,7 @@ MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
                  "install-swarm-service.py", "launchd_agent.py")
-QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtmultimedia", "qtwebengine",
-              "qtwebengine-chromium-webengine")
+QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
 SOURCE_NOTE = """# Qt in Zerus.app
 
 Zerus.app contains unmodified Qt {version} frameworks and plugins from the official
@@ -35,9 +34,9 @@ Exact corresponding Qt sources:
 - https://download.qt.io/archive/qt/{series}/{version}/single/qt-everywhere-src-{version}.tar.xz
 - Git tags `v{version}` in the Qt Project repositories at https://code.qt.io
 
-Per-module licenses, including the third-party components of Qt WebEngine and
-Chromium, are listed in the SPDX documents next to this file. Zerus' own sources
-are at https://github.com/ufna/zerus.
+Per-module licenses, including their third-party components, are listed in the
+SPDX documents next to this file. Zerus' own sources are at
+https://github.com/ufna/zerus.
 """
 
 

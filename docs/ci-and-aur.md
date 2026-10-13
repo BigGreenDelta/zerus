@@ -117,7 +117,7 @@ save them.
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
 | `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
-| `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | About 780 MB |
+| `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | Qt base and Multimedia, no WebEngine |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
 
 When `Cargo.lock` changes, a Rust cache restores the newest target directory of
@@ -298,8 +298,7 @@ gives each step a synchronous anonymous pipe as stdin, and Windows OpenSSH never
 exits after using one (the fake client refuses it), so steps that start `hgs.exe`,
 `ssh` or the desktop app read stdin from `/dev/null`.
 
-Qt 6.10.3 for MSVC 2022 x64 with Qt WebEngine, Qt WebChannel and Qt Positioning
-comes from `aqt install-qt` with aqtinstall 3.3.0, which cannot resolve the split
+Qt 6.10.3 for MSVC 2022 x64 with Qt Multimedia comes from `aqt install-qt` with aqtinstall 3.3.0, which cannot resolve the split
 repository layout of Qt 6.11 and later for Windows yet. No unhashed PyPI code runs
 in the job: `scripts/ci/aqt-requirements.txt` locks aqtinstall, py7zr and their
 whole dependency closure to the SHA-256 of each CPython 3.13 `win_amd64` wheel.
@@ -310,7 +309,8 @@ records how to regenerate it; review a new lock like the other pins. The Qt
 directory is cached with `actions/cache` under a key that covers the Qt release,
 its modules and the lock. Like every cache, only trusted main checks save it; PR,
 manual and nightly runs restore it (see [build caches](#build-caches)). Such a run
-downloads about 1.5 GB of Qt when no cache entry exists yet. The desktop build
+downloads Qt when no cache entry exists yet. Qt WebEngine is not installed: the
+embedded DeepSeek Native UI is an optional Linux plugin. The desktop build
 compiles through ccache.
 
 `scripts/ci/gui.sh` re-enters itself through `scripts/ci/msvc-env.py`, which
@@ -322,10 +322,8 @@ runs every CTest suite offscreen.
 into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folder:
 
 - `windeployqt` adds Qt, its plugins (including the SVG image and icon plugins
-  loaded at run time), translations, `QtWebEngineProcess.exe` and its resources.
-  It runs with `--no-opengl-sw`: Qt Quick and Qt WebEngine render through
-  Direct3D, and the Mesa software OpenGL fallback would need notices the zip does
-  not carry. `--no-system-d3d-compiler` and `--no-system-dxc-compiler` keep
+  loaded at run time) and translations. It runs with `--no-opengl-sw`: the Mesa
+  software OpenGL fallback would need notices the zip does not carry. `--no-system-d3d-compiler` and `--no-system-dxc-compiler` keep
   Microsoft's shader compilers out: Windows includes `D3DCompiler_47.dll`, and
   the notices do not cover the Windows SDK's `dxcompiler.dll` and `dxil.dll`.
   The ICU DLLs it copies from the build machine's System32 (a forwarder
@@ -339,14 +337,13 @@ into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folde
   documents shipped with Qt and, in `licenses/qt`, the texts from
   `packaging/windows/licenses` (sources in its `README.md`). Packaging parses the
   documents and fails when one names a standard license or exception without its
-  text there, or a `LicenseRef-` without extracted text in the documents; the
-  Qt WebEngine documents carry the Chromium component texts that way.
+  text there, or a `LicenseRef-` without extracted text in the documents.
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, a `README.txt` for Windows users and
   `build-info.json` with the source commit, product, CLI and Qt versions.
 
 `scripts/check-windows-portable.py` then checks every entry (no absolute, parent,
 device, case-duplicate or symlink names, no ICU, software OpenGL or Direct3D
-shader compiler DLLs), the required runtime and license texts, the manifest
+shader compiler DLLs and no Qt WebEngine files), the required runtime and license texts, the manifest
 provenance and the limits: at most 512 MiB compressed, the release mirror's
 asset limit, and 500 MB unpacked, the bound applied to whole nightly candidates.
 With `--run --selftest` on Windows it extracts the zip and starts both
@@ -354,9 +351,9 @@ executables with a minimal environment, without Qt or the bundle on `PATH`:
 `--version` of each, `hgs.exe ls --json --local` must report the control-only
 local computer, and `hgs-tray.exe --selftest` must find the `hgs.exe` next to
 it. The job uploads the zip and logs as `windows-x86_64-<commit>` without
-recompressing them and keeps them for seven days (three for schedules). With Qt
-WebEngine the zip is about 140 MB, about 345 MB unpacked. Only nightly assembly
-uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
+recompressing them and keeps them for seven days (three for schedules). Qt
+WebEngine, which made earlier zips about 140 MB (345 MB unpacked), is not part of
+it. Only nightly assembly uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
 waits for this job like every other suite, so a Windows failure also holds back
 Dev, but Dev candidates carry no Windows build.
 
@@ -632,12 +629,12 @@ Generate `.SRCINFO` with `makepkg --printsrcinfo`; never edit it manually.
 
 | Class | Packages | Reason |
 | --- | --- | --- |
-| Desktop runtime | `qt6-base`, `qt6-webengine`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `kidletime`, `hicolor-icon-theme` | Widgets, embedded web UI, SVG plugin, tray/window integration, idle detection and icons |
+| Desktop runtime | `qt6-base`, `qt6-multimedia`, `qt6-svg`, `kstatusnotifieritem`, `kwindowsystem`, `kidletime`, `hicolor-icon-theme` | Widgets, voice recording, SVG plugin, tray/window integration, idle detection and icons |
 | CLI/runtime tools | `tmux>=3.7`, `openssh`, `python`, `curl`, `procps-ng`, `bash`, `tar` | Persistent sessions, remote access, compatibility helper, account HTTP, process inspection, installers and remote source transfer |
 | Native library runtime | `glibc`, `libgcc`, `libstdc++` | Dynamically linked CLI/desktop binaries |
-| Source build only | `rust`, `cmake`, `ninja`; additionally `git` for `zerus-git` | Locked Rust and production Qt builds; Git source/version discovery |
+| Source build only | `rust`, `cmake`, `ninja`, `qt6-webengine`; additionally `git` for `zerus-git` | Locked Rust and production Qt builds, the native UI plugin; Git source/version discovery |
 | Standard build environment | `base-devel` | Required by Arch's makepkg/AUR build convention; its tools are not repeated in makedepends |
-| Optional features | `nodejs`, `npm`, `git`, `konsole`, `wl-clipboard`, `xclip`, `systemd` | Native agent installation/runtime, worktrees, external terminals, clipboard and user services/scopes |
+| Optional features | `nodejs`, `npm`, `git`, `konsole`, `wl-clipboard`, `xclip`, `systemd`, `qt6-webengine` | Native agent installation/runtime, worktrees, external terminals, clipboard, user services/scopes and the embedded DeepSeek Native UI |
 
 The binary package has no Rust/CMake/Ninja build dependencies. Its Qt/KDE, C/C++
 runtime and glibc dependency floors are generated from the **verified builder's
@@ -657,13 +654,20 @@ Each flavor installs the same ADE bundle:
 
 - `/usr/bin/hgs`, `/usr/bin/hgs-tray`, the `hgs_state.py` compatibility shim and
   the explicit `zerus-setup` migration helper.
+- `/usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so`, the embedded DeepSeek
+  Native UI. It alone links Qt WebEngine and loads only when `qt6-webengine` is
+  installed; otherwise Native UI opens in the browser. `check-package.py`
+  requires it and rejects an `hgs-tray` that links Qt WebEngine itself.
 - A desktop entry, existing application icons and system-provided **user** unit
   definitions for `hgs-tray`, `hgs-swarm` and `hgs-recovery`.
 - Documentation and a sample tmux configuration under `/usr/share/doc/zerus`.
 - Zerus MIT, vendored libvterm MIT and the exact host-target Cargo dependency
   license texts under `/usr/share/licenses/<package-name>`.
 
-Qt, Qt WebEngine and KDE libraries are dynamically linked system dependencies.
+Qt and KDE libraries are dynamically linked system dependencies. Qt WebEngine is
+needed only by the native UI plugin. Upgrades keep an installed `qt6-webengine`:
+an optional dependency is not an orphan for `pacman -Qdt`. Candidates sealed
+before Qt WebEngine became optional still validate for publication retries.
 `qt6-svg` supplies the dynamically loaded SVG image plugin used by menu and
 combo-box arrows; a Qt test renders the actual bundled resources so a missing
 plugin fails CI. The current Arch Qt base package supplies its Wayland display

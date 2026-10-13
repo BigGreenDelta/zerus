@@ -11,8 +11,14 @@ from macos_release import cask_for, require_template_cask, validate_macos_info
 
 REPOSITORY = "ufna/zerus"
 PACKAGES = ("zerus", "zerus-ade-bin", "zerus-git")
-BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
+BINARY_LIBRARIES = ("qt6-base", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
                    "kwindowsystem", "kidletime", "libgcc", "libstdc++", "glibc")
+# Candidates sealed before Qt WebEngine became optional (zerus-abnk, 2026-10-13)
+# required it, and their recipes lacked its optional-dependency line. Retrying
+# their publication must keep working unchanged.
+LEGACY_BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
+                           "kwindowsystem", "kidletime", "libgcc", "libstdc++", "glibc")
+OPTIONAL_WEBENGINE = "            'qt6-webengine: embedded DeepSeek Native UI'\n"
 MAINTAINER = "# Maintainer: Vladimir Alyamkin <ufna@ufna.dev>"
 DESCRIPTION_UPDATES = (
     ("An agent development environment for persistent local and remote tmux sessions",
@@ -47,6 +53,14 @@ def metadata(text):
             key, value = line.strip().split(" = ", 1)
             result.setdefault(key, []).append(value)
     return result
+
+
+def binary_library_names(floors):
+    """The ordered build libraries of a sealed candidate's floors: current or legacy."""
+    for names in (BINARY_LIBRARIES, LEGACY_BINARY_LIBRARIES):
+        if set(floors) == set(names):
+            return names
+    raise ValueError("Missing binary build-library provenance.")
 
 
 def binary_dependencies(buildinfo):
@@ -156,7 +170,7 @@ def validate_candidate(directory, version, commit=None):
             require(data.get("pkgver") == [version] and data.get("source") == [url] and data.get("sha256sums") == [digest], f"Wrong stable source/hash: {package}")
             if package == "zerus-ade-bin":
                 floors = info.get("binary_dependencies", {})
-                require(set(floors) == set(BINARY_LIBRARIES), "Missing binary build-library provenance.")
+                binary_library_names(floors)
                 require(all(f"{name}>={value}" in data.get("depends", []) for name, value in floors.items()), "Binary dependencies omit build-library version floors.")
     return info, sums
 

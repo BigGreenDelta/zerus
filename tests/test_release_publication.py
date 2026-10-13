@@ -315,6 +315,25 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing/ambiguous"):
             common.binary_dependencies("")
 
+    def test_qt_webengine_is_optional_but_legacy_candidates_still_validate(self):
+        self.assertNotIn("qt6-webengine", common.BINARY_LIBRARIES)
+        text = "".join(f"installed = {name}-6.11.2-1\n" for name in common.BINARY_LIBRARIES)
+        self.assertNotIn("qt6-webengine", common.binary_dependencies(text + "installed = qt6-webengine-6.11.2-1\n"))
+        for name in ("zerus", "zerus-ade-bin"):
+            recipe = (ROOT / "packaging/aur" / name / "PKGBUILD.in").read_text()
+            self.assertEqual(recipe.count(common.OPTIONAL_WEBENGINE), 1)
+            self.assertNotIn("'qt6-webengine'", recipe.split("optdepends=", 1)[0].split("makedepends=", 1)[0])
+        # Sealed before Qt WebEngine became optional: retrying it keeps working.
+        self.info["binary_dependencies"] = {name: "1.2.3" for name in common.LEGACY_BINARY_LIBRARIES}
+        directory = self.candidate()
+        path = directory / "aur/zerus-ade-bin/.SRCINFO"
+        path.write_text(path.read_text() + "\tdepends = qt6-webengine>=1.2.3\n")
+        common.finish_candidate(directory)
+        common.validate_candidate(directory, VERSION)
+        self.info["binary_dependencies"] = {name: "1.2.3" for name in common.BINARY_LIBRARIES if name != "qt6-svg"}
+        with self.assertRaisesRegex(ValueError, "build-library provenance"):
+            common.binary_library_names(self.info["binary_dependencies"])
+
     def test_binary_recipe_must_declare_library_version_floors(self):
         directory = self.candidate()
         path = directory / "aur/zerus-ade-bin/.SRCINFO"

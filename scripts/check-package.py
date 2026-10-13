@@ -7,6 +7,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+PLUGIN = "usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
+
+
+def needed(path):
+    """Shared libraries an ELF file names in its dynamic section."""
+    dynamic = subprocess.check_output(["readelf", "--dynamic", "--wide", str(path)], text=True)
+    return [line.split("[", 1)[1].split("]", 1)[0] for line in dynamic.splitlines() if "(NEEDED)" in line]
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -19,13 +27,19 @@ def main():
                 "usr/lib/systemd/user/hgs-swarm.service", "usr/lib/systemd/user/hgs-recovery.service",
                 f"usr/share/licenses/{args.package_name}/LICENSE", f"usr/share/licenses/{args.package_name}/libvterm-LICENSE",
                 f"usr/share/licenses/{args.package_name}/md4c-LICENSE",
-                f"usr/share/licenses/{args.package_name}/rust/inventory.json", "usr/share/doc/zerus/build-info.json"]
+                f"usr/share/licenses/{args.package_name}/rust/inventory.json", "usr/share/doc/zerus/build-info.json",
+                PLUGIN]
     for name in required:
         if not (root / name).is_file():
             raise SystemExit(f"Missing package file: {name}")
     for path in root.iterdir():
         if path.name not in {"usr", ".PKGINFO", ".BUILDINFO", ".MTREE"}:
             raise SystemExit(f"Unexpected package root: {path.name}")
+    # Qt WebEngine is optional: only the native UI plugin may load it.
+    if any(name.startswith("libQt6WebEngine") for name in needed(root / "usr/bin/hgs-tray")):
+        raise SystemExit("hgs-tray must not link Qt WebEngine; the native UI plugin does")
+    if "libQt6WebEngineWidgets.so.6" not in needed(root / PLUGIN):
+        raise SystemExit("The native UI plugin does not use Qt WebEngine Widgets")
     manifest = json.loads((root / "usr/share/doc/zerus/build-info.json").read_text())
     with tempfile.TemporaryDirectory(prefix="zerus-package-test-") as home:
         env = {key: value for key, value in os.environ.items() if not key.startswith("HGS_")}

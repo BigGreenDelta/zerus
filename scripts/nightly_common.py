@@ -5,7 +5,8 @@ import re
 import tarfile
 
 from macos_release import require_template_cask, validate_macos_info
-from release_common import BINARY_LIBRARIES, metadata, retains_description_update, require, sha256
+from release_common import (LEGACY_BINARY_LIBRARIES, OPTIONAL_WEBENGINE, binary_library_names, metadata,
+                            retains_description_update, require, sha256)
 import windows_portable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,11 +27,16 @@ def nightly_version(product, count, commit, number):
 
 
 def render_recipe(info, binary_hash):
+    floors = info["binary_dependencies"]
+    names = binary_library_names(floors)
     values = {"@VERSION@": info["version"], "@PRODUCT_VERSION@": info["product_version"],
               "@RELEASE_TAG@": info["release_tag"], "@BINARY_SHA256@": binary_hash,
-              "@BINARY_LIBRARY_DEPENDS@": " ".join(
-                  f"'{name}>={info['binary_dependencies'][name]}'" for name in BINARY_LIBRARIES)}
+              "@BINARY_LIBRARY_DEPENDS@": " ".join(f"'{name}>={floors[name]}'" for name in names)}
     text = (ROOT / "packaging/aur" / PACKAGE / "PKGBUILD.in").read_text()
+    if names == LEGACY_BINARY_LIBRARIES:
+        # The exact template those candidates were sealed with.
+        require(text.count(OPTIONAL_WEBENGINE) == 1, "Unexpected optional Qt WebEngine dependency.")
+        text = text.replace(OPTIONAL_WEBENGINE, "")
     for key, value in values.items():
         text = text.replace(key, value)
     return text
@@ -56,9 +62,10 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     require(run_id is None or identifier == run_id, "Nightly belongs to another workflow run.")
     require(run_number is None or info["workflow_run_number"] == run_number, "Nightly build number mismatch.")
     floors = info.get("binary_dependencies", {})
-    require(set(floors) == set(BINARY_LIBRARIES) and all(
-        re.fullmatch(r"[0-9][0-9A-Za-z.+:~_-]*", value) for value in floors.values()),
-        "Invalid nightly binary library provenance.")
+    require(isinstance(floors, dict), "Invalid nightly binary library provenance.")
+    binary_library_names(floors)
+    require(all(re.fullmatch(r"[0-9][0-9A-Za-z.+:~_-]*", str(value)) for value in floors.values()),
+            "Invalid nightly binary library provenance.")
     version = info["version"]
     # Schema 2 adds the notarized Apple Silicon bundle and the zerus@nightly cask.
     macos = validate_macos_info(info, version, "nightly") if schema == 2 else None

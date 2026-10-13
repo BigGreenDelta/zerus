@@ -22,7 +22,7 @@ rm -rf .ci-build/macos-tests .ci-build/macos-release
 # The shipped GUI is tested against exactly the Qt it bundles.
 cmake -S tray -B .ci-build/macos-tests "${cmake_args[@]}" -DBUILD_TESTING=ON
 cmake --build .ci-build/macos-tests --parallel "$jobs"
-QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu \
+QT_QPA_PLATFORM=offscreen \
     ctest --test-dir .ci-build/macos-tests --parallel "$jobs" --timeout 240 --output-on-failure \
     --output-junit "$PWD/artifacts/test-results/macos-bundle-qt.xml"
 cmake -S tray -B .ci-build/macos-release "${cmake_args[@]}" -DBUILD_TESTING=OFF

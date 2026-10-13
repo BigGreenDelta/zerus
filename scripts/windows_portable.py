@@ -22,16 +22,14 @@ QT_LICENSE_TEXTS = (
     "LGPL-2.1-or-later", "LGPL-3.0-only", "LLVM-exception", "Libpng", "Linux-syscall-note", "MIT", "MIT-0", "MIT-open-group", "MPL-2.0",
     "Qt-GPL-exception-1.0", "Unicode-3.0", "Unlicense", "X11", "Zlib", "blessing", "libpng-2.0",
 )
-# The tested executables, the Qt/WebEngine runtime windeployqt must deploy, the
-# app-local MSVC runtime and the notices that make the bundle redistributable.
+# The tested executables, the Qt runtime windeployqt must deploy, the app-local
+# MSVC runtime and the notices that make the bundle redistributable.
 REQUIRED = (
     "hgs.exe", "hgs-tray.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll", "Qt6Multimedia.dll",
-    "Qt6WebEngineCore.dll", "Qt6WebEngineWidgets.dll", "QtWebEngineProcess.exe",
     "platforms/qwindows.dll", "imageformats/qsvg.dll", "iconengines/qsvgicon.dll",
     "multimedia/ffmpegmediaplugin.dll", "multimedia/windowsmediaplugin.dll",
     "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swresample-5.dll", "swscale-8.dll",
-    "resources/icudtl.dat", "resources/qtwebengine_resources.pak", "resources/v8_context_snapshot.bin",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
     "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/rust/inventory.json",
     *(f"licenses/qt/{name}.txt" for name in QT_LICENSE_TEXTS),
@@ -40,8 +38,10 @@ REQUIRED = (
 # forwarder to icu.dll on current Windows; Qt6Core uses the system ICU), the
 # Mesa software OpenGL fallback has no notices in the bundle, and Microsoft's
 # Direct3D shader compilers (D3DCompiler_47.dll is part of Windows, DXC of the
-# Windows SDK) are not redistributed.
-FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:icu[^/]*|opengl32sw|d3dcompiler[^/]*|dxcompiler|dxil)\.dll$")
+# Windows SDK) are not redistributed. Qt WebEngine (Chromium) is not part of
+# Zerus on Windows: the embedded native UI is an optional Linux plugin.
+FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:(?:icu[^/]*|opengl32sw|d3dcompiler[^/]*|dxcompiler|dxil|qt6webengine[^/]*)\.dll"
+                       r"|qtwebengineprocess\.exe|qtwebengine[^/]*\.pak|icudtl\.dat|v8_context_snapshot\.bin)$")
 WINDOWS_INVALID = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\]')
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
 VERSION = re.compile(r"\d+\.\d+\.\d+")

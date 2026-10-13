@@ -117,6 +117,9 @@ private:
     void rebuild();
     void selectSession();
     void inspect();
+    // The DeepSeek native UI: its tab when the embedded plugin is available,
+    // otherwise the system browser (NativeBrowserPlugin.h).
+    void showNativeUi(const Entry &entry);
     void openSubagent(const QString &id);
     void closeSubagent();
     QJsonObject childRoster(const Entry &entry) const;

@@ -1,55 +1,24 @@
 #include "NativeUiView.h"
 #include "HgsClient.h"
+#include "NativeBrowser.h"
 #include "WorkspaceIcons.h"
-#include <QDesktopServices>
 #include <QCryptographicHash>
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QStackedWidget>
-#include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <QWebEngineDownloadRequest>
-#include <QWebEngineNewWindowRequest>
-#include <QWebEnginePage>
-#include <QWebEngineProfile>
-#include <QWebEngineSettings>
-#include <QWebEngineView>
 
 namespace {
 QString originOf(const QUrl &url) { return url.adjusted(QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment).toString(); }
-bool webLink(const QUrl &url) { return url.scheme() == "https" || url.scheme() == "http"; }
-class NativePage final : public QWebEnginePage {
-public:
-    NativePage(QWebEngineProfile *profile, const QString &origin, QObject *parent)
-        : QWebEnginePage(profile, parent), m_origin(origin) {
-        connect(this, &QWebEnginePage::newWindowRequested, this, [this](QWebEngineNewWindowRequest &request) {
-            const auto url = request.requestedUrl();
-            if (originOf(url) == m_origin) request.openIn(this);
-            else if (request.isUserInitiated() && webLink(url)) QDesktopServices::openUrl(url);
-        });
-    }
-protected:
-    bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool mainFrame) override {
-        if (!mainFrame || url == QUrl("about:blank") || originOf(url) == m_origin) return true;
-        if (type == NavigationTypeLinkClicked && webLink(url)) QDesktopServices::openUrl(url);
-        return false;
-    }
-    // Native JS diagnostics can contain an authenticated address. Keep them
-    // out of Zerus logs; visible load failures never include the launch URL.
-    void javaScriptConsoleMessage(JavaScriptConsoleMessageLevel, const QString &, int, const QString &) override {}
-private:
-    QString m_origin;
-};
 }
 
-NativeUiView::NativeUiView(HgsClient *client, QWidget *parent) : QWidget(parent), m_client(client)
+NativeUiView::NativeUiView(HgsClient *client, Factory factory, QWidget *parent)
+    : QWidget(parent), m_client(client), m_factory(std::move(factory))
 {
     setObjectName("nativeUiView");
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 8, 0, 0); layout->setSpacing(8);
@@ -85,41 +54,37 @@ NativeUiView::NativeUiView(HgsClient *client, QWidget *parent) : QWidget(parent)
         // Reused loopback ports must never revive another host generation's
         // page or cookies. Keep only a fingerprint of its launch credential.
         const QString key = m_host + '\n' + origin + '\n' + QString::fromLatin1(QCryptographicHash::hash(address.toUtf8(), QCryptographicHash::Sha256).toHex());
-        QWebEngineView *view = nullptr;
-        for (const auto &browser : m_browsers) if (browser.key == key) view = browser.view;
-        const bool fresh = !view;
-        if (!view) {
-            auto *profile = new QWebEngineProfile(this); // Off the record, including cookies and cache.
-            view = new QWebEngineView; view->setObjectName("nativeWebPage");
-            auto *page = new NativePage(profile, origin, view); view->setPage(page);
-            page->setBackgroundColor(palette().color(QPalette::Window));
-            page->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, false);
-            m_stack->addWidget(view); m_browsers.append({key, profile, view});
-            connect(view, &QWebEngineView::loadFinished, this, [this, view, key](bool ok) {
+        NativeBrowser *browser = nullptr;
+        for (const auto &entry : m_browsers) if (entry.key == key) browser = entry.browser.get();
+        const bool fresh = !browser;
+        if (!browser) {
+            auto *factory = m_factory ? m_factory() : nullptr;
+            if (!factory) { showProblem(tr("The embedded native UI is not installed. Open it in your browser.")); return; }
+            browser = factory->create(origin, palette().color(QPalette::Window), nullptr);
+            m_stack->addWidget(browser->widget()); m_browsers.push_back({key, std::unique_ptr<NativeBrowser>(browser)});
+            QWidget *view = browser->widget();
+            browser->loadFinished = [this, view, key](bool ok) {
                 if (m_stack->currentWidget() != view || m_activeOrigin != key || !m_available) return;
                 if (ok) { m_status->hide(); m_stack->show(); m_connected = true; }
                 else showProblem(tr("Native UI could not load. Use Reload to reconnect, or open it in your browser."));
-            });
-            connect(view, &QWebEngineView::renderProcessTerminated, this, [this, view, key] {
+            };
+            browser->rendererStopped = [this, view, key] {
                 if (m_stack->currentWidget() == view && m_activeOrigin == key) showProblem(tr("The native UI renderer stopped. Use Reload to reopen it."));
-            });
-            connect(profile, &QWebEngineProfile::downloadRequested, this, [this](QWebEngineDownloadRequest *download) {
-                const auto path = QFileDialog::getSaveFileName(this, tr("Save file"), QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + '/' + QFileInfo(download->suggestedFileName()).fileName());
-                if (path.isEmpty()) { download->cancel(); return; }
-                download->setDownloadDirectory(QFileInfo(path).absolutePath()); download->setDownloadFileName(QFileInfo(path).fileName()); download->accept();
-            });
+            };
         }
+        QWidget *view = browser->widget();
         m_activeOrigin = key; m_stack->setCurrentWidget(view); m_stack->show(); m_connected = true;
         if (fresh || m_forceReload) {
-            m_status->setText(tr("Loading native DeepSeek UI…")); m_status->show(); view->load(url);
+            m_status->setText(tr("Loading native DeepSeek UI…")); m_status->show(); browser->load(url);
         } else m_status->hide();
     });
 }
 
 NativeUiView::~NativeUiView()
 {
-    // A browser profile must outlive every page using it.
-    for (const auto &browser : m_browsers) { delete browser.view; delete browser.profile; }
+    // Each browser deletes its view before its profile, ahead of the stack's
+    // own child cleanup.
+    m_browsers.clear();
 }
 
 void NativeUiView::setSession(const QString &host, const QString &name, const QString &run, const QString &machine, bool available)

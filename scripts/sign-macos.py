@@ -17,7 +17,6 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB_ENTITLEMENTS = ROOT / "packaging/macos/QtWebEngineProcess.entitlements"
 APP_ENTITLEMENTS = ROOT / "packaging/macos/Zerus.entitlements"
 MINIMUM_SYSTEM = "14.0"
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
@@ -63,8 +62,6 @@ def signing_order(app):
 def entitlements_for(path, app):
     if path == app:
         return APP_ENTITLEMENTS
-    if path.name == "QtWebEngineProcess.app":
-        return WEB_ENTITLEMENTS
     return None
 
 

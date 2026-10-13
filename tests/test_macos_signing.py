@@ -24,14 +24,15 @@ class Signing(unittest.TestCase):
         self.write("Contents/MacOS/hgs", MACH_O)
         self.write("Contents/PlugIns/platforms/libqcocoa.dylib", MACH_O)
         self.write("Contents/Resources/setup/install-swarm-service.py", b"#!/usr/bin/env python3\n")
-        for name in ("QtCore", "QtWebEngineCore"):
+        for name in ("QtCore", "QtHelpers"):
             framework = f"Contents/Frameworks/{name}.framework"
             self.write(f"{framework}/Versions/A/{name}", MACH_O)
             os.symlink("A", self.app / framework / "Versions/Current")
             os.symlink(f"Versions/Current/{name}", self.app / framework / name)
-        helper = "Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app"
-        self.write(f"{helper}/Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": "QtWebEngineProcess"}))
-        self.write(f"{helper}/Contents/MacOS/QtWebEngineProcess", MACH_O)
+        # A helper application nested in a framework is signed before it.
+        helper = "Contents/Frameworks/QtHelpers.framework/Versions/A/Helpers/Helper.app"
+        self.write(f"{helper}/Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": "Helper"}))
+        self.write(f"{helper}/Contents/MacOS/Helper", MACH_O)
 
     def write(self, name, payload):
         path = self.app / name
@@ -43,8 +44,8 @@ class Signing(unittest.TestCase):
 
     def test_signing_order_is_inside_out_and_complete(self):
         order = self.relative(sign.signing_order(self.app))
-        helper = "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app"
-        engine = "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A"
+        helper = "Zerus.app/Contents/Frameworks/QtHelpers.framework/Versions/A/Helpers/Helper.app"
+        engine = "Zerus.app/Contents/Frameworks/QtHelpers.framework/Versions/A"
         self.assertEqual(len(order), len(set(order)))
         self.assertEqual(order[-1], "Zerus.app")
         self.assertEqual(set(order), {
@@ -54,14 +55,10 @@ class Signing(unittest.TestCase):
         for standalone in ("Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs"):
             self.assertLess(order.index(standalone), order.index(engine))
 
-    def test_only_the_web_helper_and_application_get_entitlements(self):
+    def test_only_the_application_gets_entitlements(self):
         entitlements = {self.relative([path])[0]: value for path in sign.signing_order(self.app)
                         if (value := sign.entitlements_for(path, self.app))}
-        self.assertEqual(set(entitlements), {
-            "Zerus.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app",
-            "Zerus.app"})
-        web = plistlib.loads(Path(entitlements[next(key for key in entitlements if "QtWebEngineProcess" in key)]).read_bytes())
-        self.assertEqual(web, {"com.apple.security.cs.allow-jit": True})
+        self.assertEqual(set(entitlements), {"Zerus.app"})
         application = plistlib.loads(Path(entitlements["Zerus.app"]).read_bytes())
         self.assertEqual(application, {"com.apple.security.automation.apple-events": True, "com.apple.security.device.audio-input": True})
 

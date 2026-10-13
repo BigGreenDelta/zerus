@@ -21,8 +21,7 @@ ALLOWED_RPATHS = ("@executable_path/", "@loader_path/")
 REFERENCES = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB"}
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
-QT_NOTICES = ("qtbase", "qtdeclarative", "qtsvg", "qtwebchannel", "qtpositioning", "qtmultimedia", "qtwebengine",
-              "qtwebengine-chromium-webengine")
+QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
 EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", "Contents/Resources/bin/zerus-setup"]
 REQUIRED_FILES = [
     "Contents/Info.plist", *EXECUTABLES,
@@ -152,6 +151,10 @@ def bundle_findings(bundle, version, release=None):
         for name in names + files:
             path = Path(directory) / name
             label = str(path.relative_to(bundle))
+            # The embedded native UI is an optional Linux plugin; Chromium never ships here.
+            if "webengine" in name.lower():
+                findings.append(f"{label}: Qt WebEngine is not part of the macOS bundle")
+                continue
             if path.is_symlink():
                 target = (path.parent / os.readlink(path)).resolve()
                 if root not in target.parents and target != root:

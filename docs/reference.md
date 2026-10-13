@@ -1256,13 +1256,22 @@ A new session waits for its first message. API-key `deepseek-official` connectio
 work independently of account sign-in. If `deepseek-account` needs login, Activity
 shows **Sign in** and keeps the draft until native authorization finishes.
 
-**Native UI** embeds the official web interface beside Activity and opens the
-host workspace's native session list, including sessions created through Zerus.
-Navigation preserves its screen and draft. The header can also open it in a
-browser. Questions and approvals for Zerus-managed sessions remain in Activity;
-**Respond in Activity** points there when needed. Native cookie exchange supplies
-authentication, and ports/tunnels are discovered automatically. Embedded cookies
-and cache are memory-only. Qt WebEngine is required.
+**Native UI** opens the official web interface and the host workspace's native
+session list, including sessions created through Zerus. Native cookie exchange
+supplies authentication, and ports/tunnels are discovered automatically. The
+header always opens it in your browser. On Linux, the optional embedded view
+shows it as a tab beside Activity: navigation preserves its screen and draft,
+embedded cookies and cache are memory-only, and questions and approvals for
+Zerus-managed sessions remain in Activity (**Respond in Activity** points there
+when needed). The embedded view is the plugin
+`<prefix>/lib/hgs-tray/plugins/libhgs-tray-native-ui.so` (`/usr/lib/...` from
+Arch packages, `~/.local/lib/...` from `tray/install.sh`), which alone needs Qt
+WebEngine (`qt6-webengine` is an optional dependency on Arch). The GUI loads it
+when a DeepSeek session is first shown. Without it, or on macOS, there is no
+Native UI tab, and Sign in, Open terminal and the other Native UI actions open
+the browser instead; the Windows control console does not offer the native UI
+([Windows](installation.md#windows)). Builds choose with the CMake option
+`HGS_NATIVE_UI_PLUGIN` (`AUTO` by default: built when Qt WebEngine is found).
 `hgs native-ui SESSION --json` returns a private connection URL containing a token;
 keep that output private.
 

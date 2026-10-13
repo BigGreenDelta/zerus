@@ -21,10 +21,13 @@ migration deliberately after saving your sessions. Never kill a live server or
 native agents as part of a Zerus GUI/package update.
 [Official tmux releases](https://github.com/tmux/tmux/releases).
 
-For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets, WebEngine and Multimedia.
+For the desktop: CMake, a C++17 compiler and Qt 6 with Widgets and Multimedia.
 Linux also needs KDE Frameworks 6 KStatusNotifierItem, KWindowSystem and KIdleTime,
-a system tray and user systemd for the standard autostart setup. On macOS, the
-installer uses Qt from Homebrew, and the desktop app requires macOS 14 or later.
+a system tray and user systemd for the standard autostart setup. On Linux, Qt
+WebEngine is optional: when it is installed, the build adds the embedded
+DeepSeek [Native UI](reference.md#deepseek); otherwise Native UI opens in your
+browser. On macOS, the installer uses Qt from Homebrew, and the desktop app
+requires macOS 14 or later.
 
 ## Local installation
 
@@ -38,11 +41,12 @@ cd zerus
 On macOS, install the dependencies first:
 
 ```sh
-brew install rust python tmux cmake qt qtwebengine qtmultimedia
+brew install rust python tmux cmake qt qtmultimedia
 ```
 
-On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-webengine`, `qt6-svg`,
-`kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools.
+On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-multimedia`, `qt6-svg`,
+`kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools; add
+`qt6-webengine` for the embedded Native UI.
 
 Add `~/.local/bin` to `PATH`. The CLI installs to `~/.local/bin/hgs`; SSH calls
 use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or

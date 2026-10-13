@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 from pathlib import Path
+import plistlib
 import re
 import sys
 import tempfile
@@ -97,7 +98,7 @@ class BundleChecks(unittest.TestCase):
             bundle = Path(temporary) / "Zerus.app"
             main = bundle / "Contents/MacOS/hgs-tray"
             framework = bundle / "Contents/Frameworks/QtCore.framework/Versions/A/QtCore"
-            helper = bundle / "Contents/Frameworks/QtWebEngineCore.framework/Helpers/QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess"
+            helper = bundle / "Contents/Frameworks/QtHelpers.framework/Helpers/Helper.app/Contents/MacOS/Helper"
             for path in (main, framework, helper):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"")
@@ -108,11 +109,11 @@ class BundleChecks(unittest.TestCase):
             nested = [("LC_RPATH", "@executable_path/../../../../../../Frameworks"),
                       ("LC_LOAD_DYLIB", "@rpath/QtCore.framework/Versions/A/QtCore")]
             self.assertEqual(check.unresolved_references(bundle, helper, nested), [])
-            missing = commands + [("LC_LOAD_DYLIB", "@rpath/QtWebEngineCore.framework/Versions/A/QtWebEngineCore"),
+            missing = commands + [("LC_LOAD_DYLIB", "@rpath/QtMultimedia.framework/Versions/A/QtMultimedia"),
                                   ("LC_LOAD_DYLIB", "@loader_path/libmissing.dylib")]
             findings = check.unresolved_references(bundle, main, missing)
             self.assertEqual(len(findings), 2, findings)
-            self.assertIn("QtWebEngineCore", findings[0])
+            self.assertIn("QtMultimedia", findings[0])
 
     def test_plist_identity_and_minimum_system_are_required(self):
         good = {"CFBundleIdentifier": "com.hgdev.hgs-tray", "CFBundleExecutable": "hgs-tray",
@@ -144,11 +145,21 @@ class BundleChecks(unittest.TestCase):
         for name in ("Contents/MacOS/hgs", "Contents/Resources/bin/zerus-setup",
                      "Contents/Resources/setup/install-macos-session-service.py",
                      "Contents/Resources/licenses/qt/LGPL-3.0.txt",
-                     "Contents/Resources/licenses/qt/qtwebengine-chromium-webengine.spdx.json",
+                     "Contents/Resources/licenses/qt/qtmultimedia.spdx.json",
                      "Contents/Resources/licenses/qt/SOURCE.md",
                      "Contents/Resources/licenses/rust/inventory.json",
                      "Contents/Resources/licenses/codex-LICENSE.txt"):
             self.assertIn(name, names)
+
+    def test_qt_webengine_never_ships_in_the_bundle(self):
+        self.assertFalse([name for name in check.REQUIRED_FILES if "webengine" in name.lower()])
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "Zerus.app"
+            (bundle / "Contents/Frameworks/QtWebEngineCore.framework").mkdir(parents=True)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({}))
+            findings = check.bundle_findings(bundle, "0.38.0")
+            self.assertIn("Contents/Frameworks/QtWebEngineCore.framework: Qt WebEngine is not part of the macOS bundle",
+                          findings)
 
     def test_setup_scripts_ship_with_their_local_imports(self):
         local = {path.stem for path in (ROOT / "scripts").glob("*.py")}

@@ -76,7 +76,7 @@ class InspectTests(unittest.TestCase):
                 portable.inspect(bundle(self.directory / f"unsafe-{index}.zip", entries=[(entry, b"x")]))
 
     def test_missing_runtime_or_notices_are_rejected(self):
-        for name in ("hgs.exe", "Qt6WebEngineCore.dll", "QtWebEngineProcess.exe", "imageformats/qsvg.dll",
+        for name in ("hgs.exe", "Qt6Multimedia.dll", "multimedia/ffmpegmediaplugin.dll", "imageformats/qsvg.dll",
                      "vcruntime140_1.dll", "licenses/qt/LGPL-3.0-only.txt", "licenses/qt/IJG.txt",
                      "licenses/rust/inventory.json"):
             files = {item: b"x" for item in portable.REQUIRED if item != name}
@@ -86,13 +86,15 @@ class InspectTests(unittest.TestCase):
     def test_system_libraries_and_software_opengl_are_rejected(self):
         # windeployqt copies System32's ICU forwarder, Mesa's opengl32sw.dll and
         # Microsoft's Direct3D shader compilers by default.
+        # Qt WebEngine (Chromium) is never part of the Windows bundle.
         for name in ("icuuc.dll", "ICUIN.DLL", "icu.dll", "opengl32sw.dll", "plugins/icudt72.dll",
-                     "D3Dcompiler_47.dll", "d3dcompiler_46.dll", "dxcompiler.dll", "DXIL.dll"):
+                     "D3Dcompiler_47.dll", "d3dcompiler_46.dll", "dxcompiler.dll", "DXIL.dll",
+                     "Qt6WebEngineCore.dll", "Qt6WebEngineWidgets.dll", "QtWebEngineProcess.exe",
+                     "resources/icudtl.dat", "resources/qtwebengine_resources.pak", "resources/v8_context_snapshot.bin"):
             files = {**{item: b"x" for item in portable.REQUIRED}, name: b"x"}
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "must not contain"):
                 portable.inspect(bundle(self.directory / "forbidden.zip", files=files))
-        # Qt WebEngine's own ICU data stays.
-        self.assertIn("resources/icudtl.dat", portable.REQUIRED)
+        self.assertFalse([name for name in portable.REQUIRED if "webengine" in name.lower()])
 
     def test_manifest_must_name_the_exact_windows_build(self):
         for updates in ({"platform": "Arch Linux"}, {"architecture": "arm64"}, {"native_agents_bundled": True},
@@ -183,7 +185,7 @@ class PackageTests(unittest.TestCase):
         version_file.parent.mkdir(parents=True)
         version_file.write_text(f'set(PACKAGE_VERSION "{QT_VERSION}")\n')
         (self.qt / "sbom").mkdir()
-        for name in ("qtbase", "qtwebengine", "qtwebengine-chromium-webengine", "qtsvg", "qtmultimedia"):
+        for name in ("qtbase", "qtsvg", "qtmultimedia"):
             (self.qt / "sbom" / f"{name}-{QT_VERSION}.spdx").write_text(f"SPDXVersion: SPDX-2.3\nName: {name}\n")
         (self.qt / "sbom" / f"qtbase-{QT_VERSION}.spdx").write_text("\n".join([
             "SPDXVersion: SPDX-2.3", "PackageName: BundledLibjpeg", "PackageLicenseConcluded: IJG AND BSD-3-Clause",
@@ -276,7 +278,7 @@ class PackageTests(unittest.TestCase):
             self.assertFalse([name for name in names if "icu" in name.lower() and name.endswith(".dll")])
             self.assertFalse([name for name in names if portable.FORBIDDEN.search(name)])
             self.assertNotIn(f"{portable.TOP}/licenses/qt/README.md", names)
-            self.assertIn(f"{portable.TOP}/licenses/qt/sbom/qtwebengine-chromium-webengine-{QT_VERSION}.spdx", names)
+            self.assertIn(f"{portable.TOP}/licenses/qt/sbom/qtmultimedia-{QT_VERSION}.spdx", names)
             self.assertNotIn(f"{portable.TOP}/licenses/qt/sbom/qtbase-{QT_VERSION}.source.spdx", names)
             self.assertIn(f"{portable.TOP}/licenses/rust/serde-1.0.0/LICENSE-MIT", names)
             readme = archive.read(f"{portable.TOP}/README.txt").decode()
@@ -321,7 +323,7 @@ class PackageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("vcruntime140_1.dll", result.stderr)
         (self.crt / "vcruntime140_1.dll").write_bytes(b"restored")
-        (self.qt / "sbom" / f"qtwebengine-chromium-webengine-{QT_VERSION}.spdx").unlink()
+        (self.qt / "sbom" / f"qtbase-{QT_VERSION}.spdx").unlink()
         result = self.package(output)
         self.assertIn("SBOM", result.stderr)
         self.assertEqual(sorted(path.name for path in self.directory.glob("*.zip*")), [])
