@@ -1,6 +1,6 @@
 // Deterministic, keyless model running inside the official release for adapter
 // integration tests. This fixture is never loaded by the installed HGS host.
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -51,7 +51,7 @@ class Adapter extends LlmAdapter {
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
     if (text.includes('SUBAGENT') && last?.role !== 'tool') {
-      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ HOLD_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
+      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ (?:HOLD|DISPOSING)_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'child-call',name:'subagent',argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'child-call',name:'subagent',arguments:args}};
@@ -85,6 +85,22 @@ export function apply(ctx,config) {
   ctx.on('agent/pre-step',async(request,next)=>{
     const hold=request.agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
     for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+    return next();
+  });
+  // Native disposal unloads an agent's Cordis scope before the agent leaves
+  // the live registry. Keep a marked child in that window, as a slow scope
+  // teardown would, and report it with a marker file until the test releases it.
+  const disposing=new WeakSet();
+  ctx.on('agent/pre-step',(request,next)=>{
+    const agent=request.agent;
+    const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/DISPOSING_CHILD_\w+/)?.[0];
+    if(hold&&config?.holds&&!disposing.has(agent)){
+      disposing.add(agent);
+      agent.ctx.effect(()=>async()=>{
+        writeFileSync(join(config.holds,hold+'.disposing'),'');
+        for(let i=0;i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+      },'hgs-test.disposal-hold');
+    }
     return next();
   });
   ctx.tools.register(defineTool({name:'hgs_test_job_read',description:'Verify the model output cursor',parameters:{},

@@ -121,6 +121,15 @@ export function apply(ctx, config) {
     opening.set(sessionId, work);
     return work;
   }
+  // selectionFor installs prompt listeners on an Agent's first read, e.g. for a
+  // child. Native disposal unloads the Agent's Cordis scope before the Agent
+  // leaves the live registry, and Cordis rejects every new effect on a disposed
+  // (uid null) or unloading (state 5) fiber. Reads there use the stored selection.
+  const selectionOf = (agent, projections) => {
+    const fiber = agent.ctx.fiber;
+    if (fiber.uid !== null && fiber.state !== 5) return { ...control.selectionFor(agent).current };
+    return projections?.modelSelection?.next ?? null;
+  };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
     .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
   // A live request is the only authority for answering. Disconnecting HGS does
@@ -214,7 +223,7 @@ export function apply(ctx, config) {
     const lifecycleIdle = lifecycleRows?.items?.find(row => row.sessionId === sessionId)?.running === false;
     const parentLive = ctx.agents.get(sessionId);
     const live = agentId ? ctx.agents.get(agentId) : parentLive;
-    const selection = live ? { ...control.selectionFor(live).current } : null;
+    const selection = live ? selectionOf(live, baseline.values) : null;
     const status = await accountStatus();
     const jobs = ctx.get('jobs');
     return { generation, baseline, page,
@@ -237,7 +246,7 @@ export function apply(ctx, config) {
         const status = await accountStatus();
         return { ...list, generation, items: list.items.map(row => {
           const agent = ctx.agents.get(row.sessionId);
-          const selection = agent ? { ...control.selectionFor(agent).current } : null;
+          const selection = agent ? selectionOf(agent, row.projections?.values) : null;
           return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
             goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
             pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId) };
