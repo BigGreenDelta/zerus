@@ -152,13 +152,16 @@ cargo build --locked --example fake_agent
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_SSH="$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")" \
   python -m unittest discover -s tests -p test_windows_client.py -v </dev/null
+python scripts/fetch-conpty.py --output target/conpty
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
+HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
-    --gui .ci-build/gui/hgs-tray.exe --output artifacts/zerus-windows-x86_64.zip
+    --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
+    --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
 ```
 
@@ -166,9 +169,14 @@ python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --ru
 injected through `HGS_SSH`, with `HOME` and `USERPROFILE` in a temporary folder;
 it never uses your SSH configuration and skips itself on other systems. The
 native session host of Windows Phase 2 has its own isolated recipe and tests,
-`tests/test_windows_host.py` and the survival tests in
+`tests/test_windows_host.py`, the bundled ConPTY tests in
+`tests/test_windows_host_conpty.py` and the survival tests in
 `tests/test_windows_host_survival.py`:
-[testing the Windows session host](docs/windows-host-testing.md). On Windows,
+[testing the Windows session host](docs/windows-host-testing.md).
+`scripts/fetch-conpty.py` downloads the ConPTY package pinned in
+`packaging/windows/conpty.json` from nuget.org and writes only its checked
+`conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to
+`hgs.exe` and fetches them itself without `--conpty`. On Windows,
 `scripts/ci/gui.sh` re-enters itself in the Visual Studio x64 environment
 (`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs
 every Qt suite offscreen. The Qt fixtures are Python scripts that a small native
@@ -179,7 +187,8 @@ a fixture whose shim is killed; `ZERUS_FIXTURE_POOL=0` starts a Python process p
 call instead.
 `package-windows.py` finds the app-local Visual C++ runtime with `vswhere`, and
 `check-windows-portable.py --run --selftest` starts both executables from an
-extracted copy with a minimal environment. Never start the packaged app with
+extracted copy with a minimal environment and enables local sessions in its
+disposable profile, which must stage the pinned ConPTY pair. Never start the packaged app with
 `QT_QPA_PLATFORM=offscreen`: the zip has no offscreen plugin, and Qt's error box
 then hangs the process out of sight.
 

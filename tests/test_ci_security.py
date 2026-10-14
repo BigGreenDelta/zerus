@@ -303,7 +303,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("rustup toolchain install 1.85.0 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
-                     "test_windows_host_survival test_windows_lifecycle </dev/null",
+                     "test_windows_lifecycle test_windows_hooks </dev/null",
                      "bash scripts/ci/gui.sh build </dev/null", "bash scripts/ci/gui.sh test </dev/null",
                      "--output artifacts/zerus-windows-x86_64.zip </dev/null",
                      "--run --selftest \\\n            </dev/null"):
@@ -601,6 +601,33 @@ class WorkflowSecurityTests(unittest.TestCase):
                 save = next(step for step in self.checks_steps(name)
                             if f"key: ${{{{ steps.{step_id}.outputs.cache-primary-key }}}}" in step)
                 self.assertIn(f"if: inputs.save_caches && steps.{step_id}.outputs.cache-hit != 'true'\n", save)
+
+    def test_windows_conpty_pair_is_fetched_once_from_its_pin(self):
+        windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")
+        steps = self.checks_steps("windows-desktop")
+        fetch = next(step for step in steps if "fetch-conpty.py" in step)
+        host = next(step for step in steps if "- name: Windows session host tests\n" in step)
+        package = next(step for step in steps if "scripts/package-windows.py" in step)
+        # One fetch, from the URL and digests in packaging/windows/conpty.json only.
+        self.assertEqual(windows.count("scripts/fetch-conpty.py"), 1)
+        self.assertIn('\n        run: python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null\n', fetch)
+        self.assertNotRegex(windows, r"(?i)nuget\.org|\.nupkg")
+        self.assertLess(steps.index(fetch), steps.index(host))
+        self.assertLess(steps.index(host), steps.index(package))
+        # The host suites get the folder; the zip takes the same pair.
+        self.assertIn('HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")\n', host)
+        self.assertIn("export HGS_TEST_BIN HGS_TEST_FAKE_AGENT HGS_TEST_FAKE_SSH HGS_TEST_CONPTY_DIR\n", host)
+        modules = [word for word in re.search(r"python -m unittest -v ([\w \\\n]+?)</dev/null", host)[1].split()
+                   if word != "\\"]
+        self.assertEqual(modules, ["test_windows_host", "test_windows_host_conpty", "test_windows_host_survival",
+                                   "test_windows_lifecycle", "test_windows_hooks"])
+        for module in modules:
+            self.assertTrue((ROOT / "tests" / f"{module}.py").is_file(), module)
+        self.assertIn('--conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null', package)
+        # Outside the uploaded artifacts and every cache.
+        for step in steps:
+            if "uses: actions/cache/" in step or "uses: actions/upload-artifact@" in step:
+                self.assertFalse([path for path in self.step_paths(step) if "conpty" in path.lower()], step)
 
     def test_windows_ccache_is_an_exact_release_verified_before_use(self):
         windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")

@@ -1,8 +1,13 @@
-"""Windows portable zip contracts: packaging, layout checks and size limits.
+"""Windows portable zip contracts: packaging, layout checks, the pinned ConPTY
+pair and size limits.
 
-Packaging runs with a synthetic Qt installation, windeployqt and MSVC runtime,
-so these checks need no Windows tools and never execute bundled programs.
+Packaging runs with a synthetic Qt installation, windeployqt, MSVC runtime and
+ConPTY pair, so these checks need no Windows tools or network and never execute
+bundled programs. The synthetic pair passes as the pinned build because the
+cases replace the pinned digests (`pinned`); `ConptyPinTests` checks the real pin.
 """
+import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +22,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import conpty_pair
 import windows_portable as portable
 
 COMMIT = "a" * 40
@@ -27,6 +33,39 @@ QT_VERSION = "6.10.3"
 QT_RUNTIME = [name for name in portable.REQUIRED if name.startswith(("Qt", "platforms/", "imageformats/",
                                                                    "iconengines/", "resources/", "multimedia/",
                                                                    "avcodec-", "avformat-", "avutil-", "swresample-", "swscale-"))]
+# Stand-ins for the ConPTY pair.
+PAIR = {"conpty.dll": b"synthetic conpty.dll", "OpenConsole.exe": b"synthetic OpenConsole.exe"}
+# Runs a script as `python SCRIPT ARGS...` would, after replacing the pinned pair
+# with the pin in argv[1]: `python -c WITH_PIN PIN SCRIPT ARGS...`.
+WITH_PIN = "\n".join([
+    "import json, runpy, sys",
+    f"sys.path.insert(0, {str(ROOT / 'scripts')!r})",
+    "import conpty_pair",
+    "conpty_pair.PIN = conpty_pair.validate(json.loads(sys.argv[1]))",
+    "sys.argv = sys.argv[2:]",
+    "runpy.run_path(sys.argv[0], run_name='__main__')",
+])
+
+
+def pinned(files=PAIR, **package):
+    """The repository's ConPTY pin with these bytes as its pair and these package fields."""
+    pin = copy.deepcopy(conpty_pair.load())
+    pin.update(package)
+    for name, data in files.items():
+        pin["files"][name].update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+    return conpty_pair.validate(pin)
+
+
+def use_pin(case, pin):
+    """Replace the pinned pair for the rest of `case`."""
+    patcher = patch.object(conpty_pair, "PIN", pin)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
+def complete(**changes):
+    """Every required file: the synthetic pair and placeholders for the rest."""
+    return {**{name: PAIR.get(name, b"x") for name in portable.REQUIRED}, **changes}
 
 
 def manifest(**updates):
@@ -39,7 +78,7 @@ def manifest(**updates):
 
 def bundle(path, files=None, info=None, entries=()):
     """A minimal zip with every required file; entries adds raw ZipInfo/data pairs."""
-    files = {name: b"x" for name in portable.REQUIRED} if files is None else files
+    files = complete() if files is None else files
     files = {**files, "build-info.json": json.dumps(manifest() if info is None else info).encode()}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(files.items()):
@@ -54,6 +93,7 @@ class InspectTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="zerus-windows-contract-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+        use_pin(self, pinned())
 
     def test_complete_bundle_returns_its_manifest(self):
         self.assertEqual(portable.inspect(bundle(self.directory / "ok.zip")), manifest())
@@ -77,11 +117,33 @@ class InspectTests(unittest.TestCase):
 
     def test_missing_runtime_or_notices_are_rejected(self):
         for name in ("hgs.exe", "Qt6Multimedia.dll", "multimedia/ffmpegmediaplugin.dll", "imageformats/qsvg.dll",
-                     "vcruntime140_1.dll", "licenses/qt/LGPL-3.0-only.txt", "licenses/qt/IJG.txt",
+                     "vcruntime140_1.dll", "conpty.dll", "OpenConsole.exe", "licenses/qt/LGPL-3.0-only.txt",
+                     "licenses/qt/IJG.txt", "licenses/conpty-LICENSE.txt", "licenses/conpty-NOTICE.md",
                      "licenses/rust/inventory.json"):
-            files = {item: b"x" for item in portable.REQUIRED if item != name}
+            files = {item: data for item, data in complete().items() if item != name}
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "lacks: " + name):
                 portable.inspect(bundle(self.directory / "missing.zip", files=files))
+
+    def test_the_conpty_pair_must_be_the_pinned_build_next_to_hgs(self):
+        for name, data in PAIR.items():
+            # Other bytes, of another size or of the same size.
+            for other in (b"other " + data, data[:-1] + b"?"):
+                with self.subTest(name=name, data=other), \
+                        self.assertRaisesRegex(ValueError, f"{name} is not the pinned "
+                                                           f"Microsoft.Windows.Console.ConPTY {conpty_pair.PIN['version']}"):
+                    portable.inspect(bundle(self.directory / "other.zip", files=complete(**{name: other})))
+        # A real build differs from the stand-ins: the repository pin rejects them.
+        with patch.object(conpty_pair, "PIN", conpty_pair.load()), \
+                self.assertRaisesRegex(ValueError, "conpty.dll is not the pinned"):
+            portable.inspect(bundle(self.directory / "unpinned.zip"))
+        # conpty.dll would run an OpenConsole.exe from x64\ when none sat next to it,
+        # as the NuGet package's own build targets place it; no copy goes elsewhere.
+        for name in ("x64/OpenConsole.exe", "arm64/openconsole.exe", "runtimes/conpty.dll", "licenses/CONPTY.DLL"):
+            files = complete(**{name: PAIR.get(Path(name).name, b"x")})
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "belong next to hgs.exe"):
+                portable.inspect(bundle(self.directory / "elsewhere.zip", files=files))
+        # The license text is no ConPTY binary.
+        self.assertEqual(portable.inspect(bundle(self.directory / "ok.zip")), manifest())
 
     def test_system_libraries_and_software_opengl_are_rejected(self):
         # windeployqt copies System32's ICU forwarder, Mesa's opengl32sw.dll and
@@ -91,7 +153,7 @@ class InspectTests(unittest.TestCase):
                      "D3Dcompiler_47.dll", "d3dcompiler_46.dll", "dxcompiler.dll", "DXIL.dll",
                      "Qt6WebEngineCore.dll", "Qt6WebEngineWidgets.dll", "QtWebEngineProcess.exe",
                      "resources/icudtl.dat", "resources/qtwebengine_resources.pak", "resources/v8_context_snapshot.bin"):
-            files = {**{item: b"x" for item in portable.REQUIRED}, name: b"x"}
+            files = complete(**{name: b"x"})
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "must not contain"):
                 portable.inspect(bundle(self.directory / "forbidden.zip", files=files))
         self.assertFalse([name for name in portable.REQUIRED if "webengine" in name.lower()])
@@ -103,8 +165,7 @@ class InspectTests(unittest.TestCase):
                 portable.inspect(bundle(self.directory / "manifest.zip", info=manifest(**updates)))
         with self.assertRaisesRegex(ValueError, "not an object"):
             portable.inspect(bundle(self.directory / "list.zip", info=[]))
-        files = {name: b"x" for name in portable.REQUIRED}
-        path = bundle(self.directory / "large.zip", files=files, info={**manifest(), "padding": "x" * portable.MANIFEST_LIMIT})
+        path = bundle(self.directory / "large.zip", info={**manifest(), "padding": "x" * portable.MANIFEST_LIMIT})
         with self.assertRaisesRegex(ValueError, "too large"):
             portable.inspect(path)
 
@@ -131,6 +192,171 @@ class InspectTests(unittest.TestCase):
         import update_feed
         self.assertEqual(portable.ZIP_LIMIT, update_feed.ASSET_LIMIT)
         self.assertEqual(portable.UNPACKED_LIMIT, 500_000_000)
+
+
+class ConptyPinTests(unittest.TestCase):
+    """packaging/windows/conpty.json: the reviewed package and its x64 pair."""
+
+    def test_the_pin_names_the_reviewed_package_and_its_x64_pair(self):
+        pin = conpty_pair.load()
+        self.assertEqual(pin, conpty_pair.PIN)
+        self.assertEqual((pin["package"], pin["version"], pin["license"]),
+                         ("Microsoft.Windows.Console.ConPTY", "1.25.260930003", "MIT"))
+        self.assertEqual(pin["url"], "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/"
+                                     "1.25.260930003/microsoft.windows.console.conpty.1.25.260930003.nupkg")
+        self.assertEqual((pin["size"], pin["sha256"]),
+                         (1763391, "02b07b349af66d801159bdf9e440d4a1ce78bb951f37fc8609731665afdae7ee"))
+        self.assertEqual(pin["files"], {
+            "conpty.dll": {"path": "runtimes/win-x64/native/conpty.dll", "size": 119608,
+                           "sha256": "feeef341d891643c62d30b6b07800bc70f0bc148f44cb8c3bee84aa557ae805a"},
+            "OpenConsole.exe": {"path": "build/native/runtimes/x64/OpenConsole.exe", "size": 1089376,
+                                "sha256": "3d66b23d0a71bb8eed2b77edc8b9df9bf54ce6c8fb74c863a30e760997f80586"},
+        })
+
+    def test_the_pair_is_what_the_host_stages_and_loads(self):
+        self.assertEqual(sorted(conpty_pair.PIN["files"]), sorted(conpty_pair.NAMES))
+        staging = (ROOT / "src/host/staging.rs").read_text()
+        self.assertIn('pub const PAIR: [&str; 2] = ["conpty.dll", "OpenConsole.exe"];', staging)
+        source = (ROOT / "src/host/conpty.rs").read_text()
+        self.assertIn('const BUNDLED_DLL: &str = "conpty.dll";', source)
+        self.assertIn('const BUNDLED_SERVER: &str = "OpenConsole.exe";', source)
+        # conpty.rs relies on the exports of the pinned version: a new pin reviews it.
+        self.assertIn(f"`Microsoft.Windows.Console.ConPTY` {conpty_pair.PIN['version']}", source)
+        for name in (*conpty_pair.NAMES, "licenses/conpty-LICENSE.txt", "licenses/conpty-NOTICE.md"):
+            self.assertIn(name, portable.REQUIRED)
+        text = (ROOT / "docs/licenses/conpty-LICENSE.txt").read_text()
+        self.assertTrue(text.startswith("Copyright (c) Microsoft Corporation. All rights reserved.\n\nMIT License\n"))
+        # OpenConsole.exe contains third-party code (Chromium's numerics under
+        # BSD-3-Clause, wil, GSL, {fmt} and others): Windows Terminal's NOTICE.md.
+        notice = (ROOT / "docs/licenses/conpty-NOTICE.md").read_text()
+        self.assertTrue(notice.startswith("# NOTICES AND INFORMATION\n"))
+        for component in ("## chromium/base/numerics", "## \\{fmt\\}", "## `wil`", "## `GSL`"):
+            self.assertIn(component, notice)
+        self.assertIn("Microsoft.Windows.Console.ConPTY", (ROOT / "THIRD_PARTY_NOTICES.md").read_text())
+
+    def test_pin_rejects_foreign_sources_and_other_files(self):
+        changes = [
+            lambda pin: pin.update(url=pin["url"].replace("api.nuget.org", "mirror.example")),
+            lambda pin: pin.update(url=pin["url"].replace("1.25.260930003.nupkg", "1.25.260930004.nupkg")),
+            lambda pin: pin.update(package="Other.ConPTY"),
+            lambda pin: pin.update(version="1.25"),
+            lambda pin: pin.update(license="Proprietary"),
+            lambda pin: pin.update(sha256="0" * 63),
+            lambda pin: pin.update(size=0),
+            lambda pin: pin.update(size=True),
+            lambda pin: pin.update(unexpected=True),
+            lambda pin: pin["files"].pop("OpenConsole.exe"),
+            lambda pin: pin["files"].update({"conpty.lib": dict(pin["files"]["conpty.dll"])}),
+            lambda pin: pin["files"]["conpty.dll"].update(path="runtimes/win-arm64/native/conpty.dll"),
+            lambda pin: pin["files"]["OpenConsole.exe"].update(path="build/native/runtimes/x86/OpenConsole.exe"),
+            lambda pin: pin["files"]["conpty.dll"].update(path="runtimes/win-x64/../../conpty.dll"),
+            lambda pin: pin["files"]["conpty.dll"].update(path="/runtimes/win-x64/native/conpty.dll"),
+            lambda pin: pin["files"]["conpty.dll"].update(path="runtimes/win-x64/native/OpenConsole.exe"),
+            lambda pin: pin["files"]["OpenConsole.exe"].update(sha256="A" * 64),
+            lambda pin: pin["files"]["OpenConsole.exe"].update(size=conpty_pair.FILE_LIMIT + 1),
+            lambda pin: pin["files"]["OpenConsole.exe"].update(unexpected=True),
+        ]
+        for index, change in enumerate(changes):
+            pin = copy.deepcopy(conpty_pair.load())
+            change(pin)
+            with self.subTest(change=index), self.assertRaises(ValueError):
+                conpty_pair.validate(pin)
+
+
+class FetchTests(unittest.TestCase):
+    """conpty_pair.fetch and scripts/fetch-conpty.py with a synthetic package
+    served from a file: URL, so nothing reaches the network."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="zerus-conpty-fetch-")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.package = self.directory / "feed" / "microsoft.windows.console.conpty.1.25.260930003.nupkg"
+        self.package.parent.mkdir()
+        files = {entry["path"]: PAIR[name] for name, entry in conpty_pair.load()["files"].items()}
+        # The other architectures, headers and build files stay in the package.
+        files.update({"runtimes/win-arm64/native/conpty.dll": b"arm64 conpty.dll",
+                      "build/native/runtimes/arm64/OpenConsole.exe": b"arm64 OpenConsole.exe",
+                      "runtimes/win-x64/lib/uap10.0/conpty.lib": b"import library", "inc/conpty.h": b"header",
+                      "Microsoft.Windows.Console.ConPTY.nuspec": b"<package/>"})
+        with zipfile.ZipFile(self.package, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        data = self.package.read_bytes()
+        self.pin = pinned(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+        use_pin(self, self.pin)
+
+    def test_fetch_writes_exactly_the_pinned_pair(self):
+        output = self.directory / "pair"
+        found = conpty_pair.fetch(output, url=self.package.as_uri())
+        self.assertEqual(found, {name: output / name for name in PAIR})
+        self.assertEqual(sorted(path.name for path in output.iterdir()), sorted(PAIR))
+        for name, data in PAIR.items():
+            self.assertEqual((output / name).read_bytes(), data)
+        self.assertEqual(conpty_pair.check_folder(output), found)
+        # A downloaded copy gives the same pair without a download.
+        again = self.directory / "again"
+        with patch.object(conpty_pair.urllib.request, "urlopen", side_effect=AssertionError("downloaded")):
+            conpty_pair.fetch(again, package=self.package)
+        self.assertEqual(sorted(path.name for path in again.iterdir()), sorted(PAIR))
+
+    def test_a_package_that_is_not_the_pinned_one_is_never_opened(self):
+        tampered = self.directory / "tampered.nupkg"
+        data = bytearray(self.package.read_bytes())
+        data[-1] ^= 1
+        tampered.write_bytes(bytes(data))
+        output = self.directory / "pair"
+        with patch.object(conpty_pair.zipfile, "ZipFile", side_effect=AssertionError("opened")):
+            with self.assertRaisesRegex(ValueError, "is not the pinned Microsoft.Windows.Console.ConPTY"):
+                conpty_pair.fetch(output, package=tampered)
+            with self.assertRaisesRegex(ValueError, "is not the pinned Microsoft.Windows.Console.ConPTY"):
+                conpty_pair.fetch(output, url=tampered.as_uri())
+        self.assertFalse(output.exists())
+        # A download never takes more than the pinned size.
+        longer = self.directory / "longer.nupkg"
+        longer.write_bytes(self.package.read_bytes() + b"\0")
+        with self.assertRaisesRegex(ValueError, "larger than pinned"):
+            conpty_pair.fetch(output, url=longer.as_uri())
+        self.assertFalse(output.exists())
+
+    def test_a_pinned_file_that_differs_writes_neither(self):
+        for name, entry in (("OpenConsole.exe", {"sha256": "0" * 64}), ("conpty.dll", {"size": len(PAIR["conpty.dll"]) + 1}),
+                            ("conpty.dll", {"path": "runtimes/win-x64/other/conpty.dll"})):
+            pin = copy.deepcopy(self.pin)
+            pin["files"][name].update(entry)
+            output = self.directory / "pair"
+            with self.subTest(name=name, entry=entry), patch.object(conpty_pair, "PIN", pin), \
+                    self.assertRaisesRegex(ValueError, "is not the pinned build|lacks runtimes/win-x64/other"):
+                conpty_pair.fetch(output, package=self.package)
+            self.assertFalse(output.exists())
+
+    def test_a_folder_must_hold_both_pinned_files(self):
+        folder = self.directory / "pair"
+        conpty_pair.fetch(folder, package=self.package)
+        (folder / "OpenConsole.exe").write_bytes(PAIR["OpenConsole.exe"][:-1] + b"?")
+        with self.assertRaisesRegex(ValueError, "is not the OpenConsole.exe of the pinned"):
+            conpty_pair.check_folder(folder)
+        (folder / "OpenConsole.exe").unlink()
+        with self.assertRaisesRegex(ValueError, "OpenConsole.exe is missing"):
+            conpty_pair.check_folder(folder)
+
+    def test_the_fetch_script_reuses_a_downloaded_package(self):
+        output = self.directory / "pair"
+        result = subprocess.run([sys.executable, "-c", WITH_PIN, json.dumps(self.pin), str(ROOT / "scripts/fetch-conpty.py"),
+                                 "--output", str(output), "--nupkg", str(self.package)],
+                                cwd=self.directory, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Fetched Microsoft.Windows.Console.ConPTY 1.25.260930003 (sha256 {self.pin['sha256']})",
+                      result.stdout)
+        self.assertEqual(sorted(path.name for path in output.iterdir()), sorted(PAIR))
+        # The repository pin refuses the synthetic package, with a message and no traceback.
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/fetch-conpty.py"), "--output",
+                                 str(self.directory / "refused"), "--nupkg", str(self.package)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, f"fetch-conpty: {self.package.name} is not the pinned "
+                                        "Microsoft.Windows.Console.ConPTY 1.25.260930003 package.\n")
+        self.assertFalse((self.directory / "refused").exists())
 
 
 class SbomLicenseTests(unittest.TestCase):
@@ -225,21 +451,33 @@ class PackageTests(unittest.TestCase):
         (self.rust / "inventory.json").write_text(json.dumps({"target": "x86_64-pc-windows-msvc", "packages": [{}]}))
         (base / "hgs.exe").write_bytes(b"tested cli")
         (base / "hgs-tray.exe").write_bytes(b"tested gui")
+        # As scripts/fetch-conpty.py leaves it, with the synthetic pair pinned in
+        # this process and in the scripts below.
+        self.conpty = base / "conpty"
+        self.conpty.mkdir()
+        for name, data in PAIR.items():
+            (self.conpty / name).write_bytes(data)
+        self.pin = pinned()
+        use_pin(self, self.pin)
+
+    def run_script(self, name, *arguments, **options):
+        """`python scripts/<name> ARGUMENTS` with the synthetic pair pinned."""
+        command = [sys.executable, "-c", WITH_PIN, json.dumps(self.pin), str(ROOT / "scripts" / name), *arguments]
+        return subprocess.run(command, capture_output=True, text=True, **options)
 
     def package(self, output, **overrides):
         arguments = {"--cli": self.directory / "hgs.exe", "--gui": self.directory / "hgs-tray.exe",
                      "--output": output, "--qt-root": self.qt, "--windeployqt": self.windeployqt,
-                     "--crt-dir": self.crt, "--rust-licenses": self.rust, **overrides}
-        command = [sys.executable, str(ROOT / "scripts/package-windows.py")]
+                     "--crt-dir": self.crt, "--rust-licenses": self.rust, "--conpty": self.conpty, **overrides}
+        command = []
         for key, value in arguments.items():
             command += [key, str(value)]
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "HGS_"))}
         environment["SOURCE_DATE_EPOCH"] = "1760000000"
-        return subprocess.run(command, cwd=self.directory, env=environment, capture_output=True, text=True)
+        return self.run_script("package-windows.py", *command, cwd=self.directory, env=environment)
 
     def check(self, path, *arguments):
-        return subprocess.run([sys.executable, str(ROOT / "scripts/check-windows-portable.py"), str(path), *arguments],
-                              capture_output=True, text=True)
+        return self.run_script("check-windows-portable.py", str(path), *arguments)
 
     def test_multimedia_notices_are_required(self):
         (self.qt / "sbom" / f"qtmultimedia-{QT_VERSION}.spdx").unlink()
@@ -281,9 +519,21 @@ class PackageTests(unittest.TestCase):
             self.assertIn(f"{portable.TOP}/licenses/qt/sbom/qtmultimedia-{QT_VERSION}.spdx", names)
             self.assertNotIn(f"{portable.TOP}/licenses/qt/sbom/qtbase-{QT_VERSION}.source.spdx", names)
             self.assertIn(f"{portable.TOP}/licenses/rust/serde-1.0.0/LICENSE-MIT", names)
+            # The pinned ConPTY pair next to hgs.exe, its license and notices,
+            # and nothing else of its package.
+            for name, data in PAIR.items():
+                self.assertEqual(archive.read(f"{portable.TOP}/{name}"), data)
+            for name in ("conpty-LICENSE.txt", "conpty-NOTICE.md"):
+                self.assertEqual(archive.read(f"{portable.TOP}/licenses/{name}"),
+                                 (ROOT / "docs/licenses" / name).read_bytes())
+            self.assertEqual([name for name in names if "conpty" in name.lower() or "openconsole" in name.lower()],
+                             [f"{portable.TOP}/{name}" for name in ("OpenConsole.exe", "conpty.dll",
+                                                                     "licenses/conpty-LICENSE.txt",
+                                                                     "licenses/conpty-NOTICE.md")])
             readme = archive.read(f"{portable.TOP}/README.txt").decode()
             self.assertIn(f"Zerus {VERSION} for Windows", readme)
             self.assertIn(head, readme)
+            self.assertIn("Microsoft.Windows.Console.ConPTY 1.25.260930003, under the MIT license", readme)
             self.assertNotRegex(readme, r"@[A-Z_]+@")
             self.assertNotRegex(readme, r"[^\r]\n")
         # Equal inputs give equal bytes, so a rebuilt zip can be compared.
@@ -294,6 +544,31 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertIn("files", report.stdout)
         self.assertNotEqual(self.check(output, "--commit", "b" * 40).returncode, 0)
+        # The checker refuses another binary under a ConPTY name, and the
+        # repository pin refuses the synthetic pair.
+        head_bundle = {**manifest(), "source_commit": head}
+        tampered = bundle(self.directory / "tampered.zip", files=complete(**{"OpenConsole.exe": b"another console"}),
+                          info=head_bundle)
+        report = self.check(tampered)
+        self.assertEqual(report.returncode, 1)
+        self.assertIn("OpenConsole.exe is not the pinned Microsoft.Windows.Console.ConPTY", report.stderr)
+        report = subprocess.run([sys.executable, str(ROOT / "scripts/check-windows-portable.py"), str(output)],
+                                capture_output=True, text=True)
+        self.assertEqual(report.returncode, 1)
+        self.assertIn("conpty.dll is not the pinned Microsoft.Windows.Console.ConPTY 1.25.260930003 build",
+                      report.stderr)
+
+    def test_a_conpty_pair_other_than_the_pinned_one_leaves_no_bundle(self):
+        output = self.directory / "zerus-windows-x86_64.zip"
+        (self.conpty / "OpenConsole.exe").write_bytes(b"another console")
+        result = self.package(output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not the OpenConsole.exe of the pinned Microsoft.Windows.Console.ConPTY", result.stderr)
+        (self.conpty / "OpenConsole.exe").unlink()
+        result = self.package(output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OpenConsole.exe is missing; run scripts/fetch-conpty.py", result.stderr)
+        self.assertEqual(sorted(path.name for path in self.directory.glob("*.zip*")), [])
 
     def test_a_license_without_its_text_leaves_no_bundle(self):
         sbom = self.qt / "sbom" / f"qtsvg-{QT_VERSION}.spdx"

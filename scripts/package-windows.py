@@ -2,8 +2,10 @@
 """Bundle the tested hgs.exe and hgs-tray.exe into the Windows portable zip.
 
 windeployqt adds the Qt runtime, vswhere locates the app-local MSVC runtime,
-and the notices that make the bundle redistributable are copied next to them. Nothing is compiled here: the executables are the exact files
-the Windows CI job has just tested.
+the pinned ConPTY pair (conpty.dll and OpenConsole.exe, scripts/conpty_pair.py)
+goes next to hgs.exe, and the notices that make the bundle redistributable are
+copied next to them. Nothing is compiled here: the executables are the exact
+files the Windows CI job has just tested.
 """
 import argparse
 import datetime
@@ -19,6 +21,7 @@ import tempfile
 import tomllib
 import zipfile
 
+import conpty_pair
 from release_common import require
 from windows_portable import TOP, inspect, missing_license_texts
 
@@ -113,6 +116,9 @@ def main():
     parser.add_argument("--crt-dir", type=Path, help="Microsoft.VC14*.CRT folder [default: found with vswhere]")
     parser.add_argument("--rust-licenses", type=Path,
                         help="notices from scripts/collect-licenses.py [default: collected for this host target]")
+    parser.add_argument("--conpty", type=Path,
+                        help="folder with the pinned conpty.dll and OpenConsole.exe from scripts/fetch-conpty.py "
+                             "[default: fetched from nuget.org]")
     args = parser.parse_args()
     require(args.qt_root is not None and args.qt_root.is_dir(), "Pass --qt-root or set QT_ROOT_DIR.")
     require(args.output.suffix == ".zip", "The output must be a .zip file.")
@@ -128,6 +134,14 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="zerus-windows-") as temporary:
         stage = Path(temporary) / TOP
+        # Microsoft's ConPTY next to hgs.exe (spec D2, D6): `hgs session-host
+        # install` stages both files from there into the host image, whose
+        # session host loads conpty.dll by absolute path; conpty.dll runs the
+        # OpenConsole.exe next to it. Only the two pinned files are taken.
+        if args.conpty:
+            pair = conpty_pair.check_folder(args.conpty)
+        else:
+            pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
         # Qt libraries, plugins and translations. The SVG image and icon plugins
@@ -155,12 +169,16 @@ def main():
             copy(dll, stage / dll.name)
         missing = [name for name in CRT_REQUIRED if not (stage / name).is_file()]
         require(not missing, f"The MSVC runtime under {crt} lacks: {', '.join(missing)}")
+        for name, path in pair.items():
+            copy(path, stage / name)
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
             copy(ROOT / name, stage / name)
         licenses = stage / "licenses"
         copy(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
         copy(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
         copy(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
+        copy(ROOT / "docs/licenses/conpty-LICENSE.txt", licenses / "conpty-LICENSE.txt")
+        copy(ROOT / "docs/licenses/conpty-NOTICE.md", licenses / "conpty-NOTICE.md")
         if args.rust_licenses:
             require((args.rust_licenses / "inventory.json").is_file(), "Collect dependency license texts first.")
             shutil.copytree(args.rust_licenses, licenses / "rust")
@@ -185,6 +203,7 @@ def main():
         readme = (ROOT / "packaging/windows/README.txt").read_text(encoding="utf-8")
         for key in ("version", "cli_version", "qt_version", "source_commit"):
             readme = readme.replace(f"@{key.upper()}@", manifest[key])
+        readme = readme.replace("@CONPTY_VERSION@", conpty_pair.PIN["version"])
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.
         (stage / "README.txt").write_bytes(readme.replace("\n", "\r\n").encode("utf-8"))

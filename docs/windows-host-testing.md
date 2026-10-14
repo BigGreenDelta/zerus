@@ -252,6 +252,8 @@ cargo build --locked
 cargo build --locked --example fake_agent
 cargo test --locked --no-run --bin hgs   # names the test binary, target/debug/deps/hgs-<hash>.exe
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/debug/hgs.exe")" target/debug/deps/hgs-<hash>.exe host::attach </dev/null
+python scripts/fetch-conpty.py --output target/conpty     # the pinned ConPTY pair
+export HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")"
 python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
@@ -269,10 +271,13 @@ bindings, a resize, `--existing --run-id`, the session's end and the host's
 death, and the console modes before, during and after each attach. Run it from
 the test binary itself: `cargo test` keeps its tests in a job that forbids
 breakaway, where hgs starts no host (D4), so under `cargo test` it skips.
-`tests/test_windows_host.py`, `tests/test_windows_host_survival.py` and
+`tests/test_windows_host.py`, `tests/test_windows_host_conpty.py`,
+`tests/test_windows_host_survival.py` and
 `tests/test_windows_lifecycle.py` take the build from `HGS_TEST_BIN` (default
 `target/debug/hgs.exe`) and the fake agent from `HGS_TEST_FAKE_AGENT` (default
 `target/debug/examples/fake_agent.exe`); their fake agent cases skip without one.
+The ConPTY cases take the pinned pair from `HGS_TEST_CONPTY_DIR` and skip without
+it ([the bundled ConPTY pair](#the-bundled-conpty-pair)).
 The lifecycle cases install into a temporary profile as `Staged` does and launch
 from the build under test, which plays the portable copy: sessions must still run
 the staged stable CLI. Their `Attach` cases run `hgs a` and an attached launch on
@@ -284,8 +289,9 @@ output to the end. `Listings` checks `local_host` in the local box.
 through `pwsh` and Windows PowerShell as Codex runs it (as an isolated test host's
 hooks, so local sessions need not be enabled), and tracked fake agents with
 private homes in a profile whose folder name has spaces and Cyrillic. The
-`windows-desktop` CI job runs the host and survival modules against the release
-`hgs.exe` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
+`windows-desktop` CI job runs the host, ConPTY, survival and lifecycle modules
+against the release `hgs.exe`, with the pinned pair it fetched in
+`HGS_TEST_CONPTY_DIR` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
 
 ## Writing host tests
 
@@ -328,3 +334,28 @@ the client finishes normally, and a later install removes the aside file and the
 old image once nothing runs them. When the test process itself runs inside a job
 that forbids breakaway, every host start fails with that reason; the survival cases
 also say where the test process runs.
+
+## The bundled ConPTY pair
+
+A host uses the bundled ConPTY only when `conpty.dll` and `OpenConsole.exe` both
+sit next to its own executable (spec D6, `src/host/conpty.rs`), and
+`hgs session-host install` stages them from the folder of the `hgs.exe` it runs as
+(D2). `hgs __host status` reports the result as `conpty` (`bundled` or `inbox`),
+and `host.log` notes it, with the reason for `inbox`, when the host starts.
+`python scripts/fetch-conpty.py --output DIR` writes the pair pinned in
+`packaging/windows/conpty.json` into `DIR`
+([CI](ci-and-aur.md#the-bundled-conpty-pair)); the portable zip ships it next to
+`hgs.exe`.
+
+`tests/test_windows_host_conpty.py` takes that folder from `HGS_TEST_CONPTY_DIR`
+and checks it against the pin first. `Bundled` copies the build under test into a
+temporary image folder with the pair and starts an isolated host from it
+(`HGS_HOST_IMAGE`): the host reports `bundled`, its cmd.exe session runs, and the
+host's pseudoconsole is the `OpenConsole.exe` of that folder, a child of the host.
+`conpty.dll` would otherwise fall back to System32's `conhost.exe` without saying
+so. With only `conpty.dll` left and then with neither file, the same copy reports
+`inbox` with its reason and starts no `OpenConsole.exe`. `Portable` runs
+`session-host install` from a folder laid out like the extracted zip, without the
+test host variables: the staged image holds the pinned pair, and the host started
+from it uses it. Every case waits until no process holds the files of its image
+folders before its temporary folder goes.

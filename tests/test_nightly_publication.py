@@ -1,5 +1,6 @@
 """Contracts for trusted nightly provenance, immutable assets and AUR upgrades."""
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from homebrew_tap_fixture import make_tap_remote, remote_file
+import conpty_pair
 import macos_release
 import nightly_common as nightly
 import release_common as common
@@ -48,6 +50,15 @@ def portable_zip(path, commit=COMMIT, version="0.37.0", entries=()):
     return path
 
 
+def pinned_pair():
+    """The ConPTY pin with the stand-ins of `portable_zip` as its pair."""
+    pin = copy.deepcopy(conpty_pair.load())
+    for name in conpty_pair.NAMES:
+        data = f"tested {name}".encode()
+        pin["files"][name].update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+    return pin
+
+
 class Download:
     """An anonymous release download served from the local candidate."""
     def __init__(self, path): self.stream = path.open("rb")
@@ -64,6 +75,10 @@ class NightlyTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="zerus-nightly-contract-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+        # The synthetic zips' ConPTY pair passes as the pinned build.
+        pin = patch.object(conpty_pair, "PIN", pinned_pair())
+        pin.start()
+        self.addCleanup(pin.stop)
         self.info = {"schema": 1, "channel": "nightly", "publication": "candidate",
                      "product_version": "0.37.0", "revision_count": 60, "source_commit": COMMIT,
                      "workflow_run_id": 123, "workflow_run_number": 7, "release_tag": "nightly-123",
