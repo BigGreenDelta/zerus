@@ -472,10 +472,20 @@ runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook run
   it (`CLAUDE_CODE_GIT_BASH_PATH`, Git for Windows in Program Files, the `git` on
   PATH) and is refused otherwise. A version that cannot be read is refused, as a
   form chosen without it would be kept.
-- **Codex** runs every command hook on Windows with `%COMSPEC% /C "COMMAND"` (a raw
-  argument; no configured hook shell) and prefers `commandWindows` there when it is
-  set; its handler accepts unknown fields, so older versions ignore it. hgs writes
-  the shell form as both `command` and `commandWindows`.
+- **Codex** prefers `commandWindows` on Windows and runs a command hook with the
+  session's shell (`build_hooks_config` in `core/src/session/mod.rs`, from 0.140 to
+  0.162), which `default_user_shell` makes PowerShell there: `pwsh`, else Windows
+  PowerShell, as `-NoProfile -Command COMMAND`. Only a session without one ready
+  local environment, which hgs never starts, or a computer without PowerShell uses
+  `cmd.exe /C "COMMAND"`.
+  PowerShell reads the shell form's quoted program as a string, runs it only with
+  its call operator, and turns a native exit code other than 0 or 1 into 1. hgs
+  writes the shell form as `command` and
+  `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` as `commandWindows`; the
+  command never reads `$input`, so PowerShell leaves the payload on standard input
+  to hgs (PowerShell 7's console host reads it only for a command that uses
+  `$input`). A stable CLI path with `“`, `”` or `„`, which PowerShell also reads as
+  double quotes, is refused.
 - **Kimi Code** runs `[[hooks]] command` with Node.js `spawn(command, {shell: true})`,
   that is `%COMSPEC% /d /s /c "COMMAND"`; it gets the shell form. On Windows the
   block's marker lines may end with CR LF; Unix keeps its LF-only search.

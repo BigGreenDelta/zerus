@@ -72,7 +72,8 @@
 //!   its own `timeout`, and `--hook-extra JSON` adds fields to every payload. On
 //!   Unix a command runs with `/bin/sh -c`. On Windows a configured command runs
 //!   as its agent runs it (spec D12): Codex's (its `commandWindows` when there is
-//!   one) with `%COMSPEC% /C "COMMAND"`, Kimi's with `%COMSPEC% /d /s /c
+//!   one) with PowerShell, `pwsh` or else Windows PowerShell, as `-NoProfile
+//!   -Command COMMAND` in a console of its own, Kimi's with `%COMSPEC% /d /s /c
 //!   "COMMAND"` (Node.js's `shell: true`); Claude Code's and `--hook-command`
 //!   directly, the first word (or double-quoted path) as the program and the
 //!   rest as its command line. An entry with `args` (Claude Code's exec form)
@@ -1361,7 +1362,8 @@ struct Hook {
 enum Runner {
     /// Directly: Claude Code's shell form and `--hook-command`.
     Direct,
-    /// `%COMSPEC% /C "COMMAND"`, as Codex runs it.
+    /// `-NoProfile -Command COMMAND` with the session's PowerShell, as Codex
+    /// runs it.
     Codex,
     /// `%COMSPEC% /d /s /c "COMMAND"`, as Kimi Code (Node.js) runs it.
     Kimi,
@@ -1478,18 +1480,40 @@ fn hook_process(command: &str, _runner: Runner) -> Command {
     process
 }
 
+/// The PowerShell Codex runs a hook with on Windows (its `default_user_shell`):
+/// `pwsh` on PATH or in PowerShell 7's folder, else Windows PowerShell.
+#[cfg(windows)]
+fn codex_powershell() -> PathBuf {
+    let on_path = |name: &str| {
+        env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|folder| folder.join(name))
+            .find(|path| path.is_file())
+    };
+    let system = PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()));
+    on_path("pwsh.exe")
+        .or_else(|| {
+            Some(PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe")).filter(|p| p.is_file())
+        })
+        .or_else(|| on_path("powershell.exe"))
+        .unwrap_or_else(|| system.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+}
+
 /// `"C:/path/hgs.exe" __state hook` as `runner` starts it: directly (the
-/// program, then its command line as is) or through `cmd.exe` as Codex or Kimi
-/// Code does.
+/// program, then its command line as is), through PowerShell as Codex does or
+/// through `cmd.exe` as Kimi Code does.
 #[cfg(windows)]
 fn hook_process(command: &str, runner: Runner) -> Command {
     use std::os::windows::process::CommandExt;
+    /// CREATE_NO_WINDOW, as Codex starts its hooks.
+    const NO_WINDOW: u32 = 0x0800_0000;
     let shell = || Command::new(env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
     match runner {
         Runner::Direct => {}
         Runner::Codex => {
-            let mut process = shell();
-            process.arg("/C").raw_arg(format!("\"{command}\""));
+            let mut process = Command::new(codex_powershell());
+            process
+                .args(["-NoProfile", "-Command", command])
+                .creation_flags(NO_WINDOW);
             return process;
         }
         Runner::Kimi => {

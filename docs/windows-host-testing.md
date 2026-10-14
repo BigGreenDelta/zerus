@@ -191,7 +191,8 @@ cat "$root/claude-home/settings.json"     # exec form: the stable CLI, args __st
 Hooks name the stable CLI with forward slashes. Claude Code from 2.1.296 gets its
 exec form (`command` and `args`, no shell), an older one the shell form
 `"C:/…/hgs.exe" __state hook` with Git Bash; Codex gets the shell form as `command`
-and `commandWindows` and runs it with `%COMSPEC% /C`; Kimi gets it in its
+and `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` as `commandWindows`, which
+it runs with PowerShell (`-NoProfile -Command`); Kimi gets the shell form in its
 `config.toml` block and runs it with `%COMSPEC% /d /s /c`. PowerShell cannot run the
 shell form. The fake agent runs each configuration's hooks the way its agent does.
 
@@ -216,9 +217,10 @@ from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
 agent cases skip without one. The lifecycle cases install into a temporary profile
 as `Staged` does and launch from the build under test, which plays the portable
 copy: sessions must still run the staged stable CLI. `tests/test_windows_hooks.py`
-runs the hook shell form through `CreateProcess`, `cmd.exe` as Codex and Kimi run
-it, and Git Bash when installed, and tracked fake agents through the S6 preview in
-a profile whose folder name has spaces and Cyrillic.
+runs the hook shell form through `CreateProcess`, `cmd.exe` as Kimi runs it, and
+Git Bash when installed, Codex's PowerShell form through `pwsh` and Windows
+PowerShell as Codex runs it, and tracked fake agents through the S6 preview in a
+profile whose folder name has spaces and Cyrillic.
 
 ## Writing host tests
 

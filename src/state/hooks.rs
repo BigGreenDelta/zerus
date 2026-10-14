@@ -114,8 +114,8 @@ fn resolved_target(path: &Path) -> Result<PathBuf> {
 /// (spec D12) it names the stable CLI by its absolute path with forward
 /// slashes: Claude Code gets its exec form when the installed version has it,
 /// else the shell form `"C:/…/hgs.exe" __state hook` that Git Bash, `cmd.exe`
-/// and `CreateProcess` read alike; Codex gets the shell form both as `command`
-/// and as its Windows override `commandWindows`.
+/// and `CreateProcess` read alike; Codex gets the shell form as `command` and
+/// its PowerShell form as its Windows override `commandWindows`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     /// The command line a shell runs, or with `args` the executable.
@@ -444,11 +444,15 @@ mod windows {
 
     pub(super) type Version = (u64, u64, u64);
 
-    /// Characters that Git Bash, `cmd.exe` and `CreateProcess` read
-    /// differently inside double quotes: `"` ends them, `%` expands a variable
-    /// in `cmd.exe` and `!` with its delayed expansion, `$` and `` ` `` expand
-    /// in bash.
+    /// Characters that Git Bash, `cmd.exe`, `CreateProcess` and PowerShell
+    /// read differently inside double quotes: `"` ends them, `%` expands a
+    /// variable in `cmd.exe` and `!` with its delayed expansion, `$` and `` ` ``
+    /// expand in bash and PowerShell.
     const SHELL_SPECIAL: &[char] = &['"', '%', '!', '$', '`'];
+
+    /// What PowerShell also reads as a double quote: a path with one would end
+    /// the quoted program of Codex's PowerShell form.
+    const POWERSHELL_QUOTES: &[char] = &['\u{201C}', '\u{201D}', '\u{201E}'];
 
     /// The absolute Windows path `path` of the stable CLI with forward
     /// slashes, as every Windows hook names it: `C:/Users/example/.local/bin/hgs.exe`.
@@ -515,14 +519,38 @@ mod windows {
         shell_command(stable).map(Entry::shell)
     }
 
-    /// Codex's entry: the shell form as `command` and as `commandWindows`,
-    /// which Codex runs with `%COMSPEC% /C` on Windows and older versions
-    /// ignore.
+    /// The PowerShell form, `& "C:/…/hgs.exe" __state hook; exit
+    /// $LASTEXITCODE`: PowerShell runs a quoted program only with its call
+    /// operator, and its `-Command` turns a native exit code other than 0 or 1
+    /// into 1 unless the command exits with it (hgs's 2 blocks a prompt during
+    /// a pause). The command never reads `$input`, so PowerShell leaves its
+    /// standard input, the hook's payload, to hgs unread.
+    pub(super) fn powershell_command(stable: &str) -> Result<String> {
+        shell_command(stable)?;
+        let path = path(stable)?;
+        if let Some(quote) = path.chars().find(|c| POWERSHELL_QUOTES.contains(c)) {
+            return Err(format!(
+                "the stable hgs CLI path {path} contains {quote:?}, which PowerShell reads as \
+                 a double quote in a hook command; tracked sessions need a profile path \
+                 without it. Set HGS_TRACKING=0 to run the agent untracked"
+            ));
+        }
+        Ok(format!(
+            "& \"{path}\" {} {}; exit $LASTEXITCODE",
+            HOOK_ARGS[0], HOOK_ARGS[1]
+        ))
+    }
+
+    /// Codex's entry: the shell form as `command`, and the PowerShell form as
+    /// `commandWindows`, which Codex prefers on Windows and runs with the
+    /// session's shell, PowerShell there (`-NoProfile -Command`, Codex 0.140 to
+    /// 0.162: `build_hooks_config`, `default_user_shell`). `cmd.exe` runs it
+    /// only for a session without one local environment, which hgs never
+    /// starts, or on a computer without PowerShell.
     pub(super) fn codex_entry(stable: &str) -> Result<Entry> {
-        let command = shell_command(stable)?;
         Ok(Entry {
-            command_windows: Some(command.clone()),
-            ..Entry::shell(command)
+            command_windows: Some(powershell_command(stable)?),
+            ..Entry::shell(shell_command(stable)?)
         })
     }
 
@@ -792,6 +820,8 @@ mod tests {
     const UNIX: &str = "'/opt/hgs dir/hgs' __state hook";
     const STABLE: &str = r"C:\Profiles\Иван Петров\.local\bin\hgs.exe";
     const SHELL: &str = r#""C:/Profiles/Иван Петров/.local/bin/hgs.exe" __state hook"#;
+    const POWERSHELL: &str =
+        r#"& "C:/Profiles/Иван Петров/.local/bin/hgs.exe" __state hook; exit $LASTEXITCODE"#;
 
     fn path() -> PathBuf {
         PathBuf::from("/config/file")
@@ -1094,8 +1124,36 @@ mod tests {
             Entry {
                 command: SHELL.into(),
                 args: None,
-                command_windows: Some(SHELL.into()),
+                command_windows: Some(POWERSHELL.into()),
             }
+        );
+    }
+
+    #[test]
+    fn codex_gets_a_powershell_form_on_windows() {
+        assert_eq!(forms::powershell_command(STABLE).unwrap(), POWERSHELL);
+        assert_eq!(
+            forms::powershell_command(r"C:\Profiles\a & b (1)\^x;y'z%\hgs.exe").unwrap_err(),
+            forms::shell_command(r"C:\Profiles\a & b (1)\^x;y'z%\hgs.exe").unwrap_err()
+        );
+        assert_eq!(
+            forms::powershell_command(r"C:\Profiles\a & b (1)\^x;y'z\hgs.exe").unwrap(),
+            r#"& "C:/Profiles/a & b (1)/^x;y'z/hgs.exe" __state hook; exit $LASTEXITCODE"#
+        );
+        // PowerShell also ends a double-quoted string at these.
+        for quote in ['\u{201C}', '\u{201D}', '\u{201E}'] {
+            let stable = format!(r"C:\Users\a{quote}b\hgs.exe");
+            assert!(forms::shell_command(&stable).is_ok());
+            let error = forms::powershell_command(&stable).unwrap_err();
+            assert!(error.contains(&format!("{quote:?}")), "{error}");
+            assert!(error.contains("HGS_TRACKING=0"), "{error}");
+            assert!(forms::codex_entry(&stable).is_err());
+        }
+        // The shell form, Codex's `command`, is what names the entry as hgs's.
+        let hook = json!({"type": "command", "command": SHELL, "commandWindows": POWERSHELL});
+        assert_eq!(
+            Entry::owned(&hook, true),
+            Some(forms::codex_entry(STABLE).unwrap())
         );
     }
 
@@ -1181,7 +1239,8 @@ mod tests {
             assert_eq!(
                 hook_entries(&hooks, event),
                 [
-                    json!({"type": "command", "command": SHELL, "commandWindows": SHELL, "timeout": 5})
+                    json!({"type": "command", "command": SHELL, "commandWindows": POWERSHELL,
+                    "timeout": 5})
                 ]
             );
         }

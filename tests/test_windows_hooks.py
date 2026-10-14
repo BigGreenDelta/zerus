@@ -3,21 +3,26 @@
 
 Windows only. `HookForms` runs the shell form hgs writes there,
 `"C:/…/hgs.exe" __state hook`, through every program that runs it for an agent:
-`CreateProcess` directly, `%COMSPEC% /C "…"` (Codex), `%COMSPEC% /d /s /c "…"`
-(Kimi Code, Node.js's `shell: true`) and Git Bash (Claude Code's shell form) when
-it is installed, with a copy of the build under test as the fake hgs in a folder
-whose name has spaces, Cyrillic and characters that `cmd.exe` treats specially
-outside quotes. Each run must reach `hgs __state hook` with its payload on stdin:
-the payload has no session ID, so hgs answers with exactly that error. PowerShell
-reads a quoted program as a string and never runs hgs, which is why Claude Code
-needs Git Bash for the shell form.
+`CreateProcess` directly, `%COMSPEC% /d /s /c "…"` (Kimi Code, Node.js's
+`shell: true`), `%COMSPEC% /C "…"` and Git Bash (Claude Code's shell form) when it
+is installed, and Codex's PowerShell form
+`& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` the way Codex runs it, with
+`pwsh` and Windows PowerShell as `-NoProfile -Command …` in a console of their
+own. A copy of the build under test is the fake hgs, in a folder whose name has
+spaces, Cyrillic and characters that `cmd.exe` treats specially outside quotes.
+Each run must reach `hgs __state hook` with its payload on stdin: the payload has
+no session ID, so hgs answers with exactly that error. PowerShell reads the
+quoted program of the shell form as a string and never runs hgs, which is why
+Claude Code needs Git Bash for the shell form and Codex, whose hook shell is
+PowerShell, gets the PowerShell form.
 
 `TrackedHooks` enables local sessions in a temporary profile whose folder has
 spaces, Cyrillic and parentheses, sets `HGS_WINDOWS_TRACKING_PREVIEW=1` with an
 isolated state directory and private agent homes, and launches tracked sessions of
 native fake agents named `claude`, `codex` and `kimi`. hgs installs its hooks into
-their homes (Claude Code's exec form, Codex's `command` and `commandWindows`,
-Kimi's block); each fake reads them and runs them as its agent does
+their homes (Claude Code's exec form, Codex's shell form as `command` and
+PowerShell form as `commandWindows`, Kimi's block); each fake reads them and runs
+them as its agent does
 (`examples/fake_agent.rs`), and the hooks move the session's state: the
 conversation is confirmed, a prompt and its reply appear in `hgs inspect`, and a
 Claude session pauses and resumes its conversation. The preview's refusals are
@@ -59,6 +64,19 @@ def shell_form(hgs):
     return f'"{str(hgs).replace(os.sep, "/")}" __state hook'
 
 
+def powershell_form(hgs):
+    return f'& "{str(hgs).replace(os.sep, "/")}" __state hook; exit $LASTEXITCODE'
+
+
+def powershells():
+    """The PowerShells Codex may run its hooks with (its `default_user_shell`): pwsh, Windows PowerShell."""
+    pwsh = shutil.which("pwsh.exe") or Path(os.environ.get("ProgramFiles", r"C:\Program Files"), "PowerShell", "7",
+                                            "pwsh.exe")
+    windows = shutil.which("powershell.exe") or Path(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0",
+                                                     "powershell.exe")
+    return [str(path) for path in (pwsh, windows) if Path(path).is_file()]
+
+
 @unittest.skipUnless(os.name == "nt", "the Windows hook forms run on Windows only")
 class HookForms(unittest.TestCase):
     def setUp(self):
@@ -88,7 +106,7 @@ class HookForms(unittest.TestCase):
         # A string is the command line CreateProcess parses itself.
         runners = {
             "CreateProcess": command,
-            "cmd /C (Codex)": f'"{comspec}" /C "{command}"',
+            "cmd /C": f'"{comspec}" /C "{command}"',
             "cmd /d /s /c (Kimi Code, Node.js)": f'"{comspec}" /d /s /c "{command}"',
         }
         bash = git_bash()
@@ -102,12 +120,18 @@ class HookForms(unittest.TestCase):
         # Claude Code's exec form: the program and its arguments, no shell.
         result = self.run_form([str(self.hgs).replace(os.sep, "/"), "__state", "hook"])
         self.assertIn(NO_SESSION, result.stderr)
-        # PowerShell reads the quoted program as a string expression.
-        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-        if powershell:
-            result = self.run_form([powershell, "-NoProfile", "-NonInteractive", "-Command", command])
-            self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn(NO_SESSION, result.stderr + result.stdout)
+        shells = powershells()
+        self.assertTrue(shells, "no PowerShell")
+        for powershell in shells:
+            with self.subTest(powershell=powershell):
+                # Codex's form, as Codex runs it: hgs reads the payload PowerShell left unread.
+                result = self.run_form([powershell, "-NoProfile", "-Command", powershell_form(self.hgs)])
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(NO_SESSION, result.stderr)
+                # PowerShell reads the shell form's quoted program as a string expression.
+                result = self.run_form([powershell, "-NoProfile", "-NonInteractive", "-Command", command])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(NO_SESSION, result.stderr + result.stdout)
 
 
 @unittest.skipUnless(os.name == "nt", "local sessions on Windows run on Windows only")
@@ -194,14 +218,15 @@ class TrackedHooks(LifecycleCase):
 
         # The bytes hgs wrote: each agent's own form, naming the stable CLI.
         shell = f'"{self.stable}" __state hook'
+        powershell = f'& "{self.stable}" __state hook; exit $LASTEXITCODE'
         settings = json.loads((self.homes["claude"] / "settings.json").read_text(encoding="utf-8"))
         for event, groups in settings["hooks"].items():
             self.assertEqual(groups, [{"hooks": [{"type": "command", "command": self.stable,
                                                   "args": ["__state", "hook"], "timeout": 5}]}], event)
         hooks = json.loads((self.homes["codex"] / "hooks.json").read_text(encoding="utf-8"))
         for event, groups in hooks["hooks"].items():
-            self.assertEqual(groups, [{"hooks": [{"type": "command", "command": shell, "commandWindows": shell,
-                                                  "timeout": 5}]}], event)
+            self.assertEqual(groups, [{"hooks": [{"type": "command", "command": shell,
+                                                  "commandWindows": powershell, "timeout": 5}]}], event)
         kimi = (self.homes["kimi"] / "config.toml").read_text(encoding="utf-8")
         self.assertEqual(kimi.count("# BEGIN hgs session tracking"), 1)
         self.assertEqual({hook["command"] for hook in tomllib.loads(kimi)["hooks"]}, {shell})
