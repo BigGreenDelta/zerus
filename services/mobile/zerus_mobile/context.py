@@ -8,7 +8,7 @@ from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
 CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clear-context"}
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
 TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
-LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "launch", "worktrees", "worktree_create"})
+LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "directory_create", "launch", "worktrees", "worktree_create"})
 COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})

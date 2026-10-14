@@ -456,6 +456,29 @@ preserves deliberate edits through dependent selector changes. A delayed result
 cannot change a later deliberate selection. It cannot be dismissed while a
 creation is in flight.
 
+The folder browser offers **New folder** and an explicit **Create this path**
+for a missing typed path. `directory_create` is a separate computer-scoped
+API-v1 mutation with exactly `{request_id, path}` and an absolute POSIX path;
+it never creates Git repositories, worktrees or agent sessions. The parent must
+already exist. The connector verifies that canonical parent, then calls the
+installed `hgs dirs --create <path> --request-id UUID` once. A confirmed receipt
+matches the UUID, literal requested path and canonical parent/new folder name.
+The phone persists the exact target and request before transport, keeps pending
+creation locked, and reads only the original receipt after an uncertain result.
+It browses a confirmed result before offering **Use this folder**; delayed
+results cannot select a folder in another form or on another computer.
+
+This additive operation requires relay, connector and installed computer CLI
+support as well as the Android client. It is advertised only for a target whose
+help includes `dirs --create <path>`; existing folder browsing remains available
+on older peers. Publish the additive relay support, then update the gateway and
+direct-peer CLI plus the connector while retaining its configuration and durable
+journal. Verify fresh per-target capabilities before offering clients the new
+workflow. No database/index/read-retention migration is needed: folder creation
+stays in the permanent mutation class, outside every read or short-retention
+class. Deployment must use the exact qualified source, since semantic versions
+alone do not establish this capability.
+
 Worktree discovery and creation are separate capability-gated operations on the
 selected computer. Discovery returns a bounded native catalog; stale data cannot
 authorize creation or project membership. Creation pins the source, verified Git
@@ -802,7 +825,7 @@ An envelope contains `request_id`, `state`, `result` and `error`. States are
 are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 `compact_context`, `clear_context`, `send_now`, `settings`, `process_output`
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
-`terminal_input`, `history`, `catalog`, `dirs`, `launch`, `worktrees`,
+`terminal_input`, `history`, `catalog`, `dirs`, `directory_create`, `launch`, `worktrees`,
 `worktree_create`, `recovery_action`, `mark_read`, `set_mobile_delivery` and
 `attachment_read`.
 

@@ -35,6 +35,7 @@ from .history import validate_history
 from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
 from .launch import catalog as project_catalog, validate as validate_launch
 from .launch import projects as launch_projects, project_choice
+from .launch import DIRECTORY_CREATE_HELP, DIRECTORY_CREATE_FEATURE, canonical_directory, directory_created
 from . import worktrees
 from .terminal import validate as validate_terminal
 from .history import bound_inspection
@@ -302,6 +303,7 @@ class Connector:
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
+        self.directory_create_supported = False
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
@@ -478,9 +480,9 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
-            "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
+            "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
                         **({} if self.terminal_supported else {"terminal": "Native CLI lacks the scoped Terminal ABI"})}}
 
@@ -497,6 +499,7 @@ class Connector:
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
+        self.directory_create_supported = False
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
@@ -515,6 +518,7 @@ class Connector:
             self.launch_supported = isinstance(help_text,str) and "--launch-id" in help_text
             self.project_launch_supported = isinstance(help_text,str) and "swarm assign-launch --json" in help_text
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
+            self.directory_create_supported = isinstance(help_text, str) and DIRECTORY_CREATE_HELP in help_text
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
@@ -803,6 +807,11 @@ class Connector:
         if not self.journal.claim(request_id, journal_operation, request_hash):
             return self.journal.replay(request_id)
         try:
+            if operation == "directory_create" and "gateway_route" in request:
+                route = request["gateway_route"]
+                if (not isinstance(route, dict) or ("computer_id" in request
+                        and route.get("computer_id") != request["computer_id"])):
+                    raise ConnectorError("directory creation computer does not match its immutable route")
             target, machine_id = await self.fleet.resolve(request.get("gateway_route"),
                                                        present="gateway_route" in request)
         except asyncio.CancelledError:
@@ -853,8 +862,10 @@ class Connector:
                 raise ConnectorError("native speech profile management ABI is unavailable")
             if operation in speech.OPERATIONS and not self.speech_supported:
                 raise ConnectorError("native speech ABI is unavailable")
-            if operation in LAUNCH_OPERATIONS and not self.launch_supported:
+            if operation in LAUNCH_OPERATIONS - {"directory_create"} and not self.launch_supported:
                 raise ConnectorError("native exact launch-ID ABI is unavailable")
+            if operation == "directory_create" and not self.directory_create_supported:
+                raise ConnectorError("native explicit directory creation ABI is unavailable")
             if operation in COMPUTER_OPERATIONS and (not self.preference_supported or getattr(self, "fleet", None) is None):
                 raise ConnectorError("the shared delivery setting is changed on the gateway computer with a current hgs")
             if operation in worktrees.OPERATIONS and not self.worktree_supported:
@@ -863,6 +874,13 @@ class Connector:
                 raise ConnectorError("native shared read ABI is unavailable")
             if operation == "attachment_read" and not self.attachment_read_supported:
                 raise ConnectorError("native attachment read ABI is unavailable")
+            if operation == "directory_create":
+                from pathlib import PurePosixPath
+                parent_result = await self.native(["dirs", str(PurePosixPath(payload["path"]).parent)], timeout=5)
+                if not isinstance(parent_result, dict):
+                    raise ConnectorError("native directory parent catalog is invalid")
+                try: confirmed_parent = canonical_directory(parent_result.get("path"))
+                except ValueError as error: raise ConnectorError(str(error)) from None
             if operation == "worktree_create":
                 from pathlib import PurePosixPath
                 destination = PurePosixPath(payload["destination"])
@@ -929,6 +947,7 @@ class Connector:
                 except ValueError as error: raise ConnectorError(str(error)) from None
                 result["project_launch_supported"] = False
                 result["worktree_supported"] = self.worktree_supported
+                result["directory_create_supported"] = self.directory_create_supported
                 if self.project_launch_supported:
                     try:
                         result.update(launch_projects(await self.native(["swarm", "get"], timeout=3)))
@@ -944,6 +963,11 @@ class Connector:
             elif operation == "worktrees":
                 result = worktrees.catalog(await self.native(["worktrees", "--path", payload['path'], "--refresh", "--json"], timeout=5), payload['path'])
                 result['request_id'] = request_id
+            elif operation == "directory_create":
+                argv = ["dirs", "--create", payload["path"], "--request-id", request_id]
+                raw = await self.native(argv, timeout=5)
+                try: result = directory_created(raw, payload, request_id, confirmed_parent)
+                except ValueError as error: raise ConnectorError(str(error)) from None
             elif operation == "worktree_create":
                 argv = ["worktrees", "create", "--path", payload['path'], "--common-dir", payload['common_dir'],
                         "--branch", payload['branch'], "--base", payload['base'], "--destination", payload['destination'], "--request-id", request_id, "--json", "--mobile"]

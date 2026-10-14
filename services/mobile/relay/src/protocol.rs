@@ -32,7 +32,14 @@ pub const READS: &[&str] = &[
 /// (`attachment_history`), so this text and that index stay unchanged.
 pub const READ_SQL: &str =
     "('inspect','history','process_output','terminal_snapshot','catalog','dirs','worktrees','mark_read')";
-pub const LAUNCH: &[&str] = &["catalog", "dirs", "launch", "worktrees", "worktree_create"];
+pub const LAUNCH: &[&str] = &[
+    "catalog",
+    "dirs",
+    "directory_create",
+    "launch",
+    "worktrees",
+    "worktree_create",
+];
 /// Computer-scoped: no session, delivered to the gateway computer itself.
 pub const SPEECH: &[&str] = &[
     "speech_config",
@@ -75,6 +82,7 @@ pub const OPERATIONS: &[&str] = &[
     "clear_context",
     "compact_context",
     "dirs",
+    "directory_create",
     "forget",
     "fork",
     "history",
@@ -571,6 +579,16 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
             fields(p, &["request_id", "path"], &[])?;
             let path = text(&p["path"], 4096, false)?;
             if path != "~" && !path.starts_with('/') {
+                return Err(Error::BAD);
+            }
+        }
+        "directory_create" => {
+            fields(p, &["request_id", "path"], &[])?;
+            let path = text(&p["path"], 4096, false)?;
+            if !path.starts_with('/')
+                || path.len() > 4096
+                || matches!(path.rsplit('/').next(), Some("" | "." | ".."))
+            {
                 return Err(Error::BAD);
             }
         }

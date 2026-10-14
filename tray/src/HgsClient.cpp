@@ -1,6 +1,7 @@
 #include "HgsClient.h"
 #include "ProcessRunner.h"
 #include "LocalFile.h"
+#include "MachinePlatform.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1076,6 +1077,70 @@ quint64 HgsClient::requestDirectories(const QString &host, const QString &path, 
            }, [this, host, request](const QString &, const QString &detail) {
                emit directoriesFailed(request, host, detail);
            });
+    return request;
+}
+
+quint64 HgsClient::createDirectory(const QString &host, const QString &path)
+{
+    const quint64 request = ++m_directoryRequest;
+    const auto token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const auto style = host.isEmpty() ? MachinePlatform::build() : MachinePlatform::Style::Posix;
+    auto requested = path;
+    if (style == MachinePlatform::Style::Windows) requested.replace('\\', '/');
+    const auto split = requested.lastIndexOf('/');
+    const auto parentPath = split < 0 ? QStringLiteral(".") : split == 0 ? QStringLiteral("/") : requested.left(split);
+    const auto leaf = requested.mid(split + 1);
+    const auto mutate = [this, host, path, request, token, style, leaf](const QString &parent) {
+        QStringList args{"dirs", "--create", path, "--request-id", token};
+        if (!host.isEmpty()) args.prepend('@' + host);
+        const auto expected = MachinePlatform::clean(parent + '/' + leaf, style);
+        runHgs(m_hgs, args, host.isEmpty() ? 5000 : 15000, this,
+            [this, host, path, request, token, style, expected, parent](const QByteArray &bytes) {
+                const auto data = QJsonDocument::fromJson(bytes).object();
+                const auto confirmed = data.value("path").toString();
+                if (data["status"] != "created" || data["request_id"] != token || data["requested_path"] != path
+                    || !MachinePlatform::absolute(confirmed, style) || !MachinePlatform::same(confirmed, expected, style)
+                    || !MachinePlatform::same(data.value("parent").toString(), parent, style)) {
+                    emit directoryCreationFailed(request, host,
+                        tr("Folder creation could not be confirmed. Open the path to check it before trying again."));
+                    return;
+                }
+                emit directoryCreated(request, host, data);
+            }, [this, host, request](const QString &, const QString &error) {
+                emit directoryCreationFailed(request, host,
+                    tr("%1\nOpen the path to check whether the folder exists before trying again.").arg(error));
+            });
+    };
+    QStringList help{QStringLiteral("--help")};
+    if (!host.isEmpty()) help.prepend('@' + host);
+    // Probe the selected installed CLI, never fall through to an old agent launch.
+    runHgs(m_hgs, help, host.isEmpty() ? 5000 : 15000, this,
+        [this, host, request, parentPath, style, mutate](const QByteArray &out) {
+            if (!out.contains("dirs --create <path>")) {
+                emit directoryCreationFailed(request, host,
+                    tr("Update hgs on %1 to create folders. You can still choose existing folders.")
+                        .arg(host.isEmpty() ? tr("this computer") : host));
+                return;
+            }
+            QStringList args{"dirs", parentPath};
+            if (!host.isEmpty()) args.prepend('@' + host);
+            // Pin the canonical parent before mkdir, retaining symlink aliases.
+            runHgs(m_hgs, args, host.isEmpty() ? 5000 : 15000, this,
+                [this, host, request, style, mutate](const QByteArray &bytes) {
+                    const auto data = QJsonDocument::fromJson(bytes).object();
+                    const auto parent = data.value("path").toString();
+                    if (!MachinePlatform::absolute(parent, style) || !data.value("directories").isArray()) {
+                        emit directoryCreationFailed(request, host,
+                            tr("The computer did not confirm the parent folder. Open it before creating a folder."));
+                        return;
+                    }
+                    mutate(parent);
+                }, [this, host, request](const QString &, const QString &error) {
+                    emit directoryCreationFailed(request, host, error);
+                });
+        }, [this, host, request](const QString &, const QString &error) {
+            emit directoryCreationFailed(request, host, error);
+        });
     return request;
 }
 

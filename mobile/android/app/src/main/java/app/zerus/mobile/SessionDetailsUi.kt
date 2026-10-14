@@ -432,7 +432,7 @@ import org.json.JSONObject
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
-    "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
+    "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
 }
 /** Computer-scoped actions such as set_mobile_delivery have no session, so the operation names the card. */
 internal fun sessionActionTitle(action: SessionAction) =

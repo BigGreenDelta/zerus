@@ -238,6 +238,56 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     )
 }
 
+fn create_directory(path: &str, request_id: &str) -> Result<Value> {
+    if path.is_empty() || path.len() > 4096 || path.chars().any(|c| c.is_control()) {
+        return Err("directory paths must be nonempty, at most 4096 UTF-8 bytes and free of control characters".into());
+    }
+    let leaf = path.rsplit(|c| c == '/' || (cfg!(windows) && c == '\\')).next().unwrap_or("");
+    if matches!(leaf, "" | "." | "..") {
+        return Err("choose a new folder name without a trailing separator".into());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        let relative = Path::new(rest);
+        if relative.has_root() || matches!(relative.components().next(), Some(std::path::Component::Prefix(_))) {
+            return Err("home-relative paths cannot start with a root or drive prefix".into());
+        }
+    }
+    if !uuid::Uuid::parse_str(request_id)
+        .is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+    {
+        return Err("--request-id must be a canonical nonempty UUID".into());
+    }
+    let expanded = if path == "~" {
+        home()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        home().join(rest)
+    } else {
+        PathBuf::from(path)
+    };
+    expanded.file_name().ok_or("choose a new folder name")?;
+    let parent = expanded.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = crate::platform::canonical(parent)
+        .map_err(|e| format!("parent folder must already exist: {e}"))?;
+    if !parent.is_dir() {
+        return Err("parent is not a directory".into());
+    }
+    // One atomic mkdir: never overwrite, create intermediate parents or retry.
+    std::fs::create_dir(&expanded).map_err(|e| format!("{path}: {e}"))?;
+    let directory = crate::platform::canonical(&expanded)
+        .map_err(|e| format!("folder creation could not be confirmed; inspect {path}: {e}"))?;
+    Ok(json!({"status":"created", "request_id":request_id,
+        "requested_path":path, "path":directory, "parent":parent}))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn home_relative_creation_rejects_windows_roots_and_drive_prefixes_before_effects() {
+    for path in ["~//root/child", "~/\\root\\child", "~/C:/child", "~/C:child"] {
+        let error = create_directory(path, "11111111-1111-4111-8111-111111111111").unwrap_err();
+        assert!(error.contains("root or drive prefix"), "{path}: {error}");
+    }
+}
+
 /// Enrich the CLI's tmux snapshot without a subprocess or a JSON stdin pipe.
 pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
     local_sessions()?;
@@ -502,6 +552,19 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "worktrees" { return worktrees::dispatch(args); }
     if command == "git-status" { return git_status::dispatch(args); }
     if command == "dirs" {
+        if args.first().map(String::as_str) == Some("--create") {
+            let request_id;
+            let (path, id) = match args {
+                [_, path] => {
+                    request_id = uuid::Uuid::new_v4().to_string();
+                    (path, request_id.as_str())
+                }
+                [_, path, option, id] if option == "--request-id" => (path, id.as_str()),
+                _ => return Err("usage: hgs dirs --create <path> [--request-id UUID]".into()),
+            };
+            println!("{}", create_directory(path, id)?);
+            return Ok(0);
+        }
         let hidden = args.first().map(String::as_str) == Some("--hidden");
         let paths = if hidden { &args[1..] } else { args };
         if paths.len() > 1 {

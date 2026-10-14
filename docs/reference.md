@@ -944,6 +944,23 @@ catalog assignments and unresolved conflicts remain available for review.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
+browser offers **New folder…** on the selected remote computer. Enter a new
+folder path and explicitly choose **Create folder**; the parent must already
+exist. A missing path entered in the browser is carried into that form. Once
+creation is confirmed, choose **Use this folder** to select it for the project
+or session. Browsing and cancelling the creation form do not create anything,
+and existing paths are never replaced. This requires an updated `hgs` on the
+selected computer; older peers can still browse existing folders. If creation
+cannot be confirmed, open the path with **Go** before deciding whether to try
+again. Creating a folder does not initialize Git or start an agent.
+
+The CLI equivalent is `hgs [@host] dirs --create <path> [--request-id UUID]`.
+It creates one directory and returns the canonical path plus the exact request
+identity as JSON. It never creates missing parents or repeats an uncertain
+operation. Local creation rejects `--dry-run`; remote dry runs only print the
+transport command.
+
+The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
 the sort. Sorting preserves the selected folder and does not reorder the shared
 catalog. The divider below the list adjusts the folder/worktree heights and

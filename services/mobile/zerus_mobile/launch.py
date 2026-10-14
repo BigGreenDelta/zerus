@@ -1,20 +1,23 @@
 """Allowlisted native session creation and privacy-minimal local catalogs."""
 import json
 import re
+import uuid
 from pathlib import PurePosixPath
 from .context import bounded
 from .projects import normalize
 from . import worktrees
 from .accounts import MAX_CATALOG_BYTES, model_options, usage
 
-OPERATIONS = frozenset({'catalog','dirs','launch'}) | worktrees.OPERATIONS
+OPERATIONS = frozenset({'catalog','dirs','directory_create','launch'}) | worktrees.OPERATIONS
+DIRECTORY_CREATE_HELP = 'dirs --create <path>'
+DIRECTORY_CREATE_FEATURE = 'directory_create_v1'
 AGENTS = frozenset({'codex','claude','kimi','dsh','opencode'})
 
 
 def validate(operation, payload, request_id):
     if operation in worktrees.OPERATIONS:
         return worktrees.validate(operation, payload, request_id)
-    fields = {'catalog': {'request_id'}, 'dirs': {'request_id','path'},
+    fields = {'catalog': {'request_id'}, 'dirs': {'request_id','path'}, 'directory_create': {'request_id','path'},
               'launch': {'request_id','agent','directory','tag'}}[operation]
     extras = {'account_id','model','swarm_id','project_id','project_folder_id','add_folder','worktree_folder_id','worktree_common_dir'} if operation=='launch' else set()
     if not isinstance(payload, dict) or not fields <= set(payload) or set(payload)-fields-extras or payload.get('request_id')!=request_id:
@@ -22,6 +25,10 @@ def validate(operation, payload, request_id):
     if operation=='dirs':
         path=bounded(payload['path'],4096)
         if path!='~' and not PurePosixPath(path).is_absolute(): raise ValueError('directory must be absolute or home')
+    if operation=='directory_create':
+        if str(uuid.UUID(request_id)) != request_id:
+            raise ValueError('directory creation requires a canonical request UUID')
+        directory_destination(payload['path'])
     if operation=='launch':
         if not isinstance(payload['agent'],str) or payload['agent'] not in AGENTS: raise ValueError('unsupported native provider')
         directory=bounded(payload['directory'],4096)
@@ -55,6 +62,35 @@ def validate(operation, payload, request_id):
                 folder=bounded(payload['project_folder_id'],128)
                 if folder.strip()!=folder or len(folder.encode('utf-8'))>128: raise ValueError('invalid project folder identifier')
                 if payload['add_folder']: raise ValueError('an existing folder cannot also be added')
+
+
+def directory_destination(value):
+    """Literal absolute POSIX child path; parents must already exist natively."""
+    value = bounded(value, 4096)
+    if (not value.startswith('/') or len(value.encode('utf-8')) > 4096
+            or value.rsplit('/', 1)[-1] in ('', '.', '..')):
+        raise ValueError('new directory must be an absolute child path')
+    return value
+
+
+def canonical_directory(value):
+    value = bounded(value, 4096)
+    path = PurePosixPath(value)
+    if (not path.is_absolute() or len(value.encode('utf-8')) > 4096
+            or str(path) != value or value.startswith('//') or '..' in path.parts):
+        raise ValueError('native directory path is not canonical')
+    return value
+
+
+def directory_created(raw, payload, request_id, parent):
+    """Only the exact native receipt may select the new folder on the client."""
+    expected = str(PurePosixPath(parent) / payload['path'].rsplit('/', 1)[-1])
+    if (not isinstance(raw, dict) or raw.get('status') != 'created'
+            or raw.get('request_id') != request_id or raw.get('requested_path') != payload['path']
+            or raw.get('parent') != parent or raw.get('path') != expected):
+        raise ValueError('native directory creation was not confirmed by exact identity')
+    return {'status': 'created', 'request_id': request_id, 'requested_path': payload['path'],
+            'path': canonical_directory(raw['path']), 'parent': canonical_directory(raw['parent'])}
 
 
 def catalog(raw):

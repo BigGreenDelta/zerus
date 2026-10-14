@@ -170,6 +170,7 @@ public:
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &fingerprint, bool deleteBranch);
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
+    quint64 createDirectory(const QString &host, const QString &path);
     bool requestInspection(const QString &host, const QString &name, qint64 after = 0, const QString &archiveId = {}, bool includeProcesses = true);
     quint64 requestProcess(const QString &host, const QString &name, const QString &processId, const QString &run,
                            const QString &conversation, const QString &archive, const QString &generation, bool stop = false);
@@ -284,6 +285,8 @@ signals:
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void worktreeRemoved(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void directoriesReady(quint64 request, const QString &host, const QJsonObject &data);
+    void directoryCreated(quint64 request, const QString &host, const QJsonObject &data);
+    void directoryCreationFailed(quint64 request, const QString &host, const QString &detail);
     void directoriesFailed(quint64 request, const QString &host, const QString &detail);
     // Процесс не запустился или не уложился в таймаут. Это НЕ то же самое, что ok:false:
     // здесь сломан сам вызов hgs, и трей должен показать состояние «?».

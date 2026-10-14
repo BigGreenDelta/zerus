@@ -273,6 +273,12 @@ target_link_libraries(test_projectsdialog PRIVATE Qt6::Test Qt6::Widgets hgs-tra
 zerus_add_test(projectsdialog test_projectsdialog)
 set_tests_properties(projectsdialog PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
 
+add_executable(test_directorydialog test_directorydialog.cpp)
+target_include_directories(test_directorydialog PRIVATE ../src)
+target_link_libraries(test_directorydialog PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(directorydialog test_directorydialog)
+set_tests_properties(directorydialog PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
+
 # Меню трея целиком: дерево QMenu, переиспользование долгоживущих подменю, гейт «не
 # трогать неизменившееся содержимое» и сигналы наружу. QApplication нужен, потому что
 # QMenu -- виджет; offscreen задаётся тут же, тем же приёмом, что у iconfactory выше,

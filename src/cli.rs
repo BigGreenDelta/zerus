@@ -100,6 +100,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
+       hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
        hgs [@host] archive <session>          move a stopped conversation to Archive
@@ -469,6 +470,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
         | "attachment" | "recovery" | "voice" => {
+            if command == "dirs" && has(args, "--create") && dry {
+                return Err(Error::new(1, "folder creation does not support --dry-run"));
+            }
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }

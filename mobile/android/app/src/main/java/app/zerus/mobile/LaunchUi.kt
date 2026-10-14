@@ -553,31 +553,77 @@ private fun projectColor(hex: String?,fallback: Color): Color = hex?.takeIf { it
     },confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
 }
 
-@Composable private fun LaunchFolderDialog(model: ZerusViewModel,machine: MachineKey,onChoose: (String) -> Unit,onDismiss: () -> Unit) {
+@Composable internal fun LaunchFolderDialog(model: ZerusViewModel,machine: MachineKey,onChoose: (String) -> Unit,onDismiss: () -> Unit) {
     val raw = model.launchDirectoryState
     val path = raw?.string("path").orEmpty()
     val parent = raw?.string("parent").orEmpty()
     val home = raw?.string("home").orEmpty()
-    var typedPath by remember(machine) { mutableStateOf(path) }
+    val form = model.launchFormId
+    var typedPath by rememberSaveable(machine,form) { mutableStateOf(path) }
+    var lastFolder by rememberSaveable(machine,form) { mutableStateOf(path) }
+    var creatingPath by rememberSaveable(machine,form) { mutableStateOf<String?>(null) }
+    var observedCreation by rememberSaveable(machine,form) { mutableStateOf("") }
+    LaunchedEffect(path) { if(path.isNotBlank()) { if(typedPath.isBlank()) typedPath=path;lastFolder=path } }
+    LaunchedEffect(model.launchCreatedDirectory) {
+        val created=model.launchCreatedDirectory
+        if(created.isNotBlank() && created!=observedCreation) { observedCreation=created;typedPath=created;creatingPath=null }
+    }
     val folders = remember(raw) { LaunchPresentation.folders(raw) }
-    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Choose folder on machine") },text = {
+    val busy = model.launchBusy || model.launchDirectoryLoading
+    val pending = DirectoryCreation.pending(model.sessionActions,machine)
+    val createReason = model.directoryCreateReason(machine)
+    val computer = model.machines.find { it.connectionId==machine.connectionId && it.id==machine.computerId }?.name ?: machine.computerId
+    fun dismiss() { if(!model.launchBusy) onDismiss() }
+    ZerusAlertDialog(onDismissRequest = ::dismiss,title = { Text("Choose folder on $computer") },text = {
         Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if(model.launchDirectoryLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
-            SelectionContainer { Text(path.ifBlank { "Loading native folders…" },style = MaterialTheme.typography.bodySmall) }
-            Row {
-                TextButton(onClick = { model.browseLaunchDirectory(machine,parent) },enabled = parent.isNotBlank() && !model.launchDirectoryLoading) { Text("Up") }
-                TextButton(onClick = { model.browseLaunchDirectory(machine,home.ifBlank { "~" }) },enabled = !model.launchDirectoryLoading) { Text("Home") }
+            if(model.launchDirectoryLoading || model.directoryCreateSubmitting) LinearProgressIndicator(Modifier.fillMaxWidth())
+            SelectionContainer { Text(path.ifBlank { lastFolder.ifBlank { "Loading native folders…" } },style = MaterialTheme.typography.bodySmall) }
+            FlowRow {
+                TextButton(onClick = { model.browseLaunchDirectory(machine,parent) },enabled = parent.isNotBlank() && !busy,modifier = Modifier.heightIn(min=48.dp)) { Text("Up") }
+                TextButton(onClick = { model.browseLaunchDirectory(machine,home.ifBlank { "~" }) },enabled = !busy,modifier = Modifier.heightIn(min=48.dp)) { Text("Home") }
+                TextButton(onClick = { creatingPath=DirectoryCreation.child(lastFolder,"New folder") },enabled = LaunchPresentation.absoluteFolder(lastFolder) && !busy && createReason.isBlank(),modifier = Modifier.heightIn(min=48.dp)) {
+                    Icon(Icons.Default.Add,null,Modifier.size(18.dp));Text("New folder",Modifier.padding(start=4.dp))
+                }
             }
-            OutlinedTextField(typedPath,{ typedPath = it },Modifier.fillMaxWidth(),label = { Text("Browse absolute path") },singleLine = true)
-            TextButton(onClick = { model.browseLaunchDirectory(machine,typedPath) },enabled = LaunchPresentation.absoluteFolder(typedPath) && !model.launchDirectoryLoading) { Text("Browse") }
-            folders.forEach { folder -> TextButton(onClick = { model.browseLaunchDirectory(machine,folder.path) },enabled = !model.launchDirectoryLoading,modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(typedPath,{ typedPath = it },Modifier.fillMaxWidth(),label = { Text("Absolute folder path") },singleLine = true,readOnly = busy)
+            FlowRow {
+                TextButton(onClick = { model.browseLaunchDirectory(machine,typedPath) },enabled = LaunchPresentation.absoluteFolder(typedPath) && !busy,modifier = Modifier.heightIn(min=48.dp)) { Text("Browse") }
+                if(typedPath.isNotBlank() && typedPath!=path && folders.none { it.path==typedPath })
+                    TextButton(onClick = { creatingPath=typedPath },enabled = DirectoryCreation.pathError(typedPath).isBlank() && !busy && createReason.isBlank(),modifier = Modifier.heightIn(min=48.dp)) { Text("Create this path") }
+            }
+            pending?.let { action ->
+                Text(DirectoryCreation.uncertain,style=MaterialTheme.typography.bodySmall)
+                SelectionContainer { Text(runCatching { JSONObject(action.arguments).string("path") }.getOrDefault(""),style=MaterialTheme.typography.bodySmall) }
+                TextButton(onClick = { model.checkLaunchDirectoryCreation(machine,action) },enabled = !busy,modifier = Modifier.heightIn(min=48.dp)) { Text("Check original folder result") }
+            }
+            if(pending==null && createReason.isNotBlank()) Text(createReason,style=MaterialTheme.typography.bodySmall)
+            folders.forEach { folder -> TextButton(onClick = { model.browseLaunchDirectory(machine,folder.path) },enabled = !busy,modifier = Modifier.fillMaxWidth().heightIn(min=48.dp)) {
                 Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder,null);Text(folder.name,Modifier.padding(start = 8.dp)) }
             } }
             if(raw?.optBoolean("truncated") == true) Text("Folder listing is incomplete. Browse an exact path to reach another folder.",style = MaterialTheme.typography.bodySmall)
             if(model.launchError.isNotBlank()) Text(model.launchError,color = MaterialTheme.colorScheme.secondary,style = MaterialTheme.typography.bodySmall)
         }
-    },confirmButton = { TextButton(onClick = { onChoose(path) },enabled = LaunchPresentation.absoluteFolder(path) && !model.launchDirectoryLoading) { Text("Use this folder") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    },confirmButton = { TextButton(onClick = { onChoose(path) },enabled = LaunchPresentation.absoluteFolder(path) && !busy,modifier = Modifier.heightIn(min=48.dp)) { Text("Use this folder") } },
+        dismissButton = { TextButton(onClick = ::dismiss,enabled = !model.launchBusy,modifier = Modifier.heightIn(min=48.dp)) { Text("Cancel") } })
+    creatingPath?.let { initial -> CreateFolderDialog(model,machine,computer,initial) { if(!model.launchBusy) creatingPath=null } }
+}
+
+@Composable private fun CreateFolderDialog(model:ZerusViewModel,machine:MachineKey,computer:String,initial:String,onDismiss:()->Unit) {
+    var path by rememberSaveable(machine,model.launchFormId,initial) { mutableStateOf(initial) }
+    val busy=model.directoryCreateSubmitting
+    val problem=DirectoryCreation.pathError(path)
+    ZerusAlertDialog(onDismissRequest = { if(!busy) onDismiss() },properties = DialogProperties(dismissOnClickOutside=false),
+        title = { Text("Create folder") },text = {
+            Column(Modifier.heightIn(max=400.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                Text("Create a folder on $computer. Its parent must already exist.",style=MaterialTheme.typography.bodyMedium)
+                OutlinedTextField(path,{ path=it },Modifier.fillMaxWidth(),label={ Text("New folder path") },singleLine=true,readOnly=busy)
+                if(problem.isNotBlank()) Text(problem,style=MaterialTheme.typography.bodySmall)
+                if(model.launchError.isNotBlank()) Text(model.launchError,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
+                if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        },confirmButton = { TextButton(onClick = { model.createLaunchDirectory(machine,path) },enabled = !busy && problem.isBlank() && model.directoryCreateReason(machine).isBlank(),modifier=Modifier.heightIn(min=48.dp)) {
+            Text(if(busy) "Creating folder…" else "Create folder")
+        } },dismissButton = { TextButton(onClick = onDismiss,enabled = !busy,modifier=Modifier.heightIn(min=48.dp)) { Text("Cancel") } })
 }
 
 /** Desktop Create manually…: a new branch and folder; the branch suggestion follows the session name. */

@@ -900,6 +900,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchWorktreeState by mutableStateOf<JSONObject?>(null);private set
     var launchWorktreeLoading by mutableStateOf(false);private set
     var worktreeSubmitting by mutableStateOf(false);private set
+    var directoryCreateSubmitting by mutableStateOf(false);private set
+    var launchCreatedDirectory by mutableStateOf("");private set
     private var launchWorktreeJob:Job?=null
     var launchCatalogLoading by mutableStateOf(false);private set
     var launchDirectoryLoading by mutableStateOf(false);private set
@@ -924,7 +926,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchCreatedWorktree by mutableStateOf("");private set
     var launchCreatedEvidence by mutableStateOf<JSONObject?>(null);private set
     var launchAutomaticFailed by mutableStateOf(false);private set
-    val launchBusy get() = launchSubmitting || worktreeSubmitting || launchStage.isNotEmpty()
+    val launchBusy get() = launchSubmitting || worktreeSubmitting || directoryCreateSubmitting || launchStage.isNotEmpty()
     fun launchCatalogSignature()=launchCatalogEvidence
     fun launchReason(machine:MachineKey):String {
         if(updateInstallPreparing) return "Saving drafts for an app update."
@@ -939,7 +941,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         launchGeneration++;launchMachine=machine;launchVisible=true;launchCatalogState=null;launchDirectoryState=null;launchWorktreeState=null;launchError="";launchCatalogEvidence=""
         launchFormId=launchGeneration;launchGeneratedName=LaunchPresentation.generatedName();launchStage="";launchCreatedWorktree="";launchCreatedEvidence=null;launchAutomaticFailed=false
-        launchBaseline=sessionActions.filter { it.operation in setOf("launch","worktree_create") }.associate { it.requestId to it.status }
+        launchCreatedDirectory=""
+        launchBaseline=sessionActions.filter { it.operation in setOf("launch","worktree_create","directory_create") }.associate { it.requestId to it.status }
         launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchDirectoryLoading=false
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration;launchCatalogLoading=true
@@ -974,7 +977,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return receipt.getJSONObject("result").put("requested_path",requested)
     }
     fun browseLaunchDirectory(machine:MachineKey,path:String) {
-        if(launchMachine != machine || launchDirectoryLoading || !launchVisible || launchStage.isNotEmpty()) return
+        if(launchMachine != machine || launchDirectoryLoading || !launchVisible || launchStage.isNotEmpty() || directoryCreateSubmitting) return
         if(path != "~" && (!path.startsWith('/') || path.length > 4096 || path.any(Char::isISOControl))) { launchError="Choose an absolute native folder.";return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         launchWorktreeJob?.cancel();launchWorktreeState=null;launchWorktreeLoading=false;launchDirectoryState=null
@@ -988,6 +991,74 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch(e:Exception) { if(e is CancellationException) throw e;if(launchGeneration == generation) launchError=e.message.orEmpty() }
             finally { if(launchGeneration == generation) launchDirectoryLoading=false }
+        }
+    }
+    fun directoryCreateReason(machine:MachineKey):String {
+        val reason=launchReason(machine);if(reason.isNotBlank()) return reason
+        if("directory_create" !in relayOperations[machine.connectionId].orEmpty() || "directory_create" !in machineOperations[machine].orEmpty())
+            return "Update the gateway and Zerus on this computer to create folders."
+        if(DirectoryCreation.pending(sessionActions,machine)!=null) return "Check the previous folder creation receipt before creating another."
+        return ""
+    }
+    private fun publishCreatedDirectory(machine:MachineKey,generation:Long,action:SessionAction) {
+        if(launchGeneration!=generation || launchMachine!=machine || !launchVisible || !DirectoryCreation.computerTarget(action,machine) ||
+            action.status!="completed" || action.resultPath.isBlank()) return
+        launchCreatedDirectory=action.resultPath
+        // The result proves creation, but browsing still verifies the selectable native folder.
+        browseLaunchDirectory(machine,action.resultPath)
+    }
+    fun createLaunchDirectory(machine:MachineKey,path:String) {
+        if(launchBusy || launchDirectoryLoading || !launchVisible || launchMachine!=machine) return
+        val problem=directoryCreateReason(machine).ifBlank { DirectoryCreation.pathError(path) }
+        if(problem.isNotBlank()) { launchError=problem;return }
+        val connection=connections.find { it.id==machine.connectionId } ?: return
+        val generation=launchGeneration
+        val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),DirectoryCreation.operation,
+            SessionActionPolicies.arguments(DirectoryCreation.operation,JSONObject().put("path",path)).toString())
+        directoryCreateSubmitting=true;launchError="";actionFlights+=action.requestId
+        viewModelScope.launch {
+            var attempted=false;var rejected=false
+            try {
+                durable({ state -> check(DirectoryCreation.pending(state.sessionActions,machine)==null);state.action(action) },
+                    { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
+                check(!updateInstallPreparing && storageReady && !demo && launchVisible && launchGeneration==generation && launchMachine==machine &&
+                    connections.any { it==connection } && machines.any { it.connectionId==machine.connectionId && it.id==machine.computerId && it.online && !it.lastKnown } &&
+                    "directory_create" in relayOperations[machine.connectionId].orEmpty() && "directory_create" in machineOperations[machine].orEmpty()) {
+                    "The selected computer or form changed. Folder creation was not sent."
+                }
+                attempted=true
+                val initial=try { api.submit(connection,action.target,action.operation,JSONObject(action.arguments).put("request_id",action.requestId),action.requestId) }
+                    catch(error:RelayException) { rejected=error.status in listOf(400,401,403,404,409,413,429);throw error }
+                settleSessionAction(action,api.await(connection,initial))
+                val settled=messageState.sessionActions.first { it.requestId==action.requestId }
+                if(launchGeneration==generation) launchError=settled.error
+            } catch(error:Exception) {
+                try { durable({ state -> state.sessionActions.find { it.requestId==action.requestId }?.let { current ->
+                    if(current.blocksSending) state.action(current.copy(status=if(!attempted || rejected) "failed" else "uncertain",
+                        error=if(!attempted || rejected) error.message.orEmpty() else DirectoryCreation.uncertain)) else state
+                } ?: state }) } catch(_:Exception) { if(launchGeneration==generation) launchError="Could not save the folder outcome. Check the original request." }
+                if(error is CancellationException) throw error
+                if(launchGeneration==generation) launchError=if(!attempted || rejected) error.message.orEmpty() else DirectoryCreation.uncertain
+            } finally {
+                directoryCreateSubmitting=false;actionFlights-=action.requestId
+                messageState.sessionActions.find { it.requestId==action.requestId }?.let { publishCreatedDirectory(machine,generation,it) }
+            }
+        }
+    }
+    /** Only reads the original durable receipt. An unknown result never submits again. */
+    fun checkLaunchDirectoryCreation(machine:MachineKey,action:SessionAction) {
+        val stored=sessionActions.find { it.requestId==action.requestId && DirectoryCreation.computerTarget(it,machine) } ?: return
+        if(launchBusy || !launchVisible || launchMachine!=machine || stored.requestId in actionFlights) return
+        val connection=connections.find { it.id==machine.connectionId } ?: return
+        val generation=launchGeneration
+        directoryCreateSubmitting=true;actionFlights+=stored.requestId
+        viewModelScope.launch {
+            try { settleSessionAction(stored,api.await(connection,api.receipt(connection,stored.requestId))) }
+            catch(error:Exception) { if(error is CancellationException) throw error;if(launchGeneration==generation) launchError="The original folder receipt could not be checked. Nothing has been retried." }
+            finally {
+                directoryCreateSubmitting=false;actionFlights-=stored.requestId
+                messageState.sessionActions.find { it.requestId==stored.requestId }?.let { publishCreatedDirectory(machine,generation,it) }
+            }
         }
     }
     fun worktreeOperationsSupported(machine:MachineKey)=listOf("worktrees","worktree_create").all { it in relayOperations[machine.connectionId].orEmpty() && it in machineOperations[machine].orEmpty() }

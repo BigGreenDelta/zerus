@@ -325,10 +325,16 @@ fn validate(request: &LocalRequest) -> Result<()> {
             no_payload()?;
         }
         "dirs" => {
-            ensure!(
-                rest.len() == 1 && session(&rest[0]),
-                "invalid directory request"
-            );
+            if rest.first().is_some_and(|value| value == "--create") {
+                ensure!(rest.len() == 4 && rest[2] == "--request-id" && uuid(&rest[3]),
+                    "directory creation requires an exact request UUID");
+                let path = &rest[1];
+                let leaf = path.rsplit('/').next().unwrap_or("");
+                ensure!(path.starts_with('/') && text(path, 4096, false)
+                    && !matches!(leaf, "" | "." | ".."), "invalid directory creation path");
+            } else {
+                ensure!(rest.len() == 1 && session(&rest[0]), "invalid directory request");
+            }
             no_payload()?;
         }
         "worktrees" => {
@@ -1106,6 +1112,23 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn directory_creation_admits_only_one_exact_computer_scoped_mkdir() {
+        let argv = ["dirs", "--create", "/fixture/new ' проект", "--request-id", ID];
+        assert!(validate(&request(&argv, None)).is_ok());
+        assert!(validate(&request(&argv, Some(scope()))).is_err());
+        for path in ["relative", "~/project", "/", "/fixture/new/", "/fixture/.", "/fixture/..", "/fixture/bad\npath"] {
+            let mut bad = argv; bad[2] = path;
+            assert!(validate(&request(&bad, None)).is_err(), "{path:?}");
+        }
+        for args in [
+            vec!["dirs", "--create", "/fixture/new"],
+            vec!["dirs", "--create", "/fixture/new", "--request-id", "bad"],
+            vec!["dirs", "--create", "/fixture/new", "--request-id", ID, "--parents"],
+            vec!["dirs", "--create", "/fixture/new", "--request-id", ID, "--request-id", ID],
+        ] { assert!(validate(&request(&args, None)).is_err()); }
     }
 
     #[test]

@@ -277,6 +277,26 @@ class MobilePeers(unittest.TestCase):
         self.assertEqual(local['hgs_version'], version)
         self.assertEqual(peer['hgs_version'], version)
 
+    def test_remote_directory_creation_pins_target_and_never_overwrites_or_replays(self):
+        target = self.root / "new ' проект $(touch injected)"
+        identity = str(uuid.uuid4())
+        argv = ['dirs', '--create', str(target), '--request-id', identity]
+        wrong = self.request(argv, target=self.ids['c'])
+        self.call('a', 'mobile-peer', '--json', data=wrong, ok=False)
+        self.assertFalse(target.exists())
+        request = self.request(argv)
+        result = self.call('a', 'mobile-peer', '--json', data=request).json()
+        self.assertEqual(result['request_id'], identity)
+        self.assertEqual(result['requested_path'], str(target))
+        self.assertEqual(result['path'], str(target.resolve()))
+        self.assertTrue(target.is_dir())
+        self.assertFalse((target / '.git').exists())
+        self.assertFalse((self.root / 'injected').exists())
+        (target / 'retained').write_text('retained')
+        self.call('a', 'mobile-peer', '--json', data=request, ok=False)
+        self.assertEqual((target / 'retained').read_text(), 'retained')
+        self.assertFalse((self.root / 'native-called').exists())
+
     def test_replaced_persistent_identity_cannot_execute_old_bound_request(self):
         path = self.root / 'b/swarm/catalog.json'
         data = json.loads(path.read_text())

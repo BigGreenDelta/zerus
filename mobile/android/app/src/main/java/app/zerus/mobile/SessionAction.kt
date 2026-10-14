@@ -14,7 +14,7 @@ data class SessionAction(val requestId: String, val target: Target, val operatio
 
 object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
-    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "recovery_action")
+    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action")
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
     private fun uuid(value: String) = runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
     fun arguments(operation: String, raw: JSONObject): JSONObject {
@@ -22,12 +22,14 @@ object SessionActionPolicies {
         val allowed = when(operation) { "rename" -> setOf("new_name"); "fork" -> setOf("tag"); "send_now" -> setOf("queue_id")
             "launch" -> setOf("agent","directory","tag","account_id","model","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
             "worktree_create" -> setOf("path","common_dir","destination","branch","base")
+            "directory_create" -> setOf("path")
             "recovery_action" -> setOf("job_id","action")
             "terminal_input" -> setOf("terminal_binding_id", "text", "enter", "key")
             "settings" -> setOf("model", "effort", "expected_pending_id"); "process_stop" -> setOf("process_id", "generation"); else -> emptySet() }
         require(raw.keys().asSequence().all { it in allowed }) { "Unexpected action argument." }
         val args = JSONObject(raw.toString())
         when(operation) {
+            "directory_create" -> require(args.opt("path") is String && DirectoryCreation.pathError(args.getString("path")).isBlank()) { "Enter a valid absolute path for a new folder." }
             "rename", "fork" -> {
                 val field = if(operation == "rename") "new_name" else "tag"
                 val name = args.getString(field)
@@ -131,6 +133,7 @@ object SessionActionPolicies {
         if(receipt.string("request_id") != action.requestId) return action.copy(status="uncertain",error="The receipt belongs to another request.")
         if(receipt.string("state") == "failed") return action.copy(status="failed",error=receipt.string("error").ifBlank { "The computer rejected this action." })
         if(action.operation == MobileDelivery.OPERATION) return MobileDelivery.result(action,receipt)
+        if(action.operation == DirectoryCreation.operation) return DirectoryCreation.result(action,receipt)
         val native = receipt.optJSONObject("result")
         if(action.operation == "worktree_create") {
             val args=JSONObject(action.arguments)

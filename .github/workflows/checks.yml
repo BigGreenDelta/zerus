@@ -164,6 +164,7 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_rust_relay.py -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test*end_to_end.py' -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_peer_migration.py -v
+          ZERUS_DIRECTORY_TEST_HGS="$GITHUB_WORKSPACE/target/debug/hgs" "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_directory_create.py -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
           env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech.py -v
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_mobile_speech_config.py -v
