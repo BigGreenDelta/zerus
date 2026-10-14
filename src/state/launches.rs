@@ -20,6 +20,7 @@
 //! gone. Evidence is listed and kept for `KEPT`, as long as the desktop keeps a
 //! placeholder.
 use super::*;
+use crate::host::last_lines;
 use std::collections::BTreeSet;
 use std::fs;
 use std::time::{Duration, SystemTime};
@@ -196,22 +197,6 @@ fn ending(screen: &str, error: Option<&str>) -> String {
     last_lines(&text, LINES, BYTES)
 }
 
-/// The end of `text`, a screen: its last `lines` lines that are not blank,
-/// trailing spaces trimmed, cut to at most `bytes` bytes from its end.
-fn last_lines(text: &str, lines: usize, bytes: usize) -> String {
-    let kept: Vec<&str> = text
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = kept[kept.len().saturating_sub(lines)..].join("\n");
-    let mut start = tail.len().saturating_sub(bytes);
-    while !tail.is_char_boundary(start) {
-        start += 1;
-    }
-    tail[start..].to_owned()
-}
-
 #[derive(Default)]
 struct Launch {
     name: String,
@@ -332,9 +317,6 @@ mod tests {
         assert_eq!(ending("", Some("cannot start")), "hgs: cannot start");
         let many: Vec<String> = (1..=20).map(|line| format!("line {line}")).collect();
         assert_eq!(ending(&many.join("\n"), None), many[12..].join("\n"));
-        // A cut never splits a character.
-        assert_eq!(last_lines("ééé", 8, 3), "é");
-        assert_eq!(last_lines("abcdef", 8, 4), "cdef");
     }
 
     #[test]
