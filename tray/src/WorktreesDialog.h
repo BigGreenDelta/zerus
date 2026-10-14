@@ -5,21 +5,26 @@
 #include <QDialog>
 #include <QMap>
 #include <QSet>
+#include <functional>
 
 class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QTreeWidget;
+class QLineEdit;
+class QCheckBox;
+class WorktreeInspectionPanel;
 
 // A project-catalog overview. Catalog reads are bounded; cleanup still belongs
-// to WorktreeCleanupDialog and the owning machine's reviewed removal contract.
+// to the batch preview and the owning machine's reviewed removal contract.
 class WorktreesDialog : public QDialog {
 public:
     WorktreesDialog(HgsClient *client, const SessionOrganization &projects,
                     const FleetState &fleet, bool allProjects, QWidget *parent = nullptr);
     void setContext(const SessionOrganization &projects, const FleetState &fleet, bool allProjects);
     bool changed() const { return m_changed; }
+    std::function<void(const QString &, const QString &)> sessionRequested;
 private:
     struct Source {
         QString host, machine, path;
@@ -43,7 +48,10 @@ private:
     void render();
     void showDetails();
     void reviewSelection();
-    void cleanUp(bool focused);
+    void cleanUp();
+    QList<QJsonObject> selectedEntries() const;
+    void updateActions();
+    void invalidateReview(const QString &repository);
     HgsClient *m_client;
     FleetState m_fleet;
     QByteArray m_context, m_rendered;
@@ -52,12 +60,15 @@ private:
     QMap<QString, QJsonObject> m_reviews;
     QMap<QString, QString> m_reviewErrors;
     QSet<QString> m_reviewAttempted;
+    QMap<QString, QString> m_checked;
     quint64 m_generation = 0, m_reviewRequest = 0, m_reviewGeneration = 0;
-    QString m_reviewKey;
+    QString m_reviewKey, m_reviewWorktree;
     bool m_changed = false;
-    QComboBox *m_project, *m_computer;
+    QComboBox *m_project, *m_computer, *m_category, *m_sort;
+    QLineEdit *m_search;
+    QCheckBox *m_showMain;
     QTreeWidget *m_tree;
-    QPlainTextEdit *m_details;
+    WorktreeInspectionPanel *m_details;
     QLabel *m_status;
     QPushButton *m_refresh, *m_cleanup, *m_remove, *m_copy;
 };

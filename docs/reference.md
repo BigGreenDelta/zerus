@@ -1210,21 +1210,52 @@ The UI caches at most 64 snapshots and 8 MiB. Cleanup is described in
 
 ### Cleaning up worktrees
 
-**Worktrees…** in the Projects heading opens an overview across all visible
-projects and computers, without selecting a project folder first. Project and
-computer filters retain exact identities, even when names or paths match.
-Repositories linked from several projects or subfolders appear once per computer.
-The list shows each checkout's branch, path, related sessions and cleanup state;
-the details include the owning computer, commit and reasons that prevent removal.
-Catalog reads run two at a time. Cleanup review runs on demand for the selected
-repository; offline snapshots remain readable but cannot be cleaned up.
-**Clean up repository…** opens the existing batch review, and **Remove worktree…**
-or **Forget missing worktree…** opens it for the selected linked checkout.
+**Worktrees…** in the Projects heading opens a cleanup workspace across visible
+projects and computers. Repositories linked from several projects or subfolders
+appear once per computer; filters preserve exact project and machine identities.
+Four groups separate **Cleanup candidates**, **Review work**, **In use** and
+**Not checked**. Main checkouts and ordinary folders are hidden by default.
+Search matches folder, branch, project and related session names; sorting offers
+largest folders, oldest Git activity or folder names. Sizes are apparent file
+sizes, not a promise of physical disk space reclaimed; incomplete measurements
+are marked as lower bounds.
+
+Catalog reads run two at a time, and repository reviews run sequentially in the
+background. Coverage reports checked/known worktrees and incomplete catalogs.
+After the first bounded repository review, unchecked known rows are checked
+individually, including rows beyond the native 64-row review limit. Catalogs
+remain bounded at 512 entries; this is not a scan of every folder on a computer.
+Offline snapshots remain readable but cannot be selected for removal. Expired
+checks are refreshed; changed fingerprints invalidate previous selections.
+
+**Inspect changes** reads changed/untracked file names, tracked diffs and up to
+30 original commits absent from the base history. The base comparison is a
+two-way diff and can include later changes on the base. **Local files** previews
+ignored entries and their contents; **Sessions** opens the exact related
+conversation on its owning computer. Reads are bounded (200 changed files or
+directory entries per page and 128 KiB per text preview), with truncation shown. **Browse all files** and **Next files** continue beyond
+the largest ignored entries or the first directory page. Binary
+files are identified, and symlinks are not followed. Git refs are local snapshots;
+inspection never fetches. No-base and failed checks are reported explicitly.
+
+**Select candidates** selects only currently visible, verified cleanup candidates.
+Folders with local files outside Git require individual selection, even when
+Git reports them clean and merged. **Review cleanup** shows the exact selected
+folders across repositories and computers, estimated space and branch handling.
+Local data needs a separate explicit checkbox; deletion checks its reviewed
+metadata fingerprint again. A missing folder only loses its Git registration.
+Each result remains visible, and failures or uncertain replies are not replayed. **Stop after this folder**
+lets the current operation finish and leaves the remaining folders untouched.
+
+Integration evidence distinguishes ancestor commits, identical file trees and
+cherry-pick-equivalent patches. Equivalent content is useful when reviewing
+squash/cherry-pick workflows, but only Git ancestry permits optional branch
+removal. Original branches otherwise remain available.
 
 Removal is always explicit and is reviewed on the computer that owns the
 checkout. **Clean up…** in Projects or the session inspector lists the linked
 worktrees of the repository as **Ready** (preselected), **Review** (removable but
-with notes such as unmerged commits, archived sessions or activity in the last
+with notes such as local ignored files, unmerged commits, archived sessions or activity in the last
 24 hours), **Missing** (the folder is gone; only Git's record is forgotten) or
 **Blocked**. The button shows the number of ready and missing worktrees; that
 review runs at most every five minutes while the panel is visible and never
@@ -1251,7 +1282,9 @@ When **Move to archive** succeeds for the last session in a linked worktree, the
 status bar briefly offers **Clean up worktree…**, which opens the same review for
 that worktree. The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
---common-dir DIR --fingerprint HASH [--delete-branch] --json`. Machines with an
+--common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch]
+--json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
+--common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
 
 ## Machines and accounts
