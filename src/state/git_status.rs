@@ -104,8 +104,12 @@ pub(super) fn inspect(path: &Path) -> Value {
         data["remote_state"] = json!("detached"); return data;
     }
     let branch = format!("refs/heads/{}", string(&data, "branch"));
-    let upstream = text(&path, &["for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", &branch], local_deadline);
-    let Some((remote, reference)) = upstream.as_deref().and_then(|s| s.split_once('\0')) else {
+    // A failed or timed-out lookup is no evidence that no upstream is
+    // configured: keep remote_state unknown.
+    let Some(upstream) = text(&path, &["for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", &branch], local_deadline) else {
+        return data;
+    };
+    let Some((remote, reference)) = upstream.split_once('\0') else {
         data["remote_state"] = json!("no_upstream"); return data;
     };
     if remote.is_empty() || reference.is_empty() || remote == "." {
