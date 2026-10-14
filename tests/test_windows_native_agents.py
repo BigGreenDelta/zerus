@@ -531,7 +531,9 @@ class NativeAgent:
         Ctrl+C clears a draft, Ctrl+S neither freezes the screen (XOFF) nor stops input, and the
         keys hgs itself clears Claude's input with (C-e C-u: claude_question.rs, interrupt.rs;
         hgs never clears Codex's composer with keys) empty it. Each step is checked on the screen,
-        and the empty composer by an exact `hgs send`, which refuses a non-empty one."""
+        and the empty composer by an exact `hgs send`, which refuses a non-empty one. Codex
+        resolves Ctrl+letter in the keyboard layout (zerus-c8r9): a non-Latin layout reproduces
+        what a hosted runner's US layout cannot."""
         self.ready(name)
         pid = self.record(name).get("pid")
         shows = lambda text: lambda: text in (self.composer(name) or "")  # noqa: E731

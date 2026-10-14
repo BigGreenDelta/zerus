@@ -337,6 +337,12 @@ the runner also sets `PYTHONUTF8` for the suites. CI runs the same command in th
 ([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)). Local sessions on
 Windows remain a preview until these suites pass there.
 
+The input key cases also depend on the keyboard layout. Codex reads a control key
+through the console as its character plus the Ctrl state, and crossterm resolves that
+character's letter in the foreground window's layout: under a Cyrillic layout, Ctrl+C
+became Ctrl+С and did nothing (zerus-c8r9). Hosted runners use a US layout, so run the
+keys cases on a PC with a non-Latin layout too before trusting a change to key input.
+
 ## The terminal backend contract
 
 `tests/test_backend_contract.py` holds the twelve CLI-level tests that every
