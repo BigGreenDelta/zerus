@@ -9,7 +9,7 @@
 //! | `session_exists`, `session_name`, `enclosing_session` | `resolve_target` |
 //! | `pane_info`, `probe` | `pane_info`, its fields in `PaneField` order, flags as `1` or `0` |
 //! | `on_terminal` | `pane_info`, and the agent's parent is the pane's supervisor |
-//! | `start`, `launch -d` | `create_session`, starting the host when none runs |
+//! | `start`, `launch -d` | `create_session`, starting the host when none runs; `launch -d` then `launch_status` |
 //! | `attach`, `launch` | `attach` on a connection of its own (role `attach`); `launch` creates first |
 //! | `attachable` | none: this process's console and its attach modes |
 //! | `set_run_marker` | `set_environment` of `RUN_MARKER` |
@@ -39,6 +39,17 @@
 //! `HGS_HOST_PANE`) and the terminal type. A launch's `HGS_LAUNCH_ID` is the
 //! host's launch ID, so a retried create never starts a second session; other
 //! starts get a launch ID that listings leave out, as tmux lists none for them.
+//!
+//! **A program that cannot start.** The supervisor reports why it could not
+//! start its program (a missing or unreadable executable, a refused hook
+//! setup) on the pane, which then ends, before any record exists. A launch,
+//! attached or not, therefore watches its new session for `STARTUP` through
+//! `launch_status`: one that ends in that time with a failure fails the launch
+//! (exit 1) with its exit code and the last lines its pane showed, so that the
+//! GUI, which reads a detached launch's exit, reports it instead of waiting for
+//! a session that never comes. A detached launch returns once the session has
+//! run that long. `start`, which resumes, restores and forks call under the
+//! state lock that the supervisor needs, does not wait.
 //!
 //! **Supervisor (D10, D11).** The `--run` supervisor opens its session's
 //! supervisor channel (`host::supervisor`), through which the host pauses the
@@ -76,8 +87,8 @@ use crate::{
         client::AttachStream,
         protocol::{
             self, Attach, Attached, Captured, CreateSession, Created, Done, EnvValue, ErrorBody,
-            ErrorCode, HostStatus, InputReady, Listed, Op, PaneDetails, Resolved, Signal, Size,
-            RUN_MARKER,
+            ErrorCode, HostStatus, InputReady, LaunchState, Listed, Op, PaneDetails, Resolved,
+            Signal, Size, RUN_MARKER,
         },
         spawn::{self, Environment},
     },
@@ -88,6 +99,8 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::{Mutex, PoisonError},
+    thread,
+    time::{Duration, Instant},
 };
 
 /// What an attach client reports when its host has gone: the tmux backend's
@@ -102,6 +115,15 @@ pub(crate) const SIZE: Size = Size { cols: 80, rows: 24 };
 /// Launch IDs of starts without `--launch-id` begin with this, which no UUID
 /// does; listings leave them out.
 const STARTED: &str = "hgs-start-";
+/// A launch whose session ends within this time, with a failure, reports that
+/// its program could not start: the "ended immediately" of the tmux backend's
+/// launch (`cli::launch`).
+pub(crate) const STARTUP: Duration = Duration::from_secs(3);
+/// How long a launch waits, after the startup time, for a session whose root
+/// process has exited to end: the host lets its output drain for up to 5 s.
+const ENDING: Duration = Duration::from_secs(10);
+/// How often a launch asks how its new session is doing.
+const STARTUP_POLL: Duration = Duration::from_millis(100);
 /// Variables that describe the session a command runs in. A launch from inside
 /// a session must not hand them to the new one: tmux starts a pane from its
 /// server's environment, which never holds them. A launch sets those its session
@@ -175,11 +197,52 @@ pub(crate) trait Connector: Sync {
     fn var(&self, name: &str) -> Option<String>;
 }
 
+/// What a launch makes of its new session's state (`startup`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Startup {
+    /// Ask again.
+    Wait,
+    /// The program runs, or ended at once with exit 0.
+    Started,
+    /// The program could not start: the launch fails with this message.
+    Failed(String),
+}
+
+/// What a launch makes of `state`, its session's, `elapsed` after the
+/// session was created. A session that ended with a failure (or an unknown
+/// exit) before it ran for `window` failed to start, with what its pane
+/// showed last; one whose root process exited waits for its end, at most
+/// `ENDING` more. An exit code beyond 255 is an NTSTATUS, shown in hex as
+/// Windows tools show it.
+pub(crate) fn startup(state: &LaunchState, elapsed: Duration, window: Duration) -> Startup {
+    if state.ended {
+        let code = match state.code {
+            Some(0) => return Startup::Started,
+            Some(code @ 0..=255) => format!("exit {code}"),
+            Some(code) => format!("exit {:#010x}", code as u32),
+            None => "exit code unknown".to_owned(),
+        };
+        let mut message = format!("session {} ended immediately ({code})", state.name);
+        if !state.output.is_empty() {
+            message.push_str(":\n");
+            message.push_str(&state.output);
+        }
+        return Startup::Failed(message);
+    }
+    if elapsed >= window && (!state.dead || elapsed >= window + ENDING) {
+        Startup::Started
+    } else {
+        Startup::Wait
+    }
+}
+
 /// The session host backend over `C`.
 pub(crate) struct HostBackend<C> {
     connector: C,
     /// Text `stage` holds for `paste`, by buffer name.
     staged: Mutex<BTreeMap<String, String>>,
+    /// `STARTUP`; tests shorten it.
+    startup: Duration,
 }
 
 impl<C: Connector> HostBackend<C> {
@@ -187,7 +250,15 @@ impl<C: Connector> HostBackend<C> {
         Self {
             connector,
             staged: Mutex::new(BTreeMap::new()),
+            startup: STARTUP,
         }
+    }
+
+    /// This backend with a launch's startup time `startup` instead of `STARTUP`.
+    #[cfg(test)]
+    pub(crate) fn with_startup(mut self, startup: Duration) -> Self {
+        self.startup = startup;
+        self
     }
 
     fn staged(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
@@ -218,20 +289,42 @@ impl<C: Connector> HostBackend<C> {
         })
     }
 
-    /// Start the session `spec` describes at `size`; the host's answer.
-    fn create(&self, spec: &LaunchSpec, size: Size) -> Result<Created> {
+    /// Start the session `spec` describes at `size`; the host's answer and
+    /// the launch ID.
+    fn create(&self, spec: &LaunchSpec, size: Size) -> Result<(Created, String)> {
         let environment = session_environment(
             self.connector.environment()?,
             &spec.env,
             &self.connector.stable_cli()?,
         )?;
         let request = create_request(spec, environment, size, || uuid::Uuid::new_v4().to_string());
+        let launch_id = request.launch_id.clone();
         let created = self
             .connector
             .create(Op::CreateSession(request))
             .map_err(Failure::message)?;
         serde_json::from_value::<Created>(created)
+            .map(|created| (created, launch_id))
             .map_err(|error| format!("invalid session host answer: {error}"))
+    }
+
+    /// Watch the session that launch `launch_id` created at `since` until it
+    /// has run for the startup time or ended (`startup`). A host that cannot
+    /// tell, such as one of an earlier version, leaves the launch started, as
+    /// before.
+    fn await_start(&self, launch_id: &str, since: Instant) -> CliResult<()> {
+        loop {
+            let Ok(state) = self.call::<LaunchState>(Op::LaunchStatus {
+                launch_id: launch_id.into(),
+            }) else {
+                return Ok(());
+            };
+            match startup(&state, since.elapsed(), self.startup) {
+                Startup::Wait => thread::sleep(STARTUP_POLL),
+                Startup::Started => return Ok(()),
+                Startup::Failed(message) => return Err(Error::new(1, message)),
+            }
+        }
     }
 
     /// This process's console for an attach client (D13), refused when it is
@@ -737,10 +830,19 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
     }
 
     /// D13: an attached launch needs this process's console before anything
-    /// starts, and the session starts at its size.
+    /// starts, and the session starts at its size. A session that ends within
+    /// `STARTUP` with a failure fails the launch with what its pane showed
+    /// last: a program that cannot start is reported, attached or not (a
+    /// detached launch waits that long for it). The state lock is not held
+    /// here: the supervisor takes it before it starts the program.
     fn launch(&self, spec: &LaunchSpec) -> CliResult<ClientExit> {
         if spec.detached {
-            self.start(spec).map_err(|error| Error::new(1, error))?;
+            let (created, launch_id) = self
+                .create(spec, SIZE)
+                .map_err(|error| Error::new(1, error))?;
+            if !created.existing {
+                self.await_start(&launch_id, Instant::now())?;
+            }
             return Ok(ClientExit {
                 code: 0,
                 server_died: false,
@@ -748,15 +850,31 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         }
         let terminal = self.console()?;
         let size = terminal.size().unwrap_or(SIZE);
-        let created = self
+        let (created, launch_id) = self
             .create(spec, size)
             .map_err(|error| Error::new(1, error))?;
-        self.interactive(
+        let since = Instant::now();
+        let exit = self.interactive(
             &*terminal,
             protocol::Target::Session(created.session),
             None,
             true,
-        )
+        )?;
+        // Only a session that has exited is waited for, not one the client
+        // left at once.
+        if !created.existing
+            && exit.code == 0
+            && !exit.server_died
+            && since.elapsed() < self.startup
+            && self
+                .call::<LaunchState>(Op::LaunchStatus {
+                    launch_id: launch_id.clone(),
+                })
+                .is_ok_and(|state| state.dead)
+        {
+            self.await_start(&launch_id, since)?;
+        }
+        Ok(exit)
     }
     fn attachable(&self) -> CliResult<()> {
         self.console().map(drop)
@@ -1771,6 +1889,124 @@ mod tests {
             (error.code, error.message.as_str()),
             (1, "duplicate session: fake_agent/project/one")
         );
+    }
+
+    #[test]
+    fn a_launch_fails_when_its_session_ends_at_once_with_a_failure() {
+        let state = |dead, ended, code: Option<i32>, output: &str| LaunchState {
+            session: "$0".into(),
+            pane: "%0".into(),
+            name: "claude/p/a".into(),
+            dead,
+            ended,
+            code,
+            output: output.into(),
+        };
+        let soon = Duration::from_millis(100);
+        let running = state(false, false, None, "");
+        assert_eq!(startup(&running, soon, STARTUP), Startup::Wait);
+        assert_eq!(startup(&running, STARTUP, STARTUP), Startup::Started);
+        // A root process that has exited waits for the session's end, which
+        // tells how; for at most ENDING past the startup time.
+        let exited = state(true, false, None, "");
+        assert_eq!(startup(&exited, STARTUP + soon, STARTUP), Startup::Wait);
+        assert_eq!(
+            startup(&exited, STARTUP + ENDING, STARTUP),
+            Startup::Started
+        );
+        // Exit 0 at once has started, as a tmux launch of such a program.
+        let quick = state(true, true, Some(0), "done");
+        assert_eq!(startup(&quick, soon, STARTUP), Startup::Started);
+        // A failure, or an exit nobody could read, fails with the pane's end.
+        let denied = state(
+            true,
+            true,
+            Some(126),
+            "hgs: claude: Access is denied. (os error 5)",
+        );
+        assert_eq!(
+            startup(&denied, soon, STARTUP),
+            Startup::Failed(
+                "session claude/p/a ended immediately (exit 126):\n\
+                 hgs: claude: Access is denied. (os error 5)"
+                    .into()
+            )
+        );
+        assert_eq!(
+            startup(&state(true, true, None, ""), STARTUP + soon, STARTUP),
+            Startup::Failed("session claude/p/a ended immediately (exit code unknown)".into())
+        );
+        // A supervisor that could not run at all: a missing DLL.
+        assert_eq!(
+            startup(
+                &state(true, true, Some(0xC000_0135_u32 as i32), ""),
+                soon,
+                STARTUP
+            ),
+            Startup::Failed("session claude/p/a ended immediately (exit 0xc0000135)".into())
+        );
+    }
+
+    #[test]
+    fn a_detached_launch_asks_how_its_session_is_doing() {
+        let command = [r"C:\hgs.exe", "--run", "0", "x"];
+        let created = json!({"session": "$0", "pane": "%0", "name": "fake_agent/project/one",
+            "pid": 7, "existing": false});
+        let ended = json!({"session": "$0", "pane": "%0", "name": "fake_agent/project/one",
+            "dead": true, "ended": true, "code": 127, "output": "hgs: x: program not found"});
+        let backend = HostBackend::new(Fake::new(move |op| match op {
+            Op::CreateSession(_) => Ok(created.clone()),
+            Op::LaunchStatus { .. } => Ok(ended.clone()),
+            op => panic!("unexpected {op:?}"),
+        }));
+        let error = backend
+            .launch(&spec(
+                &["HGS_LAUNCH_ID=0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10"],
+                &command,
+                true,
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (
+                1,
+                "session fake_agent/project/one ended immediately (exit 127):\n\
+                 hgs: x: program not found"
+            )
+        );
+        let sent = calls(&backend);
+        assert!(
+            matches!(&sent[1], Op::LaunchStatus { launch_id }
+                if launch_id == "0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10"),
+            "{sent:?}"
+        );
+        // A start (resume, restore, fork) does not ask.
+        backend.start(&spec(&[], &command, true)).unwrap();
+        assert!(matches!(calls(&backend).as_slice(), [Op::CreateSession(_)]));
+
+        // A host of an earlier version cannot tell: the launch has started, as
+        // before; so has a retried launch that found its session.
+        for (status, existing) in [
+            (Err(ErrorCode::Unsupported), false),
+            (Err(ErrorCode::NotFound), false),
+            (Ok(()), true),
+        ] {
+            let backend = HostBackend::new(Fake::new(move |op| match op {
+                Op::CreateSession(_) => Ok(json!({"session": "$0", "pane": "%0",
+                    "name": "fake_agent/project/one", "pid": 7, "existing": existing})),
+                Op::LaunchStatus { .. } => match status {
+                    Err(code) => Err(host_error(
+                        code,
+                        "this session host does not know the request",
+                    )),
+                    Ok(()) => panic!("an existing session is not asked about"),
+                },
+                op => panic!("unexpected {op:?}"),
+            }));
+            let exit = backend.launch(&spec(&[], &command, true)).ok().unwrap();
+            assert_eq!((exit.code, exit.server_died), (0, false));
+        }
     }
 
     #[test]

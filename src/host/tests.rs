@@ -2544,6 +2544,89 @@ mod terminal_backend {
         assert!(!screen.entered.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn a_launch_whose_program_cannot_start_fails_with_what_it_said() {
+        let (host, launcher) = new_host();
+        let startup = Duration::from_millis(300);
+        let backend = HostBackend::new(Direct {
+            host: host.clone(),
+            creates: Arc::default(),
+            screen: None,
+        })
+        .with_startup(startup);
+        let spec = |tag: &str, detached| LaunchSpec {
+            name: format!("fake_agent/p/{tag}"),
+            cwd: WORK.into(),
+            env: Vec::new(),
+            command: strings(&[PROGRAM, "--run", "0", "fake_agent"]),
+            detached,
+        };
+        let cannot_start = || {
+            *lock(&launcher.0.fail_at_once) = Some((
+                126,
+                b"hgs: fake_agent: Access is denied. (os error 5)\r\n".to_vec(),
+            ));
+        };
+        let denied = |tag: &str| {
+            Err((
+                1,
+                format!(
+                    "session fake_agent/p/{tag} ended immediately (exit 126):\n\
+                     hgs: fake_agent: Access is denied. (os error 5)"
+                ),
+            ))
+        };
+
+        // The supervisor cannot start its program: a detached launch fails.
+        cannot_start();
+        assert_eq!(ended(backend.launch(&spec("a", true))), denied("a"));
+        // A program that runs for the startup time has started.
+        let since = Instant::now();
+        assert_eq!(ended(backend.launch(&spec("b", true))), Ok((0, false)));
+        assert!(since.elapsed() >= startup);
+        // So has one that ends at once with exit 0, as under tmux.
+        launcher.0.exit_at_once.store(true, Ordering::SeqCst);
+        assert_eq!(ended(backend.launch(&spec("c", true))), Ok((0, false)));
+        launcher.0.exit_at_once.store(false, Ordering::SeqCst);
+        // A start (resume, restore, fork) does not wait.
+        cannot_start();
+        backend.start(&spec("d", true)).unwrap();
+        assert_eq!(launcher.count(), 4);
+
+        // An attached launch, whose client finds the session ended, fails the
+        // same way.
+        let (backend, screen, _) = console_backend(&host, Size { cols: 80, rows: 24 });
+        cannot_start();
+        assert_eq!(ended(backend.launch(&spec("e", false))), denied("e"));
+        assert_eq!(launcher.count(), 5);
+        // So does one whose client sees the program fail at once.
+        let attached = {
+            let (backend, spec) = (backend.clone(), spec("f", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || {
+            let listed: Listed = connect(&host).call(Op::List).unwrap();
+            listed
+                .sessions
+                .iter()
+                .any(|session| session.name == "fake_agent/p/f" && session.attached == 1)
+        });
+        let program = launcher.program(5);
+        program.write(b"fake_agent: unknown option --x\r\n");
+        eventually("the output", || screen.shown().contains("unknown option"));
+        program.exit(2);
+        assert_eq!(
+            attached.join().unwrap(),
+            Err((
+                1,
+                "session fake_agent/p/f ended immediately (exit 2):\n\
+                 fake_agent: unknown option --x"
+                    .into()
+            ))
+        );
+        assert!(screen.shown().ends_with("[exited]\r\n"));
+    }
+
     /// A host that answers one attach, shows a screen, reads one key and then
     /// dies. `running` says whether a host answers afterwards.
     struct Dying {
