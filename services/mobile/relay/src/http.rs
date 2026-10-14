@@ -57,8 +57,14 @@ struct Budget {
 fn take(s: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit> {
     s.clone().try_acquire_owned().map_err(|_| Error::BUSY)
 }
-/// A bounded discard lets a client already uploading observe a 413 or 429
-/// rejection instead of an unread-body TCP reset. No payload is retained.
+/// Refusals made before `App::body` reads (forwarding, Content-Encoding or
+/// Content-Type, authentication, rate limits, request lanes, routing, the
+/// handler deadline) answer clients that are unverified, misdirected or
+/// already over a limit, so their discard stops here instead of at the
+/// route's body limit.
+const EARLY_DISCARD: usize = 64 * 1024;
+/// A bounded discard lets a client already uploading observe a rejection
+/// instead of an unread-body TCP reset. No payload is retained.
 /// Expect/continue clients can receive rejection immediately.
 async fn discard(request: Request, maximum: usize) {
     if request.headers().contains_key(header::EXPECT) {
@@ -141,9 +147,16 @@ impl App {
         .await
         .map_err(|_| Error::UNAVAILABLE)?
     }
-    async fn body(&self, request: Request, budget: Arc<Budget>, maximum: usize) -> Result<Value> {
-        if request
-            .headers()
+    /// Takes the request out of `unread` only to read or discard its body;
+    /// a header refusal leaves it to the smaller discard in `dispatch`.
+    async fn body(
+        &self,
+        unread: &mut Option<Request>,
+        budget: Arc<Budget>,
+        maximum: usize,
+    ) -> Result<Value> {
+        let headers = unread.as_ref().map(|r| r.headers()).ok_or(Error::BAD)?;
+        if headers
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(';').next())
@@ -154,8 +167,7 @@ impl App {
                 "application/json required",
             ));
         }
-        let length = request
-            .headers()
+        let length = headers
             .get(header::CONTENT_LENGTH)
             .map(|v| {
                 v.to_str()
@@ -164,6 +176,7 @@ impl App {
                     .ok_or(Error::BAD)
             })
             .transpose()?;
+        let request = unread.take().ok_or(Error::BAD)?;
         if length.is_some_and(|n| n > maximum) {
             discard(request, maximum).await;
             return Err(Error::LARGE);
@@ -366,9 +379,15 @@ impl App {
             tokio::select! {biased;_=self.stop.cancelled()=>return Err(Error::UNAVAILABLE),_=tokio::time::sleep_until(timeout.into())=>return Ok(()),r=rx.recv()=>match r{Ok(s) if !s.is_empty()&&s!=topic=>continue,_=>return Ok(())}}
         }
     }
-    async fn handle(&self, req: Request) -> Result<Response> {
+    /// `unread` keeps the request until `App::body` takes it, so `dispatch`
+    /// can still discard the body after an earlier refusal.
+    async fn handle(&self, unread: &mut Option<Request>) -> Result<Response> {
+        let req = unread.as_ref().ok_or(Error::BAD)?;
         let path = req.uri().path().to_string();
         let method = req.method().clone();
+        // A request body is not `Sync`, so no borrow of the request may be
+        // held across an await.
+        let query = req.uri().query().unwrap_or("").to_string();
         if path == "/healthz" && method == Method::GET {
             return Ok(axum::Json(json!({"ok":true,"protocol_version":1})).into_response());
         }
@@ -413,7 +432,7 @@ impl App {
                 .rate(&json!(["pair", identity]), 10, true)
                 .await?;
             budget.keep(take(&self.responses)?);
-            let b = self.body(req, budget.clone(), MIB).await?;
+            let b = self.body(unread, budget.clone(), MIB).await?;
             protocol::fields(&b, &["code", "device_name"], &[])?;
             let v = self
                 .store
@@ -440,7 +459,7 @@ impl App {
             )
             .await?;
         let mut params = std::collections::HashMap::new();
-        for (k, v) in url::form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()) {
+        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
             if params.insert(k.into_owned(), v.into_owned()).is_some() {
                 return Err(Error::BAD);
             }
@@ -514,7 +533,7 @@ impl App {
             ),
             ("GET", ["v1", "computers"]) => (StatusCode::OK, self.store.computers(&c).await?),
             ("POST", ["v1", "requests"]) => {
-                let b = self.body(req, budget.clone(), REQUEST_MAX).await?;
+                let b = self.body(unread, budget.clone(), REQUEST_MAX).await?;
                 let submission = self
                     .work(budget.clone(), move || crate::store::Submission::new(b))
                     .await?;
@@ -522,7 +541,7 @@ impl App {
             }
             ("GET", ["v1", "requests", id]) => (StatusCode::OK, self.store.receipt(&c, id).await?),
             ("POST", ["v1", "node", "heartbeat"]) => {
-                let b = self.body(req, budget.clone(), MIB).await?;
+                let b = self.body(unread, budget.clone(), MIB).await?;
                 let (b, encoded) = self
                     .work(budget.clone(), move || {
                         protocol::heartbeat(&b)?;
@@ -535,7 +554,7 @@ impl App {
             }
             ("POST", ["v1", "node", "peers", route, "heartbeat"]) => {
                 protocol::uuid(&json!(route), false)?;
-                let b = self.body(req, budget.clone(), MIB).await?;
+                let b = self.body(unread, budget.clone(), MIB).await?;
                 let (b, encoded) = self
                     .work(budget.clone(), move || {
                         protocol::peer_heartbeat(&b)?;
@@ -547,7 +566,7 @@ impl App {
                 (StatusCode::OK, json!({"ok":true}))
             }
             ("POST", ["v1", "node", "requests", id, "result"]) => {
-                let b = self.body(req, budget.clone(), MIB).await?;
+                let b = self.body(unread, budget.clone(), MIB).await?;
                 let id_owned = id.to_string();
                 let (b, encoded) = self
                     .work(budget.clone(), move || {
@@ -564,7 +583,7 @@ impl App {
                 (StatusCode::OK, json!({"ok":true}))
             }
             ("POST", ["v1", "push"]) => {
-                let b = self.body(req, budget.clone(), MIB).await?;
+                let b = self.body(unread, budget.clone(), MIB).await?;
                 let provider = b["provider"].as_str().ok_or(Error::BAD)?;
                 let target = match provider {
                     "fcm" => {
@@ -607,12 +626,14 @@ async fn dispatch(State(app): State<App>, req: Request) -> Response {
     } else {
         40
     };
-    let mut response =
-        match tokio::time::timeout(Duration::from_secs(deadline), app.handle(req)).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => e.into_response(),
-            Err(_) => Error::TIMEOUT.into_response(),
-        };
+    let mut unread = Some(req);
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(deadline), app.handle(&mut unread)).await;
+    let mut response = match outcome {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => refuse(e, unread).await,
+        Err(_) => refuse(Error::TIMEOUT, unread).await,
+    };
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -620,6 +641,14 @@ async fn dispatch(State(app): State<App>, req: Request) -> Response {
         .headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     response
+}
+/// A request still unread was refused before `App::body` took it. Its small
+/// discard runs after `handle` has released every admission permit.
+async fn refuse(error: Error, unread: Option<Request>) -> Response {
+    if let Some(request) = unread {
+        discard(request, EARLY_DISCARD).await;
+    }
+    error.into_response()
 }
 pub fn client_identity(peer: IpAddr, forwarded: Option<&str>, cfg: &Config) -> Result<String> {
     let trusted = |ip: &IpAddr| cfg.trusted_proxy_cidrs.iter().any(|net| net.contains(ip));

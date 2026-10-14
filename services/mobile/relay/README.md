@@ -169,12 +169,16 @@ The server bounds accepted TCP connections (default 1024), headers (100 and a
 Connections closing at their lifetime ceiling are normal: clients retry reads,
 while mutation receipt recovery uses the original UUID. There are two async
 runtime threads per process. Worker overload returns 429 and `Retry-After: 1`.
-A body refused for its declared length (413) or because the large payload lane
-or small-body budget is full (429) is first discarded up to the route's body
-limit for at most two seconds, unretained, so a client still uploading reads the
-status instead of a connection reset; requests with `Expect: 100-continue` are
-refused before any body is sent. Earlier refusals, such as authentication, rate
-limits or request-lane overload, do not read the body.
+A refused body is first discarded, unretained and for at most two seconds, so a
+client still uploading reads the status instead of a connection reset. A body
+refused for its declared length (413) or because the large payload lane or
+small-body budget is full (429) is discarded up to the route's body limit. A
+refusal before the body is read (forwarding header, Content-Encoding or
+Content-Type 415, authentication 401, rate-limit or request-lane 429, unknown
+route, handler deadline) answers a client that is unverified, misdirected or
+over a limit: it discards at most 64 KiB and holds no admission permit
+meanwhile. Requests with `Expect: 100-continue` are refused before any body is
+sent. A body that times out or fails while it is being read is not discarded.
 Health is independent of SQL/admission; readiness coalesces a two-second probe
 and caches its result for one second. Errors omit SQL, bodies, tokens and URLs.
 

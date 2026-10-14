@@ -2519,6 +2519,213 @@ async fn http_oversized_declared_body_is_answered_after_bounded_drain() {
     f.close().await;
 }
 
+/// Sends a request head, then its body in paced 4 KiB pieces, so the relay
+/// decides while the client is still uploading.
+async fn upload(address: std::net::SocketAddr, head: &str, body: &[u8]) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    for piece in body.chunks(4096) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        stream
+            .write_all(piece)
+            .await
+            .expect("the relay reads the rest of an upload it refuses");
+    }
+    stream
+}
+/// Reads a `Connection: close` response to its end.
+async fn answer(mut stream: tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response))
+        .await
+        .expect("the refusal is bounded in time")
+        .expect("the refusal is readable");
+    String::from_utf8(response).unwrap()
+}
+fn refused(response: &str, status: &str, error: &str) -> bool {
+    response.starts_with(&format!("HTTP/1.1 {status} "))
+        && response.ends_with(&format!(r#"{{"error":"{error}"}}"#))
+}
+/// Waits until a rate counter exists. The relay takes the request lane before
+/// it counts the request, so the counter proves that the lane is held.
+async fn counted(f: &Fixture, key: Value) {
+    let key = digest(canonical(&key).unwrap());
+    for _ in 0..500 {
+        let row = f
+            .store
+            .db
+            .one("SELECT count FROM rate_limits WHERE key=?", args![&key])
+            .await
+            .unwrap();
+        if row.is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the held request never reached its rate limit");
+}
+
+#[tokio::test]
+async fn http_early_refusals_are_answered_after_bounded_drain() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let f = Fixture::new().await;
+    let app = App::new(f.store.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(serve(listener, app, stop.clone()));
+    let node = s(&f.credentials, "node_token");
+    let head = |path: &str, token: &str, extra: &str, length: usize| {
+        format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\nConnection: close\r\n{extra}\r\n")
+    };
+    let json = "Content-Type: application/json\r\n";
+    // A refusal made before the body is read discards up to 64 KiB, so a
+    // client uploading less than that reads the status, not a TCP reset.
+    let body = vec![b' '; 48 * 1024];
+    let heartbeat = "/v1/node/heartbeat";
+    let cases = [
+        (
+            heartbeat,
+            "not-a-credential",
+            json,
+            "401",
+            "credential not authorized",
+        ),
+        (
+            heartbeat,
+            node,
+            "Content-Type: application/json\r\nContent-Encoding: gzip\r\n",
+            "415",
+            "compressed requests are unsupported",
+        ),
+        (
+            heartbeat,
+            node,
+            "Content-Type: text/plain\r\n",
+            "415",
+            "application/json required",
+        ),
+        ("/v1/node/unknown", node, json, "404", "not found"),
+    ];
+    for (path, token, extra, status, error) in cases {
+        let stream = upload(address, &head(path, token, extra, body.len()), &body).await;
+        let response = answer(stream).await;
+        assert!(refused(&response, status, error), "{response}");
+    }
+    // Expect/continue clients are refused before they send any body byte: the
+    // discard never invites the upload with 100 Continue.
+    let expect = format!("{json}Expect: 100-continue\r\n");
+    let stream = upload(
+        address,
+        &head(heartbeat, "not-a-credential", &expect, body.len()),
+        &[],
+    )
+    .await;
+    let response = answer(stream).await;
+    assert!(
+        refused(&response, "401", "credential not authorized"),
+        "{response}"
+    );
+    // An unauthenticated client cannot make the relay read more than 64 KiB:
+    // the refusal ends at once instead of waiting for the rest of the declared
+    // body until the two-second discard deadline.
+    let started = std::time::Instant::now();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(head(heartbeat, "not-a-credential", json, 1 << 20).as_bytes())
+        .await
+        .unwrap();
+    // The relay may reset the connection while this is still being written.
+    let _ = stream.write_all(&vec![b' '; 256 * 1024]).await;
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response)).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "an early refusal read beyond its bound for {:?}",
+        started.elapsed()
+    );
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn http_rate_and_lane_refusals_are_answered_after_bounded_drain() {
+    use tokio::io::AsyncWriteExt;
+    let f = Fixture::config(Config {
+        background: false,
+        max_anonymous_requests: 1,
+        max_authenticated_requests: 1,
+        ..Config::default()
+    })
+    .await;
+    let app = App::new(f.store.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(serve(listener, app, stop.clone()));
+    let node = s(&f.credentials, "node_token");
+    let head = |path: &str, token: &str, length: usize| {
+        format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n")
+    };
+    let hold = |path: &str, token: &str| {
+        format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n{{\r\n")
+    };
+    let body = vec![b' '; 48 * 1024];
+    let busy = |response: &str| {
+        refused(response, "429", "relay capacity is busy")
+            && response.contains("\r\nretry-after: 1\r\n")
+    };
+    // Hold the sole anonymous lane with an unfinished pairing upload, then
+    // refuse a second pairing that is still uploading.
+    let mut pairing = tokio::net::TcpStream::connect(address).await.unwrap();
+    pairing
+        .write_all(hold("/v1/pair", "").as_bytes())
+        .await
+        .unwrap();
+    counted(&f, json!(["pair", "127.0.0.1"])).await;
+    let stream = upload(address, &head("/v1/pair", "", body.len()), &body).await;
+    let response = answer(stream).await;
+    assert!(busy(&response), "{response}");
+    drop(pairing);
+    // The same for the sole authenticated request lane.
+    let mut heartbeat = tokio::net::TcpStream::connect(address).await.unwrap();
+    heartbeat
+        .write_all(hold("/v1/node/heartbeat", node).as_bytes())
+        .await
+        .unwrap();
+    counted(&f, json!([Role::Node.table(), f.node.workspace, f.node.id])).await;
+    let stream = upload(
+        address,
+        &head("/v1/node/heartbeat", node, body.len()),
+        &body,
+    )
+    .await;
+    let response = answer(stream).await;
+    assert!(busy(&response), "{response}");
+    drop(heartbeat);
+    // A client over the failed-login rate limit is refused the same way.
+    for _ in 0..20 {
+        f.store
+            .rate(&json!(["login", "127.0.0.1"]), 20, true)
+            .await
+            .unwrap();
+    }
+    let stream = upload(
+        address,
+        &head("/v1/node/heartbeat", "not-a-credential", body.len()),
+        &body,
+    )
+    .await;
+    let response = answer(stream).await;
+    assert!(busy(&response), "{response}");
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    f.close().await;
+}
+
 #[tokio::test]
 async fn mark_read_payload_is_exact_and_capability_gated() {
     let f = Fixture::new().await;
