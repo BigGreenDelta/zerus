@@ -408,10 +408,15 @@ fail an unchanged commit, and Windows-only code, compiled nowhere else, is check
 against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
 `fake_agent` examples and runs `tests/test_windows_client.py` and the session host
 suites (`tests/test_windows_host.py`, `tests/test_windows_host_survival.py`,
-[testing the host](windows-host-testing.md)) against them; the host step has a
-20-minute limit. A runner step inside a job that forbids breakaway cannot start a
-host that outlives it, so the host suites then fail with that reason (spec D4)
-instead of hanging. The Rust cache uses its own
+`tests/test_windows_lifecycle.py`, [testing the host](windows-host-testing.md))
+against them. The runner puts every step in a job that forbids breakaway, where
+hgs refuses to start a host (spec D4), so `scripts/ci/outside-job.py` starts the
+host suites outside it through WMI. That copy restores the step's environment
+without credentials and runs the suites in a kill-on-close job of its own that
+allows breakaway, as an sshd session does. The step follows the log and exit
+status, and after the suites or the 15-minute timeout it ends whatever they left,
+including hosts of the tested `hgs.exe`. This is a CI harness only: the product
+never escapes a job through WMI. The Rust cache uses its own
 `windows-cli-` key with line-table debug information to bound its size. The runner
 gives each step a synchronous anonymous pipe as stdin, and Windows OpenSSH never
 exits after using one (the fake client refuses it), so steps that start `hgs.exe`,
