@@ -59,3 +59,5 @@ mod worker;
 
 #[cfg(windows)]
 pub(crate) use self::command::run;
+// What an ended launch keeps of its screen, also where hgs records it (`state::launches`).
+pub(crate) use self::registry::last_lines;

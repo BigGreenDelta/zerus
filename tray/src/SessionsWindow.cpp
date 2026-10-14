@@ -2252,6 +2252,7 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
+    QString ended;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end();) {
         const auto launch = it.value().toObject();
@@ -2272,9 +2273,28 @@ void SessionsWindow::placeLaunchedSessions()
             if(MachinePlatform::absolute(path,style))m_organization.addFolder(group,entry.machine,path,{},style);
             m_organization.moveSession(entry.identity, group); m_organization.setCollapsed(group, false); consumed = true;
         }
+        // A session that ended before any listing showed it, leaving no record,
+        // never appears: its machine reports how the launch ended instead.
+        const QString host = launch.value("host").toString();
+        const BoxState *box = host.isEmpty() ? &m_fleet.local() : m_fleet.peer(host);
+        const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
+        if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
+                return entry.host == host && entry.session.launchId == it.key(); })) {
+            consumed = true;
+            if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
+            // A hidden launch status stays hidden.
+            if (launch.value("show_pending").toBool()) {
+                const QString name = launch.value("tag").toString(); const auto code = end.value("code");
+                ended = code.isDouble() ? tr("Session %1 ended before it appeared (exit code %2).").arg(name).arg(code.toInteger())
+                    : tr("Session %1 ended before it appeared.").arg(name);
+                const QString output = end.value("output").toString().trimmed();
+                if (!output.isEmpty()) ended += '\n' + output;
+            }
+        }
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
     }
     if (changed) { saveOrganization(); savePendingLaunches(); }
+    if (!ended.isEmpty()) showNotice(ended, true);
 }
 
 bool SessionsWindow::isTerminating(const Entry &entry) const

@@ -246,6 +246,14 @@ fn current(name: &str) -> Result<Option<Current>> {
             .map(|session| (session, name.to_owned(), Some(Vec::new()))));
     }
     archive::reconcile()?;
+    // An approval answered in Terminal sends no hook. As in `hgs ls`, settle it
+    // from the screen first; that takes the lock, and only a pending request
+    // captures the terminal.
+    if record_path(name).exists() {
+        if let Ok(record) = read(name) {
+            claude_approval::reconcile(record);
+        }
+    }
     let guard = lock(None)?;
     if !record_path(name).exists() {
         return Ok(None);

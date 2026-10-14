@@ -15,7 +15,7 @@ val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
 val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
     require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
 }
-val stableVersionName = "0.1.31"
+val stableVersionName = "0.1.32"
 val stableVersionCode = rootProject.file("VERSION_CODE").readText().trim().toInt().also {
     require(it in 1..2_100_000_000) { "Invalid committed Android version code." }
 }

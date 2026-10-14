@@ -179,6 +179,10 @@ BoxState boxFromObject(const QJsonObject &obj)
     if (!errorDetail.isEmpty()) box.error = errorDetail;
     box.localSessions = obj.value(QStringLiteral("local_sessions")).toBool(true);
     box.localHost = obj.value(QStringLiteral("local_host")).toObject();
+    for (const auto &value : obj.value(QStringLiteral("ended_launches")).toArray()) {
+        const auto launch = value.toObject(); const auto id = launch.value(QStringLiteral("launch_id")).toString();
+        if (!id.isEmpty()) box.endedLaunches.insert(id, launch);
+    }
     box.peersKnown = obj.value("peers").isArray();
     for (const auto &peer : obj.value("peers").toArray()) if (peer.isString()) box.peers.append(peer.toString());
 
