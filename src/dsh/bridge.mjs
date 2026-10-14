@@ -160,6 +160,42 @@ export function apply(ctx, config) {
     });
   }, { prepend: true });
 
+  async function childPage(address) {
+    const abort = new AbortController();
+    const stream = api.follow({ address, maxMessages: 150 }, abort.signal);
+    try {
+      const first = await stream.next();
+      if (first.value?.type !== 'snapshot') throw new Error('Native child history is unavailable');
+      return { baseline: first.value.projections, page: { records: first.value.records, hasMore: first.value.hasMore } };
+    } finally { abort.abort(); await stream.return(); }
+  }
+  // Native authorization reports a child without its own descriptor as corrupt.
+  // A one-shot child records it in its first step, after its parent catalogs
+  // it and after that step's durability checkpoint, so a new child looks the
+  // same until then. Such a live child has no public history yet.
+  async function childHistory(address) {
+    try { return await childPage(address); } catch (error) {
+      if (error?.code !== 'subagent/catalog-diagnostic') throw error;
+      const state = await childEstablishment(address).catch(() => 'unknown');
+      if (state === 'starting') return { baseline: { asOfSeq: -1, values: {} }, page: { records: [], hasMore: false }, starting: true };
+      if (state !== 'recorded') throw error;
+    }
+    // A descriptor recorded since the first read passes native validation;
+    // a corrupt one fails it again.
+    return childPage(address);
+  }
+  async function childEstablishment({ parentSessionId, childSessionId }) {
+    const observation = await ctx.sessionQuery.observeSession(childSessionId, { projectionMode: 'none' });
+    try {
+      const { header, inheritedEventCount } = observation;
+      if (header.origin !== 'subagent' || header.parentSession !== parentSessionId) return 'unrelated';
+      const own = observation.events.slice(inheritedEventCount);
+      if (own.some(event => event.type === 'subagent/descriptor')) return 'recorded';
+      // Agent disposal drains storage before a session leaves the live
+      // registry, so a stored child without a descriptor stays a diagnostic.
+      return observation.source === 'live' && !own.some(event => event.type === 'step/start') ? 'starting' : 'missing';
+    } finally { observation[Symbol.dispose](); }
+  }
   async function inspect(request) {
     const { sessionId, agentId } = request;
     let baseline = await api.projections({ sessionId }, new AbortController().signal);
@@ -167,18 +203,11 @@ export function apply(ctx, config) {
     const child = agentId ? baseline.values.subagentCatalog?.find(child => child.id === agentId) : null;
     const jobOwners = agentId ? [agentId] : [sessionId, ...(baseline.values.subagentCatalog ?? []).map(child => child.id)];
     let address = { kind: 'session', sessionId };
-    let page;
+    let page, starting = false;
     if (agentId) {
         // Native page authorization verifies the direct parent/child relation.
         address = { kind: 'subagent', parentSessionId: sessionId, childSessionId: agentId, mode: 'unknown' };
-        const abort = new AbortController();
-        const stream = api.follow({ address, maxMessages: 150 }, abort.signal);
-        try {
-          const first = await stream.next();
-          if (first.value?.type !== 'snapshot') throw new Error('Native child history is unavailable');
-          baseline = first.value.projections;
-          page = { records: first.value.records, hasMore: first.value.hasMore };
-        } finally { abort.abort(); await stream.return(); }
+        ({ baseline, page, starting = false } = await childHistory(address));
     }
     page ??= await api.page({ address, throughSeq: baseline.asOfSeq, maxMessages: 150 }, new AbortController().signal);
     const lifecycleRows = agentId ? null : await api.list({}, new AbortController().signal);
@@ -193,7 +222,7 @@ export function apply(ctx, config) {
       jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => job.kind === 'bash' && job.owner === owner)
         .map(job => ({ ...job, callId:jobCalls.get(job.id)?.callId, controllable: owned.has(sessionId) && Boolean(ctx.agents.get(owner)) }))) : undefined,
       shellCalls:request.includeProcesses !== false ? [...shellCalls.values()].filter(call=>jobOwners.includes(call.owner)) : undefined,
-      childMode: child?.mode, childSendSupported: child?.mode === 'continuable' && Boolean(parentLive), goal: live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null,
+      childMode: child?.mode, childSendSupported: !starting && child?.mode === 'continuable' && Boolean(parentLive), goal: live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
       compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId) };
