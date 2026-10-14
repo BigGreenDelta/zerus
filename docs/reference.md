@@ -157,8 +157,9 @@ event they do not know. Until then each launch reads the version again; a versio
 that cannot be read gets no such event. A launch through a project `run_claude.sh`
 never reads it, because a launcher runs only under supervision. Once registered,
 the version is read again only when the `claude` executable changes; a version older
-than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before the start,
-dropping the event only when nothing else is left in it. The user's own hooks for
+than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before a tracked
+start, dropping the event only when nothing else is left in it; started outside hgs
+or with `HGS_TRACKING=0` first, it still warns until then. The user's own hooks for
 that event stay, and older versions still warn about those. An unreadable version or
 a launcher keeps the entry, as does a wrapper script that starts another Claude Code
 without itself changing: delete the entry from its `settings.json` by hand there.
