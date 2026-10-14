@@ -2294,6 +2294,10 @@ void SessionsWindow::placeLaunchedSessions()
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
             consumed = true; m_endedLaunches.append({it.key(), launch});
+            // Terminal launches and launches restored after a restart never
+            // report a result, so only the newest ended launches are kept.
+            constexpr qsizetype EndedLaunchLimit = 16;
+            if (m_endedLaunches.size() > EndedLaunchLimit) m_endedLaunches.removeFirst();
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {

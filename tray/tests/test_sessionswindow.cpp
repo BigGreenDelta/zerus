@@ -354,6 +354,7 @@ private slots:
     void endedLaunchOutranksALaterStartedCallback();
     void endedLaunchOutranksALaterFailure_data();
     void endedLaunchOutranksALaterFailure();
+    void endedLaunchesWithoutAResultStayBounded();
     void folderBrowserIgnoresStaleResponses();
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
@@ -7674,6 +7675,42 @@ void TestSessionsWindow::endedLaunchOutranksALaterFailure()
     // launch status showed nothing, so its failure still names the launch.
     QCOMPARE(notice->text(), order == "hidden" ? QString("Could not start session racing: timed out") : ended);
     QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
+}
+
+void TestSessionsWindow::endedLaunchesWithoutAResultStayBounded()
+{
+    // Terminal launches and launches restored after a restart never report a
+    // result, so the window remembers only the newest ended launches.
+    constexpr int remembered = 16;
+    QStringList tokens; QJsonObject pending;
+    for (int i = 0; i <= remembered; ++i) {
+        tokens << QUuid::createUuid().toString(QUuid::WithoutBraces);
+        pending.insert(tokens.last(), QJsonObject{{"host", QString()}, {"cmd", "claude"}, {"tag", QString("ended-%1").arg(i)},
+            {"group", "ungrouped"}, {"target", "/remote/infra"}, {"add_folder", false}, {"show_pending", true},
+            {"created", QDateTime::currentSecsSinceEpoch()}});
+    }
+    QSettings().setValue("workspace/pendingLaunches", QJsonDocument(pending).toJson(QJsonDocument::Compact));
+    auto state = fleet();
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *notice = window.findChild<QLabel *>("notice");
+    QVERIFY(client); QVERIFY(notice);
+    auto box = state.local();
+    for (const auto &token : tokens) {
+        // Each listing reports one more launch ended, oldest first.
+        box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"code", 3}});
+        state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    }
+    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+    const QString newest = QString("Session ended-%1 ended before it appeared (exit code 3).").arg(remembered);
+    QCOMPARE(notice->text(), newest);
+    // The oldest remembered launch still keeps the ended notice over a late result.
+    client->nativeSessionLaunched(tokens[1], true, {});
+    QCOMPARE(notice->text(), newest);
+    client->nativeSessionLaunched(tokens[2], false, "timed out");
+    QCOMPARE(notice->text(), newest);
+    // An older one was forgotten: its result is handled like that of any other launch.
+    client->nativeSessionLaunched(tokens[0], true, {});
+    QCOMPARE(notice->text(), QString("Session started. Loading activity…"));
 }
 
 void TestSessionsWindow::folderBrowserIgnoresStaleResponses()
