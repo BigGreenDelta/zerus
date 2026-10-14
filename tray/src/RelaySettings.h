@@ -1,4 +1,5 @@
 #pragma once
+#include "ChildProcess.h"
 #include "RelayConfiguration.h"
 #include <QApplication>
 #include <QClipboard>
@@ -131,7 +132,7 @@ private:
             else probeOutput+=chunk;
         });
         connect(p,&QProcess::readyReadStandardError,p,[p]{p->readAllStandardError();});
-        p->setProcessChannelMode(QProcess::SeparateChannels);
+        p->setProcessChannelMode(QProcess::SeparateChannels);ChildProcess::inheritStdioOnly(*p);
         p->start(QStringLiteral("systemctl"),{QStringLiteral("--user"),QStringLiteral("show"),QStringLiteral("zerus-mobile-connector.service"),QStringLiteral("--property=LoadState,ActiveState,SubState"),QStringLiteral("--no-pager")});
         deadline->start(3000);
 #else

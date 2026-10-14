@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 
+#include "ChildProcess.h"
 #include "FakeCli.h"
 #include "ProcessRunner.h"
 
@@ -38,6 +39,8 @@ private slots:
     void destroyedOwnerGetsNoResultAndKillsChild();
     void launchBackendMatchesPlatform();
     void childInheritsOnlyStandardDescriptors();
+    void directChildSkipsPipesTheRunnerIsCreating();
+    void stdioOnlyKeepsOtherProcessParameters();
     void environmentIsInheritedOrReplaced();
     void bareProgramNamesSearchPath();
     void largeInputAndOutputFlowTogether();
@@ -85,6 +88,27 @@ qint64 readPid(const QString &path)
     QFile file(path); if (!file.open(QIODevice::ReadOnly)) return 0;
     return file.readAll().trimmed().toLongLong();
 }
+#ifdef Q_OS_UNIX
+// A request's pipe the runner's macOS worker is still creating: pipe() made it
+// and close-on-exec follows only afterwards. High numbers keep its ends apart
+// from the descriptor a listing of /dev/fd opens.
+struct CreatingPipe {
+    int ends[2] = {-1, -1};
+    CreatingPipe()
+    {
+        int made[2]; if (::pipe(made) != 0) return;
+        for (int i = 0; i < 2; ++i) { ends[i] = ::fcntl(made[i], F_DUPFD, 64); ::close(made[i]); }
+    }
+    ~CreatingPipe() { for (int fd : ends) if (fd >= 0) ::close(fd); }
+    bool valid() const { return ends[0] >= 64 && ends[1] >= 64; }
+};
+// The descriptors in a child's `ls /dev/fd`.
+QList<int> descriptors(const QByteArray &listing)
+{
+    QList<int> open; for (const auto &name : listing.simplified().split(' ')) if (!name.isEmpty()) open << name.toInt();
+    return open;
+}
+#endif
 }
 
 void TestProcessRunner::launchesOnWorkerAndReportsOnOwnerThread()
@@ -219,6 +243,57 @@ void TestProcessRunner::childInheritsOnlyStandardDescriptors()
     ::close(leaked);
     QCOMPARE(result.outcome, ProcessRunner::Result::Finished);
     QCOMPARE(result.standardOutput, QByteArray("0 1 2 "));
+#endif
+}
+
+void TestProcessRunner::directChildSkipsPipesTheRunnerIsCreating()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("Unix descriptors only");
+#else
+    if (!ChildProcess::inheritsStdioOnly) QSKIP("This Qt cannot close inherited descriptors");
+    // The GUI thread starts a QProcess of its own (machine setup, a transfer, a
+    // terminal) while the worker has made a request's pipe without close-on-exec.
+    const CreatingPipe creating; QVERIFY(creating.valid());
+    const auto list = [](bool stdioOnly) {
+        QProcess process; process.setProgram(QStringLiteral("/bin/sh"));
+        process.setArguments({QStringLiteral("-c"), QStringLiteral("ls /dev/fd")});
+        if (stdioOnly) ChildProcess::inheritStdioOnly(process);
+        process.start();
+        return process.waitForFinished(10000) ? descriptors(process.readAllStandardOutput()) : QList<int>{};
+    };
+    const auto plain = list(false), limited = list(true);
+    const auto shown = QStringLiteral("pipe %1 %2, plain child %3, stdio only %4").arg(creating.ends[0]).arg(creating.ends[1])
+        .arg(QDebug::toString(plain), QDebug::toString(limited)).toLatin1();
+    // A plain child holds both ends, and with them that request's end of input.
+    QVERIFY2(plain.contains(creating.ends[0]) && plain.contains(creating.ends[1]), shown.constData());
+    QVERIFY2(limited.contains(0) && limited.contains(1) && limited.contains(2), shown.constData());
+    for (int fd : creating.ends) QVERIFY2(!limited.contains(fd), shown.constData());
+    // Detached children (a terminal, osascript, open -R) as well.
+    QTemporaryDir dir; QVERIFY(dir.isValid()); const auto listing = dir.filePath(QStringLiteral("fds"));
+    QVERIFY(ChildProcess::startDetached(QStringLiteral("/bin/sh"),
+        {QStringLiteral("-c"), QStringLiteral("ls /dev/fd > \"$1.part\" && mv \"$1.part\" \"$1\""), QStringLiteral("sh"), listing}));
+    QTRY_VERIFY(QFileInfo::exists(listing));
+    QFile file(listing); QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto detached = descriptors(file.readAll()); const auto detachedShown = QDebug::toString(detached).toLatin1();
+    QVERIFY2(detached.contains(1), detachedShown.constData());
+    for (int fd : creating.ends) QVERIFY2(!detached.contains(fd), detachedShown.constData());
+#endif
+}
+
+void TestProcessRunner::stdioOnlyKeepsOtherProcessParameters()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("Unix process parameters only");
+#else
+    if (!ChildProcess::inheritsStdioOnly) QSKIP("This Qt cannot close inherited descriptors");
+    // The Linux runner already asks for vfork; inheriting only stdio adds to that.
+    QProcess process; QProcess::UnixProcessParameters parameters;
+    parameters.flags = QProcess::UnixProcessFlag::UseVFork | QProcess::UnixProcessFlag::IgnoreSigPipe;
+    process.setUnixProcessParameters(parameters);
+    ChildProcess::inheritStdioOnly(process);
+    QCOMPARE(process.unixProcessParameters().flags, parameters.flags | QProcess::UnixProcessFlag::CloseFileDescriptors);
+    QCOMPARE(process.unixProcessParameters().lowestFileDescriptorToClose, 0);
 #endif
 }
 

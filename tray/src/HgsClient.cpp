@@ -1,4 +1,5 @@
 #include "HgsClient.h"
+#include "ChildProcess.h"
 #include "ProcessRunner.h"
 #include "LocalFile.h"
 #include "MachinePlatform.h"
@@ -69,11 +70,14 @@ ProcessRunner::Request processRequest(const QString &program, const QStringList 
     return request;
 }
 
+// Direct QProcess children (machine setup, transfers, launches) start on the GUI
+// thread while the runner may be creating a request's pipes (ChildProcess.h).
 void configureProcess(QProcess *process, const QString &program, const QStringList &arguments)
 {
     const auto request = processRequest(program, arguments);
     process->setProgram(request.program); process->setArguments(request.arguments);
     if (request.environment) process->setProcessEnvironment(*request.environment);
+    ChildProcess::inheritStdioOnly(*process);
 }
 
 // null -> QString(), не пустая строка "": вызывающий код различает их через isNull().

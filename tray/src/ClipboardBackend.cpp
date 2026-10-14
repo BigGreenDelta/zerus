@@ -1,4 +1,5 @@
 #include "ClipboardBackend.h"
+#include "ChildProcess.h"
 
 #include <QClipboard>
 #include <QCoreApplication>
@@ -76,6 +77,8 @@ bool copyViaWlCopy(const QString &text, QString *error)
     p.setStandardOutputFile(QProcess::nullDevice());
     p.setStandardErrorFile(QProcess::nullDevice());
     p.setWorkingDirectory(QDir::homePath());
+    // The background owner it forks lives on until the clipboard changes.
+    ChildProcess::inheritStdioOnly(p);
     p.start(QStringLiteral("wl-copy"), args);
     if (!p.waitForStarted(kCallTimeoutMs)) {
         *error = QStringLiteral("cannot start wl-copy (not in PATH?)");

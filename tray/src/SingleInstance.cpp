@@ -1,4 +1,5 @@
 #include "SingleInstance.h"
+#include "ChildProcess.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -121,6 +122,7 @@ Service currentService()
 #ifdef Q_OS_UNIX
     QProcess process;
     process.setStandardInputFile(QProcess::nullDevice());
+    ChildProcess::inheritStdioOnly(process);
     process.start(program, arguments);
     if (!process.waitForFinished(2000)) {
         process.kill();
