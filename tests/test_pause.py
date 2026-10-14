@@ -651,6 +651,32 @@ class Lifecycle(Harness):
         self.resume(name)
         self.assertEqual(self.binding(name)["conversation_id"], sid)
 
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_session_ending_between_terminal_queries_lists_its_saved_state(self):
+        # A listing reads the sessions, then their panes. A session that ends in
+        # between lists with its saved state, never as an untracked live row.
+        name = self.start()
+        listed = self.root / "end-after-listing"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        self.script("tmux", f'''#!/bin/sh
+{tmux} "$@"; status=$?
+if [ "$1" = list-sessions ] && rm {shlex.quote(str(listed))} 2>/dev/null; then
+    {tmux} send-keys -t {shlex.quote("=" + name + ":")} unknown-exit Enter
+    tries=0
+    while {tmux} has-session -t {shlex.quote("=" + name)} 2>/dev/null && [ $tries -lt 500 ]; do
+        tries=$((tries + 1)); sleep 0.01
+    done
+fi
+exit $status
+''')
+        listed.touch()
+        sessions = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse(listed.exists())
+        self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + name],
+                                           env=self.env, capture_output=True).returncode, 0)
+        self.assertEqual([(s["name"], s.get("state")) for s in sessions], [(name, "stopped")])
+        self.assertTrue(sessions[0]["resumable"])
+
     def test_normal_launch_resumes_saved_and_fresh_replaces_it(self):
         name = self.start()
         sid = self.binding(name)["conversation_id"]

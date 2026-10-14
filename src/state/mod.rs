@@ -302,6 +302,11 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
         .ok_or("invalid session snapshot")?;
+    // The terminal listed these sessions before `snapshot`. Every live session
+    // has a pane, so one that the later snapshot lacks ended in between: it is
+    // not live, and its saved binding lists below with a state instead of as
+    // an untracked live row.
+    sessions.retain(|session| snapshot.contains_key(string(session, "name")));
     let mut by_name = BTreeMap::new();
     for (index, session) in sessions.iter().enumerate() {
         by_name.insert(string(session, "name").to_owned(), index);
