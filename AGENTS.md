@@ -95,11 +95,11 @@ the 10 GiB cache limit without owner authorization. Authenticated model tests st
 opt-in. Validate workflow edits locally before pushing. See `docs/ci-and-aur.md`.
 Native terminal/lifecycle changes need isolated real-agent contract coverage for
 reviewed versions, including retained resident versions. Full CI runs the
-keyless pinned Codex (Linux) and Claude Code (Linux and macOS) matrices; the
-separate upstream canary reports new releases and protocol changes without
-advancing pins or updating live agents. Review capabilities before adopting
-them; a skipped native suite is not compatibility evidence. See the native
-compatibility section in `docs/ci-and-aur.md`.
+keyless pinned Codex (Linux and Windows) and Claude Code (Linux, macOS and
+Windows) matrices; the separate upstream canary reports new releases and
+protocol changes without advancing pins or updating live agents. Review
+capabilities before adopting them; a skipped native suite is not compatibility
+evidence. See the native compatibility section in `docs/ci-and-aur.md`.
 External fork workflows require maintainer approval for every external contributor.
 PR/manual checks inherit read-only cache tokens; only exact upstream main pushes
 and scheduled checks may write caches. Publish jobs have no cache access. Keep

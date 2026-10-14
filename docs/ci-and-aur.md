@@ -11,10 +11,10 @@ also carry a Windows x86_64 portable zip of the control console.
 Hosted checks run automatically on pushes to `main` and pull requests targeting
 `main`, including Dependabot proposals. External fork workflows wait for a
 maintainer's **Approve and run** decision. Every automatic run selects source/MSRV,
-full Linux CLI, Arch desktop/package, both macOS suites and the Windows client and
-desktop suite. The owner enabled this policy on 2026-10-09 after making the
-repository public: standard Ubuntu, macOS and Windows GitHub-hosted runners are
-free for public repositories.
+full Linux CLI, Arch desktop/package, both macOS suites and both Windows suites
+(client and desktop, and real agents through the session host). The owner enabled
+this policy on 2026-10-09 after making the repository public: standard Ubuntu,
+macOS and Windows GitHub-hosted runners are free for public repositories.
 
 Manual CI remains available and defaults to all suites. `ci.yml` chooses the cache
 trust boundary and calls the shared jobs in `checks.yml`. Reusable CI keeps explicit
@@ -33,6 +33,7 @@ can select a PR head or another exact revision.
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| Windows real agents | Always | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
@@ -119,6 +120,10 @@ save them.
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | Qt base and Multimedia, no WebEngine |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
+
+The Windows real-agent job restores the `windows-cli-` family of the Windows
+desktop job for its release build and never saves it, so two jobs cannot race to
+save one key.
 
 When `Cargo.lock` changes, a Rust cache restores the newest target directory of
 the same compiler and month. A new compiler or month starts empty, so stale
@@ -432,9 +437,10 @@ against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
 suites (`tests/test_windows_host.py`, `tests/test_windows_host_conpty.py`,
 `tests/test_windows_host_survival.py`, `tests/test_windows_lifecycle.py`,
 `tests/test_windows_hooks.py`, [testing the host](windows-host-testing.md)) and the
-[terminal backend contract](#terminal-backend-contract) against them. Before the host suites,
-`scripts/fetch-conpty.py` fetches the [ConPTY pair](#the-bundled-conpty-pair) once
-into `RUNNER_TEMP/conpty`; the host step names that folder in
+[terminal backend contract](#terminal-backend-contract) against them; real agents
+run in a job of their own ([below](#windows-real-agents-through-the-session-host)).
+Before the host suites, `scripts/fetch-conpty.py` fetches the
+[ConPTY pair](#the-bundled-conpty-pair) once into `RUNNER_TEMP/conpty`; the host step names that folder in
 `HGS_TEST_CONPTY_DIR`, and the portable zip takes the same files. Nothing caches
 or uploads the folder. The runner puts every step in a job that forbids breakaway, where
 hgs refuses to start a host (spec D4), so `scripts/ci/outside-job.py` starts the
@@ -574,6 +580,43 @@ Windows job builds and tests the real binary.
 On a Windows development PC the same steps run from Git Bash;
 [CONTRIBUTING.md](../CONTRIBUTING.md#windows) lists the requirements and commands.
 
+### Windows real agents through the session host
+
+The `windows-host` job runs the reviewed `win32-x64` Claude Code and Codex in
+isolated session hosts of the release `hgs.exe` on a standard `windows-2025` runner
+(M7 of [Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
+Local sessions on Windows remain a preview until it passes. It is selected with the
+Windows desktop job and the gate requires both, but it is a job of its own: a
+failure points at the host, and the desktop job keeps its time margin. Like that
+job it checks out text files unchanged and uses the same exact CPython; it builds
+the release binary from the `windows-cli-` Rust cache, which it restores and never
+saves, and fetches the [ConPTY pair](#the-bundled-conpty-pair) the same way.
+
+It then runs `scripts/ci/agent-compatibility.py` with `HGS_TEST_BIN` and
+`HGS_TEST_CONPTY_DIR` ([native agent compatibility](#native-agent-compatibility-and-upstream-review)):
+the runner verifies each package against its pin, extracts only `claude.exe` or
+`codex.exe` and runs that agent's class of `tests/test_windows_native_agents.py`,
+whose agents reach only a local fake API (Anthropic's for Claude Code, OpenAI's
+for Codex) and keep their homes private. The suites confirm what spike S6 ran by
+hand with these versions (a tracked launch to a ready composer, hook events in
+listings, records and the journal, key input, pause, resume and terminate,
+non-ASCII prompts) and assert what had run only with the fake agent: exact
+`hgs send` acceptance with a trailing backslash and multiline messages, question
+and approval answers, and clear. Compaction and the model and effort pickers are not
+reviewed on Windows and stay out. Codex runs without its Windows sandbox: the
+package's sandbox setup program and command runner, its code-mode host, `rg` and
+voice libraries are never extracted.
+
+The suites start session hosts, so `scripts/ci/outside-job.py` runs the whole
+runner outside the step's job, as the desktop job does for the host suites, with a
+45-minute bound inside the 50-minute step. Afterwards it ends what is left by
+executable path: hosts of the tested `hgs.exe`, anything run from the suites'
+`hgs-host-*` folders (copies and staged images) and the extracted agents in the
+runner's `zerus-native-compat-*` folder. The step runs Python in UTF-8 mode, so a
+non-ASCII prompt in a log cannot fail on the runner's code page. The harness log,
+`report.json`, `summary.md` and each suite's log are kept as `windows-host-results`
+like the CLI job's logs: for seven days, or three after a failed scheduled run.
+
 ### Real-peer smoke on a Windows PC
 
 Hosted CI runs `hgs.exe` only against the fake SSH client. Changes to SSH handling,
@@ -651,23 +694,35 @@ accounts in private configuration.
 ### Native agent compatibility and upstream review
 
 Full Linux and macOS CLI CI also run `python3
-scripts/ci/agent-compatibility.py`. Each reviewed version in
-`scripts/ci/agent-compatibility.json` names the official npm package for one
-target, `linux-x64` or `darwin-arm64`, with an exact version and SHA-512
-integrity pin. The runner selects the pins for its host and refuses an agent
-that has none. The Codex matrix is Linux-only and retains 0.160.1 (a
-resident-session regression) and 0.162.0. The Claude Code matrix pins 2.1.296
-for both targets, so macOS runs Claude Code alone. Only the native executable is
-extracted into a disposable directory; agent binaries are neither committed nor
-bundled. The runner treats skipped or empty native suites as failures. `--agent
-claude` or `--agent codex` limits a local run to one matrix.
+scripts/ci/agent-compatibility.py`, and the Windows real-agent job runs it on
+Windows ([above](#windows-real-agents-through-the-session-host)). Each reviewed
+version in `scripts/ci/agent-compatibility.json` names the official npm package
+for one target, `linux-x64`, `darwin-arm64` or `win32-x64`, with an exact version
+and SHA-512 integrity pin. The runner selects the pins for its host and refuses an
+agent that has none. The Codex matrix pins 0.162.0 for Linux and Windows and
+retains 0.160.1 (a resident-session regression boundary) on Linux only. The Claude
+Code matrix pins 2.1.296 for all three targets, so macOS runs Claude Code alone.
+Only the native executable is extracted into a disposable directory (`claude.exe`
+and `codex.exe` on Windows, never Codex's sandbox setup program or its other
+helpers); agent binaries are neither committed nor bundled. The runner treats
+skipped or empty native suites as failures. It writes each suite's output to
+files rather than pipes, so a process a suite leaves behind cannot keep the run
+waiting, and a suite that times out still leaves its log. `--agent claude` or
+`--agent codex` limits a local run to one matrix. `--hgs` names the build under
+test (default: `HGS_TEST_BIN`, else the debug build). The suites get a private
+home; of the caller's `HGS_` variables only `HGS_TEST_CONPTY_DIR` reaches them. On
+Windows the runner's own version, help and schema probes also get a private
+`USERPROFILE`, `APPDATA` and `LOCALAPPDATA`, while the suites keep the real
+profile: each case gives its hosts and agents a profile of its own, and Codex
+prints folders relative to the real one, which the suites place projects by.
 
-Claude Code runs every `tests/test_claude_*_native.py` suite plus the Claude
-clear and compaction fixtures: exact input, questions, approvals, trust,
-resume, clear, compaction and session-only model settings. Each test launches
-the real TUI under `env -i` with a fixture API key, a loopback or local fake API
-and no nonessential traffic, so no account, telemetry or model request leaves
-the runner.
+On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
+plus the Claude clear and compaction fixtures: exact input, questions, approvals,
+trust, resume, clear, compaction and session-only model settings. Each test
+launches the real TUI under `env -i` with a fixture API key, a loopback or local
+fake API and no nonessential traffic, so no account, telemetry or model request
+leaves the runner. On Windows each agent runs its class of
+`tests/test_windows_native_agents.py` through the session host instead.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
 enabled and disabled. Animated 95x47 checks require the actual released settled
@@ -728,7 +783,9 @@ python3 scripts/ci/agent-compatibility.py --agent claude
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 
-The generated `artifacts/test-results/agent-compatibility/summary.md` and
+On Windows it takes the release build and the ConPTY pair as
+[testing the session host](windows-host-testing.md#real-agents) shows. The
+generated `artifacts/test-results/agent-compatibility/summary.md` and
 `report.json` contain the coverage result and review candidates. Before changing
 a pin, read the provider's release notes and compare CLI flags, hook events,
 native history and protocol schemas. Classify each relevant feature as already
@@ -736,8 +793,10 @@ supported, requiring an adapter change, or requiring a separately reviewed
 integration; track implementation work in Beads. Add an isolated native contract
 for every adopted lifecycle/input change and retain versions still used by
 resident sessions until their compatibility boundary is deliberately reviewed.
-Pin a reviewed version for every target its agent supports; the runner's unit
-tests reject a version that is missing one.
+Pin a reviewed version for every target its agent supports. Only an older version
+kept as a regression boundary may cover fewer targets: each of its pins gives the
+reason in `retained`, and the newest version is never retained. The runner refuses
+a manifest that breaks this rule, and its unit tests cover it.
 
 Zerus receives activity from structured hooks, conversation messages and usage
 from native history, and DeepSeek controls from its native API. Terminal checks

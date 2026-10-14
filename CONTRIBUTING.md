@@ -159,6 +159,10 @@ HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
+# Downloads the pinned win32-x64 Claude Code and Codex for their real-agent suites:
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
+HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
+  python -X utf8 scripts/ci/agent-compatibility.py </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
@@ -172,9 +176,11 @@ injected through `HGS_SSH`, with `HOME` and `USERPROFILE` in a temporary folder;
 it never uses your SSH configuration and skips itself on other systems. The
 native session host of Windows Phase 2 has its own isolated recipe and tests,
 `tests/test_windows_host.py`, the bundled ConPTY tests in
-`tests/test_windows_host_conpty.py` and the survival tests in
-`tests/test_windows_host_survival.py`:
-[testing the Windows session host](docs/windows-host-testing.md).
+`tests/test_windows_host_conpty.py`, the survival tests in
+`tests/test_windows_host_survival.py` and the real-agent suites in
+`tests/test_windows_native_agents.py`, which `scripts/ci/agent-compatibility.py`
+runs with the reviewed Claude Code and Codex packages, each against a local fake
+API: [testing the Windows session host](docs/windows-host-testing.md).
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to

@@ -3,6 +3,7 @@
     {
       "version": "0.160.1",
       "target": "linux-x64",
+      "retained": "Resident-session regression boundary, reviewed on Linux only",
       "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.160.1-linux-x64.tgz",
       "integrity": "sha512-sIDhqV+bsZKKVaVFVY5iB+pAzyOz2XRm3H1KXCsSJwGj5p98qnrT0Fweo1Hfe7WnyTp8mfBNdbVzUeO+mHYugA=="
     },
@@ -11,6 +12,12 @@
       "target": "linux-x64",
       "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.162.0-linux-x64.tgz",
       "integrity": "sha512-qHWp6oKpf456PqjberGN8avs8zChv2oS+UuDiqVFYAuDOhq6vBc1drh8jEsnR7dBX+zcw03PN5VLtePGlMcC3w=="
+    },
+    {
+      "version": "0.162.0",
+      "target": "win32-x64",
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.162.0-win32-x64.tgz",
+      "integrity": "sha512-W8kqHaqpW0qPz71E0rRT5dq+socGz1BbJyYN7o3SP1TWQt8Zl6ML74R9Hvt/xn1NNLVlDTRfXqNmaMkte6yEMQ=="
     }
   ],
   "claude": [
@@ -25,6 +32,12 @@
       "target": "darwin-arm64",
       "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.296.tgz",
       "integrity": "sha512-vqtx3kS3r1hNLMk+N8JMG5J4kcLHIbI3t/NSIdcFQZrRVCFA6NtcxJyn/B+Sf3GxJaFJOCEfoBQXsFo10+Oj9A=="
+    },
+    {
+      "version": "2.1.296",
+      "target": "win32-x64",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.296.tgz",
+      "integrity": "sha512-g2aYBzYM5YTDio0ulAoGIGgtGRMa08WAecer4wuOUrKPwVPRfyRdmoZI01BNS8jF9yupDmQycBMuBcVui/VGNw=="
     }
   ],
   "upstream": [

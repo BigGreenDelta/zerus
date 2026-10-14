@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,9 +18,13 @@ spec.loader.exec_module(compat)
 
 
 class AgentCompatibility(unittest.TestCase):
-    def archive(self, *, name=compat.AGENTS['codex']['member'], symlink=False):
+    def archive(self, *, name=compat.AGENTS['codex']['members']['linux-x64'], symlink=False, others=()):
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode='w:gz') as tar:
+            for other in others:
+                info = tarfile.TarInfo(other)
+                info.size = len(b'synthetic-helper')
+                tar.addfile(info, io.BytesIO(b'synthetic-helper'))
             info = tarfile.TarInfo(name)
             payload = b'synthetic-native-executable'
             if symlink:
@@ -31,25 +36,38 @@ class AgentCompatibility(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(payload))
         return stream.getvalue()
 
-    def package(self, payload, agent='codex', target=None):
-        target = target or compat.AGENTS[agent]['targets'][0]
+    def package(self, payload, agent='codex', target='linux-x64'):
         return {'version': '1.2.3', 'target': target,
                 'url': compat.AGENTS[agent]['tarball'].format(version='1.2.3', target=target),
                 'integrity': 'sha512-' + base64.b64encode(hashlib.sha512(payload).digest()).decode()}
 
     def test_verified_archive_extracts_only_the_expected_executable(self):
-        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() for target in spec['targets']]:
-            payload = self.archive(name=compat.AGENTS[agent]['member'])
+        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() for target in spec['members']]:
+            payload = self.archive(name=compat.AGENTS[agent]['members'][target])
             with self.subTest(agent=agent, target=target), tempfile.TemporaryDirectory() as temporary, patch.object(
                     compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
                 native = compat.install_native(agent, self.package(payload, agent, target), Path(temporary))
-                self.assertEqual(native.name, agent)
+                self.assertEqual(native.name, agent + ('.exe' if target == 'win32-x64' else ''))
                 self.assertEqual(native.read_bytes(), b'synthetic-native-executable')
                 self.assertEqual(native.stat().st_mode & 0o777, 0o755)
                 self.assertEqual(list(Path(temporary).iterdir()), [native])
 
+    def test_windows_codex_helpers_are_never_extracted(self):
+        # The sandbox setup program must never run; nothing but the CLI leaves the archive.
+        vendor = 'package/vendor/x86_64-pc-windows-msvc/'
+        helpers = [vendor + name for name in (
+            'codex-resources/codex-windows-sandbox-setup.exe', 'codex-resources/codex-command-runner.exe',
+            'bin/codex-code-mode-host.exe', 'codex-path/rg.exe', 'codex-resources/voice/bin/vcruntime140.dll',
+            'codex-package.json')]
+        payload = self.archive(name=compat.AGENTS['codex']['members']['win32-x64'], others=helpers)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+                compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
+            native = compat.install_native('codex', self.package(payload, 'codex', 'win32-x64'), Path(temporary))
+            self.assertEqual(native, Path(temporary) / 'codex.exe')
+            self.assertEqual([path.name for path in Path(temporary).rglob('*')], ['codex.exe'])
+
     def test_each_agent_accepts_only_its_own_official_distribution(self):
-        payload = self.archive(name=compat.AGENTS['claude']['member'])
+        payload = self.archive(name=compat.AGENTS['claude']['members']['linux-x64'])
         darwin = self.package(payload, 'claude', 'darwin-arm64')
         cases = [('codex', self.package(payload, 'claude')), ('claude', self.package(payload, 'codex')),
                  # A target must match its URL, and Codex has no reviewed macOS package.
@@ -65,17 +83,45 @@ class AgentCompatibility(unittest.TestCase):
     def test_reviewed_releases_match_the_pinned_packages(self):
         manifest = json.loads(compat.MANIFEST.read_text())
         reviewed = {row['name']: row['reviewed_versions'] for row in manifest['upstream']}
+        compat.check_manifest(manifest)
         for agent, spec in compat.AGENTS.items():
             pins = manifest[agent]
             versions = list(dict.fromkeys(package['version'] for package in pins))
             self.assertTrue(pins, agent)
             self.assertEqual(reviewed[spec['name']], versions)
-            # Every reviewed version is pinned exactly once for each supported target.
-            self.assertEqual(sorted((package['version'], package['target']) for package in pins),
-                             sorted((version, target) for version in versions for target in spec['targets']))
+            # Every current version is pinned exactly once for each supported target.
+            current = [version for version in versions
+                       if not any(package.get('retained') for package in pins if package['version'] == version)]
+            self.assertEqual(sorted((package['version'], package['target']) for package in pins
+                                    if package['version'] in current),
+                             sorted((version, target) for version in current for target in spec['members']))
             for package in pins:
                 self.assertEqual(package['url'], spec['tarball'].format(**package))
                 self.assertTrue(package['integrity'].startswith('sha512-'))
+        # Codex 0.160.1 stays a Linux-only regression boundary for resident sessions.
+        self.assertEqual([(package['version'], package['target']) for package in manifest['codex']
+                          if package.get('retained')], [('0.160.1', 'linux-x64')])
+        self.assertEqual({package['target'] for package in manifest['claude']}, {'linux-x64', 'darwin-arm64', 'win32-x64'})
+
+    def test_only_an_older_retained_version_may_skip_a_target(self):
+        def pin(version, target, **extra):
+            return dict(version=version, target=target, **extra)
+
+        retained = dict(retained='fixture regression boundary')
+        claude = [pin('2.0.0', target) for target in compat.AGENTS['claude']['members']]
+        codex = [pin('1.0.0', 'linux-x64', **retained), pin('1.1.0', 'linux-x64'), pin('1.1.0', 'win32-x64')]
+        compat.check_manifest({'codex': codex, 'claude': claude})
+        for label, pins, message in [
+                ('current version without Windows', codex[:2], 'needs a pin for every target'),
+                ('newest version retained', [pin('1.1.0', 'linux-x64', **retained)], 'only an older'),
+                ('retained without a reason', [pin('1.0.0', 'linux-x64', retained=''), *codex[1:]], 'only an older'),
+                ('retained on one target only', [*codex[:1], pin('1.0.0', 'win32-x64'), *codex[1:]],
+                 'some targets only'),
+                ('target pinned twice', [*codex, pin('1.1.0', 'win32-x64')], 'one target twice'),
+                ('unsupported target', [*codex, pin('1.1.0', 'darwin-arm64')], 'unsupported target'),
+                ('no version', [], 'no reviewed version')]:
+            with self.subTest(label), self.assertRaisesRegex(ValueError, message):
+                compat.check_manifest({'codex': pins, 'claude': claude})
 
     def test_changed_package_bytes_fail_before_extraction(self):
         payload = self.archive()
@@ -161,13 +207,17 @@ class AgentCompatibility(unittest.TestCase):
         qualified = []
 
         def qualify(agent, package, work, results, hgs):
-            qualified.append((agent, package['target']))
+            qualified.append((agent, package['version'], package['target']))
             return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed'}
 
         for target, arguments, expected in [
-                ('linux-x64', [], [('codex', 'linux-x64'), ('codex', 'linux-x64'), ('claude', 'linux-x64')]),
-                ('darwin-arm64', [], [('claude', 'darwin-arm64')]),
+                ('linux-x64', [], [('codex', '0.160.1', 'linux-x64'), ('codex', '0.162.0', 'linux-x64'),
+                                   ('claude', '2.1.296', 'linux-x64')]),
+                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64')]),
                 ('darwin-arm64', ['--agent', 'codex'], SystemExit),
+                # The retained Codex 0.160.1 has no Windows pin.
+                ('win32-x64', [], [('codex', '0.162.0', 'win32-x64'), ('claude', '2.1.296', 'win32-x64')]),
+                ('win32-arm64', [], SystemExit),
                 (None, [], SystemExit)]:
             qualified.clear()
             with self.subTest(target=target, arguments=arguments), tempfile.TemporaryDirectory() as temporary, \
@@ -184,6 +234,109 @@ class AgentCompatibility(unittest.TestCase):
                     self.assertEqual(qualified, expected)
                     self.assertIn('(' + target + '): passed', (Path(temporary) / 'summary.md').read_text())
 
+    def test_host_target_names_64_bit_windows_as_its_npm_packages_do(self):
+        for system, machine, expected in [('Windows', 'AMD64', 'win32-x64'), ('Windows', 'ARM64', 'win32-arm64'),
+                                          ('Linux', 'x86_64', 'linux-x64'), ('Darwin', 'arm64', 'darwin-arm64'),
+                                          ('FreeBSD', 'amd64', None)]:
+            with self.subTest(system=system, machine=machine), \
+                    patch.object(compat.platform, 'system', return_value=system), \
+                    patch.object(compat.platform, 'machine', return_value=machine):
+                self.assertEqual(compat.host_target(), expected)
+
+    def test_windows_runs_only_the_session_host_suites(self):
+        classes = {'claude': 'NativeWindowsClaude', 'codex': 'NativeWindowsCodex'}
+        for agent, spec in compat.AGENTS.items():
+            windows = compat.target_spec(agent, 'win32-x64')
+            self.assertEqual(windows['suites'], ['test_windows_native_agents.' + classes[agent]])
+            self.assertEqual(windows['variable'], spec['variable'])
+            self.assertFalse([name for name in spec['suites'] if 'windows' in name])
+            for target in set(spec['members']) - {'win32-x64'}:
+                with self.subTest(agent=agent, target=target):
+                    self.assertIs(compat.target_spec(agent, target), spec)
+
+    def qualify_fixture(self, agent, target):
+        """Run qualify() with stand-ins for the package, the executable and the suite
+        interpreter; returns the report row, the suite runs, the results folder and the
+        profile each probe of the executable saw."""
+        runs, profiles = [], []
+
+        def run(argv, **options):
+            self.assertIs(options['stdin'], compat.subprocess.DEVNULL)
+            runs.append((argv[3:], options['env'], options['timeout']))
+            options['stdout'].write(b'ZERUS_NATIVE_RESULT={"tests": 2, "skipped": 0}\n')
+            options['stderr'].write('ok: \u041f\u0440\u0438\u0432\u0435\u0442\n'.encode())
+            return SimpleNamespace(returncode=0)
+
+        def probe(native, arguments, env, timeout=60):
+            profiles.append(env['USERPROFILE'])
+            if arguments == ['--version']:
+                return compat.AGENTS[agent]['version_output'].format('1.2.3') + '\n'
+            if arguments[:2] == ['app-server', 'generate-json-schema']:
+                Path(arguments[3]).mkdir(parents=True)
+                (Path(arguments[3]) / 'ClientRequest.json').write_text(
+                    json.dumps({'properties': {'method': {'const': 'thread/start'}}}))
+            return 'fixture help\n'
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work, results = Path(temporary.name) / 'work', Path(temporary.name) / 'results'
+        (work / agent / '1.2.3').mkdir(parents=True)
+        package = {'version': '1.2.3', 'target': target, 'integrity': 'sha512-fixture'}
+        with patch.object(compat, 'install_native', return_value=work / agent / '1.2.3' / 'native'), \
+                patch.object(compat, 'probe', side_effect=probe), \
+                patch.object(compat.subprocess, 'run', side_effect=run), \
+                patch.dict(compat.os.environ, {'HGS_TEST_CONPTY_DIR': 'C:\\fixture\\conpty',
+                                               'HGS_SESSION': 'fixture-live-session',
+                                               'USERPROFILE': 'C:\\Users\\fixture-runner'}), \
+                patch('sys.stdout', io.StringIO()):
+            row = compat.qualify(agent, package, work, results, Path('hgs-under-test'))
+        return row, runs, results / agent / '1.2.3', profiles
+
+    def test_windows_qualifies_each_agent_once_through_the_session_host(self):
+        for agent, spec in compat.AGENTS.items():
+            with self.subTest(agent=agent):
+                row, runs, directory, profiles = self.qualify_fixture(agent, 'win32-x64')
+                self.assertEqual(row['status'], 'passed', row.get('error'))
+                self.assertEqual(row['cases'], {'default': {'tests': 2, 'skipped': 0}})
+                [(suites, env, timeout)] = runs
+                self.assertEqual((suites, timeout), (spec['windows']['suites'], spec['windows']['timeout']))
+                self.assertEqual(env['HGS_TEST_BIN'], 'hgs-under-test')
+                self.assertEqual(Path(env[spec['variable']]).name, 'native')
+                # The pinned ConPTY pair reaches the suite; the live session does not.
+                self.assertEqual(env['HGS_TEST_CONPTY_DIR'], 'C:\\fixture\\conpty')
+                self.assertNotIn('HGS_SESSION', env)
+                self.assertNotIn('HGS_CODEX_TEST_SIZE', env)
+                # The probes find a private profile; the suite gets the real one, by
+                # which it places projects where Codex prints their full path.
+                self.assertEqual(set(profiles), {env['HOME']})
+                self.assertEqual(len(profiles), 4 if agent == 'codex' else 2)
+                self.assertEqual(env['USERPROFILE'], 'C:\\Users\\fixture-runner')
+                # The log keeps stdout, then stderr, as the suite wrote them.
+                self.assertEqual((directory / 'default.log').read_bytes().decode(),
+                                 'ZERUS_NATIVE_RESULT={"tests": 2, "skipped": 0}\nok: \u041f\u0440\u0438\u0432\u0435\u0442\n')
+
+    def test_linux_codex_keeps_its_terminal_size_and_animation_cases(self):
+        row, runs, directory, profiles = self.qualify_fixture('codex', 'linux-x64')
+        self.assertEqual(row['status'], 'passed', row.get('error'))
+        self.assertEqual(sorted(row['cases']), ['110x35-animated', '110x35-reduced', '95x47-animated', '95x47-reduced'])
+        self.assertEqual([suites for suites, env, timeout in runs], [compat.AGENTS['codex']['suites']] * 4)
+        self.assertEqual({env['HGS_CODEX_TEST_SIZE'] for suites, env, timeout in runs}, {'95x47', '110x35'})
+        self.assertEqual(row['schema_stable']['methods'], ['thread/start'])
+        self.assertEqual(set(profiles), {'C:\\Users\\fixture-runner'})
+
+    def test_a_suite_that_times_out_keeps_its_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / 'default.log'
+
+            def run(argv, **options):
+                options['stderr'].write(b'test_launch ... ')
+                raise compat.subprocess.TimeoutExpired(argv, options['timeout'])
+
+            with patch.object(compat.subprocess, 'run', side_effect=run), patch('sys.stdout', io.StringIO()), \
+                    self.assertRaises(compat.subprocess.TimeoutExpired):
+                compat.run_suites(['fixture'], {}, 5, Path(temporary), log)
+            self.assertEqual(log.read_bytes(), b'test_launch ... ')
+
     def test_native_runner_rejects_an_empty_or_skipped_suite(self):
         # Execute the actual CI runner with an unavailable native executable:
         # a unittest skip must never turn this compatibility gate green.
@@ -192,7 +345,10 @@ class AgentCompatibility(unittest.TestCase):
         env = dict(os.environ, PYTHONPATH=str(ROOT / 'tests'))
         for spec in compat.AGENTS.values():
             env.pop(spec['variable'], None)
-        for name, suites in [('empty', [])] + [(agent, spec['suites']) for agent, spec in compat.AGENTS.items()]:
+        # macOS runs the Linux suites; Windows its session host suites.
+        matrices = [(agent + ' ' + target, compat.target_spec(agent, target)['suites'])
+                    for agent in compat.AGENTS for target in ('linux-x64', 'win32-x64')]
+        for name, suites in [('empty', [])] + matrices:
             with self.subTest(name):
                 result = subprocess.run([compat.sys.executable, '-c', compat.NATIVE_RUNNER, *suites], env=env,
                                         text=True, capture_output=True, timeout=30)
@@ -207,16 +363,30 @@ class AgentCompatibility(unittest.TestCase):
                 'HGS_SESSION': 'fixture-live-session', 'HGS_RUN_ID': 'fixture-live-run',
                 'HGS_ACCOUNT': 'fixture-account', 'CODEX_HOME': '/fixture-live-home',
                 'CLAUDE_CONFIG_DIR': '/fixture-live-claude', 'CLAUDECODE': '1',
-                'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key'}):
+                'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key',
+                'HGS_TEST_CONPTY_DIR': '/fixture-conpty', 'SYSTEMROOT': 'C:\\Windows', 'PATHEXT': '.COM;.EXE',
+                'TEMP': '/fixture-temp', 'USERPROFILE': '/fixture-live-profile'}):
             home = Path(temporary) / 'home'
             env = compat.fixture_environment(home)
             self.assertEqual(env['HOME'], str(home))
             self.assertTrue(Path(env['CODEX_HOME']).is_dir())
             self.assertEqual(env['PYTHONPATH'], str(ROOT / 'tests'))
+            self.assertEqual(env['PYTHONUTF8'], '1')
             self.assertEqual(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
             for key in ('HGS_SESSION', 'HGS_RUN_ID', 'HGS_ACCOUNT', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
                         'CLAUDE_CONFIG_DIR', 'CLAUDECODE'):
                 self.assertNotIn(key, env)
+            # The suites' own inputs and what Windows programs need pass through. So
+            # does the real profile: the Windows suites place their projects by it.
+            for key in ('HGS_TEST_CONPTY_DIR', 'SYSTEMROOT', 'PATHEXT', 'TEMP', 'USERPROFILE'):
+                self.assertEqual(env[key], os.environ[key])
+            # The runner's own probes on Windows find a private profile instead.
+            probes = compat.private_profile(env, home)
+            self.assertEqual(probes['USERPROFILE'], str(home))
+            for key in ('APPDATA', 'LOCALAPPDATA'):
+                self.assertTrue(Path(probes[key]).is_dir())
+                self.assertEqual(Path(probes[key]).parents[1], home)
+            self.assertEqual(env['USERPROFILE'], '/fixture-live-profile')
 
     def test_canary_has_no_publication_credentials_or_write_access(self):
         workflow = (ROOT / '.github/workflows/agent-upstream.yml').read_text()
