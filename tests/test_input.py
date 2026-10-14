@@ -167,9 +167,11 @@ class InputTransport(unittest.TestCase):
         self.record.pop('last_event_at',None)
         self.write_record()
 
-    def resumed_unconfirmed(self, fork_parent=None):
+    def resumed_unconfirmed(self, fork_parent=None, native=None):
         # A native executable name, exact parent PID and an open rollout are
         # all checked by the bridge. No real provider or model call is involved.
+        # `native` replaces the C source of that executable; it takes the same
+        # arguments and writes agent-pid and received the same way.
         self.tmux('kill-session', '-t', self.name)
         (self.root / 'agent-pid').unlink()
         self.rollout = self.root / 'saved.jsonl'
@@ -180,7 +182,7 @@ class InputTransport(unittest.TestCase):
             meta['payload'].update(forked_from_id=fork_parent, source='cli', cwd=str(self.root))
         self.rollout.write_text(json.dumps(meta)+'\n')
         source = self.root / 'codex.c'
-        source.write_text(r'''
+        source.write_text(native or r'''
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -380,6 +382,35 @@ int main(int argc,char **argv) {
         hook=subprocess.run([str(HGS),'__state','hook'],env=env,input=json.dumps(event),capture_output=True,text=True)
         self.assertEqual(hook.returncode,0,hook.stderr)
         self.assertNotIn('expected_id',self.inspect())
+
+    def test_resumed_codex_can_pause_before_deferred_session_start(self):
+        self.resumed_unconfirmed()
+        self.record.update(base=['codex'], launch_dir=str(self.root)); self.write_record()
+        initial = self.record.copy()
+        pause = lambda: subprocess.run([str(HGS), 'pause', self.name], env=self.env, capture_output=True, text=True, timeout=20)
+        # A sent message may have started a turn, an archive restore commits only
+        # on its hook, and a draft or dialog is not the verified empty composer.
+        for patch, screen in [(dict(input_pending_at=time.time()), None),
+                              (dict(restore_archive_id=str(uuid.uuid4())), None),
+                              ({}, ('\x1b[2J\x1b[H› unsent draft', '14:0')),
+                              ({}, ('\x1b[2J\x1b[HTrust this folder? ', '19:0'))]:
+            with self.subTest(patch=patch, screen=screen):
+                self.record = dict(initial, **patch); self.write_record()
+                self.screen(*(screen or ('\x1b[2J\x1b[H› ', '2:0')))
+                self.assertNotIn('pause', self.inspect()['allowed_actions'])
+                self.assertNotEqual(pause().returncode, 0)
+                self.assertTrue(self.tmux('list-panes', '-t', '=' + self.name, check=False))
+        self.record = initial; self.write_record(); self.screen('\x1b[2J\x1b[H› ', '2:0')
+        self.assertIn('pause', self.inspect()['allowed_actions'])
+        result = pause()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f'hgs: paused {self.name}\n')
+        paused = json.loads(self.record_path.read_text())
+        self.assertTrue(paused['paused'])
+        # Resume restores the same saved conversation; nothing confirmed or typed.
+        self.assertEqual((paused['conversation_id'], paused['expected_id']), (self.conversation_id, self.conversation_id))
+        self.assertFalse(paused.get('error'))
+        self.assertEqual(self.received(), b'')
 
     def test_resume_input_rejects_wrong_history_process_dialog_and_stale_run(self):
         self.resumed_unconfirmed(); initial=self.record.copy()

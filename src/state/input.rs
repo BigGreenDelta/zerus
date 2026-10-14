@@ -160,6 +160,15 @@ pub(super) fn checked_ready(name: &str, run_id: &str, conversation_id: &str) -> 
     checked_input(name, run_id, conversation_id, false)
 }
 
+/// A resume before its deferred SessionStart, verified as for its first message.
+pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    if !resume_input::clearable(&record) {
+        return Err("The agent is no longer waiting for its resumed conversation; refresh".into());
+    }
+    Ok(record)
+}
+
 /// Session settings may precede the first user message, when Codex/Kimi have
 /// not created a conversation yet. Other idle-only actions keep checked_ready.
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {

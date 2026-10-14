@@ -337,6 +337,27 @@ pub(super) fn cancel_for_input(name: &str) -> Result<()> {
 fn active(job: &Value) -> bool {
     ["waiting", "dispatching", "retrying"].contains(&string(job, "state"))
 }
+/// The agent works again after a provider failure while the continuation it
+/// accepted is still its latest input: that turn went on rather than stopped.
+fn working_on_continuation(job: &Value, s: &Value) -> bool {
+    job["acknowledged"] == true
+        && job["attempt"].as_u64().unwrap_or(0) > 0
+        && ["working", "tool", "compacting"].contains(&string(s, "phase"))
+}
+/// An account has one recovery request in flight at a time, until the agent
+/// accepts its continuation and then makes progress: from there the provider
+/// serves the account again, and a long working turn must not hold the
+/// account's other sessions at "Waiting to retry". Turn-start markers that
+/// follow the accepted input (Kimi's TurnStarted) are not provider progress.
+fn occupies(job: &Value, s: &Value) -> bool {
+    match string(job, "state") {
+        "dispatching" => true,
+        "retrying" => !(job["acknowledged"] == true
+            && s["phase"] != "error"
+            && seconds(s, "provider_status_at") > seconds(job, "user_at").max(seconds(s, "turn_started"))),
+        _ => false,
+    }
+}
 fn schedule(job: &mut Value, s: &Value, time: f64) {
     job["action"] = json!(adapter(s));
     let category = class(&s["provider_error"]);
@@ -472,7 +493,11 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
             }
             return job;
         } else if job["state"] == "waiting" {
-            if !same_failure(&job, s) || s["phase"] != "error" {
+            if (!same_failure(&job, s) || s["phase"] != "error") && working_on_continuation(&job, s) {
+                // The failure did not end the agent's work: never restart the
+                // loop or send another continuation into a working agent.
+                stop(&mut job, "retrying", "The agent kept working after the provider error");
+            } else if !same_failure(&job, s) || s["phase"] != "error" {
                 stop(
                     &mut job,
                     "cancelled",
@@ -625,7 +650,7 @@ fn tick() -> Result<()> {
         let mut occupied = std::collections::BTreeSet::new();
         for s in &snapshots {
             let job = load_job(string(s, "name"));
-            if job["state"] == "dispatching" || job["state"] == "retrying" {
+            if occupies(&job, s) {
                 occupied.insert(json!([s["agent"], s["account_id"]]).to_string());
             }
         }
@@ -1317,6 +1342,109 @@ mod tests {
         s["run_id"] = json!("new-run");
         s["provider_error"] = Value::Null;
         assert!(advance(original, &s, &on(), 30.0).is_null());
+    }
+    #[test]
+    fn failures_while_the_agent_keeps_working_never_restart_the_loop() {
+        let mut s = snapshot("claude");
+        s["provider_error"]["detail"] = json!("429 Too many requests");
+        let original = advance(Value::Null, &s, &on(), 11.0);
+        let mut working = s.clone();
+        working["phase"] = json!("tool");
+        working["provider_error"] = Value::Null;
+        // Before any continuation, the agent's own progress still ends the episode.
+        assert_eq!(advance(original.clone(), &working, &on(), 12.0)["reason"], "The failed turn is no longer current");
+        let mut job = original;
+        job["state"] = json!("retrying");
+        job["attempt"] = json!(1);
+        job["attempts"]["service"] = json!(0);
+        job["attempts"]["rate_limit"] = json!(1);
+        job["sent_at"] = json!(30.0);
+        job["request_id"] = json!("request");
+        job["acknowledged"] = json!(false);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["recovery_user_at"] = json!(31.0);
+        s["recovery_user_text"] = json!(CONTINUATION);
+        job = advance(job, &s, &on(), 31.5);
+        assert_eq!((&job["state"], &job["acknowledged"]), (&json!("retrying"), &json!(true)));
+        // A rate-limit hook right after the agent accepted the continuation.
+        s["phase"] = json!("error");
+        s["provider_error"] = json!({"source":"provider_hook","message_id":"limit-2","at":32.0,"detail":"429 Too many requests"});
+        job = advance(job, &s, &on(), 32.5);
+        assert_eq!((&job["state"], &job["class_attempt"]), (&json!("waiting"), &json!(1)));
+        for phase in ["tool", "working", "compacting"] {
+            let mut busy = s.clone();
+            busy["phase"] = json!(phase);
+            busy["provider_error"] = Value::Null;
+            // Even after its retry is due, a working agent gets no continuation.
+            let resumed = advance(job.clone(), &busy, &on(), 1000.0);
+            assert_eq!(resumed["state"], "retrying", "{phase}");
+            for key in ["id", "attempt", "attempts", "class_attempt", "acknowledged", "sent_at", "request_id", "failure_id"] {
+                assert_eq!(resumed[key], job[key], "{key}");
+            }
+            assert_eq!(advance(resumed.clone(), &busy, &on(), 2000.0), resumed);
+        }
+        working = s.clone();
+        working["phase"] = json!("tool");
+        working["provider_error"] = Value::Null;
+        job = advance(job, &working, &on(), 40.0);
+        let mut done = working.clone();
+        done["phase"] = json!("idle");
+        done["recovery_success_at"] = json!(50.0);
+        let finished = advance(job.clone(), &done, &on(), 51.0);
+        assert_eq!((&finished["state"], &finished["attempt"]), (&json!("succeeded"), &json!(1)));
+        // A later failure that ends the turn continues the same budget.
+        let mut failed = working;
+        failed["phase"] = json!("error");
+        failed["provider_error"] = json!({"source":"provider_hook","message_id":"limit-3","at":60.0,"detail":"429 Too many requests"});
+        let next = advance(job, &failed, &on(), 61.0);
+        assert_eq!((&next["state"], &next["attempt"], &next["class_attempt"]), (&json!("waiting"), &json!(1), &json!(1)));
+    }
+    #[test]
+    fn an_accepted_continuation_releases_the_account_once_the_agent_progresses() {
+        let mut s = snapshot("claude");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        assert!(!occupies(&job, &s));
+        job["state"] = json!("dispatching");
+        assert!(occupies(&job, &s));
+        job["state"] = json!("retrying");
+        job["sent_at"] = json!(20.0);
+        job["acknowledged"] = json!(false);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["provider_status_at"] = json!(25.0);
+        assert!(occupies(&job, &s), "delivery is unconfirmed");
+        job["acknowledged"] = json!(true);
+        job["user_at"] = json!(21.0);
+        s["provider_status_at"] = json!(21.0);
+        assert!(occupies(&job, &s), "the agent accepted it but nothing followed yet");
+        s["provider_status_at"] = json!(21.5);
+        assert!(!occupies(&job, &s), "the provider serves the account again");
+        s["phase"] = json!("error");
+        assert!(occupies(&job, &s));
+        for state in ["waiting", "succeeded", "cancelled", "uncertain", "blocked", "exhausted"] {
+            job["state"] = json!(state);
+            assert!(!occupies(&job, &s), "{state}");
+        }
+    }
+    #[test]
+    fn a_turn_start_after_the_continuation_is_not_provider_progress() {
+        // Kimi reports TurnStarted (and TaskStarted) right after the
+        // continuation's UserPromptSubmit, before the provider answers.
+        let mut s = snapshot("kimi");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        job["state"] = json!("retrying");
+        job["attempt"] = json!(1);
+        job["sent_at"] = json!(20.0);
+        job["acknowledged"] = json!(true);
+        job["user_at"] = json!(21.0);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["turn_started"] = json!(21.2);
+        s["provider_status_at"] = json!(21.2);
+        assert!(occupies(&job, &s), "the turn started but the provider has not served it");
+        s["provider_status_at"] = json!(22.0);
+        assert!(!occupies(&job, &s), "a later tool call shows the provider serves the account");
     }
     #[test]
     fn late_acknowledgement_cannot_restart_an_uncertain_episode() {

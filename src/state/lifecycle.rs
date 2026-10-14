@@ -300,9 +300,13 @@ fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<std::process
 }
 
 pub(super) fn safe_to_pause(record: &Value) -> bool {
-    string(record, "activity") == "idle"
-        && telemetry::grouped_active(record) == 0
-        && string(record, "expected_id").is_empty()
+    pausable(record, || resume_input::idle(record))
+}
+
+/// `safe_to_pause` with the verification of a pending resume supplied by the
+/// caller; it is asked only when no confirmed idle conversation qualifies.
+pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> bool {
+    telemetry::grouped_active(record) == 0
         && !record["active_tools"]
             .as_object()
             .map(|tools| !tools.is_empty())
@@ -315,6 +319,10 @@ pub(super) fn safe_to_pause(record: &Value) -> bool {
                     .any(|child| string(child, "state") == "working")
             })
             .unwrap_or(false)
+        && ((string(record, "activity") == "idle" && string(record, "expected_id").is_empty())
+            // Codex defers SessionStart after resume until the next turn; a
+            // verified resume waits at its restored conversation's empty composer.
+            || resumed_idle())
 }
 
 fn pause_check(name: &str, snapshot: &Snapshot) -> Result<Value> {

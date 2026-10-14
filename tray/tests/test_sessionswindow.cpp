@@ -290,6 +290,7 @@ private slots:
     void quotaFailureExplainsRecoveryAndKeepsDraft();
     void firstMessageWaitsForNativePrompt_data();
     void firstMessageWaitsForNativePrompt();
+    void resumedConversationPausesAndClearsOnceVerified();
     void failedMessagesReconcileAndRetryWithoutLosingDrafts();
     void modelSettingsKeepSessionIdentity_data();
     void modelSettingsKeepSessionIdentity();
@@ -3164,6 +3165,40 @@ elif args[0]=='send':
     state["activity"] = "busy"; state["phase"] = "working"; QVERIFY(save());
     client->requestInspection({}, "codex/hgs/dashboard", 0);
     setComposerText(composer, "Next message"); QTRY_VERIFY(send->isEnabled());
+}
+
+void TestSessionsWindow::resumedConversationPausesAndClearsOnceVerified()
+{
+    // Codex defers SessionStart after resume, so the binding still expects the
+    // saved conversation. Only hgs's verification enables Pause and Clear.
+    const QString program = m_dir->filePath("resumed-actions-hgs");
+    QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(R"PY(#!/usr/bin/env python3
+import sys,pathlib
+root=pathlib.Path(__file__).parent
+print((root/'resumed-state.json').read_text() if sys.argv[1:2]==['inspect'] else '{}')
+)PY");
+    file.close(); QVERIFY(FakeCli::makeRunnable(file.fileName()));
+    QJsonObject state{{"tracked", true}, {"run_id", "resumed-run"}, {"conversation_id", "saved-conversation"},
+        {"expected_id", "saved-conversation"}, {"runtime_state", "live"}, {"process_state", "running"},
+        {"activity", "unknown"}, {"phase", "starting"}, {"resume_message_can_send", false},
+        {"resume_message_reason", "Codex has not opened the saved conversation yet"}, {"clear_context_supported", false},
+        {"allowed_actions", QJsonArray{"rename", "terminate", "forget"}}, {"events", QJsonArray{}}, {"cursor", 0}};
+    const auto save = [&] { return FakeCli::replace(m_dir->filePath("resumed-state.json"), QJsonDocument(state).toJson()); };
+    QVERIFY(save());
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *pause = window.findChild<QPushButton *>("pauseAction"); auto *clear = window.findChild<QAction *>("clearSessionAction");
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", state);
+    QVERIFY(!pause->isEnabled()); QVERIFY(!clear->isEnabled());
+    // Verified: the exact process holds the saved history at an empty composer.
+    // An hgs that reports this without allowing the pause keeps it disabled.
+    state["activity"] = "idle"; state["phase"] = "idle"; state["resume_message_can_send"] = true; state["resume_message_reason"] = "";
+    QVERIFY(save()); settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", state);
+    QVERIFY(!pause->isEnabled()); QVERIFY(!clear->isEnabled());
+    state["clear_context_supported"] = true; state["allowed_actions"] = QJsonArray{"pause", "rename", "terminate", "forget"};
+    QVERIFY(save()); settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", state);
+    QVERIFY(pause->isEnabled()); QVERIFY(clear->isEnabled());
 }
 
 void TestSessionsWindow::coldQuestionSubmissionRevalidatesConsent_data()
