@@ -439,10 +439,9 @@ ID is in the supervisor's own job (the session job). Editors and pagers are `vi`
 ### D12. Hooks on Windows
 
 Hook bytes, once written, are kept (`src/state/hooks.rs:152-162,211-221`), so the
-first Windows form must be final. Until it is settled, Windows refuses tracked
-Claude Code, Codex and Kimi launches before anything is written
-(`state::tracking_available`); untracked sessions (`HGS_TRACKING=0`, any other
-program) run. The form:
+first Windows form had to be final. Spike S6 settled it (results below), and
+tracked Claude Code, Codex and Kimi sessions run on Windows as on Unix;
+`HGS_TRACKING=0` runs them untracked. The form:
 
 - the command names the stable CLI (D8) by its absolute path with forward slashes in
   double quotes, followed by `__state hook`, which Git Bash, `cmd.exe` and a direct
@@ -459,9 +458,8 @@ Spikes never write hooks into real agent configuration: every spike uses private
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`. Spike S6 fixes the exact form
 per agent version.
 
-Implemented in M4.3 (`src/state/hooks.rs`), still behind the refusal: the forms
-are written only through the S6 preview below until S6 passes. What each agent
-runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook runner
+Implemented in M4.3 (`src/state/hooks.rs`) and enabled once S6 passed. What each
+agent runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook runner
 (strings of the win32 build), Codex 0.162.0's source (`hooks/src/engine`,
 `config/src/hook_config.rs`) and Kimi Code 2.1.1's bundled source
 (`externalHooks/internal/runHook.ts`):
@@ -501,13 +499,28 @@ runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook run
   fine. Existing hgs entries are repeated exactly for new events, exec form
   included, and Unix keeps its forms and recognition byte for byte.
 
-**S6 preview (temporary).** `HGS_WINDOWS_TRACKING_PREVIEW=1` lets tracked agents
-start on Windows before that, for spike S6: it is refused unless the state
-directory is isolated (as for the M3 test overrides, D2) and the agent's home
-variable names an existing directory that is not its default one, so a form under
-test reaches only disposable configuration. The CLI checks it before launching and
-the supervisor again before it writes anything. Once S6 passes, the switch
-`WINDOWS_TRACKING` in `src/state/mod.rs` enables tracking and the preview goes.
+**S6 results (2026-10-14).** Real Claude Code 2.1.296, Codex 0.162.0 and Kimi Code
+2.1.1 ran through the host with private homes on Windows 11 Pro 10.0.26200 (bundled
+ConPTY 1.25.260930003, Windows PowerShell 5.1.26100, real-time scanning off). All
+eight scenarios passed; the real homes were unchanged and no process was left.
+
+- Claude Code's exec form delivers SessionStart, UserPromptSubmit, PreToolUse,
+  PostToolUse, Stop and SessionEnd: UserPromptSubmit about 0.1 s and Stop 0.22-0.37 s
+  after the prompt. Pause takes 0.1 s, SessionStart confirms a resume 0.9 s later,
+  and terminate (0.1 s) archives the session. The shell form runs under Git Bash;
+  with `"shell": "powershell"` it never runs.
+- Codex runs `commandWindows` with Windows PowerShell 5.1 and prefers it to a Unix
+  `command`; the shell form as the only `command` never runs. UserPromptSubmit
+  arrives about 1-2 s and Stop 2-3 s after the prompt (5.6 s for a turn with a
+  tool); a resumed conversation is confirmed only by Codex's next message.
+- Kimi runs the shell form through `cmd /d /s /c`. Pause takes 4.9 s and
+  SessionStart confirms a resume after 5.6 s; a CRLF `config.toml` with a complete
+  hgs block gets no second block.
+- A prompt with Cyrillic and Latin diacritics reaches hgs intact through each
+  runner (no shell, PowerShell, `cmd.exe`).
+- The whole hook path (a Stop replayed through `hgs __state hook`) takes a median of
+  37-38 ms, p95 at most 41 ms; a bare `hgs.exe` start takes 25 ms. Hooks under
+  real-time scanning remain S7's question.
 
 ### D13. Attach
 
@@ -654,17 +667,16 @@ spike records its results in Beads and adjusts this document.
 | S6 | after M3 | Hook forms per agent version: Claude exec form and Git Bash form, Codex Windows command, Kimi command shell; hook latency with real-time scanning. | D12 |
 | S7 | after M3 | Start cost of `hgs.exe` and hooks under real-time scanning; SQLite journal writes within the 5 s hook timeout. | D12, M4 |
 
-Status on 2026-10-13: S1 is done (results in D6, D7, D8). S2 and S5 probes are done
-(results in D10, D11) and are confirmed through the host after M3. S4 is folded into
-the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe` starts
-in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook takes
-about 55 ms; that PC has no real-time scanning, so the scanning half of S7 needs
-another machine. S3 and S6 are pending. S6 runs real Claude Code, Codex and Kimi
-through the host with the M4.3 hook forms under the preview (D12): installation,
-the hook events in listings, records and the journal, hook latency, pause, resume
-and terminate.
+Status on 2026-10-14: S1 is done (results in D6, D7, D8). S3 is done (2026-10-13;
+its report is kept outside the repository, and the M4 parser changes it called for
+landed in PR #33). S6 is done (2026-10-14; results in D12). S2 and S5 probes are
+done (results in D10, D11) and are confirmed through the host after M3. S4 is folded
+into the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe`
+starts in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook
+takes about 55 ms; S6 measured a 25 ms start and a 37-38 ms hook path on its PC.
+Neither PC scans in real time, so the scanning half of S7 needs another machine.
 
-D10, D11 and D12 are provisional until their spikes are confirmed.
+D10 and D11 are provisional until their spikes are confirmed through the host.
 
 ## Milestones
 
@@ -699,8 +711,8 @@ one.
   backend's input and paste paths; M4.2, the supervisor channel, input evidence,
   pause and terminate, exit evidence and the recovery worker (D9-D11, D14),
   implemented 2026-10-14 and run with untracked sessions; M4.3, the hook forms
-  (D12), implemented 2026-10-14 and run only through the S6 preview until S6
-  passes): host backend
+  (D12), implemented 2026-10-14 and enabled for tracked agents once S6 passed the
+  same day): host backend
   client, launch and accounts (D8), supervisor
   and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
   (D14), Windows dialog fixtures and path-aware screen parsers

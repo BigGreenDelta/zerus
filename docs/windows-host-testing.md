@@ -101,9 +101,9 @@ process's environment minus the variables of a session it runs in, plus the
 launch's own; the launching side sets `HGS_EXECUTABLE` to the stable CLI and the
 host sets `HGS_HOST_SESSION`, `HGS_HOST_PANE` and `TERM`. Programs are found with
 `PATHEXT`; an npm command shim runs Node.js on its script, and any other batch
-file is refused. Tracked Claude Code, Codex and Kimi sessions are refused until
-their Windows hook form is settled (spec D12; `HGS_TRACKING=0` runs them
-untracked, and the S6 preview below runs them tracked in a disposable setup).
+file is refused. Claude Code, Codex and Kimi run tracked, with hgs's hooks in
+their configuration ([below](#tracked-agents); `HGS_TRACKING=0` runs them
+untracked).
 `hgs a` and a launch without `-d` attach the console they run in
 ([below](#attaching-a-terminal)). In a new Git Bash window, as above:
 
@@ -168,22 +168,20 @@ With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running ho
 to supervise the stable CLI's `hgs.exe recovery worker` (D14); without a host
 nothing starts one.
 
-## Tracked agents: the S6 preview
+## Tracked agents
 
-Spike S6 confirms the Windows hook forms (spec D12, `src/state/hooks.rs`) with real
-agents before tracking is enabled. Until then `HGS_WINDOWS_TRACKING_PREVIEW=1` runs
-tracked Claude Code, Codex and Kimi sessions, and only where nothing outlives the
-test: the state directory must be isolated (as for the host overrides above) and
-the agent's home variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIMI_CODE_HOME`) must
-name an existing directory that is not its default one. The variable is temporary;
-the switch `WINDOWS_TRACKING` in `src/state/mod.rs` replaces it once S6 passes. In
-a window prepared as in "Local sessions through the CLI", with a fake agent named
+A tracked Claude Code, Codex or Kimi session writes hgs's hooks into the agent's
+configuration in the forms of spec D12 (`src/state/hooks.rs`), which spike S6
+confirmed with the real agents. Hooks, once written, are kept: try them only with
+a private agent home, the home variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`KIMI_CODE_HOME`) naming a directory of the test, never the agent's own. In a
+window prepared as in "Local sessions through the CLI", with a fake agent named
 `claude` that answers hgs's version probe:
 
 ```sh
 cp target/debug/examples/fake_agent.exe "$root/bin/claude.exe"
 mkdir "$root/claude-home"
-export HGS_WINDOWS_TRACKING_PREVIEW=1 CLAUDE_CONFIG_DIR="$(cygpath -w "$root/claude-home")"
+export CLAUDE_CONFIG_DIR="$(cygpath -w "$root/claude-home")"
 FAKE_AGENT_PROBE_TEXT='2.1.296 (Claude Code)' FAKE_AGENT_PROMPT='claude> ' \
     "$hgs" claude "$project" --new -n tracked -d
 cat "$root/claude-home/settings.json"     # exec form: the stable CLI, args __state hook
@@ -197,7 +195,11 @@ exec form (`command` and `args`, no shell), an older one the shell form
 and `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` as `commandWindows`, which
 it runs with PowerShell (`-NoProfile -Command`); Kimi gets the shell form in its
 `config.toml` block and runs it with `%COMSPEC% /d /s /c`. PowerShell cannot run the
-shell form. The fake agent runs each configuration's hooks the way its agent does.
+shell form. Before anything is written, the supervisor refuses a Claude Code whose
+version cannot be read or that is older and finds no Git Bash, and a stable CLI
+path that a hook command would read differently; `HGS_TRACKING=0` runs such an
+agent untracked. The fake agent runs each configuration's hooks the way its agent
+does.
 
 ## Attaching a terminal
 
@@ -277,8 +279,8 @@ output to the end. `Listings` checks `local_host` in the local box.
 `tests/test_windows_hooks.py` runs the hook shell form through `CreateProcess`,
 `cmd.exe` as Kimi runs it, and Git Bash when installed, Codex's PowerShell form
 through `pwsh` and Windows PowerShell as Codex runs it (as an isolated test host's
-hooks, so local sessions need not be enabled), and tracked fake agents through the
-S6 preview in a profile whose folder name has spaces and Cyrillic. The
+hooks, so local sessions need not be enabled), and tracked fake agents with
+private homes in a profile whose folder name has spaces and Cyrillic. The
 `windows-desktop` CI job runs the host and survival modules against the release
 `hgs.exe` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
 
