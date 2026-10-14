@@ -119,8 +119,9 @@ common accidental machine paths and keys; it is not a complete secret scanner.
 
 ## Windows
 
-Windows builds the [control console](docs/installation.md#windows): `hgs.exe`
-without the local session host and `hgs-tray.exe` for remote machines. You need:
+Windows builds the [portable zip](docs/installation.md#windows): `hgs.exe`, whose
+session host runs local sessions once they are enabled, and `hgs-tray.exe`.
+You need:
 
 - Visual Studio 2022 with the x64 C++ tools and a Windows SDK; its own CMake
   (3.22 or later is needed for the Windows tests) and Ninja are used;

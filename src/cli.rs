@@ -140,8 +140,8 @@ resume --all excludes Archive. kill --archive forgets only that archived entry.
 rename changes the session label while preserving its agent/project, process and conversation.
 "#;
 
-/// Fails where this computer runs no local sessions (Windows for now). Forwarded
-/// `@host` commands never reach it.
+/// Fails where this computer runs no local sessions (a Windows computer whose local
+/// sessions are not enabled). Forwarded `@host` commands never reach it.
 fn local_sessions() -> Result<()> {
     if platform::local_sessions() {
         Ok(())

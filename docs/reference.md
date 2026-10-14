@@ -1090,7 +1090,7 @@ under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
 `hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
 running worker stays outdated, Settings → Mobile connection asks you to restart the
 sync service. Windows has no service manager for the worker; the desktop app runs
-it there ([Windows control console](#windows)).
+it there ([Windows](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
@@ -1429,7 +1429,7 @@ Arch packages, `~/.local/lib/...` from `tray/install.sh`), which alone needs Qt
 WebEngine (`qt6-webengine` is an optional dependency on Arch). The GUI loads it
 when a DeepSeek session is first shown. Without it, or on macOS, there is no
 Native UI tab, and Sign in, Open terminal and the other Native UI actions open
-the browser instead; the Windows control console does not offer the native UI
+the browser instead; Zerus on Windows does not offer the native UI
 ([Windows](installation.md#windows)). Builds choose with the CMake option
 `HGS_NATIVE_UI_PLUGIN` (`AUTO` by default: built when Qt WebEngine is found).
 `hgs native-ui SESSION --json` returns a private connection URL containing a token;
@@ -1764,7 +1764,7 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH, and the stable CLI once local sessions are enabled ([Windows](#windows)) |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
@@ -1792,34 +1792,61 @@ repository.
 
 <a id="windows"></a>
 
-## Windows control console
+## Windows
 
-On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines;
-the local session host is not compiled in. See
-[installation and limitations](installation.md#windows).
+On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines as
+a control console. Once local sessions are enabled on the computer, `hgs.exe` also
+runs agent sessions there, in a session host of the user on ConPTY
+([Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
+See [installation and limitations](installation.md#windows) and
+[testing the session host](windows-host-testing.md).
+
+**Local sessions.** `hgs session-host install | status | stop | uninstall [--json]`
+exists only on Windows and manages only the computer it runs on; for another
+machine, `hgs @host session-host` exits with code 2. `install` enables local
+sessions: it stages the stable CLI `%USERPROFILE%\.local\bin\hgs.exe` and a host
+image below `%USERPROFILE%\.local\share\hgs\host`, then writes the `local-sessions`
+marker in the configuration directory. `status` reports the marker, the staged
+files and the running host without starting one; `stop` stops an idle host;
+`uninstall` refuses while sessions run, then removes the marker and leaves the
+staged files. The marker alone decides, so a stopped or crashed host leaves the
+computer enabled with its saved sessions. The host starts with a launch, resume or
+fork, never with a listing, and exits a few seconds after its last session. Every
+session runs the stable CLI's `hgs.exe --run`, which starts the agent; tracked
+Claude Code, Codex and Kimi sessions get hooks that name the stable CLI. `hgs a`
+needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
+window, and detaches with `Ctrl+B d`.
 
 **Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with POSIX quoting. Locally, `ls`,
-`machine`, `project`, `swarm` and `presence` work. `account ls` and `account
-default` without an ID print an empty catalog, and `account copy` works between
-two remote machines. Every other local command, such as `a`, `send`, `inspect` of a
-local session or a launch without `@host`, exits with code 2:
+remote command stays `~/.local/bin/hgs` with POSIX quoting. Until local sessions
+are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
+work locally. `account ls` and `account default` without an ID print an empty
+catalog, and `account copy` works between two remote machines. Every other local
+command, such as `a`, `send`, `inspect` of a local session or a launch without
+`@host`, exits with code 2:
 
 ```text
-hgs: Local sessions are not supported on Windows yet; choose a remote machine.
+hgs: Local sessions are not enabled on this computer; enable them on the Machines page or run hgs session-host install, or choose a remote machine.
 ```
 
-The DeepSeek Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`)
-and the mobile-peer commands also exit with code 2, each with its own message.
+With local sessions enabled, local session commands run this computer's sessions
+in the session host. `paste`, `clip` and `notify` still exit with code 2
+(`hgs: clip is not supported on Windows`), DeepSeek sessions and voice messages are
+refused with their own messages, and OpenCode is not supported there. The DeepSeek
+Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`) and the
+mobile-peer commands exit with code 2 in both cases, each with its own message.
 
-**Listing.** The local element of `hgs ls --json` and `hgs ls --json --local` is a
-control-only box with `"local_sessions": false`, `projects: {}` and `sessions: []`.
-Its metrics include CPU, memory and uptime; load averages are null. Plain `hgs ls`
-prints `(control console: sessions run on remote machines)` for this computer, and
-`--dry-run ls` prints nothing for it. The computer's name is `HGS_SELF` when set,
-otherwise its lowercase `COMPUTERNAME`. Configuration and state live under `HOME`
-when set, otherwise `%USERPROFILE%`, in the usual `.config\hgs` and
-`.local\state\hgs` folders.
+**Listing.** Until local sessions are enabled, the local element of `hgs ls --json`
+and `hgs ls --json --local` is a control-only box with `"local_sessions": false`,
+`projects: {}` and `sessions: []`; plain `hgs ls` prints
+`(control console: sessions run on remote machines)` for this computer, and
+`--dry-run ls` prints nothing for it. With local sessions enabled, it lists this
+computer's projects and sessions as on Linux. Either way it carries `local_host`,
+the session host as found ([JSON](#json-and-external-clients)), and its metrics
+include CPU, memory and uptime; load averages are null. The computer's name is
+`HGS_SELF` when set, otherwise its lowercase `COMPUTERNAME`. Configuration and
+state live under `HOME` when set, otherwise `%USERPROFILE%`, in the usual
+`.config\hgs` and `.local\state\hgs` folders.
 
 **OpenSSH.** Windows OpenSSH never exits after it has used a synchronous pipe for
 one of its standard streams, the kind that Rust's standard library, Python and
@@ -1844,9 +1871,10 @@ kills leaves its folder behind until the next interactive link, which removes th
 folders of ended processes.
 
 **Embedded terminal.** The built-in Terminal runs `hgs.exe @host a SESSION
---existing` in a Windows pseudoconsole (ConPTY). Disconnect closes the
-pseudoconsole, waits up to a second and then ends `hgs.exe` and `ssh.exe` through a
-job object; the session keeps running on the remote machine.
+--existing`, or `hgs.exe a SESSION --existing` for a session on this computer, in a
+Windows pseudoconsole (ConPTY). Disconnect closes the pseudoconsole, waits up to a
+second and then ends `hgs.exe` and `ssh.exe` through a job object; the session
+keeps running on the remote machine or in the session host.
 
 **Machine setup.** `hgs machine setup` (**Install / update HGS…**) needs a source
 checkout on Windows. It packs the checkout with the system `tar.exe` and refuses one
@@ -1863,23 +1891,33 @@ desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when neede
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS
-fallback to `~/.local/bin` and Homebrew does not apply. Settings are in
+fallback to `~/.local/bin` and Homebrew does not apply. Without `--hgs` or `hgs=`,
+each start first asks that `hgs.exe` for `session-host status`, before the tray
+icon appears; once local sessions are enabled, the app then runs the stable CLI
+instead, after `session-host install` when that `hgs.exe` differs from the staged
+one and is at least as new. A small *Starting Zerus…* note shows while these
+checks take longer than half a second. Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
-user. When the local box reports
-`local_sessions: false`, the app offers remote machines only: in New session,
-Overview, the tray menu, Accounts, Projects and search. The Machines page lists
-this computer as a control console without SSH settings. Settings → Mobile
-connection is hidden, automatic recovery settings are saved to the first
-reachable remote machine, no desktop presence is recorded, and this computer is
-listed at most once every 15 seconds. Attention notices are tray notifications
-with a taskbar badge. A start without options opens the workspace, because
-Windows 11 first hides a new notification icon in the overflow; `--background`
-starts in the notification area only, as a Startup-folder shortcut should.
-Starting `hgs-tray.exe` again opens the running app's workspace, unless with
-`--background`. After a main-thread watchdog abort, Windows Error Reporting
-restarts the app with the same settings in the background (`--background`,
-never `--sessions`): a window that opens by itself after a crash would be a
-surprise.
+user. When the local box reports `local_sessions: false`, the app offers remote
+machines only: in New session, Overview, the tray menu, Accounts, Projects and
+search. The Machines page lists this computer as a control console without SSH
+settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
+confirmation), and shows the session host's state, PID, ConPTY, integrity level
+and Windows session in both modes. Automatic recovery settings of a control
+console are saved to the first reachable remote machine, and it is listed at most
+once every 15 seconds. With local sessions enabled, New session and Accounts offer
+this computer without DeepSeek and OpenCode, the shell entry is
+**Run PowerShell**, voice messages to its sessions are disabled with the reason as
+the tooltip, and it is listed at most once every 5 seconds. In both modes,
+Settings → Mobile connection is hidden and no desktop presence is recorded.
+Attention notices are tray notifications with a taskbar badge. A start without
+options opens the workspace, because Windows 11 first hides a new notification
+icon in the overflow; `--background` starts in the notification area only, as a
+Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running
+app's workspace, unless with `--background`. After a main-thread watchdog abort,
+Windows Error Reporting restarts the app with the same settings in the background
+(`--background`, never `--sessions`): a window that opens by itself after a crash
+would be a surprise.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. The zip cannot tell
@@ -1924,10 +1962,10 @@ an empty array. A minimal shape is:
 }
 ```
 
-A computer that runs no sessions of its own (`hgs.exe` on Windows) adds
-`"local_sessions": false` and returns empty `projects` and `sessions`. The key
-appears only when false; a missing key means true, so Linux and macOS snapshots
-are unchanged. [Windows control console](#windows).
+A computer that runs no sessions of its own (`hgs.exe` on Windows until local
+sessions are enabled) adds `"local_sessions": false` and returns empty `projects`
+and `sessions`. The key appears only when false; a missing key means true, so Linux
+and macOS snapshots are unchanged. [Windows](#windows).
 
 On Windows the local box also carries `local_host`, the session host as found
 (never started): `state` is `not-installed`, `stopped`, `running` or `unavailable`

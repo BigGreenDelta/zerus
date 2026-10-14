@@ -221,10 +221,10 @@ is published.
 
 **Windows**: nightly releases include a portable x86_64
 [control console](docs/installation.md#windows) that manages agents on your
-Linux and macOS machines over SSH. Agents do not run on Windows itself yet; a
-native session host on ConPTY, without WSL, is the next phase. Stable releases
-after 0.42.2 include it too; Dev builds have none. Contributions that follow the
-plan are welcome.
+Linux and macOS machines over SSH. With local sessions enabled on its Machines
+page, it also runs agents on the Windows computer itself, in a native session
+host on ConPTY without WSL. Stable releases after 0.42.2 include it too; Dev
+builds have none. Contributions that follow the plan are welcome.
 
 [Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 
