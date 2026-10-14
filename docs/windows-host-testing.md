@@ -271,7 +271,9 @@ agent cases skip without one. The lifecycle cases install into a temporary profi
 as `Staged` does and launch from the build under test, which plays the portable
 copy: sessions must still run the staged stable CLI. Their `Attach` cases run
 `hgs a` and an attached launch on a pseudoconsole of the test (`PseudoConsole`),
-and `Listings` checks `local_host` in the local box. `tests/test_windows_hooks.py`
+which reads the last frame as the GUI does: once the program has exited, it closes
+the pseudoconsole and reads its output to the end. `Listings` checks `local_host`
+in the local box. `tests/test_windows_hooks.py`
 runs the hook shell form through `CreateProcess`, `cmd.exe` as Kimi runs it, and
 Git Bash when installed, Codex's PowerShell form through `pwsh` and Windows
 PowerShell as Codex runs it (as an isolated test host's hooks, so local sessions

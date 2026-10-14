@@ -307,10 +307,12 @@ impl<C: Connector> HostBackend<C> {
                     eprintln!("{HOST_DIED}");
                     Ok(exit(1, true))
                 } else {
-                    eprintln!(
+                    // Whole, as `main` prints errors: the client exits next.
+                    let message = format!(
                         "hgs: lost the connection to the session host ({reason}); \
                          the session continues, attach again"
                     );
+                    eprintln!("{message}");
                     Ok(exit(1, false))
                 }
             }

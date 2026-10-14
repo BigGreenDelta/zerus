@@ -207,12 +207,21 @@ class PseudoConsole:
         return squeeze(text.encode()) in self.shown()
 
     def wait(self, timeout=LIMIT):
-        """The program's exit code once it has exited."""
+        """The program's exit code once it has exited, with everything it wrote
+        drawn. A pseudoconsole draws in frames of its own, the last ones after
+        its program has ended, so the test then does what the GUI's embedded
+        terminal does (tray/src/PtyProcess_win.cpp): it closes the
+        pseudoconsole, which paints its last frame and ends its output, and
+        reads to the end."""
         if KERNEL32.WaitForSingleObject(self.process, int(timeout * 1000)) != WAIT_OBJECT_0:
             raise AssertionError(f"the program did not end; it shows {self.shown()!r}")
         code = wintypes.DWORD()
         if not KERNEL32.GetExitCodeProcess(self.process, ctypes.byref(code)):
             raise ctypes.WinError(ctypes.get_last_error())
+        if self.console:
+            KERNEL32.ClosePseudoConsole(self.console)
+            self.console = ctypes.c_void_p()
+        self.thread.join(timeout)
         return code.value
 
     def close(self):
