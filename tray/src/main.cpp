@@ -374,7 +374,7 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
         std::abort();
     });
-    QObject::connect(&server, &QLocalServer::newConnection, &server, [&server, &agent]() {
+    const auto takeActivation = [&server, &agent]() {
         QLocalSocket *c = server.nextPendingConnection();
         QObject::connect(c, &QLocalSocket::disconnected, c, &QLocalSocket::deleteLater);
         auto activate = [c, &agent]() {
@@ -382,7 +382,15 @@ int main(int argc, char *argv[])
         };
         QObject::connect(c, &QLocalSocket::readyRead, c, activate);
         activate();
-    });
+    };
+    QObject::connect(&server, &QLocalServer::newConnection, &server, takeActivation);
+#ifdef Q_OS_WIN
+    // stableHgs waited for hgs in an event loop: a second instance may have
+    // connected then, with no one to take it. Otherwise each later activation
+    // would take the one before it.
+    while (server.hasPendingConnections())
+        takeActivation();
+#endif
     UpdateController::instance()->checkOnStart();
     if (cfg.showSessions) agent.showSessions();
     return app.exec();
