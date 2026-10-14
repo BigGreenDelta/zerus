@@ -178,24 +178,28 @@ for line in sys.stdin:
             self.assertEqual(f.stat().st_mode & 0o777,0o600)
             self.assertNotIn('DO-NOT-EXPOSE',f.read_text());self.assertNotIn('CHANGED',f.read_text())
     def test_explicit_agent_install_is_allowlisted_and_failed_download_never_runs(self):
-        for provider in ('codex','claude','kimi','dsh'):
+        # Unix runs npm or the vendors' install.sh; Windows gets install.ps1 (src/accounts/install.rs).
+        for provider,package,url in (('codex','@openai/codex',''),('claude','','https://claude.ai/install.sh'),
+                                     ('kimi','','https://code.kimi.com/kimi-code/install.sh'),('dsh','@deepseek-ai/dsh@0.2.0-rc.2','')):
             result=json.loads(self.run_hgs('account','install',provider,'--dry-run').stdout)
-            self.assertEqual(result['provider'],provider)
-            self.assertTrue(result['dry_run'])
+            self.assertEqual(result,{'provider':provider,'package':package,'installer_url':url,'dry_run':True})
         self.run_hgs('account','install','arbitrary-command',ok=False)
         npm=self.bin/'npm'
         npm.write_text('#!/usr/bin/env python3\nimport json,pathlib,sys\npathlib.Path(__file__).with_name("npm-args").write_text(json.dumps(sys.argv[1:]))\n')
         npm.chmod(0o755)
         self.run_hgs('account','install','codex')
         self.assertEqual(json.loads((self.bin/'npm-args').read_text()),['install','-g','@openai/codex'])
-        curl=self.bin/'curl'; marker=self.root/'installer-ran'
-        curl.write_text('#!/usr/bin/env python3\nimport pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index("--output")+1])\np.write_text('+repr('printf installed > '+str(marker)+'\n')+')\nsys.exit(22)\n')
+        curl=self.bin/'curl'; marker=self.root/'installer-ran'; self.env['TMPDIR']=str(self.root)
+        curl.write_text('#!/usr/bin/env python3\nimport pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index("--output")+1])\np.with_name("curl-url").write_text(sys.argv[-1])\np.write_text('+repr('printf installed > '+str(marker)+'\n')+')\nsys.exit(22)\n')
         curl.chmod(0o755)
         self.run_hgs('account','install','kimi',ok=False)
         self.assertFalse(marker.exists())
         curl.write_text(curl.read_text().replace('sys.exit(22)','sys.exit(0)'))
         self.run_hgs('account','install','kimi')
         self.assertEqual(marker.read_text(),'installed')
+        self.run_hgs('account','install','claude')
+        self.assertEqual((self.root/'curl-url').read_text(),'https://claude.ai/install.sh')
+        self.assertEqual(list(self.root.glob('.tmp*')),[]) # The downloaded script is removed.
 
     def test_claude_signed_out_json_uses_exit_one(self):
         cmd=self.bin/'claude'
