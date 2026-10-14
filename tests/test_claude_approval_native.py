@@ -110,4 +110,32 @@ class NativeClaudeInterrupt(NativeClaudeReadApproval):
         self.assertEqual(self.inspect()['phase'], 'interrupted')
         self.assertFalse((self.root/'work/slept.txt').exists())
 
+class NativeClaudeTerminalAnswers(NativeClaudeReadApproval):
+    """Answers chosen in Terminal itself: Claude reports none of them with a hook."""
+    tool_name = 'Bash'
+    tool_input = {'command': 'sleep 20; printf done > slept.txt', 'description': 'Wait for the fixture'}
+    test_session_grant_is_marked_broader_and_deny_reaches_claude = None
+    key = native.NativeClaudeQuestions.key
+
+    def settled(self, phase):
+        return self.wait_for(lambda: (state := self.inspect())['phase'] == phase and state)
+
+    def test_yes_settles_once_the_command_shows_it_runs(self):
+        self.key('Enter')
+        state = self.settled('tool')
+        self.assertEqual(state['pending_questions'], [])
+        self.assertNotIn('Do you want to proceed?', self.screen())
+        self.assertFalse((self.root/'work/slept.txt').exists())
+
+    def test_no_ends_the_turn_as_an_interruption(self):
+        for _ in self.options()[1:]: self.key('Down')
+        self.key('Enter')
+        self.assertEqual(self.settled('interrupted')['pending_questions'], [])
+        self.assertIn('What should Claude do instead?', self.screen())
+
+    def test_escape_ends_the_turn_as_an_interruption(self):
+        self.key('Escape')
+        self.assertEqual(self.settled('interrupted')['pending_questions'], [])
+        self.assertIn('What should Claude do instead?', self.screen())
+
 if __name__ == '__main__': unittest.main()

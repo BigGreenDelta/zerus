@@ -69,6 +69,48 @@ class SessionActions(unittest.TestCase):
         receipt=self.request('interrupt',dict(self.identity(),expected_turn_started=self.record['turn_started']))
         self.assertFalse(receipt['confirmed']);self.assertEqual(self.received()[len(before):],b'\x1b')
         self.assertEqual(json.loads(self.record_path.read_text())['phase'],'working')
+    def test_claude_terminal_approval_answers_settle_from_the_screen(self):
+        # Claude Code 2.1.296 sends no hook after an approval is answered in Terminal.
+        # Its real screens settle the request; anything short of proof keeps it waiting.
+        from pathlib import Path
+        command=('sleep 6 && printf %s fixture-output-with-a-rather-long-name-to-wrap-the-row > '
+                 '/work/example/projects/a-really-long-directory-name/approved.txt\necho second line')
+        def pending():
+            self.record.update(agent='claude',activity='busy',phase='approval',turn_started=time.time(),
+                active_tools=dict(toolu_fixture=dict(name='Bash',detail='sleep 6',started=1.0)),pending_approval_at=time.time(),
+                pending_approval=dict(hook_event_name='PermissionRequest',tool_name='Bash',tool_input=dict(command=command)))
+            self.write_record()
+        def show(fixture,column):
+            rows=(Path(__file__).resolve().parent/'fixtures'/fixture).read_text().split('\n')[:-1]
+            self.tmux('resize-window','-t','='+self.name+':','-x',str(max(map(len,rows))),'-y',str(len(rows)))
+            self.screen('\x1b[2J\x1b[H'+'\r\n'.join(rows)+f'\x1b[1;{column}H',f'{column-1}:0')
+        def listed():
+            result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return next(row for row in json.loads(result.stdout)['sessions'] if row['name']==self.name)
+        def inspected():
+            result=subprocess.run([str(HGS),'inspect',self.name],env=self.env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return json.loads(result.stdout)
+        pending()
+        # The panel, then Yes before the command shows its elapsed time.
+        for column,fixture in enumerate(['claude-bash-safety.txt','claude-approval-starting.txt'],start=2):
+            show(fixture,column)
+            self.assertEqual((listed()['phase'],inspected()['phase']),('approval','approval'),fixture)
+            self.assertIn('pending_approval',json.loads(self.record_path.read_text()))
+        show('claude-approval-running.txt',5)
+        self.assertEqual(listed()['phase'],'tool')
+        state=json.loads(self.record_path.read_text())
+        self.assertEqual((state['phase'],state['activity'],'pending_approval' in state),('tool','busy',False))
+        # No or Esc, with the composer or the one-time auto-mode nudge below.
+        for column,fixture in enumerate(['claude-approval-denied.txt','claude-approval-denied-nudge.txt'],start=6):
+            pending();show(fixture,column)
+            inspection=inspected()
+            self.assertEqual((inspection['phase'],inspection['pending_questions']),('interrupted',[]),fixture)
+            state=json.loads(self.record_path.read_text())
+            self.assertEqual((state['phase'],state['activity'],state['active_tools'],'pending_approval' in state),
+                             ('interrupted','unknown',{},False))
+        self.assertEqual(self.received(),b'')
     def test_changed_turn_and_idle_state_receive_nothing(self):
         self.working('codex');data=dict(self.identity(),expected_turn_started=self.record['turn_started']-1)
         self.request('interrupt',data,ok=False)
