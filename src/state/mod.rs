@@ -104,6 +104,23 @@ pub(super) fn local_sessions() -> Result<()> {
     }
 }
 
+/// Why a Windows computer refuses tracked agents for now.
+const TRACKING_UNAVAILABLE: &str = "tracked Claude Code, Codex and Kimi sessions are not \
+    available on Windows yet: their tracking hooks are not settled. Set HGS_TRACKING=0 to run \
+    the agent untracked";
+
+/// Whether tracked agents (Claude Code, Codex and Kimi under the `--run`
+/// supervisor) run here. Not on Windows until their hook form is settled (spec
+/// D12): hook commands, once written into an agent's configuration, are kept
+/// for ever, so no provisional form may ever be written.
+pub(crate) fn tracking_available() -> Result<()> {
+    if cfg!(windows) {
+        Err(TRACKING_UNAVAILABLE.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Whether the automatic recovery worker holds its lock; unknown without local
 /// sessions.
 pub(crate) fn recovery_worker_running() -> Option<bool> {

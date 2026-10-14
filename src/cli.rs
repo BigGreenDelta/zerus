@@ -175,6 +175,16 @@ fn require<'a>(args: &'a [String], index: usize, message: &str) -> Result<&'a st
 fn sanitize(name: &str) -> String {
     name.replace([':', '.'], "_")
 }
+/// A Windows folder's name after either separator (spec D15).
+#[cfg(windows)]
+fn basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return "/".into();
+    }
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(path).into()
+}
+#[cfg(unix)]
 fn basename(path: &str) -> String {
     if path.trim_end_matches('/').is_empty() {
         return "/".into();
@@ -198,6 +208,13 @@ fn binding_exists(config: &Config, name: &str) -> Result<bool> {
     }
     Ok(state_command("exists", &[name.into()])? == 0)
 }
+/// On Windows only the stable CLI, whichever hgs.exe runs now: records, hooks
+/// and recipes never name a portable folder that an update replaces (spec D8).
+#[cfg(windows)]
+fn executable_path() -> Result<PathBuf> {
+    platform::stable_executable().map_err(|error| Error::new(1, error))
+}
+#[cfg(unix)]
 fn executable_path() -> Result<PathBuf> {
     if let Some(path) = env::var_os("HGS_EXECUTABLE").filter(|s| !s.is_empty()) {
         let path = PathBuf::from(path);
@@ -247,6 +264,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
     }
+    // A Windows `--run` supervisor belongs to its session's job (spec D9).
+    #[cfg(windows)]
+    if args.first().is_some_and(|a| a == "--run") {
+        platform::prepare_supervisor();
+    } else {
+        platform::prepare_environment();
+    }
+    #[cfg(unix)]
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
     if args.first().is_some_and(|a| a == "__state") {
@@ -269,10 +294,13 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return mobile_peers(&config, &args);
     }
     if args.first().is_some_and(|a| a == "--run") {
-        #[cfg(unix)]
+        // A control console (local sessions off) still refuses it as in Phase 1;
+        // an isolated test host's sessions may run it (spec D2).
+        #[cfg(windows)]
+        if !platform::local_sessions() && !crate::host::gate::test_session() {
+            return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
+        }
         return run(&args[1..]);
-        #[cfg(not(unix))]
-        return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
     }
     let mut target = String::new();
     let mut dry = false;
@@ -444,7 +472,10 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
 }
 
-#[cfg(unix)]
+/// A session's root process: `--run N RESUME... BASE...`. Tracked agents run
+/// under `state`'s supervisor; anything else first tries the N resume words,
+/// then runs the base command in place of this process on Unix and as its
+/// child on Windows, which has no exec (spec D8).
 fn run(args: &[String]) -> Result<i32> {
     let n: usize = require(args, 0, "--run needs a resume-argument count")?
         .parse()
@@ -462,14 +493,26 @@ fn run(args: &[String]) -> Result<i32> {
     }
     let resume = &args[1..n + 1];
     let base = &args[n + 1..];
+    // The agent gets Ctrl+C; a stop request or a closing console waits for it.
+    // The session host pauses the agent and reads its console through the
+    // supervisor channel (spec D10, D11).
+    #[cfg(windows)]
+    let _stops = platform::ShutdownGuard::install()?;
+    #[cfg(windows)]
+    crate::host::supervisor::open();
     if n != 0 {
         let start = Instant::now();
-        let rc = platform::wait_interactive(Command::new(&resume[0]).args(&resume[1..]))?;
+        let rc = run_resume(resume)?;
         let seconds: u64 = env::var("HGS_FALLBACK_SECS")
             .unwrap_or_else(|_| "5".into())
             .parse()
             .map_err(|_| Error::new(1, "HGS_FALLBACK_SECS must be a nonnegative integer"))?;
-        if rc == 0 || start.elapsed().as_secs() >= seconds || rc >= 128 {
+        if resume_stands(
+            rc,
+            start.elapsed().as_secs(),
+            seconds,
+            platform::shutdown_signal() != 0,
+        ) {
             return Ok(rc);
         }
         eprintln!(
@@ -477,6 +520,27 @@ fn run(args: &[String]) -> Result<i32> {
             start.elapsed().as_secs()
         );
     }
+    run_base(base)
+}
+
+/// Whether a resume attempt that exited with `rc` after `elapsed` seconds is
+/// final, rather than "nothing to resume" (a quick ordinary failure, after
+/// which the base command starts fresh): it succeeded, ran for at least
+/// `limit` seconds, crashed or was signalled (128 and above; Windows reads
+/// crash statuses as signals, `platform::ntstatus_exit`), or a stop request
+/// reached the supervisor (`stopped`, Windows only: there a paused agent may
+/// exit with any code).
+fn resume_stands(rc: i32, elapsed: u64, limit: u64, stopped: bool) -> bool {
+    rc == 0 || elapsed >= limit || rc >= 128 || stopped
+}
+
+#[cfg(unix)]
+fn run_resume(argv: &[String]) -> Result<i32> {
+    platform::wait_interactive(Command::new(&argv[0]).args(&argv[1..]))
+}
+
+#[cfg(unix)]
+fn run_base(base: &[String]) -> Result<i32> {
     // The untracked runner has no durable process state and can replace itself directly.
     use std::os::unix::process::CommandExt;
     let error = Command::new(&base[0]).args(&base[1..]).exec();
@@ -488,6 +552,39 @@ fn run(args: &[String]) -> Result<i32> {
         },
         format!("{}: {error}", base[0]),
     ))
+}
+
+#[cfg(windows)]
+fn run_resume(argv: &[String]) -> Result<i32> {
+    run_child(argv)
+}
+
+#[cfg(windows)]
+fn run_base(base: &[String]) -> Result<i32> {
+    run_child(base)
+}
+
+/// Run `argv` on this console as the pane's program, which shares this
+/// process group, and wait for it; its exit code, a crash read as 128 plus a
+/// signal (`platform::code`).
+#[cfg(windows)]
+fn run_child(argv: &[String]) -> Result<i32> {
+    let mut child = platform::agent_command(argv)
+        .and_then(|mut command| command.spawn())
+        .map_err(|error| {
+            Error::new(
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                },
+                format!("{}: {error}", argv[0]),
+            )
+        })?;
+    platform::forward_shutdown(&child);
+    let status = child.wait()?;
+    platform::shutdown_child_exited();
+    Ok(platform::code(status))
 }
 
 fn peer_session(command: &str, args: &[String]) -> String {
@@ -732,7 +829,8 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
     }
-    let listing = terminal().listing();
+    // A listing that fails is an error: no sessions would show live ones as stopped.
+    let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
     let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
         let name = row.name.as_str();
         let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
@@ -753,7 +851,7 @@ fn local_list(config: &Config) -> Result<()> {
         println!("  (control console: sessions run on remote machines)");
         return Ok(());
     }
-    match terminal().attached_counts() {
+    match terminal().attached_counts().map_err(|e| Error::new(1, e))? {
         Some(rows) => {
             for (name, count) in rows {
                 println!("  {name:<40} {count} client(s)");
@@ -1452,7 +1550,13 @@ fn resolve_project(
         let directory = logical_cwd()?.to_string_lossy().into_owned();
         return Ok((directory.clone(), basename(&directory)));
     }
-    if project.contains('/') || project.starts_with('~') || matches!(project.as_str(), "." | "..") {
+    // A Windows folder may also be `C:\work`, `work\site` or `C:work`.
+    let windows_path = cfg!(windows) && (project.contains('\\') || project.get(1..2) == Some(":"));
+    if project.contains('/')
+        || project.starts_with('~')
+        || matches!(project.as_str(), "." | "..")
+        || windows_path
+    {
         let directory = absolute_directory(&config.expand_home(project))
             .map_err(|_| Error::new(1, format!("no such directory: {project}")))?
             .to_string_lossy()
@@ -1631,6 +1735,7 @@ fn launch(
             account_environment = crate::accounts::select(config, id, &command_name)?;
         }
     }
+    #[cfg(unix)]
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (mut base, mut resume): (Vec<String>, Vec<String>) = match command_name.as_str() {
         "claude" | "kimi" => (
@@ -1641,7 +1746,14 @@ fn launch(
             vec!["codex".into()],
             vec!["codex".into(), "resume".into(), "--last".into()],
         ),
+        #[cfg(unix)]
         "sh" => (vec![shell.clone(), "-l".into()], Vec::new()),
+        // PowerShell, untracked like the Unix login shell (spec D8).
+        #[cfg(windows)]
+        "sh" => (
+            platform::powershell().map_err(|e| Error::new(1, e))?,
+            Vec::new(),
+        ),
         _ => (vec![command.into()], Vec::new()),
     };
     let launcher = Path::new(&directory).join(format!("run_{command_name}.sh"));
@@ -1725,9 +1837,14 @@ fn launch(
         }
     }
     let executable = executable_path()?.to_string_lossy().into_owned();
-    let command = if command_name == "sh" {
+    // The Unix login shell is the pane's root process. On Windows PowerShell
+    // runs under `--run` as well: the host starts every root process as a new
+    // process group, which ignores Ctrl+C together with everything it starts,
+    // and only the supervisor turns Ctrl+C back on for its child (spec D11).
+    let command = if command_name == "sh" && cfg!(unix) {
         base
     } else {
+        #[cfg(unix)]
         let mut words = vec![
             shell,
             "-lic".into(),
@@ -1741,6 +1858,10 @@ fn launch(
             },
             executable.clone(),
         ];
+        // The supervisor starts directly, with the session's variables, which
+        // carry the account (spec D8).
+        #[cfg(windows)]
+        let mut words = vec![executable.clone(), "--run".to_owned()];
         if auto {
             words.push(resume.len().to_string());
             words.extend(resume);
@@ -1826,6 +1947,7 @@ fn launch(
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
+        state::tracking_available().map_err(|e| Error::new(2, e))?;
         spec.env.extend([
             format!("HGS_SESSION={session}"),
             format!("HGS_AGENT={command_name}"),
@@ -1870,4 +1992,33 @@ fn launch(
         eprintln!("hgs: session {session} ended immediately — command not found on this box? try --dry-run");
     }
     Ok(rc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crashes_and_stops_of_a_resume_are_final_and_quick_failures_start_fresh() {
+        // A quick ordinary failure means nothing to resume.
+        assert!(!resume_stands(1, 0, 5, false));
+        assert!(!resume_stands(127, 4, 5, false));
+        // Success, a run long enough to have resumed, a signal or crash.
+        assert!(resume_stands(0, 0, 5, false));
+        assert!(resume_stands(1, 5, 5, false));
+        assert!(resume_stands(130, 0, 5, false));
+        // Windows: Ctrl+Break or a closed console (STATUS_CONTROL_C_EXIT), an
+        // access violation, a missing DLL (spec D9) all read as signals.
+        for status in [0xC000_013A_u32, 0xC000_0005, 0xC000_0135] {
+            let rc = platform::ntstatus_exit(status).exit_code();
+            assert!(rc >= 128, "{status:#x}");
+            assert!(resume_stands(rc, 0, 5, false), "{status:#x}");
+        }
+        // exit(-1) stays an ordinary failure.
+        let rc = platform::ntstatus_exit(u32::MAX).exit_code();
+        assert_eq!(rc, -1);
+        assert!(!resume_stands(rc, 0, 5, false));
+        // A paused agent that exits with an ordinary failure was still stopped.
+        assert!(resume_stands(1, 0, 5, true));
+    }
 }

@@ -7,13 +7,14 @@ fn required_env(name: &str) -> Result<String> {
 }
 
 fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     // Older Codex already runs in-process and rejects this newer flag. Probe
     // capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
+    let mut command = crate::platform::agent_command(&[executable.into(), "--help".into()])
+        .map_err(|error| format!("{executable}: {error}"))?;
     let mut child = crate::platform::spawn(
-        Command::new(executable)
-            .arg("--help")
+        command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
             .stdin(Stdio::null())
@@ -38,6 +39,8 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
 }
 
 pub(super) fn run(args: &[String]) -> Result<i32> {
+    // Before anything is written: hooks, settings or the record.
+    tracking_available()?;
     let first_count: usize = args
         .first()
         .ok_or("missing launch argument count")?
@@ -96,6 +99,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
+    // The session host's channel for pauses and input checks (spec D10, D11).
+    #[cfg(windows)]
+    crate::host::supervisor::open();
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -359,9 +365,11 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
             .filter(|pid| *pid > 0)
             .ok_or("invalid tracked process ID")?;
         // Only signal the exact PID whose start identity was just checked.
-        // Never target a process group, terminal input or the tmux server.
+        // Never target a process group, terminal input or the tmux server. On
+        // Windows the pane's supervisor raises Ctrl+Break for the group it
+        // shares with this agent, as spec D11 decides.
         if let Some(scope)=scope {scope.changing();}
-        crate::platform::request_exit(pid as u32).map_err(|e| e.to_string())?;
+        backend::current().request_exit(string(&current, "pane"), pid as u32)?;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {
@@ -525,23 +533,7 @@ fn session_spec(
         ));
     }
     let executable = runner_executable()?;
-    let shell = if string(record, "shell").is_empty() {
-        "/bin/bash"
-    } else {
-        string(record, "shell")
-    };
-    let mut launch = vec![
-        shell.into(),
-        "-lic".into(),
-        crate::accounts::run_script(
-            string(record, "account_id"),
-            string(record, "agent"),
-            string(record, "agent_home"),
-        ),
-        executable.clone(),
-        "0".into(),
-    ];
-    launch.extend(argv);
+    let launch = supervisor_command(record, &executable, argv);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_AGENT", string(record, "agent").to_owned()),
@@ -575,6 +567,7 @@ fn session_spec(
         env: environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
+            .chain(account_variables(record))
             .collect(),
         command: launch,
         detached: true,

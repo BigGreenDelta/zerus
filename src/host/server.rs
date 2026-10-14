@@ -11,7 +11,8 @@
 //! session has ended it lingers, decides to exit (from then on a create is
 //! refused as `busy` and a new connection ends before its hello is answered),
 //! closes its listener and exits once the connections it had accepted have
-//! ended, or after `DRAIN` (D3).
+//! ended, or after `DRAIN` (D3), stopping the recovery worker it supervises
+//! once a client asked (D14).
 //!
 //! `serve_connection` is the protocol of one connection and runs on every
 //! platform: the hello (read within `HELLO_TIMEOUT`, the client authenticated
@@ -433,7 +434,11 @@ mod windows {
             image_hash: admitted.hash,
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOLS.max,
-            capabilities: vec!["attach".into(), "supervisor-channel".into()],
+            capabilities: vec![
+                "attach".into(),
+                "supervisor-channel".into(),
+                "recovery-worker".into(),
+            ],
             integrity: identity.integrity.clone(),
             windows_session: token::windows_session().map_err(|e| failed(e.to_string()))?,
             in_job,
@@ -465,10 +470,12 @@ mod windows {
             argv_of,
             enabled,
         );
-        let worker = worker::recovery_from_environment().map(|image| {
+        host.supervise_recovery_with(|| {
+            let cli = worker::stable_cli()?;
             Worker::start("hgs-recovery-worker", move || {
-                console::spawn_hidden(&image, &["recovery".into(), "worker".into()])
+                console::spawn_hidden(&cli, &["recovery".into(), "worker".into()])
             })
+            .map_err(|error| error.to_string())
         });
         let accepting = {
             let (host, listener) = (host.clone(), listener.clone());
@@ -484,9 +491,7 @@ mod windows {
         listener.close();
         let _ = accepting.join();
         host.drain(DRAIN);
-        if let Some(Ok(worker)) = worker {
-            worker.stop();
-        }
+        host.stop_workers();
         Ok(())
     }
 

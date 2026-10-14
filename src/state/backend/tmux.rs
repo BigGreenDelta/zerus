@@ -204,7 +204,7 @@ impl TerminalBackend for Tmux {
         nonempty_env("TMUX_PANE").ok_or_else(|| "missing TMUX_PANE in tracked agent launch".into())
     }
 
-    fn listing(&self) -> Listing {
+    fn listing(&self) -> Result<Listing> {
         let clients = platform::capture(
             "tmux",
             &["list-clients", "-F", "#{client_session}\t#{client_tty}"],
@@ -240,20 +240,23 @@ impl TerminalBackend for Tmux {
                 }
             })
             .collect();
-        Listing { clients, sessions }
+        // tmux reports a failed listing as no sessions, as hgs always has.
+        Ok(Listing { clients, sessions })
     }
-    fn attached_counts(&self) -> Option<Vec<(String, String)>> {
-        let rows = platform::capture(
+    fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
+        let Some(rows) = platform::capture(
             "tmux",
             &["list-sessions", "-F", "#{session_name}|#{session_attached}"],
         )
-        .filter(|rows| !rows.trim().is_empty())?;
-        Some(
+        .filter(|rows| !rows.trim().is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some(
             rows.lines()
                 .filter_map(|row| row.split_once('|'))
                 .map(|(name, count)| (name.into(), count.into()))
                 .collect(),
-        )
+        ))
     }
     fn panes(&self) -> Result<Vec<PaneRow>> {
         let output = tmux(

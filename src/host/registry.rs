@@ -12,6 +12,9 @@
 //! marker check of `gate`): a create that races `hgs session-host uninstall`
 //! is refused once the marker is gone, and starts nothing.
 //!
+//! `recovery_worker` starts the supervision of the recovery worker that
+//! `server.rs` configures (D14); it ends with the host.
+//!
 //! The host exits like a tmux server: when its last session has ended, it
 //! lingers for `LINGER`, then decides to exit under the registry lock, so a
 //! `create_session` that comes later is refused as `busy`, a connection whose
@@ -21,6 +24,7 @@
 use super::{
     channel::{self, PaneFacts, SupervisorChannel},
     link::Link,
+    log,
     protocol::{
         Attach, Attached, Captured, ClientEntry, ClientList, ConsoleEvidence, CreateSession,
         Created, Done, EnvValue, ErrorBody, ErrorCode, HostStatus, InputClaim, InputReady, Listed,
@@ -28,6 +32,7 @@ use super::{
         SupervisorRegistration, Target, RUN_MARKER,
     },
     session::{self, lock, Attachment, LaunchPlan, Launcher, Session},
+    worker::Worker,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -47,8 +52,15 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a request waits for a supervisor whose registration was just
 /// answered to open its channel.
 const SUPERVISOR_OPENING: Duration = Duration::from_secs(2);
-/// D11: a terminate waits this long for the supervisor to record its exit.
+/// D11: a terminate waits this long, from its request, for the supervisor to
+/// record its exit.
 const TERMINATE_GRACE: Duration = Duration::from_secs(10);
+/// How long a supervisor's registration waits for its session: the root
+/// process runs before its create has registered the session.
+const REGISTRATION_WAIT: Duration = Duration::from_secs(10);
+/// How long a pause whose supervisor left without an answer waits for the
+/// supervisor's end.
+const GONE_WAIT: Duration = Duration::from_secs(2);
 /// Ended launches that a retried create still finds.
 const ENDED_LAUNCHES: usize = 256;
 
@@ -123,6 +135,19 @@ struct Registry {
     supervisors: HashMap<u64, Arc<SupervisorChannel>>,
 }
 
+/// Starts the supervision of the recovery worker (D14).
+type StartWorker = Box<dyn Fn() -> Result<Worker, String> + Send + Sync>;
+
+/// The recovery worker that the host supervises once a client asks (D14).
+#[derive(Default)]
+struct Recovery {
+    /// None where the host supervises no worker.
+    start: Option<StartWorker>,
+    running: Option<Worker>,
+    /// The host is exiting: no worker starts any more.
+    stopped: bool,
+}
+
 /// The session host's state, shared by every connection.
 pub(crate) struct Host<L: Launcher> {
     launcher: L,
@@ -140,6 +165,7 @@ pub(crate) struct Host<L: Launcher> {
     changed: Condvar,
     /// Creates run one at a time, so names and launch IDs are checked once.
     creating: Mutex<()>,
+    recovery: Mutex<Recovery>,
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
@@ -176,6 +202,26 @@ fn client_id(number: u64) -> String {
     format!("c{number}")
 }
 
+/// The session `target` names in `registry`.
+fn lookup(registry: &Registry, target: &Target) -> Option<Arc<Session>> {
+    let mut sessions = registry.sessions.values();
+    match target {
+        Target::Name(name) => sessions.find(|session| session.name() == *name),
+        Target::Session(id) => sessions.find(|session| session.session_id() == *id),
+        Target::Pane(id) => sessions.find(|session| session.pane_id() == *id),
+    }
+    .cloned()
+}
+
+/// tmux's message for a target that names nothing.
+fn missing(target: &Target) -> ErrorBody {
+    let message = match target {
+        Target::Name(name) | Target::Session(name) => format!("can't find session: {name}"),
+        Target::Pane(pane) => format!("can't find pane: {pane}"),
+    };
+    error(ErrorCode::NotFound, message)
+}
+
 impl<L: Launcher> Host<L> {
     pub(crate) fn new(
         launcher: L,
@@ -207,7 +253,56 @@ impl<L: Launcher> Host<L> {
             }),
             changed: Condvar::new(),
             creating: Mutex::new(()),
+            recovery: Mutex::default(),
         })
+    }
+
+    /// Supervise the recovery worker with `start` once a client asks (D14).
+    pub(crate) fn supervise_recovery_with(
+        &self,
+        start: impl Fn() -> Result<Worker, String> + Send + Sync + 'static,
+    ) {
+        lock(&self.recovery).start = Some(Box::new(start));
+    }
+
+    /// Stop the supervised workers for good; the host is exiting.
+    pub(crate) fn stop_workers(&self) {
+        let running = {
+            let mut recovery = lock(&self.recovery);
+            recovery.stopped = true;
+            recovery.running.take()
+        };
+        if let Some(worker) = running {
+            worker.stop();
+        }
+    }
+
+    /// D14: supervise the recovery worker from now on, unless the host does.
+    fn recovery_worker(&self) -> Result<(), ErrorBody> {
+        let mut recovery = lock(&self.recovery);
+        if recovery.stopped {
+            return Err(error(
+                ErrorCode::Busy,
+                "the session host is exiting; start it again",
+            ));
+        }
+        if recovery.running.is_some() {
+            return Ok(());
+        }
+        let Some(start) = &recovery.start else {
+            return Err(error(
+                ErrorCode::Unsupported,
+                "this session host supervises no recovery worker",
+            ));
+        };
+        let worker = start().map_err(|message| {
+            error(
+                ErrorCode::Internal,
+                format!("cannot supervise the recovery worker: {message}"),
+            )
+        })?;
+        recovery.running = Some(worker);
+        Ok(())
     }
 
     fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
@@ -220,20 +315,27 @@ impl<L: Launcher> Host<L> {
 
     /// The session `target` names.
     pub(crate) fn find(&self, target: &Target) -> Result<Arc<Session>, ErrorBody> {
-        let registry = self.registry();
-        let mut sessions = registry.sessions.values();
-        let found = match target {
-            Target::Name(name) => sessions.find(|session| session.name() == *name),
-            Target::Session(id) => sessions.find(|session| session.session_id() == *id),
-            Target::Pane(id) => sessions.find(|session| session.pane_id() == *id),
-        };
-        found.cloned().ok_or_else(|| {
-            let message = match target {
-                Target::Name(name) | Target::Session(name) => format!("can't find session: {name}"),
-                Target::Pane(pane) => format!("can't find pane: {pane}"),
-            };
-            error(ErrorCode::NotFound, message)
-        })
+        lookup(&self.registry(), target).ok_or_else(|| missing(target))
+    }
+
+    /// `find`, waiting at most `timeout` while sessions are being created.
+    fn find_created(&self, target: &Target, timeout: Duration) -> Result<Arc<Session>, ErrorBody> {
+        let deadline = Instant::now() + timeout;
+        let mut registry = self.registry();
+        loop {
+            if let Some(session) = lookup(&registry, target) {
+                return Ok(session);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if registry.starting == 0 || left.is_zero() {
+                return Err(missing(target));
+            }
+            registry = self
+                .changed
+                .wait_timeout(registry, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
     }
 
     /// Answer one request. `attach` and `supervisor_register` belong to
@@ -348,6 +450,10 @@ impl<L: Launcher> Host<L> {
                     ));
                 }
                 registry.stop = true;
+                payload(&Done {})
+            }
+            Op::RecoveryWorker => {
+                self.recovery_worker()?;
                 payload(&Done {})
             }
             Op::Attach(_) | Op::SupervisorRegister(_) => Err(error(
@@ -522,6 +628,16 @@ impl<L: Launcher> Host<L> {
 
     /// A session's root process exited and its console and job are gone.
     fn ended(&self, session: &Arc<Session>, code: Option<i32>) {
+        // How the supervisor ended: 128 and above for a signal, a crash or a
+        // pause it reported (D9, D11).
+        log::note(format!(
+            "session {} ended: {}",
+            session.session_id(),
+            code.map_or_else(
+                || "exit code unknown".into(),
+                |code| format!("exit {code} ({:#010x})", code as u32)
+            )
+        ));
         let mut registry = self.registry();
         registry.sessions.remove(&session.id);
         registry.launches.insert(
@@ -621,9 +737,10 @@ impl<L: Launcher> Host<L> {
         Ok(())
     }
 
+    /// The session's open supervisor channel. One whose registration answer
+    /// is still on its way opens within moments: it is waited for.
     fn supervisor(&self, session: &Session) -> Result<Arc<SupervisorChannel>, ErrorBody> {
         let channel = self.registry().supervisors.get(&session.id).cloned();
-        // A registration answered a moment ago opens right after its answer.
         channel
             .filter(|channel| channel.wait_open(SUPERVISOR_OPENING))
             .ok_or_else(|| {
@@ -642,11 +759,18 @@ impl<L: Launcher> Host<L> {
         let session = self.find(target)?;
         let channel = self.supervisor(&session)?;
         match signal {
-            Signal::Pause => channel.call(SupervisorOp::Stop, STOP_TIMEOUT).map(drop),
+            Signal::Pause => match channel.call(SupervisorOp::Stop, STOP_TIMEOUT) {
+                Ok(_) => Ok(()),
+                // The supervisor raised Ctrl+Break and ended with its agent
+                // before its answer arrived: the pause did what it asks.
+                Err(_) if channel.is_closed() && session.wait_exit(GONE_WAIT) => Ok(()),
+                Err(error) => Err(error),
+            },
             Signal::Terminate => {
+                let deadline = Instant::now() + TERMINATE_GRACE;
                 let terminate = move || {
                     let _ = channel.call(SupervisorOp::Stop, STOP_TIMEOUT);
-                    if !session.wait_exit(TERMINATE_GRACE) {
+                    if !session.wait_exit(deadline.saturating_duration_since(Instant::now())) {
                         session.kill();
                     }
                 };
@@ -739,14 +863,19 @@ impl<L: Launcher> Host<L> {
 
     /// Accept `link` as the supervisor channel of a session (D10), from a
     /// client running as `client_pid`: the session's root process or one of
-    /// its descendants in the session's job.
+    /// its descendants in the session's job. A supervisor starts before its
+    /// create has registered the session, so a session being created is
+    /// waited for.
     pub(crate) fn register_supervisor(
         &self,
         registration: &SupervisorRegistration,
         client_pid: u32,
         link: Arc<dyn Link>,
     ) -> Result<Arc<SupervisorChannel>, ErrorBody> {
-        let session = self.find(&Target::Session(registration.session.clone()))?;
+        let session = self.find_created(
+            &Target::Session(registration.session.clone()),
+            REGISTRATION_WAIT,
+        )?;
         if session.pane_id() != registration.pane {
             return Err(error(
                 ErrorCode::NotFound,

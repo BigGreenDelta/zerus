@@ -1,16 +1,13 @@
 //! D14: the host supervises the recovery worker (`hgs.exe recovery worker` of the
-//! stable CLI), because Windows has no user service manager. The worker is
-//! restarted after it exits, with a delay that doubles from 1 s to 5 min and
-//! starts again at 1 s after a run that lasted `STABLE`, and it is stopped with
-//! the host. Its process is in the host's own job, so it never outlives the
-//! host either.
-//!
-//! Until the Windows lifecycle (M4) stages the stable CLI, supervision is off
-//! unless `HGS_HOST_RECOVERY_WORKER` names the CLI to run, as an absolute path.
+//! stable CLI), because Windows has no user service manager. Supervision starts
+//! when a client asks (`recovery::ensure_worker` sends `recovery_worker`, as the
+//! Unix CLI starts its worker); the worker is then restarted after it exits,
+//! with a delay that doubles from 1 s to 5 min and starts again at 1 s after a
+//! run that lasted `STABLE`, and it is stopped with the host. Its process is in
+//! the host's own job, so it never outlives the host either.
 use super::session::lock;
 use std::{
     io,
-    path::PathBuf,
     sync::{Arc, Condvar, Mutex, PoisonError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -24,14 +21,23 @@ pub(crate) const MAX_DELAY: Duration = Duration::from_secs(300);
 pub(crate) const STABLE: Duration = Duration::from_secs(60);
 /// How often a running worker is checked against a stop request.
 const POLL: Duration = Duration::from_millis(200);
-/// The environment variable that turns supervision on (until M4).
-pub(crate) const ENABLE: &str = "HGS_HOST_RECOVERY_WORKER";
 
-/// The CLI whose recovery worker the host supervises, when enabled.
-pub(crate) fn recovery_from_environment() -> Option<PathBuf> {
-    std::env::var_os(ENABLE)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
+/// The stable CLI whose recovery worker the host runs (D2, D14): the file
+/// that `hgs session-host install` staged in this user's profile. Unlike
+/// `platform::stable_executable`, the environment that started the host has
+/// no say.
+#[cfg(windows)]
+pub(crate) fn stable_cli() -> Result<std::path::PathBuf, String> {
+    let cli = super::staging::Layout::current()
+        .ok_or("no home directory: set USERPROFILE or HOME")?
+        .cli;
+    if !cli.is_file() {
+        return Err(format!(
+            "the stable hgs CLI {} is not installed; run hgs session-host install",
+            cli.display()
+        ));
+    }
+    Ok(cli)
 }
 
 /// Restart delays.

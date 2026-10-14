@@ -87,19 +87,103 @@ rm -rf "$root"
 Remove the folder only after `__host status` reports no host: a running host keeps
 files open in its state directory and image.
 
+## Local sessions through the CLI
+
+With local sessions enabled, `hgs` runs this computer's sessions in the host
+(spec D3, D8; `src/state/backend/host.rs`). A launch starts the host from the
+staged image when none runs; a listing never does, and only "no host" lists no
+sessions. Each session's root process is the stable CLI's `hgs.exe --run`, which
+runs the program as its child (PowerShell for `hgs sh`), with the launching
+process's environment minus the variables of a session it runs in, plus the
+launch's own; the launching side sets `HGS_EXECUTABLE` to the stable CLI and the
+host sets `HGS_HOST_SESSION`, `HGS_HOST_PANE` and `TERM`. Programs are found with
+`PATHEXT`; an npm command shim runs Node.js on its script, and any other batch
+file is refused. Tracked Claude Code, Codex and Kimi sessions are refused until
+their Windows hook form is settled (spec D12; `HGS_TRACKING=0` runs them
+untracked), and attaching a terminal (`hgs a`, a launch without `-d`) waits for
+the attach client (M5). In a new Git Bash window, as above:
+
+```sh
+cargo build --locked && cargo build --locked --example fake_agent
+export MSYS_NO_PATHCONV=1
+unset $(compgen -e | grep -E '^(HGS_|XDG_|TMUX)')
+root="$(mktemp -d)"
+mkdir -p "$root/state" "$root/home" "$root/work/project" "$root/bin"
+cp target/debug/examples/fake_agent.exe "$root/bin/"
+export HGS_STATE_DIR="$(cygpath -w "$root/state")" HGS_TAB=0
+export USERPROFILE="$(cygpath -w "$root/home")" HOME="$(cygpath -w "$root/home")"
+export PATH="$root/bin:$PATH"
+hgs=target/debug/hgs.exe project="$(cygpath -w "$root/work/project")"
+"$hgs" session-host install                           # marker, stable CLI, host image
+"$hgs" ls --json --local                              # no sessions, no host started
+"$hgs" fake_agent "$project" --new -n one -d -- --prompt 'fake> '
+"$hgs" ls --json --local                              # fake_agent/project/one
+"$hgs" __host backend '{"op":"capture","pane":"%0"}'  # the agent's screen
+"$hgs" __host backend '{"op":"send","pane":"%0","keys":[{"literal":"hi"},{"named":"Enter"}]}'
+"$hgs" rename fake_agent/project/one fake_agent/project/two
+"$hgs" --dry-run sh "$project" -n ps -d              # the create request, not sent
+"$hgs" kill fake_agent/project/two
+"$hgs" __host status                                  # {"running": false} once idle
+rm -rf "$root"
+```
+
+`hgs __host backend '<operation>'` runs one operation of the terminal backend
+(`listing`, `panes`, `pane_info`, `capture`, `send`, `paste`, `set_run_marker`,
+`rename`, `kill_session`, `kill_pane`, `session_exists`, `session_name`,
+`input_state`, `request_exit`, `on_terminal`; see `src/host/command.rs`) and prints
+`{"ok": ...}` or `{"error": ...}`. It reaches only a running host.
+
+## The supervisor channel
+
+Every session's `hgs.exe --run` registers a channel with its host before it starts
+its program (spec D10, D11; `src/host/supervisor.rs`). Through it the host reads
+the console evidence that input checks judge (the input mode, the attached
+processes and whether the supervisor's agent runs inside the session job) and asks
+for a pause: Ctrl+Break for the supervisor's process group, which its agent
+shares. Terminate pauses first and closes the console after 10 s. `host.log` notes
+each session's end with its supervisor's exit code (130 after a pause that ended
+the agent with `STATUS_CONTROL_C_EXIT`). In a window prepared as above, before its
+`rm -rf`:
+
+```sh
+ready="$(cygpath -w "$root/ready.json")"
+"$hgs" fake_agent "$project" --new -n three -d -- --ready "$ready" --prompt 'fake> '
+until [ -s "$root/ready.json" ]; do sleep 0.2; done
+pid=$(python -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$ready")
+pane=$("$hgs" __host call '{"op":"resolve_target","target":{"name":"fake_agent/project/three"}}' |
+    python -c 'import json, sys; print(json.load(sys.stdin)["ok"]["pane"])')
+"$hgs" __host backend '{"op":"set_run_marker","name":"fake_agent/project/three","run_id":"run-1"}'
+"$hgs" __host backend '{"op":"input_state","pane":"'"$pane"'","name":"fake_agent/project/three","run_id":"run-1","agent":"fake_agent","pid":'"$pid"'}'
+ends=$(grep -c ' ended: ' "$root/state/host.log")
+"$hgs" __host backend '{"op":"request_exit","pane":"'"$pane"'","pid":'"$pid"'}'  # the pause
+until [ "$(grep -c ' ended: ' "$root/state/host.log")" -gt "$ends" ]; do sleep 0.2; done
+grep ' ended: ' "$root/state/host.log" | tail -1  # session $N ended: exit 130 (0x00000082)
+```
+
+With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running host
+to supervise the stable CLI's `hgs.exe recovery worker` (D14); without a host
+nothing starts one.
+
 ## Running the tests
 
 ```sh
-cargo test --locked -- host:: state::control_console_tests platform::windows::tests </dev/null
+cargo test --locked -- host:: state::backend state::control_console_tests platform::windows::tests </dev/null
 cargo build --locked
 cargo build --locked --example fake_agent
 python -m unittest discover -s tests -p test_windows_host.py -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
+python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
 ```
 
-`tests/test_windows_host.py` takes the build from `HGS_TEST_BIN` (default
-`target/debug/hgs.exe`) and the fake agent from `HGS_TEST_FAKE_AGENT` (default
-`target/debug/examples/fake_agent.exe`); its fake agent cases skip without one.
+The Rust filter `host::supervisor` includes
+`a_supervisor_reports_its_console_and_pauses_its_group`, which runs the test binary
+as a supervisor on a pseudoconsole of an in-process host and its raw-input agent.
+`tests/test_windows_host.py` and `tests/test_windows_lifecycle.py` take the build
+from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
+`HGS_TEST_FAKE_AGENT` (default `target/debug/examples/fake_agent.exe`); their fake
+agent cases skip without one. The lifecycle cases install into a temporary profile
+as `Staged` does and launch from the build under test, which plays the portable
+copy: sessions must still run the staged stable CLI.
 
 ## Writing host tests
 

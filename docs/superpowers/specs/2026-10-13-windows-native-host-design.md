@@ -113,7 +113,8 @@ version of skew.
   failure (busy past the retry budget, a protocol mismatch, a refused server
   identity) is an error, never an empty snapshot, because an empty snapshot would
   show live sessions as resumable (`src/state/mod.rs:247-260`,
-  `src/state/lifecycle.rs:679-701`).
+  `src/state/lifecycle.rs:679-701`). The backend's `listing` and
+  `attached_counts` are fallible for this (M4.1); tmux keeps answering as before.
 - **One host per user and state directory.** The host holds an exclusive lock on
   `host.lock` in the state directory for its whole life; a second host exits at once.
 - The host exits after its last session ends and no client is attached, after a
@@ -265,16 +266,26 @@ login PATH applies and the supervisor becomes the pane's root process. On Window
 
 - the creating client sends its whole environment block plus the session overrides,
   and the host starts the stable CLI's `hgs.exe --run <argv>` with that block. A
-  long-lived host never hands out its own stale `PATH`;
-- **the host sets `HGS_EXECUTABLE` to the stable CLI**, and on Windows
+  long-lived host never hands out its own stale `PATH`. The client first removes the
+  variables of a session it may run in (`TMUX`, `HGS_HOST_*`, `HGS_SESSION`,
+  `HGS_RUN_ID` and the other launch identities, `HGS_TRACKING`, `HGS_CLIENT`): tmux
+  starts a pane from its server's environment, which never holds them. An override
+  with an empty value removes the variable. `--run` runs an untracked program as its
+  child, since Windows has no `exec`;
+- **the launching client sets `HGS_EXECUTABLE` to the stable CLI** (decided in M4.1:
+  the client already resolved the stable CLI as the supervisor's program, and the
+  protocol keeps the host from adding environment of its own), and on Windows
   `executable_path()` and `runner_executable()` (`src/cli.rs:190-200`,
-  `src/state/storage.rs:305-321`) fail closed if they would resolve to anything else.
+  `src/state/storage.rs:305-321`) fail closed if they would resolve to anything else:
+  they answer the stable CLI whichever hgs.exe runs, and refuse an `HGS_EXECUTABLE`
+  that names another file or a computer where it is not installed.
   Hooks, recipes and records therefore never embed the portable folder's path, which a
   GUI update replaces (`tray/src/AppConfig.cpp:71-73`). A test launches from a
-  portable copy and checks the stable path in the hooks;
+  portable copy and checks that the session runs the stable CLI;
 - the account environment that `run_script` applies on Unix after the login shell
   (`src/accounts.rs:919-944`: `HGS_ACCOUNT_ID`, `ANTHROPIC_CONFIG_DIR`, blanked
-  `AUTH_ENV` keys, agent home variables) is applied by the host;
+  `AUTH_ENV` keys, agent home variables) is among the session's own variables
+  (`accounts::run_environment`), after the others;
 - `--run` keeps its role: it is the supervisor, the pane's root process (`pane_pid`);
   it installs hooks, writes the record and starts the agent;
 - the supervisor is created suspended, assigned to the session job (D9), then resumed;
@@ -296,7 +307,9 @@ obfuscation by Defender for Endpoint (Orca's evidence) and breaks multi-line
 arguments. Native executables run directly. Windows PATH preparation adds
 `%USERPROFILE%\.local\bin` and `%APPDATA%\npm` when present, the counterpart of
 `platform/unix.rs:22-43`. The `sh` command means PowerShell (`pwsh.exe`, else
-`powershell.exe -NoLogo`) and stays untracked. Process-name checks compare file stems
+`powershell.exe -NoLogo`) and stays untracked; it runs under `--run` like any other
+program, because a root process started as a new process group ignores Ctrl+C and
+only the supervisor turns it back on (D11). Process-name checks compare file stems
 case-insensitively (`node.exe` is `node`; `src/state/external_agents.rs:15`,
 `src/state/input.rs:568`, `src/state/processes/control.rs:267-281`).
 
@@ -323,6 +336,12 @@ on Windows; every direct `HOME` read (`src/accounts.rs:379,390`,
 - **Exit evidence.** NTSTATUS crash codes and `STATUS_CONTROL_C_EXIT` map to a
   completion reason without changing Unix values; the `--run` fallback test
   (`src/cli.rs:445`) treats them as a crash, not as "nothing to resume".
+  Implemented in M4.2 (`platform::ntstatus_exit`): known statuses read as the
+  signal of the same meaning (`STATUS_CONTROL_C_EXIT` is SIGINT, 130), any other
+  error status Windows defines (severity "error", customer bit clear, such as a
+  missing DLL) and unhandled C++ and .NET exceptions read as SIGABRT (134), and
+  everything else, `exit(-1)` included, stays an exit code. The `--run` fallback
+  also keeps a resume attempt that a stop request reached, whatever its code.
 
 ### D10. The supervisor channel and input evidence
 
@@ -362,6 +381,20 @@ Spike S2 probes support this evidence on both backends:
 The exact rule for other attached processes (agent-launched MCP servers) is settled
 with the host prototype after M3.
 
+Implemented in M4.2 (`src/host/supervisor.rs`, judged by `src/host/channel.rs`):
+every `--run` supervisor the host started (untracked ones included) registers its
+channel before it starts its program and keeps it; a supervisor that cannot
+register still runs its program, and the host then refuses the session's input
+checks and pauses. The host waits for a session it is still creating when the
+registration arrives first, and a request waits for a channel whose registration
+answer is still going out. The evidence reports `ENABLE_PROCESSED_INPUT` as well
+(not judged), names attached processes from a Toolhelp snapshot (a process that
+exited meanwhile is left out), and reports the agent the supervisor started last
+(the one `platform::forward_shutdown` received), whether it runs and whether its
+ID is in the supervisor's own job (the session job). Editors and pagers are `vi`,
+`vim`, `nvim`, `nano`, `emacs`, `notepad`, `less`, `more` and the others in
+`channel::EDITORS`; agent-launched helpers that are no shell or editor pass.
+
 ### D11. Stopping, pausing and terminating
 
 - **Process groups.** The host starts the supervisor with `CREATE_NEW_PROCESS_GROUP`.
@@ -385,11 +418,25 @@ with the host prototype after M3.
   (exit 0), Codex and Kimi (`0xC000013A`) within 60 ms while the supervisor
   survives; `ClosePseudoConsole` ends them with `0xC000013A` (Claude Code 129, Kimi 1
   without a supervisor); resume after either keeps the conversation for all three.
+- Implemented in M4.2: `hgs pause` asks the backend (`request_exit`, the tmux
+  backend's exact-PID SIGTERM), whose host form is the `signal` `pause` request
+  for the pane; the supervisor records the request as SIGTERM, then raises
+  `CTRL_BREAK_EVENT` for its own group (`GenerateConsoleCtrlEvent` with its PID,
+  which reaches no process when it leads no group; its own handler runs on a
+  console thread that may come after the agent has ended), and also re-raises a
+  stop that arrived before its agent started. A
+  pause whose supervisor ends with its agent before its answer arrives counts as
+  done. A terminate's 10 s run from its request, so a slow pause answer is part
+  of it; `hgs terminate` waits 20 s on Windows for the agent to exit (10 s on
+  Unix).
 
 ### D12. Hooks on Windows
 
 Hook bytes, once written, are kept (`src/state/hooks.rs:152-162,211-221`), so the
-first Windows form must be final:
+first Windows form must be final. Until it is settled, Windows refuses tracked
+Claude Code, Codex and Kimi launches before anything is written
+(`state::tracking_available`); untracked sessions (`HGS_TRACKING=0`, any other
+program) run. The form:
 
 - the command names the stable CLI (D8) by its absolute path with forward slashes in
   double quotes, followed by `__state hook`, which Git Bash, `cmd.exe` and a direct
@@ -437,6 +484,12 @@ session lifecycle and Windows has no user service manager. On Windows,
 `recovery::ensure_worker` (`src/state/recovery.rs:1080-1106`) asks the host instead of
 detaching a process inside `hgs.exe`'s job, and does nothing when no host runs. The
 swarm worker stays tray-supervised as in Phase 1.
+
+Implemented in M4.2: the request is protocol 1's `recovery_worker` (capability
+`recovery-worker`); the host starts supervising the staged stable CLI's worker on
+the first one and stops it when it exits. A host that does not know the request
+(an older one) is treated like no host; the next request reaches its successor.
+The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
 
 ### D15. Paths and files
 
@@ -555,7 +608,13 @@ one.
 - **M2 Screen model** with the differential tests (D7).
 - **M3 Session host**: endpoint, protocol 1, ConPTY sessions, jobs, staging and the
   marker, breakaway start, the supervisor channel, `session-host` (D1-D6, D9).
-- **M4 Windows lifecycle**: host backend client, launch and accounts (D8), supervisor
+- **M4 Windows lifecycle** (M4.1, the host backend and the launch path, implemented
+  2026-10-14: untracked sessions, PowerShell, listings, rename, kill and the
+  backend's input and paste paths; M4.2, the supervisor channel, input evidence,
+  pause and terminate, exit evidence and the recovery worker (D9-D11, D14),
+  implemented 2026-10-14 and run with untracked sessions; tracked agents wait for
+  D12): host backend
+  client, launch and accounts (D8), supervisor
   and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
   (D14), Windows dialog fixtures and path-aware screen parsers
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,

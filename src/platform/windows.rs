@@ -1,5 +1,6 @@
 //! Windows process, console and file primitives. A Windows build manages remote
-//! machines through the system OpenSSH client; no agent session runs here.
+//! machines through the system OpenSSH client and, once local sessions are
+//! enabled, runs agent sessions in its session host (spec D2, D8).
 use super::{
     capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
     RunError,
@@ -11,20 +12,20 @@ use crate::{
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, Read, Seek, SeekFrom},
     os::windows::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
-        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
         process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, PoisonError,
     },
     thread,
     time::{Duration, Instant},
@@ -85,9 +86,10 @@ use windows_sys::{
     },
 };
 
-/// PATH, the locale and the console code page stay as they are: Rust writes
-/// Unicode to the console itself, and a changed code page would outlive hgs in
-/// the user's shell. Console children (ssh.exe, tar.exe) must not outlive hgs
+/// The locale and the console code page stay as they are: Rust writes Unicode to
+/// the console itself, and a changed code page would outlive hgs in the user's
+/// shell. PATH gains the stable CLI's folder and npm's global folder
+/// (`prepare_path`). Console children (ssh.exe, tar.exe) must not outlive hgs
 /// when the GUI stops it, so this process joins a job that terminates its
 /// remaining members when its last handle, held only here, closes.
 ///
@@ -101,6 +103,7 @@ use windows_sys::{
 /// supervisor must not join this job: a host that starts in a job fails its
 /// placement check, and a supervisor belongs to its session's job (D9).
 pub fn prepare_environment() {
+    prepare_path();
     static PREPARED: std::sync::Once = std::sync::Once::new();
     PREPARED.call_once(|| {
         // Best effort: an enclosing job that forbids nesting keeps the old behavior.
@@ -118,6 +121,57 @@ pub fn prepare_environment() {
         }
     });
 }
+/// `prepare_environment` for a `--run` supervisor: PATH only. The supervisor
+/// belongs to its session's job, which the host created (spec D9); it joins no
+/// job of its own.
+pub fn prepare_supervisor() {
+    prepare_path();
+}
+/// The Windows counterpart of the Unix PATH preparation (spec D8): the stable
+/// CLI's folder `<home>\.local\bin` first and npm's global folder
+/// `%APPDATA%\npm`, where `npm install -g` puts agents, last, each when it exists
+/// and PATH does not list it yet. Agents are looked up on this PATH, and a
+/// session's environment is this process's.
+fn prepare_path() {
+    static PREPARED: std::sync::Once = std::sync::Once::new();
+    PREPARED.call_once(|| {
+        let first = home()
+            .map(|home| PathBuf::from(below(&home, ".local/bin")))
+            .filter(|folder| folder.is_dir());
+        let last = env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(|folder| PathBuf::from(folder).join("npm"))
+            .filter(|folder| folder.is_dir());
+        let path = env::var_os("PATH").unwrap_or_default();
+        if let Some(path) = prepared_path(&path, first, last) {
+            env::set_var("PATH", path);
+        }
+    });
+}
+/// `path` with `first` in front and `last` at the end, each unless `path` lists
+/// it already (compared without case and trailing separators); None when
+/// nothing changes.
+fn prepared_path(path: &OsStr, first: Option<PathBuf>, last: Option<PathBuf>) -> Option<OsString> {
+    let key = |folder: &Path| {
+        folder
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    };
+    let mut folders: Vec<PathBuf> = env::split_paths(path).collect();
+    let listed =
+        |folders: &[PathBuf], folder: &Path| folders.iter().any(|entry| key(entry) == key(folder));
+    let mut changed = false;
+    if let Some(folder) = first.filter(|folder| !listed(&folders, folder)) {
+        folders.insert(0, folder);
+        changed = true;
+    }
+    if let Some(folder) = last.filter(|folder| !listed(&folders, folder)) {
+        folders.push(folder);
+        changed = true;
+    }
+    changed.then(|| env::join_paths(folders).ok()).flatten()
+}
 /// Whether this computer runs agent sessions: once the user has enabled them
 /// (`hgs session-host install`, which writes the `local-sessions` marker in the
 /// configuration directory; spec D2). Until then it is a control console for
@@ -131,48 +185,13 @@ pub fn local_sessions() -> bool {
 pub fn code(status: ExitStatus) -> i32 {
     ExitInfo::of(status).exit_code()
 }
-/// NTSTATUS values that end a process the way a signal ends a Unix one, with
-/// that signal's number: Ctrl+C or a closed console, memory faults, illegal
-/// instructions, arithmetic faults, breakpoints and fail-fast aborts (which is
-/// how a Rust panic set to abort ends).
-const CRASH_SIGNALS: [(u32, i32); 18] = [
-    (0xC000_013A, 2),  // STATUS_CONTROL_C_EXIT: SIGINT
-    (0xC000_0005, 11), // STATUS_ACCESS_VIOLATION: SIGSEGV
-    (0xC000_0006, 11), // STATUS_IN_PAGE_ERROR
-    (0xC000_00FD, 11), // STATUS_STACK_OVERFLOW
-    (0xC000_008C, 11), // STATUS_ARRAY_BOUNDS_EXCEEDED
-    (0xC000_001D, 4),  // STATUS_ILLEGAL_INSTRUCTION: SIGILL
-    (0xC000_0096, 4),  // STATUS_PRIVILEGED_INSTRUCTION
-    (0xC000_008D, 8),  // STATUS_FLOAT_DENORMAL_OPERAND: SIGFPE
-    (0xC000_008E, 8),  // STATUS_FLOAT_DIVIDE_BY_ZERO
-    (0xC000_008F, 8),  // STATUS_FLOAT_INEXACT_RESULT
-    (0xC000_0090, 8),  // STATUS_FLOAT_INVALID_OPERATION
-    (0xC000_0091, 8),  // STATUS_FLOAT_OVERFLOW
-    (0xC000_0092, 8),  // STATUS_FLOAT_STACK_CHECK
-    (0xC000_0093, 8),  // STATUS_FLOAT_UNDERFLOW
-    (0xC000_0094, 8),  // STATUS_INTEGER_DIVIDE_BY_ZERO
-    (0xC000_0095, 8),  // STATUS_INTEGER_OVERFLOW
-    (0x8000_0003, 5),  // STATUS_BREAKPOINT: SIGTRAP
-    (0xC000_0409, 6),  // STATUS_STACK_BUFFER_OVERRUN (fail fast): SIGABRT
-];
-/// Other codes, including large ones such as `exit(-1)`, stay exit codes.
+/// Crash statuses read as signals of the same meaning (`super::ntstatus_exit`,
+/// spec D9); other codes, `exit(-1)` included, stay exit codes.
 pub(super) fn exit_info(status: ExitStatus) -> ExitInfo {
-    let Some(code) = status.code() else {
-        return ExitInfo {
-            code: None,
-            signal: None,
-        };
-    };
-    match CRASH_SIGNALS
-        .iter()
-        .find(|(status, _)| *status == code as u32)
-    {
-        Some(&(_, signal)) => ExitInfo {
-            code: None,
-            signal: Some(signal),
-        },
+    match status.code() {
+        Some(code) => super::ntstatus_exit(code as u32),
         None => ExitInfo {
-            code: Some(code),
+            code: None,
             signal: None,
         },
     }
@@ -210,6 +229,169 @@ pub(super) fn candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
         .iter()
         .map(|extension| dir.join(format!("{program}{extension}")))
         .collect()
+}
+/// The command that starts an agent or untracked program, `argv` with its program
+/// first (spec D8). The program is found with PATHEXT (`super::which`). A
+/// native program runs directly; an npm command shim runs what it would run
+/// (`shim`), Node.js on the package's script or the package's program; any
+/// other batch file, script or document is refused, as hgs never starts a
+/// program through `cmd.exe /c`. NotFound when nothing on PATH has the name.
+pub fn agent_command(argv: &[String]) -> io::Result<Command> {
+    let (program, arguments) = argv
+        .split_first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing program"))?;
+    let path = super::which(program)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found on PATH"))?;
+    let (program, prefix) = resolve_program(&path)?;
+    let mut command = Command::new(program);
+    command.args(prefix).args(arguments);
+    Ok(command)
+}
+/// What runs for the program file `path`, and the arguments before the caller's.
+fn resolve_program(path: &Path) -> io::Result<(PathBuf, Vec<PathBuf>)> {
+    let refused = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} is {what}; hgs starts programs directly, never through cmd.exe",
+                path.display()
+            ),
+        )
+    };
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("exe" | "com") => Ok((path.to_owned(), Vec::new())),
+        Some("cmd" | "bat") => {
+            let mut text = String::new();
+            fs::File::open(path)?
+                .take(64 * 1024)
+                .read_to_string(&mut text)
+                .map_err(|_| refused("a batch file that is not an npm command shim"))?;
+            let folder = path.parent().unwrap_or(Path::new(""));
+            match super::shim::npm_shim(&text) {
+                Some(super::shim::NpmShim::Node { script }) => {
+                    let script = folder.join(script);
+                    if !script.is_file() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "the script {} of {} is missing",
+                                script.display(),
+                                path.display()
+                            ),
+                        ));
+                    }
+                    let bundled = folder.join("node.exe");
+                    let node = if bundled.is_file() {
+                        bundled
+                    } else {
+                        native_program("node").ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("{} needs node.exe, which is not on PATH", path.display()),
+                            )
+                        })?
+                    };
+                    Ok((node, vec![script]))
+                }
+                Some(super::shim::NpmShim::Program { path: program }) => {
+                    let program = folder.join(program);
+                    let native = program.extension().is_some_and(|extension| {
+                        ["exe", "com"]
+                            .contains(&extension.to_string_lossy().to_ascii_lowercase().as_str())
+                    });
+                    if !native {
+                        return Err(refused("an npm shim for something other than a program"));
+                    }
+                    if !program.is_file() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "the program {} of {} is missing",
+                                program.display(),
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Ok((program, Vec::new()))
+                }
+                None => Err(refused("a batch file that is not an npm command shim")),
+            }
+        }
+        _ => Err(refused("not a program")),
+    }
+}
+/// A native program (`.exe` or `.com`) named `name` on PATH.
+fn native_program(name: &str) -> Option<PathBuf> {
+    env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .flat_map(|folder| {
+            [
+                folder.join(format!("{name}.exe")),
+                folder.join(format!("{name}.com")),
+            ]
+        })
+        .find(|path| path.is_file())
+}
+/// The interactive shell of an `sh` session (spec D8): PowerShell 7 (`pwsh.exe`)
+/// from PATH, else Windows PowerShell without its banner, by absolute path.
+pub fn powershell() -> std::result::Result<Vec<String>, String> {
+    let absolute = |path: PathBuf| canonical(&path).ok().map(|path| path.display().to_string());
+    if let Some(pwsh) = native_program("pwsh").and_then(absolute) {
+        return Ok(vec![pwsh]);
+    }
+    let system = env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .filter(|path| path.is_file());
+    system
+        .or_else(|| native_program("powershell"))
+        .and_then(absolute)
+        .map(|powershell| vec![powershell, "-NoLogo".into()])
+        .ok_or_else(|| "neither pwsh.exe nor powershell.exe was found".into())
+}
+/// The stable CLI `<home>\.local\bin\hgs.exe` (spec D2, D8), the only hgs.exe a
+/// session, hook, recipe or record names, so none of them names a portable
+/// folder that a GUI update replaces. Whichever hgs.exe runs, this is the one
+/// sessions start; `HGS_EXECUTABLE`, when set, must name it too. Anything else
+/// fails closed, as does a computer where it is not installed.
+pub fn stable_executable() -> std::result::Result<PathBuf, String> {
+    let layout = crate::host::staging::Layout::current()
+        .ok_or("no home directory: set USERPROFILE or HOME")?;
+    stable_executable_in(&layout.cli, env::var_os("HGS_EXECUTABLE"))
+}
+fn stable_executable_in(
+    stable: &Path,
+    explicit: Option<OsString>,
+) -> std::result::Result<PathBuf, String> {
+    let installed = canonical(stable)
+        .ok()
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "the stable hgs CLI {} is not installed; run hgs session-host install",
+                stable.display()
+            )
+        })?;
+    let same = |path: &Path| {
+        canonical(path).is_ok_and(|path| {
+            path.to_string_lossy().to_lowercase() == installed.to_string_lossy().to_lowercase()
+        })
+    };
+    if let Some(explicit) = explicit
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        if !explicit.is_absolute() || !same(&explicit) {
+            return Err(format!(
+                "HGS_EXECUTABLE names {}, but sessions on this computer run only the stable \
+                 hgs CLI {}",
+                explicit.display(),
+                installed.display()
+            ));
+        }
+    }
+    Ok(installed)
 }
 /// The Windows OpenSSH client from System32 first: a Git or MSYS ssh earlier on
 /// PATH uses another configuration, key agent and home directory.
@@ -1215,6 +1397,14 @@ mod process {
         }
         Ok(rows)
     }
+    /// The image file name (`node.exe`) of every process that runs now, by ID.
+    /// Toolhelp names processes of every user and integrity level.
+    pub fn process_names() -> io::Result<BTreeMap<u32, String>> {
+        Ok(snapshot()?
+            .into_iter()
+            .map(|(pid, _, name)| (pid, name))
+            .collect())
+    }
     /// Toolhelp keeps a parent's ID after the parent exits, and Windows soon gives
     /// that ID to another process: a parent link counts only while a process with
     /// that ID exists and was created no later than the child. Otherwise 0.
@@ -1553,17 +1743,64 @@ mod process {
     pub fn shutdown_signal() -> i32 {
         SHUTDOWN_SIGNAL.load(Ordering::SeqCst)
     }
-    /// The console delivers later requests to `child` itself. One that arrived
-    /// before it started never reached it: raise Ctrl+Break again on this console.
-    pub fn forward_shutdown(_: &Child) {
+    /// The agent the supervisor started last: its process ID and a handle that
+    /// keeps the ID from being reused, for the supervisor channel's evidence
+    /// (`host::supervisor`, spec D10).
+    static AGENT: Mutex<Option<(u32, OwnedHandle)>> = Mutex::new(None);
+    /// `child` is the supervisor's agent from now on (`supervised_agent`). The
+    /// console delivers later requests to it itself, as it shares this process
+    /// group. One that arrived before it started never reached it: raise
+    /// Ctrl+Break again for the group.
+    pub fn forward_shutdown(child: &Child) {
+        let pinned = child.as_handle().try_clone_to_owned().ok();
+        *AGENT.lock().unwrap_or_else(PoisonError::into_inner) =
+            pinned.map(|handle| (child.id(), handle));
         if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
-            unsafe {
-                GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
-            }
+            let _ = break_process_group();
         }
     }
-    /// Nothing is passed on (see `forward_shutdown`), so nothing stops.
+    /// Nothing is passed on (see `forward_shutdown`), so nothing stops. The
+    /// agent stays the supervisor's until the next one starts: its evidence then
+    /// shows it gone.
     pub fn shutdown_child_exited() {}
+    /// The agent `forward_shutdown` named last: its process ID and whether it
+    /// still runs.
+    pub fn supervised_agent() -> Option<(u32, bool)> {
+        AGENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(pid, handle)| (*pid, !exited(handle.as_raw_handle())))
+    }
+    /// D11's pause: Ctrl+Break for this process's group, which a supervisor the
+    /// session host started leads (CREATE_NEW_PROCESS_GROUP) and its agent
+    /// shares with every tool it started, as a Unix pane's group does. The
+    /// supervisor's own handler records it and keeps running, but the console
+    /// runs that handler on a thread of its own, which may come after the agent
+    /// has ended: the request is recorded as SIGTERM before the event goes out,
+    /// so that the `--run` fallback sees the stop however soon the agent ends
+    /// (spec D9). A process that leads no group reaches no process this way.
+    pub fn break_process_group() -> io::Result<()> {
+        let recorded = SHUTDOWN_SIGNAL
+            .compare_exchange(0, SIGTERM, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        // SAFETY: plain call; the event goes to the processes on this
+        // process's console whose group ID is this process's ID.
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, std::process::id()) } == 0 {
+            let error = io::Error::last_os_error();
+            // Nothing went out, so nothing was asked to stop.
+            if recorded {
+                let _ = SHUTDOWN_SIGNAL.compare_exchange(
+                    SIGTERM,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
 
     /// Start `command` outside this process's job, with a hidden console of its
     /// own (its console children never open a window) and its own process group.
@@ -1717,6 +1954,124 @@ mod process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_gains_the_stable_cli_and_npm_folders_once() {
+        let path = |folders: &[&str]| env::join_paths(folders).unwrap();
+        let bin = PathBuf::from(r"C:\Users\a\.local\bin");
+        let npm = PathBuf::from(r"C:\Users\a\AppData\Roaming\npm");
+        assert_eq!(
+            prepared_path(
+                &path(&[r"C:\Windows"]),
+                Some(bin.clone()),
+                Some(npm.clone())
+            ),
+            Some(path(&[
+                r"C:\Users\a\.local\bin",
+                r"C:\Windows",
+                r"C:\Users\a\AppData\Roaming\npm"
+            ]))
+        );
+        // Listed already, in another case or with a trailing separator.
+        assert_eq!(
+            prepared_path(
+                &path(&[
+                    r"c:\users\a\.local\bin\",
+                    r"C:\Windows",
+                    r"C:\Users\A\AppData\Roaming\npm"
+                ]),
+                Some(bin.clone()),
+                Some(npm.clone())
+            ),
+            None
+        );
+        assert_eq!(
+            prepared_path(&path(&[r"C:\Windows"]), None, Some(npm)),
+            Some(path(&[r"C:\Windows", r"C:\Users\a\AppData\Roaming\npm"]))
+        );
+        assert_eq!(prepared_path(&path(&[r"C:\Windows"]), None, None), None);
+    }
+
+    #[test]
+    fn sessions_name_only_the_stable_cli() {
+        let folder = tempfile::tempdir().unwrap();
+        let stable = folder.path().join(r".local\bin\hgs.exe");
+        let error = stable_executable_in(&stable, None).unwrap_err();
+        assert!(error.contains("hgs session-host install"), "{error}");
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&stable, b"").unwrap();
+        let canonical_stable = canonical(&stable).unwrap();
+        assert_eq!(
+            stable_executable_in(&stable, None).unwrap(),
+            canonical_stable
+        );
+        // HGS_EXECUTABLE may name it in any case, never another file.
+        let upper = OsString::from(stable.to_string_lossy().to_uppercase());
+        assert_eq!(
+            stable_executable_in(&stable, Some(upper)).unwrap(),
+            canonical_stable
+        );
+        assert_eq!(
+            stable_executable_in(&stable, Some(OsString::new())).unwrap(),
+            canonical_stable
+        );
+        let portable = folder.path().join(r"Zerus\hgs.exe");
+        fs::create_dir_all(portable.parent().unwrap()).unwrap();
+        fs::write(&portable, b"").unwrap();
+        for explicit in [portable.into_os_string(), OsString::from(r"hgs.exe")] {
+            let error = stable_executable_in(&stable, Some(explicit)).unwrap_err();
+            assert!(error.contains("only the stable hgs CLI"), "{error}");
+        }
+    }
+
+    #[test]
+    fn agents_run_directly_or_through_their_npm_shim() {
+        let folder = tempfile::tempdir().unwrap();
+        let npm = folder.path();
+        let program = npm.join("agent.exe");
+        fs::write(&program, b"").unwrap();
+        let command = agent_command(&[program.display().to_string(), "--flag".into()]).unwrap();
+        assert_eq!(command.get_program(), program.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--flag"]);
+
+        let script = npm.join(r"node_modules\@scope\agent\cli.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, b"").unwrap();
+        fs::write(npm.join("node.exe"), b"").unwrap();
+        let shim = npm.join("agent.cmd");
+        fs::write(
+            &shim,
+            "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\n\
+             SETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  \
+             SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  \
+             SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || \
+             title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@scope\\agent\\cli.js\" %*\r\n",
+        )
+        .unwrap();
+        let command =
+            agent_command(&[shim.display().to_string(), "line one\nline two".into()]).unwrap();
+        assert_eq!(command.get_program(), npm.join("node.exe").as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [script.as_os_str(), OsStr::new("line one\nline two")]
+        );
+
+        let wrapper = npm.join("wrapper.cmd");
+        fs::write(&wrapper, "@echo off\r\nnode \"%~dp0\\cli.js\" %*\r\n").unwrap();
+        let error = agent_command(&[wrapper.display().to_string()]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("never through cmd.exe"),
+            "{error}"
+        );
+        let missing = npm.join("missing.exe");
+        assert_eq!(
+            agent_command(&[missing.display().to_string()])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn home_prefers_a_set_home_over_the_profile() {

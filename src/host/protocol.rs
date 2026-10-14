@@ -594,6 +594,10 @@ pub enum Op {
     StopHost,
     /// Turn this connection into the supervisor channel of a session.
     SupervisorRegister(SupervisorRegistration),
+    /// Supervise the recovery worker, the stable CLI's `hgs.exe recovery
+    /// worker`, until the host exits (D14): started now unless it runs,
+    /// restarted after it exits. `unsupported` where the host supervises none.
+    RecoveryWorker,
     /// An op this host does not know; answered with `unsupported`.
     #[serde(other)]
     Unsupported,
@@ -919,6 +923,10 @@ pub struct ConsoleEvidence {
     pub line_input: bool,
     /// `ENABLE_ECHO_INPUT` (the counterpart of ECHO).
     pub echo_input: bool,
+    /// `ENABLE_PROCESSED_INPUT` (the counterpart of ISIG): reported, not
+    /// judged, as D10 asks only for line and echo input to be off.
+    #[serde(default)]
+    pub processed_input: bool,
     /// `GetConsoleProcessList`.
     pub processes: Vec<ConsoleProcess>,
     /// The tracked agent, once started.
@@ -1339,6 +1347,10 @@ mod tests {
                 ),
                 r#"{"id":20,"op":"signal","target":{"pane":"%3"},"signal":"terminate"}"#,
             ),
+            (
+                request(21, Op::RecoveryWorker),
+                r#"{"id":21,"op":"recovery_worker"}"#,
+            ),
         ];
         for (request, text) in &cases {
             golden(request, text);
@@ -1429,6 +1441,7 @@ mod tests {
                 &ConsoleEvidence {
                     line_input: false,
                     echo_input: false,
+                    processed_input: true,
                     processes: vec![
                         ConsoleProcess {
                             pid: 77,
@@ -1444,8 +1457,14 @@ mod tests {
                     agent_in_job: true,
                 },
             ),
-            r#"{"id":1,"ok":{"line_input":false,"echo_input":false,"processes":[{"pid":77,"name":"hgs.exe"},{"pid":78,"name":"node.exe"}],"agent_pid":78,"agent_alive":true,"agent_in_job":true}}"#,
+            r#"{"id":1,"ok":{"line_input":false,"echo_input":false,"processed_input":true,"processes":[{"pid":77,"name":"hgs.exe"},{"pid":78,"name":"node.exe"}],"agent_pid":78,"agent_alive":true,"agent_in_job":true}}"#,
         );
+        // A supervisor that reports no processed input flag (an older one).
+        let evidence: ConsoleEvidence = serde_json::from_str(
+            r#"{"line_input":true,"echo_input":true,"processes":[],"agent_alive":false,"agent_in_job":false}"#,
+        )
+        .unwrap();
+        assert!(!evidence.processed_input && evidence.agent_pid.is_none());
     }
 
     #[test]

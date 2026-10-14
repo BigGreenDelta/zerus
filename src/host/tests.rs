@@ -4,7 +4,7 @@
 //! the pipe transport are covered by the Windows tests of their modules and by
 //! `tests/test_windows_host.py`.
 use super::{
-    channel::{answer_requests, SupervisorChannel, NOT_AGENT_INPUT, NOT_RAW},
+    channel::{answer_requests, SupervisorChannel, NOT_AGENT_INPUT, NOT_ATTACHED, NOT_RAW},
     client::{ClientError, Connection, Event},
     link::{memory_pair, write_json, Link},
     protocol::{
@@ -18,6 +18,7 @@ use super::{
     session::{
         self, foreground, paste_bytes, Attachment, Console, LaunchPlan, Launched, Launcher, Out,
     },
+    supervisor, worker,
 };
 use std::{
     collections::VecDeque,
@@ -310,6 +311,9 @@ impl Launcher for FakeLauncher {
             "HGS_HOST_SESSION",
             "HGS_HOST_PANE",
             "Path",
+            "HGS_EXECUTABLE",
+            "HGS_SESSION",
+            "HGS_CLIENT",
         ];
         let program = Arc::new(Program {
             pid: 1000 + self.0.next_pid.fetch_add(1, Ordering::SeqCst),
@@ -1011,6 +1015,7 @@ fn evidence(echo: bool) -> ConsoleEvidence {
     ConsoleEvidence {
         line_input: false,
         echo_input: echo,
+        processed_input: false,
         processes: vec![
             ConsoleProcess {
                 pid: 1000,
@@ -1447,4 +1452,509 @@ fn an_exiting_host_admits_no_hello_and_answers_the_connections_it_had() {
     let started = Instant::now();
     draining.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_supervisor_registers_while_its_create_is_still_registering_the_session() {
+    // The host resumes the root process before it registers the session, so a
+    // quick supervisor asks for a session that is not listed yet.
+    let (host, launcher) = new_host();
+    launcher.hold(true);
+    let creating = {
+        let mut client = connect(&host);
+        thread::spawn(move || client.call::<Created>(create("l", "claude/p/a")))
+    };
+    eventually("the launch", || {
+        launcher.0.waiting.load(Ordering::SeqCst) == 1
+    });
+    let registering = {
+        let host = host.clone();
+        thread::spawn(move || {
+            connect_as(&host, 1000, Role::Supervisor)
+                .register_supervisor(SupervisorRegistration {
+                    session: "$0".into(),
+                    pane: "%0".into(),
+                    pid: 1000,
+                })
+                .map(drop)
+        })
+    };
+    thread::sleep(Duration::from_millis(200));
+    assert!(!registering.is_finished(), "it waits for the create");
+    launcher.hold(false);
+    creating.join().unwrap().unwrap();
+    registering.join().unwrap().unwrap();
+
+    // Without a create under way an unknown session is refused at once.
+    let started = Instant::now();
+    let unknown = connect_as(&host, 1000, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: "$5".into(),
+            pane: "%5".into(),
+            pid: 1000,
+        })
+        .err()
+        .unwrap();
+    assert_eq!(unknown.code, ErrorCode::NotFound);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// The supervisor's real end of the channel (`host::supervisor`) over a fake
+/// console: what its evidence reports, and what a pause does.
+struct SupervisedConsole {
+    agent_alive: AtomicBool,
+    /// Line input, as a shell or an agent that crashed in cooked mode leaves it.
+    cooked: AtomicBool,
+    program: Arc<Program>,
+    pauses: AtomicU32,
+}
+
+impl supervisor::Console for SupervisedConsole {
+    fn evidence(&self) -> io::Result<ConsoleEvidence> {
+        let alive = self.agent_alive.load(Ordering::SeqCst);
+        let mut processes = vec![ConsoleProcess {
+            pid: 1000,
+            name: "hgs.exe".into(),
+        }];
+        if alive {
+            processes.push(ConsoleProcess {
+                pid: 2000,
+                name: "fake_agent.exe".into(),
+            });
+        }
+        let mode = if self.cooked.load(Ordering::SeqCst) {
+            supervisor::ENABLE_LINE_INPUT | supervisor::ENABLE_ECHO_INPUT
+        } else {
+            0
+        } | supervisor::ENABLE_PROCESSED_INPUT;
+        Ok(supervisor::evidence(
+            mode,
+            processes,
+            Some(supervisor::Agent {
+                pid: 2000,
+                alive,
+                in_job: alive,
+            }),
+        ))
+    }
+
+    fn pause(&self) -> io::Result<()> {
+        // Ctrl+Break ends the agent; the supervisor records the exit and ends.
+        self.pauses.fetch_add(1, Ordering::SeqCst);
+        self.agent_alive.store(false, Ordering::SeqCst);
+        self.program.exit(0xC000_013A);
+        Ok(())
+    }
+}
+
+/// `program`'s supervisor (pid 1000) registered and answering with `console`.
+fn real_supervisor(
+    host: &Arc<Host<FakeLauncher>>,
+    console: Arc<SupervisedConsole>,
+) -> thread::JoinHandle<()> {
+    let link = connect_as(host, 1000, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: "$0".into(),
+            pane: "%0".into(),
+            pid: 1000,
+        })
+        .unwrap();
+    thread::spawn(move || {
+        let _ = supervisor::serve(&*link, &*console);
+    })
+}
+
+#[test]
+fn the_supervisor_end_reports_its_console_and_pauses_its_agent() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-1".into()),
+        })
+        .unwrap();
+    program.write(b"\x1b[?2004h> ");
+    eventually("bracketed paste", || {
+        info(&mut client, pane("claude/p/a")).bracketed_paste
+    });
+    let console = Arc::new(SupervisedConsole {
+        agent_alive: AtomicBool::new(true),
+        cooked: AtomicBool::new(false),
+        program: program.clone(),
+        pauses: AtomicU32::new(0),
+    });
+    let supervisor = real_supervisor(&host, console.clone());
+    let claim = || {
+        Op::InputState(InputClaim {
+            target: Target::Pane("%0".into()),
+            name: "claude/p/a".into(),
+            run_id: "run-1".into(),
+            agent: "claude".into(),
+            pid: Some(2000),
+        })
+    };
+    // Raw input with only the agent attached; processed input does not count.
+    let ready: InputReady = client.call(claim()).unwrap();
+    assert_eq!((ready.cursor_x, ready.cursor_y), (2, 0));
+    console.cooked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        client.call::<InputReady>(claim()).unwrap_err().message,
+        NOT_RAW
+    );
+    console.cooked.store(false, Ordering::SeqCst);
+    // The agent crashed and its raw mode lingers while the supervisor runs on.
+    console.agent_alive.store(false, Ordering::SeqCst);
+    assert_eq!(
+        client.call::<InputReady>(claim()).unwrap_err().message,
+        NOT_ATTACHED
+    );
+    console.agent_alive.store(true, Ordering::SeqCst);
+    client.call::<InputReady>(claim()).unwrap();
+
+    // A pause is Ctrl+Break for the supervisor's group; the session then ends.
+    client
+        .call::<Done>(Op::Signal {
+            target: pane("claude/p/a"),
+            signal: Signal::Pause,
+        })
+        .unwrap();
+    assert_eq!(console.pauses.load(Ordering::SeqCst), 1);
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+    // The host closed the channel with the session.
+    supervisor.join().unwrap();
+}
+
+/// Session `index`'s supervisor (pid `1000 + index`), registered: on the
+/// first stop request it ends `program` when `ends_agent`, then leaves
+/// without an answer, as a supervisor that exits with its agent does.
+fn leaving_supervisor(
+    host: &Arc<Host<FakeLauncher>>,
+    index: u32,
+    program: Arc<Program>,
+    ends_agent: bool,
+) -> thread::JoinHandle<()> {
+    let link = connect_as(host, 1000 + index, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: format!("${index}"),
+            pane: format!("%{index}"),
+            pid: 1000 + index,
+        })
+        .unwrap();
+    thread::spawn(move || {
+        while let Ok(Some(frame)) = link.read_frame() {
+            let request = super::protocol::Request::<SupervisorOp>::decode(&frame.payload);
+            if request.is_ok_and(|request| request.op == SupervisorOp::Stop) {
+                if ends_agent {
+                    program.exit(0xC000_013A);
+                }
+                break;
+            }
+        }
+        // Dropping the only handle ends the connection, as an exit does.
+        drop(link);
+    })
+}
+
+#[test]
+fn a_pause_whose_supervisor_leaves_unanswered_counts_only_when_the_session_ends() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l1", "claude/p/a")).unwrap();
+    client.call::<Created>(create("l2", "claude/p/b")).unwrap();
+    let pause = |client: &mut Connection, name: &str| {
+        client.call::<Done>(Op::Signal {
+            target: pane(name),
+            signal: Signal::Pause,
+        })
+    };
+
+    // Ctrl+Break ended the agent and the supervisor with it before its answer
+    // went out: the pause did what it asks.
+    let ended = leaving_supervisor(&host, 0, launcher.program(0), true);
+    pause(&mut client, "claude/p/a").unwrap();
+    ended.join().unwrap();
+    eventually("the end", || {
+        client
+            .call::<Listed>(Op::List)
+            .unwrap()
+            .sessions
+            .iter()
+            .all(|session| session.name != "claude/p/a")
+    });
+
+    // A supervisor that leaves while its session runs on has paused nothing.
+    let left = leaving_supervisor(&host, 1, launcher.program(1), false);
+    let started = Instant::now();
+    let error = pause(&mut client, "claude/p/b").unwrap_err();
+    left.join().unwrap();
+    assert_eq!(error.code, ErrorCode::Refused, "{error:?}");
+    assert!(error.message.contains("no longer connected"), "{error:?}");
+    assert!(started.elapsed() < LIMIT);
+    assert!(lock(&launcher.program(1).exit).is_none(), "still running");
+    client
+        .call::<Done>(Op::Kill {
+            target: pane("claude/p/b"),
+        })
+        .unwrap();
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+}
+
+#[test]
+fn the_recovery_worker_is_supervised_once_asked_and_stops_with_the_host() {
+    // A host without a worker to supervise says so.
+    let (host, _launcher) = new_host();
+    let mut client = connect(&host);
+    assert_eq!(
+        client.call::<Done>(Op::RecoveryWorker).unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+
+    let starts = Arc::new(AtomicU32::new(0));
+    let spawned = Arc::new(AtomicU32::new(0));
+    let killed = Arc::new(AtomicBool::new(false));
+    struct Running(Arc<AtomicBool>);
+    impl worker::Process for Running {
+        fn wait(&mut self, timeout: Duration) -> io::Result<Option<u32>> {
+            thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(None)
+        }
+        fn kill(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    {
+        let (starts, spawned, killed) = (starts.clone(), spawned.clone(), killed.clone());
+        host.supervise_recovery_with(move || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            let (spawned, killed) = (spawned.clone(), killed.clone());
+            worker::Worker::start("test-recovery", move || {
+                spawned.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(Running(killed.clone())) as Box<dyn worker::Process>)
+            })
+            .map_err(|error| error.to_string())
+        });
+    }
+    client.call::<Done>(Op::RecoveryWorker).unwrap();
+    client.call::<Done>(Op::RecoveryWorker).unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 1, "started once");
+    eventually("the worker", || spawned.load(Ordering::SeqCst) == 1);
+    assert!(!killed.load(Ordering::SeqCst));
+    host.stop_workers();
+    assert!(
+        killed.load(Ordering::SeqCst),
+        "the worker ends with the host"
+    );
+    assert_eq!(
+        client.call::<Done>(Op::RecoveryWorker).unwrap_err().code,
+        ErrorCode::Busy
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+    // A start that fails is reported.
+    let (host, _launcher) = new_host();
+    host.supervise_recovery_with(|| Err("the stable hgs CLI is not installed".into()));
+    let error = connect(&host).call::<Done>(Op::RecoveryWorker).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert!(error.message.contains("not installed"), "{error:?}");
+}
+
+/// `state::backend::host`, the terminal backend hgs uses on Windows, over a
+/// real host: every backend operation is answered by the registry.
+mod terminal_backend {
+    use super::*;
+    use crate::{
+        host::spawn::Environment,
+        state::backend::{
+            self as terminal,
+            host::{Connector, Failure, HostBackend},
+            LaunchSpec, PaneField, StageErrors, TerminalBackend,
+        },
+    };
+    use serde_json::Value;
+
+    struct Direct {
+        host: Arc<Host<FakeLauncher>>,
+        creates: Arc<AtomicU32>,
+    }
+
+    impl Connector for Direct {
+        fn call(&self, op: Op) -> Result<Value, Failure> {
+            connect(&self.host).request(op).map_err(Failure::Host)
+        }
+        fn create(&self, op: Op) -> Result<Value, Failure> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            self.call(op)
+        }
+        fn environment(&self) -> Result<Environment, String> {
+            // A launch from inside another session.
+            Environment::parse([
+                "Path=/bin",
+                "HGS_SESSION=claude/outer/main",
+                "HGS_HOST_PANE=%9",
+            ])
+            .map_err(|error| error.to_string())
+        }
+        fn stable_cli(&self) -> Result<String, String> {
+            Ok(PROGRAM.into())
+        }
+        fn parent(&self, pid: u32) -> Option<u32> {
+            // The fake supervisor of the first session started agent 2000.
+            (pid == 2000).then_some(1000)
+        }
+        fn var(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    const LAUNCH_ID: &str = "0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10";
+
+    #[test]
+    fn the_terminal_backend_runs_sessions_through_the_host() {
+        let (host, launcher) = new_host();
+        let creates = Arc::new(AtomicU32::new(0));
+        let backend = HostBackend::new(Direct {
+            host: host.clone(),
+            creates: creates.clone(),
+        });
+        assert!(backend.listing().unwrap().sessions.is_empty());
+        assert!(!backend.session_exists("fake_agent/p/a"));
+        let spec = LaunchSpec {
+            name: "fake_agent/p/a".into(),
+            cwd: WORK.into(),
+            env: strings(&["HGS_CLIENT=laptop", &format!("HGS_LAUNCH_ID={LAUNCH_ID}")]),
+            command: strings(&[PROGRAM, "--run", "0", "fake_agent"]),
+            detached: true,
+        };
+        backend.start(&spec).unwrap();
+        assert_eq!(creates.load(Ordering::SeqCst), 1);
+        let program = launcher.program(0);
+        assert_eq!(program.argv, spec.command);
+        assert_eq!(program.cwd, WORK);
+        let variable = |name: &str| {
+            program
+                .environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, value)| value.clone())
+        };
+        assert_eq!(variable("HGS_EXECUTABLE").as_deref(), Some(PROGRAM));
+        assert_eq!(variable("HGS_CLIENT").as_deref(), Some("laptop"));
+        assert_eq!(variable("HGS_HOST_PANE").as_deref(), Some("%0"));
+        assert_eq!(variable("HGS_SESSION"), None);
+        assert_eq!(variable("Path").as_deref(), Some("/bin"));
+        // A retried start of the same launch starts nothing.
+        backend.start(&spec).unwrap();
+        assert_eq!(launcher.count(), 1);
+
+        let listing = backend.listing().unwrap();
+        assert_eq!(listing.sessions.len(), 1);
+        assert_eq!(
+            (
+                listing.sessions[0].name.as_str(),
+                listing.sessions[0].launch_id.as_str()
+            ),
+            ("fake_agent/p/a", LAUNCH_ID)
+        );
+        backend.set_run_marker("fake_agent/p/a", "run-1").unwrap();
+        let panes = backend.panes().unwrap();
+        assert_eq!(
+            (
+                panes[0].pane.as_str(),
+                panes[0].dead.as_str(),
+                panes[0].run_marker.as_str()
+            ),
+            ("%0", "0", "run-1")
+        );
+        let info = backend
+            .pane_info(
+                terminal::Target::Name("fake_agent/p/a"),
+                &[
+                    PaneField::SessionId,
+                    PaneField::PanePid,
+                    PaneField::Tty,
+                    PaneField::RunMarker,
+                ],
+            )
+            .unwrap();
+        assert_eq!(info.fields(), ["$0", "1000", "conpty:%0", "run-1"]);
+        // The viewing peer is the session variable that attaching sets; the
+        // launch's HGS_CLIENT is in the program's environment only.
+        assert_eq!(backend.viewer("fake_agent/p/a"), "");
+        backend.set_client(terminal::Target::Session("$0"), "laptop");
+        assert_eq!(backend.viewer("fake_agent/p/a"), "laptop");
+        assert!(backend.on_terminal("2000", "conpty:%0").unwrap());
+        assert!(!backend.on_terminal("2001", "conpty:%0").unwrap());
+
+        program.write(b"fake> ");
+        eventually("the prompt", || {
+            backend
+                .capture("%0", terminal::Capture::Plain)
+                .unwrap()
+                .starts_with(b"fake>\n")
+        });
+        backend
+            .send(
+                "%0",
+                &[terminal::Key::Literal("ls"), terminal::Key::Named("Enter")],
+            )
+            .unwrap();
+        assert_eq!(program.input_until(b"\r"), b"ls\r");
+        program.write(b"\x1b[?2004h");
+        eventually("bracketed paste", || {
+            backend
+                .pane_info(terminal::Target::Pane("%0"), &[PaneField::BracketedPaste])
+                .unwrap()
+                .value()
+                == "1"
+        });
+        assert!(backend
+            .stage("hgs-input-1", b"two\nlines", StageErrors::Read)
+            .unwrap());
+        backend
+            .paste("hgs-input-1", "%0", terminal::Paste::Composer)
+            .unwrap();
+        assert_eq!(
+            program.input_until(b"\x1b[201~"),
+            b"\x1b[200~two\nlines\x1b[201~"
+        );
+
+        // Input checks need the session's supervisor, which this one never registered.
+        let error = backend
+            .input_state(&terminal::InputClaim {
+                pane: "%0",
+                name: "fake_agent/p/a",
+                run_id: "run-1",
+                agent: "claude",
+                pid: Some(2000),
+            })
+            .err()
+            .unwrap();
+        assert!(error.contains("no supervisor"), "{error}");
+
+        assert_eq!(
+            backend.session_name("$0").unwrap().as_deref(),
+            Some("fake_agent/p/a")
+        );
+        backend.rename("$0", "fake_agent/p/b").unwrap();
+        assert!(
+            backend.session_exists("fake_agent/p/b") && !backend.session_exists("fake_agent/p/a")
+        );
+        assert_eq!(backend.session_name("$7").unwrap(), None);
+
+        // Without a supervisor, terminate ends the session as kill-session does.
+        backend
+            .kill_session(terminal::Target::Session("$0"))
+            .unwrap();
+        eventually("the end", || backend.listing().unwrap().sessions.is_empty());
+        assert!(!backend.session_exists("fake_agent/p/b"));
+        assert_eq!(backend.attached_counts().unwrap(), None);
+    }
 }

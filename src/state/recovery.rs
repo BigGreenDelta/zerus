@@ -766,12 +766,14 @@ fn worker() -> Result<i32> {
         std::thread::sleep(Duration::from_secs(2));
     }
 }
-/// The session host supervises the worker on Windows (spec D14); until it does,
-/// nothing starts one. A worker detached from hgs.exe's job would outlive the
-/// GUI and keep the GUI's hgs.exe from being replaced.
+/// The session host supervises the worker on Windows (spec D14): it runs the
+/// stable CLI's `hgs.exe recovery worker` and restarts it while the host runs.
+/// Without a host nothing starts one, as no session runs then; a worker detached
+/// from hgs.exe's job would outlive the GUI and keep the GUI's hgs.exe from
+/// being replaced.
 #[cfg(windows)]
 fn ensure_worker() -> Result<()> {
-    Ok(())
+    backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
 fn ensure_worker() -> Result<()> {

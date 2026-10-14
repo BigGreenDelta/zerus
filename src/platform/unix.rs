@@ -193,6 +193,17 @@ pub(crate) fn transient_replace_error(_: &io::Error) -> bool {
 pub fn own_process_group(command: &mut Command) -> &mut Command {
     command.process_group(0)
 }
+/// The command that starts an agent or untracked program, `argv` with its program
+/// first: here the program as named, which the system finds on PATH. Windows
+/// resolves it itself (spec D8).
+pub fn agent_command(argv: &[String]) -> io::Result<Command> {
+    let (program, arguments) = argv
+        .split_first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing program"))?;
+    let mut command = Command::new(program);
+    command.args(arguments);
+    Ok(command)
+}
 /// `Command::spawn`. On Windows the child also gets a job of its own that ends
 /// with this process and that nothing it starts can leave (spec D4).
 pub fn spawn(command: &mut Command) -> io::Result<Child> {

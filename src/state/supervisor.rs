@@ -1,7 +1,7 @@
 //! Keep process-exit evidence separate from provider SessionEnd notifications.
 use super::*;
 use crate::platform::ExitInfo;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 
 pub(super) fn shutdown_requested() -> bool {
     crate::platform::shutdown_signal() != 0
@@ -10,9 +10,9 @@ pub(super) fn shutdown_requested() -> bool {
 pub(super) fn spawn(argv: &[String], name: &str, run_id: &str) -> Result<Child> {
     let _guard = lock(None)?;
     let mut record = read_run(name, run_id)?.ok_or("session changed while launching agent")?;
-    let child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .spawn()
+    // Windows finds the program and reads npm shims itself (spec D8).
+    let child = crate::platform::agent_command(argv)
+        .and_then(|mut command| command.spawn())
         .map_err(|error| format!("{}: {error}", argv[0]))?;
     crate::platform::forward_shutdown(&child);
     record["pid"] = json!(child.id());
