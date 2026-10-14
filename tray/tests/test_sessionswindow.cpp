@@ -178,6 +178,7 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
+    void enabledWindowsComputerIsNoMobileGateway();
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
@@ -7442,7 +7443,11 @@ void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
     QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
-    window.setFleet(fleet());QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
+    // A Linux computer that runs sessions is a mobile gateway; without a platform
+    // a Windows build would take this computer for Windows, which never is one.
+    auto linuxFleet=fleet();auto linuxBox=linuxFleet.local();linuxBox.metrics=QJsonObject{{"platform","linux"}};
+    linuxFleet.setLocal(linuxBox,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(linuxFleet);QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
     NewSessionDialog launch(program(),state,{},"codex");launch.show();
     auto *machine=launch.findChild<QComboBox *>("launchComputer");QVERIFY(machine);
     QCOMPARE(machine->count(),1);QCOMPARE(machine->itemData(0).toString(),QString("mac"));
@@ -7495,6 +7500,34 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryEnabled")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryRule_service")->isEnabled());
+}
+
+// An enabled Windows computer runs sessions, so it keeps its recovery policy, but
+// it is no mobile gateway (spec D16): Mobile connection stays hidden.
+void TestSessionsWindow::enabledWindowsComputerIsNoMobileGateway(){
+    QTemporaryDir fixture;QVERIFY(fixture.isValid());const auto script=fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+if a[:1]!=['recovery']:sys.exit(2)
+print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer","enabled":false,"enabled_at":0,"service":true,"network":true,"rate_limit":true,"delays":[15,30,60,300]}}')
+)PY"));
+    QSettings().remove("recovery/sharedPolicy");
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
+    QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
+    // Recovery includes this computer as well as the remote machine.
+    static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
+    auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    sections->setCurrentRow(5);window.setFleet(state);QVERIFY(sections->item(5)->isHidden());QCOMPARE(sections->currentRow(),0);
 }
 
 // Voice sends to local Windows sessions are a Phase 2 non-goal (spec D16): the
