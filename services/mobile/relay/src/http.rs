@@ -57,6 +57,25 @@ struct Budget {
 fn take(s: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit> {
     s.clone().try_acquire_owned().map_err(|_| Error::BUSY)
 }
+/// A bounded discard lets a client already uploading observe a 413 or 429
+/// rejection instead of an unread-body TCP reset. No payload is retained.
+/// Expect/continue clients can receive rejection immediately.
+async fn discard(request: Request, maximum: usize) {
+    if request.headers().contains_key(header::EXPECT) {
+        return;
+    }
+    let mut stream = request.into_body().into_data_stream();
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut discarded = 0usize;
+        while let Some(Ok(chunk)) = stream.next().await {
+            discarded = discarded.saturating_add(chunk.len());
+            if discarded > maximum {
+                break;
+            }
+        }
+    })
+    .await;
+}
 impl Budget {
     fn keep(&self, p: OwnedSemaphorePermit) {
         self.permits.lock().expect("budget mutex").push(p);
@@ -146,6 +165,7 @@ impl App {
             })
             .transpose()?;
         if length.is_some_and(|n| n > maximum) {
+            discard(request, maximum).await;
             return Err(Error::LARGE);
         }
         let admission = if length.is_none_or(|n| n > MIB) {
@@ -159,22 +179,7 @@ impl App {
         match admission {
             Ok(permit) => budget.keep(permit),
             Err(error) => {
-                // A bounded discard lets a client already uploading observe 429
-                // instead of an unread-body TCP reset. No payload is retained.
-                // Expect/continue clients can receive rejection immediately.
-                if !request.headers().contains_key(header::EXPECT) {
-                    let mut stream = request.into_body().into_data_stream();
-                    let _ = tokio::time::timeout(Duration::from_secs(2), async {
-                        let mut discarded = 0usize;
-                        while let Some(Ok(chunk)) = stream.next().await {
-                            discarded = discarded.saturating_add(chunk.len());
-                            if discarded > maximum {
-                                break;
-                            }
-                        }
-                    })
-                    .await;
-                }
+                discard(request, maximum).await;
                 return Err(error);
             }
         }
