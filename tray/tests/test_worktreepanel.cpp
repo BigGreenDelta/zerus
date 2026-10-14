@@ -231,7 +231,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
     void batchCleanupKeepsExactComputerScopesAndNeverRetriesFailure(){
         const auto row=review()["worktrees"].toArray().last().toObject();QFile fail(dir.filePath("fail-remove"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.write("/missing\n");fail.close();
         HgsClient client(FakeCli::program(script()));WorktreeBatchCleanupDialog dialog(&client,{{{"host",""},{"machine","arch"},{"common_dir","/repo/.git"},{"row",row}},{{"host","mac"},{"machine","mac"},{"common_dir","/other/.git"},{"row",row}}});dialog.show();
-        auto *remove=dialog.findChild<QPushButton *>("confirmBatchWorktreeRemoval");QVERIFY(remove->isEnabled());remove->click();QTRY_VERIFY(dialog.findChild<QLabel *>("batchCleanupStatus")->text().contains("0 removed · 2 not removed"));
+        auto *remove=dialog.findChild<QPushButton *>("confirmBatchWorktreeRemoval");QVERIFY(remove->isEnabled());remove->click();QTRY_VERIFY(dialog.findChild<QLabel *>("batchCleanupStatus")->text().contains("0 removed · 2 unconfirmed"));
         QCOMPARE(calls().count("worktrees remove"),2);QVERIFY(calls().contains("@mac worktrees remove --path /missing --common-dir /other/.git"));QVERIFY(calls().contains("worktrees remove --path /missing --common-dir /repo/.git"));QVERIFY(!dialog.changed());QVERIFY(dialog.attempted());QVERIFY(!remove->isEnabled());remove->click();QTest::qWait(80);QCOMPARE(calls().count("worktrees remove"),2);
     }
     void batchCanStopRemainingFoldersWithoutCancellingCurrentOperation(){

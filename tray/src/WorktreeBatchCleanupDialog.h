@@ -54,7 +54,7 @@ public:
         });
         connect(client, &HgsClient::worktreeRemoved, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
             if (request != m_request) return; m_request = 0;
-            auto *item = m_list->topLevelItem(m_index); item->setText(3, ok ? (result["status"] == "forgotten" ? tr("Forgotten") : tr("Removed")) : tr("Not removed"));
+            auto *item = m_list->topLevelItem(m_index); item->setText(3, ok ? (result["status"] == "forgotten" ? tr("Forgotten") : tr("Removed")) : tr("Not confirmed"));
             item->setToolTip(3, ok ? result["branch_error"].toString() : error);
             if (ok) { m_changed = true; ++m_removed; } else ++m_failed;
             if (!error.isEmpty()) m_errors << item->text(0) + ": " + error;
@@ -82,7 +82,7 @@ private:
         if (m_stop) while (m_index < m_entries.size()) { m_list->topLevelItem(m_index++)->setText(3, tr("Kept; not attempted")); ++m_skipped; }
         if (m_index == m_entries.size()) {
             m_cancel->setText(tr("Close")); m_cancel->setEnabled(true);
-            m_status->setText(tr("%1 removed · %2 not removed").arg(m_removed).arg(m_failed) + (m_skipped ? tr(" · %1 kept without an attempt").arg(m_skipped) : QString()) + (m_errors.isEmpty() ? QString() : '\n' + m_errors.join('\n'))); return;
+            m_status->setText(tr("%1 removed · %2 unconfirmed").arg(m_removed).arg(m_failed) + (m_skipped ? tr(" · %1 kept without an attempt").arg(m_skipped) : QString()) + (m_errors.isEmpty() ? QString() : '\n' + m_errors.join('\n'))); return;
         }
         const auto entry = m_entries[m_index], row = entry["row"].toObject();
         m_list->topLevelItem(m_index)->setText(3, tr("Checking and removing…"));
