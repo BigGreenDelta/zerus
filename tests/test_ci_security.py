@@ -303,7 +303,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("rustup toolchain install 1.85.0 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
-                     "test_windows_lifecycle test_windows_hooks </dev/null",
+                     "test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null",
                      "bash scripts/ci/gui.sh build </dev/null", "bash scripts/ci/gui.sh test </dev/null",
                      "--output artifacts/zerus-windows-x86_64.zip </dev/null",
                      "--run --selftest \\\n            </dev/null"):
@@ -620,7 +620,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         modules = [word for word in re.search(r"python -m unittest -v ([\w \\\n]+?)</dev/null", host)[1].split()
                    if word != "\\"]
         self.assertEqual(modules, ["test_windows_host", "test_windows_host_conpty", "test_windows_host_survival",
-                                   "test_windows_lifecycle", "test_windows_hooks"])
+                                   "test_windows_lifecycle", "test_windows_hooks", "test_backend_contract"])
         for module in modules:
             self.assertTrue((ROOT / "tests" / f"{module}.py").is_file(), module)
         self.assertIn('--conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null', package)

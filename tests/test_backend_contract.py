@@ -4,10 +4,11 @@
 A terminal backend lists, creates, resolves and attaches sessions, delivers input, captures the
 screen, renames, pauses and ends them. These tests drive each operation only through hgs commands
 and observe it only through their output and JSON and the records of the agent itself
-(examples/fake_agent.rs, linked as `claude`), so one suite holds for every backend.
+(examples/fake_agent.rs, linked or copied as `claude`), so one suite holds for every backend.
 HGS_TEST_BACKEND selects it: `tmux` (the default on Linux and macOS) or `host` (the Windows
 session host of Windows Phase 2, the default on Windows). Only the backend classes below know
-which one runs: setup, teardown and `running()`.
+which one runs: setup and teardown, `running()`, `describe()`, `alive()` (whether an agent
+process still runs) and the terminal client that attaches.
 
 Build the agent with `cargo build --locked --example fake_agent`; HGS_TEST_BIN and
 HGS_TEST_FAKE_AGENT name other builds.
@@ -32,29 +33,42 @@ try:
     import fcntl
     import pty
     import termios
-except ImportError:  # Windows: attach needs a console client there.
+except ImportError:  # Windows: the host backend attaches on a pseudoconsole instead.
     pty = None
 
 REPO = Path(__file__).resolve().parents[1]
-HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
-FAKE_AGENT = Path(os.environ.get("HGS_TEST_FAKE_AGENT", REPO / "target/debug/examples/fake_agent")).resolve()
+EXE = ".exe" if sys.platform == "win32" else ""
+HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / f"target/debug/hgs{EXE}")).resolve()
+FAKE_AGENT = Path(os.environ.get("HGS_TEST_FAKE_AGENT", REPO / f"target/debug/examples/fake_agent{EXE}")).resolve()
 TMUX = shutil.which("tmux")
-# What an agent may receive, by operation: Unix signals and Windows console events.
+# Windows: no console window for any hgs the tests start (docs/windows-host-testing.md).
+HIDDEN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# What an agent may receive, by operation: Unix signals and Windows console events. On
+# Windows a pause is Ctrl+Break for the supervisor's process group, terminate pauses first
+# and then closes the console, and kill closes it at once (spec D11).
 PAUSE_SIGNALS = {"TERM", "CTRL_BREAK"}
 CLOSE_SIGNALS = {"HUP", "TERM", "CTRL_BREAK", "CTRL_CLOSE"}
 PROMPT = "❯ "
+# What the fake `claude` answers the version probe that picks its hook form on Windows (spec D12).
+CLAUDE_VERSION = "2.1.296 (Claude Code)"
 
 
-def alive(pid, started):
-    """Whether this exact process still runs: same start time, not a zombie."""
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,lstart="], capture_output=True, text=True,
-                            env=dict(os.environ, LC_ALL="C", TZ="UTC"), timeout=5)
-    fields = result.stdout.split(None, 1)
-    return len(fields) == 2 and not fields[0].startswith(("Z", "X")) and fields[1].split() == started.split()
+def windows():
+    """tests/test_windows_lifecycle.py, whose Windows helpers the host backend reuses: the
+    pseudoconsole client and handles on processes pinned by their creation time."""
+    tests = str(Path(__file__).resolve().parent)
+    if tests not in sys.path:
+        sys.path.insert(0, tests)
+    import test_windows_lifecycle
+    return test_windows_lifecycle
 
 
 class Tmux:
     """A private tmux server: hgs runs `tmux` by name and finds this wrapper first on PATH."""
+
+    # Seconds a wait for an observation and an hgs command may take.
+    WAIT = 10
+    COMMAND = 30
 
     @staticmethod
     def unavailable():
@@ -62,8 +76,23 @@ class Tmux:
             return "tmux sessions run on Linux and macOS"
         return None if TMUX else "tmux is required"
 
+    @staticmethod
+    def alive(pid, started):
+        """Whether this exact process still runs: same start time, not a zombie."""
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,lstart="], capture_output=True, text=True,
+                                env=dict(os.environ, LC_ALL="C", TZ="UTC"), timeout=5)
+        fields = result.stdout.split(None, 1)
+        return len(fields) == 2 and not fields[0].startswith(("Z", "X")) and fields[1].split() == started.split()
+
     def __init__(self, test):
         self.test = test
+        for name in ("claude", "fake_agent"):
+            (test.bin / name).symlink_to(FAKE_AGENT)
+        # A tmux found anywhere else still never reaches the user's server.
+        folder = test.root / "tmux"
+        folder.mkdir()
+        folder.chmod(0o700)
+        test.env["TMUX_TMPDIR"] = str(folder)
         self.socket = test.root / "tmux.sock"
         # An explicit socket and no configuration file never reach the user's server.
         server = f"{shlex.quote(TMUX)} -S {shlex.quote(str(self.socket))} -f /dev/null"
@@ -94,13 +123,19 @@ class Tmux:
                                     capture_output=True, text=True).stdout for tty in sorted(ttys)]
         return "tmux panes:\n" + panes + "terminal processes:\n" + "".join(processes)
 
+    def watch(self):
+        """Nothing to note after a launch: teardown finds every agent and supervisor in their records."""
+
+    def client(self, *args, cols, rows):
+        return PtyClient(self.test, *args, cols=cols, rows=rows)
+
     def stop(self):
         # kill-server returns before panes exit. Wait for every agent and supervisor
         # of this test, so none writes into its folder after removal.
         owned = self.test.processes()
         self.command("kill-server")
         deadline = time.monotonic() + 6
-        while (left := {process for process in owned if alive(*process)}) and time.monotonic() < deadline:
+        while (left := {process for process in owned if self.alive(*process)}) and time.monotonic() < deadline:
             time.sleep(.03)
         for pid, _ in left:
             os.kill(pid, signal.SIGKILL)
@@ -109,21 +144,151 @@ class Tmux:
 
 
 class Host:
-    """The Windows session host of Windows Phase 2 (D1 to D5, D13); not implemented yet.
+    """The Windows session host of Windows Phase 2 (spec D2, D3, D8 to D13), set up as
+    tests/test_windows_lifecycle.py sets it up.
 
-    It will need a temporary USERPROFILE and HOME and an isolated HGS_STATE_DIR: the pipe name
-    derives from the state directory and its private host.secret, so the suite never reaches a
-    live host. Setup runs `hgs session-host install` into that temporary profile (marker, stable
-    CLI and host image), `running()` reads `hgs session-host status`, and teardown ends the
-    sessions, runs `hgs session-host stop` and waits for the host process. The fake agent is
-    copied as `claude.exe`, and attach needs a pseudoconsole client in place of `pty`. `alive()`
-    reads `ps` and needs a Windows form that compares creation times in 100 ns ticks.
+    The test folder is the temporary profile (USERPROFILE and HOME), and the isolated
+    HGS_STATE_DIR names the host's pipe (it derives from the state directory and its private
+    host.secret), so the suite never reaches a live host. `hgs session-host install` enables
+    local sessions there: the marker, the stable CLI in `.local\\bin` beside copies of the fake
+    agent (links need a privilege on Windows) and a host image, which a launch starts and a
+    listing never does. Every hgs runs without a console window. Teardown kills the sessions and
+    stops the host through `hgs __host call`, then waits for the host and every agent and
+    supervisor through handles opened while they ran, never by PID alone (HostCase in
+    tests/test_windows_host.py), and ends and reports any that outlive the deadline.
     """
+
+    # The lifecycle suite's limits (test_windows_host.LIMIT): a freshly copied executable may be
+    # scanned when it first starts.
+    WAIT = 30
+    COMMAND = 60
 
     @staticmethod
     def unavailable():
-        return ("the Windows session host does not exist yet (Windows Phase 2 M3 to M5); it needs an "
-                "isolated HGS_STATE_DIR and `hgs session-host install` into a temporary profile")
+        return None if sys.platform == "win32" else "the Windows session host runs on Windows only"
+
+    def __init__(self, test):
+        self.test = test
+        self.windows = windows()
+        # Handles on the host, agent and supervisor processes seen running, by (PID, start).
+        self.pinned = {}
+        if not HGS.is_file():
+            test.fail(f"{HGS} is missing; run cargo build --locked")
+        for key in [key for key in test.env if key.upper().startswith("XDG_")]:
+            del test.env[key]
+        appdata = test.root / "appdata"
+        appdata.mkdir()
+        # Agents come from the profile's .local\bin, never from the user's %APPDATA%\npm
+        # (spec D8), and Claude Code's configuration, where hgs writes its hooks, is the
+        # test's own (spec D12).
+        test.env.update(USERPROFILE=str(test.root), APPDATA=str(appdata),
+                        CLAUDE_CONFIG_DIR=str(test.root / ".claude"), FAKE_AGENT_PROBE_TEXT=CLAUDE_VERSION)
+        for name in ("claude", "fake_agent"):
+            shutil.copy2(FAKE_AGENT, test.bin / f"{name}{EXE}")
+        result = self.run("session-host", "install", "--json")
+        if result.returncode != 0 or not (test.bin / f"hgs{EXE}").is_file():
+            test.fail(f"hgs session-host install\n{result.stdout}{result.stderr}")
+
+    def run(self, *args):
+        return subprocess.run([str(HGS), *args], env=self.test.env, cwd=self.test.root, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=self.COMMAND,
+                              creationflags=HIDDEN, stdin=subprocess.DEVNULL)
+
+    def status(self):
+        """`hgs __host status`, which never starts a host; pins the host it reports."""
+        result = self.run("__host", "status")
+        if result.returncode != 0:
+            raise AssertionError(f"hgs __host status\n{result.stdout}{result.stderr}")
+        status = json.loads(result.stdout)
+        if status.get("running"):
+            self.pin(status["host"]["pid"], str(status["host"]["created"]))
+        return status
+
+    def call(self, request):
+        """One request to the running host (`hgs __host call`, which never starts one): its answer,
+        or None when it failed or no host runs."""
+        result = self.run("__host", "call", json.dumps(request))
+        try:
+            return json.loads(result.stdout)["ok"] if result.returncode == 0 else None
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def running(self):
+        return bool(self.status().get("running"))
+
+    def describe(self):
+        """The host's hello and status, its sessions and panes and the end of its log, for failure messages."""
+        found = []
+        for args in (("__host", "status"), ("__host", "call", json.dumps({"op": "list"}))):
+            try:
+                result = self.run(*args)
+                found.append(f"hgs {shlex.join(args)}: exit {result.returncode}\n{result.stdout}{result.stderr}")
+            except (OSError, subprocess.SubprocessError) as error:
+                found.append(f"hgs {shlex.join(args)}: {error}\n")
+        try:
+            log = (Path(self.test.env["HGS_STATE_DIR"]) / "host.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log = ""
+        return "session host:\n" + "".join(found) + "host.log:\n" + "".join(log.splitlines(True)[-20:])
+
+    def pin(self, pid, started):
+        """Keep a handle on process `pid` while it is the one that started at `started`."""
+        if (pid, started) not in self.pinned:
+            handle = self.windows.open_host(pid, started)
+            if handle:
+                self.pinned[pid, started] = handle
+
+    def watch(self):
+        """After a launch: pin the host and every agent and supervisor of the test while they run."""
+        status = self.status()
+        for pid, started in self.test.processes():
+            self.pin(pid, started)
+        return status
+
+    def alive(self, pid, started):
+        """Whether this exact process still runs: its creation time in 100 ns ticks, which hgs and
+        the fake agent record on Windows (spec D9), matches, and it has not exited."""
+        handle = self.windows.open_host(pid, started)
+        if not handle:
+            return False
+        try:
+            return self.windows.KERNEL32.WaitForSingleObject(handle, 0) == self.windows.WAIT_TIMEOUT
+        finally:
+            self.windows.KERNEL32.CloseHandle(handle)
+
+    def client(self, *args, cols, rows):
+        if not self.windows.CONPTY:
+            raise unittest.SkipTest("attach needs a pseudoconsole, from Windows 10 1809")
+        return ConsoleClient(self.test, *args, cols=cols, rows=rows)
+
+    def stop(self):
+        try:
+            # Kill every session, then stop the idle host (HostCase.stop_sessions).
+            if self.watch().get("running"):
+                for pane in (self.call({"op": "list"}) or {}).get("panes", []):
+                    self.call({"op": "kill", "target": {"pane": pane["pane"]}})
+                deadline = time.monotonic() + self.WAIT
+                while time.monotonic() < deadline and (self.call({"op": "list"}) or {}).get("sessions"):
+                    time.sleep(.2)
+                self.call({"op": "stop_host"})
+                deadline = time.monotonic() + self.WAIT
+                while time.monotonic() < deadline and self.status().get("running"):
+                    time.sleep(.2)
+        finally:
+            # The host's pipe goes before its process, which holds files in the state
+            # directory; its kill-on-close job then ends what its sessions left.
+            kernel32, left = self.windows.KERNEL32, set()
+            deadline = time.monotonic() + self.WAIT
+            for (pid, _), handle in self.pinned.items():
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+                if kernel32.WaitForSingleObject(handle, remaining) != self.windows.WAIT_OBJECT_0:
+                    left.add(pid)
+                    kernel32.TerminateProcess(handle, 1)
+                    kernel32.WaitForSingleObject(handle, self.WAIT * 1000)
+                kernel32.CloseHandle(handle)
+            self.pinned.clear()
+        if left:
+            raise AssertionError(f"processes survived the session host: {sorted(left)}")
 
 
 BACKENDS = {"tmux": Tmux, "host": Host}
@@ -181,7 +346,7 @@ def style(rows, text):
     raise AssertionError(f"{text!r} is not on the screen")
 
 
-class Client:
+class PtyClient:
     """`hgs a` in a private pseudo-terminal of a given size, its output drained."""
 
     def __init__(self, test, *args, cols=100, rows=30):
@@ -223,6 +388,24 @@ class Client:
             self.master = None
 
 
+class ConsoleClient:
+    """`hgs a` on a pseudoconsole of its own of a given size, as the GUI's embedded terminal runs
+    it on Windows (spec D13); test_windows_lifecycle.PseudoConsole drains what it draws."""
+
+    def __init__(self, test, *args, cols=100, rows=30):
+        self.console = windows().PseudoConsole([HGS, "a", *args], test.env, test.root, (cols, rows))
+        test.addCleanup(self.close)
+
+    def write(self, data):
+        self.console.keys(data)
+
+    def wait(self):
+        return self.console.wait()
+
+    def close(self):
+        self.console.close()
+
+
 class Contract(unittest.TestCase):
     def setUp(self):
         backend = BACKENDS.get(BACKEND)
@@ -235,13 +418,13 @@ class Contract(unittest.TestCase):
             self.fail(f"{FAKE_AGENT} is missing; run cargo build --locked --example fake_agent")
         self.root = Path(tempfile.mkdtemp(prefix="hgs-contract-")).resolve()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        # hgs puts $HOME/.local/bin first on PATH, ahead of Homebrew and /usr/local/bin,
-        # so the wrappers and agent stand-ins here win over any real tmux or claude.
+        # hgs puts $HOME/.local/bin first on PATH, ahead of Homebrew and /usr/local/bin
+        # (on Windows %USERPROFILE%\.local\bin, ahead of %APPDATA%\npm), so the wrappers
+        # and agent stand-ins that the backend puts here win over any real tmux or claude.
         self.bin = self.root / ".local" / "bin"
         self.project = self.root / "project"
-        for folder in (self.bin, self.project, self.root / "config", self.root / "tmux"):
+        for folder in (self.bin, self.project, self.root / "config"):
             folder.mkdir(parents=True)
-        (self.root / "tmux").chmod(0o700)
         self.record = self.root / "agents.jsonl"
         # Nothing from a surrounding session, agent account or fake agent configuration.
         self.env = {key: value for key, value in os.environ.items()
@@ -249,13 +432,9 @@ class Contract(unittest.TestCase):
         self.env.update(HOME=str(self.root), HGS_CONFIG_DIR=str(self.root / "config"),
                         HGS_STATE_DIR=str(self.root / "state"), HGS_SELF="test", HGS_PEERS="", HGS_TAB="0",
                         TERM="xterm-256color", PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
-                        # A tmux found anywhere else still never reaches the user's server.
-                        TMUX_TMPDIR=str(self.root / "tmux"),
                         FAKE_AGENT_RECORD=str(self.record), FAKE_AGENT_READY=str(self.root / "ready.json"),
                         FAKE_AGENT_CONTROL=str(self.root / "control"),
                         FAKE_AGENT_TRANSCRIPT_DIR=str(self.root / "history"), FAKE_AGENT_PROMPT=PROMPT)
-        for name in ("claude", "fake_agent"):
-            (self.bin / name).symlink_to(FAKE_AGENT)
         if sys.platform == "darwin":
             # Fake agents need no login: never read or unlock the real keychain.
             self.script("security", "#!/bin/sh\nexit 0\n")
@@ -275,11 +454,11 @@ class Contract(unittest.TestCase):
         self.env.update({"FAKE_AGENT_" + key: value for key, value in options.items()})
 
     def processes(self):
-        """Every agent and supervisor this test started, as (PID, start time). Teardown only."""
+        """Every agent and supervisor this test has started, as (PID, start time), for teardown."""
         found = {(event["pid"], event.get("process_start")) for event in self.events(kind="start")}
         for path in (self.root / "state").rglob("*.json"):
             try:
-                record = json.loads(path.read_text())
+                record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue  # A supervisor can archive a record meanwhile.
             if isinstance(record, dict):
@@ -294,10 +473,11 @@ class Contract(unittest.TestCase):
     def hgs(self, *args, rc=0, input=None):
         # Never the caller's terminal: a regressed `a --existing` would attach to it.
         result = subprocess.run([str(HGS), *args], env=self.env, cwd=self.root, input=input, capture_output=True,
-                                stdin=subprocess.DEVNULL if input is None else None, text=True, timeout=30)
+                                stdin=subprocess.DEVNULL if input is None else None, text=True, encoding="utf-8",
+                                errors="replace", timeout=self.backend.COMMAND, creationflags=HIDDEN)
         if rc is not None:
             self.assertEqual(result.returncode, rc, f"hgs {shlex.join(args)}\n{result.stdout}{result.stderr}"
-                             + (self.backend.describe() if self.launched else ""))
+                             + (self.backend.describe() if self.launched and result.returncode != rc else ""))
         return result
 
     def json(self, *args, input=None):
@@ -308,7 +488,8 @@ class Contract(unittest.TestCase):
 
     def events(self, pid=None, kind=None):
         # A line still being appended has no newline yet.
-        lines = self.record.read_text().split("\n")[:-1] if self.record.exists() else []
+        text = self.record.read_text(encoding="utf-8", errors="replace") if self.record.exists() else ""
+        lines = text.split("\n")[:-1]
         return [event for event in map(json.loads, lines)
                 if (pid is None or event["pid"] == pid) and (kind is None or event["kind"] == kind)]
 
@@ -319,8 +500,8 @@ class Contract(unittest.TestCase):
     def received(self, pid):
         return b"".join(bytes.fromhex(token["hex"]) for token in self.tokens(pid))
 
-    def wait_for(self, predicate, what, timeout=10):
-        deadline = time.monotonic() + timeout
+    def wait_for(self, predicate, what, timeout=None):
+        deadline = time.monotonic() + (timeout or self.backend.WAIT)
         while not (value := predicate()):
             if time.monotonic() > deadline:
                 self.fail(f"timed out waiting for {what}; agent records:\n" +
@@ -338,6 +519,7 @@ class Contract(unittest.TestCase):
         self.assertEqual(result.stdout, f"hgs: started {name}\n")
         agent = self.wait_for(lambda: next((event for event in self.events(kind="start") if event["pid"] not in before
                                             and self.events(event["pid"], "ready")), None), f"{name} to start")
+        self.backend.watch()
         if program == "claude":
             # Confirmed by the agent's own SessionStart hook.
             row = self.wait_for(lambda: (row := self.sessions().get(name)) and row.get("activity") == "idle"
@@ -397,7 +579,7 @@ class Contract(unittest.TestCase):
             return [event for event in self.events(pid, "control") if "command" in event]
         done = len(commands()) + len(text.strip().splitlines())
         temporary = self.root / "control.tmp"
-        temporary.write_text(text)
+        temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, self.root / "control")
         self.wait_for(lambda: len(commands()) >= done, "the agent's control lines")
         self.assertFalse([event for event in commands() if "error" in event])
@@ -408,6 +590,14 @@ class Contract(unittest.TestCase):
             frame = self.snapshot(row)
             return predicate(frame, ["".join(ch for ch, _ in cells) for cells in styled(frame["screen"])]) and frame
         return self.wait_for(ready, what)
+
+    def alive(self, pid, started):
+        """Whether this exact process still runs, as the backend tells."""
+        return self.backend.alive(pid, started)
+
+    def client(self, *args, cols=100, rows=30):
+        """`hgs a ARGS` on the backend's terminal client, of this size."""
+        return self.backend.client(*args, cols=cols, rows=rows)
 
 
 class Sessions(Contract):
@@ -459,7 +649,7 @@ class Sessions(Contract):
         # The same process keeps its terminal: no restart, signal or end of input.
         self.assertEqual([event["kind"] for event in self.events(pid) if event["kind"] in
                           ("start", "signal", "eof", "exit")], ["start"])
-        self.assertTrue(alive(pid, agent["process_start"]))
+        self.assertTrue(self.alive(pid, agent["process_start"]))
         self.assertFalse(self.resolves(name))
         self.assertTrue(self.resolves(renamed))
         self.send(renamed, self.message(rows[renamed], "after rename"))
@@ -484,7 +674,7 @@ class Sessions(Contract):
         self.assertEqual(exit_event["cause"], "signal:" + signals[0]["signal"])
         self.assertGreaterEqual(exit_event["t"] - signals[0]["t"], 0.2)
         self.assertEqual(self.tokens(pid), [])
-        self.assertFalse(alive(pid, agent["process_start"]))
+        self.assertFalse(self.alive(pid, agent["process_start"]))
         saved = self.sessions()[name]
         self.assertEqual({key: saved.get(key) for key in ("state", "runtime_state", "process_state", "resumable",
                                                           "conversation_id")},
@@ -521,20 +711,20 @@ class Sessions(Contract):
         self.assertEqual(exit_event["cause"], "signal:" + signals[0]["signal"])
         self.assertGreaterEqual(exit_event["t"] - signals[0]["t"], 0.3)
         self.assertEqual(self.tokens(pid), [])
-        self.assertFalse(alive(pid, agent["process_start"]))
+        self.assertFalse(self.alive(pid, agent["process_start"]))
         archived = self.sessions()[name]
         self.assertEqual({key: archived.get(key) for key in ("state", "runtime_state", "conversation_id")},
                          dict(state="archived", runtime_state="stopped", conversation_id=row["conversation_id"]))
         self.assertFalse(self.resolves(name))
         self.assertEqual(self.sessions()[kept]["run_id"], kept_row["run_id"])
-        self.assertTrue(alive(kept_agent["pid"], kept_agent["process_start"]))
+        self.assertTrue(self.alive(kept_agent["pid"], kept_agent["process_start"]))
         self.assertEqual(self.events(kept_agent["pid"], "signal"), [])
 
     def test_kill_ends_the_agent_and_forgets_the_session_but_not_its_history(self):
         name, row, agent = self.launch()
         pid = agent["pid"]
         self.hgs("kill", name)
-        self.wait_for(lambda: not alive(pid, agent["process_start"]), "the agent process to end")
+        self.wait_for(lambda: not self.alive(pid, agent["process_start"]), "the agent process to end")
         # The agent saw its terminal close and ended by itself.
         exit_event, = self.events(pid, "exit")
         self.assertIn(exit_event["cause"], {"eof"} | {"signal:" + event for event in CLOSE_SIGNALS})
@@ -677,7 +867,6 @@ class Input(Contract):
         self.assertEqual(self.received(pid), before + b"plain\r")
 
 
-@unittest.skipUnless(pty, "attach needs a pseudo-terminal client; the Windows backend brings a console one")
 class Attach(Contract):
     def attached(self, name, count):
         return self.wait_for(lambda: (row := self.sessions()[name])["attached"] == count
@@ -697,7 +886,7 @@ class Attach(Contract):
     def test_attach_relays_input_and_size_and_detaches_without_stopping_the_agent(self):
         name, row, agent = self.launch()
         pid = agent["pid"]
-        first = Client(self, name, "--existing", "--run-id", row["run_id"], cols=100, rows=30)
+        first = self.client(name, "--existing", "--run-id", row["run_id"], cols=100, rows=30)
         self.attached(name, 1)
         # The agent gets the client's width; a status line may take rows.
         size = self.wait_for(lambda: next((event for event in reversed(self.events(pid, "resize"))
@@ -709,7 +898,7 @@ class Attach(Contract):
         first.write(b"\x02\x02")
         self.wait_for(lambda: self.received(pid) == b"typed\x02", "a literal Ctrl+B")
         # Several clients attach; the size follows the latest one still attached.
-        second = Client(self, name, "--existing", cols=90, rows=20)
+        second = self.client(name, "--existing", cols=90, rows=20)
         self.attached(name, 2)
         self.wait_for(lambda: self.events(pid, "resize")[-1]["cols"] == 90, "the latest client's size")
         second.write(b"\x02d")
@@ -728,11 +917,11 @@ class Attach(Contract):
         self.assertEqual(last["cols"], 100)
         self.assertEqual(self.sessions()[name]["runtime_state"], "live")
         # A client returns when its session ends.
-        third = Client(self, name, "--existing", "--run-id", row["run_id"])
+        third = self.client(name, "--existing", "--run-id", row["run_id"])
         self.attached(name, 1)
         self.hgs("kill", name)
         third.wait()
-        self.wait_for(lambda: not alive(pid, agent["process_start"]), "the agent process to end")
+        self.wait_for(lambda: not self.alive(pid, agent["process_start"]), "the agent process to end")
 
 
 if __name__ == "__main__":

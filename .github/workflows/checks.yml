@@ -648,7 +648,8 @@ jobs:
       - name: Pinned ConPTY pair
         run: python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null
       # Isolated session hosts of the release build (docs/windows-host-testing.md),
-      # also from a copy next to the pinned ConPTY pair.
+      # also from a copy next to the pinned ConPTY pair, and the terminal backend
+      # contract against the host, its default here.
       # The runner puts every step in a job that forbids breakaway, where hgs
       # refuses to start a host (spec D4), so the suites run outside it, started
       # through WMI. Every wait in them has a deadline.
@@ -665,7 +666,7 @@ jobs:
           python ../scripts/ci/outside-job.py --timeout 900 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
             --log ../artifacts/test-results/windows-host.log -- \
             python -m unittest -v test_windows_host test_windows_host_conpty test_windows_host_survival \
-            test_windows_lifecycle test_windows_hooks </dev/null
+            test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt release, modules and installer lock.
       - name: Restore Qt 6.10.3 for MSVC
