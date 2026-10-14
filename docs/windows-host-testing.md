@@ -236,7 +236,12 @@ Windows Terminal, or `winpty`. The client gets a repaint of the pane, then its
 output as it comes, written with `WriteConsoleW`; the console keeps its own
 scrollback, as there is no alternate screen around the session. The pane takes
 the size of the client that was active last, and an attached launch starts the
-session at the console's size.
+session at the console's size. Inside a session (`HGS_HOST_PANE` is set), `hgs a`
+and a launch with or without `-d` are refused with exit 2, as inside tmux, but
+without naming tmux (`already inside session NAME; open a new tab`, or `already
+inside a session; ...` when the host cannot name it). `fork` and `resume` without
+`-d` are refused the same way (`already inside a session; use fork -d or open a new
+tab`); `fork -d` and `resume -d` still start their sessions from there.
 
 | Keys | What happens |
 |---|---|
