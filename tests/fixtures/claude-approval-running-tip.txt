@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Sonnet 4.6 · API Usage Billing
+ ▝▝   ▝▝   ~/work
+
+
+❯ Use the tool now.
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Sautéed for 0s · done 8:26 PM
+
+❯ Again please.
+
+  Waiting for the fixture · 2s
+  ⎿  $ sleep 4; printf approved >> approved.txt (3s)
+     (ctrl+b to run in background)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Crunching… (3s · ↓ 24 tokens)
+  ⎿  Tip: Start with small features or bug fixes, tell Claude to propose a plan, and verify its
+     suggested edits
+                                                                                  ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt · ← for agents

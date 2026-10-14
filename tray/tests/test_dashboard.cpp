@@ -8,8 +8,11 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QStandardItemModel>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include "DashboardPage.h"
+#include "SessionCardDelegate.h"
 #include "SessionPresentation.h"
 
 class PaintCounter : public QObject {
@@ -208,6 +211,35 @@ private slots:
         auto changed = fleet; auto remote = *changed.peer("mac"); remote.sessions[0].activityDetail = "Choose another deployment target";
         changed.setPeer(remote, changed.peerPolledAt("mac")); page.setFleet(changed);
         QTRY_VERIFY(counter.paints.value(attention) > 0);
+    }
+    void sessionCardsExplainOnlyGitBadgesOnHover()
+    {
+        // Owner report 2026-10-14: a whole-card tooltip repeated every visible field.
+        // Like Sessions cards, only the Git badges explain themselves on hover.
+        auto fleet = fixture(); auto local = fleet.local();
+        local.sessions[0].gitStatus = QJsonObject{{"state", "ok"}, {"root", "/workspace/hgs"}, {"branch", "main"},
+            {"upstream", "origin/main"}, {"changed_files", 4}, {"ahead", 2}, {"behind", 0}, {"remote_state", "verified"},
+            {"remote_age_seconds", 0}, {"remote_checked_at", QDateTime::currentSecsSinceEpoch()},
+            {"received_at_ms", QDateTime::currentMSecsSinceEpoch()}};
+        fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+        DashboardPage page; page.setFleet(fleet); page.resize(1000, 850); page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        QPushButton *row = nullptr; QModelIndex index;
+        for (auto *candidate : page.findChildren<QPushButton *>("dashboardSessionRow")) {
+            const auto *model = candidate->findChild<QStandardItemModel *>("dashboardSessionModel");
+            if (model && !model->index(0, 0).data(SessionRoles::GitStatus).toJsonObject().isEmpty()) { row = candidate; index = model->index(0, 0); }
+        }
+        QVERIFY(row); QVERIFY(row->toolTip().isEmpty());
+        QVERIFY(row->accessibleName().contains("gpt-6-astra"));
+        QVERIFY(row->accessibleDescription().contains("4 changed or new files"));
+        const auto badge = SessionDelegate::gitStatusRect(row->rect(), index, row->font(), false);
+        QVERIFY(!badge.isEmpty());
+        const auto hover = [row](QPoint at) { QHelpEvent help(QEvent::ToolTip, at, row->mapToGlobal(at)); QApplication::sendEvent(row, &help); };
+        hover(QPoint(30, 20)); QTest::qWait(20); QVERIFY(!QToolTip::isVisible());
+        hover(badge.center()); QTRY_VERIFY(QToolTip::isVisible());
+        const auto text = QToolTip::text().replace(QChar::Nbsp, ' ');
+        QVERIFY(text.contains("4 changed or new files")); QVERIFY(!text.contains("gpt-6-astra"));
+        hover(QPoint(30, row->height() - 20)); QTRY_VERIFY(!QToolTip::isVisible());
     }
     void unknownCpuIsNotZeroAndStalePeersAreExcluded()
     {

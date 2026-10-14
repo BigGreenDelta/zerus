@@ -42,9 +42,10 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+import uuid
 
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
-from test_windows_lifecycle import LifecycleCase, read_events, read_json
+from test_windows_lifecycle import LifecycleCase, deny_execute, read_events, read_json
 
 # What `hgs __state hook` answers a payload without a session ID.
 NO_SESSION = "hook did not supply a valid session_id"
@@ -264,14 +265,28 @@ class TrackedHooks(LifecycleCase):
     def test_a_claude_whose_version_cannot_be_read_gets_no_hooks(self):
         # The hook form depends on the version and is kept once written (D12),
         # so the supervisor refuses before it writes anything or starts Claude.
-        env, _, ready = self.agent_env("claude", "unread")
-        env["FAKE_AGENT_PROBE_TEXT"] = "Claude Code"
-        name = "claude/project/unread"
-        self.hgs("claude", str(self.project), "--new", "-n", "unread", "-d", rc=None, env=env)
-        self.status()  # Remember the host process, if one started, for the cleanup.
-        self.wait_for("the end", lambda: self.ended(name))
-        self.assertFalse((self.homes["claude"] / "settings.json").exists())
-        self.assertFalse(ready.exists())
+        # The launch, as the GUI runs it, fails with the supervisor's reason
+        # (zerus-ziq3.10): one that cannot run claude.exe at all, too.
+        cases = [("unread", "no version in \"Claude Code\""), ("denied", "Access is denied. (os error 5)")]
+        for tag, why in cases:
+            with self.subTest(tag=tag):
+                env, _, ready = self.agent_env("claude", tag)
+                env["FAKE_AGENT_PROBE_TEXT"] = "Claude Code"
+                if tag == "denied":
+                    deny_execute(self, self.bin / "claude.exe")
+                name = f"claude/project/{tag}"
+                result = self.hgs("claude", str(self.project), "--new", "-n", tag, "-d", "--launch-id",
+                                  str(uuid.uuid4()), rc=1, env=env)
+                self.status()  # Remember the host process, if one started, for the cleanup.
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"hgs: session {name} ended immediately (exit 1):\n", result.stderr)
+                # The pane's line, wrapped at its width, reads whole.
+                self.assertIn(f"hgs: cannot read the Claude Code version (claude --version: {why}), which "
+                              "decides its tracking hook form; set HGS_TRACKING=0 to run it untracked",
+                              result.stderr)
+                self.assertNotIn(name, self.sessions())
+                self.assertFalse((self.homes["claude"] / "settings.json").exists())
+                self.assertFalse(ready.exists())
 
 
 if __name__ == "__main__":

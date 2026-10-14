@@ -12,8 +12,8 @@ class SessionActions(unittest.TestCase):
     write_record=fixtures.InputTransport.write_record
     screen=fixtures.InputTransport.screen
     received=fixtures.InputTransport.received
-    def request(self,command,data,ok=True):
-        args=[str(HGS),command,self.name]
+    def request(self,command,data,ok=True,name=None):
+        args=[str(HGS),command,name or self.name]
         if command=='attachment':args+=['--stage']
         result=subprocess.run(args+['--json'],input=json.dumps(data),env=self.env,text=True,capture_output=True,timeout=10)
         if ok:self.assertEqual(result.returncode,0,result.stderr)
@@ -69,6 +69,48 @@ class SessionActions(unittest.TestCase):
         receipt=self.request('interrupt',dict(self.identity(),expected_turn_started=self.record['turn_started']))
         self.assertFalse(receipt['confirmed']);self.assertEqual(self.received()[len(before):],b'\x1b')
         self.assertEqual(json.loads(self.record_path.read_text())['phase'],'working')
+    def test_claude_terminal_approval_answers_settle_from_the_screen(self):
+        # Claude Code 2.1.296 sends no hook after an approval is answered in Terminal.
+        # Its real screens settle the request; anything short of proof keeps it waiting.
+        from pathlib import Path
+        command=('sleep 6 && printf %s fixture-output-with-a-rather-long-name-to-wrap-the-row > '
+                 '/work/example/projects/a-really-long-directory-name/approved.txt\necho second line')
+        def pending():
+            self.record.update(agent='claude',activity='busy',phase='approval',turn_started=time.time(),
+                active_tools=dict(toolu_fixture=dict(name='Bash',detail='sleep 6',started=1.0)),pending_approval_at=time.time(),
+                pending_approval=dict(hook_event_name='PermissionRequest',tool_name='Bash',tool_input=dict(command=command)))
+            self.write_record()
+        def show(fixture,column):
+            rows=(Path(__file__).resolve().parent/'fixtures'/fixture).read_text().split('\n')[:-1]
+            self.tmux('resize-window','-t','='+self.name+':','-x',str(max(map(len,rows))),'-y',str(len(rows)))
+            self.screen('\x1b[2J\x1b[H'+'\r\n'.join(rows)+f'\x1b[1;{column}H',f'{column-1}:0')
+        def listed():
+            result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return next(row for row in json.loads(result.stdout)['sessions'] if row['name']==self.name)
+        def inspected():
+            result=subprocess.run([str(HGS),'inspect',self.name],env=self.env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return json.loads(result.stdout)
+        pending()
+        # The panel, then Yes before the command shows its elapsed time.
+        for column,fixture in enumerate(['claude-bash-safety.txt','claude-approval-starting.txt'],start=2):
+            show(fixture,column)
+            self.assertEqual((listed()['phase'],inspected()['phase']),('approval','approval'),fixture)
+            self.assertIn('pending_approval',json.loads(self.record_path.read_text()))
+        show('claude-approval-running.txt',5)
+        self.assertEqual(listed()['phase'],'tool')
+        state=json.loads(self.record_path.read_text())
+        self.assertEqual((state['phase'],state['activity'],'pending_approval' in state),('tool','busy',False))
+        # No or Esc, with the composer or the one-time auto-mode nudge below.
+        for column,fixture in enumerate(['claude-approval-denied.txt','claude-approval-denied-nudge.txt'],start=6):
+            pending();show(fixture,column)
+            inspection=inspected()
+            self.assertEqual((inspection['phase'],inspection['pending_questions']),('interrupted',[]),fixture)
+            state=json.loads(self.record_path.read_text())
+            self.assertEqual((state['phase'],state['activity'],state['active_tools'],'pending_approval' in state),
+                             ('interrupted','unknown',{},False))
+        self.assertEqual(self.received(),b'')
     def test_changed_turn_and_idle_state_receive_nothing(self):
         self.working('codex');data=dict(self.identity(),expected_turn_started=self.record['turn_started']-1)
         self.request('interrupt',data,ok=False)
@@ -82,5 +124,28 @@ class SessionActions(unittest.TestCase):
         self.assertTrue(path.is_relative_to(self.state/'attachments'));self.assertEqual(path.stat().st_mode&0o777,0o600)
         self.assertEqual(self.received(),b'')
         data['expected_run_id']='another';self.request('attachment',data,ok=False);self.assertEqual(self.received(),b'')
+    def test_untracked_shell_upload_is_bound_to_its_live_session(self):
+        # A shell from `hgs sh -d` has no run identity: the session's creation time
+        # and the absence of a run marker bind the copy instead.
+        shell='sh/upload-test';self.tmux('new-session','-d','-s',shell,'-x','80','-y','24','sleep','300')
+        created=int(self.tmux('display-message','-p','-t','='+shell+':','#{session_created}'))
+        data=dict(request_id=str(uuid.uuid4()),expected_run_id='',expected_conversation_id='',expected_created=created,
+                  attachments=[dict(name='notes.txt',mime='text/plain',data_base64=base64.b64encode(b'untracked fixture').decode())])
+        staged=self.request('attachment',data,name=shell)
+        self.assertEqual((staged['status'],staged['name'],staged['run_id'],staged['conversation_id'],staged['created']),('staged',shell,'','',created))
+        from pathlib import Path
+        path=Path(staged['files'][0]['path']);self.assertEqual(path.read_bytes(),b'untracked fixture')
+        self.assertTrue(path.is_relative_to(self.state/'attachments'));self.assertEqual(path.stat().st_mode&0o777,0o600)
+        # Another session under that name, an unknown name, or a missing creation time.
+        self.assertIn('Session changed',self.request('attachment',dict(data,expected_created=created-1),ok=False,name=shell))
+        self.assertIn('Session changed',self.request('attachment',data,ok=False,name='sh/unknown'))
+        self.assertIn('no saved binding',self.request('attachment',{k:v for k,v in data.items() if k!='expected_created'},ok=False,name=shell))
+        # A tracked run whose identity the caller has not loaded yet.
+        tracked=int(self.tmux('display-message','-p','-t','='+self.name+':','#{session_created}'))
+        self.assertIn('Wait for the session identity',self.request('attachment',dict(data,expected_created=tracked),ok=False))
+        # The shell ended after the listing that named it.
+        self.tmux('kill-session','-t','='+shell)
+        self.assertIn('Session changed',self.request('attachment',data,ok=False,name=shell))
+        self.assertEqual(self.received(),b'')
 
 if __name__=='__main__':unittest.main()

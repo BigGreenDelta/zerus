@@ -72,7 +72,7 @@ use grid::{
     Cell, Line, ATTR_BLINK, ATTR_BRIGHT, ATTR_CHARSET, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALICS,
     ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKETHROUGH, ATTR_UNDERSCORE, ATTR_UNDERSCORE_2,
     ATTR_UNDERSCORE_3, ATTR_UNDERSCORE_4, ATTR_UNDERSCORE_5, COLOUR_FLAG_256, COLOUR_FLAG_RGB,
-    DEFAULT_CELL, FLAG_PADDING, FLAG_TAB,
+    DEFAULT_CELL, FLAG_PADDING, FLAG_TAB, LINE_WRAPPED,
 };
 use write::*;
 
@@ -234,18 +234,28 @@ impl ScreenModel {
     /// The exact bytes tmux prints. They are UTF-8 except where a program
     /// wrote four-byte sequences beyond U+10FFFF, which tmux keeps.
     pub fn capture_bytes(&self, mode: Capture) -> Vec<u8> {
-        self.serialize(mode == Capture::Styled, false)
+        self.serialize(mode == Capture::Styled, false, false)
+    }
+
+    /// The visible screen as text with wrapped rows joined, as `tmux
+    /// capture-pane -p -J` joins them: a row the program's output wrapped
+    /// onto the next one continues there with its trailing spaces, so a long
+    /// line reads whole. Unlike `-J`, a row that ends a line is trimmed, as
+    /// the Plain capture trims it.
+    pub fn joined_text(&self) -> String {
+        String::from_utf8_lossy(&self.serialize(false, false, true)).into_owned()
     }
 
     /// `capture-pane -p -e` including tmux's OSC 8 hyperlinks, for comparing
     /// with tmux. A row that ends inside a link repeats the last cell's codes
     /// before closing it, because tmux reuses that buffer.
     fn capture_with_links(&self) -> Vec<u8> {
-        self.serialize(true, true)
+        self.serialize(true, true, false)
     }
 
-    /// `cmd_capture_pane_history` over the visible rows (`grid_string_cells`).
-    fn serialize(&self, styled: bool, links: bool) -> Vec<u8> {
+    /// `cmd_capture_pane_history` over the visible rows (`grid_string_cells`),
+    /// with wrapped rows joined to the next when `join` (`-J`).
+    fn serialize(&self, styled: bool, links: bool, join: bool) -> Vec<u8> {
         let screen = &self.screen;
         let mut out = Vec::new();
         let mut last = DEFAULT_CELL;
@@ -283,11 +293,14 @@ impl ScreenModel {
                 add_hyperlink(&mut code, b"", b"");
                 row.extend_from_slice(&code);
             }
-            while row.last() == Some(&b' ') {
+            let wrapped = join && line.flags & LINE_WRAPPED != 0;
+            while !wrapped && row.last() == Some(&b' ') {
                 row.pop();
             }
             out.extend_from_slice(&row);
-            out.push(b'\n');
+            if !wrapped {
+                out.push(b'\n');
+            }
         }
         out
     }

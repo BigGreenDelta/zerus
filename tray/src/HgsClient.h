@@ -199,8 +199,11 @@ public:
                                const QList<MessageAttachment> &attachments,
                                const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {});
     quint64 requestQueueSendNow(const QString &host, const QString &name, const QString &run, const QString &conversation, const QString &queue);
+    // An untracked session (a shell from `hgs sh -d`) has no run identity: pass
+    // empty run and conversation and its listed creation time, which binds the
+    // copy to that live session instead.
     quint64 requestStageFiles(const QString &host, const QString &name, const QStringList &paths,
-                             const QString &run, const QString &conversation);
+                             const QString &run, const QString &conversation, qint64 untrackedCreated = -1);
     quint64 requestCompactContext(const QString &host, const QString &name, const QString &run, const QString &conversation);
     quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt = false);
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,

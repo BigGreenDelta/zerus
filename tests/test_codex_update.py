@@ -9,6 +9,7 @@ import time
 import unittest
 import uuid
 
+import test_clear_context_native
 import test_input as fixtures
 from test_questions import Questions
 
@@ -191,6 +192,7 @@ class NativeCodexUpdate(unittest.TestCase):
     inspect = Questions.inspect
     answer = Questions.answer
     payload = CodexUpdate.payload
+    assert_plugin_sync_off = test_clear_context_native.NativeCodexClear.assert_plugin_sync_off
 
     def wait_for(self, callback, timeout=15):
         deadline = time.monotonic() + timeout
@@ -208,7 +210,9 @@ class NativeCodexUpdate(unittest.TestCase):
         binary = os.environ['HGS_CODEX_TEST_BIN']
         self.native_version = subprocess.check_output([binary, '--version'], text=True).strip().removeprefix('codex-cli ')
         (self.native_home / 'config.toml').write_text('model="gpt-6.1-sol"\nmodel_provider="fixture"\n'
+            '[features]\nplugins=false\n'
             '[model_providers.fixture]\nname="Fixture"\nbase_url="http://127.0.0.1:1/v1"\nwire_api="responses"\n')
+        self.assert_plugin_sync_off(self.native_home)
         # A fresh cache keeps Codex from fetching release metadata during the test.
         checked = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
         self.version_file = self.native_home / 'version.json'

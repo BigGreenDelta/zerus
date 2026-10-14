@@ -278,6 +278,7 @@ private slots:
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
     void terminalDropQuotesPathsForTheMachine();
+    void terminalDropStagesIntoAnUntrackedRemoteShell();
     void folderShellFollowsTheMachinePlatform();
     void remoteFileDownloads_data();
     void remoteFileDownloads();
@@ -4957,6 +4958,80 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
                  qPrintable(remote));
         QVERIFY(!remote.contains('"'));QVERIFY(!remote.contains('\\'+QString("srv")));
     }
+}
+
+void TestSessionsWindow::terminalDropStagesIntoAnUntrackedRemoteShell()
+{
+    // A shell from `hgs sh -d` never gets a run identity: its listed creation time
+    // binds the copy instead. A tracked session still waits for its identity.
+    const auto program=m_dir->filePath("terminal-untracked-hgs");QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport json,os,runpy,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[:1]==['a']:\n if os.name!='nt':\n  import tty;tty.setraw(0)\n"
+        " sys.stdout.write('\\x1b[?2004h');sys.stdout.flush();sys.stdin.buffer.read();sys.exit(0)\n"
+        "if a[:1]==['inspect'] and a[1].startswith('sh/'):print(json.dumps(dict(name=a[1],tracked=False,events=[],cursor=0)));sys.exit(0)\n"
+        "if a[:1]==['attachment']:\n p=json.load(sys.stdin);p.pop('attachments')\n"
+        " open(__file__+'.stage','a').write(json.dumps(dict(args=sys.argv[1:],request=p))+'\\n')\n"
+        " if os.path.exists(__file__+'.old'):print(a[1]+': no saved binding; restart through hgs to enable tracking',file=sys.stderr);sys.exit(1)\n"
+        " created=p.get('expected_created',0)+os.path.exists(__file__+'.skew')\n"
+        " print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],"
+        "created=created,status='staged',files=[dict(path='/srv/inbox/notes.txt')])));sys.exit(0)\n"
+        "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
+    fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QFile file(m_dir->filePath("notes.txt"));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");file.close();
+    QMimeData mime;mime.setUrls({QUrl::fromLocalFile(file.fileName())});
+    auto state=fleet();auto mac=*state.peer("mac");
+    SessionInfo shell;shell.name="sh/scratch";shell.cmd="sh";shell.project="scratch";shell.created=1700000000;mac.sessions<<shell;
+    state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();
+    auto *terminal=window.findChild<TerminalView *>();auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
+    auto *panel=window.findChild<QWidget *>("sessionDetailPanel");auto *notice=window.findChild<QLabel *>("notice");
+    const auto stages=[&] {
+        QList<QJsonObject> result;QFile log(program+".stage");
+        if(log.open(QIODevice::ReadOnly))for(const auto &line:log.readAll().split('\n'))if(!line.isEmpty())result<<QJsonDocument::fromJson(line).object();
+        return result;
+    };
+    const auto drop=[&](const QString &name) {
+        window.showSession("mac",name);tabs->setCurrentWidget(terminal);
+        if(!QTest::qWaitFor([&]{return terminal->isConnected();},10000))return QByteArray();QTest::qWait(150);
+        QSignalSpy output(terminal->terminalScreen(),&TerminalScreen::output);const auto before=stages().size();
+        QDragEnterEvent enter(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&enter);
+        QDropEvent event(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&event);
+        if(!event.isAccepted())return QByteArray();
+        QByteArray pasted;
+        // A transfer ends in a pasted path or a notice other than its progress.
+        (void)QTest::qWaitFor([&]{
+            pasted.clear();for(const auto &item:output)pasted+=item.first().toByteArray();
+            return pasted.contains("notes.txt")||(stages().size()>before&&!notice->text().startsWith("Transferring"));
+        },20000);
+        return pasted;
+    };
+    const auto pasted=drop("sh/scratch");
+    QVERIFY2(pasted.contains("'/srv/inbox/notes.txt' "),pasted.constData());
+    auto staged=stages();QCOMPARE(staged.size(),1);
+    QCOMPARE(staged[0]["args"].toArray(),QJsonArray({"@mac","attachment","sh/scratch","--stage","--json"}));
+    const auto request=staged[0]["request"].toObject();
+    QCOMPARE(request["expected_run_id"].toString(),QString());QCOMPARE(request["expected_conversation_id"].toString(),QString());
+    QVERIFY(request["expected_run_id"].isString());QCOMPARE(request["expected_created"].toInteger(),qint64(1700000000));
+
+    // An acknowledgement for another creation time pastes nothing.
+    QVERIFY(QFile(program+".skew").open(QIODevice::WriteOnly));
+    QVERIFY(!drop("sh/scratch").contains("notes.txt"));
+    QCOMPARE(notice->text(),QString("Invalid acknowledgement. Check Terminal before retrying."));QCOMPARE(stages().size(),2);
+    QVERIFY(QFile::remove(program+".skew"));
+
+    // An hgs that predates untracked drops asks for a saved binding.
+    QVERIFY(QFile(program+".old").open(QIODevice::WriteOnly));
+    QVERIFY(!drop("sh/scratch").contains("notes.txt"));
+    QCOMPARE(notice->text(),QString("Update hgs on mac to drop files into an untracked session."));QCOMPARE(stages().size(),3);
+    QVERIFY(QFile::remove(program+".old"));
+
+    // A tracked session whose run identity has not loaded transfers nothing.
+    window.showSession("mac","claude/infra/review");tabs->setCurrentWidget(terminal);
+    QTRY_VERIFY_WITH_TIMEOUT(terminal->isConnected(),10000);QTest::qWait(150);
+    QDragEnterEvent enter(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&enter);
+    QDropEvent event(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&event);
+    QCOMPARE(notice->text(),QString("Wait for the session identity to load, then drop the files again."));
+    QTest::qWait(300);QCOMPARE(stages().size(),3);
 }
 
 void TestSessionsWindow::folderShellFollowsTheMachinePlatform()

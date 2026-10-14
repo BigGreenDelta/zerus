@@ -131,6 +131,22 @@ hgs=target/debug/hgs.exe project="$(cygpath -w "$root/work/project")"
 rm -rf "$root"
 ```
 
+A program that cannot start (one missing from `PATH`, an executable this user may
+not run, a tracked agent whose hook setup the supervisor refuses) ends its session
+at once, before any record exists. A launch therefore watches its new session for
+3 s through the host's `launch_status` (how the session of a launch ID runs or
+ended: its exit code and the last lines of its pane, wrapped rows joined): one
+that ends in that time with a failure fails the launch with exit 1, and the GUI
+shows the reason instead of waiting for the session. A detached launch that
+starts returns after those 3 s; `hgs resume`, restores and forks do not wait. In
+the window above:
+
+```sh
+"$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
+# hgs: session no_such_agent/project/missing ended immediately (exit 127):
+# hgs: no_such_agent: not found on PATH
+```
+
 `hgs __host backend '<operation>'` runs one operation of the terminal backend
 (`listing`, `panes`, `pane_info`, `capture`, `send`, `paste`, `set_run_marker`,
 `rename`, `kill_session`, `kill_pane`, `session_exists`, `session_name`,

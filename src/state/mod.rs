@@ -319,6 +319,8 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
         let name = string(&record, "name");
         if let Some(index) = by_name.get(name) {
             if matches(&record, snapshot.get(name)) {
+                // An approval answered in Terminal sends no hook.
+                let record = claude_approval::reconcile(record);
                 let session = &mut sessions[*index];
                 session["resumable"] = json!(
                     !string(&record, "conversation_id").is_empty()

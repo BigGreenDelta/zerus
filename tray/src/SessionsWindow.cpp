@@ -1165,6 +1165,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &result,const QString &error) {
         if(id!=m_terminalDropRequest)return;
         m_terminalDropRequest=0;
+        // An hgs that predates untracked drops asks for a saved binding.
+        if(!ok&&!m_terminalDropUntracked.isEmpty()&&error.contains("no saved binding")) {
+            showNotice(tr("Update hgs on %1 to drop files into an untracked session.").arg(m_terminalDropUntracked),true);return;
+        }
         if(!ok){showNotice(error,true);return;}
         if(terminalDropTarget()!=m_terminalDropKey) {showNotice(tr("Terminal changed during file transfer. Drop the files again in the intended session."),true);return;}
         QStringList paths;
@@ -1993,9 +1997,12 @@ void SessionsWindow::dropTerminalFiles(const QStringList &paths)
     if(entry->host.isEmpty()){pasteTerminalPaths(paths);return;}
     const auto run=m_details.value("run_id").toString(entry->session.runId);
     const auto conversation=m_details.value("conversation_id").toString(entry->session.conversationId);
-    if(run.isEmpty()){showNotice(tr("Wait for the session identity to load, then drop the files again."),true);return;}
-    m_terminalDropKey=terminalDropTarget();m_terminalDropCount=paths.size();
-    m_terminalDropRequest=m_client.requestStageFiles(entry->host,entry->session.name,paths,run,conversation);
+    // An untracked shell (hgs sh -d) never gets a run identity: its listed
+    // creation time binds the copy to that live session instead.
+    const bool untracked=run.isEmpty()&&conversation.isEmpty()&&!entry->session.tracked&&!m_details.value("tracked").toBool();
+    if(run.isEmpty()&&!untracked){showNotice(tr("Wait for the session identity to load, then drop the files again."),true);return;}
+    m_terminalDropKey=terminalDropTarget();m_terminalDropCount=paths.size();m_terminalDropUntracked=untracked?entry->machine:QString();
+    m_terminalDropRequest=m_client.requestStageFiles(entry->host,entry->session.name,paths,run,conversation,untracked?entry->session.created:-1);
     showNotice(tr("Transferring files to %1…").arg(entry->machine));
 }
 

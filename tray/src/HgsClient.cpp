@@ -1410,7 +1410,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
 }
 
 quint64 HgsClient::requestStageFiles(const QString &host, const QString &name, const QStringList &paths,
-                                     const QString &run, const QString &conversation)
+                                     const QString &run, const QString &conversation, qint64 untrackedCreated)
 {
     QJsonArray files; qsizetype total = 0; QString error;
     if (paths.isEmpty() || paths.size() > MaximumAttachments) error = tr("Drop between 1 and 8 files.");
@@ -1432,7 +1432,9 @@ quint64 HgsClient::requestStageFiles(const QString &host, const QString &name, c
         const auto id = ++m_sessionActionRequest;
         QTimer::singleShot(0, this, [this,id,error] { emit sessionActionFinished(id,false,{},error); }); return id;
     }
-    return runSessionAction(host,name,"attachment",{{"expected_run_id",run},{"expected_conversation_id",conversation},{"attachments",files}});
+    QJsonObject data{{"expected_run_id",run},{"expected_conversation_id",conversation},{"attachments",files}};
+    if (run.isEmpty() && conversation.isEmpty() && untrackedCreated >= 0) data["expected_created"] = untrackedCreated;
+    return runSessionAction(host,name,"attachment",data);
 }
 
 quint64 HgsClient::requestCompactContext(const QString &host, const QString &name, const QString &run, const QString &conversation)
@@ -1483,6 +1485,7 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
                 const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
                 if (result.value("request_id") != data.value("request_id") || result.value("name") != name
                     || result.value("run_id") != data.value("expected_run_id") || result.value("conversation_id") != data.value("expected_conversation_id")
+                    || (data.contains("expected_created") && result.value("created").toInteger(-1) != data.value("expected_created").toInteger())
                     || !(result.value("status") == (operation == "attachment" ? "staged" : "submitted")
                         || (operation == "clear-context" && result.value("status") == "confirmed")))
                     fail(tr("Invalid acknowledgement. Check Terminal before retrying."));
