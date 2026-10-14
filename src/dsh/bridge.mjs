@@ -137,6 +137,15 @@ export function apply(ctx, config) {
     const { provider, model, reasoningEffort } = agent.options ?? {};
     return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
   };
+  // A child lives in its parent's Agent scope and belongs to subagent routing:
+  // upstream neither prompts nor reconfigures one directly, and HGS messages it
+  // through send-child. Send and settings refuse any other than a top-level
+  // Agent before they change it.
+  const topLevel = agent => {
+    if (agent && (agent.session.header.origin === 'subagent' || !ctx.agents.roots().includes(agent)))
+      throw new Error('Use the parent to manage a subagent');
+    return agent;
+  };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
     .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
   // A live request is the only authority for answering. Disconnecting HGS does
@@ -412,6 +421,7 @@ export function apply(ctx, config) {
         return ctx.subagents.prompt(p, new AbortController().signal);
       }
       case 'send': {
+        topLevel(ctx.agents.get(p.sessionId));
         const compact = compactionPublic(p.sessionId);
         if (p.expectedCompactionId && (compact?.request_id !== p.expectedCompactionId || compact.status !== 'completed'))
           throw new Error('Compaction is not confirmed; message was not sent');
@@ -427,7 +437,7 @@ export function apply(ctx, config) {
         return api.prompt(p, new AbortController().signal);
       }
       case 'settings': {
-        const agent = await resume(p.sessionId);
+        const agent = topLevel(await resume(p.sessionId));
         const catalog = await api.modelCatalog();
         const model = catalog.groups.find(g => g.id === p.provider)?.models.find(m => m.id === p.model);
         if (!model) throw new Error('This model is unavailable for the native account');

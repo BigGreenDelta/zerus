@@ -491,6 +491,47 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(self.wait(used),chosen)
         self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
 
+    def test_send_and_settings_refuse_a_child_without_changing_its_model(self):
+        # hgs messages a child only through its parent (send-child). A send or
+        # settings request that names a live child is refused before it can
+        # install or change the child's selection, which would route its first
+        # request, held by the fixture, away from the inherited model.
+        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        chosen={'provider':'hgs-test','model':'test-b','reasoningEffort':'off'}
+        self.cli('settings',parent,self.payload(parent,model='hgs-test/test-b',effort='off'))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        try:
+            child=self.wait(child_row)['sessionId']
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('send',{'sessionId':child,'requestId':str(uuid.uuid4()),'mode':'steer',
+                                 'content':[{'type':'text','text':'Direct child send'}]})
+            row=child_row()
+            self.assertTrue(row['running']);self.assertEqual(row['selection'],chosen)
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a','reasoningEffort':'high'})
+            row=child_row()
+            self.assertEqual(row['selection'],chosen)
+            self.assertIsNone(row['projections']['values'].get('modelSelection',{}).get('next'))
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            self.assertTrue(native['live']);self.assertEqual(native['selection'],chosen)
+            parent_row=next(r for r in self.rpc('list')['items'] if r['sessionId']==parent['conversation_id'])
+            self.assertEqual(parent_row['selection'],chosen)
+        finally:
+            (self.root/'holds'/hold).touch()
+        def used():
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            return native['baseline']['values'].get('modelSelection',{}).get('lastUsed')
+        self.assertEqual(self.wait(used),chosen)
+        self.assertNotIn('Direct child send',json.dumps(self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['page']))
+        # A stored child keeps the refusal it gets when settings would resume it.
+        self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+        with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+            self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a'})
+        self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
+
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()
         self.cli('send', parent, self.payload(parent, text='SUBAGENT CONTINUABLE', attachments=[]))
