@@ -490,9 +490,10 @@ Implemented in M5 (`src/host/attach.rs`, `state::backend::host`):
   (tmux would run or swallow a binding; the client has no others, and dropping keys
   would lose input). Keys inside a bracketed paste are text, as in tmux; ESC and
   Ctrl+B in one read are Meta+Ctrl+B.
-- Standard input and output must both be a console; pipes and files are refused
-  before anything is created or attached, as tmux refuses a client without a
-  terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window size is also
+- Standard input and output must both be a console that takes the attach modes;
+  pipes, files and a legacy console are refused before anything is created,
+  resumed or attached (`TerminalBackend::attachable`), as tmux refuses a client
+  without a terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window size is also
   polled, because a classic console window sends no event when only its height
   changes. Ctrl+C and Ctrl+Break events are ignored while attached.
 - At the end the client resets the modes a session may leave on its terminal (as

@@ -1986,6 +1986,8 @@ mod terminal_backend {
         size: Mutex<Option<Size>>,
         entered: AtomicBool,
         leaves: AtomicU32,
+        /// The console cannot take the attach modes (a legacy console).
+        refuses: AtomicBool,
     }
 
     impl Screen {
@@ -2022,6 +2024,9 @@ mod terminal_backend {
             *lock(&self.0.size)
         }
         fn enter(&self) -> io::Result<()> {
+            if self.0.refuses.load(Ordering::SeqCst) {
+                return Err(io::Error::other("no terminal input sequences"));
+            }
             self.0.entered.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -2279,6 +2284,28 @@ mod terminal_backend {
         launcher.0.exit_at_once.store(true, Ordering::SeqCst);
         assert_eq!(launch(&backend, "b").join().unwrap(), Ok((0, false)));
         assert_eq!(launcher.count(), 2);
+
+        // A console without the attach modes starts nothing and attaches to
+        // nothing, as one that is not a console.
+        launcher.0.exit_at_once.store(false, Ordering::SeqCst);
+        backend.attachable().unwrap();
+        assert!(!screen.entered.load(Ordering::SeqCst));
+        screen.refuses.store(true, Ordering::SeqCst);
+        let refused = launch(&backend, "c").join().unwrap();
+        assert_eq!(refused, Err((1, "no terminal input sequences".into())));
+        let refused = backend.attachable().unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (1, "no terminal input sequences")
+        );
+        assert_eq!((creates.load(Ordering::SeqCst), launcher.count()), (2, 2));
+        connect(&host)
+            .call::<Created>(create("l", "fake_agent/p/d"))
+            .unwrap();
+        let refused = ended(backend.attach(terminal::Target::Name("fake_agent/p/d"), None));
+        assert_eq!(refused, Err((1, "no terminal input sequences".into())));
+        assert_eq!(attached_clients(&host), 0);
+        assert!(!screen.entered.load(Ordering::SeqCst));
     }
 
     /// A host that answers one attach, shows a screen, reads one key and then

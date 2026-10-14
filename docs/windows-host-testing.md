@@ -170,9 +170,10 @@ nothing starts one.
 session (spec D13; `src/host/attach.rs`), as the GUI's embedded terminal runs
 `hgs.exe a NAME --existing --run-id ID` on a pseudoconsole of its own. Standard
 input and output must both be a console (Windows Terminal, the console host, a
-pseudoconsole). The mintty window that the Git Bash shortcut opens gives pipes,
-which are refused before anything is created or attached (`attaching needs a
-console`, exit 1): use Git Bash inside Windows Terminal, or `winpty`. The client
+pseudoconsole) that takes terminal sequences. The mintty window that the Git
+Bash shortcut opens gives pipes, which are refused before anything is created,
+resumed or attached (`attaching needs a console`, exit 1): use Git Bash inside
+Windows Terminal, or `winpty`. The client
 gets a repaint of the pane, then its output as it comes, written with
 `WriteConsoleW`; the console keeps its own scrollback, as there is no alternate
 screen around the session. The pane takes the size of the client that was

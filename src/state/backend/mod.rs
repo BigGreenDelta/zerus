@@ -324,6 +324,12 @@ pub(crate) trait TerminalBackend: Sync {
     fn launch(&self, _spec: &LaunchSpec) -> CliResult<ClientExit> {
         Err(Error::new(2, UNSUPPORTED))
     }
+    /// Refuse an attach this process cannot make (`hgs a`, a launch without
+    /// `-d`) before a saved session is resumed for it; tmux finds out as it
+    /// attaches.
+    fn attachable(&self) -> CliResult<()> {
+        Ok(())
+    }
     /// Record which peer views the session, for `hgs paste`.
     fn set_client(&self, _target: Target, _client: &str) {}
     /// Attach this terminal to a session. With `run_id` (`hgs a --existing

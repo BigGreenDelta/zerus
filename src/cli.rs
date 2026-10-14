@@ -993,6 +993,7 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
         return Ok(0);
     }
     nested_guard(false)?;
+    terminal().attachable()?;
     if !session_exists(session) && config.state.is_dir() {
         env::set_var("HGS_CLIENT", client);
         let rc = state_command("resume", &[session.into()])?;
@@ -1923,6 +1924,9 @@ fn launch(
     if !options.fresh
         && (requested_saved || (options.resume_id.is_none() && binding_exists(config, &session)?))
     {
+        if !options.detached && !options.dry {
+            terminal().attachable()?;
+        }
         env::set_var("HGS_CLIENT", client);
         if let Some(id) = &options.resume_id {
             env::set_var("HGS_REQUESTED_ID", id);

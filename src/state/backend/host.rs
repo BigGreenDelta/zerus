@@ -11,6 +11,7 @@
 //! | `on_terminal` | `pane_info`, and the agent's parent is the pane's supervisor |
 //! | `start`, `launch -d` | `create_session`, starting the host when none runs |
 //! | `attach`, `launch` | `attach` on a connection of its own (role `attach`); `launch` creates first |
+//! | `attachable` | none: this process's console and its attach modes |
 //! | `set_run_marker` | `set_environment` of `RUN_MARKER` |
 //! | `set_client`, `viewer` | `set_environment`, `show_environment` of the session variable `HGS_CLIENT` (a launch's `HGS_CLIENT` is in the supervisor's environment only) |
 //! | `rename` | `rename` |
@@ -50,8 +51,10 @@
 //!
 //! **Attach (D13).** `attach` and a launch without `-d` run the attach client
 //! (`host::attach`) on this process's console, which both standard input and
-//! output must be (otherwise nothing is created or attached, as tmux refuses a
-//! client without a terminal). A launch creates the session at the console's
+//! output must be and which must take the attach modes (otherwise nothing is
+//! created or attached, and `attachable` refuses before the CLI resumes a saved
+//! session for an attach, as tmux refuses a client without a terminal). A
+//! launch creates the session at the console's
 //! size, then attaches by its session ID; one that ended before the attach
 //! counts as exited. With a run ID (`hgs a --existing --run-id`) the host
 //! checks the run marker as it attaches and a changed run is refused with
@@ -229,6 +232,22 @@ impl<C: Connector> HostBackend<C> {
             .map_err(Failure::message)?;
         serde_json::from_value::<Created>(created)
             .map_err(|error| format!("invalid session host answer: {error}"))
+    }
+
+    /// This process's console for an attach client (D13), refused when it is
+    /// not a console or cannot take the attach modes, as a check before
+    /// anything starts: the modes themselves wait for the attach, so that
+    /// Ctrl+C still interrupts a slow start.
+    fn console(&self) -> CliResult<Box<dyn Terminal>> {
+        let terminal = self
+            .connector
+            .terminal()
+            .ok_or_else(|| Error::new(1, NOT_A_CONSOLE))?;
+        terminal
+            .enter()
+            .map_err(|error| Error::new(1, error.to_string()))?;
+        terminal.leave();
+        Ok(terminal)
     }
 
     /// The attach client of `hgs a` and of a launch without `-d` (D13), on
@@ -725,10 +744,7 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
                 server_died: false,
             });
         }
-        let terminal = self
-            .connector
-            .terminal()
-            .ok_or_else(|| Error::new(1, NOT_A_CONSOLE))?;
+        let terminal = self.console()?;
         let size = terminal.size().unwrap_or(SIZE);
         let created = self
             .create(spec, size)
@@ -739,6 +755,9 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
             None,
             true,
         )
+    }
+    fn attachable(&self) -> CliResult<()> {
+        self.console().map(drop)
     }
     fn set_client(&self, target: Target, client: &str) {
         let _ = self.act(Op::SetEnvironment {
@@ -1762,6 +1781,7 @@ mod tests {
             backend
                 .attach(Target::Name("x/p"), Some("run-1"))
                 .map(|exit| exit.code),
+            backend.attachable().map(|()| 0),
         ] {
             let error = result.unwrap_err();
             assert_eq!((error.code, error.message.as_str()), (1, NOT_A_CONSOLE));
