@@ -1699,12 +1699,22 @@ else: print('{}')
     });
     auto *submit = operation == "question" ? card->findChild<QPushButton *>("submitQuestionAnswer") : send;
     QTRY_VERIFY(submit->isEnabled());
+    // An expired cache at admission opens a modal cold-cache confirmation instead,
+    // and nothing here would answer it (zerus-1okk: a Windows shard hung there). Fail
+    // instead: the timer can only run once the click returns or a dialog's loop runs.
+    bool prompted = false;
     if (outcome == "expiry") {
-        const auto deadline = QDateTime::currentSecsSinceEpoch() + 2;
+        // expires_at has whole seconds: +4 leaves at least 3 s for the slow
+        // replacement of details.json on Windows and this click.
+        const auto deadline = QDateTime::currentSecsSinceEpoch() + 4;
         details["session_usage"] = QJsonObject{{"prompt_cache", QJsonObject{{"status", "warm"}, {"expires_at", deadline}}}};
         QVERIFY(save()); client->inspectionReady({}, name, details);
+        QTimer::singleShot(0, &window, [&] {
+            for (const auto *prompt : {"coldCacheConfirm", "questionColdCacheConfirm"})
+                if (auto *dialog = window.findChild<QMessageBox *>(prompt)) { prompted = true; dialog->reject(); } });
     }
     submit->click(); // Admission captures this authoritative warm TTL without an intervening event turn.
+    QVERIFY2(!prompted, "The warm cache expired before admission");
     QTRY_VERIFY(entered.available() == 1);
     if (outcome == "expiry") client->inspectionReady({}, name, details); // Keep latest evidence equal to the captured TTL while persistence is held.
     const auto transports = [&] { QList<QJsonObject> result; QFile file(fixtureDir.filePath("transport.jsonl"));
@@ -1720,7 +1730,7 @@ else: print('{}')
     }
     if (outcome == "cancel") { auto *cancel = window.findChild<QPushButton *>("cancelCompactSend"); QVERIFY(cancel->isVisible()); cancel->click(); }
     if (outcome == "failure") { QVERIFY(QDir(storageRoot).removeRecursively()); QFile blocker(storageRoot); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close(); }
-    if (outcome == "expiry") QTRY_VERIFY(QDateTime::currentSecsSinceEpoch() >= details["session_usage"].toObject()["prompt_cache"].toObject()["expires_at"].toInteger());
+    if (outcome == "expiry") QTRY_VERIFY_WITH_TIMEOUT(QDateTime::currentSecsSinceEpoch() >= details["session_usage"].toObject()["prompt_cache"].toObject()["expires_at"].toInteger(), 10000);
     QVERIFY(transports().isEmpty()); release.release();
     const bool accepted = outcome == "complete" || outcome == "navigation";
     if (accepted) {
