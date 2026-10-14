@@ -682,6 +682,13 @@ picker and verifies its Activity identity, **Skip** and **Skip until next
 version**; it never selects **Update now**. Nested real `codex exec --ephemeral`
 reviews verify separate child Activity under Claude and Codex parents, preserved
 parent identity/model/history and the child's recorded result without a rollout.
+Codex async questions (feature `send_message_to_user_async`) come from a
+localhost provider that holds the following turn open, because Codex shows the
+panel only while a turn works. `hgs inspect` and `hgs answer` must recognize each
+pinned panel (`ctrl+] skip` in 0.160, `^] skip` in 0.162, both with a `1 of 2`
+line), keep a native draft, answer an option, Other and free text, and skip
+without a reply. Codex 0.162 steers each answer into the working turn; 0.160
+queues it until the turn ends, so the answer stays submitted until recorded.
 Every fixture owns a private home
 and tmux socket and uses only a localhost provider. No authenticated inference
 or existing session is involved.

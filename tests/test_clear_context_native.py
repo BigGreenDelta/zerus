@@ -70,7 +70,8 @@ class NativeCodexClear(unittest.TestCase):
             msg = f'{msg}\nNative fixture cursor: {cursor}; state: {state}\nNative fixture panel: {screen!r}'
         except (AttributeError, OSError, ValueError, subprocess.SubprocessError):
             pass
-        super().fail(msg)
+        # Explicit, so suites reusing this fixture can share its diagnostics.
+        unittest.TestCase.fail(self, msg)
 
     def setUp(self):
         import test_clear_context
@@ -85,12 +86,17 @@ class NativeCodexClear(unittest.TestCase):
         self.geometry = (int(width), int(height))
         self.animations = os.environ.get('HGS_CODEX_TEST_ANIMATIONS', 'true')
         self.assertIn(self.animations, ('true', 'false'))
+        # Curated plugins would be cloned from the network by a git child that
+        # can outlive Codex and race this home's cleanup. Suites reusing this
+        # fixture may serve a localhost provider and enable more features.
         (native_home / 'config.toml').write_text('''model="gpt-6.1-sol"
 model_provider="fixture"
 check_for_update_on_startup=false
-[model_providers.fixture]
+[features]
+plugins=false
+''' + getattr(self, 'native_features', '') + '''[model_providers.fixture]
 name="Fixture"
-base_url="http://127.0.0.1:1/v1"
+base_url="''' + getattr(self, 'provider_url', 'http://127.0.0.1:1/v1') + '''"
 wire_api="responses"
 ''')
         path = native_home / 'sessions/2026/10/09' / ('rollout-fixture-' + self.conversation_id + '.jsonl')

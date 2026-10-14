@@ -27,10 +27,10 @@ AGENTS = {
         tarball='https://registry.npmjs.org/@openai/codex/-/codex-{version}-{target}.tgz',
         metadata='https://registry.npmjs.org/@openai/codex/{version}-{target}', published='{version}-{target}',
         member='package/vendor/x86_64-unknown-linux-musl/bin/codex',
-        coverage='clear, draft preservation, identity, two terminal sizes and animation modes',
+        coverage='clear, draft preservation, identity, async question panels, two terminal sizes and animation modes',
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
-                'test_external_agents_native.NativeExternalAgents']),
+                'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native']),
     'claude': dict(
         name='Claude Code', variable='HGS_CLAUDE_TEST_BIN', version_output='{} (Claude Code)',
         targets=['linux-x64', 'darwin-arm64'],

@@ -693,6 +693,8 @@ impl Native<'_> {
                 // question waits. Verify the complete question and selections,
                 // not unrelated animation or ANSI color changes above it.
                 super::claude_question::same_panel(previous,&actual,self.card)
+            } else if string(self.card,"source")=="codex_async" {
+                super::codex_questions::same_panel(previous,&actual,self.card)
             } else {previous==&actual}
         });
         if !unchanged {

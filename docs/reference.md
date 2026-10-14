@@ -789,6 +789,9 @@ for your message. A dialog too narrow to read, or for another goal, stays in
 Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
+When Codex's own question panel is open, Zerus answers or skips there. Codex's
+animated working status above the panel does not block an answer; any change
+to the panel itself does.
 Queue arrows navigate optional requests from newest to oldest while retaining
 answers and the current multipart section. A required approval temporarily takes
 priority. Confirmed answers appear as **You (answer)** in Activity. Codex optional
