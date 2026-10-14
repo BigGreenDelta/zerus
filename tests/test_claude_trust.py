@@ -36,6 +36,7 @@ try:
    elif buf.startswith((b'\x1b[B',b'\x1bOB')):selected=min(1,selected+1);buf=buf[3:];render()
    elif buf.startswith(b'\r'):
     buf=buf[1:];(root/'submitted').write_text(labels[selected])
+    while (root/'gate').exists() and not (root/'release').exists():time.sleep(.01)
     if not (root/'hold-dialog').exists():
      if selected==0:sys.exit(0)
      if (root/'transition-input').exists():
@@ -85,6 +86,19 @@ class FolderTrust(unittest.TestCase):
         (self.root/file).write_text(value)
         os.kill(self.record['pid'], signal.SIGUSR1)
         self.wait_for(lambda: expected in self.tmux('capture-pane', '-p', '-t', self.pane))
+
+    def hold_screen_read_after_enter(self, ready):
+        # The agent acts on Enter only once hgs starts its first screen read
+        # after Enter, and that read waits until `ready` (a shell condition;
+        # TMUX names the private server). The agent thus changes after hgs's
+        # terminal check and before the capture that follows it.
+        (self.root/'gate').touch()
+        tmux=fixtures.TMUX+' -S "'+str(self.socket)+'" -f /dev/null'
+        submitted,release=self.root/'submitted',self.root/'release'
+        self.script('tmux','#!/bin/sh\nif [ "$1" = capture-pane ] && [ -e "'+str(submitted)+'" ] && [ ! -e "'+str(release)+'" ]; then\n'
+                    ' : > "'+str(release)+'";i=0\n until '+ready.replace('TMUX',tmux)
+                    +' || [ $i -ge 200 ]; do i=$((i+1));sleep .01;done\nfi\nexec '+tmux+' "$@"\n')
+        return release
 
     def test_attention_before_conversation_without_automatic_input(self):
         state = self.inspect()
@@ -163,11 +177,31 @@ class FolderTrust(unittest.TestCase):
         self.assertIn('delivery uncertain',self.answer(payload,success=False))
         self.assertEqual(self.received(),before)
 
+    def test_dialog_replaced_after_the_input_check_is_uncertain(self):
+        # The new screen alone, read after the agent left input mode, never acknowledges.
+        (self.root/'transition-input').touch();(self.root/'hold-input-mode').touch()
+        release=self.hold_screen_read_after_enter(
+            'TMUX capture-pane -p -t '+self.pane+' | grep -qF "Starting the native input screen"')
+        payload=self.payload()
+        self.assertIn('delivery uncertain',self.answer(payload,success=False))
+        self.assertTrue(release.exists())
+        before=self.received()
+        self.assertIn('delivery uncertain',self.answer(payload,success=False))
+        self.assertEqual(self.received(),before)
+
     def test_explicit_decline_can_exit_the_exact_process(self):
         p=self.payload(0);receipt=self.answer(p)
         self.assertEqual(receipt['status'],'answered')
         self.assertEqual((self.root/'submitted').read_text(),'No, exit')
         before=self.received();self.assertEqual(self.answer(p),receipt);self.assertEqual(self.received(),before)
+
+    def test_decline_exit_ending_tmux_during_the_screen_read_is_answered(self):
+        release=self.hold_screen_read_after_enter('! TMUX list-sessions >/dev/null 2>&1')
+        p=self.payload(0);receipt=self.answer(p)
+        self.assertEqual(receipt['status'],'answered')
+        self.assertTrue(release.exists())
+        self.assertEqual((self.root/'submitted').read_text(),'No, exit')
+        self.assertEqual(self.answer(p),receipt)
 
     def test_changed_target_rejects_stale_approval(self):
         self.redraw('target','different-command','different-command')
