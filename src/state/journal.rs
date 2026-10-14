@@ -646,7 +646,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     }
     output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
     output["compact_context_request"] = record["compact_context_request"].clone();
-    output["clear_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
+    output["clear_context_supported"] = json!(archive_id.is_none() && (clear_context::available(&record,panes.is_some())
+        || clear_context::resumed(&record,panes.is_some())));
     output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));

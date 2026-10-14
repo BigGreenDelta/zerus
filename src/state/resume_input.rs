@@ -186,6 +186,21 @@ pub(super) fn fork_ready(record: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The exact supervised Codex holds the expected conversation's rollout open.
+pub(super) fn owned(record: &Value) -> Result<()> {
+    checked_process(record)?;
+    owns_rollout(record)
+}
+
+fn verified(record: &Value) -> Result<()> {
+    owned(record)?;
+    input::checked_terminal(record, true)?;
+    if !process_alive(record) {
+        return Err("The resumed agent process has changed".into());
+    }
+    Ok(())
+}
+
 pub(super) fn ready(record: &Value) -> Result<()> {
     if !pending(record) || pause_active(record) {
         return Err("Waiting for the agent to confirm this conversation".into());
@@ -193,13 +208,23 @@ pub(super) fn ready(record: &Value) -> Result<()> {
     if record["input_pending_at"].as_f64().unwrap_or(0.0) > 0.0 {
         return Err("Message sent. Waiting for the agent to confirm this conversation.".into());
     }
-    checked_process(record)?;
-    owns_rollout(record)?;
-    input::checked_terminal(record, true)?;
-    if !process_alive(record) {
-        return Err("The resumed agent process has changed".into());
-    }
-    Ok(())
+    verified(record)
+}
+
+/// A pending resume that may also clear or pause before its deferred
+/// SessionStart once `idle` verifies it. A sent message may already have
+/// started a turn, and an archive restore commits only on the hook that names
+/// its exact conversation (archive::confirm_restore).
+pub(super) fn clearable(record: &Value) -> bool {
+    pending(record)
+        && string(record, "restore_archive_id").is_empty()
+        && record["input_pending_at"].as_f64().unwrap_or(0.0) == 0.0
+}
+
+/// A clearable resume whose exact process waits at the restored conversation's
+/// empty native composer, as an idle confirmed session does.
+pub(super) fn idle(record: &Value) -> bool {
+    clearable(record) && verified(record).is_ok()
 }
 
 pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
@@ -217,5 +242,39 @@ pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
         output["phase"] = json!("starting");
         output["activity_summary"] = json!("Restoring conversation");
         output["activity_detail"] = json!(reason);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resumed() -> Value {
+        json!({"agent":"codex","run_identity_version":1,"startup_kind":"resume",
+            "supervisor":{"pid":1,"start":"supervisor"},"run_id":"run","conversation_id":"saved",
+            "expected_id":"saved","activity":"unknown","phase":"unknown","last_event_at":0})
+    }
+
+    #[test]
+    fn only_a_resume_without_a_sent_message_or_archive_restore_may_clear_or_pause() {
+        assert!(clearable(&resumed()));
+        for (key, value) in [("input_pending_at", json!(1.0)), ("restore_archive_id", json!("archive")),
+            ("expected_id", json!("other")), ("requested_id", json!("saved")), ("startup_kind", json!("new")),
+            ("error", json!("failed")), ("last_event_at", json!(1.0)), ("activity", json!("idle")),
+            ("agent", json!("claude"))] {
+            let mut other = resumed();
+            other[key] = value;
+            assert!(!clearable(&other), "{key}");
+        }
+        // Without the exact live process nothing is verified, and no other
+        // state makes a resume idle.
+        assert!(!idle(&resumed()));
+        assert!(!lifecycle::safe_to_pause(&resumed()));
+        let mut confirmed = resumed();
+        confirmed.as_object_mut().unwrap().remove("expected_id");
+        confirmed["activity"] = json!("idle");
+        assert!(lifecycle::safe_to_pause(&confirmed));
+        confirmed["active_tools"] = json!({"tool": {}});
+        assert!(!lifecycle::safe_to_pause(&confirmed));
     }
 }

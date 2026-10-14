@@ -131,14 +131,18 @@ fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
 // not materialize the new rollout yet. Observe only the complete reset panel
 // in the exact live empty composer; keep the native ID until its real hook.
 pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
+    // A resume awaiting its deferred SessionStart has no hook-confirmed idle
+    // state: its exact process must still own the restored conversation.
+    let resumed = resume_input::clearable(record);
     if string(record,"agent") != "codex" || awaiting_start(record)
-        || record["activity"] != "idle" || record["phase"] != "idle"
+        || (!resumed && (record["activity"] != "idle" || record["phase"] != "idle"))
         || string(record,"conversation_id").is_empty()
         || (string(record,"prompt").is_empty() && string(record,"last_message").is_empty()
             && !record["clear_context_request"].is_object()) { return Ok(false); }
     // Ordinary idle polls only need one read-only capture. Perform the more
     // expensive process and composer checks only for a matching reset panel.
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
+    if resumed { resume_input::owned(record)?; }
     kimi_tui_choice::identity(record)?;
     input::checked_terminal(record,true)?;
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
@@ -164,15 +168,34 @@ pub(super) fn event(record: &Value) -> Option<Value> {
             string(record,"run_id"),string(record,"conversation_id"),clear["at"])}))
 }
 
+fn unblocked(record: &Value) -> bool {
+    !pause_active(record) && string(record,"error").is_empty()
+        && !record["clear_context_request"].is_object()
+        && !awaiting_start(record)
+        && !compact_context::pending(record)
+}
 pub(super) fn available(record: &Value, live: bool) -> bool {
     live && AGENTS.contains(&string(record,"agent"))
         && !string(record,"conversation_id").is_empty()
         && record["activity"]=="idle" && record["phase"]=="idle"
-        && !pause_active(record) && string(record,"error").is_empty()
         && string(record,"expected_id").is_empty()
-        && !record["clear_context_request"].is_object()
-        && !awaiting_start(record)
-        && !compact_context::pending(record)
+        && unblocked(record)
+}
+/// Codex defers SessionStart after `hgs resume` until the next turn. A verified
+/// resume may clear before it: the clear's own SessionStart then names the new
+/// conversation (`resumed_start`). Compaction keeps requiring `available`.
+pub(super) fn resumed(record: &Value, live: bool) -> bool {
+    live && unblocked(record) && resume_input::idle(record)
+}
+/// Codex reports a clear of a resumed conversation only with the SessionStart
+/// it defers to the next turn, under the new conversation's ID. That clear
+/// confirms the resume when it was requested or observed for the expected
+/// conversation, or the exact supervised Codex still holds its rollout open.
+pub(super) fn resumed_start(record: &Value, event: &Value) -> bool {
+    string(event,"source") == "clear"
+        && resume_input::pending(record) && string(record,"restore_archive_id").is_empty()
+        && (awaiting_start(record) || record["clear_context_request"]["conversation_id"] == record["conversation_id"]
+            || resume_input::owned(record).is_ok())
 }
 /// Claude waits in a chooser that hides its composer. Only an explicit request
 /// dismisses it, with one Esc that answers it as in Terminal.
@@ -245,10 +268,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
     let mut guard=Some(lock(None)?);
-    let dismiss=request.dismiss_prompt && !available(&read(name)?,true);
+    let current=read(name)?;
+    // A resume before its deferred SessionStart is verified as for its first message.
+    let resuming=resume_input::clearable(&current);
+    let dismiss=request.dismiss_prompt && !resuming && !available(&current,true);
     let mut record=if dismiss {checked_chooser(name,&request)?} else {
-        let record=input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?;
-        if !available(&record,true) {return Err("Wait for the agent to become idle before clearing context".into());}
+        let record=if resuming {input::checked_resumed(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
+        if !(available(&record,true) || resuming && resumed(&record,true)) {
+            return Err("Wait for the agent to become idle before clearing context".into());
+        }
         input::checked_terminal(&record,true)?;
         record
     };
@@ -287,6 +316,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
         std::thread::sleep(COMMAND_SETTLE);
         let current=if dismiss {kimi_tui_choice::identity(&record)?}
+            else if resuming {resume_input::owned(&record)?;kimi_tui_choice::identity(&record)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
@@ -339,6 +369,40 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         record["conversation_id"]=json!("new");
         assert_eq!(event(&record).unwrap()["at"],123.0);
         assert!(!awaiting_start(&record));
+    }
+    #[test] fn a_resumed_clear_start_needs_its_clear_of_the_expected_conversation() {
+        let pending=json!({"agent":"codex","run_identity_version":1,"startup_kind":"resume","supervisor":{"pid":1,"start":"s"},
+            "run_id":"run","conversation_id":"old","expected_id":"old","activity":"unknown","phase":"unknown","last_event_at":0});
+        let clear=json!({"hook_event_name":"SessionStart","session_id":"new","source":"clear"});
+        // Without the exact live process holding the expected rollout, only a
+        // clear that Zerus requested or observed confirms the resume.
+        assert!(!resumed_start(&pending,&clear));
+        let mut requested=pending.clone();requested["clear_context_request"]=json!({"conversation_id":"old"});
+        assert!(resumed_start(&requested,&clear));
+        requested["clear_context_request"]["conversation_id"]=json!("other");assert!(!resumed_start(&requested,&clear));
+        let mut observed=pending.clone();
+        observed["session_clear"]=json!({"at":7.0,"run_id":"run","conversation_id":"old","previous_conversation_id":"old",
+            "awaiting_session_start":true});
+        assert!(resumed_start(&observed,&clear));
+        for source in ["startup","resume",""] {
+            let mut other=clear.clone();other["source"]=json!(source);assert!(!resumed_start(&observed,&other),"{source}");
+        }
+        for (key,value) in [("restore_archive_id",json!("archive")),("startup_kind",json!("new")),("expected_id",json!("other")),
+            ("error",json!("failed")),("activity",json!("idle")),("last_event_at",json!(1.0)),("agent",json!("claude"))] {
+            let mut other=observed.clone();other[key]=value;assert!(!resumed_start(&other,&clear),"{key}");
+        }
+        let mut stale=observed.clone();stale["session_clear"]["run_id"]=json!("earlier");assert!(!resumed_start(&stale,&clear));
+        // The hook keeps the boundary observed in Terminal.
+        observe_start(&mut observed,&clear);observed["conversation_id"]=json!("new");
+        assert_eq!(event(&observed).unwrap()["at"],7.0);assert_eq!(observed["session_clear"]["journaled"],true);
+        assert_eq!(earlier_conversations(&observed),json!(["old"]));
+    }
+    #[test] fn a_resume_clears_only_when_verified_and_never_compacts_unconfirmed() {
+        let pending=json!({"agent":"codex","run_identity_version":1,"startup_kind":"resume","supervisor":{"pid":1,"start":"s"},
+            "run_id":"run","conversation_id":"old","expected_id":"old","activity":"unknown","phase":"unknown","last_event_at":0});
+        // Compaction, like `available`, needs the confirmed conversation; a
+        // resume needs its exact live process, absent here.
+        assert!(!available(&pending,true));assert!(!resumed(&pending,true));assert!(!resumed(&pending,false));
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
         let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor"});
