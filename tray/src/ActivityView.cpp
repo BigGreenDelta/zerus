@@ -6,6 +6,7 @@
 #include "ProcessSettings.h"
 #include "QuestionReply.h"
 #include "SessionFileReference.h"
+#include "WorkspaceIcons.h"
 #include "speech/VoicePlayerImage.h"
 
 #include <QDateTime>
@@ -1250,8 +1251,12 @@ void ActivityView::setTheme(bool dark)
     palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
     palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
     m_browser->setPalette(palette);
-    m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }")
+    m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }"
+        " QPushButton[compact=\"true\"] { background:transparent; border:0; border-radius:6px; padding:0; min-width:0; min-height:0; }"
+        " QPushButton[compact=\"true\"]:hover { background:%2; }"
+        " QPushButton[compact=\"true\"]:focus[keyboardFocus=\"true\"] { border:1px solid %1; }")
         .arg(dark ? "#8bdfc0" : "#167357", dark ? "#233a35" : "#e7f3ed", dark ? "#456e61" : "#a5c8b8"));
+    if (m_compactJump) m_latest->setIcon(workspaceIcon("chevron-down", QColor(dark ? "#8bdfc0" : "#167357")));
     for (auto *edge : m_edges) { static_cast<ColumnEdge *>(edge)->color = QColor(dark ? "#8bdfc0" : "#167357"); edge->update(); }
     m_compaction->setStyleSheet(QString("QWidget#activityCompaction { background:%3; } QLabel { color:%1; background:transparent; font-size:12px; } QProgressBar { background:%2; border:0; border-radius:2px; } QProgressBar::chunk { background:%1; border-radius:2px; }")
         .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? "#1c2229" : "#ffffff"));
@@ -1418,13 +1423,22 @@ void ActivityView::jumpToLatest()
     m_rendering = false;
 }
 
+void ActivityView::useCompactJumpButton()
+{
+    m_compactJump = true; m_latest->setProperty("compact", true);
+    m_latest->setFixedSize(24, 24); m_latest->setIconSize(QSize(16, 16));
+    setTheme(m_dark); updateJumpButton();
+}
+
 void ActivityView::updateJumpButton()
 {
-    if (!m_searchResult.isEmpty()) {
-        m_latest->setText(tr("Back to latest activity")); m_latest->show(); positionJumpButton(); return;
-    }
-    m_latest->setText(m_unseen > 0 ? tr("↓  %1 new — Jump to latest").arg(m_unseen) : tr("↓  Jump to latest"));
-    m_latest->setVisible(!m_followLatest && m_browser->verticalScrollBar()->maximum() > 0);
+    const bool search = !m_searchResult.isEmpty();
+    const QString caption = search ? tr("Back to latest activity") : m_unseen > 0
+        ? tr("Jump to latest activity (%1 new)").arg(m_unseen) : tr("Jump to latest activity");
+    m_latest->setToolTip(caption); m_latest->setAccessibleName(caption);
+    m_latest->setText(m_compactJump ? QString() : search ? caption
+        : m_unseen > 0 ? tr("↓  %1 new — Jump to latest").arg(m_unseen) : tr("↓  Jump to latest"));
+    m_latest->setVisible(search || (!m_followLatest && m_browser->verticalScrollBar()->maximum() > 0));
     positionJumpButton();
 }
 

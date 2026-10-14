@@ -498,7 +498,10 @@ copies the visible text. Claude's recorded thinking appears in
 full as a quieter **Thinking** card: the same Markdown at the same size, without
 the card fill and with dimmer text. Adjacent tool events collapse into groups.
 Reading older history preserves scroll and selection; **Jump to latest** returns
-to live events without resizing the timeline. Double-clicking a session or
+to live events without resizing the timeline. Its down-arrow icon sits beside
+Voice in the composer toolbar, outside the messages; the tooltip includes the
+number of new events. Subagents use the same icon in their own toolbar.
+Double-clicking a session or
 subagent row, or pressing Enter on it, opens Activity and performs the same jump.
 Connect commands remain available through **Copy connect command** in the session
 menu. Claude hands finished

@@ -4119,8 +4119,10 @@ void TestSessionsWindow::activityMarkReadKeepsReadingPosition()
     auto *context=window.findChild<QPushButton *>("activityContext");
     auto *latest=window.findChild<ActivityView *>("mainActivity")->jumpButton();QVERIFY(latest->isVisible());
     const auto bounds=[&](QWidget *widget){return QRect(widget->mapTo(&window,QPoint()),widget->size());};
-    // Jump to latest floats over the journal; Mark as read and the context share the toolbar row.
-    QCOMPARE(latest->parentWidget(),browser);QVERIFY(bounds(browser).contains(bounds(latest)));
+    // Jump to latest shares the existing toolbar and cannot cover a message.
+    QCOMPARE(latest->parentWidget(),composer->toolbar());QVERIFY(latest->text().isEmpty());QVERIFY(!latest->icon().isNull());
+    QVERIFY(latest->toolTip().contains("Jump to latest"));QVERIFY(bounds(latest).top()>bounds(browser).bottom());
+    QVERIFY(qAbs(bounds(latest).center().y()-bounds(context).center().y())<=1);
     QVERIFY(qAbs(bounds(button).center().y()-bounds(context).center().y())<=1);
     QVERIFY(bounds(button).top()>bounds(browser).bottom());QVERIFY(bounds(button).right()<bounds(context).left());
     QCOMPARE(browser->geometry(),initialGeometry);
@@ -4135,7 +4137,7 @@ void TestSessionsWindow::activityMarkReadKeepsReadingPosition()
     QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
     QCOMPARE(browser->geometry(),geometry);QCOMPARE(browser->document()->revision(),revision);QCOMPARE(browser->verticalScrollBar()->value(),0);
     QCOMPARE(browser->textCursor().selectedText(),selection);QCOMPARE(composer->editor()->toPlainText(),QString("Unsent draft"));
-    QVERIFY(!latest->isVisible() || bounds(browser).contains(bounds(latest)));
+    QVERIFY(!latest->isVisible() || bounds(composer->toolbar()).contains(bounds(latest)));
     auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list->currentItem()->data(SessionRoles::Key).toString().contains(session.name));
     window.setFleet(state);QVERIFY(button->isHidden());
     session.phase="input";session.activity="waiting";session.attentionId="new-question";state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(button->isVisible());

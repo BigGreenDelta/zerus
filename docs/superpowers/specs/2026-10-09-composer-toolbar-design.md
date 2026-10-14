@@ -50,14 +50,17 @@ is selected, also when it holds no chip, so the field never moves.
 
 Order, left to right:
 
-- Leading zone (message and session): attachments, Mark as read, compaction.
+- Leading zone (message and session): attachments, Voice, Jump to latest,
+  Mark as read, compaction.
 - Stretch.
 - Trailing zone (status by decreasing severity): usage limit, recovery, cache,
   context. The context counter is always rightmost.
 
-Jump to latest leaves the layout and returns to being an overlay at the bottom edge
-of the Activity view. `ActivityView` already parents it to the browser and positions
-it with `positionJumpButton()`; `SessionsWindow` stops reparenting it into the footer.
+Owner revision, 2026-10-14: Jump to latest is a compact down-arrow icon beside
+Voice in the existing toolbar, outside the transcript. Its tooltip and accessible
+name include the number of new events. The subagent toolbar owns its separate jump
+action. The toolbar height stays fixed when either action appears or disappears.
+Standalone `ActivityView` instances retain their overlay fallback.
 
 `QuestionCard` stays above the toolbar.
 
@@ -247,8 +250,9 @@ and `removeAttachment` (now the remove button of a popover row).
 - `test_sessionswindow.cpp`: the tests that look up the removed object names check
   the same behaviour through chips: Clear context from the cache popover keeps the
   draft; Retry now and Cancel retry work from the recovery popover; the recovery chip
-  ticks each second; a required question keeps the toolbar visible; Jump to latest is
-  an Activity overlay; the subagent context counter sits in the subagent toolbar.
+  ticks each second; a required question keeps the toolbar visible; Jump to latest
+  shares the fixed toolbar without covering messages; the subagent context counter
+  sits in the subagent toolbar.
 - An optional preview test (skipped unless `HGS_COMPOSER_PREVIEW` names a folder),
   following `HGS_DASHBOARD_PREVIEW` in `test_dashboard.cpp`: `grab()` of the
   composer in dark and light themes, wide and narrow, for the seven reviewed states

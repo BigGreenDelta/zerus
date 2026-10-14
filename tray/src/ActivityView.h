@@ -48,6 +48,8 @@ public:
     void clearSearchResult();
     QWidget *compactionIndicator() const { return m_compaction; }
     QPushButton *jumpButton() const { return m_latest; }
+    // The owner can place this icon in its toolbar instead of over the journal.
+    void useCompactJumpButton();
     QTextBrowser *browser() const { return m_browser; }
     bool replyVisible(const QString &replyId) const;
     // The document as copied: chips and list markers spelled out.
@@ -138,6 +140,7 @@ private:
     bool m_copyHover = false;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
     bool m_dark = false, m_tracked = true, m_initial = true;
+    bool m_compactJump = false;
     bool m_rendering = false, m_followLatest = true, m_followScheduled = false;
     quint64 m_renderGeneration = 0, m_contentRevision = 0;
     bool m_renderDirty = false, m_renderInFlight = false, m_renderScheduled = false, m_pendingContentUpdate = false;

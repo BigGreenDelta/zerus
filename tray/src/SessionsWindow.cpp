@@ -811,6 +811,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_markRead=new ToolbarChip;m_markRead->setObjectName("activityMarkRead");
     m_markRead->setLabels(tr("Mark as read"));m_markRead->setIconName("read-all");m_markRead->setTone(ChipTone::Accent);
     toolbar->add(ComposerToolbar::Slot::MarkRead,m_markRead);
+    m_activityView->useCompactJumpButton();toolbar->add(ComposerToolbar::Slot::Latest,m_activityView->jumpButton());
     auto *compaction=m_activityView->compactionIndicator();compaction->layout()->setContentsMargins(0,0,0,0);
     toolbar->add(ComposerToolbar::Slot::Compaction,compaction);toolbar->add(ComposerToolbar::Slot::CompactionCancel,m_compactCancel);
     m_cacheStatus=new CacheStatus::Chip;
@@ -869,6 +870,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // protocol supports an exact child identity; never route a child to its parent.
     m_subagentContextUsage=new SessionUsage::ContextButton;m_subagentContextUsage->setObjectName("subagentContext");
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
+    m_subagentView->useCompactJumpButton();m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Latest,m_subagentView->jumpButton());
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);
     for(auto *context:{m_contextUsage,m_subagentContextUsage})connect(context,&QPushButton::clicked,this,[this]{setInspectorVisible(true);m_inspector->setCurrentIndex(1);});
     connect(m_subagentComposer, &MessageComposer::sendRequested, this,
