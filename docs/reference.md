@@ -924,6 +924,34 @@ An open child's Activity and draft stay in place when its turn finishes. A child
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.
 
+Claude child tracking reconciles hooks with exact native history, including
+workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
+result bound to its exact owned tool call, or a final **Request interrupted by
+user** row can settle a turn even when `SubagentStop` is missing. Matching
+workflow `started`/`result` attempts independently confirm the same reply.
+Later native child activity can recover a missing start; newer hooks take
+precedence. Silence and a completed parent never prove child completion.
+Reconciliation preserves existing reply and read identities. `hgs inspect`
+reports each child's `tracking_evidence`: source, event kind, event time,
+native row identity and, when verified, workflow result confirmation. Missing,
+partial or ambiguous native evidence leaves the last reported state intact.
+
+Codex child tracking verifies the child and parent IDs in the account-owned
+rollout, then reconciles typed turn starts, successful completions and explicit
+interruptions. An interruption without a turn ID requires a matching start in
+the bounded native history. Kimi's version 2 session catalog identifies direct
+children individually, including several children using the same profile;
+their own wire turn events establish current work or completion. Older,
+delayed or ambiguous catalogs retain profile-hook counts. A removed catalog
+entry becomes unknown rather than a fabricated completed result.
+
+DeepSeek uses each child's exact native API entry within one host generation.
+A child never inherits its parent's running status. Missing, contradictory or
+cross-generation observations remain unknown; desktop and Android counters
+retain the `+` uncertainty marker. The current OpenCode adapter does not expose
+child sessions. Inspection reports native tracking evidence without changing
+reply/read identities or restarting agents.
+
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.

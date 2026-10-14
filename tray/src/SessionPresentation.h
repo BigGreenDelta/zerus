@@ -301,12 +301,12 @@ inline QString childCount(const SessionInfo &s, bool expanded = false, bool onli
     if (s.subagentSource == "hook_profiles" && !s.subagentCountsComplete)
         return expanded ? QObject::tr("Observed runs: incomplete counts") : QStringLiteral("?");
     if (!includeCompleted) {
-        if (s.subagentSource == "hooks" && !s.subagentCountsComplete && s.subagentTotalCount > 0)
+        if (s.subagentSource != "hook_profiles" && !s.subagentCountsComplete && s.subagentTotalCount > 0)
             return expanded ? QObject::tr("%1 confirmed active; some states unknown").arg(active) : QString("%1+").arg(active);
         if (active > 0) return expanded ? QObject::tr("%1 active").arg(active) : QString::number(active);
         return {};
     }
-    if (s.subagentSource == "hooks" && !s.subagentCountsComplete && s.subagentTotalCount > 0)
+    if (s.subagentSource != "hook_profiles" && !s.subagentCountsComplete && s.subagentTotalCount > 0)
         return expanded ? QObject::tr("%1 confirmed active / %2 observed; some states unknown").arg(active).arg(s.subagentTotalCount)
                         : QString("%1+/%2").arg(active).arg(s.subagentTotalCount);
     if (s.subagentTotalCount > 0)

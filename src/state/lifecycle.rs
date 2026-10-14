@@ -328,7 +328,7 @@ pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> b
             .map(|children| {
                 children
                     .values()
-                    .any(|child| string(child, "state") == "working")
+                    .any(|child| telemetry::child_working(record, child))
             })
             .unwrap_or(false)
         && ((string(record, "activity") == "idle" && string(record, "expected_id").is_empty())
