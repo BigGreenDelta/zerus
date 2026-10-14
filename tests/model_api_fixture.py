@@ -22,6 +22,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import socketserver
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -247,6 +248,12 @@ class Server(ThreadingHTTPServer):
         self.numbers = itertools.count(1)
         self.lock = threading.Lock()
         self.log = Path(root) / "requests.jsonl"
+
+    def server_bind(self):
+        # HTTPServer would name itself with socket.getfqdn, a reverse lookup that can
+        # stall for many seconds on a CI runner; the loopback address is its name.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def record(self, entry):
         with self.lock, open(self.log, "a", encoding="utf-8") as log:

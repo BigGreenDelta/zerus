@@ -87,16 +87,18 @@ class Server(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="hgs-model-api-")
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        self.process = subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(SCRIPT), "--root", str(self.root),
-                                         "--project", str(self.root)], stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.errors = self.root / "fixture.err"
+        with self.errors.open("wb") as errors:
+            self.process = subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(SCRIPT), "--root", str(self.root),
+                                             "--project", str(self.root)], stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.DEVNULL, stderr=errors,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.addCleanup(self.process.wait, 10)
         self.addCleanup(self.process.kill)
         deadline = time.monotonic() + 30
         while not (self.root / "port").is_file():
-            self.assertIsNone(self.process.poll(), "the fixture exited")
-            self.assertLess(time.monotonic(), deadline, "no port file")
+            self.assertIsNone(self.process.poll(), f"the fixture exited: {self.errors.read_text(errors='replace')}")
+            self.assertLess(time.monotonic(), deadline, f"no port file: {self.errors.read_text(errors='replace')}")
             time.sleep(0.05)
         self.url = f"http://127.0.0.1:{int((self.root / 'port').read_text())}"
         # Never through a proxy of the environment.
