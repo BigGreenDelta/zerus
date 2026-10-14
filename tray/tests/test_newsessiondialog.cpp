@@ -22,8 +22,10 @@ class TestNewSessionDialog : public QObject {
     void flag(const QString &name,bool enabled=true) {
         QFile f(m_fixture.filePath(name));if(enabled){QVERIFY(f.open(QIODevice::WriteOnly));}else f.remove();
     }
+    // The local computer reports Linux: without a platform it would follow the
+    // GUI's build platform, and a Windows build hides some agents there.
     static FleetState fleet() {
-        FleetState fleet;BoxState local;local.host="pc";local.ok=true;
+        FleetState fleet;BoxState local;local.host="pc";local.ok=true;local.metrics=QJsonObject{{"platform","linux"}};
         fleet.setLocal(local,QDateTime::currentMSecsSinceEpoch());BoxState mac;mac.host="mac";mac.ok=true;
         fleet.setPeer(mac,QDateTime::currentMSecsSinceEpoch());return fleet;
     }

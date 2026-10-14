@@ -3,6 +3,7 @@
 #include "IdentityBadge.h"
 #include "WorkspaceList.h"
 #include "WorkspaceIcons.h"
+#include "MachinePlatform.h"
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -158,7 +159,7 @@ void SessionSearch::setTheme(bool dark)
 bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool online) const
 {
     if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) return false;
-    if(!m_folderPath.isEmpty()&&(host!=m_folderHost||(m_folderCheckout?s.gitRoot:s.canonicalCwd)!=m_folderPath))return false;
+    if(!m_folderPath.isEmpty()&&(host!=m_folderHost||!MachinePlatform::same(m_folderCheckout?s.gitRoot:s.canonicalCwd,m_folderPath,MachinePlatform::of(m_fleet.local().metrics,host.isEmpty()))))return false;
     if (m_filter == "archived") return s.state == "archived";
     // Global text search includes saved and archived conversations. Other state
     // filters still narrow it explicitly, with archive labels on every hit.

@@ -46,7 +46,7 @@ class TestWorktreePanel:public QObject {
     }
     QByteArray calls() const {QFile file(dir.filePath("calls"));return file.open(QIODevice::ReadOnly)?file.readAll():QByteArray();}
     FleetState fleet() const {
-        BoxState local;local.ok=true;local.host="arch";SessionInfo a;a.name="codex/repo/one";a.gitRoot="/repo";a.canonicalCwd="/repo/subfolder";local.sessions={a};
+        BoxState local;local.ok=true;local.host="arch";local.metrics["platform"]="linux";SessionInfo a;a.name="codex/repo/one";a.gitRoot="/repo";a.canonicalCwd="/repo/subfolder";local.sessions={a};
         BoxState remote=local;remote.host="mac";remote.sessions[0].name="kimi/repo/two";
         FleetState result;result.setLocal(local,QDateTime::currentMSecsSinceEpoch());result.setPeer(remote,QDateTime::currentMSecsSinceEpoch());return result;
     }
@@ -109,6 +109,22 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         auto local=state.local();local.ok=false;state.setLocal(local,QDateTime::currentMSecsSinceEpoch());panel.setContext({},"/repo",state);QCOMPARE(tree->topLevelItemCount(),4);QVERIFY(!use->isEnabled());QVERIFY(panel.findChild<QLabel *>("worktreeStatus")->text().contains("Offline"));
         QVERIFY(tree->topLevelItem(0)->child(0)->text(0).contains("last recorded"));
         const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(panel.grab().save(preview+"/offline.png"));}
+    }
+    void localWindowsSessionsMatchTheirFolderInAnyCase(){
+        // Offline, the panel lists the folder itself with the sessions last seen in it. The
+        // local Windows machine compares paths in any case and with either separator.
+        HgsClient client(FakeCli::program(script()));
+        for(const bool windows:{true,false}){
+            BoxState local;local.host="desktop";local.metrics["platform"]=windows?"windows":"linux";
+            SessionInfo one;one.name="codex/repo/one";one.canonicalCwd=windows?"c:\\work\\repo":"/work/Repo";
+            SessionInfo two=one;two.name="codex/repo/two";two.canonicalCwd=windows?"C:\\Work\\Repo\\sub":"/work/repo";local.sessions={one,two};
+            FleetState state;state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+            WorktreePanel panel(&client);panel.setContext({},windows?"C:/Work/Repo":"/work/repo",state);
+            auto *tree=panel.findChild<QTreeWidget *>("worktreeCatalog");QCOMPARE(tree->topLevelItemCount(),1);
+            QCOMPARE(tree->topLevelItem(0)->childCount(),1);
+            QCOMPARE(tree->topLevelItem(0)->child(0)->data(0,Qt::UserRole).toString(),QString(windows?"codex/repo/one":"codex/repo/two"));
+        }
+        QVERIFY(calls().isEmpty());
     }
     void lateResponseCannotReplaceAnotherMachineOrFolder(){
         HgsClient client(FakeCli::program(script()));WorktreePanel panel(&client);auto state=fleet();panel.show();panel.setContext({},"/repo",state);panel.setContext("mac","/repo",state);
