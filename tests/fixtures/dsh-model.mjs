@@ -1,6 +1,8 @@
 // Deterministic, keyless model running inside the official release for adapter
 // integration tests. This fixture is never loaded by the installed HGS host.
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const require = createRequire(process.env.HGS_DSH_TEST_PACKAGE + '/package.json');
 const { LlmAdapter } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm')));
@@ -49,7 +51,7 @@ class Adapter extends LlmAdapter {
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
     if (text.includes('SUBAGENT') && last?.role !== 'tool') {
-      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture',run_in_background:text.includes('CONTINUABLE')});
+      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ HOLD_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'child-call',name:'subagent',argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'child-call',name:'subagent',arguments:args}};
@@ -76,8 +78,15 @@ class Adapter extends LlmAdapter {
   }
 }
 export const inject=['llm','goals','tools','approval','jobs'];
-export function apply(ctx) {
+export function apply(ctx,config) {
   ctx.llm.registerAdapter(['hgs-test'],new Adapter());
+  // Hold a marked child's first step, before it records its subagent
+  // descriptor, until the test creates the release file (as a slow checkpoint).
+  ctx.on('agent/pre-step',async(request,next)=>{
+    const hold=request.agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
+    for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+    return next();
+  });
   ctx.tools.register(defineTool({name:'hgs_test_job_read',description:'Verify the model output cursor',parameters:{},
     output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
     async execute(_args,exec){const owner=exec.agent.session.id;const job=ctx.jobs.list(owner).find(j=>j.owner===owner&&j.kind==='bash');return ctx.jobs.read(job.id,owner).chunks.map(c=>c.text).join('');}
