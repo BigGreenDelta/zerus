@@ -3,6 +3,7 @@
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
 #include "IdentityBadge.h"
+#include "MachinePlatform.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceList.h"
@@ -140,6 +141,12 @@ QString machineChoice(const FleetState &fleet, const QString &host) {
 }
 void fillMachines(QComboBox *combo, const FleetState &fleet, const QString &explicitHost = {}) {
     for (const auto &host : accountHosts(fleet, explicitHost)) combo->addItem(machineChoice(fleet, host), host);
+}
+// Whether the machine starts this provider's agent: peers are POSIX, and the
+// local Windows computer lists, adds and takes no DeepSeek or OpenCode account
+// (spec D16).
+bool launchable(const FleetState &fleet, const QString &host, const QString &provider) {
+    return AccountCatalog::launchable(provider, MachinePlatform::of(host.isEmpty() ? fleet.local().metrics : QJsonObject(), host.isEmpty()));
 }
 }
 AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsageStore *usage) : QWidget(parent), m_client(hgsPath, this)
@@ -368,7 +375,9 @@ QJsonArray AccountsPage::profiles(bool includeRemoved) const
     for(const auto &host:hosts)for(const auto *field:{"profiles","removed_profiles"})for(const auto &value:m_catalogs[host][field].toArray()) {
         const bool removed=QString::fromLatin1(field)=="removed_profiles";
         if(removed && !includeRemoved)continue;
-        auto p=value.toObject();p["host"]=host;p["machine"]=host.isEmpty()?m_fleet.local().host:host;
+        auto p=value.toObject();
+        if(!launchable(m_fleet,host,p["provider"].toString()))continue;
+        p["host"]=host;p["machine"]=host.isEmpty()?m_fleet.local().host:host;
         p["removed"]=removed;
         auto usage = m_usageStore->data(AccountUsageRef::profile(p));
         if (usage["status"] == "loading" || ((usage["status"] == "unavailable" || usage["status"] == "offline") && usage["identity"].toObject().isEmpty())) {
@@ -569,7 +578,8 @@ void AccountsPage::renderMachines()
         const auto p = value.toObject(); present << p["host"].toString();
         signature << AccountCatalog::profileKey(p) << p["label"].toString() << QString::number(online(p["host"].toString()));
     }
-    const auto hosts = accountHosts(m_fleet, m_explicitHost);
+    auto hosts = accountHosts(m_fleet, m_explicitHost);
+    hosts.removeIf([&](const QString &host) { return !launchable(m_fleet, host, account["provider"].toString()); });
     for (const auto &host : hosts) signature << host << QString::number(online(host));
     int available = 0; for (const auto &host : hosts) if (!account.isEmpty() && !present.contains(host)) ++available;
     m_copy->setEnabled(!account.isEmpty() && m_requests.isEmpty() && available > 0);
@@ -638,7 +648,12 @@ void AccountsPage::add()
     QDialog dialog(this); dialog.setWindowTitle(tr("Add agent account")); dialog.setObjectName("accountDialog"); dialog.setMinimumWidth(490);
     auto *layout = new QVBoxLayout(&dialog);layout->setSizeConstraint(QLayout::SetMinimumSize);auto *hint = label(); layout->addWidget(hint);
     auto *form = new QFormLayout; auto *machine = new QComboBox;machine->setObjectName("addAccountMachine"); fillMachines(machine, m_fleet, m_explicitHost); machine->setCurrentIndex(qMax(0, machine->findData(m_machine->currentData())));
-    auto *provider = new QComboBox;provider->setObjectName("addAccountProvider"); provider->addItems({"codex", "claude", "kimi", "dsh"});
+    auto *provider = new QComboBox;provider->setObjectName("addAccountProvider");
+    const auto providers=[=] {
+        QStringList names;for (const auto *name : {"codex", "claude", "kimi", "dsh"}) if (launchable(m_fleet, machine->currentData().toString(), name)) names << name;
+        return names;
+    };
+    provider->addItems(providers());
     auto *saved=new QComboBox;saved->setObjectName("savedAccount");auto *savedLabel=label(tr("Account"));
     auto *name = new QLineEdit;name->setObjectName("addAccountName"); name->setPlaceholderText(tr("Work, Personal, Team…"));auto *nameLabel=label(tr("Account name"));
     form->addRow(tr("Machine"), machine); form->addRow(tr("Agent"), provider);form->addRow(savedLabel,saved);form->addRow(nameLabel, name); layout->addLayout(form);
@@ -663,6 +678,12 @@ void AccountsPage::add()
         saved->setVisible(any);savedLabel->setVisible(any);update();
     };
     connect(name,&QLineEdit::textChanged,&dialog,update);connect(saved,&QComboBox::currentIndexChanged,&dialog,update);
+    connect(machine,&QComboBox::currentIndexChanged,&dialog,[=] {
+        QStringList shown;for (int i = 0; i < provider->count(); ++i) shown << provider->itemText(i);
+        if (shown == providers()) return;
+        const QSignalBlocker blocker(provider);const auto chosen=provider->currentText();
+        provider->clear();provider->addItems(providers());provider->setCurrentIndex(qMax(0,provider->findText(chosen)));
+    });
     connect(machine,&QComboBox::currentIndexChanged,&dialog,populate);connect(provider,&QComboBox::currentIndexChanged,&dialog,populate);populate();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     dialog.ensurePolished();dialog.adjustSize();
@@ -685,7 +706,8 @@ void AccountsPage::copy(const QString &target)
     layout->addWidget(label(tr("Use %1 on another machine.").arg(account["label"].toString())));
     auto *form = new QFormLayout; auto *machine = new QComboBox; machine->setObjectName("accountDestination");
     QStringList present; for (const auto &member : account["members"].toArray()) present << member.toObject()["host"].toString();
-    for (const auto &host : accountHosts(m_fleet, m_explicitHost)) if (!present.contains(host) && online(host)) machine->addItem(host.isEmpty() ? m_fleet.local().host : host, host);
+    for (const auto &host : accountHosts(m_fleet, m_explicitHost))
+        if (!present.contains(host) && online(host) && launchable(m_fleet, host, p["provider"].toString())) machine->addItem(host.isEmpty() ? m_fleet.local().host : host, host);
     if (machine->count() == 0) return;
     if (target != "*") machine->setCurrentIndex(qMax(0, machine->findData(target)));
     if (p["provider"] == "dsh") {

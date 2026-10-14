@@ -491,6 +491,25 @@ private slots:
         QCOMPARE(submit.value("action").toString(),"submit");QCOMPARE(submit.value("speech").toObject().value("machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
         QVERIFY(actions.readLine().isEmpty());
     }
+    void unavailableTargetExplainsDisabledVoice() {
+        // A conversation that can never take voice (a local Windows session, spec D16)
+        // names the reason on the disabled button; one that can keeps the usual hint.
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");
+        QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        const QString windows="Voice messages cannot reach this fixture computer.";
+        bool available=false;QString reason=windows;auto *recorder=new FixtureRecorder;
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{
+            auto value=target(composer);value.available=available;value.reason=reason;return value;
+        },recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");
+        QTRY_COMPARE(voice->toolTip(),windows);QVERIFY(!voice->isEnabled());QCOMPARE(voice->accessibleDescription(),windows);
+        QCOMPARE(voice->fullLabel(),QString("Voice"));voice->click();QCOMPARE(recorder->starts,0);
+        available=true;reason.clear();composer.setAvailability(true,{});
+        QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+        // Unavailable for a passing reason (offline, archived): the usual hint stays.
+        available=false;composer.setAvailability(true,{});
+        QVERIFY(!voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+    }
     void captureStartsBeforeDiscovery_data() {
         QTest::addColumn<QString>("gate");
         QTest::newRow("capability-probe")<<QString("help-gate");

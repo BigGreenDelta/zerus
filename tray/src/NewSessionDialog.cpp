@@ -438,8 +438,10 @@ void NewSessionDialog::updateAccounts()
 {
     if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updateForm();return;}
     QJsonArray localProfiles;
-    auto providers=m_agents;
-    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider))providers.append(provider);}
+    // The selected computer's agents only: the local Windows computer hides some (spec D16).
+    const auto style=MachinePlatform::of(host().isEmpty()?m_fleet.local().metrics:QJsonObject(),host().isEmpty());
+    QStringList providers;for(const auto &provider:m_agents)if(AccountCatalog::launchable(provider,style))providers.append(provider);
+    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider)&&AccountCatalog::launchable(provider,style))providers.append(provider);}
     for(const auto &provider:providers){
         for(const auto &value:m_accounts){
             auto profile=value.toObject();if(profile["provider"]!=provider||profile["id"].toString().isEmpty())continue;
@@ -488,7 +490,7 @@ void NewSessionDialog::updateAccounts()
         }
     }
     auto *shell=same?m_account->item(profiles.size()):new QListWidgetItem(m_account);
-    shell->setText(tr("Run shell"));shell->setData(Qt::UserRole,QString());shell->setData(ProviderRole,"sh");
+    shell->setText(style==MachinePlatform::Style::Windows?tr("Run PowerShell"):tr("Run shell"));shell->setData(Qt::UserRole,QString());shell->setData(ProviderRole,"sh");
     shell->setData(UsageTextRole,tr("Interactive terminal session"));shell->setIcon(workspaceIcon("terminal",iconColor));
     shell->setData(Qt::AccessibleTextRole,shell->text());
     if(m_preferredAgent=="sh")defaultIndex=lastIndex=explicitIndex=profiles.size();

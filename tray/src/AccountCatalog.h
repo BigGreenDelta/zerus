@@ -1,4 +1,5 @@
 #pragma once
+#include "MachinePlatform.h"
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -79,5 +80,11 @@ inline bool contains(const QJsonObject &account, const QString &profile) {
     for (const auto &member : account["members"].toArray())
         if (profileKey(member.toObject()) == profile) return true;
     return false;
+}
+// Whether a machine of this style starts the provider's agent. The local Windows
+// computer runs neither DeepSeek (a Phase 2 non-goal) nor OpenCode, whose launch
+// path does not resolve npm .cmd shims there (spec D16).
+inline bool launchable(const QString &provider, MachinePlatform::Style style) {
+    return style == MachinePlatform::Style::Posix || (provider != "dsh" && provider != "opencode");
 }
 }

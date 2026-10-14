@@ -53,6 +53,7 @@
 #include "SessionSearch.h"
 #include "SessionFileReference.h"
 #include "SessionGoal.h"
+#include "MachinePlatform.h"
 #include <cmath>
 
 #include <QApplication>
@@ -584,7 +585,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (!entry || m_details.isEmpty()) return target;
         target.key=entry->key;target.host=entry->host;target.session=entry->session.name;
         target.run=m_details.value("run_id").toString();target.conversation=m_details.value("conversation_id").toString();
-        target.available=entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        // Voice messages to local Windows sessions are a Phase 2 non-goal (spec D16).
+        const bool localWindows=entry->host.isEmpty()&&MachinePlatform::of(m_fleet.local().metrics,true)==MachinePlatform::Style::Windows;
+        target.available=!localWindows && entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        if(localWindows)target.reason=tr("Voice messages cannot be sent to sessions on this Windows computer yet.");
         if(CacheStatus::expired(m_details))target.warning=CacheStatus::warning(m_details)+tr("\n\nSend this voice message with the full conversation context?");
         return target;
     });
@@ -1985,6 +1989,7 @@ void SessionsWindow::showWorkspaceSettings()
 void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
+    m_settingsPage->setMobileGateway(fleet.local().localSessions&&MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Posix);
     m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {

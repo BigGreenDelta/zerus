@@ -178,6 +178,8 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
+    void enabledWindowsComputerIsNoMobileGateway();
+    void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
     void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -6815,7 +6817,10 @@ void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
         "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
         "elif a[0]=='worktrees':print('{\"state\":\"not_repo\"}')\n"));
     QSettings().setValue("workspace/launchOpenTerminal",true);
-    NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no OpenCode (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    NewSessionDialog dialog(FakeCli::program(fake),state,{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
     auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
     QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
@@ -6886,7 +6891,10 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     QFETCH(QString,agent);
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/workspace/infra");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    SessionsWindow window(program());auto state=fleet();window.setFleet(state);window.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no DeepSeek (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.show();
     constexpr int noticeMs=250;window.setNoticeDurationForTests(noticeMs);
     QSignalSpy terminal(&window,&SessionsWindow::newSessionRequested);
     auto *client=window.findChild<HgsClient *>();QSignalSpy launched(client,&HgsClient::nativeSessionLaunched);
@@ -7435,7 +7443,11 @@ void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
     QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
-    window.setFleet(fleet());QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
+    // A Linux computer that runs sessions is a mobile gateway; without a platform
+    // a Windows build would take this computer for Windows, which never is one.
+    auto linuxFleet=fleet();auto linuxBox=linuxFleet.local();linuxBox.metrics=QJsonObject{{"platform","linux"}};
+    linuxFleet.setLocal(linuxBox,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(linuxFleet);QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
     NewSessionDialog launch(program(),state,{},"codex");launch.show();
     auto *machine=launch.findChild<QComboBox *>("launchComputer");QVERIFY(machine);
     QCOMPARE(machine->count(),1);QCOMPARE(machine->itemData(0).toString(),QString("mac"));
@@ -7488,6 +7500,54 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryEnabled")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryRule_service")->isEnabled());
+}
+
+// An enabled Windows computer runs sessions, so it keeps its recovery policy, but
+// it is no mobile gateway (spec D16): Mobile connection stays hidden.
+void TestSessionsWindow::enabledWindowsComputerIsNoMobileGateway(){
+    QTemporaryDir fixture;QVERIFY(fixture.isValid());const auto script=fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+if a[:1]!=['recovery']:sys.exit(2)
+print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer","enabled":false,"enabled_at":0,"service":true,"network":true,"rate_limit":true,"delays":[15,30,60,300]}}')
+)PY"));
+    QSettings().remove("recovery/sharedPolicy");
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
+    QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
+    // Recovery includes this computer as well as the remote machine.
+    static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
+    auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    sections->setCurrentRow(5);window.setFleet(state);QVERIFY(sections->item(5)->isHidden());QCOMPARE(sections->currentRow(),0);
+}
+
+// Voice sends to local Windows sessions are a Phase 2 non-goal (spec D16): the
+// disabled voice button says why.
+void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
+    const QJsonObject details{{"tracked",true},{"run_id","fixture-run"},{"conversation_id","fixture-conversation"},
+        {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("windows-voice",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
+    auto *voice=composer->findChild<ToolbarChip *>("voiceRecord");QVERIFY(voice);
+    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_VERIFY(!voice->isEnabled());
+    QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){
