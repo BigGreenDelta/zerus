@@ -347,13 +347,14 @@ fn working_on_continuation(job: &Value, s: &Value) -> bool {
 /// An account has one recovery request in flight at a time, until the agent
 /// accepts its continuation and then makes progress: from there the provider
 /// serves the account again, and a long working turn must not hold the
-/// account's other sessions at "Waiting to retry".
+/// account's other sessions at "Waiting to retry". Turn-start markers that
+/// follow the accepted input (Kimi's TurnStarted) are not provider progress.
 fn occupies(job: &Value, s: &Value) -> bool {
     match string(job, "state") {
         "dispatching" => true,
         "retrying" => !(job["acknowledged"] == true
             && s["phase"] != "error"
-            && seconds(s, "provider_status_at") > seconds(job, "user_at")),
+            && seconds(s, "provider_status_at") > seconds(job, "user_at").max(seconds(s, "turn_started"))),
         _ => false,
     }
 }
@@ -1425,6 +1426,25 @@ mod tests {
             job["state"] = json!(state);
             assert!(!occupies(&job, &s), "{state}");
         }
+    }
+    #[test]
+    fn a_turn_start_after_the_continuation_is_not_provider_progress() {
+        // Kimi reports TurnStarted (and TaskStarted) right after the
+        // continuation's UserPromptSubmit, before the provider answers.
+        let mut s = snapshot("kimi");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        job["state"] = json!("retrying");
+        job["attempt"] = json!(1);
+        job["sent_at"] = json!(20.0);
+        job["acknowledged"] = json!(true);
+        job["user_at"] = json!(21.0);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["turn_started"] = json!(21.2);
+        s["provider_status_at"] = json!(21.2);
+        assert!(occupies(&job, &s), "the turn started but the provider has not served it");
+        s["provider_status_at"] = json!(22.0);
+        assert!(!occupies(&job, &s), "a later tool call shows the provider serves the account");
     }
     #[test]
     fn late_acknowledgement_cannot_restart_an_uncertain_episode() {
