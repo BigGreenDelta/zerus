@@ -12,8 +12,8 @@ class SessionActions(unittest.TestCase):
     write_record=fixtures.InputTransport.write_record
     screen=fixtures.InputTransport.screen
     received=fixtures.InputTransport.received
-    def request(self,command,data,ok=True):
-        args=[str(HGS),command,self.name]
+    def request(self,command,data,ok=True,name=None):
+        args=[str(HGS),command,name or self.name]
         if command=='attachment':args+=['--stage']
         result=subprocess.run(args+['--json'],input=json.dumps(data),env=self.env,text=True,capture_output=True,timeout=10)
         if ok:self.assertEqual(result.returncode,0,result.stderr)
@@ -82,5 +82,25 @@ class SessionActions(unittest.TestCase):
         self.assertTrue(path.is_relative_to(self.state/'attachments'));self.assertEqual(path.stat().st_mode&0o777,0o600)
         self.assertEqual(self.received(),b'')
         data['expected_run_id']='another';self.request('attachment',data,ok=False);self.assertEqual(self.received(),b'')
+    def test_untracked_shell_upload_is_bound_to_its_live_session(self):
+        # A shell from `hgs sh -d` has no run identity: the session's creation time
+        # and the absence of a run marker bind the copy instead.
+        shell='sh/upload-test';self.tmux('new-session','-d','-s',shell,'-x','80','-y','24','sleep','300')
+        created=int(self.tmux('display-message','-p','-t','='+shell+':','#{session_created}'))
+        data=dict(request_id=str(uuid.uuid4()),expected_run_id='',expected_conversation_id='',expected_created=created,
+                  attachments=[dict(name='notes.txt',mime='text/plain',data_base64=base64.b64encode(b'untracked fixture').decode())])
+        staged=self.request('attachment',data,name=shell)
+        self.assertEqual((staged['status'],staged['name'],staged['run_id'],staged['conversation_id'],staged['created']),('staged',shell,'','',created))
+        from pathlib import Path
+        path=Path(staged['files'][0]['path']);self.assertEqual(path.read_bytes(),b'untracked fixture')
+        self.assertTrue(path.is_relative_to(self.state/'attachments'));self.assertEqual(path.stat().st_mode&0o777,0o600)
+        # Another session under that name, an ended one, or a missing creation time.
+        self.assertIn('Session changed',self.request('attachment',dict(data,expected_created=created-1),ok=False,name=shell))
+        self.assertIn('Session changed',self.request('attachment',data,ok=False,name='sh/ended'))
+        self.assertIn('no saved binding',self.request('attachment',{k:v for k,v in data.items() if k!='expected_created'},ok=False,name=shell))
+        # A tracked run whose identity the caller has not loaded yet.
+        tracked=int(self.tmux('display-message','-p','-t','='+self.name+':','#{session_created}'))
+        self.assertIn('Wait for the session identity',self.request('attachment',dict(data,expected_created=tracked),ok=False))
+        self.assertEqual(self.received(),b'')
 
 if __name__=='__main__':unittest.main()
