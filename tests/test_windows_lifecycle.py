@@ -47,6 +47,7 @@ import uuid
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT, HostCase, open_host
 
 if os.name == "nt":
+    import _winapi
     from ctypes import wintypes
 
     KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -471,6 +472,11 @@ class Launch(LifecycleCase):
         self.assertTrue(os.path.samefile(program, self.cli), program)
         self.assertEqual(self.hgs("--dry-run", "kill", "fake_agent/project/dry").stdout,
                          "session-host kill -t fake_agent/project/dry\n")
+        # A session takes its folder's letter case on disk; a junction keeps its own name (spec D15).
+        _winapi.CreateJunction(str(self.project), str(self.work / "site"))
+        for folder, name in (("PROJECT", "fake_agent/project/cased"), ("site", "fake_agent/site/cased")):
+            printed = self.hgs("--dry-run", "fake_agent", str(self.work / folder), "--new", "-n", "cased", "-d").stdout
+            self.assertTrue(printed.startswith(f"session-host create-session -d -s {name} -c "), printed)
         self.assertEqual(self.status(), {"running": False})
 
 
