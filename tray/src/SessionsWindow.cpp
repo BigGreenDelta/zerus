@@ -1297,7 +1297,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     restartEntry->setProperty("glyph", "zerus");
     restartEntry->setIconSize(QSize(14, 14));
     restartEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
-    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; agents and tmux keep running."));
+    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; sessions keep running."));
     restartEntry->setAccessibleName(restartEntry->toolTip());
     statusLayout->addWidget(restartEntry);
     auto restartEntryState = [updates, restartEntry] { restartEntry->setVisible(updates->restartRequired()); };
@@ -2747,7 +2747,7 @@ void SessionsWindow::selectSession()
         m_processPollAge.invalidate();m_inspectionAge.invalidate();
         m_childrenHtml.clear(); m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
         const auto *entry = selected();
-        m_terminal->setSession(m_client.executable(), entry ? entry->host : QString(), entry ? entry->session.name : QString());
+        m_terminal->setSession(m_client.executable(), entry ? entry->host : QString(), entry ? entry->session.name : QString(), {}, entry ? entry->machine : QString());
         if (!child.isEmpty()) openSubagent(child);
         inspect(); renderDetails();
         if (selected() && m_subagentId.isEmpty() && m_detailTabs->currentWidget() == m_terminal) m_terminal->connectSession();
@@ -3115,7 +3115,7 @@ void SessionsWindow::renderDetails()
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
     renderQuestion(*entry);
     updateSessionFeedback();
-    m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());
+    m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString(), entry->machine);
     m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
     const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.

@@ -585,6 +585,50 @@ private slots:
     QVERIFY(!view.isConnected());
   }
 
+  void disconnectNamesTheMachineOfTheSession() {
+    // Sessions continue on their machine, which is not always tmux (Windows).
+    const QString idle = m_dir.filePath(QStringLiteral("idle"));
+    QVERIFY(FakeCli::install(idle, "#!/usr/bin/env python3\nimport sys\nsys.stdin.buffer.read()\n"));
+    const QString done = m_dir.filePath(QStringLiteral("done"));
+    QVERIFY(FakeCli::install(done, "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n"));
+    TerminalView view;
+    QSignalSpy status(&view, &TerminalView::statusChanged);
+    view.setSession(FakeCli::program(idle), QStringLiteral("mac"),
+                    QStringLiteral("codex/p/name"), {}, QStringLiteral("mac"));
+    view.connectSession();
+    QVERIFY(view.isConnected());
+    view.disconnectSession();
+    QCOMPARE(status.last().first().toString(),
+             QStringLiteral("Disconnected — the session continues on mac"));
+    // Switching sessions names the machine of the one left behind.
+    view.setSession(FakeCli::program(idle), {}, QStringLiteral("codex/p/name"),
+                    {}, QStringLiteral("workstation"));
+    view.connectSession();
+    QVERIFY(view.isConnected());
+    view.setSession(FakeCli::program(idle), QStringLiteral("mac"),
+                    QStringLiteral("codex/p/other"), {}, QStringLiteral("mac"));
+    QVERIFY(!view.isConnected());
+    QCOMPARE(status.last().first().toString(),
+             QStringLiteral("Disconnected — the session continues on workstation"));
+    // An attach client that ends by itself.
+    view.setSession(FakeCli::program(done), QStringLiteral("mac"),
+                    QStringLiteral("codex/p/other"), {}, QStringLiteral("mac"));
+    view.connectSession();
+    QTRY_VERIFY(!view.isConnected());
+    QTRY_COMPARE(status.last().first().toString(),
+                 QStringLiteral("Disconnected — the session continues on mac"));
+    // Without a machine label.
+    view.setSession(FakeCli::program(idle), {}, QStringLiteral("codex/p/name"));
+    view.connectSession();
+    QVERIFY(view.isConnected());
+    view.disconnectSession();
+    QCOMPARE(status.last().first().toString(),
+             QStringLiteral("Disconnected — the session keeps running"));
+    for (const auto &entry : status)
+      QVERIFY2(!entry.first().toString().contains(QStringLiteral("tmux")),
+               qPrintable(entry.first().toString()));
+  }
+
   void tmuxDetachReconnectPreservesAgent() {
     if (QStandardPaths::findExecutable(QStringLiteral("tmux")).isEmpty())
       QSKIP("tmux not installed");
