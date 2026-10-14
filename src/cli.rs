@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use std::process::Command;
 use std::{
+    borrow::Cow,
     env, fmt, fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -296,6 +297,20 @@ fn nested_guard(dry: bool) -> Result<()> {
 pub(crate) fn usage() -> &'static str {
     USAGE
 }
+/// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
+/// has no tmux C-v binding for `hgs paste`, and its dry runs print the session
+/// host's requests, so its text does not name tmux.
+fn usage_text(tmux: bool) -> Cow<'static, str> {
+    if tmux {
+        return USAGE.into();
+    }
+    USAGE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("hgs paste "))
+        .map(|line| line.replace("the tmux/ssh command", "the session-host/ssh command") + "\n")
+        .collect::<String>()
+        .into()
+}
 
 pub fn dispatch(args: Vec<String>) -> Result<i32> {
     // Private: the screen model behind the differential tmux capture test.
@@ -357,7 +372,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
     }
     let Some(command) = args.get(index) else {
-        eprint!("{USAGE}");
+        eprint!("{}", usage_text(cfg!(unix)));
         return Ok(1);
     };
     let args = &args[index + 1..];
@@ -368,7 +383,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, "--help", args, dry);
             }
-            print!("{USAGE}");
+            print!("{}", usage_text(cfg!(unix)));
             #[cfg(windows)]
             print!("{}", crate::host::admin::HELP);
             return Ok(0);
@@ -2114,6 +2129,28 @@ mod tests {
         assert!(!resume_stands(rc, 0, 5, false));
         // A paused agent that exits with an ordinary failure was still stopped.
         assert!(resume_stands(1, 0, 5, true));
+    }
+
+    #[test]
+    fn usage_names_tmux_only_where_it_hosts_the_sessions() {
+        // Unix keeps tmux's text byte for byte, capability markers included.
+        assert_eq!(usage_text(true), USAGE);
+        // Windows has no `hgs paste` and its dry runs print the host's requests;
+        // every other line stays as it is.
+        let neutral = usage_text(false);
+        assert!(!neutral.contains("tmux"), "{neutral}");
+        assert_eq!(
+            neutral,
+            USAGE
+                .replace(
+                    "       hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use\n",
+                    ""
+                )
+                .replace(
+                    "  --dry-run  print the tmux/ssh command\n",
+                    "  --dry-run  print the session-host/ssh command\n"
+                )
+        );
     }
 
     #[test]
