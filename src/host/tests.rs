@@ -2015,7 +2015,7 @@ mod terminal_backend {
         },
         state::backend::{
             self as terminal,
-            host::{Connector, Failure, HostBackend, HOST_DIED},
+            host::{Connector, Failure, HostBackend, HOST_DIED, STARTUP},
             LaunchSpec, PaneField, StageErrors, TerminalBackend, RUN_CHANGED,
         },
     };
@@ -2625,6 +2625,49 @@ mod terminal_backend {
             ))
         );
         assert!(screen.shown().ends_with("[exited]\r\n"));
+
+        // A client left at once from a program that runs has started; the
+        // session runs on.
+        let attached_to = |name: &str| {
+            let listed: Listed = connect(&host).call(Op::List).unwrap();
+            listed
+                .sessions
+                .iter()
+                .any(|session| session.name == name && session.attached == 1)
+        };
+        let left = {
+            let (backend, spec) = (backend.clone(), spec("g", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || attached_to("fake_agent/p/g"));
+        let since = Instant::now();
+        screen.keys(b"\x02\x04");
+        assert_eq!(left.join().unwrap(), Ok((0, false)));
+        assert!(since.elapsed() < STARTUP, "the launch waited");
+        let listed: Listed = connect(&host).call(Op::List).unwrap();
+        assert!(listed
+            .sessions
+            .iter()
+            .any(|session| session.name == "fake_agent/p/g"));
+        // So has a program that fails only after the startup time.
+        let backend = Arc::new(
+            HostBackend::new(Direct {
+                host: host.clone(),
+                creates: Arc::default(),
+                screen: Some(screen.clone()),
+            })
+            .with_startup(startup),
+        );
+        let since = Instant::now();
+        let late = {
+            let (backend, spec) = (backend.clone(), spec("h", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || attached_to("fake_agent/p/h"));
+        thread::sleep(startup.saturating_sub(since.elapsed()));
+        launcher.program(7).exit(2);
+        assert_eq!(late.join().unwrap(), Ok((0, false)));
+        assert_eq!(launcher.count(), 8);
     }
 
     /// A host that answers one attach, shows a screen, reads one key and then
