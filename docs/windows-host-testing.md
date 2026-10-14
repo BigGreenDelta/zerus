@@ -154,8 +154,10 @@ pane=$("$hgs" __host call '{"op":"resolve_target","target":{"name":"fake_agent/p
     python -c 'import json, sys; print(json.load(sys.stdin)["ok"]["pane"])')
 "$hgs" __host backend '{"op":"set_run_marker","name":"fake_agent/project/three","run_id":"run-1"}'
 "$hgs" __host backend '{"op":"input_state","pane":"'"$pane"'","name":"fake_agent/project/three","run_id":"run-1","agent":"fake_agent","pid":'"$pid"'}'
+ends=$(grep -c ' ended: ' "$root/state/host.log")
 "$hgs" __host backend '{"op":"request_exit","pane":"'"$pane"'","pid":'"$pid"'}'  # the pause
-tail -1 "$root/state/host.log"  # session $N ended: exit 130 (0x00000082)
+until [ "$(grep -c ' ended: ' "$root/state/host.log")" -gt "$ends" ]; do sleep 0.2; done
+grep ' ended: ' "$root/state/host.log" | tail -1  # session $N ended: exit 130 (0x00000082)
 ```
 
 With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running host
