@@ -120,13 +120,7 @@ pub(super) fn run(provider: &str, dry: bool) -> Result<i32> {
     let powershell: Option<Vec<String>> = None;
     // Download completely before running, so a failed transfer cannot execute
     // a partial script. Only the provider's fixed HTTPS installer is accepted.
-    // PowerShell runs only a `.ps1` file, and Windows PowerShell opens it only
-    // once no other handle may write to it, so the file is closed here and
-    // removed when `script` drops.
-    let script = tempfile::Builder::new()
-        .suffix(if windows { ".ps1" } else { "" })
-        .tempfile()?
-        .into_temp_path();
+    let script = tempfile::NamedTempFile::new()?;
     let status = platform::status(
         Command::new("curl")
             .args([
@@ -146,7 +140,7 @@ pub(super) fn run(provider: &str, dry: bool) -> Result<i32> {
                 "2097152",
                 "--output",
             ])
-            .arg(&script)
+            .arg(script.path())
             .arg(url),
     )?;
     if !status.success() {
@@ -155,10 +149,20 @@ pub(super) fn run(provider: &str, dry: bool) -> Result<i32> {
             "Could not download the agent installer. Nothing was executed.",
         ));
     }
-    if powershell.is_some() {
-        fs::write(&script, powershell_script(fs::read(&script)?))?;
-    }
-    let command = script_command(&script, powershell.as_deref());
+    // PowerShell runs only a `.ps1` file, and Windows PowerShell opens it only
+    // while no other handle may write to it: it gets a closed copy, removed on
+    // drop.
+    let copy;
+    let run = match powershell {
+        None => script.path(),
+        Some(_) => {
+            let mut file = tempfile::Builder::new().suffix(".ps1").tempfile()?;
+            file.write_all(&powershell_script(fs::read(script.path())?))?;
+            copy = file.into_temp_path();
+            &copy
+        }
+    };
+    let command = script_command(run, powershell.as_deref());
     platform::wait_interactive(Command::new(&command[0]).args(&command[1..]))
 }
 
