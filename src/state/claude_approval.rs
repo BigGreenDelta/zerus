@@ -496,10 +496,14 @@ fn answered(record:&Value,screen:&str)->Option<bool> {
     else {None}
 }
 
+/// A main-agent request still at Needs approval. Listings, inspection and
+/// `hgs read` reconcile every session; only this one captures its terminal.
+fn pending(record:&Value)->bool {eligible(record)&&request(record).is_some()}
+
 /// Settle a request answered in Terminal, as an Activity answer does. Without
 /// proof on the screen the session stays at Needs approval until a hook.
 pub(super) fn reconcile(record:Value)->Value {
-    if !eligible(&record)||request(&record).is_none() {return record;}
+    if !pending(&record) {return record;}
     let screen=kimi_tui_choice::identity(&record).and_then(|current|kimi_tui_choice::capture(&current));
     match screen.ok().and_then(|screen|answered(&record,&screen)) {
         Some(approved) => settle(&record,!approved).ok().flatten().unwrap_or(record),
@@ -803,6 +807,27 @@ pub(super) fn reconcile(record:Value)->Value {
         // Only indented rows belong to the spinner; a row at the margin is newer.
         assert_eq!(answered(&again,&RUNNING_TIP.replace("  ⎿ \u{a0}Tip:","● Tip:")),None);
         assert_eq!(answered(&again,&RUNNING_TIP.replace("     suggested edits","suggested edits")),None);
+    }
+
+    #[test] fn only_a_waiting_request_reads_the_screen_to_settle() {
+        let bash=record("Bash",json!({"command":LONG}));
+        assert!(pending(&bash));
+        assert!(pending(&record("Read",json!({"file_path":PATH}))));
+        // Another phase or agent, a failed or pausing run, a question, no request.
+        let mut others=Vec::new();
+        for (key,value) in [("phase",json!("tool")),("phase",json!("interrupted")),("phase",json!("input")),("agent",json!("codex")),
+            ("error",json!("Provider failed")),("pausing",json!({"pid":std::process::id(),"start":process_start(std::process::id())}))] {
+            let mut changed=bash.clone();changed[key]=value;others.push(changed);
+        }
+        for tool in ["AskUserQuestion",""] {
+            let mut changed=bash.clone();changed["pending_approval"]["tool_name"]=json!(tool);others.push(changed);
+        }
+        let mut settled=bash.clone();settled.as_object_mut().unwrap().remove("pending_approval");others.push(settled);
+        for other in others {
+            assert!(!pending(&other),"{other}");
+            // Reconciling returns such a record as it was, without a terminal.
+            assert_eq!(reconcile(other.clone()),other);
+        }
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {

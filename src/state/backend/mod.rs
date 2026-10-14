@@ -25,6 +25,64 @@ const UNSUPPORTED: &str = "Local sessions are not supported on this computer yet
 /// What `hgs a --existing --run-id` reports when the session runs another run.
 pub(crate) const RUN_CHANGED: &str = "session run changed; refresh before reconnecting";
 
+/// User-visible text that names the session terminal. Where tmux hosts the
+/// sessions (Unix) it keeps tmux's words byte for byte; on Windows it says the
+/// same without them, as the session host is not named to its users.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Wording {
+    tmux: &'static str,
+    neutral: &'static str,
+}
+impl Wording {
+    /// The text where tmux hosts the sessions (`tmux`) or where it does not.
+    pub(crate) const fn on(self, tmux: bool) -> &'static str {
+        if tmux {
+            self.tmux
+        } else {
+            self.neutral
+        }
+    }
+    /// The text for this computer's session terminal.
+    pub(crate) const fn text(self) -> &'static str {
+        self.on(cfg!(unix))
+    }
+}
+/// `hgs a --existing` and `hgs rename`: the terminal named no `$N` session ID.
+pub(crate) const INVALID_SESSION_ID: Wording = Wording {
+    tmux: "invalid tmux session identity",
+    neutral: "invalid session identity",
+};
+/// Rename recovery: the renamed session now has neither the old nor the new name.
+pub(crate) const RENAME_RECOVERY_CHANGED: Wording = Wording {
+    tmux: "tmux session changed during rename recovery",
+    neutral: "session changed during rename recovery",
+};
+/// A session's `terminal_reason` while it is not its exact live tracked pane.
+pub(crate) const TERMINAL_NEEDS_PANE: Wording = Wording {
+    tmux: "Terminal requires this exact live tracked tmux pane",
+    neutral: "Terminal requires this exact live tracked pane",
+};
+/// `hgs a` of an OpenCode session.
+pub(crate) const OPENCODE_ATTACH: Wording = Wording {
+    tmux: "OpenCode uses Activity; this adapter has no tmux Terminal",
+    neutral: "OpenCode uses Activity; this adapter has no Terminal",
+};
+/// `hgs terminal` of an OpenCode session.
+pub(crate) const OPENCODE_TERMINAL: Wording = Wording {
+    tmux: "OpenCode uses its native API without a tmux Terminal",
+    neutral: "OpenCode uses its native API without a Terminal",
+};
+/// An OpenCode session's `terminal_reason`.
+pub(crate) const OPENCODE_TERMINAL_REASON: Wording = Wording {
+    tmux: "OpenCode uses its native API; this adapter has no tmux Terminal",
+    neutral: "OpenCode uses its native API; this adapter has no Terminal",
+};
+/// `hgs terminal` of a DeepSeek session and its `terminal_reason`.
+pub(crate) const DEEPSEEK_TERMINAL: Wording = Wording {
+    tmux: "DeepSeek uses a structured native API without a tmux Terminal",
+    neutral: "DeepSeek uses a structured native API without a Terminal",
+};
+
 /// What a command acts on.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Target<'a> {
@@ -473,6 +531,56 @@ mod tests {
             assert!(workspace::pane_cwds().is_empty());
             assert!(!current().session_exists("claude/p/a"));
         });
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    use super::*;
+
+    #[test]
+    fn only_tmux_is_named_and_its_words_stay_byte_for_byte() {
+        for (wording, tmux, neutral) in [
+            (
+                INVALID_SESSION_ID,
+                "invalid tmux session identity",
+                "invalid session identity",
+            ),
+            (
+                RENAME_RECOVERY_CHANGED,
+                "tmux session changed during rename recovery",
+                "session changed during rename recovery",
+            ),
+            (
+                TERMINAL_NEEDS_PANE,
+                "Terminal requires this exact live tracked tmux pane",
+                "Terminal requires this exact live tracked pane",
+            ),
+            (
+                OPENCODE_ATTACH,
+                "OpenCode uses Activity; this adapter has no tmux Terminal",
+                "OpenCode uses Activity; this adapter has no Terminal",
+            ),
+            (
+                OPENCODE_TERMINAL,
+                "OpenCode uses its native API without a tmux Terminal",
+                "OpenCode uses its native API without a Terminal",
+            ),
+            (
+                OPENCODE_TERMINAL_REASON,
+                "OpenCode uses its native API; this adapter has no tmux Terminal",
+                "OpenCode uses its native API; this adapter has no Terminal",
+            ),
+            (
+                DEEPSEEK_TERMINAL,
+                "DeepSeek uses a structured native API without a tmux Terminal",
+                "DeepSeek uses a structured native API without a Terminal",
+            ),
+        ] {
+            assert_eq!(wording.on(true), tmux);
+            assert_eq!(wording.on(false), neutral);
+            assert_eq!(wording.text(), if cfg!(unix) { tmux } else { neutral });
+        }
     }
 }
 

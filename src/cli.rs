@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use std::process::Command;
 use std::{
+    borrow::Cow,
     env, fmt, fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -311,6 +312,20 @@ fn nested_refusal(tmux: bool, session: Option<&str>, retry: Option<&str>) -> Str
 pub(crate) fn usage() -> &'static str {
     USAGE
 }
+/// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
+/// has no tmux C-v binding for `hgs paste`, and its dry runs print the session
+/// host's requests, so its text does not name tmux.
+fn usage_text(tmux: bool) -> Cow<'static, str> {
+    if tmux {
+        return USAGE.into();
+    }
+    USAGE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("hgs paste "))
+        .map(|line| line.replace("the tmux/ssh command", "the session-host/ssh command") + "\n")
+        .collect::<String>()
+        .into()
+}
 
 pub fn dispatch(args: Vec<String>) -> Result<i32> {
     // Private: the screen model behind the differential tmux capture test.
@@ -351,7 +366,17 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         // an isolated test host's sessions may run it (spec D2).
         #[cfg(windows)]
         session_process()?;
-        return run(&args[1..]);
+        let start = Instant::now();
+        let result = run(&args[1..]);
+        // A launch the desktop waits for learns how its session ended.
+        state::launches::finished(
+            start.elapsed(),
+            result
+                .as_ref()
+                .copied()
+                .map_err(|error| (error.code, error.message.as_str())),
+        );
+        return result;
     }
     let mut target = String::new();
     let mut dry = false;
@@ -372,7 +397,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
     }
     let Some(command) = args.get(index) else {
-        eprint!("{USAGE}");
+        eprint!("{}", usage_text(cfg!(unix)));
         return Ok(1);
     };
     let args = &args[index + 1..];
@@ -383,7 +408,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, "--help", args, dry);
             }
-            print!("{USAGE}");
+            print!("{}", usage_text(cfg!(unix)));
             #[cfg(windows)]
             print!("{}", crate::host::admin::HELP);
             return Ok(0);
@@ -887,6 +912,9 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
     }
+    // Before the terminal lists: a launch's session that this listing does not
+    // show existed before it began and has ended.
+    let launches = state::launches::Evidence::read();
     // A listing that fails is an error: no sessions would show live ones as stopped.
     let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
     let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
@@ -908,7 +936,12 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
-    state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
+    let mut merged = state::merge_snapshot(raw).map_err(|e| Error::new(1, e))?;
+    let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
+    if !ended.is_empty() {
+        merged["ended_launches"] = json!(ended);
+    }
+    Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {
     if !platform::local_sessions() {
@@ -984,7 +1017,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
-    if state::opencode::exists(session) {return Err(Error::new(1,"OpenCode uses Activity; this adapter has no tmux Terminal"));}
+    if state::opencode::exists(session) {return Err(Error::new(1,state::backend::OPENCODE_ATTACH.text()));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1036,7 +1069,7 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
             .strip_prefix('$')
             .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
     {
-        return Err(Error::new(1, "invalid tmux session identity"));
+        return Err(Error::new(1, state::backend::INVALID_SESSION_ID.text()));
     }
     if run_id.is_some_and(|expected| fields[1] != expected) {
         return Err(Error::new(1, crate::state::backend::RUN_CHANGED));
@@ -2052,6 +2085,13 @@ fn launch(
     if options.detached {
         let rc = terminal().launch(&spec)?.code;
         if rc == 0 {
+            if let Some(id) = &options.launch_id {
+                // A session that ends before a listing shows it still ends
+                // its launch's placeholder (`state::launches`).
+                if let Err(error) = state::launches::started(id, &session) {
+                    eprintln!("hgs: cannot record launch {id}: {error}");
+                }
+            }
             println!("hgs: started {session}");
         }
         return Ok(rc);
@@ -2199,5 +2239,57 @@ mod tests {
         assert!(!resume_stands(rc, 0, 5, false));
         // A paused agent that exits with an ordinary failure was still stopped.
         assert!(resume_stands(1, 0, 5, true));
+    }
+
+    #[test]
+    fn usage_names_tmux_only_where_it_hosts_the_sessions() {
+        // Unix keeps tmux's text byte for byte, capability markers included.
+        assert_eq!(usage_text(true), USAGE);
+        // Windows has no `hgs paste` and its dry runs print the host's requests;
+        // every other line stays as it is.
+        let neutral = usage_text(false);
+        assert!(!neutral.contains("tmux"), "{neutral}");
+        assert_eq!(
+            neutral,
+            USAGE
+                .replace(
+                    "       hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use\n",
+                    ""
+                )
+                .replace(
+                    "  --dry-run  print the tmux/ssh command\n",
+                    "  --dry-run  print the session-host/ssh command\n"
+                )
+        );
+    }
+
+    #[test]
+    fn an_existing_attach_names_tmux_only_where_it_hosts_the_sessions() {
+        // A session ID in another form than `$N` is refused before attaching.
+        use state::backend::PaneInfo;
+        struct Answers;
+        impl TerminalBackend for Answers {
+            fn probe(&self, _target: Target, _fields: &[PaneField]) -> Option<PaneInfo> {
+                Some(PaneInfo::new("@1\trun-1\n".into()))
+            }
+        }
+        let config = Config {
+            home: String::new(),
+            dir: PathBuf::new(),
+            state: PathBuf::new(),
+            selves: Vec::new(),
+            peers: Vec::new(),
+            base_peers: Vec::new(),
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let args = ["claude/MyProj/work-1", "--existing"].map(String::from);
+        let error =
+            state::backend::with_fake(&Answers, || attach_command(&config, &args, "local", false))
+                .unwrap_err();
+        assert_eq!(error.code, 1);
+        assert_eq!(error.message, state::backend::INVALID_SESSION_ID.text());
     }
 }

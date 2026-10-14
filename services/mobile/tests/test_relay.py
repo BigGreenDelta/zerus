@@ -264,7 +264,10 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
     async def test_body_cap_nonfinite_and_poll_bounds(self):
         response = await self.client.post("/v1/node/heartbeat", data=b'{"snapshot":NaN}', headers={**self.headers(True), "Content-Type": "application/json"})
         self.assertEqual(response.status, 400)
-        response = await self.client.post("/v1/node/heartbeat", data=io.BytesIO(b"x" * (1024 * 1024 + 1)), headers={**self.headers(True), "Content-Type": "application/json"})
+        # The Rust relay rejects the declared length without reading the body and may
+        # close the socket; a client still uploading can then see EPIPE instead of 413.
+        # Expect: 100-continue reads that rejection before any body byte is written.
+        response = await self.client.post("/v1/node/heartbeat", data=io.BytesIO(b"x" * (1024 * 1024 + 1)), expect100=True, headers={**self.headers(True), "Content-Type": "application/json"})
         self.assertEqual(response.status, 413)
         await self.call("GET", "/v1/events?wait=26", expected=400)
         await self.call("GET", "/v1/node/requests?wait=NaN", node=True, expected=400)

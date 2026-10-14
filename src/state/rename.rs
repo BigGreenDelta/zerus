@@ -56,7 +56,7 @@ fn session_id(name: &str) -> Result<String> {
         .value()
         .to_owned();
     if !id.starts_with('$') || !id[1..].chars().all(|c| c.is_ascii_digit()) {
-        return Err("invalid tmux session identity".into());
+        return Err(backend::INVALID_SESSION_ID.text().into());
     }
     Ok(id)
 }
@@ -261,7 +261,7 @@ pub(super) fn recover_locked() -> Result<()> {
                     continue;
                 }
                 if current != new {
-                    return Err("tmux session changed during rename recovery".into());
+                    return Err(backend::RENAME_RECOVERY_CHANGED.text().into());
                 }
             }
         }
@@ -375,4 +375,34 @@ pub(super) fn remove_legacy(record: &Value) -> Result<()> {
         remove(&path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_id_names_tmux_only_where_it_hosts_the_sessions() {
+        struct Answers;
+        impl backend::TerminalBackend for Answers {
+            fn pane_info(
+                &self,
+                target: backend::Target,
+                _fields: &[backend::PaneField],
+            ) -> Result<backend::PaneInfo> {
+                let backend::Target::Name(name) = target else {
+                    unreachable!("{target:?}");
+                };
+                let id = if name.ends_with("work-1") { "$3" } else { "@1" };
+                Ok(backend::PaneInfo::new(format!("{id}\n")))
+            }
+        }
+        backend::with_fake(&Answers, || {
+            assert_eq!(session_id("claude/MyProj/work-1").unwrap(), "$3");
+            assert_eq!(
+                session_id("claude/MyProj/work-2").unwrap_err(),
+                backend::INVALID_SESSION_ID.text()
+            );
+        });
+    }
 }

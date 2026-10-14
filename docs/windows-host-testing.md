@@ -138,8 +138,10 @@ at once, before any record exists. A launch therefore watches its new session fo
 ended: its exit code and the last lines of its pane, wrapped rows joined): one
 that ends in that time with a failure fails the launch with exit 1, and the GUI
 shows the reason instead of waiting for the session. A detached launch that
-starts returns after those 3 s; `hgs resume`, restores and forks do not wait. In
-the window above:
+starts returns after those 3 s; `hgs resume`, restores and forks do not wait. A
+session that ends later without a record, or at once with exit 0, is reported by
+the next listing in `ended_launches` instead ([JSON and external
+clients](reference.md#json-and-external-clients)). In the window above:
 
 ```sh
 "$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
@@ -158,6 +160,13 @@ mode and its supervisor reports a console without VT and line input (Codex), so
 Codex sees Ctrl+C under any keyboard layout; otherwise, and for every program
 that reads VT input (Claude Code, Kimi, the fake agent), it goes as the C0 byte
 (spec D6).
+
+Text that names tmux on Unix says the same without it here (`Wording` in
+`src/state/backend/mod.rs`): `hgs a --existing` and `rename` refuse a session ID
+other than `$N` as `invalid session identity`, and the Terminal reasons of a
+session that is not a live tracked pane, OpenCode and DeepSeek name no `tmux
+pane` or `tmux Terminal`. `hgs --help` leaves out `hgs paste`, the tmux C-v
+binding, and gives `--dry-run` as printing the `session-host/ssh` command.
 
 ## The supervisor channel
 
