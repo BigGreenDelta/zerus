@@ -614,7 +614,9 @@ or naming an agent type; they are not listed either and never keep a finished
 session Working.
 
 File links retain their visible path and source position. Relative references
-resolve against that session's folder. Local references can open the file or its
+resolve against that session's folder. On Windows, references may also name a drive
+path (`C:\work\a.cpp:12`, `C:/work/a.cpp` or `file:///C:/work/a.cpp`); a share
+(`\\server\share\…`) never opens. Local references can open the file or its
 parent folder; remote references identify the host and offer **Download…** and
 **Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
 use that machine's configured SSH profile and SFTP, stream directly to disk and

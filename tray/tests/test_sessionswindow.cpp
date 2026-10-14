@@ -4663,9 +4663,6 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 {
-#ifdef Q_OS_WIN
-    QSKIP("Local session folders and files exist only on computers that run agents; a Windows control console has none.");
-#endif
     QFETCH(bool, folder); QFETCH(QString, name);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());

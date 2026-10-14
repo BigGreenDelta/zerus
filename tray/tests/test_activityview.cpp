@@ -226,6 +226,8 @@ private slots:
     void unknownQuestionReplyMessages();
     void nativeQuestionRepliesPreserveLiteralText();
     void preservesSessionFileReferences();
+    void fileReferencesFollowTheGuiPlatform_data();
+    void fileReferencesFollowTheGuiPlatform();
     void expandsMatchingSnapshotWithoutDuplicate();
     void kimiTurnStartedKeepsRequestBeforeTools();
     void taskNotificationIsAColoredNoticeNotYou();
@@ -1878,6 +1880,55 @@ void TestActivityView::preservesSessionFileReferences()
     QVERIFY(!SessionFileReference::parse("/tmp/file%0Acommand").valid());
     QCOMPARE(SessionFileReference::parse("LICENSE").path, QString("LICENSE"));
     QCOMPARE(SessionFileReference::parse("README.md#installation").location, QString("#installation"));
+}
+
+void TestActivityView::fileReferencesFollowTheGuiPlatform_data()
+{
+    // An empty path is an invalid reference.
+    QTest::addColumn<bool>("windows");
+    QTest::addColumn<QString>("href");
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<QString>("location");
+    // A Windows GUI reads drive paths with either separator, kept as written.
+    QTest::newRow("windows drive") << true << "C:\\work\\a b.cpp:12:3" << "C:\\work\\a b.cpp" << ":12:3";
+    QTest::newRow("windows drive slashes") << true << "C:/work/a.cpp:12" << "C:/work/a.cpp" << ":12";
+    QTest::newRow("windows drive fragment") << true << "c:\\work\\notes.md#intro" << "c:\\work\\notes.md" << "#intro";
+    QTest::newRow("windows drive root") << true << "D:\\" << "D:\\" << "";
+    QTest::newRow("windows file URL") << true << "file:///C:/work/a.cpp" << "C:/work/a.cpp" << "";
+    QTest::newRow("windows file URL decoded") << true << "file:///c:/work/x%20y.md#L4" << "c:/work/x y.md" << "#L4";
+    QTest::newRow("windows peer path") << true << "/home/user/notes.md:3" << "/home/user/notes.md" << ":3";
+    QTest::newRow("windows relative") << true << "docs/client%20map.md:12" << "docs/client map.md" << ":12";
+    // Never a share (UNC), however it is written, nor a drive-relative path.
+    QTest::newRow("windows share") << true << "\\\\server\\share\\a.txt" << "" << "";
+    QTest::newRow("windows share slashes") << true << "//server/share/a.txt" << "" << "";
+    QTest::newRow("windows share mixed") << true << "\\/server/share/a.txt" << "" << "";
+    QTest::newRow("windows share URL") << true << "file://server/share/a.txt" << "" << "";
+    QTest::newRow("windows share URL path") << true << "file:////server/share/a.txt" << "" << "";
+    QTest::newRow("windows share encoded") << true << "file:///%5C%5Cserver/share/a.txt" << "" << "";
+    QTest::newRow("windows device") << true << "\\\\?\\C:\\a.txt" << "" << "";
+    QTest::newRow("windows drive relative") << true << "C:a.txt" << "" << "";
+    QTest::newRow("windows drive control") << true << "C:\\work\\a%0A.txt" << "" << "";
+    QTest::newRow("windows drive query") << true << "C:/work/a.txt?x=1" << "" << "";
+    // POSIX GUIs read references as before.
+    QTest::newRow("posix drive") << false << "C:\\work\\a.cpp" << "" << "";
+    QTest::newRow("posix drive slashes") << false << "C:/work/a.cpp:12" << "" << "";
+    QTest::newRow("posix file URL") << false << "file:///C:/work/a.cpp" << "/C:/work/a.cpp" << "";
+    QTest::newRow("posix backslashes") << false << "\\\\server\\share\\a.txt" << "\\\\server\\share\\a.txt" << "";
+    QTest::newRow("posix share slashes") << false << "//server/share/a.txt" << "" << "";
+    QTest::newRow("posix path") << false << "/home/user/notes.md:3" << "/home/user/notes.md" << ":3";
+}
+
+void TestActivityView::fileReferencesFollowTheGuiPlatform()
+{
+    QFETCH(bool, windows); QFETCH(QString, href); QFETCH(QString, path); QFETCH(QString, location);
+    using MachinePlatform::Style;
+    const auto target = SessionFileReference::parse(href, windows ? Style::Windows : Style::Posix);
+    QCOMPARE(target.valid(), !path.isEmpty());
+    QCOMPARE(target.path, path);
+    QCOMPARE(target.location, location);
+    // References follow the platform the GUI runs on.
+    if ((MachinePlatform::build() == Style::Windows) == windows)
+        QCOMPARE(SessionFileReference::parse(href).path, path);
 }
 
 void TestActivityView::expandsMatchingSnapshotWithoutDuplicate()
