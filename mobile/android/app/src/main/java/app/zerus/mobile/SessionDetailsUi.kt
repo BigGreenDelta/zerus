@@ -3,6 +3,7 @@ package app.zerus.mobile
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -41,18 +42,19 @@ import org.json.JSONObject
     val target = session.target
     val status = if (model.activity == null && !model.demo) "Checking…" else SelectedSessionPresentation.status(session,model.activity)
     val freshness = if (model.demo) " / Preview" else if (model.activityVerified || model.activity == null) "" else " / Last known"
-    val provider = if (target.agentId.isNotBlank()) model.activity?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
-    val color = if (model.activity == null && !model.demo) MaterialTheme.colorScheme.onSurfaceVariant
-        else Color(DesktopSessionPalette.colors(DesktopSessionPalette.badge(SelectedSessionPresentation.session(session,model.activity),true).kind,
-            MaterialTheme.colorScheme.background.luminance() < .5f).foreground)
+    val kind = if (model.activity == null && !model.demo) DesktopBadgeKind.Neutral
+        else DesktopSessionPalette.badge(SelectedSessionPresentation.session(session,model.activity),true).kind
+    val colors = DesktopSessionPalette.colors(kind,MaterialTheme.colorScheme.background.luminance() < .5f)
     Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button,onClickLabel = "Session details",onClick = onDetails),
         verticalArrangement = Arrangement.Center) {
         Text(session.title,maxLines = 1,overflow = TextOverflow.Ellipsis,fontSize = 18.sp,lineHeight = 22.sp)
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val machineWidth = maxWidth * .4f
             Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(DesktopIcons.providerName(provider) + " / " + status + freshness,Modifier.weight(1f,fill = false),
-                    maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.labelSmall,color = color)
+                Surface(Modifier.weight(1f,fill = false),color = Color(colors.background),shape = RoundedCornerShape(5.dp)) {
+                    Text(status + freshness,Modifier.padding(horizontal = 7.dp,vertical = 3.dp),maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.labelSmall,color = Color(colors.foreground))
+                }
                 MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
                     Modifier.widthIn(max = machineWidth),colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
             }
@@ -63,6 +65,7 @@ import org.json.JSONObject
 @Composable internal fun SessionHeaderTools(model: ZerusViewModel, session: Session,onDetails: (() -> Unit)? = null,onJump: (ConversationMessageJump) -> Unit) {
     val target = session.target
     val settings = remember(model.activity) { SessionDetailsPresentation.settings(model.activity) }
+    val provider = if (target.agentId.isNotBlank()) model.activity?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
     var details by remember(target.key) { mutableStateOf(false) }
     var settingsOpen by remember(target.key) { mutableStateOf(false) }
     var menu by remember(target.key) { mutableStateOf(false) }
@@ -79,10 +82,17 @@ import org.json.JSONObject
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
     }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true }, modifier = Modifier.weight(1f)) {
-            Text(listOf(settings.model.ifBlank { "Model not reported" }, settings.effort).filter { it.isNotBlank() }.joinToString(" / "),
-                maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },
+            modifier = Modifier.weight(1f),contentPadding = PaddingValues(0.dp)) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val providerWidth = maxWidth * .45f
+                Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ProviderLabel(provider,Modifier.widthIn(max = providerWidth))
+                    Text(listOf(settings.model.ifBlank { "Model not reported" }, settings.effort).filter { it.isNotBlank() }.joinToString(" / "),
+                        Modifier.weight(1f),maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
         IconButton(onClick = {
             val result = model.markAllRead(listOf(target))
@@ -94,10 +104,10 @@ import org.json.JSONObject
                 else if (target.archiveId.isNotBlank()) "Read all unavailable for archived conversations"
                 else if (!model.readAllPending(target)) "Read all unavailable. Nothing in this conversation is unread on this phone"
                 else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
-        }) { Icon(Icons.Default.DoneAll,null) }
-        IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal") }
+        }) { Icon(Icons.Default.DoneAll,null,Modifier.size(20.dp)) }
+        IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
         Box {
-            IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions") }
+            IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions",Modifier.size(20.dp)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
                 DropdownMenuItem(text = { Text("Search loaded messages") },leadingIcon = { Icon(Icons.Default.Search,null) },
                     onClick = { menu = false;search = true })

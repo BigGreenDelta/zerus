@@ -1,10 +1,14 @@
 package app.zerus.mobile
 
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
@@ -15,6 +19,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import java.util.Locale
 
 /** Desktop geometry from tray/src/WorkspaceIcons.h and IdentityBadge.h.
@@ -214,4 +219,18 @@ object DesktopIcons {
 fun ProviderBadge(agent: String, modifier: Modifier = Modifier) {
     Icon(imageVector = DesktopIcons.providerIcon(agent), contentDescription = DesktopIcons.providerName(agent),
         modifier = modifier.size(18.dp), tint = DesktopIcons.providerColor(agent, MaterialTheme.colorScheme.surface.luminance() < .5f))
+}
+
+/** Provider pill geometry and colours from the desktop IdentityBadges renderer. */
+@Composable internal fun ProviderLabel(agent: String,modifier: Modifier = Modifier) {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < .5f
+    val foreground = DesktopIcons.providerColor(agent,dark)
+    Surface(modifier,color = DesktopIcons.providerBackground(dark),shape = RoundedCornerShape(4.dp)) {
+        Row(Modifier.padding(horizontal = 7.dp,vertical = 3.dp),verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Icon(DesktopIcons.providerIcon(agent),null,Modifier.size(14.dp),tint = foreground)
+            Text(DesktopIcons.providerName(agent),maxLines = 1,overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,color = foreground)
+        }
+    }
 }

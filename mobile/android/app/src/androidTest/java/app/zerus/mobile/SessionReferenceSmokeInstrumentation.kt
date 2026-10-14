@@ -110,6 +110,14 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
             }
         }
         node("Session details")
+        check(node("Session details").text?.contains("Claude")!=true) { "Provider still occupies the name/status header" }
+        node("Claude");node("Model not reported")
+        for(label in listOf("Read all","Terminal","Session actions")) {
+            val targetNode=if(label=="Read all") node(label) else action(label)
+            val frame=Rect().also(targetNode::getBoundsInScreen)
+            val minimum=48 * targetContext.resources.displayMetrics.density-1
+            check(frame.width()>=minimum && frame.height()>=minimum) { "$label touch target is too small: $frame" }
+        }
         SystemClock.sleep(250)
         screenshot("working-parent-header")
         tap("Session details");node("Overview")
@@ -123,6 +131,12 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
         val expected=checkNotNull(SessionReference.resolve(target,listOf(machine)).uri)
         await("parent clipboard") { clip()==expected }
         check(expected.contains("machine=${machine.machineId}&host=fixture-host"))
+        val background=JSONObject(raw.toString()).put("tracked",true).put("runtime_state","live").put("process_state","running")
+            .put("activity","idle").put("phase","idle").put("process_work",JSONObject().put("count",1))
+        main { session.value=session.value.copy(agent="Codex",raw=background);set(model,"setActivity",background) }
+        node("Background / Last known");node("Codex")
+        screenshot("background-parent-header")
+        main { session.value=session.value.copy(agent="Claude",raw=raw);set(model,"setActivity",raw) }
         main { set(model,"setMachines",listOf(machine.copy(machineId=""))) }
         tap("Session actions")
         node("This computer has not reported its Zerus identity. Refresh its connection.")
@@ -146,6 +160,7 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
             val frame=Rect().also(header::getBoundsInScreen)
             frame.width() <= 281 * targetContext.resources.displayMetrics.density && frame.height() >= 60 * targetContext.resources.displayMetrics.density
         }
+        SystemClock.sleep(250)
         screenshot("child-narrow-header")
         node("Session actions");check(find("Copy session reference")==null)
         tap("Session actions");check(action("Copy session reference").isEnabled)
