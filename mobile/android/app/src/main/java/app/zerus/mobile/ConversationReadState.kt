@@ -56,6 +56,23 @@ data class ConversationReadState(val records:List<ConversationReadRecord> = empt
 object ConversationReadPolicies {
     fun key(target:Target)=JSONArray(listOf(target.connectionId,target.computerId,target.session,target.conversation,target.archiveId,target.agentId,target.parentConversation)).toString()
     fun incoming(event:Event)=event.nativeType in setOf("AgentMessage","Stop") && event.role != "You" && event.role != "You (answer)" && event.outgoingId.isBlank()
+    /** Canonical order proves the incoming prefix before a visible message position, including an own row. */
+    fun incomingThroughPosition(epoch:String,ordered:List<Event>,visible:List<Event>):List<Event> {
+        val incomingVisible=visible.filter(::incoming)
+        if(epoch.isBlank()) return incomingVisible
+        fun canonical(row:Event)=row.historyEpoch==epoch && row.historyId.isNotBlank() && row.historyCursor.isNotBlank()
+        fun position(row:Event)=incoming(row) || row.role in setOf("You","You (answer)") &&
+            row.nativeType in setOf("UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted","QuestionAnswered")
+        val through=visible.filter { canonical(it) && position(it) }.mapNotNull { shown ->
+            ordered.indices.filter { index ->
+                val row=ordered[index]
+                canonical(row) && row.historyId==shown.historyId && row.historyCursor==shown.historyCursor &&
+                    row.role==shown.role && row.nativeType==shown.nativeType && row.source==shown.source
+            }.singleOrNull()
+        }.maxOrNull() ?: return incomingVisible
+        val prefix=ordered.take(through+1).filter { canonical(it) && incoming(it) && it.incomingSeq!=null }
+        return (prefix+incomingVisible).distinctBy { it.id }
+    }
     /** Resample visible content when canonical read evidence changes, independently of its text or geometry. */
     fun visibilityEvidence(rows:List<Event>)=rows.filter(::incoming).map { Triple(it.id,it.historyEpoch,it.incomingSeq) }
     fun unread(record:ConversationReadRecord?,event:Event)=incoming(event) && if(record?.epoch?.isNotBlank()==true && record.epoch == event.historyEpoch && event.incomingSeq != null)

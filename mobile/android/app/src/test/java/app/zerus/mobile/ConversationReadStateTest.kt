@@ -31,6 +31,63 @@ class ConversationReadStateTest {
         assertFalse(ConversationReadPolicies.incoming(Event("tool","Tool","text","",nativeType="ToolFinished")))
         assertTrue(ConversationReadPolicies.incoming(Event("reply","AgentMessage","text","",nativeType="AgentMessage")))
     }
+    private fun reply(sequence:Long)=Event("history:reply-$sequence","AgentMessage","Reply $sequence","",100.0-sequence,
+        source="fixture",nativeType="AgentMessage",historyId="reply-$sequence",historyCursor="cursor-$sequence",
+        historyEpoch="epoch",incomingSeq=sequence)
+    private fun own()=Event("history:own","You","Tall outgoing summary","",0.0,source="fixture",nativeType="UserPromptSubmit",
+        historyId="own",historyCursor="own-cursor",historyEpoch="epoch")
+    @Test fun ownCanonicalPositionReadsItsIncomingPrefixWithoutCountingOwnMessage() {
+        val replies=(1L..19L).map(::reply)
+        val own=own()
+        val evidence=ConversationReadPolicies.incomingThroughPosition("epoch",replies+own,listOf(own))
+        val read=ConversationReadState().head(target,"epoch",19,19,true).visible(target,evidence)
+        assertEquals(19,evidence.size)
+        assertFalse(evidence.any { it.role=="You" })
+        assertEquals(19L,read.record(target)!!.readThrough)
+        assertEquals(0,ConversationReadPolicies.lowerBound(read.record(target),replies+own))
+        // A current head may be newer than the visible window; never read it by inference.
+        assertEquals(1,ConversationReadPolicies.lowerBound(read.head(target,"epoch",20,20,true).record(target),replies+own))
+    }
+    @Test fun canonicalOrderBeforeMiddleOwnRowLeavesLaterRepliesUnread() {
+        val first=reply(1);val later=reply(2);val own=own()
+        // Deliberately non-monotonic clocks: window order, not timestamps, proves position.
+        val ordered=listOf(first,own,later)
+        val evidence=ConversationReadPolicies.incomingThroughPosition("epoch",ordered,listOf(own))
+        val read=ConversationReadState().head(target,"epoch",2,2,true).visible(target,evidence)
+        assertEquals(listOf(first),evidence)
+        assertEquals(1,ConversationReadPolicies.lowerBound(read.record(target),ordered))
+    }
+    @Test fun recordedOutgoingDisplayAliasKeepsProofButLocalOutboxDoesNot() {
+        val first=reply(1);val own=own()
+        val alias=own.copy(id="outgoing:request",outgoingId="request")
+        assertEquals(listOf(first),ConversationReadPolicies.incomingThroughPosition("epoch",listOf(first,own),listOf(alias)))
+        assertTrue(ConversationReadPolicies.incomingThroughPosition("epoch",listOf(first,own),
+            listOf(alias.copy(historyId="",historyCursor=""))).isEmpty())
+    }
+    @Test fun ownPositionRequiresExactEpochCursorAndNativeIdentity() {
+        val first=reply(1);val own=own();val ordered=listOf(first,own)
+        listOf(own.copy(historyEpoch="other"),own.copy(historyCursor="other"),own.copy(historyId="other"),
+            own.copy(source="other"),own.copy(nativeType="ToolFinished")).forEach { unproven ->
+            assertTrue(ConversationReadPolicies.incomingThroughPosition("epoch",ordered,listOf(unproven)).isEmpty())
+        }
+        assertTrue(ConversationReadPolicies.incomingThroughPosition("",ordered,listOf(own)).isEmpty())
+        assertTrue(ConversationReadPolicies.incomingThroughPosition("epoch",listOf(first,own,own),listOf(own)).isEmpty())
+    }
+    @Test fun legacyRowsAcknowledgeOnlyIncomingRowsActuallyVisible() {
+        val first=reply(1).copy(historyId="",historyCursor="",historyEpoch="",incomingSeq=null)
+        val own=own().copy(historyId="",historyCursor="",historyEpoch="")
+        assertTrue(ConversationReadPolicies.incomingThroughPosition("epoch",listOf(first,own),listOf(own)).isEmpty())
+        assertEquals(listOf(first),ConversationReadPolicies.incomingThroughPosition("epoch",listOf(first,own),listOf(first)))
+    }
+    @Test fun ownPositionResamplesPrefixMetadataWhileStreamingTextPreservesDwell() {
+        val own=own();val provisional=reply(1).copy(incomingSeq=null)
+        fun sample(rows:List<Event>,shown:Event=own)=ConversationReadPolicies.visibilityEvidence(
+            ConversationReadPolicies.incomingThroughPosition("epoch",rows,listOf(shown)))
+        val before=sample(listOf(provisional,own))
+        val after=sample(listOf(reply(1),own))
+        assertNotEquals(before,after)
+        assertEquals(after,sample(listOf(reply(1).copy(text="Streaming text"),own.copy(text="More summary text")),own.copy(text="More summary text")))
+    }
     @Test fun canonicalEvidenceChangesRequireResamplingEvenWhenVisibleIdsStayTheSame() {
         val old=Event("reply","AgentMessage","Same visible text","",nativeType="AgentMessage",historyEpoch="old",incomingSeq=10)
         val state=ConversationReadState().head(target,"old",10,10,true).visible(target,listOf(old))

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Instrumentation
 import android.content.Intent
 import android.graphics.Rect
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -36,7 +37,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
                 "Use fresh isolated emulator app data; this runner never clears existing state."
             }
             smoke(store)
-            result.putString("stream", "Conversation navigation passed: actual latest taps, owned pending read and duplicate lock, installed page tail, incomplete-head retry, same-key read metadata resampling, retained unseen replies, opening divider retirement/alias non-resurrection, draft preservation, and Sessions Read all visibility. Zero deliveries.\n")
+            result.putString("stream", "Conversation navigation passed: actual latest taps, owned pending read and duplicate lock, installed page tail, incomplete-head retry, same-key read metadata resampling, retained unseen replies, canonical own-tail prefix with later reply preservation, opening divider retirement/alias non-resurrection, draft preservation, and Sessions Read all visibility. Zero deliveries.\n")
             finish(Activity.RESULT_OK,result)
         } catch(error:Throwable) {
             result.putString("stream", "Conversation navigation failed: ${error.stackTraceToString()}\n")
@@ -57,7 +58,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
     }
     private fun diagnostic():String {
         val state=fixtureModel?.let { model -> main {
-            "loading=${model.olderLoading},newer=${model.hasNewer},error=${model.olderError},count=${model.selected?.target?.let(model::unreadCount)}"
+            "loading=${model.olderLoading},newer=${model.hasNewer},error=${model.olderError},epoch=${model.historyEpoch},count=${model.selected?.target?.let(model::unreadCount)}"
         } }.orEmpty()
         var current=find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString()=="Jump to latest messages" }
         val chain=mutableListOf<String>()
@@ -136,7 +137,10 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
             val input=JSONObject(okio.Buffer().also { chain.request().body?.writeTo(it) }.readUtf8())
             val payload=input.optJSONObject("payload") ?: JSONObject()
             val result=when(input.string("operation")) {
-                "inspect" -> JSONObject(raw.toString())
+                "inspect" -> {
+                    if(mode.get()=="own-tail") throw java.io.IOException("Synthetic retained control inspection unavailable")
+                    JSONObject(raw.toString())
+                }
                 "history" -> {
                     reads.incrementAndGet()
                     check(!payload.has("around_incoming_seq")) { "Explicit Latest reopened unread history" }
@@ -284,6 +288,85 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
             check(main { model.conversationEvents.map { it.id }==stableRows.map { it.id } })
             check(main { model.draft(target).text=="Retained fixture draft" && model.outgoing.isEmpty() })
 
+            // A tall own/compaction row can occupy the whole viewport at the
+            // real end of a conversation. Its preceding canonical replies are
+            // before the reader's visible position, even with no reply onscreen.
+            val tailEpoch="fixture-own-tail-epoch"
+            val tailWindow=AtomicReference<HistoryWindow>()
+            mode.set("own-tail")
+            // Keep the actual overlay read guard active while replacement rows
+            // are measured; a transient incoming row is not this regression.
+            tap("Session details");node("Overview")
+            main {
+                val replies=(1..19).map { i -> Event("history:own-tail-$i","AgentMessage",
+                    "Synthetic unread tail reply $i.","",i.toDouble(),source="claude_transcript",
+                    nativeType="AgentMessage",historyId="own-tail-$i",historyCursor="own-tail-cursor-$i",
+                    historyEpoch=tailEpoch,incomingSeq=i.toLong()) }
+                val own=Event("history:own-tail-summary","You",
+                    "Synthetic outgoing compaction summary.\n\n"+"Retained summary paragraph at the end of this conversation.\n\n".repeat(50)+"Outgoing tail end.",
+                    "",20.0,source="claude_transcript",nativeType="UserPromptSubmit",historyId="own-tail-summary",
+                    historyCursor="own-tail-cursor-summary",historyEpoch=tailEpoch)
+                val page=HistoryPage(target,tailEpoch,emptyList(),null,null,false,false,19,19,true,false,false,JSONObject())
+                model.javaClass.getDeclaredMethod("observeHistoryHead",HistoryPage::class.java,Boolean::class.javaPrimitiveType)
+                    .apply { isAccessible=true }.invoke(model,page,true)
+                // Retained canonical history is readable while control inspection
+                // is Last known, as in the owner report; never refresh native input.
+                set(model,"setActivityVerified",false)
+                val window=HistoryWindow(target,tailEpoch,replies+own,null,null,false,false,true)
+                tailWindow.set(window)
+                model.javaClass.getDeclaredMethod("publishWindow",Target::class.java,HistoryWindow::class.java,
+                    Boolean::class.javaPrimitiveType,Boolean::class.javaPrimitiveType,String::class.java)
+                    .apply { isAccessible=true }.invoke(model,target,window.copy(events=listOf(own),
+                        before=own.historyCursor,hasBefore=true),true,false,null)
+            }
+            await("installed own-tail history") { main { model.historyEpoch==tailEpoch && !model.hasNewer } }
+            SystemClock.sleep(600)
+            check(main { model.unreadCount(target)==19 }) { "Overlay acknowledged unseen tail replies" }
+            sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            if(find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString()=="Jump to latest messages" }!=null)
+                tap("Jump to latest messages")
+            await("tall own row at actual tail") { visibleText("Outgoing tail end.") &&
+                !visibleText("Synthetic unread tail reply 19.") }
+            await("own-tail position saved") { main { model.conversationViewport(target)?.eventId=="history:own-tail-summary" } }
+            check(main { model.unreadCount(target)==19 }) { "An own-only page invented a preceding read sequence" }
+            await("own-only unread badge") { visibleText("19 unread") }
+            SystemClock.sleep(2500) // Let the earlier intentional retry toast leave the raster.
+            checkNotNull(uiAutomation.takeScreenshot()).let { bitmap ->
+                targetContext.cacheDir.resolve("own-tail-before.png").outputStream().use {
+                    check(bitmap.compress(Bitmap.CompressFormat.PNG,100,it))
+                };bitmap.recycle()
+            }
+            // Prepend canonical replies while retaining the same own row/key and
+            // viewport. The native list anchors its existing visible row; no
+            // transient incoming replacement is allowed to satisfy this case.
+            main {
+                model.javaClass.getDeclaredMethod("publishWindow",Target::class.java,HistoryWindow::class.java,
+                    Boolean::class.javaPrimitiveType,Boolean::class.javaPrimitiveType,String::class.java)
+                    .apply { isAccessible=true }.invoke(model,target,tailWindow.get(),true,false,null)
+            }
+            await("own tail acknowledges preceding canonical replies") { main {
+                model.unreadCount(target)==0 && model.historyEpoch==tailEpoch
+            } && visibleText("Outgoing tail end.") && !visibleText("Synthetic unread tail reply 19.") }
+            check(main { model.firstUnreadEventId.isBlank() && model.draft(target).text=="Retained fixture draft" && model.outgoing.isEmpty() })
+            await("own-tail badge clears without Read all") { !visibleText("19 unread") && !button("Read all").isEnabled }
+            uiAutomation.waitForIdle(100,2000)
+            SystemClock.sleep(250) // Accessibility publication can precede the rendered screenshot frame.
+            checkNotNull(uiAutomation.takeScreenshot()).let { bitmap ->
+                targetContext.cacheDir.resolve("own-tail-after.png").outputStream().use {
+                    check(bitmap.compress(Bitmap.CompressFormat.PNG,100,it))
+                };bitmap.recycle()
+            }
+            main {
+                val page=HistoryPage(target,tailEpoch,emptyList(),null,null,false,false,20,20,true,false,false,JSONObject())
+                model.javaClass.getDeclaredMethod("observeHistoryHead",HistoryPage::class.java,Boolean::class.javaPrimitiveType)
+                    .apply { isAccessible=true }.invoke(model,page,true)
+            }
+            SystemClock.sleep(600)
+            check(main { model.unreadCount(target)==1 && model.firstUnreadEventId.isBlank() }) {
+                "Own-tail position acknowledged a later incoming head outside the window"
+            }
+
+            mode.set("reindexed")
             middleWindow();gate.set(CountDownLatch(1))
             val leavingRead=reads.get();tap("Jump to latest messages")
             await("accepted read before navigation") { reads.get()==leavingRead+1 }

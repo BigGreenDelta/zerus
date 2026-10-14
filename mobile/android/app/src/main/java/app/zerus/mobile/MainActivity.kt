@@ -863,7 +863,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         snapshotFlow { listState.isScrollInProgress && !programmatic && listState.firstVisibleItemIndex <= 3 }
             .distinctUntilChanged().collect { nearTop -> if(nearTop) model.loadOlder(target) }
     }
-    val currentReadRows by rememberUpdatedState(events)
     LaunchedEffect(target.key, listState, readable) {
         if (!readable) return@LaunchedEffect
         snapshotFlow {
@@ -874,7 +873,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }.let { rows ->
                 val ids=rows.map { it.key.toString().removePrefix("event:") }.toSet()
                 Triple(ids,rows.firstOrNull()?.let { it.key.toString().removePrefix("event:") to (-it.offset).coerceAtLeast(0) },
-                    ConversationReadPolicies.visibilityEvidence(currentReadRows.filter { it.id in ids }))
+                    model.visibleReadEvidence(target,ids))
             }
         }.distinctUntilChanged().collectLatest { viewport ->
             if (viewport == null) return@collectLatest

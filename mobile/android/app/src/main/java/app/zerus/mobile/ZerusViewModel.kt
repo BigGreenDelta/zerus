@@ -195,9 +195,19 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+    private fun visibleReadRows(target:Target,eventIds:Set<String>):List<Event> {
+        val visible=conversationEvents.filter { it.id in eventIds }
+        val window=historyWindows[target.key]?.takeIf { it.target==target }
+            ?: return visible.filter(ConversationReadPolicies::incoming)
+        return ConversationReadPolicies.incomingThroughPosition(readState.record(target)?.epoch.orEmpty(),window.events,visible)
+    }
+    fun visibleReadEvidence(target:Target,eventIds:Set<String>):List<Triple<String,String,Long?>> {
+        if(selected?.target!=target || activeFrame?.target!=target) return emptyList()
+        return ConversationReadPolicies.visibilityEvidence(visibleReadRows(target,eventIds))
+    }
     fun visibleMessages(target:Target,eventIds:Set<String>) {
         if(selected?.target != target || activeFrame?.target != target) return
-        val incoming=conversationEvents.filter { it.id in eventIds && ConversationReadPolicies.incoming(it) }
+        val incoming=visibleReadRows(target,eventIds)
         if(incoming.isEmpty()) return
         readWriter?.let { readState=it.edit { state -> state.visible(target,incoming) } };refreshReadAttention();shareRead(target)
     }

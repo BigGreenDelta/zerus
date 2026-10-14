@@ -649,6 +649,14 @@ Read positions are private to the phone and follow the canonical conversation
 across a verified resume. Incoming agent messages count; tool events and the
 user's own messages do not. Automatic read progress advances only after
 content is actually visible in the active conversation, with overlays excluded.
+For authenticated canonical rows, the visible message position acknowledges
+incoming replies before it in the window's server order. A tall own message or
+compaction summary can therefore advance that incoming prefix without counting
+as a reply itself. The exact visible row must match the current epoch, native
+identity and cursor; unrecorded outbox rows and legacy display order cannot
+supply this proof. Later incoming rows remain unread, including a newer head
+outside the window. Prefix metadata changes resample the same guarded visibility
+dwell even when the own row's display key and geometry stay unchanged.
 Opening a session or searching messages alone does not acknowledge them.
 An explicit Mark read choice can instead acknowledge the captured fresh complete
 head; without that evidence it acknowledges only captured loaded incoming rows.
