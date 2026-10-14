@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -37,7 +36,7 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
         val result=Bundle()
         try {
             check(BuildConfig.DEBUG); smoke()
-            result.putString("stream","Session reference smoke passed: no toolbar copy, busy parent and child menu copying, exact native machine/host, missing-identity explanation, narrow large-font menu.\n")
+            result.putString("stream","Session reference smoke passed: compact machine/status header, header details, menu-only search, busy parent and child menu copying, exact native machine/host, missing-identity explanation, narrow large-font header/menu.\n")
             finish(Activity.RESULT_OK,result)
         } catch(error: Throwable) {
             result.putString("stream","Session reference smoke failed: ${error.stackTraceToString()}\n")
@@ -54,7 +53,8 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
     private fun find(label: String, root: AccessibilityNodeInfo?=uiAutomation.rootInActiveWindow): AccessibilityNodeInfo? {
         if(root==null)return null
         root.refresh()
-        if(root.text?.toString()?.split('\n')?.contains(label)==true || root.contentDescription?.toString()==label)return root
+        if(root.text?.toString()?.split('\n')?.contains(label)==true || root.contentDescription?.toString()==label ||
+            root.actionList.any { it.id==AccessibilityNodeInfo.ACTION_CLICK && it.label?.toString()==label })return root
         for(index in 0 until root.childCount)find(label,root.getChild(index))?.let { return it }
         return null
     }
@@ -88,6 +88,7 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
             .put("run_id",target.run).put("conversation_id",target.conversation)
         val session=mutableStateOf(Session(target,"Working fixture","Claude","busy","","",0,raw))
         val narrow=mutableStateOf(false)
+        val details=mutableStateOf(false)
         val clipboard=targetContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         fun clip()=main { clipboard.primaryClip?.getItemAt(0)?.text?.toString() }
         main {
@@ -99,16 +100,24 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
                     key(narrow.value) {
                         CompositionLocalProvider(LocalDensity provides Density(density.density,if(narrow.value)1.8f else 1f)) {
                             Surface { Column(Modifier.width(if(narrow.value)280.dp else 390.dp)) {
-                                Text("Working fixture")
-                                SessionHeaderTools(model,session.value) {}
+                                SessionHeaderTitle(model,session.value) { details.value=true }
+                                SessionHeaderTools(model,session.value,onDetails={ details.value=true }) {}
                             } }
+                            if(details.value) SessionDetailsSheet(model,session.value) { details.value=false }
                         }
                     }
                 }
             }
         }
+        node("Session details")
+        SystemClock.sleep(250)
+        screenshot("working-parent-header")
+        tap("Session details");node("Overview")
+        sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        await("closed details") { find("Overview")==null }
+        check(find("Search loaded messages")==null) { "Search still has a toolbar button" }
         node("Session actions");check(find("Copy session reference")==null) { "Toolbar still contains Copy" }
-        tap("Session actions");check(action("Copy session reference").isEnabled)
+        tap("Session actions");node("Search loaded messages");check(action("Copy session reference").isEnabled)
         screenshot("working-parent-menu")
         tap("Copy session reference")
         val expected=checkNotNull(SessionReference.resolve(target,listOf(machine)).uri)
@@ -132,6 +141,12 @@ class SessionReferenceSmokeInstrumentation : Instrumentation() {
         check(clip()=="keep clipboard")
         val child=target.copy(conversation="",agentId="child",parentConversation="parent")
         main { set(model,"setMachines",listOf(machine));session.value=session.value.copy(target=child);narrow.value=true }
+        await("narrow large-font header") {
+            val header=find("Session details") ?: return@await false
+            val frame=Rect().also(header::getBoundsInScreen)
+            frame.width() <= 281 * targetContext.resources.displayMetrics.density && frame.height() >= 60 * targetContext.resources.displayMetrics.density
+        }
+        screenshot("child-narrow-header")
         node("Session actions");check(find("Copy session reference")==null)
         tap("Session actions");check(action("Copy session reference").isEnabled)
         check(find("Pause")==null && find("Review later on this phone")==null) { "Parent operations leaked into child menu" }

@@ -1,12 +1,14 @@
 package app.zerus.mobile
 
+import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Terminal
@@ -19,18 +21,46 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-@Composable internal fun SessionHeaderTools(model: ZerusViewModel, session: Session,onJump: (ConversationMessageJump) -> Unit) {
+@Composable internal fun SessionHeaderTitle(model: ZerusViewModel,session: Session,onDetails: () -> Unit) {
+    val target = session.target
+    val status = if (model.activity == null && !model.demo) "Checking…" else SelectedSessionPresentation.status(session,model.activity)
+    val freshness = if (model.demo) " / Preview" else if (model.activityVerified || model.activity == null) "" else " / Last known"
+    val provider = if (target.agentId.isNotBlank()) model.activity?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
+    val color = if (model.activity == null && !model.demo) MaterialTheme.colorScheme.onSurfaceVariant
+        else Color(DesktopSessionPalette.colors(DesktopSessionPalette.badge(SelectedSessionPresentation.session(session,model.activity),true).kind,
+            MaterialTheme.colorScheme.background.luminance() < .5f).foreground)
+    Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button,onClickLabel = "Session details",onClick = onDetails),
+        verticalArrangement = Arrangement.Center) {
+        Text(session.title,maxLines = 1,overflow = TextOverflow.Ellipsis,fontSize = 18.sp,lineHeight = 22.sp)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val machineWidth = maxWidth * .4f
+            Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(DesktopIcons.providerName(provider) + " / " + status + freshness,Modifier.weight(1f,fill = false),
+                    maxLines = 1,overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.labelSmall,color = color)
+                MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
+                    Modifier.widthIn(max = machineWidth),colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
+            }
+        }
+    }
+}
+
+@Composable internal fun SessionHeaderTools(model: ZerusViewModel, session: Session,onDetails: (() -> Unit)? = null,onJump: (ConversationMessageJump) -> Unit) {
     val target = session.target
     val settings = remember(model.activity) { SessionDetailsPresentation.settings(model.activity) }
     var details by remember(target.key) { mutableStateOf(false) }
@@ -41,26 +71,36 @@ import org.json.JSONObject
     var search by remember(target.key) { mutableStateOf(false) }
     var readEvidence by remember(target.key) { mutableStateOf<ReadAttentionEvidence?>(null) }
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val canReadAll = target.archiveId.isBlank() && !model.demo && model.canReadAll(target)
     val sessionReference = remember(target,model.machines) { SessionReference.resolve(target,model.machines) }
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
     }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
-    MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
-        Modifier.padding(start = 16.dp,end = 16.dp,top = 4.dp),
-        colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else details = true }, modifier = Modifier.weight(1f)) {
+        TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true }, modifier = Modifier.weight(1f)) {
             Text(listOf(settings.model.ifBlank { "Model not reported" }, settings.effort).filter { it.isNotBlank() }.joinToString(" / "),
                 maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
         }
-        IconButton(onClick = { search = true }) { Icon(Icons.Default.Search,"Search loaded messages") }
+        IconButton(onClick = {
+            val result = model.markAllRead(listOf(target))
+            Toast.makeText(context,ConversationLoadPresentation.readAllOutcome(result.marked,result.skipped,result.partial),Toast.LENGTH_SHORT).show()
+        },enabled = canReadAll,modifier = Modifier.semantics {
+            contentDescription = "Read all"
+            stateDescription = if (canReadAll) "Read all replies in this conversation on this phone"
+                else if (model.demo) "Read all unavailable in preview"
+                else if (target.archiveId.isNotBlank()) "Read all unavailable for archived conversations"
+                else if (!model.readAllPending(target)) "Read all unavailable. Nothing in this conversation is unread on this phone"
+                else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
+        }) { Icon(Icons.Default.DoneAll,null) }
         IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal") }
-        IconButton(onClick = { details = true }) { Icon(Icons.Default.Info, "Session details") }
         Box {
             IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
+                DropdownMenuItem(text = { Text("Search loaded messages") },leadingIcon = { Icon(Icons.Default.Search,null) },
+                    onClick = { menu = false;search = true })
                 readEvidence?.let { evidence ->
                     val emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty()
                     DropdownMenuItem(text = { Text(if(emptyReminder) "Clear review reminder" else if(evidence.authoritative) "Mark read on this phone" else "Mark loaded replies read") },
@@ -116,7 +156,7 @@ import org.json.JSONObject
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun SessionDetailsSheet(model: ZerusViewModel, session: Session, onDismiss: () -> Unit) {
+@Composable internal fun SessionDetailsSheet(model: ZerusViewModel, session: Session, onDismiss: () -> Unit) {
     val target = session.target
     val raw = model.activity
     val verified = model.activityVerified

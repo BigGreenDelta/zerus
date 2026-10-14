@@ -137,7 +137,7 @@ class QuestionLayoutSmokeInstrumentation : Instrumentation() {
             await("Other answer field") { field = find(uiAutomation.rootInActiveWindow) { it.isEditable && it.isVisibleToUser &&
                 bounds(it).top < footer.top }; field != null }
             SystemClock.sleep(1_000) // Let the opening jump and card layout settle.
-            val strip = bounds(owner("Read all"))
+            val strip = bounds(owner("Questions (1)"))
             val other = bounds(checkNotNull(field))
             val overflow = hint()
             val screenshot = checkNotNull(uiAutomation.takeScreenshot()) { "No screenshot" }
