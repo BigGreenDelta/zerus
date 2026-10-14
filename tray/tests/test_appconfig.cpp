@@ -65,6 +65,8 @@ private slots:
     void launcherClaimsWhenTheServiceStopsOrNeverListens();
     void staleSocketAndLockRecoverAfterACrash();
     void aStuckStartDelaysOthersBoundedly();
+    void sessionsAndBackgroundExcludeEachOther();
+    void plainStartOpensSessionsOnlyOnWindows();
     void restartKeepsSettingsButNotOneShotOptions();
 
     void writeCreatesFileWithHeaderWhenAbsent();
@@ -946,17 +948,76 @@ void TestAppConfig::aStuckStartDelaysOthersBoundedly()
     QVERIFY(stuck.isLocked());
 }
 
+void TestAppConfig::sessionsAndBackgroundExcludeEachOther()
+{
+    const auto load = [](const QStringList &options, AppConfig *cfg) {
+        QString error;
+        const bool parsed = AppConfig::load(QStringList{"hgs-tray"} + options, cfg, &error);
+        return parsed ? QString() : error;
+    };
+    AppConfig plain, sessions, background;
+    QCOMPARE(load({}, &plain), QString());
+    QVERIFY(!plain.showSessions); QVERIFY(!plain.background);
+    QCOMPARE(load({"--sessions"}, &sessions), QString());
+    QVERIFY(sessions.showSessions); QVERIFY(!sessions.background);
+    QCOMPARE(load({"--background"}, &background), QString());
+    QVERIFY(!background.showSessions); QVERIFY(background.background);
+    // Both are refused in either order, also with other options between them.
+    for (const QStringList &options : {QStringList{"--sessions", "--background"},
+                                       QStringList{"--background", "--local-poll", "500", "--sessions"}}) {
+        AppConfig cfg;
+        const QString error = load(options, &cfg);
+        QVERIFY2(error.contains("--sessions") && error.contains("--background"), qPrintable(error));
+        QVERIFY(!error.startsWith("__"));
+    }
+    // A value is not an option.
+    AppConfig valued;
+    QCOMPARE(load({"--sessions", "--terminal", "--background"}, &valued), QString());
+    QVERIFY(valued.showSessions); QVERIFY(!valued.background);
+    QCOMPARE(valued.terminalTemplate, QString("--background"));
+    QVERIFY(AppConfig::usage().contains("--background"));
+}
+
+void TestAppConfig::plainStartOpensSessionsOnlyOnWindows()
+{
+    // Windows 11 hides a new tray icon in the overflow: a plain start there opens
+    // Sessions, and so does a plain second start through the running tray.
+    using P = AppConfig::Platform;
+    AppConfig plain, sessions, background;
+    sessions.showSessions = true;
+    background.background = true;
+    for (const P p : {P::Linux, P::Mac}) {
+        QVERIFY(!plain.opensSessions(p));
+        QVERIFY(sessions.opensSessions(p));
+        QVERIFY(!background.opensSessions(p));
+    }
+    QVERIFY(plain.opensSessions(P::Windows));
+    QVERIFY(sessions.opensSessions(P::Windows));
+    QVERIFY(!background.opensSessions(P::Windows));
+}
+
 void TestAppConfig::restartKeepsSettingsButNotOneShotOptions()
 {
-    // Windows restarts a crashed tray with these (RegisterApplicationRestart).
+    // Windows restarts a crashed tray with these (RegisterApplicationRestart):
+    // in the background, whichever window the first start opened.
     const QStringList args{"C:/Zerus/hgs-tray.exe", "--sessions", "--hgs", "D:/tools/hgs.exe", "--open-mode",
                            "console", "--terminal", "--sessions", "--local-poll", "5000", "--icon-color", "#fff",
                            "--peer-poll", "60000"};
     QCOMPARE(AppConfig::restartArguments(args),
-             (QStringList{"--hgs", "D:/tools/hgs.exe", "--open-mode", "console", "--terminal", "--sessions",
-                          "--local-poll", "5000", "--icon-color", "#fff", "--peer-poll", "60000"}));
-    QVERIFY(AppConfig::restartArguments({"hgs-tray"}).isEmpty());
-    QVERIFY(AppConfig::restartArguments({"hgs-tray", "--sessions"}).isEmpty());
+             (QStringList{"--background", "--hgs", "D:/tools/hgs.exe", "--open-mode", "console", "--terminal",
+                          "--sessions", "--local-poll", "5000", "--icon-color", "#fff", "--peer-poll", "60000"}));
+    QCOMPARE(AppConfig::restartArguments({"hgs-tray"}), QStringList{"--background"});
+    QCOMPARE(AppConfig::restartArguments({"hgs-tray", "--sessions"}), QStringList{"--background"});
+    QCOMPARE(AppConfig::restartArguments({"hgs-tray", "--background", "--terminal", "--background"}),
+             (QStringList{"--background", "--terminal", "--background"}));
+    // What they say once the restarted tray parses them.
+    AppConfig restarted;
+    QString error;
+    QVERIFY(AppConfig::load(QStringList{"hgs-tray"}
+                                + AppConfig::restartArguments({"hgs-tray", "--sessions", "--local-poll", "500"}),
+                            &restarted, &error));
+    QCOMPARE(restarted.localPollMs, 500);
+    QVERIFY(!restarted.opensSessions(AppConfig::Platform::Windows));
 }
 
 QString TestAppConfig::writeHgs(const QString &dir, bool executable)

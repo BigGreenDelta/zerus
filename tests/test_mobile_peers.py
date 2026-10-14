@@ -388,7 +388,10 @@ class MobilePeers(unittest.TestCase):
 child = subprocess.Popen([sys.argv[1], 'swarm', '__mobile-peer-transport', '--json'],
                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 child.stdin.write(b'{'); child.stdin.flush()
-pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'], 'partial-pid').write_text(str(child.pid))
+# Renamed into place: the test reads the file as soon as it exists.
+staged = pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'], 'partial-pid.tmp')
+staged.write_text(str(child.pid))
+os.replace(staged, staged.with_name('partial-pid'))
 time.sleep(10)
 '''
         process = subprocess.Popen([sys.executable, '-c', script, str(HGS)], env=env)
