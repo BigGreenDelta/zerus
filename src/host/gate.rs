@@ -187,7 +187,9 @@ pub(crate) fn call_image(
 }
 
 #[cfg(windows)]
-pub(crate) use self::windows::{explicit_state_dir, host_image, unstaged_allowed};
+pub(crate) use self::windows::{
+    default_state_dirs, explicit_state_dir, host_image, unstaged_allowed,
+};
 
 #[cfg(windows)]
 mod windows {

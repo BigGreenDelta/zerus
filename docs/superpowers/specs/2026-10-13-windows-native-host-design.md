@@ -453,6 +453,46 @@ Spikes never write hooks into real agent configuration: every spike uses private
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`. Spike S6 fixes the exact form
 per agent version.
 
+Implemented in M4.3 (`src/state/hooks.rs`), still behind the refusal: the forms
+are written only through the S6 preview below until S6 passes. What each agent
+runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook runner
+(strings of the win32 build), Codex 0.162.0's source (`hooks/src/engine`,
+`config/src/hook_config.rs`) and Kimi Code 2.1.1's bundled source
+(`externalHooks/internal/runHook.ts`):
+
+- **Claude Code** documents the exec form: "When present, `command` is resolved as
+  an executable and spawned directly with these arguments — no shell." Without
+  `args` it runs the command with Git Bash, and without Git Bash with PowerShell
+  (`-Command`), which reads `"C:/…/hgs.exe" __state hook` as a string followed by
+  unexpected tokens: the shell form cannot run there. hgs reads `claude --version`
+  once, when it first writes hooks into a configuration: from 2.1.296 (the oldest
+  version reviewed with the exec form) it writes
+  `{"type":"command","command":"C:/…/hgs.exe","args":["__state","hook"],"timeout":5}`;
+  an older version gets the shell form when Git Bash is found as Claude Code finds
+  it (`CLAUDE_CODE_GIT_BASH_PATH`, Git for Windows in Program Files, the `git` on
+  PATH) and is refused otherwise. A version that cannot be read is refused, as a
+  form chosen without it would be kept.
+- **Codex** runs every command hook on Windows with `%COMSPEC% /C "COMMAND"` (a raw
+  argument; no configured hook shell) and prefers `commandWindows` there when it is
+  set; its handler accepts unknown fields, so older versions ignore it. hgs writes
+  the shell form as both `command` and `commandWindows`.
+- **Kimi Code** runs `[[hooks]] command` with Node.js `spawn(command, {shell: true})`,
+  that is `%COMSPEC% /d /s /c "COMMAND"`; it gets the shell form. On Windows the
+  block's marker lines may end with CR LF; Unix keeps its LF-only search.
+- The shell form refuses a stable CLI path that has `%`, `!`, `$`, `` ` `` or `"`
+  (read differently by `cmd.exe` or bash inside double quotes) or that is not an
+  absolute drive or UNC path; spaces, Cyrillic, `&`, `^`, `(`, `)`, `;` and `'` are
+  fine. Existing hgs entries are repeated exactly for new events, exec form
+  included, and Unix keeps its forms and recognition byte for byte.
+
+**S6 preview (temporary).** `HGS_WINDOWS_TRACKING_PREVIEW=1` lets tracked agents
+start on Windows before that, for spike S6: it is refused unless the state
+directory is isolated (as for the M3 test overrides, D2) and the agent's home
+variable names an existing directory that is not its default one, so a form under
+test reaches only disposable configuration. The CLI checks it before launching and
+the supervisor again before it writes anything. Once S6 passes, the switch
+`WINDOWS_TRACKING` in `src/state/mod.rs` enables tracking and the preview goes.
+
 ### D13. Attach
 
 - `hgs.exe a <session>` connects to the host and sets its console modes: input clears
@@ -576,7 +616,10 @@ Status on 2026-10-13: S1 is done (results in D6, D7, D8). S2 and S5 probes are d
 the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe` starts
 in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook takes
 about 55 ms; that PC has no real-time scanning, so the scanning half of S7 needs
-another machine. S3 and S6 are pending.
+another machine. S3 and S6 are pending. S6 runs real Claude Code, Codex and Kimi
+through the host with the M4.3 hook forms under the preview (D12): installation,
+the hook events in listings, records and the journal, hook latency, pause, resume
+and terminate.
 
 D10, D11 and D12 are provisional until their spikes are confirmed.
 
@@ -612,8 +655,9 @@ one.
   2026-10-14: untracked sessions, PowerShell, listings, rename, kill and the
   backend's input and paste paths; M4.2, the supervisor channel, input evidence,
   pause and terminate, exit evidence and the recovery worker (D9-D11, D14),
-  implemented 2026-10-14 and run with untracked sessions; tracked agents wait for
-  D12): host backend
+  implemented 2026-10-14 and run with untracked sessions; M4.3, the hook forms
+  (D12), implemented 2026-10-14 and run only through the S6 preview until S6
+  passes): host backend
   client, launch and accounts (D8), supervisor
   and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
   (D14), Windows dialog fixtures and path-aware screen parsers

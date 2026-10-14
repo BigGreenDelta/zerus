@@ -40,7 +40,7 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
 
 pub(super) fn run(args: &[String]) -> Result<i32> {
     // Before anything is written: hooks, settings or the record.
-    tracking_available()?;
+    tracking_available(&nonempty_env("HGS_AGENT").unwrap_or_default())?;
     let first_count: usize = args
         .first()
         .ok_or("missing launch argument count")?
@@ -75,7 +75,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         crate::accounts::prepare_claude_settings().map_err(|e|e.message)?;
     }
     crate::accounts::prepare_mcp_servers(&agent).map_err(|e|e.message)?;
-    hooks::install_hooks(&agent)?;
+    hooks::install_hooks(&agent, &base[0])?;
     let requested = nonempty_env("HGS_REQUESTED_ID");
     let expected = nonempty_env("HGS_EXPECTED_ID");
     let fresh = nonempty_env("HGS_FRESH").as_deref() == Some("1");
