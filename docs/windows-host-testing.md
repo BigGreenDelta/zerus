@@ -138,8 +138,10 @@ at once, before any record exists. A launch therefore watches its new session fo
 ended: its exit code and the last lines of its pane, wrapped rows joined): one
 that ends in that time with a failure fails the launch with exit 1, and the GUI
 shows the reason instead of waiting for the session. A detached launch that
-starts returns after those 3 s; `hgs resume`, restores and forks do not wait. In
-the window above:
+starts returns after those 3 s; `hgs resume`, restores and forks do not wait. A
+session that ends later without a record, or at once with exit 0, is reported by
+the next listing in `ended_launches` instead ([JSON and external
+clients](reference.md#json-and-external-clients)). In the window above:
 
 ```sh
 "$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
