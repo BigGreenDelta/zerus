@@ -185,8 +185,9 @@ void TestSessionSearch::folderScopeFollowsTheMachinePathStyle()
     SessionSearch search(FakeCli::program(script())); search.setScope(state, "all", {}); search.setFolderScope({}, "C:/Docs/Live", false);
     search.setQuery("needle"); QTRY_COMPARE(calls().size(), 2); QTRY_COMPARE(list(search)->count(), 2);
     for (int i = 0; i < list(search)->count(); ++i) QVERIFY(!list(search)->item(i)->data(Qt::AccessibleTextRole).toString().contains("saved body"));
+    // The peer's reply may still be on its way: wait for its hit, then check the case.
+    search.setFolderScope("mac", "/remote/Docs", false); QTRY_COMPARE(list(search)->count(), 1);
     search.setFolderScope("mac", "/remote/docs", false); QCOMPARE(list(search)->count(), 0);
-    search.setFolderScope("mac", "/remote/Docs", false); QCOMPARE(list(search)->count(), 1);
     box.metrics["platform"] = "linux"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     search.setScope(state, "all", {}); search.setFolderScope({}, "C:/Docs/Live", false); QCOMPARE(list(search)->count(), 0);
     search.setFolderScope({}, "c:\\docs\\live", false); QCOMPARE(list(search)->count(), 1);
