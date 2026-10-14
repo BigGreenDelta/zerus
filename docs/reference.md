@@ -723,7 +723,12 @@ beyond this request, such as always allowing, blocking, session-wide grants or
 mode switches, are marked and need a second **Confirm** click. Choosing a **No**
 option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
-plan approval stay visible with **Open Terminal**.
+plan approval stay visible with **Open Terminal**. Claude reports no answer
+given in Terminal, so Zerus settles it from the screen alone: Claude's
+interruption ending the turn records **No** or Esc, and the approved Bash
+command shown running with its elapsed time records **Yes**. Until Terminal
+shows either, and for an approved tool that is not a Bash command, the session
+stays at **Needs approval** until Claude's next event.
 
 Claude's Bash safety confirmations, including warnings about possibly empty
 paths in `rm` commands, also appear in Activity with the native warning text.

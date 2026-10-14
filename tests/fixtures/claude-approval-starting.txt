@@ -1,0 +1,45 @@
+
+▗▟▛███▛█▄  Claude Code v2.1.296
+ ▜██████▘  Sonnet 4.6 · API Usage Billing
+ ▝▝   ▝▝   ~/work
+
+
+❯ Use the tool now.
+
+  Waiting and writing
+  ⎿  $ sleep 6 && printf %s
+     fixture-output-with-a-rather-long-name-to-wrap-the-row >
+     /work/example/projects/a-really-long-directory-name/approved.txt
+     echo second line
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Actualizing… (0s · ↓ 52 tokens)
+                                                              ● high · /effort
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt · ← for agents
