@@ -290,6 +290,12 @@ pub(crate) trait TerminalBackend: Sync {
     fn own_pane(&self) -> Result<String> {
         Err(UNSUPPORTED.into())
     }
+    /// Whether the terminal replaces the last lines in the report that a
+    /// `--run` supervisor leaves for its launch (`launches::finished`) with
+    /// those its session showed once the session's output had drained.
+    fn completes_launch_reports(&self) -> bool {
+        false
+    }
 
     fn listing(&self) -> Result<Listing> {
         Ok(Listing {
@@ -603,6 +609,7 @@ mod unavailable_tests {
         assert!(!terminal.session_exists("claude/p"));
         assert_eq!(terminal.session_name("$1").unwrap(), None);
         assert_eq!(terminal.own_pane().unwrap_err(), UNSUPPORTED);
+        assert!(!terminal.completes_launch_reports());
         assert_eq!(
             terminal.pane_info(Target::Pane("%1"), &[PaneField::Dead]).err(),
             Some(UNSUPPORTED.into())
