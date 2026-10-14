@@ -1227,9 +1227,9 @@ session's rows: a large colored provider logo, the agent and what adding does.
 A removed profile can be added again with its saved sign-in. Choosing another agent
 never resizes the dialog or moves its fields: **Account** and **Account name** stay
 in place and are disabled when they do not apply, and the hint keeps room for its
-longest text. OpenCode has one
-native configuration per machine: **Remove from…** takes it out of Accounts and
-New session there, keeping its configuration, credentials and sessions, and Add
+longest text. OpenCode has one native configuration per machine: **Rename…**
+changes only its name in Zerus, **Remove from…** takes it out of Accounts and New
+session there, keeping its configuration, credentials and sessions, and Add
 account brings it back. Its row is unavailable while it is listed or not
 installed. **New session**
 shows one list of **Account and agent** pairs for the chosen computer on desktop

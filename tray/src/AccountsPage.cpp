@@ -519,7 +519,7 @@ void AccountsPage::selectionChanged()
     m_machineCard->setVisible(has);m_providerBadge->setVisible(has);
     const bool nativeConfig=p["provider"]=="opencode";
     m_rename->setToolTip({});m_remove->setToolTip({});m_install->setToolTip({});
-    m_rename->setEnabled(has && idle && !nativeConfig);
+    m_rename->setEnabled(has && idle);
     m_permissions->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_default->setVisible(has && p["provider"]!="dsh" && !nativeConfig);
     m_default->setEnabled(has && idle && online(p["host"].toString()) && !p["is_default"].toBool());
@@ -573,7 +573,7 @@ void AccountsPage::selectionChanged()
     if(nativeConfig) {
         const auto setup=tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.").arg(machine);
         m_detail->setText(setup);m_login->setToolTip(setup);m_permissions->setToolTip(setup);m_install->setToolTip(setup);
-        m_rename->setToolTip(setup);m_copy->setEnabled(false);
+        m_copy->setEnabled(false);
     }
     m_detail->setToolTip(p["home"].toString());
     if(isVisible())inspectSelected();
