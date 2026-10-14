@@ -21,6 +21,18 @@ public:
     {
         return open(SessionCommands::command(program, arguments), error);
     }
+    // An interactive shell in a folder of this computer. Backends that start a
+    // shell command line take SessionCommands::folderShell; Windows Terminal starts
+    // PowerShell in the folder itself.
+    virtual bool openShell(const QString &directory, QString *error)
+    {
+        const QString command = SessionCommands::folderShell({}, {}, directory);
+        if (command.isEmpty()) {
+            *error = QStringLiteral("not a folder of this computer: %1").arg(directory);
+            return false;
+        }
+        return open(command, error);
+    }
     virtual bool canRaise() const { return false; }
     // Поднять и сфокусировать окно, в котором открыт этот tty. false — не нашли.
     virtual bool raiseTty(const QString &tty, QString *error) { Q_UNUSED(tty); Q_UNUSED(error); return false; }

@@ -269,6 +269,7 @@ private slots:
     void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
+    void folderShellFollowsTheMachinePlatform();
     void remoteFileDownloads_data();
     void remoteFileDownloads();
     void buttonFocusFollowsKeyboardAndNotClicks();
@@ -3863,7 +3864,8 @@ void TestSessionsWindow::activityEscapingAndActions()
 
 void TestSessionsWindow::sessionContextMenuSignalsAndKeyboard()
 {
-    auto state = fleet(); auto box = state.local(); box.sessions[0].cwd = "/work/a folder";
+    // A POSIX folder, also when this GUI runs on Windows.
+    auto state = fleet(); auto box = state.local(); box.sessions[0].cwd = "/work/a folder"; box.metrics["platform"] = "linux";
     box.sessions[0].attached = 1; box.sessions[0].clients = {"/dev/pts/42"};
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program()); window.setFleet(state); window.setClipboardMode(true); window.show();
@@ -4688,6 +4690,40 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
     }
     QTRY_COMPARE(opened.urls.size(), 1);
     QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(folder ? directory.path() : path));
+}
+
+void TestSessionsWindow::folderShellFollowsTheMachinePlatform()
+{
+    // The local Windows machine opens drive and UNC folders; a POSIX one, and
+    // every peer, folders that start with '/'.
+    for(const auto &platform:{QString("windows"),QString("linux")}) {
+        const bool windows=platform=="windows";const auto now=QDateTime::currentMSecsSinceEpoch();
+        auto state=fleet();auto local=state.local();local.metrics["platform"]=platform;
+        local.sessions[0].cwd="C:\\work\\a folder";local.sessions[1].cwd="/work/docs";state.setLocal(local,now);
+        auto mac=*state.peer("mac");mac.sessions[0].cwd="C:/work";state.setPeer(mac,now);
+        SessionsWindow window(program());window.setFleet(state);window.show();
+        auto *list=window.findChild<QListWidget *>("sessionList");auto *menu=window.findChild<QMenu *>("sessionContextMenu");
+        auto *shell=window.findChild<QPushButton *>("openFolderShellAction");QVERIFY(shell);
+        QSignalSpy requested(&window,&SessionsWindow::folderShellRequested);
+        const auto menuAllows=[&](const QString &key) {
+            for(int row=0;row<list->count();++row) if(list->item(row)->data(SessionRoles::Key).toString()==key) {
+                const auto point=list->visualItemRect(list->item(row)).center();
+                QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));
+                QApplication::sendEvent(list->viewport(),&event);
+                const bool enabled=menu->findChild<QAction *>("contextFolderShell")->isEnabled();menu->hide();return enabled;
+            }
+            return false;
+        };
+        window.showSession({},local.sessions[0].name);
+        QCOMPARE(shell->isEnabled(),windows);QCOMPARE(menuAllows("\n"+local.sessions[0].name),windows);
+        shell->click();
+        if(windows){QCOMPARE(requested.size(),1);QCOMPARE(requested[0][0].toString(),QString());QCOMPARE(requested[0][1].toString(),QString("C:\\work\\a folder"));}
+        else QCOMPARE(requested.size(),0);
+        window.showSession({},local.sessions[1].name);
+        QCOMPARE(shell->isEnabled(),!windows);QCOMPARE(menuAllows("\n"+local.sessions[1].name),!windows);
+        window.showSession("mac",mac.sessions[0].name);
+        QVERIFY(!shell->isEnabled());QVERIFY(!menuAllows("mac\n"+mac.sessions[0].name));
+    }
 }
 
 void TestSessionsWindow::nativeSessionUsageStaysWithSelectedConversation()

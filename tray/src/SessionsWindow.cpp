@@ -48,6 +48,7 @@
 #include "MachinesPage.h"
 #include "MachineFilter.h"
 #include "MachineAppearance.h"
+#include "MachinePlatform.h"
 #include "DashboardPage.h"
 #include "AccountsPage.h"
 #include "SessionSearch.h"
@@ -2961,7 +2962,7 @@ void SessionsWindow::renderDetails()
     }
     s.cwd = m_details.value("cwd").toString(s.cwd);
     const QString directory = m_subagentId.isEmpty() ? s.cwd : m_subagentCwd;
-    m_shell->setEnabled(entry->online && directory.startsWith('/'));
+    m_shell->setEnabled(entry->online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())));
     const bool localFolder = entry->host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     m_fileManager->setEnabled(localFolder);
     m_fileManager->setToolTip(!entry->host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -4152,7 +4153,8 @@ void SessionsWindow::openFolderShell()
     const auto *entry = selected();
     if (!entry || !entry->online) return;
     const auto directory = m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd;
-    if (directory.startsWith('/')) emit folderShellRequested(entry->host, directory);
+    if (MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())))
+        emit folderShellRequested(entry->host, directory);
 }
 
 void SessionsWindow::openSessionFolder()
@@ -4205,7 +4207,8 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
         : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
-    add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell, original.online && directory.startsWith('/'));
+    add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell,
+        original.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, original.host.isEmpty())));
     add(archived ? tr("Copy restore command") : tr("Copy connect command"), "contextCopyCommand", SessionMenuAction::CopyCommand,
         (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
@@ -4295,7 +4298,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     case SessionMenuAction::OpenFolder:
         if (current.host.isEmpty()) openLocalFolder(directory); return;
     case SessionMenuAction::FolderShell:
-        if (current.online && directory.startsWith('/')) emit folderShellRequested(current.host, directory); return;
+        if (current.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, current.host.isEmpty())))
+            emit folderShellRequested(current.host, directory);
+        return;
     case SessionMenuAction::CopyName: emit copyTextRequested(current.session.name); return;
     case SessionMenuAction::CopyReference: copySessionReference(current); return;
     case SessionMenuAction::CopyFolder: if (!directory.isEmpty()) emit copyTextRequested(directory); return;

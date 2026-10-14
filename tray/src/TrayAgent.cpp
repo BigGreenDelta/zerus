@@ -613,7 +613,7 @@ void TrayAgent::showSessions()
             const auto command = SessionCommands::folderShell(m_cfg.hgsPath, host, directory);
             if (command.isEmpty()) return;
             auto backend = makeLaunchTerminal(m_cfg); QString error;
-            const bool opened = host.isEmpty() ? backend->open(command, &error)
+            const bool opened = host.isEmpty() ? backend->openShell(directory, &error)
                 : backend->openProgram(m_cfg.hgsPath, {"machine", "ssh", host, "--directory", directory}, &error);
             if (!opened) notify(tr("Could not open folder shell"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);

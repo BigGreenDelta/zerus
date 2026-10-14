@@ -1553,7 +1553,11 @@ are single-quoted when needed, `'@host'` is always quoted, and a quoted `hgs.exe
 path gets the `&` call operator. When Windows PowerShell 5.1 would pass an argument
 incorrectly (an empty one, a double quote, or a space before a final backslash),
 the command is copied as `Start-Process -FilePath … -ArgumentList … -NoNewWindow -Wait`
-instead. A computer without local sessions offers no local folder shell.
+instead. **Open shell in session folder** starts PowerShell (`pwsh.exe` when
+installed, otherwise Windows PowerShell) in a folder of this computer: in a Windows
+Terminal tab or window that starts there, or in a console window started there when
+`wt.exe` is missing or would change the folder (it expands `%NAME%`). A
+`--terminal` template receives `Set-Location -LiteralPath FOLDER` as `{cmd}`.
 
 The tray config lives at `~/.config/hgs/tray.conf` unless overridden; on Windows
 `~` is `HOME` when set, otherwise the account's profile folder (normally

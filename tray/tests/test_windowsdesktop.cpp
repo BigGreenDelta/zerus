@@ -82,8 +82,10 @@ class TestWindowsDesktop : public QObject {
 private slots:
     void terminalStartsTheProgramDirectly();
     void terminalRefusesArgumentsItWouldChange();
+    void terminalOpensPowerShellInTheFolder();
     void consoleHostArgumentsCarryTheExactCommand();
     void consoleFallbackHandsTheExactArgumentsToTheHost();
+    void shellFallbackStartsTheConsoleInTheFolder();
     void consoleHostRunsTheProgramWithItsExactArguments();
     void templateProgramGetsAConsoleWindow();
     void powerShellTemplateRunsTheExactCommand();
@@ -127,6 +129,37 @@ void TestWindowsDesktop::terminalRefusesArgumentsItWouldChange()
     QVERIFY(Backend::terminalArguments(Backend::OpenMode::Auto, "t", "C:\\Users\\50%off\\hgs.exe", {"a"}).isEmpty());
     // A trailing backslash without spaces is not quoted and survives.
     QVERIFY(!Backend::terminalArguments(Backend::OpenMode::Auto, "t", "C:\\hgs.exe", {"C:\\dir\\"}).isEmpty());
+}
+
+void TestWindowsDesktop::terminalOpensPowerShellInTheFolder()
+{
+    using Backend = WindowsTerminalBackend;
+    // PowerShell 7 when installed, otherwise Windows PowerShell without its banner.
+    const QStringList pwsh{"C:/Program Files/PowerShell/7/pwsh.exe"};
+    QCOMPARE(Backend::shell(pwsh.first()), pwsh);
+    const QStringList windowsPowerShell = Backend::shell({});
+    QCOMPARE(windowsPowerShell.size(), 2);
+    QVERIFY(windowsPowerShell.first().endsWith("/System32/WindowsPowerShell/v1.0/powershell.exe"));
+    QCOMPARE(windowsPowerShell.last(), QString("-NoLogo"));
+    // The tab starts in the folder (native separators); no command line changes
+    // into it, so nothing is quoted.
+    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work/my project", pwsh),
+             (QStringList{"-w", "0", "new-tab", "-d", "C:\\work\\my project", "--title", "Zerus: C:\\work\\my project",
+                          "--", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"}));
+    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Window, "//server/share/dir", windowsPowerShell),
+             (QStringList{"-w", "new", "new-tab", "-d", "\\\\server\\share\\dir", "--title", "Zerus: \\\\server\\share\\dir",
+                          "--", QString(windowsPowerShell.first()).replace('/', '\\'), "-NoLogo"}));
+    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Tab, "c:\\", pwsh).mid(3, 2), (QStringList{"-d", "c:\\"}));
+    // ';' separates wt subcommands, in the folder and the title as well.
+    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work/a;b", pwsh).mid(3, 4),
+             (QStringList{"-d", "C:\\work\\a\\;b", "--title", "Zerus: C:\\work\\a\\;b"}));
+    // Windows Terminal would expand %NAME% in the folder as well, or unescape "\;":
+    // a console opens these.
+    for (const QString &folder : {QString("C:/Users/user/50%off"), QString("C:/work/%OS%"), QString("C:/work/a\\;b"),
+                                  QString()})
+        QVERIFY2(Backend::shellArguments(Backend::OpenMode::Auto, folder, pwsh).isEmpty(), qPrintable(folder));
+    QVERIFY(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work", {"C:/Users/user/50%off/pwsh.exe"}).isEmpty());
+    QVERIFY(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work", {}).isEmpty());
 }
 
 void TestWindowsDesktop::consoleHostArgumentsCarryTheExactCommand()
@@ -180,6 +213,50 @@ void TestWindowsDesktop::consoleFallbackHandsTheExactArgumentsToTheHost()
     QCOMPARE(jsonStrings(host + ".argv").mid(4), (QStringList{program, "@mac", "a", "codex/p"}));
     // The detached hosts end right after recording; until then Windows keeps
     // their images, and so the folder, from being removed.
+    QTest::qWaitFor([&] { return dir.remove(); }, 20000);
+#endif
+}
+
+void TestWindowsDesktop::shellFallbackStartsTheConsoleInTheFolder()
+{
+#ifndef Q_OS_WIN
+    QSKIP("Console windows exist only on Windows");
+#else
+    // A recording stand-in for hgs-tray.exe --console-run: no window opens.
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString host = dir.filePath("host");
+    QVERIFY(FakeCli::install(host, "#!/usr/bin/env python3\nimport json,os,sys\n"
+        "open(__file__+'.cwd','w',encoding='utf-8').write(os.getcwd())\n"
+        "open(__file__+'.argv','w',encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"));
+    const auto started = [&](const QString &folder) {
+        if (!QTest::qWaitFor([&] { return QFile(host + ".argv").size() > 0; }, 20000)) return false;
+        QFile cwd(host + ".cwd");
+        return cwd.open(QIODevice::ReadOnly)
+            && QFileInfo(QString::fromUtf8(cwd.readAll())).canonicalFilePath() == QFileInfo(folder).canonicalFilePath();
+    };
+    const QStringList shell = WindowsTerminalBackend::locateShell();
+    using Backend = WindowsTerminalBackend;
+    // Windows Terminal would expand %OS% in this folder, so Auto quietly uses the console.
+    const QString folder = dir.filePath("50%OS% off");
+    QVERIFY(QDir().mkpath(folder));
+    Backend automatic(Backend::OpenMode::Auto, "C:\\missing\\wt.exe", FakeCli::program(host));
+    QString error;
+    QVERIFY2(automatic.openShell(folder, &error), qPrintable(error));
+    QVERIFY(automatic.takeAdvisory().isEmpty());
+    QVERIFY(started(folder));
+    QCOMPARE(jsonStrings(host + ".argv"),
+             ConsoleHost::arguments(Backend::title({QDir::toNativeSeparators(folder)}), shell.first(), shell.mid(1)));
+    // An explicit tab without Windows Terminal says why a console opened.
+    QFile::remove(host + ".argv"); QFile::remove(host + ".cwd");
+    Backend tab(Backend::OpenMode::Tab, {}, FakeCli::program(host));
+    QVERIFY2(tab.openShell(dir.path(), &error), qPrintable(error));
+    QVERIFY(tab.takeAdvisory().contains("the shell opened in a console window"));
+    QVERIFY(started(dir.path()));
+    // A POSIX path is no folder of this computer.
+    QVERIFY(!tab.openShell("/work", &error));
+    QVERIFY(error.contains("/work"));
+    // The detached hosts end right after recording; until then Windows keeps
+    // their images and working folders from being removed.
     QTest::qWaitFor([&] { return dir.remove(); }, 20000);
 #endif
 }
