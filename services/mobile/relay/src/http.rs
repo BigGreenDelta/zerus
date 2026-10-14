@@ -212,8 +212,9 @@ impl App {
             };
             let chunk = chunk.map_err(|_| Error::BAD)?;
             if raw.len().saturating_add(chunk.len()) > maximum {
-                // A stream over its limit releases the payload and its large
-                // lane or body budget before the rest is discarded.
+                // Only an unknown-length stream can cross its limit here; it
+                // releases the payload and its large payload lane before the
+                // rest is discarded.
                 drop((raw, chunk, admission));
                 drain(body, maximum).await;
                 return Err(Error::LARGE);

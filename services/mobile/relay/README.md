@@ -173,13 +173,14 @@ A refused body is first discarded, unretained and for at most two seconds, so a
 client still uploading reads the status instead of a connection reset. A body
 refused for its declared or streamed size (413) or because the large payload
 lane or small-body budget is full (429) is discarded up to the route's body
-limit; a stream over its limit releases its lane or budget first. A refusal
-before the body is read (forwarding header, Content-Encoding or Content-Type
-415, authentication 401, rate-limit or request-lane 429, unknown route, handler
-deadline) answers a client that is unverified, misdirected or over a limit: it
-discards at most 64 KiB and holds no admission permit meanwhile. Requests with
-`Expect: 100-continue` are refused before any body is sent. A body that times
-out or fails while it is being read is not discarded.
+limit; an unknown-length stream over its limit releases its large payload
+lane first. A refusal before the body is read (forwarding header,
+Content-Encoding or Content-Type 415, authentication 401, rate-limit or
+request-lane 429, unknown route, handler deadline) answers a client that is
+unverified, misdirected or over a limit: it discards at most 64 KiB and holds
+no admission permit meanwhile. Requests with `Expect: 100-continue` are refused
+before any body is sent. A body that times out or fails while it is being read
+is not discarded.
 Health is independent of SQL/admission; readiness coalesces a two-second probe
 and caches its result for one second. Errors omit SQL, bodies, tokens and URLs.
 
