@@ -144,7 +144,8 @@ the next listing in `ended_launches` instead ([JSON and external
 clients](reference.md#json-and-external-clients)). Its supervisor reads its pane
 before the pseudoconsole has delivered everything, so the host replaces those
 lines in the supervisor's report with its pane's last lines once the output has
-drained, before the session leaves the listing. In the window above:
+drained (followed by the supervisor's error if the pane does not show it),
+before the session leaves the listing. In the window above:
 
 ```sh
 "$hgs" no_such_agent "$project" --new -n missing -d  # exit 1

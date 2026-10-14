@@ -15,10 +15,10 @@
 //! The session host's sessions write through a pseudoconsole, whose output
 //! reaches the host a moment later, until the console closes after the
 //! supervisor has exited: what the supervisor read of its screen may lack the
-//! last lines. There its report is `draining`, and the host, once the
-//! session's output has drained, replaces the lines with the screen's last
-//! lines, which include the supervisor's error, before the session leaves its
-//! listing (`drained`).
+//! last lines. There its report is `draining`, with the supervisor's error,
+//! and the host, once the session's output has drained, replaces the lines
+//! with the screen's last lines, which show that error (else it follows them),
+//! before the session leaves its listing (`drained`).
 //!
 //! A supervisor whose run confirmed a conversation removes `ID.json` instead:
 //! from then on its record carries the launch ID. `hgs ls --json --local` reads
@@ -143,12 +143,15 @@ pub(crate) fn finished(elapsed: Duration, outcome: std::result::Result<i32, (i32
         code,
         &ending(&screen(), error),
         now(),
-        backend::current().completes_launch_reports(),
+        backend::current()
+            .completes_launch_reports()
+            .then_some(error),
     );
 }
 
-/// The report of launch `id`; `draining` when the terminal replaces `output`
-/// with what the screen showed last once the session's output has drained.
+/// The report of launch `id`; `draining`, with the error the supervisor
+/// printed, when the terminal replaces `output` with what the screen showed
+/// last once the session's output has drained.
 fn write_ended(
     folder: &Path,
     id: &str,
@@ -156,12 +159,15 @@ fn write_ended(
     code: i32,
     output: &str,
     at: f64,
-    draining: bool,
+    draining: Option<Option<&str>>,
 ) -> Result<()> {
     let mut report =
         json!({"launch_id": id, "name": name, "code": code, "output": output, "ended_at": at});
-    if draining {
+    if let Some(error) = draining {
         report["draining"] = json!(true);
+        if let Some(error) = error {
+            report["error"] = json!(error);
+        }
     }
     atomic(&ended_path(folder, id), &format!("{report}\n"))
 }
@@ -169,8 +175,10 @@ fn write_ended(
 /// Called by the session host as the session of launch `id` ends, once its
 /// output has drained, with `output`, the last lines of its screen: a
 /// `draining` report that its supervisor left in `folder` gets them in place
-/// of what the supervisor read, and is complete. Other files stay as they are,
-/// and nothing here fails the host.
+/// of what the supervisor read, and is complete. Where the drained screen
+/// lacks the supervisor's error (its output did not drain in time), the error
+/// follows the lines as the supervisor reported it. Other files stay as they
+/// are, and nothing here fails the host.
 // Only the Windows session host calls it; its tests run everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn drained(folder: &Path, id: &str, output: &str) {
@@ -185,11 +193,23 @@ pub(crate) fn drained(folder: &Path, id: &str, output: &str) {
     else {
         return;
     };
+    let output = match report["error"].as_str() {
+        Some(error) if !shows(output, error) => ending(output, Some(error)),
+        _ => output.to_owned(),
+    };
     report["output"] = json!(output);
     if let Some(fields) = report.as_object_mut() {
         fields.remove("draining");
+        fields.remove("error");
     }
     let _ = atomic(&path, &format!("{report}\n"));
+}
+
+/// Whether `output`, a screen's last lines, shows the supervisor's `error` as
+/// `main` printed it, however the screen wrapped it.
+fn shows(output: &str, error: &str) -> bool {
+    let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+    squeezed(output).contains(&squeezed(&format!("hgs: {error}")))
 }
 
 /// Whether the run of this supervisor (`HGS_SESSION`, `HGS_RUN_ID`, which the
@@ -405,13 +425,13 @@ mod tests {
             3,
             "cannot start",
             now - 20.0,
-            false,
+            None,
         )
         .unwrap();
         // Started and gone, without a supervisor's word.
         write_started(folder, TWO, "sh/project/two", now - 10.0).unwrap();
         // Ended in a terminal of its own: only its supervisor wrote.
-        write_ended(folder, THREE, None, 1, "", now - 5.0, false).unwrap();
+        write_ended(folder, THREE, None, 1, "", now - 5.0, None).unwrap();
         let ended = |sessions: &[Value]| Evidence::read_in(folder, now).ended(sessions);
         assert_eq!(
             ended(&[]),
@@ -439,7 +459,7 @@ mod tests {
         // Evidence older than a week, of an invalid or other ID, or unreadable,
         // is not listed.
         write_started(folder, ONE, "claude/project/one", now - KEPT - 60.0).unwrap();
-        write_ended(folder, ONE, None, 3, "", now - KEPT - 1.0, false).unwrap();
+        write_ended(folder, ONE, None, 3, "", now - KEPT - 1.0, None).unwrap();
         fs::write(folder.join("not-a-launch.json"), "{}").unwrap();
         fs::write(
             started_path(folder, "00000000-0000-0000-0000-000000000000"),
@@ -474,7 +494,7 @@ mod tests {
             3,
             "cannot start",
             now - 1.0,
-            false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -515,7 +535,7 @@ mod tests {
     fn pruning_removes_only_evidence_older_than_a_week() {
         let folder = tempfile::tempdir().unwrap();
         write_started(folder.path(), ONE, "sh/project/one", 0.0).unwrap();
-        write_ended(folder.path(), ONE, None, 1, "", 0.0, false).unwrap();
+        write_ended(folder.path(), ONE, None, 1, "", 0.0, None).unwrap();
         fs::write(folder.path().join("notes.txt"), "kept").unwrap();
         let week = Duration::from_secs_f64(KEPT);
         prune(
@@ -539,14 +559,14 @@ mod tests {
         let folder = folder.path();
         let read = |id: &str| fs::read_to_string(ended_path(folder, id)).unwrap();
         // Where the terminal completes no report (tmux), the report is as it was.
-        write_ended(folder, ONE, Some("claude/p/one"), 3, "half", 1.5, false).unwrap();
+        write_ended(folder, ONE, Some("claude/p/one"), 3, "half", 1.5, None).unwrap();
         let complete = format!(
             "{{\"code\":3,\"ended_at\":1.5,\"launch_id\":\"{ONE}\",\"name\":\"claude/p/one\",\
              \"output\":\"half\"}}\n"
         );
         assert_eq!(read(ONE), complete);
         // The session host's supervisor leaves it draining.
-        write_ended(folder, TWO, None, 1, "half", 2.5, true).unwrap();
+        write_ended(folder, TWO, None, 1, "half", 2.5, Some(None)).unwrap();
         assert_eq!(
             read(TWO),
             format!(
@@ -588,6 +608,60 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_report_keeps_the_supervisor_error_that_did_not_drain() {
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path();
+        let read = |id: &str| fs::read_to_string(ended_path(folder, id)).unwrap();
+        let error = "claude: Access is denied. (os error 5)";
+        let draining = |id: &str| {
+            let output = ending("half", Some(error));
+            write_ended(folder, id, None, 1, &output, 2.5, Some(Some(error))).unwrap();
+        };
+        // The supervisor's draining report carries the error it printed.
+        draining(ONE);
+        assert_eq!(
+            read(ONE),
+            format!(
+                "{{\"code\":1,\"draining\":true,\"ended_at\":2.5,\"error\":\"{error}\",\
+                 \"launch_id\":\"{ONE}\",\"name\":null,\"output\":\"half\\nhgs: {error}\"}}\n"
+            )
+        );
+        // The drained screen shows it, here wrapped at the console's width:
+        // it is not repeated.
+        drained(
+            folder,
+            ONE,
+            "half\nwhole\nhgs: claude: Access is\ndenied. (os error 5)",
+        );
+        assert_eq!(
+            read(ONE),
+            format!(
+                "{{\"code\":1,\"ended_at\":2.5,\"launch_id\":\"{ONE}\",\"name\":null,\
+                 \"output\":\"half\\nwhole\\nhgs: claude: Access is\\ndenied. (os error 5)\"}}\n"
+            )
+        );
+        // The supervisor's output did not drain in time: its error follows the
+        // drained lines, which keep at most eight lines with it.
+        draining(TWO);
+        drained(folder, TWO, "half\nwhole");
+        assert_eq!(
+            read(TWO),
+            format!(
+                "{{\"code\":1,\"ended_at\":2.5,\"launch_id\":\"{TWO}\",\"name\":null,\
+                 \"output\":\"half\\nwhole\\nhgs: {error}\"}}\n"
+            )
+        );
+        draining(THREE);
+        let many: Vec<String> = (1..=20).map(|line| format!("line {line}")).collect();
+        drained(folder, THREE, &many[12..].join("\n"));
+        let report: Value = serde_json::from_str(&read(THREE)).unwrap();
+        assert_eq!(
+            string(&report, "output"),
+            format!("{}\nhgs: {error}", many[13..].join("\n"))
+        );
+    }
+
+    #[test]
     fn a_listing_reports_the_lines_the_session_host_completed_after_its_evidence_was_read() {
         let folder = tempfile::tempdir().unwrap();
         let now = 1_800_000_000.0;
@@ -600,7 +674,7 @@ mod tests {
             3,
             "half",
             now - 2.0,
-            true,
+            Some(None),
         )
         .unwrap();
         write_ended(
@@ -610,7 +684,7 @@ mod tests {
             1,
             "as read",
             now - 1.0,
-            true,
+            Some(None),
         )
         .unwrap();
         let evidence = Evidence::read_in(folder.path(), now);
