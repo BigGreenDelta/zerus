@@ -1039,7 +1039,9 @@ project placement. A session that ends before it appears and leaves no record,
 such as an agent that cannot start after the launch reported it started, also
 removes the placeholder: a notice shows its exit code and last lines, as its
 computer reports them in `ended_launches` ([JSON and external
-clients](#json-and-external-clients)); a hidden launch status ends silently.
+clients](#json-and-external-clients)), and stays when the launch command
+reports afterwards; a hidden launch status ends silently but still shows a
+later launch error.
 Existing names and unrelated sessions are never repurposed.
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.

@@ -958,9 +958,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
         // A listing can report the launch ended before its command returns; its
         // notice stays and nothing waits to open a session that never appears.
-        const bool ended = m_endedLaunches.remove(id);
         if (ok) {
-            if (!ended) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
+            if (!takeEndedLaunch(id)) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
         } else {
             newSessionLaunchFailed(id, error);
         }
@@ -2242,9 +2241,21 @@ void SessionsWindow::savePendingLaunches()
     QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
 }
 
+bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
+{
+    const auto it = std::find_if(m_endedLaunches.begin(), m_endedLaunches.end(), [&](const auto &ended) { return ended.first == launchId; });
+    if (it == m_endedLaunches.end()) return false;
+    if (launch) *launch = it->second;
+    m_endedLaunches.erase(it); return true;
+}
+
 void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QString &error)
 {
-    const QString name = m_pendingLaunches.value(launchId).toObject().value("tag").toString();
+    // A listing that reported the launch ended already showed its reason and last
+    // lines. A hidden launch status showed nothing, so its failure still names it.
+    QJsonObject ended;
+    if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
+    const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
     m_pendingLaunches.remove(launchId); savePendingLaunches();
     rebuild();
     showNotice(error.isEmpty() ? tr("Could not start session %1. Check the terminal.").arg(name)
@@ -2282,7 +2293,7 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
-            consumed = true; m_endedLaunches.insert(it.key());
+            consumed = true; m_endedLaunches.append({it.key(), launch});
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {

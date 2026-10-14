@@ -352,6 +352,8 @@ private slots:
     void launchPlaceholderReportsASessionThatEndedUnlisted();
     void endedLaunchOutranksALaterStartedCallback_data();
     void endedLaunchOutranksALaterStartedCallback();
+    void endedLaunchOutranksALaterFailure_data();
+    void endedLaunchOutranksALaterFailure();
     void folderBrowserIgnoresStaleResponses();
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
@@ -7622,6 +7624,56 @@ void TestSessionsWindow::endedLaunchOutranksALaterStartedCallback()
     QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
     // Nothing waits to open the ended launch: a later session with its ID is not selected.
     deliver(false, true); QVERIFY(!opened());
+}
+
+void TestSessionsWindow::endedLaunchOutranksALaterFailure_data()
+{
+    QTest::addColumn<QString>("order");
+    QTest::newRow("ended-then-failed") << QString("ended");
+    QTest::newRow("ended-then-terminal-failed") << QString("terminal");
+    QTest::newRow("hidden-ended-then-failed") << QString("hidden");
+    QTest::newRow("failed-then-ended") << QString("failed");
+}
+
+void TestSessionsWindow::endedLaunchOutranksALaterFailure()
+{
+    QFETCH(QString, order);
+    // A non-detached launch command can fail after its session already ended.
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings().setValue("workspace/pendingLaunches", QJsonDocument(QJsonObject{{token, QJsonObject{{"host", QString()},
+        {"cmd", "opencode"}, {"tag", "racing"}, {"group", "ungrouped"}, {"target", "/remote/infra"}, {"add_folder", false},
+        {"show_pending", order != "hidden"}, {"created", QDateTime::currentSecsSinceEpoch()}}}}).toJson(QJsonDocument::Compact));
+    auto state = fleet();
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *notice = window.findChild<QLabel *>("notice");
+    QVERIFY(client); QVERIFY(notice);
+    const auto end = [&] {
+        auto box = state.local();
+        box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"name", "opencode/infra/racing"},
+            {"code", 3}, {"output", "cannot start: example failure"}});
+        state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    };
+    const QString ended("Session racing ended before it appeared (exit code 3).\ncannot start: example failure");
+    if (order == "failed") {
+        // A failure reported first ends the launch; the later listing adds nothing.
+        client->nativeSessionLaunched(token, false, "timed out");
+        QCOMPARE(notice->text(), QString("Could not start session racing: timed out"));
+        end();
+        QCOMPARE(notice->text(), QString("Could not start session racing: timed out"));
+        QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
+        return;
+    }
+    end();
+    QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
+    if (order == "hidden") QVERIFY(!notice->text().contains("ended before it appeared"));
+    else QCOMPARE(notice->text(), ended);
+    // A terminal launch reports its failure directly, possibly without a reason.
+    if (order == "terminal") window.newSessionLaunchFailed(token);
+    else client->nativeSessionLaunched(token, false, "timed out");
+    // The ended report already carries the reason and its last lines. A hidden
+    // launch status showed nothing, so its failure still names the launch.
+    QCOMPARE(notice->text(), order == "hidden" ? QString("Could not start session racing: timed out") : ended);
+    QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
 }
 
 void TestSessionsWindow::folderBrowserIgnoresStaleResponses()
