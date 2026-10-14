@@ -7,10 +7,10 @@
 #include "AccountUsage.h"
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
+#include "AccountChoice.h"
 #include "WorkspaceList.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
-#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -27,53 +27,10 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
-#include <QStyledItemDelegate>
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
-enum { ProviderRole=Qt::UserRole+1, ProfileRole, UsageTextRole, UsageColorRole, MembersRole };
-class LaunchAccountDelegate final : public QStyledItemDelegate {
-public:
-    explicit LaunchAccountDelegate(QWidget *parent):QStyledItemDelegate(parent),m_limits(new AccountUsage::Button(parent)) {
-        m_limits->setObjectName("launchAccountLimitsRenderer");m_limits->hide();
-        m_limits->setShowProvider(false);m_limits->setCompact(true);m_limits->setFocusPolicy(Qt::NoFocus);
-        m_limits->setAttribute(Qt::WA_TransparentForMouseEvents);
-    }
-    QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
-        return {260,16+option.fontMetrics.lineSpacing()*2};
-    }
-    void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
-        auto background=option;initStyleOption(&background,index);background.text.clear();background.icon={};
-        const auto *widget=option.widget;auto *style=widget?widget->style():QApplication::style();
-        style->drawControl(QStyle::CE_ItemViewItem,&background,p,widget);
-        p->save();p->setClipRect(option.rect);
-        const bool selected=option.state&QStyle::State_Selected;
-        const bool dark=widget&&widget->property("hgsDark").toBool();
-        const QColor color(dark?"#e8edf4":"#1a2733");
-        auto rect=option.rect.adjusted(10,8,-10,-8);
-        const int logo=option.fontMetrics.lineSpacing()*2;
-        index.data(Qt::DecorationRole).value<QIcon>().paint(p,QRect(rect.x(),rect.y(),logo,logo));rect.adjust(logo+12,0,0,0);
-        auto font=option.font;font.setWeight(QFont::DemiBold);p->setFont(font);p->setPen(color);
-        p->drawText(QRect(rect.x(),rect.y(),rect.width(),option.fontMetrics.lineSpacing()),Qt::AlignVCenter,
-            QFontMetrics(font).elidedText(index.data().toString(),Qt::ElideRight,rect.width()));
-        const QRect limits(rect.x(),rect.y()+option.fontMetrics.lineSpacing(),rect.width(),option.fontMetrics.lineSpacing());
-        const auto data=AccountUsage::launchMeterData(index.data(ProfileRole).toJsonObject()["usage"].toObject());
-        if(!data["windows"].toArray().isEmpty()){
-            // Render the actual status-footer widget without its provider badge.
-            // It remains hidden and never receives input or fetches account data.
-            m_limits->setTheme(dark);m_limits->setFont(option.font);m_limits->setIndicator(AccountUsage::indicator());m_limits->setData(data);
-            p->setClipRect(limits,Qt::IntersectClip);
-            m_limits->paintContents(*p,QPoint(limits.x()-4,limits.y()+(limits.height()-m_limits->height())/2));
-        }else{
-            const auto usageColor=index.data(UsageColorRole).value<QColor>();
-            p->setFont(option.font);p->setPen(usageColor.isValid()?usageColor:selected?color:QColor(dark?"#a1adbb":"#647386"));
-            p->drawText(limits,Qt::AlignVCenter,option.fontMetrics.elidedText(index.data(UsageTextRole).toString(),Qt::ElideRight,limits.width()));
-        }
-        p->restore();
-    }
-private:
-    AccountUsage::Button *m_limits;
-};
+using namespace AccountChoice;
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
 // Folders of the selected computer: drive and UNC paths on the local Windows
 // machine (D16), POSIX paths elsewhere.
@@ -145,7 +102,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_preferredAgent=!agent.isEmpty()?agent:m_agents.contains(lastAgent)||lastAgent=="sh"?lastAgent:QString("codex");
     m_account=new WorkspaceList;m_account->setObjectName("launchAccount");m_account->setAccessibleName(tr("Account and agent"));
     m_account->setProperty("hgsDark",dark);
-    m_account->setItemDelegate(new LaunchAccountDelegate(m_account));m_account->setMinimumHeight(180);m_account->setMaximumHeight(250);
+    m_account->setItemDelegate(new AccountChoice::Delegate(m_account));m_account->setMinimumHeight(180);m_account->setMaximumHeight(250);
     m_account->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);m_account->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto *accountField=new QVBoxLayout;accountField->setSpacing(6);accountField->addWidget(m_account);
     auto *accountStatusRow=new QHBoxLayout;

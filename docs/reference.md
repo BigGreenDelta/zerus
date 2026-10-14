@@ -1202,7 +1202,13 @@ incrementally. Known rows and selection survive refresh, failure and offline
 hosts. Limits use one current account snapshot, never the sum of machine usage.
 
 **Add account** creates a separate profile on the selected host and starts native
-sign-in. Default/native profiles retain existing authorization. **New session**
+sign-in. Default/native profiles retain existing authorization. Its agents use New
+session's rows: a large colored provider logo, the agent and what adding does.
+A removed profile can be added again with its saved sign-in. OpenCode has one
+native configuration per machine: **Remove from…** takes it out of Accounts and
+New session there, keeping its configuration, credentials and sessions, and Add
+account brings it back. Its row is unavailable while it is listed or not
+installed. **New session**
 shows one list of **Account and agent** pairs for the chosen computer on desktop
 (including macOS) and Android. A large colored provider logo spans two text lines: the
 account email and compact cached limits, or **limits n/a**. Desktop reuses the

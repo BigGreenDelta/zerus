@@ -2,6 +2,7 @@
 #include "AccountUsage.h"
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
+#include "AccountChoice.h"
 #include "IdentityBadge.h"
 #include "MachinePlatform.h"
 #include "WorkspaceIcons.h"
@@ -33,6 +34,13 @@
 #include <QVBoxLayout>
 namespace {
 QLabel *label(const QString &text = {}) { auto *w = new QLabel(text); w->setTextFormat(Qt::PlainText); w->setWordWrap(true); return w; }
+// Add account's agents: every row stays visible, measured in the current style.
+class AgentList final : public WorkspaceList {
+public:
+    using WorkspaceList::WorkspaceList;
+    QSize sizeHint() const override { return {380, count() ? sizeHintForRow(0) * count() + 2 * frameWidth() : 0}; }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+};
 using IdentityBadges::providerName;
 QString permissionMode(const QJsonObject &p) {
     return p["permission_mode"] == "bypass" ? "bypass" : p["effective_permission_mode"].toString("unknown");
@@ -500,7 +508,7 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
-    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig); m_remove->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
+    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig); m_remove->setEnabled(has && idle && online(p["host"].toString()));
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
     m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint());
     updateRefreshState();
@@ -542,7 +550,7 @@ void AccountsPage::selectionChanged()
     if(nativeConfig) {
         const auto setup=tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.").arg(machine);
         m_detail->setText(setup);m_login->setToolTip(setup);m_permissions->setToolTip(setup);m_install->setToolTip(setup);
-        m_rename->setToolTip(setup);m_remove->setToolTip(setup);m_copy->setEnabled(false);
+        m_rename->setToolTip(setup);m_copy->setEnabled(false);
     }
     m_detail->setToolTip(p["home"].toString());
     if(isVisible())inspectSelected();
@@ -645,56 +653,88 @@ void AccountsPage::renameNext()
 }
 void AccountsPage::add()
 {
-    QDialog dialog(this); dialog.setWindowTitle(tr("Add agent account")); dialog.setObjectName("accountDialog"); dialog.setMinimumWidth(490);
-    auto *layout = new QVBoxLayout(&dialog);layout->setSizeConstraint(QLayout::SetMinimumSize);auto *hint = label(); layout->addWidget(hint);
-    auto *form = new QFormLayout; auto *machine = new QComboBox;machine->setObjectName("addAccountMachine"); fillMachines(machine, m_fleet, m_explicitHost); machine->setCurrentIndex(qMax(0, machine->findData(m_machine->currentData())));
-    auto *provider = new QComboBox;provider->setObjectName("addAccountProvider");
-    const auto providers=[=] {
-        QStringList names;for (const auto *name : {"codex", "claude", "kimi", "dsh"}) if (launchable(m_fleet, machine->currentData().toString(), name)) names << name;
-        return names;
-    };
-    provider->addItems(providers());
+    QDialog dialog(this); dialog.setWindowTitle(tr("Add agent account")); dialog.setObjectName("accountDialog");
+    auto *layout = new QVBoxLayout(&dialog);layout->setContentsMargins(28,24,28,24);layout->setSpacing(18);layout->setSizeConstraint(QLayout::SetMinimumSize);
+    auto *heading = label(tr("Add account"));heading->setObjectName("heading");layout->addWidget(heading);
+    auto *form = new QFormLayout;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *machine = new QComboBox;machine->setObjectName("addAccountMachine"); fillMachines(machine, m_fleet, m_explicitHost); machine->setCurrentIndex(qMax(0, machine->findData(m_machine->currentData())));
+    // Agents use New session's rows: a colored logo, the agent and what adding does.
+    auto *provider = new AgentList;provider->setObjectName("addAccountProvider");provider->setAccessibleName(tr("Agent"));
+    provider->setProperty("hgsDark",m_dark);provider->setItemDelegate(new AccountChoice::Delegate(provider));
+    provider->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);provider->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    provider->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    const auto agent=[provider] {return provider->currentItem()?provider->currentItem()->data(AccountChoice::ProviderRole).toString():QString();};
     auto *saved=new QComboBox;saved->setObjectName("savedAccount");auto *savedLabel=label(tr("Account"));
     auto *name = new QLineEdit;name->setObjectName("addAccountName"); name->setPlaceholderText(tr("Work, Personal, Team…"));auto *nameLabel=label(tr("Account name"));
     form->addRow(tr("Machine"), machine); form->addRow(tr("Agent"), provider);form->addRow(savedLabel,saved);form->addRow(nameLabel, name); layout->addLayout(form);
+    auto *hint = label();hint->setObjectName("muted");layout->addWidget(hint);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel); auto *create = buttons->addButton(tr("Create and sign in"), QDialogButtonBox::AcceptRole); create->setEnabled(false); layout->addWidget(buttons);
+    const auto where=[=] {const auto host=machine->currentData().toString();return host.isEmpty()?m_fleet.local().host:host;};
     const auto update=[=] {
-        const bool reuse=!saved->currentData().toJsonObject().isEmpty();const auto host=machine->currentData().toString();
+        const bool reuse=!saved->currentData().toJsonObject().isEmpty();const auto host=machine->currentData().toString();const auto chosen=agent();
         // No machine to choose (a control-only computer without remote machines).
         const bool none=machine->count()==0;
         name->setVisible(!reuse);nameLabel->setVisible(!reuse);
-        create->setEnabled(!none && online(host) && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
-        create->setText(reuse?tr("Add account"):provider->currentText()=="dsh"?tr("Enter API key…"):tr("Create and sign in"));
-        hint->setText(none?remoteOnlyHint():reuse?tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(host.isEmpty()?m_fleet.local().host:host)
-            :provider->currentText()=="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in."));
+        create->setEnabled(!none && online(host) && !chosen.isEmpty() && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
+        create->setText(reuse?tr("Add account"):chosen=="dsh"?tr("Enter API key…"):tr("Create and sign in"));
+        hint->setText(none?remoteOnlyHint():reuse&&chosen=="opencode"?tr("Use OpenCode's native configuration on %1 for new sessions again.").arg(where())
+            :reuse?tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(where())
+            :chosen=="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in."));
     };
     const auto populate=[=] {
-        const QSignalBlocker blocker(saved);saved->clear();
-        for(const auto &value:savedProfiles(machine->currentData().toString(),provider->currentText())) {
+        const QSignalBlocker blocker(saved);saved->clear();const auto chosen=agent();
+        const auto icon=workspaceIcon(chosen,IdentityBadges::providerColor(chosen,m_dark));
+        for(const auto &value:savedProfiles(machine->currentData().toString(),chosen)) {
             const auto p=value.toObject();const auto email=p["usage"].toObject()["identity"].toObject()["email"].toString();
-            saved->addItem(email.isEmpty() || email==p["label"].toString()?p["label"].toString():p["label"].toString()+" ("+email+")",p);
+            saved->addItem(icon,email.isEmpty() || email==p["label"].toString()?p["label"].toString():p["label"].toString()+" ("+email+")",p);
         }
-        const bool any=saved->count()>0;saved->addItem(tr("New account…"),QJsonObject());saved->setCurrentIndex(0);
-        saved->setVisible(any);savedLabel->setVisible(any);update();
+        const bool any=saved->count()>0;
+        // OpenCode has one native configuration per machine and no separate profiles.
+        if(chosen!="opencode")saved->addItem(tr("New account…"),QJsonObject());
+        saved->setCurrentIndex(0);saved->setVisible(any);savedLabel->setVisible(any);update();
+    };
+    const auto providers=[=] {
+        const auto host=machine->currentData().toString(),previous=agent();
+        const auto listed=[&](const QString &id) {
+            for(const auto &value:m_catalogs.value(host)["profiles"].toArray())if(value.toObject()["id"]==id)return true;
+            return false;
+        };
+        const QSignalBlocker blocker(provider);provider->clear();int row=0;
+        for (const auto *value : {"codex", "claude", "kimi", "dsh", "opencode"}) {
+            const QString id=value;if(!launchable(m_fleet,host,id))continue;
+            auto *item=new QListWidgetItem(workspaceIcon(id,IdentityBadges::providerColor(id,m_dark)),providerName(id),provider);
+            item->setData(AccountChoice::ProviderRole,id);
+            const bool reusable=!savedProfiles(host,id).isEmpty();
+            QString detail=id=="dsh"?(reusable?tr("Saved API key or a new one"):tr("DeepSeek API key"))
+                :reusable?tr("Saved account or a new profile"):tr("New profile with its own sign-in");
+            if(id=="opencode"){
+                detail=reusable?tr("Add the native configuration again"):listed("native-opencode")?tr("Native configuration, already added"):tr("Not installed on %1").arg(where());
+                if(!reusable){
+                    item->setFlags(item->flags()&~(Qt::ItemIsEnabled|Qt::ItemIsSelectable));
+                    item->setToolTip(listed("native-opencode")?tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.").arg(where())
+                        :tr("Install OpenCode on %1, then refresh Accounts.").arg(where()));
+                }
+            }
+            item->setData(AccountChoice::UsageTextRole,detail);item->setData(Qt::AccessibleTextRole,providerName(id)+'\n'+detail);
+            // Keep the chosen agent where this machine offers it, else the first one.
+            if(id==previous&&(item->flags()&Qt::ItemIsEnabled))row=provider->count()-1;
+        }
+        provider->setCurrentRow(row);provider->updateGeometry();
     };
     connect(name,&QLineEdit::textChanged,&dialog,update);connect(saved,&QComboBox::currentIndexChanged,&dialog,update);
-    connect(machine,&QComboBox::currentIndexChanged,&dialog,[=] {
-        QStringList shown;for (int i = 0; i < provider->count(); ++i) shown << provider->itemText(i);
-        if (shown == providers()) return;
-        const QSignalBlocker blocker(provider);const auto chosen=provider->currentText();
-        provider->clear();provider->addItems(providers());provider->setCurrentIndex(qMax(0,provider->findText(chosen)));
-    });
-    connect(machine,&QComboBox::currentIndexChanged,&dialog,populate);connect(provider,&QComboBox::currentIndexChanged,&dialog,populate);populate();
+    connect(provider,&QListWidget::currentItemChanged,&dialog,populate);
+    connect(machine,&QComboBox::currentIndexChanged,&dialog,[=]{providers();populate();});providers();populate();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     dialog.ensurePolished();dialog.adjustSize();
-    if (dialog.exec() != QDialog::Accepted || machine->count() == 0 || !online(machine->currentData().toString())) return;
+    if (dialog.exec() != QDialog::Accepted || machine->count() == 0 || !online(machine->currentData().toString()) || agent().isEmpty()) return;
     const auto existing=saved->currentData().toJsonObject();if(!existing.isEmpty()){useSavedProfile(existing);return;}
-    if (provider->currentText() == "dsh") { setupDeepSeek(machine->currentData().toString(), name->text().trimmed()); return; }
-    const QString id = provider->currentText() + "-" + QUuid::createUuid().toString(QUuid::Id128).left(10); const QString host = machine->currentData().toString();
+    if (agent() == "opencode") return;
+    if (agent() == "dsh") { setupDeepSeek(machine->currentData().toString(), name->text().trimmed()); return; }
+    const QString id = agent() + "-" + QUuid::createUuid().toString(QUuid::Id128).left(10); const QString host = machine->currentData().toString();
     m_loginAfterAddHost = host; m_loginAfterAddId = id;
     m_activeProfile = m_requestedProfile = profileKey(host, id);
     { const QSignalBlocker blocker(m_machine); m_machine->setCurrentIndex(0); }
-    QStringList args{"add", id, "--provider", provider->currentText(), "--label", name->text().trimmed()};
+    QStringList args{"add", id, "--provider", agent(), "--label", name->text().trimmed()};
     if (m_catalogs.contains(host)) args << "--revision" << m_catalogs[host]["revision"].toString();
     request(host, args);
 }
@@ -814,7 +854,9 @@ void AccountsPage::remove()
     QMessageBox dialog(QMessageBox::Question, tr("Remove account from Zerus"),
         tr("Remove “%1” from %2?").arg(selectedAccount()["label"].toString(), machine), QMessageBox::Cancel, this);
     dialog.setObjectName("removeAccountDialog"); dialog.setTextFormat(Qt::PlainText);
-    dialog.setInformativeText(tr("This account will disappear from Accounts and New session for %1 in every Zerus connected to %1, including Zerus running on %1.\n\nSign-in credentials and existing sessions on %1 are kept. The account stays available on its other machines.\n\nTo use it here again, choose Add account or Add to %1. Zerus can reuse the saved sign-in.").arg(machine));
+    dialog.setInformativeText(p["provider"]=="opencode"
+        ? tr("OpenCode will disappear from Accounts and New session for %1 in every Zerus connected to %1, including Zerus running on %1.\n\nIts native configuration, provider credentials and existing sessions on %1 are kept.\n\nTo use it here again, choose Add account.").arg(machine)
+        : tr("This account will disappear from Accounts and New session for %1 in every Zerus connected to %1, including Zerus running on %1.\n\nSign-in credentials and existing sessions on %1 are kept. The account stays available on its other machines.\n\nTo use it here again, choose Add account or Add to %1. Zerus can reuse the saved sign-in.").arg(machine));
     auto *confirm = dialog.addButton(tr("Remove from %1").arg(machine), QMessageBox::DestructiveRole);
     dialog.setDefaultButton(QMessageBox::Cancel); dialog.setEscapeButton(QMessageBox::Cancel);
     dialog.exec();

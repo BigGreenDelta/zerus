@@ -170,6 +170,7 @@ inline QString exhaustedSummary(const QJsonObject &data) {
 inline QColor color(double value,bool dark) {return toneColor(thresholdTone(value),dark);}
 inline QString state(const QJsonObject &data) {
     return data.isEmpty() || data.value("status")=="loading" ? QObject::tr("Loading account details…")
+        : data.value("status")=="configured" && data.value("provider")=="opencode" ? QObject::tr("OpenCode uses its native provider configuration. Usage is not available here.")
         : data.value("status")=="configured" ? QObject::tr("API key configured. Usage is available in the DeepSeek console.")
         : data.value("offline").toBool() || data.value("status")=="offline" ? QObject::tr("Machine is offline. Showing the last available account data.") : data.value("status")=="expired" ? QObject::tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.")
         : data.value("status")=="signed_out" && data.value("provider")=="dsh" ? QObject::tr("DeepSeek account is signed out. API-key connections are configured separately in the native settings.")
@@ -334,7 +335,7 @@ private:
     }
     QString summaryText() const {
         const auto balances=m_data.value("balances").toArray();const auto b=balances.isEmpty()?QJsonObject():balances.first().toObject();
-        return !b.isEmpty()?b.value("balance").toString()+" "+b.value("currency").toString():m_data.value("status")=="configured"?tr("API key"):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
+        return !b.isEmpty()?b.value("balance").toString()+" "+b.value("currency").toString():m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
     }
     int contentWidth() const {
         const auto windows=m_data.value("windows").toArray();const bool loading=m_data.isEmpty() || m_data.value("status")=="loading";

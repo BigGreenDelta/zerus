@@ -17,6 +17,7 @@
 #include <QTimer>
 #include <QRadioButton>
 #include <QScopeGuard>
+#include "AccountChoice.h"
 #include <QSettings>
 #include <QStyleOptionComboBox>
 #include "FakeCli.h"
@@ -43,6 +44,7 @@ private slots:
     void init();
     void nativeDefaultsAndMachineScopedActions();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
+    void addAccountUsesProviderRows();
     void repliesFromRemovedMachineAreIgnored();
     void explicitMachineOutsidePollingSurvivesRefreshAndExpiresWithFilter();
     void launchCarriesAccountForSelectedMachine();
@@ -162,13 +164,76 @@ void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccount
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),5);
     page.showAccount({},"native-opencode");QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
     QSignalSpy install(&page,&AccountsPage::installRequested),login(&page,&AccountsPage::loginRequested);
-    for(const auto *name:{"loginAccount","installAccountAgent","accountPermissions","renameAccount","removeAccount","copyAccount"}) {
+    for(const auto *name:{"loginAccount","installAccountAgent","accountPermissions","renameAccount","copyAccount"}) {
         auto *button=page.findChild<QPushButton *>(name);QVERIFY(button);QVERIFY(!button->isEnabled());button->click();
     }
     QVERIFY(install.isEmpty());QVERIFY(login.isEmpty());QVERIFY(!page.findChild<QPushButton *>("defaultAccount")->isVisible());
     QVERIFY(page.findChild<QPushButton *>("installAccountAgent")->toolTip().contains("OpenCode"));
+    // Owner decision 2026-10-14: its Zerus entry is removed and added back like other accounts.
+    auto *remove=page.findChild<QPushButton *>("removeAccount");QTRY_VERIFY(remove->isEnabled());
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QMessageBox *>("removeAccountDialog");QVERIFY(dialog);
+        QVERIFY(dialog->informativeText().contains("native configuration, provider credentials and existing sessions"));
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}
+        QFAIL("No explicit removal button");
+    });
+    remove->click();QTRY_COMPARE(list->count(),4);
+    auto *add=page.findChild<QPushButton *>("addAccount");QTRY_VERIFY(add->isEnabled());
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountDialog");QVERIFY(dialog);
+        const auto closeOnFailure=qScopeGuard([dialog]{if(dialog->isVisible())dialog->reject();});
+        auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QCOMPARE(agents->count(),5);
+        auto *openCode=agents->item(4);QCOMPARE(openCode->data(Qt::UserRole+1).toString(),QString("opencode"));
+        QCOMPARE(openCode->text(),QString("OpenCode"));QVERIFY(openCode->flags()&Qt::ItemIsEnabled);QVERIFY(!openCode->icon().isNull());
+        QCOMPARE(openCode->data(Qt::UserRole+3).toString(),QString("Add the native configuration again"));
+        agents->setCurrentRow(4);
+        auto *saved=dialog->findChild<QComboBox *>("savedAccount");QVERIFY(saved->isVisible());QCOMPARE(saved->count(),1);
+        QCOMPARE(saved->currentData().toJsonObject()["id"].toString(),QString("native-opencode"));
+        QVERIFY(!dialog->findChild<QLineEdit *>("addAccountName")->isVisible());
+        for(auto *button:dialog->findChildren<QPushButton *>())if(button->text()=="Add account"&&button->isEnabled()){button->click();return;}
+        QFAIL("No add button");
+    });
+    add->click();QTRY_COMPARE(list->count(),5);
+    QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
+    QVERIFY(!QFile::exists(m_dir.filePath("removed-local")));QVERIFY(login.isEmpty());
     page.showAccount({},"native-codex");QTRY_VERIFY(page.findChild<QPushButton *>("renameAccount")->isEnabled());
     QVERIFY(!page.findChild<QPushButton *>("renameAccount")->toolTip().contains("OpenCode"));
+}
+
+void TestAccountsPage::addAccountUsesProviderRows()
+{
+    // Add account shows agents as New session does: colored logos, agent names and
+    // what adding does. OpenCode without an installation explains instead.
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.setTheme(true);
+    const auto preview=qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW");
+    if(!preview.isEmpty())page.setStyleSheet("QWidget { background:#171e24; color:#e4e9ee; font-size:14px; } QLabel#heading {font-size:20px;font-weight:600;} QLabel#muted {color:#9babb8;} QPushButton,QComboBox,QLineEdit {padding:9px 13px;border:1px solid #34414b;border-radius:6px;background:#1d262e;} QPushButton:disabled {color:#75808a;} QListWidget {border:1px solid #34414b;border-radius:8px;background:#1d262e;} QListWidget::item:selected {background:#21453c;} ");
+    page.show();
+    auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_VERIFY(list->count()>=4);
+    auto *add=page.findChild<QPushButton *>("addAccount");QTRY_VERIFY(add->isEnabled());
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountDialog");QVERIFY(dialog);
+        const auto closeOnFailure=qScopeGuard([dialog]{if(dialog->isVisible())dialog->reject();});
+        bool heading=false;for(auto *label:dialog->findChildren<QLabel *>("heading"))heading|=label->text()=="Add account";QVERIFY(heading);
+        auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QVERIFY(agents);
+        QVERIFY(dynamic_cast<AccountChoice::Delegate *>(agents->itemDelegate()));
+        QStringList names;for(int i=0;i<agents->count();++i)names<<agents->item(i)->text();
+        QCOMPARE(names,QStringList({"Codex","Claude","Kimi","DeepSeek","OpenCode"}));
+        QCOMPARE(agents->currentRow(),0);QCOMPARE(agents->currentItem()->data(Qt::UserRole+3).toString(),QString("New profile with its own sign-in"));
+        const auto logo=agents->item(1)->icon().pixmap(40,40).toImage();const auto expected=IdentityBadges::providerColor("claude",true);bool colored=false;
+        for(int y=0;y<logo.height();++y)for(int x=0;x<logo.width();++x){const auto pixel=logo.pixelColor(x,y);
+            if(pixel.alpha()>240&&qAbs(pixel.red()-expected.red())<3&&qAbs(pixel.green()-expected.green())<3&&qAbs(pixel.blue()-expected.blue())<3)colored=true;}
+        QVERIFY(colored);
+        auto *openCode=agents->item(4);QVERIFY(!(openCode->flags()&Qt::ItemIsEnabled));
+        QCOMPARE(openCode->data(Qt::UserRole+3).toString(),QString("Not installed on arch"));QVERIFY(openCode->toolTip().contains("Install OpenCode on arch"));
+        // Every row fits without scrolling.
+        QCOMPARE(agents->verticalScrollBar()->maximum(),0);
+        agents->setCurrentRow(3);bool key=false;
+        for(auto *button:dialog->findChildren<QPushButton *>())key|=button->text()=="Enter API key…";QVERIFY(key);
+        if(!preview.isEmpty()){QDir().mkpath(preview);agents->setCurrentRow(1);QVERIFY(dialog->grab().save(preview+"/add-account-dark.png"));}
+    });
+    add->click();
+    QVERIFY(AccountUsage::state({{"status","configured"},{"provider","opencode"}}).contains("native provider configuration"));
+    QVERIFY(AccountUsage::state({{"status","configured"},{"provider","dsh"}}).contains("DeepSeek console"));
 }
 
 void TestAccountsPage::permissionBadgesReflectInheritedAndMixedModes()
@@ -725,15 +790,20 @@ void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
     QTimer::singleShot(0, &page, [&] {
         auto *dialog = page.findChild<QDialog *>("accountDialog"); QVERIFY(dialog);
         const auto closeOnFailure = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
-        auto *machine = dialog->findChild<QComboBox *>("addAccountMachine"); auto *provider = dialog->findChild<QComboBox *>("addAccountProvider");
-        const auto names = [provider] { QStringList result; for (int i = 0; i < provider->count(); ++i) result << provider->itemText(i); return result; };
+        auto *machine = dialog->findChild<QComboBox *>("addAccountMachine"); auto *provider = dialog->findChild<QListWidget *>("addAccountProvider");
+        const auto names = [provider] { QStringList result; for (int i = 0; i < provider->count(); ++i) result << provider->item(i)->data(Qt::UserRole + 1).toString(); return result; };
+        const auto choose = [provider](const QString &id) { for (int i = 0; i < provider->count(); ++i) if (provider->item(i)->data(Qt::UserRole + 1) == id) provider->setCurrentRow(i); };
+        const auto current = [provider] { return provider->currentItem() ? provider->currentItem()->data(Qt::UserRole + 1).toString() : QString(); };
         QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
-        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
-        provider->setCurrentIndex(provider->findText("dsh"));
+        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "opencode"}));
+        // OpenCode on mac is already in Accounts: its row explains and cannot be chosen.
+        QVERIFY(!(provider->item(4)->flags() & Qt::ItemIsEnabled));
+        QCOMPARE(provider->item(4)->data(Qt::UserRole + 3).toString(), QString("Native configuration, already added"));
+        choose("dsh");
         machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
-        QCOMPARE(provider->currentText(), QString("codex"));
-        provider->setCurrentIndex(provider->findText("claude"));
-        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(provider->currentText(), QString("claude"));
+        QCOMPARE(current(), QString("codex"));
+        choose("claude");
+        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(current(), QString("claude"));
     });
     add->click();
 }
