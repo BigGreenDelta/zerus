@@ -786,7 +786,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
     result["host_generation"] = inspected["generation"].clone();
     let ping=rpc(&record,"ping",json!({})).unwrap_or(Value::Null);
     result["terminal_supported"]=json!(false);
-    result["terminal_reason"]=json!("DeepSeek uses a structured native API without a tmux Terminal");
+    result["terminal_reason"]=json!(backend::DEEPSEEK_TERMINAL.text());
     result["allowed_actions"]=if agent_id.is_none() && ping["sessionActions"]==true && ping["generation"]==inspected["generation"] {
         inspected["lifecycleActions"].clone()
     } else {json!([])};

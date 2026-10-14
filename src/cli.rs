@@ -969,7 +969,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
-    if state::opencode::exists(session) {return Err(Error::new(1,"OpenCode uses Activity; this adapter has no tmux Terminal"));}
+    if state::opencode::exists(session) {return Err(Error::new(1,state::backend::OPENCODE_ATTACH.text()));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1021,7 +1021,7 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
             .strip_prefix('$')
             .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
     {
-        return Err(Error::new(1, "invalid tmux session identity"));
+        return Err(Error::new(1, state::backend::INVALID_SESSION_ID.text()));
     }
     if run_id.is_some_and(|expected| fields[1] != expected) {
         return Err(Error::new(1, crate::state::backend::RUN_CHANGED));
@@ -2114,5 +2114,35 @@ mod tests {
         assert!(!resume_stands(rc, 0, 5, false));
         // A paused agent that exits with an ordinary failure was still stopped.
         assert!(resume_stands(1, 0, 5, true));
+    }
+
+    #[test]
+    fn an_existing_attach_names_tmux_only_where_it_hosts_the_sessions() {
+        // A session ID in another form than `$N` is refused before attaching.
+        use state::backend::PaneInfo;
+        struct Answers;
+        impl TerminalBackend for Answers {
+            fn probe(&self, _target: Target, _fields: &[PaneField]) -> Option<PaneInfo> {
+                Some(PaneInfo::new("@1\trun-1\n".into()))
+            }
+        }
+        let config = Config {
+            home: String::new(),
+            dir: PathBuf::new(),
+            state: PathBuf::new(),
+            selves: Vec::new(),
+            peers: Vec::new(),
+            base_peers: Vec::new(),
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let args = ["claude/MyProj/work-1", "--existing"].map(String::from);
+        let error =
+            state::backend::with_fake(&Answers, || attach_command(&config, &args, "local", false))
+                .unwrap_err();
+        assert_eq!(error.code, 1);
+        assert_eq!(error.message, state::backend::INVALID_SESSION_ID.text());
     }
 }
