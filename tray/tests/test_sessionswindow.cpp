@@ -354,6 +354,7 @@ private slots:
     void endedLaunchOutranksALaterStartedCallback();
     void endedLaunchOutranksALaterFailure_data();
     void endedLaunchOutranksALaterFailure();
+    void endedLaunchesInOneListingKeepUnshownFailures();
     void endedLaunchesWithoutAResultStayBounded();
     void folderBrowserIgnoresStaleResponses();
     void projectOrderAndDefaultBadge();
@@ -7674,6 +7675,34 @@ void TestSessionsWindow::endedLaunchOutranksALaterFailure()
     // The ended report already carries the reason and its last lines. A hidden
     // launch status showed nothing, so its failure still names the launch.
     QCOMPARE(notice->text(), order == "hidden" ? QString("Could not start session racing: timed out") : ended);
+    QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
+}
+
+void TestSessionsWindow::endedLaunchesInOneListingKeepUnshownFailures()
+{
+    // Pending launches are visited in key order; the last ended launch's
+    // notice replaces the notices of those that ended in the same listing.
+    const QString first("00000000-0000-4000-8000-000000000001"), second("00000000-0000-4000-8000-000000000002");
+    QJsonObject pending;
+    for (const auto &[token, tag] : {std::pair{first, QString("first")}, std::pair{second, QString("second")}})
+        pending.insert(token, QJsonObject{{"host", QString()}, {"cmd", "opencode"}, {"tag", tag}, {"group", "ungrouped"},
+            {"target", "/remote/infra"}, {"add_folder", false}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
+    QSettings().setValue("workspace/pendingLaunches", QJsonDocument(pending).toJson(QJsonDocument::Compact));
+    auto state = fleet();
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *notice = window.findChild<QLabel *>("notice");
+    QVERIFY(client); QVERIFY(notice);
+    auto box = state.local();
+    for (const auto &token : {first, second}) box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"code", 3}});
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    const QString ended("Session second ended before it appeared (exit code 3).");
+    QCOMPARE(notice->text(), ended);
+    // The shown launch keeps its notice; the other one never showed it, so its
+    // later failure still names it.
+    client->nativeSessionLaunched(second, false, "timed out");
+    QCOMPARE(notice->text(), ended);
+    client->nativeSessionLaunched(first, false, "timed out");
+    QCOMPARE(notice->text(), QString("Could not start session first: timed out"));
     QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
 }
 

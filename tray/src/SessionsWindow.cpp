@@ -2265,7 +2265,7 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
-    QString ended;
+    QString ended, endedLaunch;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end();) {
         const auto launch = it.value().toObject();
@@ -2301,6 +2301,10 @@ void SessionsWindow::placeLaunchedSessions()
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {
+                // Only the last ended notice shows. A launch whose notice it
+                // replaces showed nothing, so its later failure still names it.
+                for (auto &[id, shown] : m_endedLaunches) if (id == endedLaunch) shown["show_pending"] = false;
+                endedLaunch = it.key();
                 const QString name = launch.value("tag").toString(); const auto code = end.value("code");
                 ended = code.isDouble() ? tr("Session %1 ended before it appeared (exit code %2).").arg(name).arg(code.toInteger())
                     : tr("Session %1 ended before it appeared.").arg(name);
