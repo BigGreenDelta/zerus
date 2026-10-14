@@ -225,6 +225,9 @@ even with `-c`. Use `-- resume --last --model MODEL` when needed. Claude and Kim
 forward `-c` to their wrapper. Existing sessions attach without rerunning the
 wrapper. Interactive setup needs an attached launch; detached mode assumes the
 required environment is already available. Never put private keys in wrappers.
+Tracking never runs `run_codex.sh` to detect Codex capabilities; it runs only as
+the launch and always receives `--no-daemon`, so it must start a Codex release with
+that flag. `--bare` checks the native Codex and omits the flag for an older release.
 
 <a id="desktop"></a>
 

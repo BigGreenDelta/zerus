@@ -6,10 +6,22 @@ fn required_env(name: &str) -> Result<String> {
     nonempty_env(name).ok_or_else(|| format!("missing {name} in tracked agent launch"))
 }
 
+/// Whether a tracked Codex launch passes `--no-daemon`. Older Codex already
+/// runs in-process and rejects this newer flag, so the native CLI is asked.
+/// A project launcher such as `run_codex.sh` runs only under supervision: it
+/// may prompt, unlock secrets or exit before this run is recorded. It receives
+/// the flag that reviewed Codex releases require; `--bare` selects the native
+/// CLI for an older Codex.
+fn codex_daemon_flag(executable: &str) -> Result<bool> {
+    if executable != "codex" {
+        return Ok(true);
+    }
+    codex_supports_no_daemon(executable)
+}
+
 fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
     use std::process::Stdio;
-    // Older Codex already runs in-process and rejects this newer flag. Probe
-    // capabilities without starting a conversation or inheriting a hook identity.
+    // Probe capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
     let mut command = crate::platform::agent_command(&[executable.into(), "--help".into()])
         .map_err(|error| format!("{executable}: {error}"))?;
@@ -55,7 +67,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let mut name = required_env("HGS_SESSION")?;
     let agent = required_env("HGS_AGENT")?;
     home_var(&agent)?;
-    let codex_no_daemon = agent == "codex" && codex_supports_no_daemon(&base[0])?;
+    let codex_no_daemon = agent == "codex" && codex_daemon_flag(&base[0])?;
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         if nonempty_env(key).is_none() {
             std::env::remove_var(key);
@@ -786,4 +798,21 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_detection_never_runs_a_project_launcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let marker = folder.path().join("launcher-ran");
+        let launcher = folder.path().join("run_codex.sh");
+        std::fs::write(&launcher, format!("#!/bin/sh\n: > '{}'\nexit 7\n", marker.display())).unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(codex_daemon_flag(&launcher.to_string_lossy()), Ok(true));
+        assert!(!marker.exists());
+    }
 }
