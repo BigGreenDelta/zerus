@@ -1956,7 +1956,8 @@ appear newest first, at most 32, in `ended_launches`, as `{launch_id, name, code
 output}`. `code` is the exit code of the session's supervisor, or null when no
 supervisor reported one (a command that runs without one, a supervisor that was
 killed); `output` holds the last 8 lines (2 KiB) of the session's screen, followed
-by the error that stopped the supervisor. A detached launch records its launch ID
+by the error that stopped the supervisor (on Windows, as the screen shows both
+once the session's output has drained). A detached launch records its launch ID
 once the terminal has created the session, and a supervisor that ends within two
 minutes without a confirmed conversation records how; a run that confirmed one
 leaves its record to carry the launch ID instead. These records live in
