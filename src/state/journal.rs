@@ -435,7 +435,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let resumed = resume_input::summary_check(record, live_pane);
     output.as_object_mut().unwrap().extend(session_action::summary(record,live_pane,&resumed).as_object().unwrap().clone());
     output["terminal_supported"] = json!(live_pane && string(record,"archive_id").is_empty() && process_alive(record));
-    output["terminal_reason"] = json!(if output["terminal_supported"] == true { "" } else { "Terminal requires this exact live tracked tmux pane" });
+    output["terminal_reason"] = json!(if output["terminal_supported"] == true { "" } else { backend::TERMINAL_NEEDS_PANE.text() });
     output["subagent_count"] = output["subagent_active_count"].clone();
     let account = account_binding(record);
     output["account_id"] = account["id"].clone();
