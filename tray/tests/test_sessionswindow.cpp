@@ -7452,6 +7452,7 @@ void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted_data(
     QTest::newRow("hidden-status") << QString() << QString("hidden");
     QTest::newRow("listed-launch") << QString("mac") << QString("listed");
     QTest::newRow("other-machine") << QString() << QString("other");
+    QTest::newRow("unavailable") << QString() << QString("unavailable");
 }
 
 void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted()
@@ -7483,10 +7484,12 @@ void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted()
         SessionInfo renamed; renamed.name = "claude/infra/renamed"; renamed.cmd = "claude"; renamed.project = "infra";
         renamed.tag = "renamed"; renamed.state = "running"; renamed.launchId = token; box.sessions.append(renamed);
     }
+    // A listing that reports its machine unavailable is no evidence.
+    if (mode == "unavailable") box.ok = false;
     if (reporter.isEmpty()) state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     else state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state);
-    const bool ends = mode != "listed" && mode != "other";
+    const bool ends = mode != "listed" && mode != "other" && mode != "unavailable";
     QCOMPARE(placeholder() == nullptr, ends || mode == "hidden");
     QCOMPARE(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token), !ends);
     if (mode == "ended") {
