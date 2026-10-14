@@ -365,7 +365,8 @@ impl<L: Launcher> Host<L> {
                 text: self.find(&target)?.capture(styled),
             }),
             Op::SendKeys { target, keys } => {
-                self.find(&target)?.send_keys(&keys)?;
+                let session = self.find(&target)?;
+                session.send_keys(&keys, || self.evidence(&session).ok())?;
                 payload(&Done {})
             }
             Op::Paste {
@@ -783,6 +784,18 @@ impl<L: Launcher> Host<L> {
         }
     }
 
+    /// The console evidence of `session`'s supervisor (D10).
+    fn evidence(&self, session: &Session) -> Result<ConsoleEvidence, ErrorBody> {
+        let channel = self.supervisor(session)?;
+        serde_json::from_value(channel.call(SupervisorOp::InputState, INPUT_STATE_TIMEOUT)?)
+            .map_err(|e| {
+                error(
+                    ErrorCode::Internal,
+                    format!("invalid console evidence from the supervisor: {e}"),
+                )
+            })
+    }
+
     fn input_state(&self, claim: &InputClaim) -> Result<InputReady, ErrorBody> {
         let refused = |message: &str| error(ErrorCode::Refused, message);
         let session = self.find(&claim.target)?;
@@ -798,15 +811,7 @@ impl<L: Launcher> Host<L> {
             },
         )
         .map_err(refused)?;
-        let channel = self.supervisor(&session)?;
-        let evidence: ConsoleEvidence =
-            serde_json::from_value(channel.call(SupervisorOp::InputState, INPUT_STATE_TIMEOUT)?)
-                .map_err(|e| {
-                    error(
-                        ErrorCode::Internal,
-                        format!("invalid console evidence from the supervisor: {e}"),
-                    )
-                })?;
+        let evidence = self.evidence(&session)?;
         channel::judge(claim, session.pid, &evidence, &self.argv).map_err(refused)?;
         let info = session.info();
         let cells = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);

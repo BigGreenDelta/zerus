@@ -7,17 +7,19 @@
 //! attached clients. The writer is the only thread that writes the console's
 //! input, which can block; keys, pastes, query answers and client input reach
 //! it through a channel, client input after its terminal's own answers are
-//! removed. The host's waiter thread waits for the root process (the inbox
-//! pseudoconsole's output does not end before it is closed, D6), then closes
-//! the console off the reader thread, lets the output drain and ends the
-//! session's job.
+//! removed. Sent Ctrl+letter keys reach a program that reads key records as
+//! win32-input-mode records once the console asks for that mode (D6). The
+//! host's waiter thread waits for the root process (the inbox pseudoconsole's
+//! output does not end before it is closed, D6), then closes the console off
+//! the reader thread, lets the output drain and ends the session's job.
 //!
 //! Everything platform-specific (the pseudoconsole, the job and the process)
 //! sits behind `Launcher` and `Console`, so this file and its tests are plain
 //! Rust; `console.rs` implements them with ConPTY on Windows.
 use super::{
+    channel,
     keys::{self, Modes},
-    protocol::{Control, ErrorBody, ErrorCode, Key, Size},
+    protocol::{ConsoleEvidence, Control, ErrorBody, ErrorCode, Key, Size},
     sequences::{QueryStripper, ReplyFilter},
     spawn::{Environment, EnvironmentError},
 };
@@ -385,16 +387,34 @@ impl Session {
         }
     }
 
-    /// Write `keys` as `send-keys` does, in the pane's current modes.
-    pub(crate) fn send_keys(&self, keys: &[Key]) -> Result<(), ErrorBody> {
+    /// Write `keys` as `send-keys` does, in the pane's current modes. When a
+    /// key is Ctrl and a letter and the console wants win32-input-mode, the
+    /// supervisor's `evidence` (None without one or its answer), asked once,
+    /// tells whether the program reads key records (`channel::key_records`).
+    pub(crate) fn send_keys(
+        &self,
+        keys: &[Key],
+        evidence: impl FnOnce() -> Option<ConsoleEvidence>,
+    ) -> Result<(), ErrorBody> {
         if self.dead() {
             return Err(exited(&self.pane_id()));
         }
-        let info = self.info();
-        let modes = Modes {
-            cursor: info.application_cursor_keys,
-            keypad: info.application_keypad,
+        let (mut modes, win32_input) = {
+            let screen = lock(&self.screen);
+            let info = screen.model.info();
+            let modes = Modes {
+                cursor: info.application_cursor_keys,
+                keypad: info.application_keypad,
+                key_records: false,
+            };
+            (modes, screen.stripper.win32_input())
         };
+        let ctrl_letter = keys
+            .iter()
+            .any(|key| matches!(key, Key::Named(name) if keys::ctrl_letter(name, modes)));
+        if ctrl_letter {
+            modes.key_records = channel::key_records(win32_input, evidence);
+        }
         let bytes: Vec<u8> = keys
             .iter()
             .flat_map(|key| match key {

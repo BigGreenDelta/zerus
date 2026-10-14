@@ -135,7 +135,13 @@ rm -rf "$root"
 (`listing`, `panes`, `pane_info`, `capture`, `send`, `paste`, `set_run_marker`,
 `rename`, `kill_session`, `kill_pane`, `session_exists`, `session_name`,
 `input_state`, `request_exit`, `on_terminal`; see `src/host/command.rs`) and prints
-`{"ok": ...}` or `{"error": ...}`. It reaches only a running host.
+`{"ok": ...}` or `{"error": ...}`. It reaches only a running host. A `send` of a
+named Ctrl+letter key (`C-c`, `C-u`, `C-s`) goes as win32-input-mode key records
+with the Latin letter and Left Ctrl when the session's ConPTY has asked for that
+mode and its supervisor reports a console without VT and line input (Codex), so
+Codex sees Ctrl+C under any keyboard layout; otherwise, and for every program
+that reads VT input (Claude Code, Kimi, the fake agent), it goes as the C0 byte
+(spec D6).
 
 ## The supervisor channel
 
@@ -223,8 +229,11 @@ session at the console's size.
 | `Ctrl+B`, then any other key | both reach the agent unchanged |
 
 Keys inside a bracketed paste are never bindings, and ESC with Ctrl+B in one read
-is Meta+Ctrl+B. Ctrl+C reaches the agent as a key; Ctrl+Break is ignored. At the
-end the client resets what the session may have left on (mouse, paste, focus and
+is Meta+Ctrl+B. Ctrl+C reaches the agent as a key, byte for byte as the
+client's terminal sends it; Ctrl+Break is ignored. Under a non-Latin keyboard
+layout Codex reads such a Ctrl+C as Ctrl and a letter of that layout and ignores
+it, as it does in Windows Terminal itself (a crossterm limitation upstream, spec
+D6). At the end the client resets what the session may have left on (mouse, paste, focus and
 keypad modes, the alternate screen, a hidden cursor), restores the console modes
 it found and moves below the last row. The session's end prints `[exited]` (exit
 0). The host's death prints `hgs: the session host died; terminal restored,

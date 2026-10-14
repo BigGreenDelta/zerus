@@ -1016,6 +1016,7 @@ fn evidence(echo: bool) -> ConsoleEvidence {
         line_input: false,
         echo_input: echo,
         processed_input: false,
+        virtual_terminal_input: Some(true),
         processes: vec![
             ConsoleProcess {
                 pid: 1000,
@@ -1122,6 +1123,145 @@ fn the_supervisor_channel_carries_input_checks_and_stops() {
             SupervisorOp::Stop
         ]
     );
+}
+
+#[test]
+fn sent_ctrl_letters_reach_a_program_that_reads_key_records_as_records() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "codex/p/a")).unwrap();
+    let program = launcher.program(0);
+    let send = |client: &mut Connection, keys: &[&str]| {
+        let keys = keys
+            .iter()
+            .map(|key| match key.strip_prefix("literal:") {
+                Some(text) => Key::Literal(text.into()),
+                None => Key::Named(key.to_string()),
+            })
+            .collect();
+        client
+            .call::<Done>(Op::SendKeys {
+                target: pane("codex/p/a"),
+                keys,
+            })
+            .unwrap();
+    };
+    let ctrl_c: &[u8] = b"\x1b[67;46;99;1;8;1_\x1b[67;46;99;0;8;1_";
+    let ctrl_u: &[u8] = b"\x1b[85;22;117;1;8;1_\x1b[85;22;117;0;8;1_";
+    // Until the console asks for win32-input-mode, keys are plain VT input.
+    send(&mut client, &["C-c", "C-u", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\x15\r");
+    // ConPTY asks at its start; the session has no supervisor yet, as an
+    // untracked one, so the bytes go as before.
+    program.write(b"\x1b[?9001h\x1b[?1004hready");
+    eventually("the request", || {
+        capture(&mut client, pane("codex/p/a")).starts_with("ready")
+    });
+    send(&mut client, &["C-c", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\r");
+
+    // A supervisor that reports its console's VT input flag as `vt_input`
+    // holds, and counts the requests.
+    let vt_input = Arc::new(Mutex::new(Some(true)));
+    let asked = Arc::new(AtomicU32::new(0));
+    let link = connect_as(&host, program.pid, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: "$0".into(),
+            pane: "%0".into(),
+            pid: program.pid,
+        })
+        .unwrap();
+    {
+        let (vt_input, asked) = (vt_input.clone(), asked.clone());
+        thread::spawn(move || {
+            answer_requests(&*link, |op| {
+                assert_eq!(op, SupervisorOp::InputState);
+                asked.fetch_add(1, Ordering::SeqCst);
+                let reported = ConsoleEvidence {
+                    virtual_terminal_input: *lock(&vt_input),
+                    ..evidence(false)
+                };
+                Ok(serde_json::to_value(reported).unwrap())
+            })
+        });
+    }
+    // Claude Code, Kimi and the fake agent read VT input (0x0208): ConPTY
+    // would give them a key record's letter alone, so the byte goes as before.
+    send(&mut client, &["C-c", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\r");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // Codex reads key records (0x0098): Ctrl+letter goes as records, and the
+    // supervisor is asked once for the whole send.
+    *lock(&vt_input) = Some(false);
+    send(
+        &mut client,
+        &[
+            "C-c",
+            "C-u",
+            "C-M-a",
+            "C-h",
+            "Tab",
+            "literal:x\x03",
+            "Enter",
+        ],
+    );
+    assert_eq!(
+        program.input_until(b"\r"),
+        [ctrl_c, ctrl_u, b"\x1b\x01\x08\tx\x03\r"].concat()
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    // A send without Ctrl+letter asks nothing.
+    send(&mut client, &["literal:hi", "Escape", "Up", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"hi\x1b\x1b[A\r");
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    // Pastes, query answers and what an attached client types stay as they
+    // are: a client's terminal sends what it sends to any program.
+    client
+        .call::<Done>(Op::Paste {
+            target: pane("codex/p/a"),
+            text: "a\x03b".into(),
+            bracketed: false,
+        })
+        .unwrap();
+    assert_eq!(program.input_until(b"b"), b"a^Cb");
+    program.write(b"\x1b[6n");
+    assert_eq!(program.input_until(b"R"), b"\x1b[1;6R");
+    let (_attached, stream) = connect_as(&host, 9, Role::Attach)
+        .attach(Attach {
+            target: pane("codex/p/a"),
+            size: Size { cols: 80, rows: 24 },
+            run_id: None,
+        })
+        .unwrap();
+    stream.send(b"\x03\x15x").unwrap();
+    assert_eq!(program.input_until(b"x"), b"\x03\x15x");
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    // A supervisor that does not report the flag (an older one).
+    *lock(&vt_input) = None;
+    send(&mut client, &["C-u", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x15\r");
+    assert_eq!(asked.load(Ordering::SeqCst), 3);
+
+    // Once the console resets the mode, keys are plain VT input again and
+    // the supervisor is not asked.
+    *lock(&vt_input) = Some(false);
+    program.write(b"\x1b[?9001ldone");
+    eventually("the reset", || {
+        capture(&mut client, pane("codex/p/a")).starts_with("readydone")
+    });
+    send(&mut client, &["C-c", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\r");
+    assert_eq!(asked.load(Ordering::SeqCst), 3);
+    // The client's terminal never saw the mode.
+    let mut relayed = Vec::new();
+    eventually("relayed output", || {
+        if let Ok(Some(Event::Output(bytes))) = stream.next() {
+            relayed.extend(bytes);
+        }
+        relayed.ends_with(b"done")
+    });
+    let relayed = String::from_utf8_lossy(&relayed);
+    assert!(!relayed.contains("9001"), "{relayed:?}");
 }
 
 #[test]

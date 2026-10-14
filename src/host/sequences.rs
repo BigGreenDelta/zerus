@@ -11,8 +11,10 @@
 //! sequence until its last byte arrives, so a sequence split across reads is
 //! judged whole. Everything that is not dropped is passed on byte for byte.
 //! The output also loses DECSET 9001 (win32-input-mode), which ConPTY asks of
-//! the terminal it talks to: the host is that terminal and writes plain VT
-//! input, and a client terminal must not switch its keyboard encoding.
+//! the terminal it talks to, and a client terminal must not switch its
+//! keyboard encoding. The host is that terminal: `QueryStripper` notes whether
+//! the mode is on, and the host writes plain VT input but for Ctrl+letter key
+//! sends to a program that reads key records (`keys::win32_ctrl_letter`, D6).
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
@@ -347,24 +349,26 @@ fn is_query(raw: &[u8]) -> bool {
     matches!(dcs_header(raw), Some((b"$" | b"+", b'q')))
 }
 
-/// DECSET or DECRST of `raw` without mode 9001; None when nothing changes.
-fn without_win32_input(raw: &[u8]) -> Option<Vec<u8>> {
+/// Whether `raw`, a DECSET or DECRST that names mode 9001 (win32-input-mode),
+/// sets or resets it, and `raw` without the mode; None for any other sequence.
+fn win32_input_mode(raw: &[u8]) -> Option<(bool, Vec<u8>)> {
     let csi = Csi::parse(raw)?;
     if csi.prefix != b'?' || !csi.intermediates.is_empty() || !matches!(csi.last, b'h' | b'l') {
         return None;
     }
+    let set = csi.last == b'h';
     let modes: Vec<&[u8]> = csi.params.split(|byte| *byte == b';').collect();
     if !modes.iter().any(|mode| *mode == b"9001") {
         return None;
     }
     let kept: Vec<&[u8]> = modes.into_iter().filter(|mode| *mode != b"9001").collect();
     if kept.is_empty() {
-        return Some(Vec::new());
+        return Some((set, Vec::new()));
     }
     let mut out = b"\x1b[?".to_vec();
     out.extend(kept.join(&b';'));
     out.push(csi.last);
-    Some(out)
+    Some((set, out))
 }
 
 /// Whether `raw`, a whole sequence from a client's terminal, answers a query
@@ -400,26 +404,42 @@ fn is_reply(raw: &[u8]) -> bool {
 }
 
 /// The output relayed to attached clients: a session's output without the
-/// queries in it, which the host alone answers.
+/// queries in it, which the host alone answers, and without win32-input-mode,
+/// which it notes.
 #[derive(Debug, Default)]
 pub(crate) struct QueryStripper {
     scanner: Scanner,
+    /// The console has set win32-input-mode and not reset it since.
+    win32_input: bool,
 }
 
 impl QueryStripper {
     /// What to relay for `bytes`. A sequence cut at the end is held until the
     /// rest arrives.
     pub(crate) fn strip(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let Self {
+            scanner,
+            win32_input,
+        } = self;
         let mut out = Vec::with_capacity(bytes.len());
-        self.scanner.feed(bytes, &mut |piece| match piece {
+        scanner.feed(bytes, &mut |piece| match piece {
             Piece::Text(text) => out.extend_from_slice(text),
             Piece::Sequence(raw) if is_query(raw) => {}
-            Piece::Sequence(raw) => match without_win32_input(raw) {
-                Some(rewritten) => out.extend(rewritten),
+            Piece::Sequence(raw) => match win32_input_mode(raw) {
+                Some((set, rewritten)) => {
+                    *win32_input = set;
+                    out.extend(rewritten);
+                }
                 None => out.extend_from_slice(raw),
             },
         });
         out
+    }
+
+    /// Whether the console wants win32-input-mode (DECSET 9001), as ConPTY
+    /// asks at its start; off until it does.
+    pub(crate) fn win32_input(&self) -> bool {
+        self.win32_input
     }
 }
 
@@ -561,6 +581,54 @@ mod tests {
         strips_whole_and_split(b"\x1b[?9001l", b"");
         strips_whole_and_split(b"\x1b[?1004;9001;25h", b"\x1b[?1004;25h");
         strips_whole_and_split(b"\x1b[?90011h", b"\x1b[?90011h");
+    }
+
+    /// Every way to cut `bytes` in reads relays `expected` and leaves the
+    /// console's win32-input-mode at `mode`.
+    fn notes_whole_and_split(bytes: &[u8], mode: bool, expected: &[u8]) {
+        let mut stripper = QueryStripper::default();
+        assert_eq!(stripper.strip(bytes), expected, "{bytes:?}");
+        assert_eq!(stripper.win32_input(), mode, "{bytes:?}");
+        for cut in 0..=bytes.len() {
+            let mut stripper = QueryStripper::default();
+            let mut out = stripper.strip(&bytes[..cut]);
+            out.extend(stripper.strip(&bytes[cut..]));
+            assert_eq!(out, expected, "{bytes:?} cut at {cut}");
+            assert_eq!(stripper.win32_input(), mode, "{bytes:?} cut at {cut}");
+        }
+        let mut stripper = QueryStripper::default();
+        for byte in bytes {
+            stripper.strip(&[*byte]);
+        }
+        assert_eq!(stripper.win32_input(), mode, "{bytes:?} byte by byte");
+    }
+
+    #[test]
+    fn win32_input_mode_is_noted_from_the_output() {
+        assert!(!QueryStripper::default().win32_input());
+        notes_whole_and_split(b"\x1b[?9001h\x1b[?1004h", true, b"\x1b[?1004h");
+        notes_whole_and_split(b"ab\x1b[?1004;9001;25hcd", true, b"ab\x1b[?1004;25hcd");
+        notes_whole_and_split(b"\x1b[?9001h\x1b[?9001l", false, b"");
+        notes_whole_and_split(b"\x1b[?9001hx\x1b[?25;9001ly", false, b"x\x1b[?25ly");
+        notes_whole_and_split(b"\x1b[?9001l\x1b[?9001h", true, b"");
+        // Other modes, ANSI mode 9001, a mode report query and strings.
+        for other in [
+            &b"\x1b[?90011h"[..],
+            b"\x1b[?900h",
+            b"\x1b[9001h",
+            b"\x1b]0;?9001h\x07",
+            b"\x1bP?9001h\x1b\\",
+        ] {
+            notes_whole_and_split(other, false, other);
+        }
+        notes_whole_and_split(b"\x1b[?9001$p", false, b"");
+        // The mode lasts until the console resets it.
+        let mut stripper = QueryStripper::default();
+        stripper.strip(b"\x1b[?9001h");
+        stripper.strip(b"text\x1b[?1049h\x1b[?9001");
+        assert!(stripper.win32_input());
+        assert_eq!(stripper.strip(b";1004l"), b"\x1b[?1004l");
+        assert!(!stripper.win32_input());
     }
 
     #[test]

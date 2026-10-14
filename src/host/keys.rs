@@ -20,6 +20,11 @@
 //! input recorder in a private server; 1317 names (every key and modifier
 //! combination above, in each mode) matched it byte for byte when this was
 //! written.
+//!
+//! One mode is ConPTY's, not tmux's: when the console has asked for
+//! win32-input-mode (DECSET 9001) and its program reads key records rather
+//! than VT input, a key that tmux writes as a lone C0 byte for Ctrl and a
+//! letter is written as key records instead (`win32_ctrl_letter`, D6).
 
 /// The pane modes that change what a key sends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,20 +33,84 @@ pub(crate) struct Modes {
     pub cursor: bool,
     /// DECKPAM (`ESC =`): keypad keys send `ESC O p` and so on.
     pub keypad: bool,
+    /// Ctrl and a letter go as win32-input-mode key records: the console
+    /// asked for win32-input-mode (`CSI ? 9001 h`) and its program reads key
+    /// records (`channel::key_records`).
+    pub key_records: bool,
 }
 
 /// The bytes `send-keys` writes for the key named `name`.
 pub(crate) fn named(name: &str, modes: Modes) -> Vec<u8> {
     match lookup(name) {
-        // tmux has written Meta's ESC before it finds that it cannot write
-        // the key; the name follows it as text.
-        Lookup::Key(key) => encode(key, modes).unwrap_or_else(|mut written| {
-            written.extend(literal(name));
-            written
-        }),
+        Lookup::Key(key) => match encode(key, modes) {
+            Ok(bytes) => match (modes.key_records, bytes.as_slice()) {
+                (true, &[byte]) => win32_ctrl_letter(byte).unwrap_or(bytes),
+                _ => bytes,
+            },
+            // tmux has written Meta's ESC before it finds that it cannot
+            // write the key; the name follows it as text.
+            Err(mut written) => {
+                written.extend(literal(name));
+                written
+            }
+        },
         Lookup::Any => Vec::new(),
         Lookup::Unknown => literal(name),
     }
+}
+
+/// Whether key records change what the key named `name` sends: tmux writes
+/// it as one C0 byte for Ctrl and a letter.
+pub(crate) fn ctrl_letter(name: &str, modes: Modes) -> bool {
+    let plain = Modes {
+        key_records: false,
+        ..modes
+    };
+    named(name, plain)
+        != named(
+            name,
+            Modes {
+                key_records: true,
+                ..modes
+            },
+        )
+}
+
+/// Set-1 scan codes of the letters A to Z, at their places on a US keyboard.
+const LETTER_SCAN_CODES: [u8; 26] = [
+    0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19,
+    0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c,
+];
+/// `LEFT_CTRL_PRESSED` in a key record's control key state.
+const LEFT_CTRL_PRESSED: u16 = 0x0008;
+
+/// The win32-input-mode records (`CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`) of Ctrl
+/// and the letter that the C0 byte `byte` stands for, key down and then key
+/// up: the letter's virtual key and scan code, the lower-case Latin letter as
+/// its character and `LEFT_CTRL_PRESSED`. None for any other byte, and for
+/// backspace, tab, line feed and carriage return (`C-h`, `C-i`, `C-j`,
+/// `C-m`), which ConPTY maps to their own keys.
+///
+/// ConPTY turns a C0 byte into a key record whose character is the control
+/// character. A program that reads key records rather than VT input (Codex,
+/// through crossterm) then looks the character up in the keyboard layout of
+/// the foreground window, so with a Russian layout Ctrl+C arrives as Ctrl and
+/// a Cyrillic letter, which Codex ignores. A record with the Latin letter is
+/// Ctrl+C in every layout, and ConPTY gives a program that reads VT input
+/// (Claude Code, Kimi) the C0 byte again.
+pub(crate) fn win32_ctrl_letter(byte: u8) -> Option<Vec<u8>> {
+    if !(0x01..=0x1a).contains(&byte) || matches!(byte, 0x08 | 0x09 | 0x0a | 0x0d) {
+        return None;
+    }
+    let virtual_key = b'@' + byte;
+    let scan_code = LETTER_SCAN_CODES[usize::from(byte - 1)];
+    let character = virtual_key.to_ascii_lowercase();
+    let records = [1, 0]
+        .map(|down| {
+            format!("\x1b[{virtual_key};{scan_code};{character};{down};{LEFT_CTRL_PRESSED};1_")
+        })
+        .concat();
+    Some(records.into_bytes())
 }
 
 /// The bytes `send-keys -l` writes for `text`: its UTF-8 bytes.
@@ -558,14 +627,17 @@ mod tests {
     const NORMAL: Modes = Modes {
         cursor: false,
         keypad: false,
+        key_records: false,
     };
     const CURSOR: Modes = Modes {
         cursor: true,
         keypad: false,
+        key_records: false,
     };
     const KEYPAD: Modes = Modes {
         cursor: false,
         keypad: true,
+        key_records: false,
     };
 
     fn hex(bytes: &[u8]) -> String {
@@ -713,5 +785,147 @@ mod tests {
     fn literal_text_is_its_utf8_bytes() {
         assert_eq!(literal("/model ä\n\x1b"), "/model ä\n\x1b".as_bytes());
         assert_eq!(literal(""), b"");
+    }
+
+    /// The set-1 scan codes of a US keyboard, letter by letter.
+    const US_SCAN_CODES: &[(char, u8)] = &[
+        ('A', 0x1e),
+        ('B', 0x30),
+        ('C', 0x2e),
+        ('D', 0x20),
+        ('E', 0x12),
+        ('F', 0x21),
+        ('G', 0x22),
+        ('H', 0x23),
+        ('I', 0x17),
+        ('J', 0x24),
+        ('K', 0x25),
+        ('L', 0x26),
+        ('M', 0x32),
+        ('N', 0x31),
+        ('O', 0x18),
+        ('P', 0x19),
+        ('Q', 0x10),
+        ('R', 0x13),
+        ('S', 0x1f),
+        ('T', 0x14),
+        ('U', 0x16),
+        ('V', 0x2f),
+        ('W', 0x11),
+        ('X', 0x2d),
+        ('Y', 0x15),
+        ('Z', 0x2c),
+    ];
+
+    #[test]
+    fn ctrl_letters_have_win32_key_records() {
+        // As probed with Codex on a Russian layout (zerus-c8r9).
+        assert_eq!(
+            win32_ctrl_letter(0x03).unwrap(),
+            b"\x1b[67;46;99;1;8;1_\x1b[67;46;99;0;8;1_"
+        );
+        assert_eq!(
+            win32_ctrl_letter(0x15).unwrap(),
+            b"\x1b[85;22;117;1;8;1_\x1b[85;22;117;0;8;1_"
+        );
+        assert_eq!(US_SCAN_CODES.len(), 26);
+        for (letter, scan_code) in US_SCAN_CODES {
+            let byte = *letter as u8 - b'@';
+            let records = win32_ctrl_letter(byte);
+            if matches!(letter, 'H' | 'I' | 'J' | 'M') {
+                assert_eq!(records, None, "{letter}");
+                continue;
+            }
+            let virtual_key = *letter as u32;
+            let character = letter.to_ascii_lowercase() as u32;
+            let expected = format!(
+                "\x1b[{virtual_key};{scan_code};{character};1;8;1_\
+                 \x1b[{virtual_key};{scan_code};{character};0;8;1_"
+            );
+            assert_eq!(
+                String::from_utf8(records.unwrap()).unwrap(),
+                expected,
+                "{letter}"
+            );
+        }
+        for byte in (0x00..=0xff).filter(|byte| !(0x01..=0x1a).contains(byte)) {
+            assert_eq!(win32_ctrl_letter(byte), None, "{byte:#04x}");
+        }
+    }
+
+    #[test]
+    fn keys_for_a_program_that_reads_key_records_send_ctrl_letters_as_records() {
+        for (base, win32) in [
+            (
+                NORMAL,
+                Modes {
+                    key_records: true,
+                    ..NORMAL
+                },
+            ),
+            (
+                CURSOR,
+                Modes {
+                    key_records: true,
+                    ..CURSOR
+                },
+            ),
+            (
+                KEYPAD,
+                Modes {
+                    key_records: true,
+                    ..KEYPAD
+                },
+            ),
+        ] {
+            // Every recorded key is the same, but a lone Ctrl+letter byte.
+            for (name, ..) in RECORDED {
+                let plain = named(name, base);
+                let expected = match plain.as_slice() {
+                    &[byte] => win32_ctrl_letter(byte).unwrap_or(plain.clone()),
+                    _ => plain.clone(),
+                };
+                assert_eq!(named(name, win32), expected, "{name} in {win32:?}");
+                assert_eq!(ctrl_letter(name, base), expected != plain, "{name}");
+            }
+            for name in ["C-c", "c-C", "^c", "^C", "C-S-c", "0x3"] {
+                assert_eq!(
+                    named(name, win32),
+                    b"\x1b[67;46;99;1;8;1_\x1b[67;46;99;0;8;1_",
+                    "{name}"
+                );
+                assert!(ctrl_letter(name, base), "{name}");
+            }
+            assert_eq!(
+                named("C-u", win32),
+                b"\x1b[85;22;117;1;8;1_\x1b[85;22;117;0;8;1_"
+            );
+            assert_eq!(named("C-z", win32), win32_ctrl_letter(0x1a).unwrap());
+            // Keys ConPTY maps itself, Ctrl with other keys, Meta and text.
+            for (name, bytes) in [
+                ("C-h", &b"\x08"[..]),
+                ("C-i", b"\t"),
+                ("Tab", b"\t"),
+                ("C-j", b"\n"),
+                ("C-m", b"\r"),
+                ("Enter", b"\r"),
+                ("Escape", b"\x1b"),
+                ("C-[", b"\x1b"),
+                ("C-Space", b"\0"),
+                ("C-]", b"\x1d"),
+                ("C-_", b"\x1f"),
+                ("C-?", b"\x7f"),
+                ("BSpace", b"\x7f"),
+                ("C-M-a", b"\x1b\x01"),
+                ("M-c", b"\x1bc"),
+                ("c", b"c"),
+                ("C-Up", b"\x1b[1;5A"),
+                ("\x03", b"\x03"),
+            ] {
+                assert_eq!(named(name, win32), bytes, "{name}");
+                assert!(!ctrl_letter(name, base), "{name}");
+            }
+        }
+        assert_eq!(literal("\x03"), b"\x03");
     }
 }
