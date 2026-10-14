@@ -86,8 +86,7 @@ class NativeCodexClear(unittest.TestCase):
         self.geometry = (int(width), int(height))
         self.animations = os.environ.get('HGS_CODEX_TEST_ANIMATIONS', 'true')
         self.assertIn(self.animations, ('true', 'false'))
-        # Curated plugins would be cloned from the network by a git child that
-        # can outlive Codex and race this home's cleanup. Suites reusing this
+        # Plugins stay off (see assert_plugin_sync_off). Suites reusing this
         # fixture may serve a localhost provider and enable more features.
         (native_home / 'config.toml').write_text('''model="gpt-6.1-sol"
 model_provider="fixture"
@@ -99,6 +98,7 @@ name="Fixture"
 base_url="''' + getattr(self, 'provider_url', 'http://127.0.0.1:1/v1') + '''"
 wire_api="responses"
 ''')
+        NativeCodexClear.assert_plugin_sync_off(self, native_home)
         path = native_home / 'sessions/2026/10/09' / ('rollout-fixture-' + self.conversation_id + '.jsonl')
         path.parent.mkdir(parents=True)
         usage_path = test_clear_context.ClearContext.usage_history(self, self.conversation_id, 109000, 100000)
@@ -123,6 +123,18 @@ wire_api="responses"
         self.wait_for(lambda: 'Previous fixture answer' in self.tmux('capture-pane', '-p', '-t', self.pane))
         self.record.update(transcript=str(path), last_message='Previous fixture answer')
         self.write_record()
+
+    def assert_plugin_sync_off(self, home):
+        # With plugins on, Codex clones its curated plugins from the network into
+        # CODEX_HOME through a git child that can outlive the TUI or `codex exec`
+        # and write into the fixture while its cleanup removes it ("Directory not
+        # empty"). Every native fixture home turns them off; Codex reports the
+        # effective value, so a renamed or ignored setting fails here instead.
+        listing = subprocess.run([os.environ['HGS_CODEX_TEST_BIN'], 'features', 'list'],
+            env=dict(self.env, CODEX_HOME=str(home)), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
+        state = next((row[-1] for row in map(str.split, listing.stdout.splitlines()) if row[:1] == ['plugins']), None)
+        self.assertEqual(state, 'false', 'Codex plugins in a fixture home:\n' + listing.stdout + listing.stderr)
 
     def launch(self, project, *arguments):
         width, height = map(str, self.geometry)
