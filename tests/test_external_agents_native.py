@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 
+import test_clear_context_native
 import test_input as fixtures
 
 
@@ -48,6 +49,7 @@ class NativeExternalAgents(unittest.TestCase):
     write_record = fixtures.InputTransport.write_record
     wait_for = fixtures.InputTransport.wait_for
     received = fixtures.InputTransport.received
+    assert_plugin_sync_off = test_clear_context_native.NativeCodexClear.assert_plugin_sync_off
 
     def test_ephemeral_review_is_a_child_of_claude_and_codex(self):
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Response)
@@ -59,6 +61,8 @@ class NativeExternalAgents(unittest.TestCase):
         (native_home / 'config.toml').write_text('''model="gpt-6.1-sol"
 model_provider="fixture"
 check_for_update_on_startup=false
+[features]
+plugins=false
 [model_providers.fixture]
 name="Fixture"
 base_url="http://127.0.0.1:''' + str(server.server_port) + '''/v1"
@@ -66,6 +70,8 @@ wire_api="responses"
 request_max_retries=0
 stream_max_retries=0
 ''')
+        # `codex exec` would sync plugins too, leaving its git child running after it exits.
+        self.assert_plugin_sync_off(native_home)
         command = shlex.quote(str(fixtures.HGS)) + ' __state hook'
         # Keep the provider-neutral command installed in resident accounts.
         (native_home / 'hooks.json').write_text(json.dumps(dict(hooks={kind: [dict(hooks=[
