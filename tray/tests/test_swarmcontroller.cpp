@@ -154,22 +154,70 @@ print(json.dumps(result))
         catalog(false);controller.suspend(false);QTRY_COMPARE(requests().size(),5);QTRY_VERIFY(controller.settled());
         QVERIFY(ids(ready,"p").isEmpty());QCOMPARE(ready["projects"].toArray().size(),1);
     }
+    void peerUncFoldersSyncWhileLocalOnesStayLocal() {
+        // A Windows GUI can store "//server/share" for a POSIX peer, a path the catalog
+        // holds. Only this computer's Windows folders stay out of requests.
+        const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
+        const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","C:/work"},{"name",""},{"machine_id",""},{"machine_name",""}};
+        const QJsonObject share{{"id","share"},{"machine","desktop"},{"path","//server/share/local"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
+        QJsonObject peer{{"id","peer"},{"machine","laptop"},{"path","//server/share/peer"},{"name",""},{"machine_id","node-b"},{"machine_name","Laptop"}};
+        const auto with=[this](const QJsonArray &folders){
+            auto result=organization("Original");auto p=result["projects"].toArray()[0].toObject();p["folders"]=folders;result["projects"]=QJsonArray{p};return result;};
+        const auto catalog=[&](const QJsonArray &folders){
+            write("response",QJsonDocument(QJsonObject{{"schema",1},{"node_id","node-a"},{"organization",with(folders)},{"versions",QJsonObject{}},
+                {"peers",QJsonObject{{"laptop",QJsonObject{}}}},{"conflicts",QJsonArray{}}}).toJson());
+        };
+        const auto ids=[](const QJsonObject &organization){
+            QStringList result;for(const auto &p:organization["projects"].toArray())for(const auto &f:p.toObject()["folders"].toArray())result.append(f.toObject()["id"].toString());return result;};
+        const auto input=[this](int request,const QString &field){return requests()[request].toObject()["input"].toObject()[field].toObject();};
+        catalog({posix,peer});
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
+        QJsonObject ready;connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){ready=value;});
+        controller.start(with({posix,share,peer,drive}));QTRY_VERIFY(controller.settled());
+        // Before a snapshot names this computer, any Windows folder may be its own.
+        QCOMPARE(ids(requests()[0].toObject()["input"].toObject()),QStringList{"posix"});
+        QCOMPARE(ids(ready),QStringList({"posix","peer","share","drive"}));
+        // Renaming the peer's folder sends it; this computer's stay out.
+        peer["name"]="Renamed";
+        controller.edit(with({posix,share,peer,drive}));QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(input(1,"base")),QStringList({"posix","peer"}));QCOMPARE(ids(input(1,"desired")),QStringList({"posix","peer"}));
+        QCOMPARE(input(1,"desired")["projects"].toArray()[0].toObject()["folders"].toArray()[1].toObject(),peer);
+        // A sync keeps it as renamed and merges this computer's back.
+        catalog({posix,peer});controller.refresh();QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(ready),QStringList({"posix","peer","share","drive"}));
+        QCOMPARE(ready["projects"].toArray()[0].toObject()["folders"].toArray()[1].toObject()["name"].toString(),QString("Renamed"));
+        // Removing it sends the removal; a read without it does not restore it.
+        controller.edit(with({posix,share,drive}));QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(input(3,"base")),QStringList({"posix","peer"}));QCOMPARE(ids(input(3,"desired")),QStringList{"posix"});
+        catalog({posix});controller.refresh();QTRY_COMPARE(requests().size(),5);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(ready),QStringList({"posix","share","drive"}));
+        QFile raw(m_root+"/requests");QVERIFY(raw.open(QIODevice::ReadOnly));const auto sent=raw.readAll();
+        for(const char *path:{"C:/work","share/local"})QVERIFY2(!sent.contains(path),path);
+    }
     void posixRequestsKeepTheirForm() {
         // Without local Windows folders a request is the former shared organization:
-        // fallback rows removed, the explicit hint added, folders as they were.
+        // fallback rows removed, the explicit hint added, folders as they were, before
+        // and after a snapshot names this computer. Unix GUIs store nothing else.
         auto local=organization("Original");auto project=local["projects"].toArray()[0].toObject();
         project["folders"]=QJsonArray{QJsonObject{{"id","posix"},{"machine","desktop"},{"path","/work/C:/x"},{"name",""}},
-                                      QJsonObject{{"id","root"},{"machine","mac"},{"path","/"},{"name","Root"}}};
+                                      QJsonObject{{"id","root"},{"machine","mac"},{"path","/"},{"name","Root"}},
+                                      QJsonObject{{"id","own"},{"machine","desktop"},{"path","/own"},{"name",""},{"machine_id","node-a"}},
+                                      QJsonObject{{"id","peer"},{"machine","mac"},{"path","/peer"},{"name",""},{"machine_id","node-b"}}};
         project["sessions"]=QJsonArray{"desktop\nseen","desktop\nobserved"};
         const QJsonObject bare{{"id","bare"},{"name","Without folders"},{"sessions",QJsonArray{}}};
         local["projects"]=QJsonArray{project,bare};local["unassigned_sessions"]=QJsonArray{"desktop\nobserved"};
         local["runs"]=QJsonObject{{"desktop\nrun","desktop\nseen"}};
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"node_id","node-a"},{"organization",organization("Original")},{"versions",QJsonObject{}},
+            {"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
         HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
         controller.start(local);QTRY_VERIFY(controller.settled());
         auto expected=local;expected.remove("unassigned_sessions");expected["session_assignments_explicit"]=true;
         project["sessions"]=QJsonArray{"desktop\nseen"};expected["projects"]=QJsonArray{project,bare};
         const auto input=requests().first().toObject()["input"].toObject();
         QCOMPARE(input,expected);QCOMPARE(QJsonDocument(input).toJson(QJsonDocument::Compact),QJsonDocument(expected).toJson(QJsonDocument::Compact));
+        controller.edit(local);QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
+        const auto desired=requests()[1].toObject()["input"].toObject()["desired"].toObject();
+        QCOMPARE(QJsonDocument(desired).toJson(QJsonDocument::Compact),QJsonDocument(expected).toJson(QJsonDocument::Compact));
     }
     void firstObservationDoesNotRaceAnotherDesktopAssignment() {
         // Both desktops start from the same catalog before either sees this

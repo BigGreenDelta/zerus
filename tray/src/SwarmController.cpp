@@ -6,12 +6,19 @@
 #include "MachinePlatform.h"
 
 namespace {
-// Local Windows folders (D15): the shared catalog has no Windows path kind yet.
-bool localOnly(const QJsonValue &folder)
+bool windowsShaped(const QJsonValue &folder)
 {
     return MachinePlatform::windowsShaped(folder.toObject().value("path").toString());
 }
-QJsonObject sharedOrganization(QJsonObject local)
+// Local Windows folders (D15): the shared catalog has no Windows path kind yet. They
+// are this computer's: no machine ID yet, or the snapshot's node_id. A peer's
+// "//server/share" is a POSIX path, which a Windows GUI can store; it is shared.
+bool localOnly(const QJsonValue &folder, const QString &node)
+{
+    const auto machine = folder.toObject().value("machine_id").toString();
+    return windowsShaped(folder) && (machine.isEmpty() || machine == node);
+}
+QJsonObject sharedOrganization(QJsonObject local, const QString &node)
 {
     // Keep fallback placement/order in the desktop cache, but never send it as
     // membership. Older CLIs ignore the additive organization hint; the patch
@@ -24,9 +31,11 @@ QJsonObject sharedOrganization(QJsonObject local)
         for (const auto &session : project.value("sessions").toArray())
             if (!unassigned.contains(session.toString())) sessions.append(session);
         project.insert("sessions", sessions);
-        // Local Windows folders stay in this cache; presentation() restores them.
+        // Local Windows folders stay in this cache; presentation() restores them. Before
+        // a snapshot names this computer, any Windows folder may be one of them.
         const auto folders = project.value("folders").toArray(); QJsonArray shared;
-        for (const auto &folder : folders) if (!localOnly(folder)) shared.append(folder);
+        for (const auto &folder : folders)
+            if (node.isEmpty() ? !windowsShaped(folder) : !localOnly(folder, node)) shared.append(folder);
         if (shared.size() != folders.size()) project.insert("folders", shared);
         projects.append(project);
     }
@@ -83,8 +92,8 @@ void SwarmController::send(const QString &action)
     if(busy())return;
     m_action=action;m_sent=m_desired;
     QJsonObject input;
-    if(action=="initialize")input=sharedOrganization(m_desired);
-    if(action=="apply")input={{"base",sharedOrganization(m_base)},{"desired",sharedOrganization(m_desired)},{"versions",m_versions}};
+    if(action=="initialize")input=sharedOrganization(m_desired,m_node);
+    if(action=="apply")input={{"base",sharedOrganization(m_base,m_node)},{"desired",sharedOrganization(m_desired,m_node)},{"versions",m_versions}};
     m_request=m_client->requestSwarm({action},input);
 }
 void SwarmController::persist()
@@ -132,8 +141,8 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
         // synced, or of this node) while their project lives; a deleted project drops them.
         auto folders=project.value("folders").toArray();const auto sharedFolders=folders.size();
         for(const auto &value:old.value("folders").toArray()){
-            const auto folder=value.toObject();const auto machine=folder.value("machine_id").toString();
-            if(!localOnly(folder)||(!machine.isEmpty()&&machine!=node))continue;
+            const auto folder=value.toObject();
+            if(!localOnly(folder,node))continue;
             bool present=false;for(const auto &f:folders)present|=f.toObject().value("id")==folder.value("id");
             if(!present)folders.append(folder);
         }
@@ -156,6 +165,7 @@ void SwarmController::received(quint64 id,const QJsonObject &result)
         emit statusChanged(tr("Project sync needs an updated HGS installation."),true);return;
     }
     const bool previouslyReady=m_ready;m_ready=true;
+    if(const auto node=result.value("node_id").toString();!node.isEmpty())m_node=node;
     const auto written=result.value("written").toObject();
     // Advancing only our own acknowledged fields preserves genuine conflicts with
     // remote changes that the user has not seen while editing the same field.

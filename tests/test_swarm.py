@@ -219,9 +219,10 @@ class Swarm(unittest.TestCase):
         before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
         project_a = next(p for p in desired['projects'] if p['id'] == 'a')
         project_a['name'] = 'Renamed beside Windows folders'
+        # This machine by its alias, or by its ID once a snapshot named it.
         project_a['folders'] += [dict(id='drive', machine='a', path='C:\\work', name='Drive'),
                                  dict(id='unc', machine='a', path='//server/share/dir', name='Share'),
-                                 dict(id='unknown', machine='windows-desktop', path='c:/Users/user/project', name='')]
+                                 dict(id='by-id', machine='desktop', machine_id=before['node_id'], path='c:/Users/user/project', name='')]
         windows = copy.deepcopy(desired)
         self.patch('a', before, desired); self.call('a', 'sync')
         for node in ('a', 'b'):
@@ -229,15 +230,42 @@ class Swarm(unittest.TestCase):
             self.assertEqual(projects['a']['name'], 'Renamed beside Windows folders')
             self.assertEqual([f['path'] for f in projects['a']['folders']], ['/a'])
         exported = json.dumps(self.call('a', 'export'))
-        for private in ['C:\\\\work', '//server/share', 'Users/user', 'windows-desktop']:
+        for private in ['C:\\\\work', '//server/share', 'Users/user']:
             self.assertNotIn(private, exported)
-        # Removing them again is no change; other invalid paths still fail.
+        # Removing them again is no change; other invalid paths, a peer's drive
+        # path among them, still fail.
         saved = self.call('a', 'get'); desired = copy.deepcopy(saved['organization'])
         self.patch('a', dict(saved, organization=windows), desired)
         self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
-        next(p for p in desired['projects'] if p['id'] == 'a')['folders'].append(dict(id='relative', machine='a', path='work', name=''))
-        self.call('a', 'apply', data=dict(base=saved['organization'], desired=desired, versions=saved['versions']), ok=False)
+        for folder in [dict(id='relative', machine='a', path='work', name=''),
+                       dict(id='peer-drive', machine='b', path='C:\\work', name=''),
+                       dict(id='unknown', machine='windows-desktop', path='c:/Users/user/project', name='')]:
+            failing = copy.deepcopy(desired)
+            next(p for p in failing['projects'] if p['id'] == 'a')['folders'].append(folder)
+            self.call('a', 'apply', data=dict(base=saved['organization'], desired=failing, versions=saved['versions']), ok=False)
         self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
+        self.assertNotIn('windows-desktop', json.dumps(self.call('a', 'export')))
+
+    def test_a_peers_unc_shaped_folder_syncs_as_a_posix_path(self):
+        # A Windows GUI can store "//server/share" for a POSIX peer. The catalog
+        # holds it like any folder, so renaming and removing it sync.
+        self.join('a', 'b')
+        def folders(node):
+            return [f for p in self.call(node, 'get')['organization']['projects'] if p['id'] == 'a' for f in p['folders']]
+        def edit(change):
+            before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+            change(next(p for p in desired['projects'] if p['id'] == 'a')['folders'])
+            self.patch('a', before, desired); self.call('a', 'sync')
+        edit(lambda items: items.append(dict(id='unc', machine='b', path='//server/share/dir', name='')))
+        node_b = self.call('b', 'get')['node_id']
+        for node in ('a', 'b'):
+            unc = next(f for f in folders(node) if f['id'] == 'unc')
+            self.assertEqual((unc['path'], unc['machine_id']), ('//server/share/dir', node_b))
+        edit(lambda items: next(f for f in items if f['id'] == 'unc').update(name='Share'))
+        self.assertEqual(next(f for f in folders('b') if f['id'] == 'unc')['name'], 'Share')
+        edit(lambda items: items.remove(next(f for f in items if f['id'] == 'unc')))
+        for node in ('a', 'b'):
+            self.assertEqual([f['path'] for f in folders(node)], ['/a'])
 
     def test_remote_payload_validation_keeps_store_unchanged(self):
         before = self.call('a', 'get')
