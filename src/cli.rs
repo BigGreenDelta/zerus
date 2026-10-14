@@ -312,8 +312,29 @@ fn nested_refusal(tmux: bool, session: Option<&str>, retry: Option<&str>) -> Str
 pub(crate) fn usage() -> &'static str {
     USAGE
 }
-/// Usage lines of commands that only Unix dispatches.
-const UNIX_ONLY_USAGE: [&str; 3] = ["hgs notify ", "hgs clip ", "hgs paste "];
+/// Commands that only Unix dispatches: `notify` for the tray, and `clip` and
+/// `paste`, which tmux's C-v binding runs.
+const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
+/// Whether a usage line tells of what only Unix has: a command of
+/// `UNIX_ONLY_COMMANDS`.
+fn unix_only_usage(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    match words.next() {
+        Some("hgs") => words
+            .next()
+            .is_some_and(|word| UNIX_ONLY_COMMANDS.contains(&word)),
+        _ => false,
+    }
+}
+/// Refuses a command of `UNIX_ONLY_COMMANDS` where Unix does not dispatch it
+/// (`unix` false: Windows), so that it fails there instead of starting a
+/// program of that name.
+fn unix_only(command: &str, unix: bool) -> Result<()> {
+    if unix || !UNIX_ONLY_COMMANDS.contains(&command) {
+        return Ok(());
+    }
+    Err(Error::new(2, format!("hgs {command} is not supported on Windows")))
+}
 /// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
 /// has no tmux C-v binding for `hgs paste`, no `hgs clip` or `hgs notify`, and
 /// its dry runs print the session host's requests, so its text lists none of
@@ -324,12 +345,7 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
     }
     USAGE
         .lines()
-        .filter(|line| {
-            let line = line.trim_start();
-            !UNIX_ONLY_USAGE
-                .iter()
-                .any(|command| line.starts_with(command))
-        })
+        .filter(|line| !unix_only_usage(line))
         .map(|line| line.replace("the tmux/ssh command", "the session-host/ssh command") + "\n")
         .collect::<String>()
         .into()
@@ -483,6 +499,8 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech") {
         local_sessions()?;
     }
+    // Only Unix has arms for these below; elsewhere they would reach the launch arm.
+    unix_only(command, cfg!(unix))?;
     match command.as_str() {
         "speech" => crate::speech::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
@@ -2252,6 +2270,26 @@ mod tests {
                     "  --dry-run  print the session-host/ssh command\n"
                 )
         );
+    }
+
+    #[test]
+    fn unix_only_commands_are_refused_elsewhere_instead_of_launched() {
+        for command in ["notify", "clip", "paste"] {
+            // Unix dispatches them as before.
+            assert!(unix_only(command, true).is_ok(), "{command}");
+            // Windows refuses each with exit code 2 before the launch arm.
+            let error = unix_only(command, false).unwrap_err();
+            assert_eq!(error.code, 2);
+            assert_eq!(
+                error.message,
+                format!("hgs {command} is not supported on Windows")
+            );
+        }
+        // Any other word stays a command or a program to launch.
+        for command in ["claude", "sh", "ls", "clipboard", "pastes", "notify-send"] {
+            assert!(unix_only(command, false).is_ok(), "{command}");
+            assert!(unix_only(command, true).is_ok(), "{command}");
+        }
     }
 
     #[test]

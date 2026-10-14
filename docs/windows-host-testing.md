@@ -165,7 +165,8 @@ other than `$N` as `invalid session identity`, and the Terminal reasons of a
 session that is not a live tracked pane, OpenCode and DeepSeek name no `tmux
 pane` or `tmux Terminal`. `hgs --help` leaves out the Unix-only `hgs paste` (the
 tmux C-v binding), `hgs clip` and `hgs notify`, and gives `--dry-run` as printing
-the `session-host/ssh` command.
+the `session-host/ssh` command. Those three exit with code 2 (`hgs: hgs clip is
+not supported on Windows`) instead of starting a program of that name.
 
 ## The supervisor channel
 

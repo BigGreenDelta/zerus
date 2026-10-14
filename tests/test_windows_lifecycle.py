@@ -438,6 +438,18 @@ class Launch(LifecycleCase):
         self.launch("runs")
         self.assertGreaterEqual(time.monotonic() - started, 3)
 
+    def test_unix_only_commands_are_refused_instead_of_launched(self):
+        # Only Unix dispatches `notify`, `clip` and `paste`; here they fail
+        # rather than start a program of that name, such as clip.exe (zerus-pxjr).
+        for command, args in (("notify", ["notify", "claude/p"]), ("clip", ["clip"]),
+                              ("paste", ["paste", "claude/p", "%1"]), ("clip", ["--dry-run", "clip"])):
+            with self.subTest(args=args):
+                result = self.hgs(*args, rc=2)
+                self.assertEqual((result.stdout, result.stderr),
+                                 ("", f"hgs: hgs {command} is not supported on Windows\n"))
+        self.assertEqual(self.sessions(), {})
+        self.assertEqual(self.status(), {"running": False})
+
     def prompt(self, pane):
         """Whether PowerShell in `pane` waits at an empty prompt, which may wrap: the screen ends with it."""
         text = self.backend({"op": "capture", "pane": pane})["text"].rstrip()
