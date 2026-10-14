@@ -71,7 +71,8 @@ impl Scope {
 }
 
 /// A presentation gate, never a substitute for the locked action checks.
-pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
+/// `resumed` is the summary's single verification of a pending resume.
+pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<()>>) -> Value {
     let archived = !string(record, "archive_id").is_empty();
     let changing = record.get("pausing").is_some() || record["resume_pending"] == true;
     let confirmed = !string(record, "conversation_id").is_empty();
@@ -80,7 +81,10 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let decisions = [
         (
             "pause",
-            !archived && live_pane && !changing && confirmed && lifecycle::safe_to_pause(record),
+            !archived && live_pane && !changing && confirmed
+                && lifecycle::pausable(record, || {
+                    resume_input::idle_checked(record, resumed.as_ref().is_some_and(Result::is_ok))
+                }),
         ),
         (
             "resume",
