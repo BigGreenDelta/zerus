@@ -1977,7 +1977,6 @@ fn launch(
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
-        state::tracking_available(&command_name).map_err(|e| Error::new(2, e))?;
         spec.env.extend([
             format!("HGS_SESSION={session}"),
             format!("HGS_AGENT={command_name}"),

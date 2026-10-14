@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tracking hooks on Windows (spec D12) and tracked agents through the S6 preview.
+"""Tracking hooks on Windows (spec D12) and tracked agents that run them.
 
 Windows only. `HookForms` runs the shell form hgs writes there,
 `"C:/…/hgs.exe" __state hook`, through every program that runs it for an agent:
@@ -20,16 +20,16 @@ Claude Code needs Git Bash for the shell form and Codex, whose hook shell is
 PowerShell, gets the PowerShell form.
 
 `TrackedHooks` enables local sessions in a temporary profile whose folder has
-spaces, Cyrillic and parentheses, sets `HGS_WINDOWS_TRACKING_PREVIEW=1` with an
-isolated state directory and private agent homes, and launches tracked sessions of
-native fake agents named `claude`, `codex` and `kimi`. hgs installs its hooks into
+spaces, Cyrillic and parentheses and, with an isolated state directory and private
+agent homes, launches tracked sessions of native fake agents named `claude`,
+`codex` and `kimi`. hgs installs its hooks into
 their homes (Claude Code's exec form, Codex's shell form as `command` and
 PowerShell form as `commandWindows`, Kimi's block); each fake reads them and runs
 them as its agent does
 (`examples/fake_agent.rs`), and the hooks move the session's state: the
 conversation is confirmed, a prompt and its reply appear in `hgs inspect`, and a
-Claude session pauses and resumes its conversation. The preview's refusals are
-checked too.
+Claude session pauses and resumes its conversation. A Claude Code whose version
+cannot be read gets no hooks, as a form chosen without it would be kept.
 
 HGS_TEST_BIN and HGS_TEST_FAKE_AGENT name the builds, as for
 test_windows_lifecycle.py, whose hermetic rules apply.
@@ -48,7 +48,6 @@ from test_windows_lifecycle import LifecycleCase, read_events, read_json
 
 # What `hgs __state hook` answers a payload without a session ID.
 NO_SESSION = "hook did not supply a valid session_id"
-PREVIEW = "HGS_WINDOWS_TRACKING_PREVIEW"
 HOMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "kimi": "KIMI_CODE_HOME"}
 # The answers to the capability probes hgs runs before a tracked agent starts.
 PROBES = {"claude": "2.1.296 (Claude Code)", "codex": "codex-cli 0.162.0", "kimi": "kimi 2.1.1"}
@@ -155,7 +154,6 @@ class TrackedHooks(LifecycleCase):
             home.mkdir(parents=True)
             self.homes[agent] = home
             self.env[variable] = str(home)
-        self.env[PREVIEW] = "1"
         self.transcripts = self.root / "transcripts"
         # Hooks name the canonical stable CLI: long names, no verbatim prefix.
         self.stable = os.path.realpath(self.cli).replace(os.sep, "/")
@@ -263,30 +261,17 @@ class TrackedHooks(LifecycleCase):
         self.hgs("kill", name)
         self.wait_for_exit(again)
 
-    def test_the_preview_runs_only_isolated_agents(self):
-        settings = self.homes["claude"] / "settings.json"
-        # Without the preview, tracked agents wait for D12 as before.
-        refused = self.hgs("claude", str(self.project), "--new", "-n", "a", "-d", rc=2,
-                           env={k: v for k, v in self.env.items() if k != PREVIEW})
-        self.assertIn("HGS_TRACKING=0", refused.stderr)
-        # The agent's home must be private.
-        refused = self.hgs("claude", str(self.project), "--new", "-n", "b", "-d", rc=2,
-                           env={k: v for k, v in self.env.items() if k != "CLAUDE_CONFIG_DIR"})
-        self.assertIn("CLAUDE_CONFIG_DIR", refused.stderr)
-        default = self.home / ".claude"
-        default.mkdir()
-        refused = self.hgs("claude", str(self.project), "--new", "-n", "c", "-d", rc=2,
-                           env=dict(self.env, CLAUDE_CONFIG_DIR=str(default)))
-        self.assertIn("CLAUDE_CONFIG_DIR", refused.stderr)
-        # So must the state directory: the profile's default one is not isolated.
-        state = self.home / ".local" / "state" / "hgs" / "sessions"
-        state.mkdir(parents=True)
-        refused = self.hgs("claude", str(self.project), "--new", "-n", "d", "-d", rc=2,
-                           env=dict(self.env, HGS_STATE_DIR=str(state)))
-        self.assertIn("HGS_STATE_DIR", refused.stderr)
-        self.assertFalse(settings.exists())
-        self.assertFalse((default / "settings.json").exists())
-        self.assertEqual(self.status(), {"running": False})
+    def test_a_claude_whose_version_cannot_be_read_gets_no_hooks(self):
+        # The hook form depends on the version and is kept once written (D12),
+        # so the supervisor refuses before it writes anything or starts Claude.
+        env, _, ready = self.agent_env("claude", "unread")
+        env["FAKE_AGENT_PROBE_TEXT"] = "Claude Code"
+        name = "claude/project/unread"
+        self.hgs("claude", str(self.project), "--new", "-n", "unread", "-d", rc=None, env=env)
+        self.status()  # Remember the host process, if one started, for the cleanup.
+        self.wait_for("the end", lambda: self.ended(name))
+        self.assertFalse((self.homes["claude"] / "settings.json").exists())
+        self.assertFalse(ready.exists())
 
 
 if __name__ == "__main__":

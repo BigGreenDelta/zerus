@@ -39,8 +39,6 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
 }
 
 pub(super) fn run(args: &[String]) -> Result<i32> {
-    // Before anything is written: hooks, settings or the record.
-    tracking_available(&nonempty_env("HGS_AGENT").unwrap_or_default())?;
     let first_count: usize = args
         .first()
         .ok_or("missing launch argument count")?

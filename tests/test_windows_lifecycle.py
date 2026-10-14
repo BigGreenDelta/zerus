@@ -10,8 +10,8 @@ listings never start it. Sessions are listed with `hgs ls --json`, renamed and
 killed with the CLI, and driven through `hgs __host backend`, which runs one
 operation of the terminal backend hgs uses for them (`src/state/backend/host.rs`).
 
-Tracked agents (Claude Code, Codex, Kimi) are refused on Windows until their hook
-form is settled (spec D12); that refusal is checked here.
+Tracked agents (Claude Code, Codex, Kimi) run with their hooks (spec D12);
+test_windows_hooks.py launches them, with private agent homes.
 
 `Attach` runs `hgs a` and a launch without `-d` on a pseudoconsole of its own, as
 the GUI's embedded terminal runs `hgs.exe a NAME --existing --run-id ID` (spec
@@ -443,10 +443,7 @@ class Launch(LifecycleCase):
         self.hgs("kill", name)
         self.wait_for("the end", lambda: name not in self.sessions())
 
-    def test_tracked_agents_attach_and_other_executables_are_refused(self):
-        # Tracked agents wait for their Windows hook form (D12); nothing starts.
-        refused = self.hgs("claude", str(self.project), "--new", "-n", "t", "-d", rc=2)
-        self.assertIn("HGS_TRACKING=0", refused.stderr)
+    def test_attach_without_a_console_and_other_executables_are_refused(self):
         # Attaching a terminal needs a console (D13): pipes are refused first.
         refused = self.hgs("fake_agent", str(self.project), "--new", "-n", "attached", rc=1)
         self.assertIn("attaching needs a console", refused.stderr)
