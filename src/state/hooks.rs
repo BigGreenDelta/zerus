@@ -45,7 +45,8 @@ const CLAUDE_MODEL_SWITCH: Version = (2, 1, 296);
 /// version hgs registers it for. Claude Code (2.1.200 and 2.1.296 alike) stops
 /// every start at a settings warning while `settings.json` names a hook event
 /// it does not know, so these are added only for a version read from the
-/// agent, never for one that cannot be read. `PreModelSwitch` stays
+/// agent's native CLI, never for a project launcher or a version that cannot
+/// be read. `PreModelSwitch` stays
 /// unregistered: its allow would also skip Claude's cache-miss confirmation
 /// for the user.
 fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
@@ -429,7 +430,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
             agent,
             cfg!(windows),
             &mut || fresh_entry(agent, &executable, &installed),
-            &mut || installed.version().ok(),
+            &mut || installed.native_version(agent),
         )?
     };
     let Some(content) = merged else {
@@ -462,6 +463,13 @@ impl Installed<'_> {
         self.version
             .get_or_init(|| version::agent_version(self.program, self.agent))
             .clone()
+    }
+
+    /// The version of the native CLI `cli`, never of a project launcher such
+    /// as `run_claude.sh`: a launcher runs only under supervision, since it may
+    /// prompt or unlock secrets, so its version stays unknown.
+    fn native_version(&self, cli: &str) -> Option<Version> {
+        (self.program == cli).then(|| self.version().ok()).flatten()
     }
 }
 
@@ -540,7 +548,7 @@ mod version {
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?);
         // On Unix in a process group of its own, so a timeout also stops
-        // whatever a launcher script started.
+        // whatever a wrapper script started.
         #[cfg(unix)]
         let spawned = crate::platform::spawn_group(&mut command);
         #[cfg(windows)]
@@ -1515,5 +1523,29 @@ mod tests {
             Entry::owned(&hook_entries(&settings, "PostModelSwitch")[0], true),
             Some(exec)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_switch_version_never_runs_a_project_launcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let marker = folder.path().join("launcher-ran");
+        let launcher = folder.path().join("run_claude.sh");
+        let script = format!("#!/bin/sh\n: > '{}'\necho '2.1.296 (Claude Code)'\n", marker.display());
+        fs::write(&launcher, script).unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let program = launcher.to_string_lossy();
+        let installed = Installed {
+            program: &program,
+            agent: "Claude Code",
+            version: std::cell::OnceCell::new(),
+        };
+        // A launcher may prompt or unlock secrets: its version stays unknown.
+        assert_eq!(installed.native_version("claude"), None);
+        assert!(!marker.exists());
+        // The same script read as the agent itself answers.
+        assert_eq!(installed.native_version(&program), Some(CLAUDE_MODEL_SWITCH));
+        assert!(marker.exists());
     }
 }

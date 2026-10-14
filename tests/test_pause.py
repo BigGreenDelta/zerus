@@ -630,7 +630,8 @@ class Lifecycle(Harness):
         settings.write_text(json.dumps({"custom": True, "hooks": {"Stop": [
             {"hooks": [{"type": "command", "command": "true"}]}]}}))
         launcher = self.project / "run_claude.sh"
-        launcher.write_text('#!/bin/sh\nexec claude "$@"\n')
+        probed = self.root / "launcher-probed"
+        launcher.write_text('#!/bin/sh\n[ "$1" = --version ] && : > ' + shlex.quote(str(probed)) + '\nexec claude "$@"\n')
         launcher.chmod(0o755)
         name = self.start()
         self.hgs("pause", name)
@@ -640,6 +641,9 @@ class Lifecycle(Harness):
         self.assertTrue(settings.is_symlink())
         self.assertTrue(data["custom"])
         self.assertEqual(len(data["hooks"]["Stop"]), 2)
+        # A launcher runs only under supervision: its version is never read.
+        self.assertFalse(probed.exists())
+        self.assertNotIn("PostModelSwitch", data["hooks"])
 
     @unittest.skipIf(LEGACY_STATE, "Claude's PostModelSwitch requires the native CLI")
     def test_claude_model_switch_hook_records_the_exact_model(self):

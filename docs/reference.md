@@ -154,7 +154,9 @@ new launches. Native hook trust still requires an explicit user choice in Codex.
 Claude Code's `PostModelSwitch` is registered only once `claude --version` reports
 2.1.296 or later: older versions stop every start at a settings warning for a hook
 event they do not know. Until then each launch reads the version again; a version
-that cannot be read gets no such event. `PreModelSwitch` is never registered.
+that cannot be read gets no such event. A launch through a project `run_claude.sh`
+never reads it, because a launcher runs only under supervision. `PreModelSwitch` is
+never registered.
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
