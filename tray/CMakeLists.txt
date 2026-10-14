@@ -120,6 +120,11 @@ endif()
 target_include_directories(hgs-tray-core PUBLIC src)
 target_link_libraries(hgs-tray-core PUBLIC Qt6::Core Threads::Threads)
 
+# The single-instance socket and its serialized start (SingleInstance.h, main.cpp).
+add_library(hgs-single-instance STATIC src/SingleInstance.cpp)
+target_include_directories(hgs-single-instance PUBLIC src)
+target_link_libraries(hgs-single-instance PUBLIC Qt6::Network)
+
 add_library(hgs-tray-gui STATIC src/AttentionTracker.cpp
     # The clipboard exists everywhere: unlike Konsole and Terminal.app, this
     # backend builds on every platform and asks the platform itself.
@@ -259,7 +264,7 @@ endif()
 target_compile_definitions(hgs-tray PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
 # QLocalServer/QLocalSocket (single-instance guard in main.cpp) live in QtNetwork, not
 # QtWidgets — the plan's dependency list missed this; noted in the Task 1 report.
-target_link_libraries(hgs-tray PRIVATE hgs-tray-views hgs-tray-gui Qt6::Widgets Qt6::Network
+target_link_libraries(hgs-tray PRIVATE hgs-tray-views hgs-tray-gui hgs-single-instance Qt6::Widgets Qt6::Network
     Threads::Threads hgs-terminal hgs-markdown hgs-window-layer)
 if(LINUX)
     target_link_libraries(hgs-tray PRIVATE Qt6::DBus KF6::StatusNotifierItem KF6::WindowSystem KF6::IdleTime)

@@ -310,22 +310,29 @@ int main(int argc, char *argv[])
         errOut << QStringLiteral("hgs-tray: cannot listen for a second instance: %1\n").arg(server.errorString())
                << Qt::flush;
 #else
-    const QString singleInstanceKey = SingleInstance::key();
+    // Concurrent starts take turns, and a launcher start leaves the socket to the
+    // systemd or launchd service that is starting (SingleInstance::start).
+    QLocalServer server;
     {
-        QLocalSocket probe;
-        probe.connectToServer(singleInstanceKey);
-        if (probe.waitForConnected(200)) {
-            probe.write(cfg.showSessions ? "sessions\n" : "show\n");
-            probe.waitForBytesWritten(200);
+        SingleInstance::Startup startup;
+        startup.key = SingleInstance::key();
+        startup.lockPath = SingleInstance::startLockPath();
+        startup.activation = cfg.showSessions ? "sessions\n" : "show\n";
+        startup.self = QCoreApplication::applicationPid();
+        startup.service = SingleInstance::currentService;
+        startup.report = [&errOut](const QString &text) {
+            errOut << QStringLiteral("hgs-tray: %1\n").arg(text) << Qt::flush;
+        };
+        switch (SingleInstance::start(startup, server)) {
+        case SingleInstance::Outcome::Forwarded:
             errOut << QStringLiteral("hgs-tray: already running\n");
             return 0;
+        case SingleInstance::Outcome::Failed:
+            errOut << QStringLiteral("hgs-tray: cannot claim the socket: %1\n").arg(server.errorString());
+            return 3;
+        case SingleInstance::Outcome::Claimed:
+            break;
         }
-    }
-    QLocalServer::removeServer(singleInstanceKey);
-    QLocalServer server;
-    if (!server.listen(singleInstanceKey)) {
-        errOut << QStringLiteral("hgs-tray: cannot claim the socket: %1\n").arg(server.errorString());
-        return 3;
     }
 #endif
 

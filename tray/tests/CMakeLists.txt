@@ -191,9 +191,11 @@ if(LINUX)
     set_tests_properties(kwinwindowlayer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# Also the single-instance start (SingleInstance.h): concurrent starts on a
+# temporary socket, with the service manager's answers made up.
 add_executable(test_appconfig test_appconfig.cpp)
 target_include_directories(test_appconfig PRIVATE ../src)
-target_link_libraries(test_appconfig PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+target_link_libraries(test_appconfig PRIVATE Qt6::Test Qt6::Core hgs-tray-core hgs-single-instance)
 zerus_add_test(appconfig test_appconfig)
 
 add_executable(test_hgsclient test_hgsclient.cpp)
