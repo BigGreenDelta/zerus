@@ -199,6 +199,7 @@ class GitStatus(unittest.TestCase):
         self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
         cache = self.root / 'state/git-status-cache'
         for lookup in ('echo "fatal: unable to read refs/remotes/origin/main: Connection timed out" >&2; exit 128',
+                       'echo "error: unable to read refs/remotes/origin/main" >&2; exit 1',
                        'kill -KILL $$', 'exec sleep 30'):
             program.write_text("#!/bin/sh\ncase \" $* \" in *' @{upstream} '*) " + lookup + ';; esac\n'
                                'exec ' + shlex.quote(shutil.which('git')) + ' "$@"\n')
