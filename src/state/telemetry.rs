@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) fn grouped_active(record: &Value) -> u64 {
+    if record["kimi_native_roster"] == true { return 0; }
     record["subagent_groups"]
         .as_object()
         .map(|groups| {
@@ -11,6 +12,11 @@ pub(super) fn grouped_active(record: &Value) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+pub(super) fn child_working(record: &Value, child: &Value) -> bool {
+    child["state"] == "working" && (record["kimi_native_roster"] != true
+        || child["external"] == true || child["native_roster"] == true)
 }
 
 /// Kimi external hooks expose a profile name, not the Swarm child's identity.
@@ -26,6 +32,11 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
     let profile = journal::clipped(&event["agent_name"], 160);
     if profile.is_empty() {
         return;
+    }
+    if record.as_object_mut().unwrap().remove("kimi_native_roster") == Some(json!(true)) {
+        // Native completions need not have emitted profile Stop hooks, so the
+        // old profile totals lose authority when a newer hook beats the catalog.
+        record["subagent_groups_complete"] = json!(false);
     }
     if record.get("subagent_groups_complete").is_none() {
         record["subagent_groups_complete"] = json!(record["subagents"]
@@ -75,7 +86,8 @@ fn children(record: &Value) -> Value {
     let observed = record["last_event_at"].as_f64().unwrap_or(0.0) > 0.0;
     let children = record["subagents"].as_object();
     let groups = record["subagent_groups"].as_object();
-    let profiles = string(record, "agent") == "kimi"
+    let native_kimi = record["kimi_native_roster"] == true;
+    let profiles = string(record, "agent") == "kimi" && !native_kimi
         && (groups.is_some() || children.is_some_and(|children| !children.is_empty()));
     let external = children.is_some_and(|c| c.values().any(|v| v["external"] == true));
     if profiles && !external {
@@ -107,20 +119,22 @@ fn children(record: &Value) -> Value {
         return result;
     }
     let mut active = 0;
-    let mut completed = record["subagents_completed_pruned"].as_u64().unwrap_or(0);
+    let mut completed = if native_kimi { 0 } else { record["subagents_completed_pruned"].as_u64().unwrap_or(0) };
     let mut unknown = 0;
     let mut previews = Vec::new();
     let mut roster = serde_json::Map::new();
     if let Some(children) = children {
         for (id, child) in children {
-            if string(record, "agent") == "kimi" && child["external"] != true {
+            if string(record, "agent") == "kimi" && child["external"] != true
+                && (!native_kimi || child["native_roster"] != true) {
                 continue;
             }
             roster.insert(id.clone(), json!({"name":string(child,"name"),
                 "state":string(child,"state"),"display_state":child["display_state"],"attention_id":child["attention_id"],
                 "provider":child.get("provider").unwrap_or(&record["agent"]),"external":child["external"],"model":child["model"],"reply_id":child["reply_id"],
                 "detail":journal::clipped(&child["detail"],240),
-                "current_tool":string(child,"current_tool"),"updated":child["updated"]}));
+                "current_tool":string(child,"current_tool"),"updated":child["updated"],
+                "completion_source":child["completion_source"],"tracking_evidence":child["tracking_evidence"]}));
             let state = if string(child, "display_state") == "unknown" {
                 "unknown"
             } else {
@@ -150,7 +164,9 @@ fn children(record: &Value) -> Value {
                 .sum::<u64>();
         }
     }
-    result["subagent_source"] = json!(if profiles && external {
+    result["subagent_source"] = json!(if native_kimi {
+        "kimi_native"
+    } else if profiles && external {
         "mixed_hooks"
     } else {
         "hooks"

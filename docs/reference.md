@@ -225,6 +225,9 @@ even with `-c`. Use `-- resume --last --model MODEL` when needed. Claude and Kim
 forward `-c` to their wrapper. Existing sessions attach without rerunning the
 wrapper. Interactive setup needs an attached launch; detached mode assumes the
 required environment is already available. Never put private keys in wrappers.
+Tracking never runs `run_codex.sh` to detect Codex capabilities; it runs only as
+the launch and always receives `--no-daemon`, so it must start a Codex release with
+that flag. `--bare` checks the native Codex and omits the flag for an older release.
 
 <a id="desktop"></a>
 
@@ -921,6 +924,34 @@ An open child's Activity and draft stay in place when its turn finishes. A child
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.
 
+Claude child tracking reconciles hooks with exact native history, including
+workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
+result bound to its exact owned tool call, or a final **Request interrupted by
+user** row can settle a turn even when `SubagentStop` is missing. Matching
+workflow `started`/`result` attempts independently confirm the same reply.
+Later native child activity can recover a missing start; newer hooks take
+precedence. Silence and a completed parent never prove child completion.
+Reconciliation preserves existing reply and read identities. `hgs inspect`
+reports each child's `tracking_evidence`: source, event kind, event time,
+native row identity and, when verified, workflow result confirmation. Missing,
+partial or ambiguous native evidence leaves the last reported state intact.
+
+Codex child tracking verifies the child and parent IDs in the account-owned
+rollout, then reconciles typed turn starts, successful completions and explicit
+interruptions. An interruption without a turn ID requires a matching start in
+the bounded native history. Kimi's version 2 session catalog identifies direct
+children individually, including several children using the same profile;
+their own wire turn events establish current work or completion. Older,
+delayed or ambiguous catalogs retain profile-hook counts. A removed catalog
+entry becomes unknown rather than a fabricated completed result.
+
+DeepSeek uses each child's exact native API entry within one host generation.
+A child never inherits its parent's running status. Missing, contradictory or
+cross-generation observations remain unknown; desktop and Android counters
+retain the `+` uncertainty marker. The current OpenCode adapter does not expose
+child sessions. Inspection reports native tracking evidence without changing
+reply/read identities or restarting agents.
+
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
@@ -1554,7 +1585,9 @@ machine: in single quotes on Unix machines, and with backslashes for a session o
 this Windows computer, in double quotes when a path has spaces or shell-special
 characters, or in single quotes when it has `$` or a backtick, which PowerShell
 would expand inside double quotes. Remote drops first copy files to the session host, limited to eight
-files, 10 MiB each and 20 MiB total.
+files, 10 MiB each and 20 MiB total. The copy is bound to the session's run and
+conversation. An untracked shell (`hgs sh -d`) has neither: its copy is bound to
+the live session's creation time and refused when a tracked run owns the session.
 Changing tab, session or connection during transfer cancels insertion.
 **Open externally** and **Copy connect command** retain access from other clients.
 
@@ -1876,7 +1909,9 @@ On Windows the local box also carries `local_host`, the session host as found
 (never started): `state` is `not-installed`, `stopped`, `running` or `unavailable`
 (with `error`), and `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity`
 and `windows_session` describe a running host and are null otherwise. Its sessions
-list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths.
+list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths,
+and a live session's `cwd` (`cwd_source: tmux`) is the folder it started in: the
+host does not follow a later change of directory, such as `cd` in a shell.
 Linux and macOS snapshots have no `local_host`. When `windows_session` differs from
 the desktop app's own Windows session (a host started over SSH, for example), the app
 asks before a launch, resume, restore or fork on this computer goes into that host,

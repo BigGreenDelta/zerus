@@ -10,10 +10,10 @@ use super::{
     protocol::{
         Attach, Attached, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
         Created, Done, EnvValue, ErrorBody, ErrorCode, Hello, HelloAnswer, HelloReply, InputClaim,
-        InputReady, Integrity, Key, Kind, Listed, Op, PaneDetails, Protocols, Resolved, Role,
-        Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
+        InputReady, Integrity, Key, Kind, LaunchState, Listed, Op, PaneDetails, Protocols,
+        Resolved, Role, Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
     },
-    registry::{Host, Linger, Next},
+    registry::{last_lines, Host, Linger, Next},
     server::serve_connection,
     session::{
         self, foreground, paste_bytes, Attachment, Console, LaunchPlan, Launched, Launcher, Out,
@@ -38,10 +38,14 @@ const CLIENT_PID: u32 = 4242;
 const PROGRAM: &str = r"C:\hgs\hgs.exe";
 #[cfg(windows)]
 const WORK: &str = r"C:\work\project";
+#[cfg(windows)]
+const OTHER_WORK: &str = r"C:\work\other";
 #[cfg(not(windows))]
 const PROGRAM: &str = "/opt/hgs/hgs";
 #[cfg(not(windows))]
 const WORK: &str = "/work/project";
+#[cfg(not(windows))]
+const OTHER_WORK: &str = "/work/other";
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -262,6 +266,9 @@ struct Launches {
     fail: AtomicBool,
     /// The next programs have exited by the time their launch returns.
     exit_at_once: AtomicBool,
+    /// The next program writes this and has exited with this code by the
+    /// time its launch returns, as a supervisor that cannot start its agent.
+    fail_at_once: Mutex<Option<(u32, Vec<u8>)>>,
     /// While set, a launch waits (`waiting` counts those that do).
     held: Mutex<bool>,
     released: Condvar,
@@ -304,7 +311,11 @@ impl Launcher for FakeLauncher {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         }
-        let exited = self.0.exit_at_once.load(Ordering::SeqCst).then_some(0);
+        let failure = lock(&self.0.fail_at_once).take();
+        let exited = match &failure {
+            Some((code, _)) => Some(*code),
+            None => self.0.exit_at_once.load(Ordering::SeqCst).then_some(0),
+        };
         let names = [
             "TERM",
             "COLORTERM",
@@ -338,6 +349,9 @@ impl Launcher for FakeLauncher {
             exit_on_hang_up: AtomicBool::new(true),
             members: Mutex::new(Vec::new()),
         });
+        if let Some((_, said)) = failure {
+            program.write(&said);
+        }
         lock(&self.0.programs).push(program.clone());
         Ok(Launched {
             pid: program.pid,
@@ -498,6 +512,7 @@ fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
     assert!(!listed.panes[0].dead);
     assert_eq!(listed.panes[0].run_marker, "run-1");
     assert_eq!(listed.panes[1].run_marker, "");
+    assert_eq!(listed.panes[0].current_path, WORK);
     assert!(listed.clients.is_empty());
 
     for target in [
@@ -524,6 +539,50 @@ fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
         (missing.code, missing.message.as_str()),
         (ErrorCode::NotFound, "can't find pane: %9")
     );
+}
+
+/// A pane's current directory is the one its session started in (tmux's
+/// `pane_current_path` for a program that never changes directory): the host
+/// does not read another process's current directory, and without this an
+/// untracked session would have no folder at all.
+#[test]
+fn panes_report_the_directory_their_session_started_in() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client
+        .call::<Created>(create("launch-a", "claude/p/a"))
+        .unwrap();
+    let Op::CreateSession(mut other) = create("launch-b", "pwsh/p/b") else {
+        unreachable!()
+    };
+    other.cwd = OTHER_WORK.into();
+    client
+        .call::<Created>(Op::CreateSession(other.clone()))
+        .unwrap();
+    assert_eq!(launcher.program(1).cwd, OTHER_WORK);
+    // A retried create reports its first session and moves nothing.
+    other.cwd = WORK.into();
+    let again: Created = client.call(Op::CreateSession(other)).unwrap();
+    assert!(again.existing);
+    // A rename keeps the directory.
+    client
+        .call::<Done>(Op::Rename {
+            target: pane("pwsh/p/b"),
+            name: "pwsh/p/c".into(),
+        })
+        .unwrap();
+
+    let listed: Listed = client.call(Op::List).unwrap();
+    let paths: Vec<_> = listed
+        .panes
+        .iter()
+        .map(|pane| (pane.session.as_str(), pane.current_path.as_str()))
+        .collect();
+    assert_eq!(paths, [("claude/p/a", WORK), ("pwsh/p/c", OTHER_WORK)]);
+    // On the wire it is `list`'s `current_path`, which the host backend
+    // reports as the pane's path (`TerminalBackend::pane_paths`).
+    let wire: serde_json::Value = client.call(Op::List).unwrap();
+    assert_eq!(wire["panes"][1]["current_path"], OTHER_WORK);
 }
 
 /// Whether the host of `sessions_start_only_while_local_sessions_are_enabled`
@@ -1524,6 +1583,92 @@ fn a_session_that_ends_at_once_still_leaves_the_listing() {
     assert_eq!(launcher.count(), 1000);
 }
 
+fn launch_status(connection: &mut Connection, launch_id: &str) -> Result<LaunchState, ErrorBody> {
+    connection.call(Op::LaunchStatus {
+        launch_id: launch_id.into(),
+    })
+}
+
+#[test]
+fn a_launch_reports_how_its_session_ended_with_its_last_lines() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    // A launch the host does not know.
+    let error = launch_status(&mut client, "launch-x").unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::NotFound, "can't find launch: launch-x")
+    );
+
+    // A running session.
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let running = LaunchState {
+        session: "$0".into(),
+        pane: "%0".into(),
+        name: "claude/p/a".into(),
+        dead: false,
+        ended: false,
+        code: None,
+        output: String::new(),
+    };
+    assert_eq!(launch_status(&mut client, "l"), Ok(running.clone()));
+
+    // A supervisor that cannot start its agent says why and exits at once;
+    // the message, longer than the pane is wide, reads whole.
+    let said = "hgs: cannot read the Claude Code version (claude --version: Access is \
+                denied. (os error 5)), which decides its tracking hook form";
+    *lock(&launcher.0.fail_at_once) = Some((1, format!("\r\n\r\n{said}\r\n").into_bytes()));
+    let created: Created = client.call(create("m", "claude/p/b")).unwrap();
+    let ended = |client: &mut Connection| launch_status(client, "m").unwrap();
+    eventually("the end", || ended(&mut client).ended);
+    assert_eq!(
+        ended(&mut client),
+        LaunchState {
+            session: created.session.clone(),
+            pane: created.pane.clone(),
+            name: "claude/p/b".into(),
+            dead: true,
+            ended: true,
+            code: Some(1),
+            output: said.into(),
+        }
+    );
+    // A retried create still finds it, and starts nothing.
+    let again: Created = client.call(create("m", "claude/p/b")).unwrap();
+    assert_eq!((again.session, again.existing), (created.session, true));
+    assert_eq!(launcher.count(), 2);
+
+    // A session that ends later reports its exit too; the other one runs on.
+    launcher.program(0).write(b"bye\r\n");
+    eventually("the output", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("bye")
+    });
+    launcher.program(0).exit(0);
+    eventually("the end", || launch_status(&mut client, "l").unwrap().ended);
+    assert_eq!(
+        launch_status(&mut client, "l"),
+        Ok(LaunchState {
+            dead: true,
+            ended: true,
+            code: Some(0),
+            output: "bye".into(),
+            ..running
+        })
+    );
+}
+
+#[test]
+fn an_ended_screen_keeps_its_last_lines() {
+    let screen = "one\n\n  two  \nthree\n\n\n";
+    assert_eq!(last_lines(screen, 8, 2048), "one\n  two\nthree");
+    assert_eq!(last_lines(screen, 2, 2048), "  two\nthree");
+    assert_eq!(last_lines(screen, 8, 7), "o\nthree");
+    assert_eq!(last_lines("\n\n", 8, 2048), "");
+    // A cut never splits a character.
+    assert_eq!(last_lines("aé", 8, 1), "");
+    assert_eq!(last_lines("aé", 8, 2), "é");
+}
+
 #[test]
 fn a_rename_cannot_take_the_name_of_a_session_being_created() {
     let (host, launcher) = new_host();
@@ -1919,7 +2064,7 @@ mod terminal_backend {
         },
         state::backend::{
             self as terminal,
-            host::{Connector, Failure, HostBackend, HOST_DIED},
+            host::{Connector, Failure, HostBackend, HOST_DIED, STARTUP},
             LaunchSpec, PaneField, StageErrors, TerminalBackend, RUN_CHANGED,
         },
     };
@@ -2446,6 +2591,132 @@ mod terminal_backend {
         assert_eq!(refused, Err((1, "no terminal input sequences".into())));
         assert_eq!(attached_clients(&host), 0);
         assert!(!screen.entered.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_launch_whose_program_cannot_start_fails_with_what_it_said() {
+        let (host, launcher) = new_host();
+        let startup = Duration::from_millis(300);
+        let backend = HostBackend::new(Direct {
+            host: host.clone(),
+            creates: Arc::default(),
+            screen: None,
+        })
+        .with_startup(startup);
+        let spec = |tag: &str, detached| LaunchSpec {
+            name: format!("fake_agent/p/{tag}"),
+            cwd: WORK.into(),
+            env: Vec::new(),
+            command: strings(&[PROGRAM, "--run", "0", "fake_agent"]),
+            detached,
+        };
+        let cannot_start = || {
+            *lock(&launcher.0.fail_at_once) = Some((
+                126,
+                b"hgs: fake_agent: Access is denied. (os error 5)\r\n".to_vec(),
+            ));
+        };
+        let denied = |tag: &str| {
+            Err((
+                1,
+                format!(
+                    "session fake_agent/p/{tag} ended immediately (exit 126):\n\
+                     hgs: fake_agent: Access is denied. (os error 5)"
+                ),
+            ))
+        };
+
+        // The supervisor cannot start its program: a detached launch fails.
+        cannot_start();
+        assert_eq!(ended(backend.launch(&spec("a", true))), denied("a"));
+        // A program that runs for the startup time has started.
+        let since = Instant::now();
+        assert_eq!(ended(backend.launch(&spec("b", true))), Ok((0, false)));
+        assert!(since.elapsed() >= startup);
+        // So has one that ends at once with exit 0, as under tmux.
+        launcher.0.exit_at_once.store(true, Ordering::SeqCst);
+        assert_eq!(ended(backend.launch(&spec("c", true))), Ok((0, false)));
+        launcher.0.exit_at_once.store(false, Ordering::SeqCst);
+        // A start (resume, restore, fork) does not wait.
+        cannot_start();
+        backend.start(&spec("d", true)).unwrap();
+        assert_eq!(launcher.count(), 4);
+
+        // An attached launch, whose client finds the session ended, fails the
+        // same way.
+        let (backend, screen, _) = console_backend(&host, Size { cols: 80, rows: 24 });
+        cannot_start();
+        assert_eq!(ended(backend.launch(&spec("e", false))), denied("e"));
+        assert_eq!(launcher.count(), 5);
+        // So does one whose client sees the program fail at once.
+        let attached = {
+            let (backend, spec) = (backend.clone(), spec("f", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || {
+            let listed: Listed = connect(&host).call(Op::List).unwrap();
+            listed
+                .sessions
+                .iter()
+                .any(|session| session.name == "fake_agent/p/f" && session.attached == 1)
+        });
+        let program = launcher.program(5);
+        program.write(b"fake_agent: unknown option --x\r\n");
+        eventually("the output", || screen.shown().contains("unknown option"));
+        program.exit(2);
+        assert_eq!(
+            attached.join().unwrap(),
+            Err((
+                1,
+                "session fake_agent/p/f ended immediately (exit 2):\n\
+                 fake_agent: unknown option --x"
+                    .into()
+            ))
+        );
+        assert!(screen.shown().ends_with("[exited]\r\n"));
+
+        // A client left at once from a program that runs has started; the
+        // session runs on.
+        let attached_to = |name: &str| {
+            let listed: Listed = connect(&host).call(Op::List).unwrap();
+            listed
+                .sessions
+                .iter()
+                .any(|session| session.name == name && session.attached == 1)
+        };
+        let left = {
+            let (backend, spec) = (backend.clone(), spec("g", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || attached_to("fake_agent/p/g"));
+        let since = Instant::now();
+        screen.keys(b"\x02\x04");
+        assert_eq!(left.join().unwrap(), Ok((0, false)));
+        assert!(since.elapsed() < STARTUP, "the launch waited");
+        let listed: Listed = connect(&host).call(Op::List).unwrap();
+        assert!(listed
+            .sessions
+            .iter()
+            .any(|session| session.name == "fake_agent/p/g"));
+        // So has a program that fails only after the startup time.
+        let backend = Arc::new(
+            HostBackend::new(Direct {
+                host: host.clone(),
+                creates: Arc::default(),
+                screen: Some(screen.clone()),
+            })
+            .with_startup(startup),
+        );
+        let since = Instant::now();
+        let late = {
+            let (backend, spec) = (backend.clone(), spec("h", false));
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        eventually("the client", || attached_to("fake_agent/p/h"));
+        thread::sleep(startup.saturating_sub(since.elapsed()));
+        launcher.program(7).exit(2);
+        assert_eq!(late.join().unwrap(), Ok((0, false)));
+        assert_eq!(launcher.count(), 8);
     }
 
     /// A host that answers one attach, shows a screen, reads one key and then

@@ -20,6 +20,7 @@
 #include <QSettings>
 #include <QStyle>
 #include <QTimer>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -185,15 +186,28 @@ public:
             projectContext(session), item->data(SessionRoles::Detail).toString(), session.model, session.effort,
             childCount(session, true, online, includeCompleted)};
         const auto git = GitStatusBadge::tooltip(session.gitStatus);
-        const auto name = description.join(" / "), tip = description.join("\n") + (session.gitStatus.isEmpty() ? QString() : "\n\n" + git);
+        const auto name = description.join(" / ");
         if (accessibleName() != name) setAccessibleName(name);
-        if (toolTip() != tip) setToolTip(tip);
         if (accessibleDescription() != git) setAccessibleDescription(git);
         // Background polls repeat most cards unchanged; repaint only changed ones.
         if (changed) QWidget::update();
     }
     void updateElapsed() { if (m_model.item(0)->data(SessionRoles::Working).toBool()) QWidget::update(); }
 protected:
+    bool event(QEvent *event) override
+    {
+        // The card already shows its fields; like Sessions cards, only the Git badges explain themselves.
+        if (event->type() == QEvent::ToolTip) {
+            const auto *help = static_cast<QHelpEvent *>(event);
+            const auto index = m_model.index(0, 0);
+            const auto badge = SessionDelegate::gitStatusRect(rect(), index, font(), false);
+            const auto text = badge.contains(help->pos()) ? GitStatusBadge::tooltip(index.data(SessionRoles::GitStatus).toJsonObject()) : QString();
+            if (text.isEmpty()) QToolTip::hideText();
+            else QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), this, badge);
+            return true;
+        }
+        return QPushButton::event(event);
+    }
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);

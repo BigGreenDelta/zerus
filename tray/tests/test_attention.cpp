@@ -4,6 +4,7 @@
 #include <QWindow>
 #include "AttentionTracker.h"
 #include "FleetState.h"
+#include "SessionPresentation.h"
 
 class TestAttention : public QObject {
     Q_OBJECT
@@ -26,7 +27,22 @@ private slots:
     void actualApplicationFocusSuppressesBanners();
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
     void replyWaitsForLiveBackgroundShellToFinish();
+    void nativeChildCountersPreserveUnknownEvidence();
 };
+
+void TestAttention::nativeChildCountersPreserveUnknownEvidence()
+{
+    SessionInfo s; s.activity="idle"; s.subagentActiveCount=2; s.subagentTotalCount=6;
+    s.subagentCountsComplete=false;
+    for (const auto &source : {QString("dsh_native"), QString("kimi_native"), QString("mixed_hooks")}) {
+        s.subagentSource=source;
+        QCOMPARE(SessionPresentation::childCount(s,false,true,false),QString("2+"));
+        QCOMPARE(SessionPresentation::childCount(s,false,true,true),QString("2+/6"));
+    }
+    s.subagentSource="dsh_native";s.subagentActiveCount=0;s.subagentTotalCount=1;
+    QCOMPARE(SessionPresentation::childCount(s,false,true,false),QString("0+"));
+    QVERIFY(SessionPresentation::childCount(s,false,false,false).isEmpty());
+}
 
 void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
 {

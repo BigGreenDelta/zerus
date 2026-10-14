@@ -114,6 +114,8 @@ pub(super) fn read(name: &str) -> Result<Value> {
     }
     journal::repair_kimi_main(&mut record);
     journal::repair_claude_internal(&mut record);
+    claude_subagents::reconcile(&mut record);
+    native_subagents::reconcile(&mut record);
     Ok(record)
 }
 
