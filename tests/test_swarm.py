@@ -212,6 +212,33 @@ class Swarm(unittest.TestCase):
         self.assertEqual({f['path'] for f in projects[0]['folders']}, {'/a', '/b'})
         self.assertTrue(list((self.root / 'a/swarm').glob('backup-before-join-*.json')))
 
+    def test_local_windows_folders_never_reach_the_catalog(self):
+        # A desktop keeps its local Windows folders (D15); an older or newer GUI
+        # that sends one still applies, and neither node's catalog shows it.
+        self.join('a', 'b')
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        project_a = next(p for p in desired['projects'] if p['id'] == 'a')
+        project_a['name'] = 'Renamed beside Windows folders'
+        project_a['folders'] += [dict(id='drive', machine='a', path='C:\\work', name='Drive'),
+                                 dict(id='unc', machine='a', path='//server/share/dir', name='Share'),
+                                 dict(id='unknown', machine='windows-desktop', path='c:/Users/user/project', name='')]
+        windows = copy.deepcopy(desired)
+        self.patch('a', before, desired); self.call('a', 'sync')
+        for node in ('a', 'b'):
+            projects = {p['id']: p for p in self.call(node, 'get')['organization']['projects']}
+            self.assertEqual(projects['a']['name'], 'Renamed beside Windows folders')
+            self.assertEqual([f['path'] for f in projects['a']['folders']], ['/a'])
+        exported = json.dumps(self.call('a', 'export'))
+        for private in ['C:\\\\work', '//server/share', 'Users/user', 'windows-desktop']:
+            self.assertNotIn(private, exported)
+        # Removing them again is no change; other invalid paths still fail.
+        saved = self.call('a', 'get'); desired = copy.deepcopy(saved['organization'])
+        self.patch('a', dict(saved, organization=windows), desired)
+        self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
+        next(p for p in desired['projects'] if p['id'] == 'a')['folders'].append(dict(id='relative', machine='a', path='work', name=''))
+        self.call('a', 'apply', data=dict(base=saved['organization'], desired=desired, versions=saved['versions']), ok=False)
+        self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
+
     def test_remote_payload_validation_keeps_store_unchanged(self):
         before = self.call('a', 'get')
         self.call('a', 'exchange', data=dict(swarm_id=before['swarm_id'], known=[], operations=[dict(id='bad')]), ok=False)
