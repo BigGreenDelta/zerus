@@ -187,6 +187,10 @@ pub(super) fn available(record: &Value, live: bool) -> bool {
 pub(super) fn resumed(record: &Value, live: bool) -> bool {
     live && unblocked(record) && resume_input::idle(record)
 }
+/// `resumed` for an inspection whose summary already verified the resume.
+pub(super) fn resumed_verified(record: &Value, live: bool, verified: bool) -> bool {
+    live && unblocked(record) && resume_input::idle_checked(record, verified)
+}
 /// Codex reports a clear of a resumed conversation only with the SessionStart
 /// it defers to the next turn, under the new conversation's ID. That clear
 /// confirms the resume when it was requested or observed for the expected

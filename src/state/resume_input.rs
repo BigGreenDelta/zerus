@@ -227,11 +227,23 @@ pub(super) fn idle(record: &Value) -> bool {
     clearable(record) && verified(record).is_ok()
 }
 
-pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
-    if !live || !pending(record) {
+/// One summary's verification of a live pending resume, or None. Its message,
+/// pause and clear availability all reuse it, so they agree and the process,
+/// history and composer are each checked once.
+pub(super) fn summary_check(record: &Value, live: bool) -> Option<Result<()>> {
+    (live && pending(record)).then(|| ready(record))
+}
+
+/// `idle` for a record whose `summary_check` passed, without verifying again.
+pub(super) fn idle_checked(record: &Value, verified: bool) -> bool {
+    verified && clearable(record)
+}
+
+pub(super) fn enrich(output: &mut Value, check: &Option<Result<()>>) {
+    let Some(check) = check else {
         return;
-    }
-    let reason = ready(record).err().unwrap_or_default();
+    };
+    let reason = check.clone().err().unwrap_or_default();
     output["resume_message_can_send"] = json!(reason.is_empty());
     output["resume_message_reason"] = json!(reason);
     if reason.is_empty() {
