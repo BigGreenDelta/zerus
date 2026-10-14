@@ -7,18 +7,19 @@
 //! attached clients. The writer is the only thread that writes the console's
 //! input, which can block; keys, pastes, query answers and client input reach
 //! it through a channel, client input after its terminal's own answers are
-//! removed. While the console wants win32-input-mode (D6), Ctrl+letter keys,
-//! sent or typed, reach it as key records. The host's waiter thread waits for the root process (the inbox
-//! pseudoconsole's output does not end before it is closed, D6), then closes
-//! the console off the reader thread, lets the output drain and ends the
-//! session's job.
+//! removed. Sent Ctrl+letter keys reach a program that reads key records as
+//! win32-input-mode records once the console asks for that mode (D6). The
+//! host's waiter thread waits for the root process (the inbox pseudoconsole's
+//! output does not end before it is closed, D6), then closes the console off
+//! the reader thread, lets the output drain and ends the session's job.
 //!
 //! Everything platform-specific (the pseudoconsole, the job and the process)
 //! sits behind `Launcher` and `Console`, so this file and its tests are plain
 //! Rust; `console.rs` implements them with ConPTY on Windows.
 use super::{
+    channel,
     keys::{self, Modes},
-    protocol::{Control, ErrorBody, ErrorCode, Key, Size},
+    protocol::{ConsoleEvidence, Control, ErrorBody, ErrorCode, Key, Size},
     sequences::{QueryStripper, ReplyFilter},
     spawn::{Environment, EnvironmentError},
 };
@@ -117,13 +118,8 @@ pub(crate) fn environment(
 enum Input {
     /// From the host: keys, pastes and query answers.
     Host(Vec<u8>),
-    /// What an attached client typed, before its terminal's answers are
-    /// removed, and whether the console wanted win32-input-mode then.
-    Client {
-        id: u64,
-        bytes: Vec<u8>,
-        win32_input: bool,
-    },
+    /// What an attached client typed, before its terminal's answers are removed.
+    Client(u64, Vec<u8>),
     /// A client left; an escape sequence it began goes out as typed.
     Gone(u64),
 }
@@ -391,23 +387,34 @@ impl Session {
         }
     }
 
-    /// The pane's modes that change what a key sends.
-    fn modes(&self) -> Modes {
-        let screen = lock(&self.screen);
-        let info = screen.model.info();
-        Modes {
-            cursor: info.application_cursor_keys,
-            keypad: info.application_keypad,
-            win32_input: screen.stripper.win32_input(),
-        }
-    }
-
-    /// Write `keys` as `send-keys` does, in the pane's current modes.
-    pub(crate) fn send_keys(&self, keys: &[Key]) -> Result<(), ErrorBody> {
+    /// Write `keys` as `send-keys` does, in the pane's current modes. When a
+    /// key is Ctrl and a letter and the console wants win32-input-mode, the
+    /// supervisor's `evidence` (None without one or its answer), asked once,
+    /// tells whether the program reads key records (`channel::key_records`).
+    pub(crate) fn send_keys(
+        &self,
+        keys: &[Key],
+        evidence: impl FnOnce() -> Option<ConsoleEvidence>,
+    ) -> Result<(), ErrorBody> {
         if self.dead() {
             return Err(exited(&self.pane_id()));
         }
-        let modes = self.modes();
+        let (mut modes, win32_input) = {
+            let screen = lock(&self.screen);
+            let info = screen.model.info();
+            let modes = Modes {
+                cursor: info.application_cursor_keys,
+                keypad: info.application_keypad,
+                key_records: false,
+            };
+            (modes, screen.stripper.win32_input())
+        };
+        let ctrl_letter = keys
+            .iter()
+            .any(|key| matches!(key, Key::Named(name) if keys::ctrl_letter(name, modes)));
+        if ctrl_letter {
+            modes.key_records = channel::key_records(win32_input, evidence);
+        }
         let bytes: Vec<u8> = keys
             .iter()
             .flat_map(|key| match key {
@@ -490,15 +497,8 @@ impl Session {
 
     /// Input typed in client `id`.
     pub(crate) fn client_input(&self, id: u64, bytes: Vec<u8>) {
-        let mut screen = lock(&self.screen);
-        if self.activity(&mut screen, id) {
-            let win32_input = screen.stripper.win32_input();
-            drop(screen);
-            self.send(Input::Client {
-                id,
-                bytes,
-                win32_input,
-            });
+        if self.activity(&mut lock(&self.screen), id) {
+            self.send(Input::Client(id, bytes));
         }
     }
 
@@ -674,9 +674,8 @@ fn read_output(session: &Session, mut output: Box<dyn Read + Send>) {
 }
 
 /// The only writer of a console's input. Each client's input passes its own
-/// `ReplyFilter`, which also turns typed Ctrl+letter keys into key records for
-/// a console in win32-input-mode; a sequence a client began and did not finish
-/// within `ESCAPE_TIME` goes out as typed.
+/// `ReplyFilter`; a sequence a client began and did not finish within
+/// `ESCAPE_TIME` goes out as typed.
 fn write_input(mut input: Box<dyn Write + Send>, inbox: Receiver<Input>) {
     let mut filters: HashMap<u64, (ReplyFilter, Instant)> = HashMap::new();
     loop {
@@ -706,16 +705,12 @@ fn write_input(mut input: Box<dyn Write + Send>, inbox: Receiver<Input>) {
                 .flat_map(|(filter, _)| filter.flush())
                 .collect(),
             Some(Input::Host(bytes)) => bytes,
-            Some(Input::Client {
-                id,
-                bytes,
-                win32_input,
-            }) => {
+            Some(Input::Client(id, bytes)) => {
                 let (filter, last) = filters
                     .entry(id)
                     .or_insert_with(|| (ReplyFilter::default(), now));
                 *last = now;
-                filter.filter(&bytes, win32_input)
+                filter.filter(&bytes)
             }
             Some(Input::Gone(id)) => filters
                 .remove(&id)

@@ -35,6 +35,7 @@ use std::io;
 pub(crate) const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
 pub(crate) const ENABLE_LINE_INPUT: u32 = 0x0002;
 pub(crate) const ENABLE_ECHO_INPUT: u32 = 0x0004;
+pub(crate) const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
 /// The supervisor's agent as its evidence reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub(crate) fn evidence(
         line_input: mode & ENABLE_LINE_INPUT != 0,
         echo_input: mode & ENABLE_ECHO_INPUT != 0,
         processed_input: mode & ENABLE_PROCESSED_INPUT != 0,
+        virtual_terminal_input: Some(mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0),
         processes,
         agent_pid: agent.map(|agent| agent.pid),
         agent_alive: agent.is_some_and(|agent| agent.alive),
@@ -353,6 +355,7 @@ mod tests {
                 line_input: false,
                 echo_input: false,
                 processed_input: false,
+                virtual_terminal_input: Some(true),
                 processes: vec![process(10, "hgs.exe"), process(20, "node.exe")],
                 agent_pid: Some(20),
                 agent_alive: true,
@@ -368,6 +371,16 @@ mod tests {
         );
         let echo = evidence(ENABLE_ECHO_INPUT, Vec::new(), None);
         assert!(echo.echo_input && !echo.line_input && !echo.processed_input);
+        // Codex reads key records (S2: 0x0098); Claude Code, Kimi and the fake
+        // agent read VT input (0x0208).
+        assert_eq!(
+            evidence(0x0098, Vec::new(), None).virtual_terminal_input,
+            Some(false)
+        );
+        assert_eq!(
+            evidence(0x0208, Vec::new(), None).virtual_terminal_input,
+            Some(true)
+        );
         // A crashed agent: still named, no longer alive (S2).
         let crashed = evidence(
             0,

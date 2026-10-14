@@ -254,26 +254,38 @@ event (`src/state/hooks.rs:283`).
   exactly the queries tmux answers and stays silent on the rest, as tmux does. The
   bundled pair stays first: on older inbox builds mode passthrough is missing, and
   only the pair gives the host every query.
-- **Input is plain VT, but Ctrl+letter goes as win32-input-mode key records once
-  the console asks for them.** The host notes DECSET/DECRST 9001 in the session's
-  output (and still strips it from what clients see, so their terminals keep
-  their keyboard encoding); the mode is off until requested. While it is on, a
-  key send whose bytes are one C0 byte for Ctrl and a letter (`C-c`, `C-u`, `^C`;
-  not `C-h`, `C-i`, `C-j`, `C-m`, which ConPTY maps to Backspace, Tab and Enter)
-  and a C0 byte an attached client types outside every escape sequence and
-  bracketed paste are written as `CSI Vk;Sc;Uc;1;8;1 _` and `CSI Vk;Sc;Uc;0;8;1 _`
-  (key down and up): the letter's virtual key and US scan code, the lower-case
-  Latin letter as the character and `LEFT_CTRL_PRESSED`. ESC with a C0 byte
-  (Meta+Ctrl), literal text, pastes and query answers stay as they are, and
-  without the mode every byte does. The reason is the keyboard layout: ConPTY
-  turns a plain C0 byte into a key record whose character is the control
-  character, and crossterm, which Codex uses to read key records, resolves such
-  a record through the foreground window's layout, so on a Russian layout Ctrl+C
-  reached Codex as Ctrl+`с` and was ignored (zerus-c8r9, probed with Codex
-  0.162.0 and Claude Code 2.1.296 on the bundled pair). With the Latin letter
-  Codex sees Ctrl+C, and ConPTY still gives programs that read VT input (Claude
-  Code, Kimi) the C0 byte. Implemented in `src/host/keys.rs`
-  (`win32_ctrl_letter`) and `src/host/sequences.rs`.
+- **Input is plain VT, but sent Ctrl+letter keys reach a program that reads key
+  records as win32-input-mode records.** The host notes DECSET/DECRST 9001 in the
+  session's output (and still strips it from what clients see, so their terminals
+  keep their keyboard encoding); the mode is off until requested. A key send
+  (`send_keys`) whose key tmux writes as one C0 byte for Ctrl and a letter (`C-c`,
+  `C-u`, `C-s`, `^C`; not `C-h`, `C-i`, `C-j`, `C-m`, which ConPTY maps to
+  Backspace, Tab and Enter) is written as `CSI Vk;Sc;Uc;1;8;1 _` and
+  `CSI Vk;Sc;Uc;0;8;1 _` (key down and up: the letter's virtual key and US scan
+  code, the lower-case Latin letter as the character and `LEFT_CTRL_PRESSED`)
+  only when the console has requested 9001 and the session's supervisor, asked
+  once per such send over its channel with the `input_state` timeout, reports an
+  input mode without `ENABLE_VIRTUAL_TERMINAL_INPUT` and without
+  `ENABLE_LINE_INPUT` (Codex: 0x0098). Otherwise the C0 byte goes as before:
+  without a supervisor (untracked sessions), when it does not answer in time or
+  does not report the flag, and for programs that read VT input (Claude Code,
+  Kimi and the fake agent show 0x0208; `ssh.exe` reads VT input too). ConPTY
+  gives such a program a key record's character alone, so a record would reach
+  it as `c`; a cooked read would take it as typed text too. Literal text,
+  pastes, query answers and what attached clients type are never converted.
+  The reason is the keyboard layout: ConPTY turns a plain C0 byte into a key
+  record whose character is the control character, and crossterm, which Codex
+  uses to read key records, resolves such a record through the foreground
+  window's layout, so on a Russian layout Ctrl+C reached Codex as Ctrl+`с` and
+  was ignored (zerus-c8r9, probed with Codex 0.162.0 and Claude Code 2.1.296 on
+  the bundled pair). With the Latin letter Codex sees Ctrl+C. Typed input of an
+  attached client passes unchanged, as Windows Terminal would send it, so Codex
+  under a non-Latin layout behaves there as it does in Windows Terminal itself:
+  a known limitation of crossterm upstream, not of the host. Implemented in
+  `src/host/keys.rs` (`win32_ctrl_letter`), `src/host/channel.rs`
+  (`key_records`), `src/host/sequences.rs` and `src/host/session.rs`; the
+  supervisor's evidence carries `virtual_terminal_input` (absent from older
+  supervisors, which keeps the byte).
 
 ### D7. Screen model and capture
 
@@ -418,7 +430,8 @@ Spike S2 probes support this evidence on both backends:
   180 ms after a paste submits, and a lone ESC and Ctrl+S are harmless. Ctrl+C
   cleared the composer in Claude Code and Kimi but not in Codex 0.162: the probe
   PC's Russian layout turned the plain `\x03` into Ctrl+`с` for Codex, which
-  the host now avoids by writing Ctrl+letter as win32-input-mode key records (D6).
+  the host now avoids for key sends by writing Ctrl+letter as win32-input-mode
+  key records to a program that reads key records (D6).
 
 The exact rule for other attached processes (agent-launched MCP servers) is settled
 with the host prototype after M3.
@@ -430,7 +443,8 @@ register still runs its program, and the host then refuses the session's input
 checks and pauses. The host waits for a session it is still creating when the
 registration arrives first, and a request waits for a channel whose registration
 answer is still going out. The evidence reports `ENABLE_PROCESSED_INPUT` as well
-(not judged), names attached processes from a Toolhelp snapshot (a process that
+(not judged) and `ENABLE_VIRTUAL_TERMINAL_INPUT` (for Ctrl+letter key sends,
+D6), names attached processes from a Toolhelp snapshot (a process that
 exited meanwhile is left out), and reports the agent the supervisor started last
 (the one `platform::forward_shutdown` received), whether it runs and whether its
 ID is in the supervisor's own job (the session job). Editors and pagers are `vi`,

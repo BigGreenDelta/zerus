@@ -21,10 +21,10 @@
 //! combination above, in each mode) matched it byte for byte when this was
 //! written.
 //!
-//! One mode is ConPTY's, not tmux's: while the console has asked for
-//! win32-input-mode (DECSET 9001), a key that tmux writes as a lone C0 byte
-//! for Ctrl and a letter is written as key records instead
-//! (`win32_ctrl_letter`).
+//! One mode is ConPTY's, not tmux's: when the console has asked for
+//! win32-input-mode (DECSET 9001) and its program reads key records rather
+//! than VT input, a key that tmux writes as a lone C0 byte for Ctrl and a
+//! letter is written as key records instead (`win32_ctrl_letter`, D6).
 
 /// The pane modes that change what a key sends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,16 +33,17 @@ pub(crate) struct Modes {
     pub cursor: bool,
     /// DECKPAM (`ESC =`): keypad keys send `ESC O p` and so on.
     pub keypad: bool,
-    /// win32-input-mode (`CSI ? 9001 h`), which ConPTY asks of its terminal:
-    /// Ctrl and a letter go as key records.
-    pub win32_input: bool,
+    /// Ctrl and a letter go as win32-input-mode key records: the console
+    /// asked for win32-input-mode (`CSI ? 9001 h`) and its program reads key
+    /// records (`channel::key_records`).
+    pub key_records: bool,
 }
 
 /// The bytes `send-keys` writes for the key named `name`.
 pub(crate) fn named(name: &str, modes: Modes) -> Vec<u8> {
     match lookup(name) {
         Lookup::Key(key) => match encode(key, modes) {
-            Ok(bytes) => match (modes.win32_input, bytes.as_slice()) {
+            Ok(bytes) => match (modes.key_records, bytes.as_slice()) {
                 (true, &[byte]) => win32_ctrl_letter(byte).unwrap_or(bytes),
                 _ => bytes,
             },
@@ -56,6 +57,23 @@ pub(crate) fn named(name: &str, modes: Modes) -> Vec<u8> {
         Lookup::Any => Vec::new(),
         Lookup::Unknown => literal(name),
     }
+}
+
+/// Whether key records change what the key named `name` sends: tmux writes
+/// it as one C0 byte for Ctrl and a letter.
+pub(crate) fn ctrl_letter(name: &str, modes: Modes) -> bool {
+    let plain = Modes {
+        key_records: false,
+        ..modes
+    };
+    named(name, plain)
+        != named(
+            name,
+            Modes {
+                key_records: true,
+                ..modes
+            },
+        )
 }
 
 /// Set-1 scan codes of the letters A to Z, at their places on a US keyboard.
@@ -609,17 +627,17 @@ mod tests {
     const NORMAL: Modes = Modes {
         cursor: false,
         keypad: false,
-        win32_input: false,
+        key_records: false,
     };
     const CURSOR: Modes = Modes {
         cursor: true,
         keypad: false,
-        win32_input: false,
+        key_records: false,
     };
     const KEYPAD: Modes = Modes {
         cursor: false,
         keypad: true,
-        win32_input: false,
+        key_records: false,
     };
 
     fn hex(bytes: &[u8]) -> String {
@@ -836,26 +854,26 @@ mod tests {
     }
 
     #[test]
-    fn keys_for_a_win32_input_console_send_ctrl_letters_as_key_records() {
+    fn keys_for_a_program_that_reads_key_records_send_ctrl_letters_as_records() {
         for (base, win32) in [
             (
                 NORMAL,
                 Modes {
-                    win32_input: true,
+                    key_records: true,
                     ..NORMAL
                 },
             ),
             (
                 CURSOR,
                 Modes {
-                    win32_input: true,
+                    key_records: true,
                     ..CURSOR
                 },
             ),
             (
                 KEYPAD,
                 Modes {
-                    win32_input: true,
+                    key_records: true,
                     ..KEYPAD
                 },
             ),
@@ -868,6 +886,7 @@ mod tests {
                     _ => plain.clone(),
                 };
                 assert_eq!(named(name, win32), expected, "{name} in {win32:?}");
+                assert_eq!(ctrl_letter(name, base), expected != plain, "{name}");
             }
             for name in ["C-c", "c-C", "^c", "^C", "C-S-c", "0x3"] {
                 assert_eq!(
@@ -875,6 +894,7 @@ mod tests {
                     b"\x1b[67;46;99;1;8;1_\x1b[67;46;99;0;8;1_",
                     "{name}"
                 );
+                assert!(ctrl_letter(name, base), "{name}");
             }
             assert_eq!(
                 named("C-u", win32),
@@ -903,6 +923,7 @@ mod tests {
                 ("\x03", b"\x03"),
             ] {
                 assert_eq!(named(name, win32), bytes, "{name}");
+                assert!(!ctrl_letter(name, base), "{name}");
             }
         }
         assert_eq!(literal("\x03"), b"\x03");

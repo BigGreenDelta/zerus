@@ -12,6 +12,9 @@
 //! attached: an editor or pager, or a shell started without a command. That
 //! last rule replaces the foreground process group check and stays provisional
 //! until the host prototype has met agent-launched helpers (D10).
+//!
+//! The evidence also decides how a key send writes Ctrl+letter (D6,
+//! `key_records`).
 use super::{
     link::{write_json, Link},
     protocol::{
@@ -290,6 +293,25 @@ const SHELLS: &[&str] = &[
     "nu",
 ];
 
+/// Whether a key send writes Ctrl+letter as win32-input-mode key records
+/// (`keys::win32_ctrl_letter`, D6) rather than as its C0 byte: only when the
+/// console has asked for win32-input-mode (`win32_input`) and the supervisor's
+/// `evidence`, asked only then, shows a program that reads key records itself
+/// (Codex): an input mode without `ENABLE_VIRTUAL_TERMINAL_INPUT` and without
+/// `ENABLE_LINE_INPUT`. ConPTY gives a program that reads VT input a key
+/// record's character alone, so Ctrl+C would reach it as `c`, and a cooked
+/// read takes the character as typed text. Without a supervisor, an answer or
+/// the flag, the C0 byte goes as before.
+pub(crate) fn key_records(
+    win32_input: bool,
+    evidence: impl FnOnce() -> Option<ConsoleEvidence>,
+) -> bool {
+    win32_input
+        && evidence().is_some_and(|evidence| {
+            evidence.virtual_terminal_input == Some(false) && !evidence.line_input
+        })
+}
+
 /// A process image's name as programs are compared on Windows: the file name
 /// without a program extension, in lower case (`node.exe` is `node`).
 pub(crate) fn program_stem(name: &str) -> String {
@@ -514,6 +536,7 @@ mod tests {
             line_input: false,
             echo_input: false,
             processed_input: false,
+            virtual_terminal_input: Some(true),
             processes: processes
                 .iter()
                 .map(|(pid, name)| ConsoleProcess {
@@ -669,5 +692,37 @@ mod tests {
         assert_eq!(program_stem(r"C:\Windows\System32\CMD.EXE"), "cmd");
         assert_eq!(program_stem("node"), "node");
         assert_eq!(program_stem(".exe"), ".exe");
+    }
+
+    #[test]
+    fn ctrl_letters_go_as_key_records_only_to_a_program_that_reads_them() {
+        let with = |vt: Option<bool>| ConsoleEvidence {
+            virtual_terminal_input: vt,
+            ..evidence(&[(10, "hgs.exe"), (20, "codex.exe")])
+        };
+        let asked = std::cell::Cell::new(0);
+        let ask = |answer: Option<ConsoleEvidence>| {
+            || {
+                asked.set(asked.get() + 1);
+                answer
+            }
+        };
+        // Codex (0x0098): records once the console wants win32-input-mode.
+        assert!(key_records(true, ask(Some(with(Some(false))))));
+        // Claude Code, Kimi, ssh and the fake agent (0x0208) read VT input.
+        assert!(!key_records(true, ask(Some(with(Some(true))))));
+        // A cooked console (line input, as in the default mode 0x01f7).
+        let cooked = ConsoleEvidence {
+            line_input: true,
+            ..with(Some(false))
+        };
+        assert!(!key_records(true, ask(Some(cooked))));
+        // No supervisor, no answer, or an older one without the flag.
+        assert!(!key_records(true, ask(None)));
+        assert!(!key_records(true, ask(Some(with(None)))));
+        assert_eq!(asked.get(), 5);
+        // Without the mode the supervisor is never asked.
+        assert!(!key_records(false, ask(Some(with(Some(false))))));
+        assert_eq!(asked.get(), 5);
     }
 }

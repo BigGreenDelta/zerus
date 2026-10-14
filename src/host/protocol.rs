@@ -927,6 +927,11 @@ pub struct ConsoleEvidence {
     /// judged, as D10 asks only for line and echo input to be off.
     #[serde(default)]
     pub processed_input: bool,
+    /// `ENABLE_VIRTUAL_TERMINAL_INPUT`: the program reads VT input rather
+    /// than key records, which decides how Ctrl+letter key sends are written
+    /// (D6). None from a supervisor that does not report it.
+    #[serde(default)]
+    pub virtual_terminal_input: Option<bool>,
     /// `GetConsoleProcessList`.
     pub processes: Vec<ConsoleProcess>,
     /// The tracked agent, once started.
@@ -1442,6 +1447,7 @@ mod tests {
                     line_input: false,
                     echo_input: false,
                     processed_input: true,
+                    virtual_terminal_input: Some(false),
                     processes: vec![
                         ConsoleProcess {
                             pid: 77,
@@ -1457,14 +1463,15 @@ mod tests {
                     agent_in_job: true,
                 },
             ),
-            r#"{"id":1,"ok":{"line_input":false,"echo_input":false,"processed_input":true,"processes":[{"pid":77,"name":"hgs.exe"},{"pid":78,"name":"node.exe"}],"agent_pid":78,"agent_alive":true,"agent_in_job":true}}"#,
+            r#"{"id":1,"ok":{"line_input":false,"echo_input":false,"processed_input":true,"virtual_terminal_input":false,"processes":[{"pid":77,"name":"hgs.exe"},{"pid":78,"name":"node.exe"}],"agent_pid":78,"agent_alive":true,"agent_in_job":true}}"#,
         );
-        // A supervisor that reports no processed input flag (an older one).
+        // A supervisor that reports no processed or VT input flag (an older one).
         let evidence: ConsoleEvidence = serde_json::from_str(
             r#"{"line_input":true,"echo_input":true,"processes":[],"agent_alive":false,"agent_in_job":false}"#,
         )
         .unwrap();
         assert!(!evidence.processed_input && evidence.agent_pid.is_none());
+        assert_eq!(evidence.virtual_terminal_input, None);
     }
 
     #[test]
