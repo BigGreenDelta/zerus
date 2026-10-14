@@ -161,6 +161,13 @@ Codex sees Ctrl+C under any keyboard layout; otherwise, and for every program
 that reads VT input (Claude Code, Kimi, the fake agent), it goes as the C0 byte
 (spec D6).
 
+Text that names tmux on Unix says the same without it here (`Wording` in
+`src/state/backend/mod.rs`): `hgs a --existing` and `rename` refuse a session ID
+other than `$N` as `invalid session identity`, and the Terminal reasons of a
+session that is not a live tracked pane, OpenCode and DeepSeek name no `tmux
+pane` or `tmux Terminal`. `hgs --help` leaves out `hgs paste`, the tmux C-v
+binding, and gives `--dry-run` as printing the `session-host/ssh` command.
+
 ## The supervisor channel
 
 Every session's `hgs.exe --run` registers a channel with its host before it starts
