@@ -1415,6 +1415,12 @@ balance, other quota and context exhaustion require manual action. Questions, ne
 Stop, session termination and identity changes cancel waiting; a native draft
 blocks delivery. Unknown providers do not receive automatic input.
 
+A continuation goes only to an agent that the failure stopped. When the agent
+keeps working after a provider error that followed an accepted continuation, the
+episode returns to **Recovery in progress** with the same attempt count: nothing
+further is scheduled or delivered while it works, and its answer completes the
+episode.
+
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear
 under **Needs attention**. Activity explains the stopped turn and offers
