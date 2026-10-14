@@ -1033,7 +1033,12 @@ the worktree and the outside folder, not the worktree, joins the project.
 New launches immediately show **Starting…** until the matching session appears.
 Controls stay disabled before confirmation. Errors remove the placeholder and
 show a reason; **Hide launch status** hides it while preserving a late session's
-project placement. Existing names and unrelated sessions are never repurposed.
+project placement. A session that ends before it appears and leaves no record,
+such as an agent that cannot start after the launch reported it started, also
+removes the placeholder: a notice shows its exit code and last lines, as its
+computer reports them in `ended_launches` ([JSON and external
+clients](#json-and-external-clients)); a hidden launch status ends silently.
+Existing names and unrelated sessions are never repurposed.
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.
 
@@ -1941,6 +1946,19 @@ that machine's own listing, so their `host` is the name the machine gives itself
 (its first `HGS_SELF` name, otherwise its host name), which may differ from the
 alias; an unreachable peer's entry names the alias. Key a peer by the alias you
 asked for, as Zerus does; the local entry's `peers` lists those aliases.
+
+A launch with `--launch-id` that no session or record of the snapshot carries, and
+whose session existed before the snapshot was taken, has ended: such launches
+appear newest first, at most 32, in `ended_launches`, as `{launch_id, name, code,
+output}`. `code` is the exit code of the session's supervisor, or null when no
+supervisor reported one (a command that runs without one, a supervisor that was
+killed); `output` holds the last 8 lines (2 KiB) of the session's screen, followed
+by the error that stopped the supervisor. A detached launch records its launch ID
+once the terminal has created the session, and a supervisor that ends within two
+minutes without a confirmed conversation records how; a run that confirmed one
+leaves its record to carry the launch ID instead. These records live in
+`launches/` of the hgs state directory for a week, as long as the desktop keeps a
+launch placeholder. The key is omitted when no launch has ended.
 
 A running Zerus desktop records input idle time and screen lock with
 `hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every

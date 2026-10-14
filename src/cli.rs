@@ -351,7 +351,17 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         // an isolated test host's sessions may run it (spec D2).
         #[cfg(windows)]
         session_process()?;
-        return run(&args[1..]);
+        let start = Instant::now();
+        let result = run(&args[1..]);
+        // A launch the desktop waits for learns how its session ended.
+        state::launches::finished(
+            start.elapsed(),
+            result
+                .as_ref()
+                .copied()
+                .map_err(|error| (error.code, error.message.as_str())),
+        );
+        return result;
     }
     let mut target = String::new();
     let mut dry = false;
@@ -887,6 +897,9 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
     }
+    // Before the terminal lists: a launch's session that this listing does not
+    // show existed before it began and has ended.
+    let launches = state::launches::Evidence::read();
     // A listing that fails is an error: no sessions would show live ones as stopped.
     let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
     let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
@@ -908,7 +921,12 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
-    state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
+    let mut merged = state::merge_snapshot(raw).map_err(|e| Error::new(1, e))?;
+    let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
+    if !ended.is_empty() {
+        merged["ended_launches"] = json!(ended);
+    }
+    Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {
     if !platform::local_sessions() {
@@ -2052,6 +2070,13 @@ fn launch(
     if options.detached {
         let rc = terminal().launch(&spec)?.code;
         if rc == 0 {
+            if let Some(id) = &options.launch_id {
+                // A session that ends before a listing shows it still ends
+                // its launch's placeholder (`state::launches`).
+                if let Err(error) = state::launches::started(id, &session) {
+                    eprintln!("hgs: cannot record launch {id}: {error}");
+                }
+            }
             println!("hgs: started {session}");
         }
         return Ok(rc);

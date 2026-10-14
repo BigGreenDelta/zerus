@@ -79,6 +79,7 @@ pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
 }
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
+pub(crate) mod launches;
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

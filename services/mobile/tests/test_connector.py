@@ -74,6 +74,14 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
             snapshot = await self.connector.snapshot()
             self.assertEqual(snapshot['sessions'][0]['process_work'], expected)
 
+    async def test_ended_launches_never_leave_the_computer(self):
+        ended = [{'launch_id': '00000000-0000-4000-8000-000000000001', 'name': 'claude/example',
+                  'code': 1, 'output': 'hgs: claude: Access is denied.'}]
+        self.hgs.write_text(FAKE_HGS.replace("'hgs_version': '9.8.7', ", "'hgs_version': '9.8.7', 'ended_launches': %r, " % ended))
+        snapshot = await self.connector.snapshot()
+        self.assertNotIn('ended_launches', snapshot)
+        self.assertNotIn('Access is denied', json.dumps(snapshot))
+
     async def test_desktop_presence_travels_beside_the_snapshot_with_old_relay_fallback(self):
         presence = {'idle_seconds': 4.0, 'locked': False, 'locked_seconds': None}
         self.hgs.write_text(FAKE_HGS.replace("'hgs_version': '9.8.7', ", "'hgs_version': '9.8.7', 'desktop_presence': %r, " % presence))
