@@ -258,6 +258,7 @@ python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
 python -m unittest discover -s tests -p test_windows_hooks.py -v </dev/null
+python -m unittest discover -s tests -p test_backend_contract.py -v </dev/null
 ```
 
 The Rust filter `host::supervisor` includes
@@ -289,9 +290,29 @@ output to the end. `Listings` checks `local_host` in the local box.
 through `pwsh` and Windows PowerShell as Codex runs it (as an isolated test host's
 hooks, so local sessions need not be enabled), and tracked fake agents with
 private homes in a profile whose folder name has spaces and Cyrillic. The
-`windows-desktop` CI job runs the host, ConPTY, survival and lifecycle modules
-against the release `hgs.exe`, with the pinned pair it fetched in
-`HGS_TEST_CONPTY_DIR` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
+`windows-desktop` CI job runs the host, ConPTY, survival, lifecycle and hooks
+modules and the backend contract against the release `hgs.exe`, with the pinned
+pair it fetched in `HGS_TEST_CONPTY_DIR`
+([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
+
+## The terminal backend contract
+
+`tests/test_backend_contract.py` holds the twelve CLI-level tests that every
+terminal backend passes ([the contract](ci-and-aur.md#terminal-backend-contract)).
+On Windows it runs against the session host (`HGS_TEST_BACKEND=host`, the default
+there), with `HGS_TEST_BIN` and `HGS_TEST_FAKE_AGENT` as above. Each test uses its
+temporary folder as `USERPROFILE` and `HOME`, installs into it and launches from
+the build under test as the lifecycle cases do, and drives sessions only with `hgs`
+commands: `ls --json`, `send --json`, `terminal --json`, `rename`, `pause`,
+`resume`, `terminate`, `kill` and `a`, the last on a `PseudoConsole` client of the
+test. Its sessions are tracked `claude` sessions of the fake agent (a copy named
+`claude.exe` that answers the version probe as Claude Code 2.1.296, with a private
+`CLAUDE_CONFIG_DIR`) and an untracked `fake_agent`. Whether an agent process still
+runs is read through a handle and its creation time. The module's `Host` class and
+its console client are its only Windows code, reusing the helpers of the lifecycle
+and host suites; a behaviour every backend must have belongs in a contract test,
+not there. Like the other host suites, it must run outside a job that
+forbids breakaway.
 
 ## Writing host tests
 

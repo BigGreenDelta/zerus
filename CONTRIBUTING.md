@@ -57,9 +57,11 @@ private tmux socket; `HGS_TEST_FAKE_AGENT` names another build.
 [terminal backend contract](docs/ci-and-aur.md#terminal-backend-contract): every
 session operation a backend provides, driven and observed only through `hgs`
 commands, their JSON and the agent's records. `HGS_TEST_BACKEND` selects `tmux`
-(default on Linux and macOS) or `host` (Windows; skipped until the session host
-exists). A new backend adds only its setup, teardown and `running()` there; extend
-the contract rather than the backend classes when a behaviour must hold for both.
+(default on Linux and macOS) or `host` (the Windows session host, default on
+Windows; see [testing the host](docs/windows-host-testing.md#the-terminal-backend-contract)).
+A backend class there provides only its setup and teardown, `running()`,
+`describe()`, `alive()` and attach client; extend the contract rather than the
+backend classes when a behaviour must hold for both.
 
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable

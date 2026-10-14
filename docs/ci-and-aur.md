@@ -365,37 +365,59 @@ rules are in doubt, record main twice and compare the two recordings first.
 
 ### Terminal backend contract
 
-`tests/test_backend_contract.py` states once what every terminal backend must do,
-for tmux on Unix now and for the Windows session host later. It is a black box at
+`tests/test_backend_contract.py` states once what every terminal backend must do:
+tmux on Linux and macOS, and the Windows session host. It is a black box at
 the CLI: tests drive only `hgs` commands and observe only their output and JSON
-and the records of the native fake agent (`examples/fake_agent.rs`, linked as
-`claude`), never the backend or the internal Rust `TerminalBackend` trait. It
-covers listing without starting the backend; launches (folder, arguments, launch
-ID, one session per name, untracked commands); `a --existing [--run-id]`
-resolution and attach in a pseudo-terminal (input, client size, several clients,
-`Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of `send` and
-Terminal input (one bracketed paste, then one Enter, no replay, keys in both
-cursor modes); state read from the screen (styled capture, wide glyphs, cursor,
-size, bracketed paste, an echoed draft against a dim placeholder) and raw-mode
-evidence; rename; pause and resume; terminate and kill, with what each does to the
-agent process. Signal expectations accept the Unix signal or the Windows console
-event the Phase 2 design names for each operation.
+and the records of the native fake agent (`examples/fake_agent.rs`, linked or
+copied as `claude`), never the backend or the internal Rust `TerminalBackend`
+trait. It covers listing without starting the backend; launches (folder,
+arguments, launch ID, one session per name, untracked commands); `a --existing
+[--run-id]` resolution and attach from a terminal client (input, client size,
+several clients, `Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of
+`send` and Terminal input (one bracketed paste, then one Enter, no replay, keys in
+both cursor modes); state read from the screen (styled capture, wide glyphs,
+cursor, size, bracketed paste, an echoed draft against a dim placeholder) and
+raw-mode evidence; rename; pause and resume; terminate and kill, with what each
+does to the agent process. Signal expectations accept the Unix signal or the
+Windows console event each operation sends: on Windows a pause is Ctrl+Break for
+the supervisor's process group, terminate pauses first and then closes the
+console, and kill closes it at once (spec D11).
 
-`HGS_TEST_BACKEND` selects the backend: `tmux` (the default on Linux and macOS: a
-private server and state per test) or `host` (the default on Windows). hgs puts
-`$HOME/.local/bin` ahead of Homebrew and `/usr/local/bin` on its `PATH`, so the
-private `tmux` wrapper and the agent stand-ins live in the test home's
-`.local/bin`, and a private `TMUX_TMPDIR` keeps any other tmux off the user's
-server. Only the
-backend classes in the module differ: setup, teardown and `running()`. Until the
-session host exists (M3 to M5), `host` skips with that reason. It will need an
-isolated `HGS_STATE_DIR`, so the pipe name never reaches a live host, `hgs
-session-host install` into a temporary profile, a console client for attach in
-place of `pty`, and a Windows form of the `ps` check that tells whether an agent
-process still runs. The fake agent of a test has one configuration, set before its
-first launch, because a backend may keep the environment of the launch that
-started it. The module runs in the Linux and macOS CLI jobs in about 7 s, skips
-without tmux, and passed 20 runs with 8 in parallel.
+`HGS_TEST_BACKEND` selects the backend: `tmux` (the default on Linux and macOS) or
+`host` (the default on Windows, skipped elsewhere). Each test has a private home,
+state and configuration directory. hgs puts the home's `.local/bin` first on its
+`PATH` (ahead of Homebrew and `/usr/local/bin`; on Windows ahead of
+`%APPDATA%\npm`), so the agent stand-ins live there. Only the backend classes in
+the module differ: setup and teardown, `running()`, `describe()` (the backend's
+state in failure messages), `alive()` (whether an agent process with a recorded
+start time still runs) and the attach client.
+
+- `tmux`: a private server through a `tmux` wrapper in that folder, a private
+  `TMUX_TMPDIR` that keeps any other tmux off the user's server, the fake agent
+  linked as `claude` and `fake_agent`, `ps` start times and a pseudo-terminal
+  client.
+- `host`: the test folder is also `USERPROFILE`, and `hgs session-host install`
+  enables local sessions there, as `tests/test_windows_lifecycle.py` does: the
+  build under test launches as a portable copy, the staged host image serves and
+  the staged stable CLI supervises. The isolated `HGS_STATE_DIR` keeps the host's
+  pipe away from any live host. The fake agent is copied as `claude.exe` and
+  `fake_agent.exe` and answers hgs's version probe as Claude Code 2.1.296, whose
+  hooks hgs writes in their exec form into a private `CLAUDE_CONFIG_DIR` (spec
+  D12); `APPDATA` is private too. `running()` reads `hgs __host status`,
+  `alive()` compares creation times through a process handle (spec D9), and attach
+  runs `hgs a` on a pseudoconsole of the test (`PseudoConsole` of the lifecycle
+  suite, spec D13). Teardown kills the sessions and stops the host through `hgs
+  __host call`, then waits for the host and every agent and supervisor through
+  handles opened while they ran, and ends and reports any that outlive it. Waits
+  allow 30 s and commands 60 s, as in the lifecycle suite: a freshly copied
+  executable may be scanned when it first starts.
+
+The fake agent of a test has one configuration, set before its first launch,
+because a backend may keep the environment of the launch that started it. The
+module runs in the Linux and macOS CLI jobs in about 7 s, skips without tmux, and
+passed 20 runs with 8 in parallel. The `windows-desktop` job runs it against the
+host in its session host step
+([below](#windows-client-desktop-and-portable-zip)).
 
 ### Windows client, desktop and portable zip
 
@@ -409,7 +431,8 @@ against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
 `fake_agent` examples and runs `tests/test_windows_client.py` and the session host
 suites (`tests/test_windows_host.py`, `tests/test_windows_host_conpty.py`,
 `tests/test_windows_host_survival.py`, `tests/test_windows_lifecycle.py`,
-[testing the host](windows-host-testing.md)) against them. Before the host suites,
+`tests/test_windows_hooks.py`, [testing the host](windows-host-testing.md)) and the
+[terminal backend contract](#terminal-backend-contract) against them. Before the host suites,
 `scripts/fetch-conpty.py` fetches the [ConPTY pair](#the-bundled-conpty-pair) once
 into `RUNNER_TEMP/conpty`; the host step names that folder in
 `HGS_TEST_CONPTY_DIR`, and the portable zip takes the same files. Nothing caches
