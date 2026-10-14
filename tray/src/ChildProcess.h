@@ -15,7 +15,8 @@
 // (glibc marks neither). Every QProcess the GUI starts on Unix, directly or as
 // a runner child, therefore goes through inheritStdioOnly() right before start()
 // or startDetached(); the runner's posix_spawn children on macOS get the same
-// from POSIX_SPAWN_CLOEXEC_DEFAULT.
+// from POSIX_SPAWN_CLOEXEC_DEFAULT. The two starts in UpdateController.cpp do
+// not go through it yet.
 namespace ChildProcess {
 
 // Whether this Qt build limits children to stdio (tests).
