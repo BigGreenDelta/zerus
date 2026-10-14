@@ -51,7 +51,7 @@ class NativeExternalAgents(unittest.TestCase):
     received = fixtures.InputTransport.received
     assert_plugin_sync_off = test_clear_context_native.NativeCodexClear.assert_plugin_sync_off
 
-    def test_ephemeral_review_is_a_child_of_claude_and_codex(self):
+    def test_review_child_identity_and_missing_stop_recovery(self):
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Response)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -74,8 +74,6 @@ stream_max_retries=0
         self.assert_plugin_sync_off(native_home)
         command = shlex.quote(str(fixtures.HGS)) + ' __state hook'
         # Keep the provider-neutral command installed in resident accounts.
-        (native_home / 'hooks.json').write_text(json.dumps(dict(hooks={kind: [dict(hooks=[
-            dict(type='command', command=command)])] for kind in ('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd')})))
         self.script('review-launcher', '''#!/usr/bin/env python3
 import json, os, pathlib, subprocess
 root = pathlib.Path(os.environ['INPUT_FIXTURE'])
@@ -84,15 +82,20 @@ run = subprocess.run(json.loads(os.environ['REVIEW_ARGV']), capture_output=True,
 (root / 'review-exit').write_text(str(run.returncode))
 ''')
         native = os.environ['HGS_CODEX_TEST_BIN']
-        for parent in ('claude', 'codex'):
-            with self.subTest(parent=parent):
+        for parent, ephemeral in ((parent, ephemeral) for parent in ('claude', 'codex') for ephemeral in (True, False)):
+            with self.subTest(parent=parent, ephemeral=ephemeral):
+                # Persistent reviews deliberately omit both completion hooks;
+                # only the exact owned native rollout can settle that turn.
+                kinds = ('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd') if ephemeral else ('SessionStart', 'UserPromptSubmit')
+                (native_home / 'hooks.json').write_text(json.dumps(dict(hooks={kind: [dict(hooks=[
+                    dict(type='command', command=command)])] for kind in kinds})))
                 self.record.update(agent=parent, model='parent-model', transcript='parent-history',
                     prompt='Parent request', main_done=False, subagents={}, cwd=str(self.root))
                 self.write_record()
                 (self.root / 'review-exit').unlink(missing_ok=True)
                 env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id,
                            CODEX_HOME=str(native_home), REVIEW_ARGV=json.dumps([native, 'exec',
-                           '--ephemeral', '--dangerously-bypass-hook-trust', '--skip-git-repo-check',
+                           *(['--ephemeral'] if ephemeral else []), '--dangerously-bypass-hook-trust', '--skip-git-repo-check',
                            '-s', 'read-only', '-C', str(self.root), '--color', 'never', 'Review the isolated fixture.']))
                 for key in tuple(env):
                     if key.startswith(('OPENAI_', 'ANTHROPIC_', 'CLAUDE_', 'CODEX_')) and key != 'CODEX_HOME':
@@ -113,14 +116,18 @@ run = subprocess.run(json.loads(os.environ['REVIEW_ARGV']), capture_output=True,
                 self.assertEqual(len(raw['subagents']), 1, output)
                 child_id, child = next(iter(raw['subagents'].items()))
                 self.assertEqual(child['provider'], 'codex')
-                self.assertEqual(child['state'], 'finished')
-                self.assertFalse(child.get('transcript'))
+                self.assertEqual(child['state'], 'finished' if ephemeral else 'working')
+                self.assertEqual(bool(child.get('transcript')), not ephemeral)
                 view = subprocess.run([str(fixtures.HGS), 'inspect', self.name, '--agent', child_id],
                     env=self.env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(view.returncode, 0, view.stderr)
-                events = json.loads(view.stdout)['events']
-                self.assertTrue(any(e.get('type') == 'Stop' and 'Isolated review complete.' in e.get('detail', '')
+                inspected = json.loads(view.stdout)
+                self.assertEqual(inspected['state'], 'finished')
+                events = inspected['events']
+                self.assertTrue(any(e.get('type') in ('Stop', 'AgentMessage') and 'Isolated review complete.' in e.get('detail', '')
                                     for e in events), events)
+                if not ephemeral:
+                    self.assertEqual(inspected['tracking_evidence']['source'], 'codex_native_rollout')
                 self.assertEqual(self.received(), b'')
 
 

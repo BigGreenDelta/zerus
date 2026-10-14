@@ -37,7 +37,8 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
     let mut output = json!({"name":name,"agent_id":id,"parent_conversation_id":record["conversation_id"],
         "conversation_id":format!("{}/{}",string(&record,"conversation_id"),id),"run_id":record["run_id"],
         "provider":native_record["agent"],"model":child["model"],"label":child["name"],"tracked":true,"read_only":true,"cwd":native_record["cwd"],
-        "history_scope":"Recorded subagent activity","state":child["state"],"cursor":0});
+        "history_scope":"Recorded subagent activity","state":child["state"],"cursor":0,
+        "completion_source":child["completion_source"],"tracking_evidence":child["tracking_evidence"]});
     if let Some(archive) = archive_id {
         output["archive_id"] = json!(archive);
         output["state"] = json!("archived");
@@ -145,16 +146,8 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
             PathBuf::from(path)
         }
         "claude" => {
-            let transcript = PathBuf::from(string(record, "transcript"));
-            if transcript.file_stem().and_then(|v| v.to_str())
-                != Some(string(record, "conversation_id"))
-            {
-                return Ok(None);
-            }
-            transcript
-                .with_extension("")
-                .join("subagents")
-                .join(format!("agent-{id}.jsonl"))
+            let Some(path) = claude_subagents::paths(record, &[id]).remove(id) else { return Ok(None); };
+            path
         }
         "kimi" => {
             let Some(main) = questions::wire_paths(record)?.into_iter().next() else {
@@ -208,6 +201,9 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
             }
             event["agentId"] = json!("main");
         } else if agent == "claude" {
+            if event["agentId"] != id || event["sessionId"] != record["conversation_id"] {
+                continue;
+            }
             // Sidechain messages are the selected child's own conversation.
             event["isSidechain"] = json!(false);
         }

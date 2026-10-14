@@ -413,6 +413,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         let row = row.unwrap_or(&Value::Null);
         let failure = idle_failure(&record, row, &list["generation"]);
         let mut value = normalize(&record, row, &json!({"provider_error":failure}));
+        child_summaries(&record, &mut value, list, &list["generation"]);
         if !list.is_null() {
             value["host_generation"] = list["generation"].clone();
         }
@@ -505,6 +506,31 @@ fn goal(value: &Value) -> Value {
     json!({"id":value["id"],"objective":value["objective"],"status":value["phase"],"revision":value["revision"],
         "rounds_used":value["roundsStarted"],"round_budget":value["maxGoalRounds"],"activation":value["activation"],
         "reason":value["blockedReason"]["message"],"source":"dsh_goal_v1"})
+}
+
+fn child_summaries(record: &Value, value: &mut Value, listed: &Value, generation: &Value) {
+    if !generation.is_string() || listed["generation"] != *generation { return; }
+    let Some(children) = value["subagents"].as_object_mut() else { return; };
+    let mut active = 0;
+    let mut completed = 0;
+    let mut unknown = 0;
+    for (id, child) in children.iter_mut() {
+        let candidates: Vec<_> = listed["items"].as_array().into_iter().flatten()
+            .filter(|row| row["sessionId"] == id.as_str() && row["parentSessionId"] == record["conversation_id"]
+                && row["origin"] == "subagent").collect();
+        let [row] = candidates.as_slice() else { unknown += 1; continue; };
+        let (Some(running),Some(available)) = (row["running"].as_bool(),row["agentAvailable"].as_bool()) else { unknown += 1; continue; };
+        if running && !available { unknown += 1; continue; }
+        child["state"] = json!(if running { "working" } else { "finished" });
+        child["updated"] = json!(row["updatedAt"].as_f64().unwrap_or(0.0) / 1000.0);
+        child["tracking_evidence"] = json!({"source":"dsh_native_api","kind":"live_state","generation":generation,"native_id":id});
+        if running { active += 1; } else { completed += 1; }
+    }
+    value["subagent_active_count"] = json!(active);
+    value["subagent_completed_count"] = json!(completed);
+    value["subagent_unknown_count"] = json!(unknown);
+    value["subagent_count"] = json!(active);
+    value["subagent_counts_complete"] = json!(unknown == 0);
 }
 fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     let parts = string(record, "name").splitn(3, '/').collect::<Vec<_>>();
@@ -751,7 +777,13 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
                 .find(|v| v["sessionId"] == record["conversation_id"])
         })
         .unwrap_or(&Value::Null);
-    let mut result = normalize(&record, row, &inspected);
+    let child_row = agent_id.and_then(|id| listed["items"].as_array().and_then(|items| {
+        let rows: Vec<_> = items.iter().filter(|child| child["sessionId"] == id
+            && child["parentSessionId"] == record["conversation_id"] && child["origin"] == "subagent").collect();
+        if let [row] = rows.as_slice() { Some(*row) } else { None }
+    })).filter(|_| listed["generation"] == inspected["generation"]);
+    let mut result = normalize(&record, child_row.unwrap_or(row), &inspected);
+    child_summaries(&record, &mut result, &listed, &inspected["generation"]);
     let mut events = native_events(&inspected["page"]["records"]);
     let process_snapshot=if include_processes { processes::dsh_snapshot(&record,&inspected) } else { Value::Null };
     for event in &mut events {
@@ -813,6 +845,30 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
     result["interrupt_supported"] = json!(inspected["interruptSupported"] == true &&
         ["working","tool","compacting"].contains(&string(&result,"phase")) && result["process_state"] == "running" && result["turn_started"].as_f64().unwrap_or(0.0)>0.0);
     if let Some(id) = agent_id {
+        // The child's native status must never inherit the parent's running flag.
+        let children: Vec<_> = listed["items"].as_array().into_iter().flatten()
+            .filter(|child| child["sessionId"] == id && child["parentSessionId"] == record["conversation_id"]
+                && child["origin"] == "subagent").collect();
+        if let [child] = children.as_slice() {
+            if listed["generation"] == inspected["generation"] && child["running"].is_boolean()
+                && child["agentAvailable"].is_boolean() && (child["running"] != true || child["agentAvailable"] == true) {
+                let running = child["running"] == true;
+                if !["input","approval","error"].contains(&string(&result,"phase")) {
+                    result["phase"] = json!(if running { "working" } else { "idle" });
+                    result["activity"] = json!(if running { "busy" } else { "idle" });
+                    result["activity_summary"] = json!(if running { "Working" } else { "Ready" });
+                }
+                result["tracking_evidence"] = json!({"source":"dsh_native_api","kind":"live_state","generation":inspected["generation"],"native_id":id});
+            } else {
+                result["phase"] = json!("unknown");
+                result["activity"] = json!("unknown");
+                result["activity_summary"] = json!("Status unavailable");
+            }
+        } else {
+            result["phase"] = json!("unknown");
+            result["activity"] = json!("unknown");
+            result["activity_summary"] = json!("Status unavailable");
+        }
         result["agent_id"] = json!(id);
         result["parent_conversation_id"] = record["conversation_id"].clone();
         result["conversation_id"] = json!(format!("{}/{id}", string(&record, "conversation_id")));
@@ -1240,6 +1296,22 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(all(test, unix))]
 mod provider_failure_tests {
     use super::*;
+    #[test]
+    fn child_summaries_require_own_identity_and_one_host_generation() {
+        let record=json!({"conversation_id":"parent"});
+        let mut value=json!({"subagents":{"active":{"state":"unknown"},"idle":{"state":"unknown"},"foreign":{"state":"unknown"}}});
+        let list=json!({"generation":"host-one","items":[
+            {"sessionId":"active","parentSessionId":"parent","origin":"subagent","running":true,"agentAvailable":true},
+            {"sessionId":"idle","parentSessionId":"parent","origin":"subagent","running":false,"agentAvailable":false},
+            {"sessionId":"foreign","parentSessionId":"other","origin":"subagent","running":false,"agentAvailable":true}]});
+        child_summaries(&record,&mut value,&list,&json!("host-one"));
+        assert_eq!(value["subagents"]["active"]["state"],"working");
+        assert_eq!(value["subagents"]["idle"]["state"],"finished");
+        assert_eq!(value["subagents"]["foreign"]["state"],"unknown");
+        assert_eq!(value["subagent_active_count"],1);assert_eq!(value["subagent_counts_complete"],false);
+        let mut stale=json!({"subagents":{"active":{"state":"unknown"}}});let before=stale.clone();
+        child_summaries(&record,&mut stale,&list,&json!("host-two"));assert_eq!(stale,before);
+    }
     #[test]
     fn failed_native_turn_needs_attention_without_confusing_tool_results() {
         let record =

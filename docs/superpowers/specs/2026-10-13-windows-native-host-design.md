@@ -138,7 +138,13 @@ readable in both directions across one version of skew.
   instance because an exiting host still holds it retries until that host's process
   is gone.
 - `create` is idempotent by launch ID, so a retried request never starts a session
-  twice.
+  twice. `launch_status` (capability `launch-status`) answers by the same ID how
+  that session runs or ended (its exit code and the last lines of its pane). A
+  launch watches its new session for 3 s, the tmux launch's "ended immediately": a
+  program that could not start ends it at once, before any record exists, and the
+  launch then fails with that exit and output instead of reporting a start that the
+  GUI would wait for (zerus-ziq3.10). A supervisor that fails only after those 3 s
+  (a `--version` probe that times out) is still reported as started.
 - The host owns its sessions: a host crash ends them, exactly as a tmux server crash
   does. The host joins its own kill-on-close job before the first session and fails
   closed if it cannot, so its death never orphans agents (Orca does the same).
@@ -223,7 +229,11 @@ invocations): create session, list sessions and panes, resolve a target, pane in
 capture (plain or styled), send keys, paste (bracketed or not), run marker and
 session environment, rename, kill, signal, input state, attach, list clients, host
 status. On Windows, `list` is one round trip, because hooks call `live()` on every
-event (`src/state/hooks.rs:283`).
+event (`src/state/hooks.rs:283`). A listed pane's `current_path` (tmux's
+`pane_current_path`) is the directory its session started in: another process's
+current directory lives in its memory, which the host does not read, so an untracked
+session keeps its folder and a shell that changes directory is still listed where it
+started (`zerus-ziq3.9`).
 
 ### D6. ConPTY: bundled pair first, inbox as degraded fallback
 

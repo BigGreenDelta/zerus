@@ -4,9 +4,11 @@
 //! Sessions and panes keep tmux's textual IDs, `$N` and `%N`, from counters that
 //! never repeat while the host runs (D9). `create_session` is idempotent by
 //! launch ID: a retried request returns the session the first one started,
-//! also for a while after that session ended. Every request but `attach` and
-//! `supervisor_register`, which turn their connection into a stream, is
-//! answered here; the connection handling lives in `server.rs`.
+//! also for a while after that session ended; `launch_status` reports by the
+//! same ID how that session ended, with the last lines of its screen, so that
+//! a launch can report a program that could not start. Every request but
+//! `attach` and `supervisor_register`, which turn their connection into a
+//! stream, is answered here; the connection handling lives in `server.rs`.
 //!
 //! A session starts only while local sessions are enabled (`enabled`, the
 //! marker check of `gate`): a create that races `hgs session-host uninstall`
@@ -27,9 +29,9 @@ use super::{
     log,
     protocol::{
         Attach, Attached, Captured, ClientEntry, ClientList, ConsoleEvidence, CreateSession,
-        Created, Done, EnvValue, ErrorBody, ErrorCode, HostStatus, InputClaim, InputReady, Listed,
-        Op, PaneDetails, PaneEntry, Resolved, SessionEntry, Signal, SupervisorOp,
-        SupervisorRegistration, Target, RUN_MARKER,
+        Created, Done, EnvValue, ErrorBody, ErrorCode, HostStatus, InputClaim, InputReady,
+        LaunchState, Listed, Op, PaneDetails, PaneEntry, Resolved, SessionEntry, Signal,
+        SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
     },
     session::{self, lock, Attachment, LaunchPlan, Launcher, Session},
     worker::Worker,
@@ -63,6 +65,9 @@ const REGISTRATION_WAIT: Duration = Duration::from_secs(10);
 const GONE_WAIT: Duration = Duration::from_secs(2);
 /// Ended launches that a retried create still finds.
 const ENDED_LAUNCHES: usize = 256;
+/// What `launch_status` keeps of an ended session's screen: its last lines.
+const ENDING_LINES: usize = 8;
+const ENDING_BYTES: usize = 2048;
 
 /// When an idle host exits (D3).
 #[derive(Debug)]
@@ -107,8 +112,25 @@ impl Linger {
 
 enum Launch {
     Running(u64),
-    /// What the request that started it was told, with `existing` set.
-    Ended(Created),
+    /// What the request that started it was told, with `existing` set, and
+    /// how the session ended.
+    Ended(Created, LaunchState),
+}
+
+/// The end of `text`, a screen: its last `lines` lines that are not blank,
+/// trailing spaces trimmed, cut to at most `bytes` bytes from its end.
+pub(crate) fn last_lines(text: &str, lines: usize, bytes: usize) -> String {
+    let kept: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = kept[kept.len().saturating_sub(lines)..].join("\n");
+    let mut start = tail.len().saturating_sub(bytes);
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail[start..].to_owned()
 }
 
 struct Registry {
@@ -351,6 +373,7 @@ impl<L: Launcher> Host<L> {
     fn answer(self: &Arc<Self>, op: Op) -> Result<Value, ErrorBody> {
         match op {
             Op::CreateSession(request) => payload(&self.create(request)?),
+            Op::LaunchStatus { launch_id } => payload(&self.launch_status(&launch_id)?),
             Op::List => payload(&self.list()),
             Op::ResolveTarget { target } => {
                 let session = self.find(&target)?;
@@ -501,7 +524,7 @@ impl<L: Launcher> Host<L> {
                         existing: true,
                     });
                 }
-                Some(Launch::Ended(created)) => return Ok(created.clone()),
+                Some(Launch::Ended(created, _)) => return Ok(created.clone()),
                 None => {}
             }
         }
@@ -577,6 +600,30 @@ impl<L: Launcher> Host<L> {
         })
     }
 
+    /// How the session `launch_id` started is doing.
+    fn launch_status(&self, launch_id: &str) -> Result<LaunchState, ErrorBody> {
+        let registry = self.registry();
+        match registry.launches.get(launch_id) {
+            Some(Launch::Running(id)) => {
+                let session = &registry.sessions[id];
+                Ok(LaunchState {
+                    session: session.session_id(),
+                    pane: session.pane_id(),
+                    name: session.name(),
+                    dead: session.dead(),
+                    ended: false,
+                    code: None,
+                    output: String::new(),
+                })
+            }
+            Some(Launch::Ended(_, state)) => Ok(state.clone()),
+            None => Err(error(
+                ErrorCode::NotFound,
+                format!("can't find launch: {launch_id}"),
+            )),
+        }
+    }
+
     fn launch(
         self: &Arc<Self>,
         request: &CreateSession,
@@ -596,16 +643,8 @@ impl<L: Launcher> Host<L> {
                 size: request.size,
             })
             .map_err(|e| failed(format!("cannot start the session: {e}")))?;
-        Session::start(
-            id,
-            pane,
-            request.launch_id.clone(),
-            request.name.clone(),
-            unix_now(),
-            request.size,
-            launched,
-        )
-        .map_err(|e| failed(format!("cannot start the session: {e}")))
+        Session::start(id, pane, request, unix_now(), launched)
+            .map_err(|e| failed(format!("cannot start the session: {e}")))
     }
 
     /// Wait for a registered session's end on a thread of its own.
@@ -639,22 +678,36 @@ impl<L: Launcher> Host<L> {
                 |code| format!("exit {code} ({:#010x})", code as u32)
             )
         ));
+        // The output has drained: the screen holds what the program said
+        // last, such as why it could not start.
+        let output = last_lines(&session.joined_text(), ENDING_LINES, ENDING_BYTES);
         let mut registry = self.registry();
         registry.sessions.remove(&session.id);
         registry.launches.insert(
             session.launch_id.clone(),
-            Launch::Ended(Created {
-                session: session.session_id(),
-                pane: session.pane_id(),
-                name: session.name(),
-                pid: session.pid,
-                existing: true,
-            }),
+            Launch::Ended(
+                Created {
+                    session: session.session_id(),
+                    pane: session.pane_id(),
+                    name: session.name(),
+                    pid: session.pid,
+                    existing: true,
+                },
+                LaunchState {
+                    session: session.session_id(),
+                    pane: session.pane_id(),
+                    name: session.name(),
+                    dead: true,
+                    ended: true,
+                    code,
+                    output,
+                },
+            ),
         );
         registry.ended.push_back(session.launch_id.clone());
         while registry.ended.len() > ENDED_LAUNCHES {
             if let Some(old) = registry.ended.pop_front() {
-                if matches!(registry.launches.get(&old), Some(Launch::Ended(_))) {
+                if matches!(registry.launches.get(&old), Some(Launch::Ended(..))) {
                     registry.launches.remove(&old);
                 }
             }
@@ -688,9 +741,11 @@ impl<L: Launcher> Host<L> {
                 pid: session.pid,
                 dead: session.dead(),
                 run_marker: session.variable(RUN_MARKER).unwrap_or_default(),
-                // Another process's current directory is not readable yet
-                // (platform::current_directories); "" means unknown.
-                current_path: String::new(),
+                // Where the session started: another process's current
+                // directory lives in its memory, which the host does not read
+                // (platform::current_directories), so a program that changes
+                // directory is still listed where it started.
+                current_path: session.cwd.clone(),
             });
             listed.clients.extend(clients);
         }

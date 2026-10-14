@@ -137,9 +137,11 @@ class SessionCardPresentationTest {
         assertEquals("3/?" to "3 active / total unknown", count(""""subagent_source":"hooks","subagent_counts_complete":true,"subagent_active_count":3""", true))
         assertEquals("" to "", count(""""subagent_source":"hooks","subagent_counts_complete":true,"subagent_active_count":0""", true))
         assertEquals("" to "", count(""""subagent_source":"hooks","subagent_counts_complete":true,"subagent_active_count":0,"subagent_total_count":0""", true))
-        // Only the hooks source reports partial evidence with a plus.
-        assertEquals("2/6" to "2 active / 6 total", count(""""subagent_source":"mixed_hooks","subagent_counts_complete":false,"subagent_active_count":2,"subagent_total_count":6""", true))
-        assertEquals("2" to "2 active", count(""""subagent_source":"mixed_hooks","subagent_counts_complete":false,"subagent_active_count":2,"subagent_total_count":6""", false))
+        // Every individual roster retains unknown evidence, including native API snapshots.
+        for (source in listOf("mixed_hooks", "dsh_native", "kimi_native")) {
+            assertEquals("2+/6" to "2 confirmed active / 6 observed; some states unknown", count(""""subagent_source":"$source","subagent_counts_complete":false,"subagent_active_count":2,"subagent_total_count":6""", true))
+            assertEquals("2+" to "2 confirmed active; some states unknown", count(""""subagent_source":"$source","subagent_counts_complete":false,"subagent_active_count":2,"subagent_total_count":6""", false))
+        }
     }
 
     @Test fun childCountUsesTheLargerActiveFieldAndNeedsCurrentActivity() {
