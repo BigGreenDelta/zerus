@@ -171,10 +171,14 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "external") {
             p.drawLine(12, 4, 20, 4); p.drawLine(20, 4, 20, 12); p.drawLine(20, 4, 10, 14);
             QPainterPath path; path.moveTo(8, 5); path.lineTo(4, 5); path.lineTo(4, 20); path.lineTo(19, 20); path.lineTo(19, 16); p.drawPath(path);
-        } else if (name == "send" || name == "chevron-down") {
+        } else if (name == "send" || name == "chevron-down" || name == "chevrons-down") {
             // Composer actions sit beside semibold text; match its weight.
             p.setPen(QPen(color, 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             if (name == "send") { p.drawLine(12, 19, 12, 5); p.drawLine(6, 11, 12, 5); p.drawLine(18, 11, 12, 5); }
+            else if (name == "chevrons-down") {
+                p.drawLine(6, 6, 12, 12); p.drawLine(12, 12, 18, 6);
+                p.drawLine(6, 12, 12, 18); p.drawLine(12, 18, 18, 12);
+            }
             else { p.drawLine(6, 9, 12, 15); p.drawLine(12, 15, 18, 9); }
         } else if (name == "more") { p.drawPoint(5, 12); p.drawPoint(12, 12); p.drawPoint(19, 12); }
         p.end(); icon.addPixmap(pm);

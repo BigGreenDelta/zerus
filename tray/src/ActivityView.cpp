@@ -1256,7 +1256,7 @@ void ActivityView::setTheme(bool dark)
         " QPushButton[compact=\"true\"]:hover { background:%2; }"
         " QPushButton[compact=\"true\"]:focus[keyboardFocus=\"true\"] { border:1px solid %1; }")
         .arg(dark ? "#8bdfc0" : "#167357", dark ? "#233a35" : "#e7f3ed", dark ? "#456e61" : "#a5c8b8"));
-    if (m_compactJump) m_latest->setIcon(workspaceIcon("chevron-down", QColor(dark ? "#8bdfc0" : "#167357")));
+    if (m_compactJump) m_latest->setIcon(workspaceIcon("chevrons-down", QColor(dark ? "#8bdfc0" : "#167357")));
     for (auto *edge : m_edges) { static_cast<ColumnEdge *>(edge)->color = QColor(dark ? "#8bdfc0" : "#167357"); edge->update(); }
     m_compaction->setStyleSheet(QString("QWidget#activityCompaction { background:%3; } QLabel { color:%1; background:transparent; font-size:12px; } QProgressBar { background:%2; border:0; border-radius:2px; } QProgressBar::chunk { background:%1; border-radius:2px; }")
         .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? "#1c2229" : "#ffffff"));

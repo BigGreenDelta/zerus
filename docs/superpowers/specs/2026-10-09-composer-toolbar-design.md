@@ -56,7 +56,7 @@ Order, left to right:
 - Trailing zone (status by decreasing severity): usage limit, recovery, cache,
   context. The context counter is always rightmost.
 
-Owner revision, 2026-10-14: Jump to latest is a compact down-arrow icon beside
+Owner revision, 2026-10-14: Jump to latest is a compact double-down-arrow icon beside
 Voice in the existing toolbar, outside the transcript. Its tooltip and accessible
 name include the number of new events. The subagent toolbar owns its separate jump
 action. The toolbar height stays fixed when either action appears or disappears.
