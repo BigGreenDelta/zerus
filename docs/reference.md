@@ -1881,15 +1881,18 @@ restarts the app with the same settings in the background (`--background`,
 never `--sessions`): a window that opens by itself after a crash would be a
 surprise.
 
-**Updates.** The portable zip has no installer or self-update, and only nightly
-releases carry it. Settings → Updates therefore uses the nightly channel by
-default on a portable installation. It reports a nightly with a newer product
-version than the running app and links to its release page; nightlies of the same
-product version cannot be told apart. Stable releases and Dev builds have no
-Windows build: on those channels Updates says so, never reports an update and
-offers no dev download. The zip is published on GitHub only: the zerus.dev mirror
-neither stores it nor lists it in the v1 desktop feed, and the v2 Dev catalogs
-have no Windows artifact.
+**Updates.** The portable zip has no installer or self-update. Stable releases
+after 0.42.2 and nightly releases carry the same tested zip. The zip cannot tell
+which of them it came from, so a portable installation starts on the nightly
+channel; choose Stable to follow stable releases only. Settings → Updates reports
+a stable release or nightly with a newer product version than the running app and
+links to its release page; nightlies of the same product version cannot be told
+apart. Stable 0.42.2 and earlier have no Windows build and are never reported as
+an update, even when newer: Updates says so and points to the nightly channel.
+Dev builds have no Windows build either: on that channel Updates says so, never
+reports an update and offers no dev download. The zip is published on GitHub
+only: the zerus.dev mirror neither stores it nor lists it in the v1 desktop feed,
+and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 

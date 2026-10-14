@@ -188,11 +188,11 @@ backup.
 
 ## Windows control console
 
-Nightly releases include a portable Windows x86_64 zip with the desktop app
-(`hgs-tray.exe`) and the CLI (`hgs.exe`). They manage agent sessions on your Linux
-and macOS machines through the Windows OpenSSH client. Agents do not run on the
-Windows computer itself: this is the first phase of the
-[Windows plan](superpowers/specs/2026-10-10-windows-support-design.md).
+Stable releases after 0.42.2 and nightly releases include a portable Windows
+x86_64 zip with the desktop app (`hgs-tray.exe`) and the CLI (`hgs.exe`). They
+manage agent sessions on your Linux and macOS machines through the Windows OpenSSH
+client. Agents do not run on the Windows computer itself: this is the first phase
+of the [Windows plan](superpowers/specs/2026-10-10-windows-support-design.md).
 
 Requirements:
 
@@ -208,8 +208,10 @@ Requirements:
 
 Install and start:
 
-1. From a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
-   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`.
+1. From the [latest stable release](https://github.com/ufna/zerus/releases/latest)
+   or a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
+   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`. Each release
+   carries the zip its own CI run tested; stable 0.42.2 and earlier have none.
 2. Check the zip in PowerShell. Both commands must show the same hash
    (`Get-FileHash` prints it in upper case):
 
@@ -260,15 +262,17 @@ Limitations of the control console:
   Mobile connection is hidden, and activity on the Windows computer does not
   delay phone alerts.
 - Other machines cannot connect to the Windows computer as a peer.
-- No installer, code signing, autostart or self-update, and only nightly
-  releases carry the zip. **Settings → Updates** reports nightlies with a newer
-  product version; Stable and Dev have no Windows build, so on those channels it
-  says so and reports no update. To update, quit Zerus from the tray menu and
-  replace the folder with the new one; configuration and state stay in your
-  profile. To start Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the
-  Startup folder (`shell:startup`) and add a space and `--background` at the end
-  of its **Target** field, so Zerus starts in the notification area without
-  opening its window.
+- No installer, code signing, autostart or self-update. **Settings → Updates**
+  starts on the Nightly channel; choose Stable to hear only about stable
+  releases. It reports a release with a newer product version than the running
+  zip, with a link to its release page. Stable 0.42.2 and earlier have no
+  Windows build, so they are never reported; Dev has none either, so on that
+  channel it says so and reports no update. To update, quit Zerus from the
+  tray menu and replace the folder with the new one; configuration and state
+  stay in your profile. To start Zerus at sign-in, put a shortcut to
+  `hgs-tray.exe` in the Startup folder (`shell:startup`) and add a space and
+  `--background` at the end of its **Target** field, so Zerus starts in the
+  notification area without opening its window.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds.

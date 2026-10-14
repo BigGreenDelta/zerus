@@ -71,7 +71,7 @@ automatically on pushes to main and PRs targeting main. Manual runs default to f
 coverage; explicit suite inputs can narrow a manual/reusable run. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
-releases remain manually published.
+releases, which carry the zip their own candidate run tested, remain manually published.
 See [CI and Arch publication](docs/ci-and-aur.md) for triggers and publication
 requirements.
 

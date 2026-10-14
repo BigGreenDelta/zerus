@@ -53,6 +53,11 @@ WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 
+def asset_name(version):
+    """The release asset of the tested zip: renamed for its stable or nightly version, never rebuilt."""
+    return f"zerus-{version}-windows-x86_64.zip"
+
+
 def safe_name(name):
     """A relative file path that extracts identically and safely on Windows."""
     require(isinstance(name, str) and name.startswith(TOP + "/") and not WINDOWS_INVALID.search(name),
@@ -135,6 +140,18 @@ def inspect(path, required=REQUIRED):
                 f"Invalid Windows portable {key}.")
     require(isinstance(manifest.get("source_commit"), str) and re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"]),
             "Windows portable bundle lacks its exact source commit.")
+    return manifest
+
+
+def require_build(path, commit, version):
+    """build-info.json of the zip, which must be the build of `commit` at product `version`.
+
+    Release assembly and publication call this: like `inspect`, it never extracts
+    or runs anything.
+    """
+    manifest = inspect(path)
+    require(manifest["source_commit"] == commit and manifest["version"] == version,
+            "Windows portable bundle belongs to another commit/version.")
     return manifest
 
 

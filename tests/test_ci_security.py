@@ -260,12 +260,16 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Manual CI selects every suite by default; reusable callers opt in.
         self.assertRegex(self.ci, r"(?m)^      run_windows:\n        description: .+\n        type: boolean\n        default: true$")
         self.assertRegex(self.ci, r"(?m)^      run_windows:\n        type: boolean\n        default: false$")
-        nightly = (ROOT / ".github/workflows/nightly.yml").read_text()
-        self.assertIn("      run_windows: true\n", job(nightly, "verify"))
-        self.assertIn("name: windows-x86_64-${{ github.sha }}", job(nightly, "assemble"))
-        self.assertIn('--windows-zip "${portables[0]}"', job(nightly, "assemble"))
-        # A stable Windows asset is a separate decision: release checks skip it.
-        self.assertNotIn("run_windows", (ROOT / ".github/workflows/release.yml").read_text())
+        # Stable and nightly candidates carry the zip that their own run tested.
+        for name in ("nightly.yml", "release.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                self.assertIn("      run_windows: true\n", job(workflow, "verify"))
+                assemble = job(workflow, "assemble")
+                self.assertIn("name: windows-x86_64-${{ github.sha }}\n          path: artifacts/windows\n", assemble)
+                self.assertIn('portables=(artifacts/windows/*.zip)', assemble)
+                self.assertIn('test "${#portables[@]}" = 1', assemble)
+                self.assertIn('--windows-zip "${portables[0]}"', assemble)
 
     def test_windows_job_is_bounded_credential_free_and_pinned(self):
         windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")
@@ -778,7 +782,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                     "github": SimpleNamespace(event_name="push"), "inputs": SimpleNamespace(**{name: False})}))
         self.assertIn("    needs: [gate, automatic, dev-android]\n", job(self.ci, "dev"))
         # The v2 Dev catalogs have no Windows artifact kind; the portable zip
-        # stays a nightly-only GitHub asset.
+        # stays a GitHub asset of stable and nightly releases.
         dev = (ROOT / ".github/workflows/dev.yml").read_text()
         downloads = re.findall(r"uses: actions/download-artifact@\S+ # v[\d.]+\n        with:\n          name: (.+)", dev)
         self.assertEqual(downloads, ["arch-x86_64-${{ github.sha }}"])

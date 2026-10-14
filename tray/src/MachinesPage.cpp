@@ -93,7 +93,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_ssh = new QPushButton(tr("Open SSH terminal")); m_ssh->setObjectName("sshMachine");
     actions->addWidget(m_save); actions->addWidget(m_discardDraft); actions->addWidget(m_check); actions->addWidget(m_ssh); actions->addStretch(); editor->addLayout(actions);
     auto *setup = new QHBoxLayout;
-    m_enableLocal = new QPushButton(tr("Enable local sessions (preview)")); m_enableLocal->setObjectName("enableLocalSessions"); m_enableLocal->hide(); setup->addWidget(m_enableLocal);
+    m_enableLocal = new QPushButton(tr("Enable local sessions")); m_enableLocal->setObjectName("enableLocalSessions"); m_enableLocal->hide(); setup->addWidget(m_enableLocal);
     m_enableLocal->setToolTip(tr("Run agents on this computer too. Zerus stages the HGS CLI and a session host in your user profile."));
     m_install = new QPushButton(tr("Install / update HGS…")); m_install->setObjectName("installMachine"); setup->addWidget(m_install);
     m_sessions = new QPushButton(tr("View sessions")); m_sessions->setObjectName("machineSessions"); setup->addWidget(m_sessions);
@@ -415,7 +415,7 @@ void MachinesPage::enableLocalSessions() {
     if (m_request || m_installing) return;
     QMessageBox confirm(QMessageBox::Question, tr("Enable local sessions?"),
         tr("Run agents on this computer too? Zerus stages the HGS CLI and a session host in your user profile and enables local sessions. "
-           "This is a preview; to disable local sessions again, run hgs session-host uninstall."), QMessageBox::Cancel, this);
+           "To disable local sessions again, run hgs session-host uninstall."), QMessageBox::Cancel, this);
     confirm.setObjectName("enableLocalSessionsConfirm"); confirm.setTextFormat(Qt::PlainText);
     auto *proceed = confirm.addButton(tr("Enable local sessions"), QMessageBox::AcceptRole);
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
