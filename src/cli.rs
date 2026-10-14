@@ -312,16 +312,24 @@ fn nested_refusal(tmux: bool, session: Option<&str>, retry: Option<&str>) -> Str
 pub(crate) fn usage() -> &'static str {
     USAGE
 }
+/// Usage lines of commands that only Unix dispatches.
+const UNIX_ONLY_USAGE: [&str; 3] = ["hgs notify ", "hgs clip ", "hgs paste "];
 /// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
-/// has no tmux C-v binding for `hgs paste`, and its dry runs print the session
-/// host's requests, so its text does not name tmux.
+/// has no tmux C-v binding for `hgs paste`, no `hgs clip` or `hgs notify`, and
+/// its dry runs print the session host's requests, so its text lists none of
+/// them and does not name tmux.
 fn usage_text(tmux: bool) -> Cow<'static, str> {
     if tmux {
         return USAGE.into();
     }
     USAGE
         .lines()
-        .filter(|line| !line.trim_start().starts_with("hgs paste "))
+        .filter(|line| {
+            let line = line.trim_start();
+            !UNIX_ONLY_USAGE
+                .iter()
+                .any(|command| line.starts_with(command))
+        })
         .map(|line| line.replace("the tmux/ssh command", "the session-host/ssh command") + "\n")
         .collect::<String>()
         .into()
@@ -2220,8 +2228,8 @@ mod tests {
     fn usage_names_tmux_only_where_it_hosts_the_sessions() {
         // Unix keeps tmux's text byte for byte, capability markers included.
         assert_eq!(usage_text(true), USAGE);
-        // Windows has no `hgs paste` and its dry runs print the host's requests;
-        // every other line stays as it is.
+        // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, and its dry
+        // runs print the host's requests; every other line stays as it is.
         let neutral = usage_text(false);
         assert!(!neutral.contains("tmux"), "{neutral}");
         assert_eq!(
@@ -2229,6 +2237,14 @@ mod tests {
             USAGE
                 .replace(
                     "       hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use\n",
+                    ""
+                )
+                .replace(
+                    "       hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)\n",
+                    ""
+                )
+                .replace(
+                    "       hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)\n",
                     ""
                 )
                 .replace(

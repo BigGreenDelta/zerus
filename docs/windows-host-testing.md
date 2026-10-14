@@ -163,8 +163,9 @@ Text that names tmux on Unix says the same without it here (`Wording` in
 `src/state/backend/mod.rs`): `hgs a --existing` and `rename` refuse a session ID
 other than `$N` as `invalid session identity`, and the Terminal reasons of a
 session that is not a live tracked pane, OpenCode and DeepSeek name no `tmux
-pane` or `tmux Terminal`. `hgs --help` leaves out `hgs paste`, the tmux C-v
-binding, and gives `--dry-run` as printing the `session-host/ssh` command.
+pane` or `tmux Terminal`. `hgs --help` leaves out the Unix-only `hgs paste` (the
+tmux C-v binding), `hgs clip` and `hgs notify`, and gives `--dry-run` as printing
+the `session-host/ssh` command.
 
 ## The supervisor channel
 
