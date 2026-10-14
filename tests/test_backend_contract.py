@@ -49,7 +49,8 @@ HIDDEN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PAUSE_SIGNALS = {"TERM", "CTRL_BREAK"}
 CLOSE_SIGNALS = {"HUP", "TERM", "CTRL_BREAK", "CTRL_CLOSE"}
 PROMPT = "❯ "
-# What the fake `claude` answers the version probe that picks its hook form on Windows (spec D12).
+# What the fake `claude` answers the version probe that picks its hook form on Windows (spec D12)
+# and whether it gets PostModelSwitch.
 CLAUDE_VERSION = "2.1.296 (Claude Code)"
 
 
@@ -88,6 +89,8 @@ class Tmux:
         self.test = test
         for name in ("claude", "fake_agent"):
             (test.bin / name).symlink_to(FAKE_AGENT)
+        # hgs reads Claude Code's version before it registers PostModelSwitch.
+        test.env["FAKE_AGENT_PROBE_TEXT"] = CLAUDE_VERSION
         # A tmux found anywhere else still never reaches the user's server.
         folder = test.root / "tmux"
         folder.mkdir()

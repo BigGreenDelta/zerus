@@ -151,6 +151,10 @@ Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before
 first edit. It respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`.
 Handlers do nothing outside an `hgs` run. `HGS_TRACKING=0` disables registration for
 new launches. Native hook trust still requires an explicit user choice in Codex.
+Claude Code's `PostModelSwitch` is registered only once `claude --version` reports
+2.1.296 or later: older versions stop every start at a settings warning for a hook
+event they do not know. Until then each launch reads the version again; a version
+that cannot be read gets no such event. `PreModelSwitch` is never registered.
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -847,6 +851,10 @@ warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in
 notice. A confirmation requested by a `PreModelSwitch` hook is declined and
 reported, as is a picker without the session-only choice; use Terminal for those.
+With Claude Code 2.1.296 or later, its `PostModelSwitch` hook names the exact model
+of every switch at once: `/model` in Terminal, a change from Zerus, an automatic
+switch or a resume. The selector shows that model until the transcript records a
+later turn or `/model` receipt; the switch itself adds no Activity entry.
 A stopped Claude session resumes with a choice made in Zerus through `--model` and
 `--effort`; otherwise it starts with the account's settings.
 
