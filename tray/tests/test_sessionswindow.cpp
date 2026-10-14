@@ -173,7 +173,8 @@ static void settleSelectedInspection(MessageComposer *composer, HgsClient *clien
 // details lands afterwards and replaces them. On Windows it can even arrive before a
 // confirmation accepted from a short timer returns: Qt posts such timer events, and
 // they share a batch with queued process replies (zerus-a0ak, zerus-a857). Call
-// this before show(): the window then inspects only on show, selection and Refresh.
+// this before show(): the window then inspects only when something asks it to, such
+// as show, selection, Refresh, a tab change or a changed conversation in a reply.
 // HgsClient runs one inspection per session, so once the reply to the test's own
 // inspection is in (settleSelectedInspection), none is pending and no poll follows.
 static void keepDetailsPollsOut(SessionsWindow &window)
