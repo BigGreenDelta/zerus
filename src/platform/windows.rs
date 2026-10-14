@@ -88,7 +88,7 @@ use windows_sys::{
 
 /// The locale and the console code page stay as they are: Rust writes Unicode to
 /// the console itself, and a changed code page would outlive hgs in the user's
-/// shell. PATH gains the stable CLI's folder and npm's global folder
+/// shell. PATH gains the stable CLI's folder and the agent installers' folders
 /// (`prepare_path`). Console children (ssh.exe, tar.exe) must not outlive hgs
 /// when the GUI stops it, so this process joins a job that terminates its
 /// remaining members when its last handle, held only here, closes.
@@ -128,30 +128,42 @@ pub fn prepare_supervisor() {
     prepare_path();
 }
 /// The Windows counterpart of the Unix PATH preparation (spec D8): the stable
-/// CLI's folder `<home>\.local\bin` first and npm's global folder
-/// `%APPDATA%\npm`, where `npm install -g` puts agents, last, each when it exists
-/// and PATH does not list it yet. Agents are looked up on this PATH, and a
+/// CLI's folder `<home>\.local\bin`, where Claude Code's installer also puts
+/// `claude.exe`, first; npm's global folder `%APPDATA%\npm`, where `npm install
+/// -g` puts agents, and Kimi Code's `<home>\.kimi-code\bin` last, as on Unix;
+/// each when it exists and PATH does not list it yet. So an agent that `hgs
+/// account install` just installed is found before Windows gives this process
+/// the PATH its installer changed. Agents are looked up on this PATH, and a
 /// session's environment is this process's.
 fn prepare_path() {
     static PREPARED: std::sync::Once = std::sync::Once::new();
     PREPARED.call_once(|| {
-        let first = home()
-            .map(|home| PathBuf::from(below(&home, ".local/bin")))
+        let home = home();
+        let first = home
+            .as_deref()
+            .map(|home| PathBuf::from(below(home, ".local/bin")))
             .filter(|folder| folder.is_dir());
-        let last = env::var_os("APPDATA")
+        let npm = env::var_os("APPDATA")
             .filter(|value| !value.is_empty())
-            .map(|folder| PathBuf::from(folder).join("npm"))
-            .filter(|folder| folder.is_dir());
+            .map(|folder| PathBuf::from(folder).join("npm"));
+        let kimi = home
+            .as_deref()
+            .map(|home| PathBuf::from(below(home, ".kimi-code/bin")));
+        let last: Vec<PathBuf> = [npm, kimi]
+            .into_iter()
+            .flatten()
+            .filter(|folder| folder.is_dir())
+            .collect();
         let path = env::var_os("PATH").unwrap_or_default();
-        if let Some(path) = prepared_path(&path, first, last) {
+        if let Some(path) = prepared_path(&path, first, &last) {
             env::set_var("PATH", path);
         }
     });
 }
-/// `path` with `first` in front and `last` at the end, each unless `path` lists
-/// it already (compared without case and trailing separators); None when
-/// nothing changes.
-fn prepared_path(path: &OsStr, first: Option<PathBuf>, last: Option<PathBuf>) -> Option<OsString> {
+/// `path` with `first` in front and `last` at the end in order, each unless
+/// `path` lists it already (compared without case and trailing separators);
+/// None when nothing changes.
+fn prepared_path(path: &OsStr, first: Option<PathBuf>, last: &[PathBuf]) -> Option<OsString> {
     let key = |folder: &Path| {
         folder
             .to_string_lossy()
@@ -166,9 +178,11 @@ fn prepared_path(path: &OsStr, first: Option<PathBuf>, last: Option<PathBuf>) ->
         folders.insert(0, folder);
         changed = true;
     }
-    if let Some(folder) = last.filter(|folder| !listed(&folders, folder)) {
-        folders.push(folder);
-        changed = true;
+    for folder in last {
+        if !listed(&folders, folder) {
+            folders.push(folder.clone());
+            changed = true;
+        }
     }
     changed.then(|| env::join_paths(folders).ok()).flatten()
 }
@@ -1956,20 +1970,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_gains_the_stable_cli_and_npm_folders_once() {
+    fn path_gains_the_stable_cli_and_agent_installer_folders_once() {
         let path = |folders: &[&str]| env::join_paths(folders).unwrap();
         let bin = PathBuf::from(r"C:\Users\a\.local\bin");
         let npm = PathBuf::from(r"C:\Users\a\AppData\Roaming\npm");
+        let kimi = PathBuf::from(r"C:\Users\a\.kimi-code\bin");
         assert_eq!(
             prepared_path(
                 &path(&[r"C:\Windows"]),
                 Some(bin.clone()),
-                Some(npm.clone())
+                &[npm.clone(), kimi.clone()]
             ),
             Some(path(&[
                 r"C:\Users\a\.local\bin",
                 r"C:\Windows",
-                r"C:\Users\a\AppData\Roaming\npm"
+                r"C:\Users\a\AppData\Roaming\npm",
+                r"C:\Users\a\.kimi-code\bin"
             ]))
         );
         // Listed already, in another case or with a trailing separator.
@@ -1978,18 +1994,31 @@ mod tests {
                 &path(&[
                     r"c:\users\a\.local\bin\",
                     r"C:\Windows",
-                    r"C:\Users\A\AppData\Roaming\npm"
+                    r"C:\Users\A\AppData\Roaming\npm",
+                    r"C:\USERS\a\.kimi-code\bin\"
                 ]),
                 Some(bin.clone()),
-                Some(npm.clone())
+                &[npm.clone(), kimi.clone()]
             ),
             None
         );
         assert_eq!(
-            prepared_path(&path(&[r"C:\Windows"]), None, Some(npm)),
+            prepared_path(&path(&[r"C:\Windows"]), None, &[npm.clone()]),
             Some(path(&[r"C:\Windows", r"C:\Users\a\AppData\Roaming\npm"]))
         );
-        assert_eq!(prepared_path(&path(&[r"C:\Windows"]), None, None), None);
+        assert_eq!(
+            prepared_path(
+                &path(&[r"C:\Windows", r"C:\Users\a\AppData\Roaming\npm"]),
+                None,
+                &[npm, kimi]
+            ),
+            Some(path(&[
+                r"C:\Windows",
+                r"C:\Users\a\AppData\Roaming\npm",
+                r"C:\Users\a\.kimi-code\bin"
+            ]))
+        );
+        assert_eq!(prepared_path(&path(&[r"C:\Windows"]), None, &[]), None);
     }
 
     #[test]
