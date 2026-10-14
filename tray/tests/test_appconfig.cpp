@@ -840,7 +840,9 @@ void TestAppConfig::launcherClaimsWhenTheServiceStopsOrNeverListens()
     QSKIP("Windows has no service manager here (main.cpp)");
 #endif
     {
-        // The service stops before it listens, for example without a system tray.
+        // The service stops before it listens, for example when it crashes on start.
+        // (Without a system tray it listens first and then exits: main.cpp checks
+        // the tray only after it has claimed the socket.)
         QTemporaryDir dir;
         QElapsedTimer elapsed;
         elapsed.start();
