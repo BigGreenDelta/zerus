@@ -1713,6 +1713,10 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--sessions` | Open the workspace |
 
 A single-instance socket forwards repeated launches to the running GUI.
+On Linux and macOS, concurrent launches take turns on it, and a launch such as
+`hgs-tray --sessions` never takes it from the `hgs-tray` systemd or launchd
+service while that service runs or restarts: it waits up to 30 seconds for the
+service's GUI and opens the workspace there.
 The desktop version appears in the rail and Settings. **Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
