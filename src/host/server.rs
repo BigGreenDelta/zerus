@@ -438,6 +438,7 @@ mod windows {
                 "attach".into(),
                 "supervisor-channel".into(),
                 "recovery-worker".into(),
+                "launch-status".into(),
             ],
             integrity: identity.integrity.clone(),
             windows_session: token::windows_session().map_err(|e| failed(e.to_string()))?,
