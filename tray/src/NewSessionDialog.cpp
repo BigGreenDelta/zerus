@@ -444,7 +444,7 @@ void NewSessionDialog::updateAccounts()
     if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updateForm();return;}
     QJsonArray localProfiles;
     // The selected computer's agents only: the local Windows computer hides some (spec D16).
-    const auto style=MachinePlatform::of(host().isEmpty()?m_fleet.local().metrics:QJsonObject(),host().isEmpty());
+    const auto style=folderStyle(m_fleet,host());
     QStringList providers;for(const auto &provider:m_agents)if(AccountCatalog::launchable(provider,style))providers.append(provider);
     for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider)&&AccountCatalog::launchable(provider,style))providers.append(provider);}
     for(const auto &provider:providers){

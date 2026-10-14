@@ -54,7 +54,6 @@
 #include "SessionSearch.h"
 #include "SessionFileReference.h"
 #include "SessionGoal.h"
-#include "MachinePlatform.h"
 #include <cmath>
 
 #include <QApplication>
