@@ -780,6 +780,8 @@ pub struct PaneEntry {
     /// The run ID its supervisor set ("" when untracked).
     pub run_marker: String,
     /// The pane's current directory when known, else "" (passive metadata).
+    /// The host reports the directory the session started in: it does not
+    /// read another process's current directory.
     pub current_path: String,
 }
 

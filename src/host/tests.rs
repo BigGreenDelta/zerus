@@ -38,10 +38,14 @@ const CLIENT_PID: u32 = 4242;
 const PROGRAM: &str = r"C:\hgs\hgs.exe";
 #[cfg(windows)]
 const WORK: &str = r"C:\work\project";
+#[cfg(windows)]
+const OTHER_WORK: &str = r"C:\work\other";
 #[cfg(not(windows))]
 const PROGRAM: &str = "/opt/hgs/hgs";
 #[cfg(not(windows))]
 const WORK: &str = "/work/project";
+#[cfg(not(windows))]
+const OTHER_WORK: &str = "/work/other";
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -498,6 +502,7 @@ fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
     assert!(!listed.panes[0].dead);
     assert_eq!(listed.panes[0].run_marker, "run-1");
     assert_eq!(listed.panes[1].run_marker, "");
+    assert_eq!(listed.panes[0].current_path, WORK);
     assert!(listed.clients.is_empty());
 
     for target in [
@@ -524,6 +529,50 @@ fn sessions_are_created_once_per_launch_and_listed_with_every_field() {
         (missing.code, missing.message.as_str()),
         (ErrorCode::NotFound, "can't find pane: %9")
     );
+}
+
+/// A pane's current directory is the one its session started in (tmux's
+/// `pane_current_path` for a program that never changes directory): the host
+/// does not read another process's current directory, and without this an
+/// untracked session would have no folder at all.
+#[test]
+fn panes_report_the_directory_their_session_started_in() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client
+        .call::<Created>(create("launch-a", "claude/p/a"))
+        .unwrap();
+    let Op::CreateSession(mut other) = create("launch-b", "pwsh/p/b") else {
+        unreachable!()
+    };
+    other.cwd = OTHER_WORK.into();
+    client
+        .call::<Created>(Op::CreateSession(other.clone()))
+        .unwrap();
+    assert_eq!(launcher.program(1).cwd, OTHER_WORK);
+    // A retried create reports its first session and moves nothing.
+    other.cwd = WORK.into();
+    let again: Created = client.call(Op::CreateSession(other)).unwrap();
+    assert!(again.existing);
+    // A rename keeps the directory.
+    client
+        .call::<Done>(Op::Rename {
+            target: pane("pwsh/p/b"),
+            name: "pwsh/p/c".into(),
+        })
+        .unwrap();
+
+    let listed: Listed = client.call(Op::List).unwrap();
+    let paths: Vec<_> = listed
+        .panes
+        .iter()
+        .map(|pane| (pane.session.as_str(), pane.current_path.as_str()))
+        .collect();
+    assert_eq!(paths, [("claude/p/a", WORK), ("pwsh/p/c", OTHER_WORK)]);
+    // On the wire it is `list`'s `current_path`, which the host backend
+    // reports as the pane's path (`TerminalBackend::pane_paths`).
+    let wire: serde_json::Value = client.call(Op::List).unwrap();
+    assert_eq!(wire["panes"][1]["current_path"], OTHER_WORK);
 }
 
 /// Whether the host of `sessions_start_only_while_local_sessions_are_enabled`

@@ -223,7 +223,11 @@ invocations): create session, list sessions and panes, resolve a target, pane in
 capture (plain or styled), send keys, paste (bracketed or not), run marker and
 session environment, rename, kill, signal, input state, attach, list clients, host
 status. On Windows, `list` is one round trip, because hooks call `live()` on every
-event (`src/state/hooks.rs:283`).
+event (`src/state/hooks.rs:283`). A listed pane's `current_path` (tmux's
+`pane_current_path`) is the directory its session started in: another process's
+current directory lives in its memory, which the host does not read, so an untracked
+session keeps its folder and a shell that changes directory is still listed where it
+started (`zerus-ziq3.9`).
 
 ### D6. ConPTY: bundled pair first, inbox as degraded fallback
 

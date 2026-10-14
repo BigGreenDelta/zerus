@@ -19,7 +19,7 @@
 use super::{
     channel,
     keys::{self, Modes},
-    protocol::{ConsoleEvidence, Control, ErrorBody, ErrorCode, Key, Size},
+    protocol::{ConsoleEvidence, Control, CreateSession, ErrorBody, ErrorCode, Key, Size},
     sequences::{QueryStripper, ReplyFilter},
     spawn::{Environment, EnvironmentError},
 };
@@ -240,6 +240,8 @@ pub(crate) struct Session {
     /// The number in `%N`.
     pub pane: u64,
     pub launch_id: String,
+    /// The absolute directory the root process started in.
+    pub cwd: String,
     /// When it started, in Unix seconds.
     pub created: u64,
     /// The root process (the `--run` supervisor).
@@ -256,14 +258,13 @@ fn exited(pane: &str) -> ErrorBody {
 }
 
 impl Session {
-    /// Take over a launched session and start its reader and writer threads.
+    /// Take over the session `request` launched and start its reader and
+    /// writer threads.
     pub(crate) fn start(
         id: u64,
         pane: u64,
-        launch_id: String,
-        name: String,
+        request: &CreateSession,
         created: u64,
-        size: Size,
         launched: Launched,
     ) -> io::Result<Arc<Self>> {
         let Launched {
@@ -272,16 +273,18 @@ impl Session {
             input,
             console,
         } = launched;
+        let size = request.size;
         let (sender, inbox) = mpsc::channel();
         let session = Arc::new(Self {
             id,
             pane,
-            launch_id,
+            launch_id: request.launch_id.clone(),
+            cwd: request.cwd.clone(),
             created,
             pid,
             console,
             meta: Mutex::new(Meta {
-                name,
+                name: request.name.clone(),
                 variables: BTreeMap::new(),
                 dead: false,
                 stopping: false,
