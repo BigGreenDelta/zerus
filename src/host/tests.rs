@@ -1774,7 +1774,7 @@ mod terminal_backend {
         host::{
             attach::Terminal,
             client::AttachStream,
-            protocol::{HostStatus, Response},
+            protocol::{Frame, FrameError, HostStatus, Response},
             spawn::Environment,
         },
         state::backend::{
@@ -2375,5 +2375,72 @@ mod terminal_backend {
             assert!(!screen.entered.load(Ordering::SeqCst));
             assert_eq!(screen.leaves.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// A client end whose control frame (the detach) is answered at once by
+    /// the end of the stream, before the write returns: the host closes an
+    /// attached connection as soon as it reads a detach.
+    struct ClosedOnDetach<L: Link>(L);
+
+    impl<L: Link> Link for ClosedOnDetach<L> {
+        fn read_frame(&self) -> Result<Option<Frame>, FrameError> {
+            self.0.read_frame()
+        }
+        fn write_frame(&self, kind: Kind, payload: &[u8]) -> Result<(), FrameError> {
+            self.0.write_frame(kind, payload)?;
+            if kind == Kind::Control {
+                self.0.shutdown();
+                thread::sleep(Duration::from_millis(300));
+            }
+            Ok(())
+        }
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            self.0.set_read_timeout(timeout)
+        }
+        fn shutdown(&self) {
+            self.0.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_detach_the_host_closes_at_once_is_still_a_detach() {
+        let (client, host) = memory_pair();
+        let host = thread::spawn(move || {
+            host.read_frame().unwrap().unwrap();
+            let hello = HelloReply {
+                protocol: 1,
+                ..identity()
+            };
+            write_json(&host, Kind::Json, &HelloAnswer::Accepted(hello)).unwrap();
+            host.read_frame().unwrap().unwrap();
+            let attached = Attached {
+                client: "c1".into(),
+                session: "$0".into(),
+                name: "claude/p/a".into(),
+                pane: "%0".into(),
+            };
+            write_json(&host, Kind::Json, &Response::ok(1, &attached)).unwrap();
+            while let Ok(Some(_)) = host.read_frame() {}
+        });
+        let size = Size { cols: 80, rows: 24 };
+        let (attached, stream) = Connection::hello(Arc::new(ClosedOnDetach(client)), Role::Attach)
+            .unwrap()
+            .attach(Attach {
+                target: Target::Name("claude/p/a".into()),
+                size,
+                run_id: None,
+            })
+            .unwrap();
+        let screen = Screen::new(size);
+        let terminal = FakeTerminal(screen.clone());
+        terminal.enter().unwrap();
+        screen.keys(b"\x02d");
+        let outcome = crate::host::attach::relay(&stream, &terminal, &attached.name, size);
+        assert_eq!(outcome, crate::host::attach::Outcome::Detached);
+        assert!(screen
+            .shown()
+            .ends_with("[detached (from session claude/p/a)]\r\n"));
+        drop(stream);
+        host.join().unwrap();
     }
 }

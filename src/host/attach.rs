@@ -334,12 +334,16 @@ pub(crate) fn relay(
             .spawn_scoped(scope, || {
                 type_keys(stream, terminal, size, &stop, &detaching, &failed)
             });
-        if let Err(error) = input {
-            let _ = stream.detach();
-            return Outcome::Failed(error.to_string());
-        }
+        let input = match input {
+            Ok(input) => input,
+            Err(error) => {
+                let _ = stream.detach();
+                return Outcome::Failed(error.to_string());
+            }
+        };
         let mut exited = None;
-        let outcome = loop {
+        // Err: this console failed; Ok: why the stream ended.
+        let end = loop {
             match stream.next() {
                 Ok(Some(Event::Output(bytes))) => {
                     modes.feed(&bytes);
@@ -347,7 +351,7 @@ pub(crate) fn relay(
                     if !shown.is_empty() {
                         if let Err(error) = terminal.write(&shown) {
                             let _ = stream.detach();
-                            break Outcome::Failed(error.to_string());
+                            break Err(error.to_string());
                         }
                     }
                 }
@@ -355,19 +359,19 @@ pub(crate) fn relay(
                 // Resize and detach go to the host, never from it; a notice
                 // has no status line to show on.
                 Ok(Some(Event::Control(_))) => {}
-                Ok(None) => {
-                    break ended(
-                        &detaching,
-                        &failed,
-                        exited,
-                        "the session host closed the connection".into(),
-                    )
-                }
-                Err(error) => break ended(&detaching, &failed, exited, error.to_string()),
+                Ok(None) => break Ok("the session host closed the connection".to_owned()),
+                Err(error) => break Ok(error.to_string()),
             }
         };
         stop.store(true, Ordering::SeqCst);
-        outcome
+        // The host closes the stream as soon as it reads a detach, which
+        // can be before the input thread has recorded it: only once that
+        // thread has ended does `detaching` tell a detach from a lost host.
+        let _ = input.join();
+        match end {
+            Err(error) => Outcome::Failed(error),
+            Ok(reason) => ended(&detaching, &failed, exited, reason),
+        }
     });
     if matches!(outcome, Outcome::Failed(_)) {
         return outcome;
