@@ -53,6 +53,7 @@
 #include "SessionSearch.h"
 #include "SessionFileReference.h"
 #include "SessionGoal.h"
+#include "MachinePlatform.h"
 #include <cmath>
 
 #include <QApplication>
@@ -584,7 +585,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (!entry || m_details.isEmpty()) return target;
         target.key=entry->key;target.host=entry->host;target.session=entry->session.name;
         target.run=m_details.value("run_id").toString();target.conversation=m_details.value("conversation_id").toString();
-        target.available=entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        // Voice messages to local Windows sessions are a Phase 2 non-goal (spec D16).
+        const bool localWindows=entry->host.isEmpty()&&MachinePlatform::of(m_fleet.local().metrics,true)==MachinePlatform::Style::Windows;
+        target.available=!localWindows && entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        if(localWindows)target.reason=tr("Voice messages cannot be sent to sessions on this Windows computer yet.");
         if(CacheStatus::expired(m_details))target.warning=CacheStatus::warning(m_details)+tr("\n\nSend this voice message with the full conversation context?");
         return target;
     });

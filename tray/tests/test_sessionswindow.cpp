@@ -178,6 +178,7 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
+    void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
     void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -7494,6 +7495,26 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryEnabled")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryRule_service")->isEnabled());
+}
+
+// Voice sends to local Windows sessions are a Phase 2 non-goal (spec D16): the
+// disabled voice button says why.
+void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
+    const QJsonObject details{{"tracked",true},{"run_id","fixture-run"},{"conversation_id","fixture-conversation"},
+        {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("windows-voice",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
+    auto *voice=composer->findChild<ToolbarChip *>("voiceRecord");QVERIFY(voice);
+    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_VERIFY(!voice->isEnabled());
+    QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){
