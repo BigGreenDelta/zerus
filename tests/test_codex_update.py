@@ -30,6 +30,13 @@ def render(*args):
  for i in (1,2):lines += [('› ' if selected==i else '  ')+str(i+1)+'. '+labels[i]]
  lines += ['','  enter continue · esc skip']
  os.write(1,b'\x1b[2J\x1b[H'+'\r\n'.join(lines).encode())
+def drain(seconds):
+ # Keep recording input, so a resent key stays visible to the test. A release
+ # file ends the wait early.
+ end=time.monotonic()+seconds
+ while (left:=end-time.monotonic())>0 and not (root/'release').exists():
+  if select.select([fd],[],[],min(left,.05))[0]:
+   with (root/'received').open('ab') as f:f.write(os.read(fd,65536))
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
@@ -44,15 +51,18 @@ try:
     buf=buf[1:];(root/'submitted').write_text(labels[selected])
     if (root/'hold-dialog').exists():continue
     if selected==0:
-     os.write(1,('\x1b[2J\x1b[H\r\nUpdating Codex via `'+command+'`...\r\n').encode())
+     # Like Codex: leave raw mode and clear the picker at once, then announce
+     # the command after the given teardown seconds.
+     if (root/'teardown').exists():
+      termios.tcsetattr(fd,termios.TCSANOW,original);os.write(1,b'\x1b[2J\x1b[H')
+      if (root/'exit-before-announcement').exists():sys.exit(1)
+      drain(float((root/'teardown').read_text()))
+     announced=(root/'announce').read_text() if (root/'announce').exists() else command
+     os.write(1,('\x1b[2J\x1b[H\r\nUpdating Codex via `'+announced+'`...\r\n').encode())
      if (root/'exit-after-update').exists():sys.exit(0)
      # Like Codex: leave the TUI, run the installer for the given seconds, then exit.
-     # Keep recording input meanwhile, so a resent key stays visible to the test.
      if (root/'installer').exists():
-      termios.tcsetattr(fd,termios.TCSANOW,original);end=time.monotonic()+float((root/'installer').read_text())
-      while (left:=end-time.monotonic())>0:
-       if select.select([fd],[],[],left)[0]:
-        with (root/'received').open('ab') as f:f.write(os.read(fd,65536))
+      termios.tcsetattr(fd,termios.TCSANOW,original);drain(float((root/'installer').read_text()))
       sys.exit(0)
     else:
      # Codex keeps announcing the newer version in its main view after a skip.
@@ -150,11 +160,85 @@ class CodexUpdate(unittest.TestCase):
         self.assertTrue(receipt['open_terminal'])
         self.assertEqual(self.received(), b'\r')
 
-    def test_update_now_installer_outliving_acknowledgement_is_never_retried(self):
-        (self.root / 'installer').write_text('5')
+    def alive(self):
+        try:
+            os.kill(self.record['pid'], 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def finish_installer(self):
+        (self.root / 'release').touch()
+        deadline = time.monotonic() + 10
+        while self.alive() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertFalse(self.alive(), 'the fake installer did not finish')
+
+    def test_update_now_installer_outliving_acknowledgement_is_answered_and_never_retried(self):
+        # Codex's announcement delivers the choice; nothing waits for the installer.
+        (self.root / 'installer').write_text('60')
         request = self.payload('update_now')
+        receipt = self.answer(request)
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.assertTrue(self.alive())
+        self.assertEqual(self.received(), b'\r')
+        self.assertEqual(self.answer(request), receipt)
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_waits_for_a_slow_teardown_after_raw_mode_ends(self):
+        # Codex leaves raw mode and clears the picker before it announces the
+        # command; a slow teardown outlives the usual 2 s acknowledgement.
+        (self.root / 'teardown').write_text('3')
+        (self.root / 'installer').write_text('60')
+        started = time.monotonic()
+        receipt = self.answer(self.payload('update_now'))
+        self.assertGreaterEqual(time.monotonic() - started, 3)
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_exit_before_the_announcement_is_answered(self):
+        (self.root / 'teardown').write_text('0')
+        (self.root / 'exit-before-announcement').touch()
+        receipt = self.answer(self.payload('update_now'))
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'exited'))
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_announcing_another_command_in_input_mode_is_uncertain(self):
+        # Still in input mode, the wait ends at the usual 2 s.
+        (self.root / 'announce').write_text('brew upgrade --cask codex')
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(self.received(), b'\r')
         self.assertIn('delivery uncertain', self.answer(request, success=False))
         self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_without_the_exact_announcement_is_uncertain_and_never_retried(self):
+        # Out of input mode, the wait for the exact announcement or an exit is bounded.
+        for name, value in [('teardown', '0'), ('announce', 'brew upgrade --cask codex'), ('installer', '60')]:
+            (self.root / name).write_text(value)
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False, timeout=30))
+        self.assertGreaterEqual(time.monotonic() - started, 15)
+        self.assertTrue(self.alive())
+        self.assertEqual(self.received(), b'\r')
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_with_the_picker_still_open_is_uncertain_without_the_longer_wait(self):
+        (self.root / 'hold-dialog').touch()
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertLess(time.monotonic() - started, 10)
         self.assertIn('delivery uncertain', self.answer(request, success=False))
         self.assertEqual(self.received(), b'\r')
 
