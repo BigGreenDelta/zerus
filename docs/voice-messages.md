@@ -97,7 +97,10 @@ contains `action`, `request_id`, `expected_run_id` and
 `expected_conversation_id`. Actions:
 
 * `profiles`: returns `computers`, each containing `machine_id`, `name`,
-  `profiles`, `available` and an optional `reason`.
+  `profiles`, `available` and an optional `reason`. Computers are queried
+  concurrently, but their transport processes start one at a time: on macOS a
+  query started in between could inherit another's pipes and hold that request
+  open until it ends itself.
 * `submit`: also contains `speech: {machine_id, profile_id}` and
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`.
   Recording duration is bounded to 120 seconds. The request UUID is the permanent
