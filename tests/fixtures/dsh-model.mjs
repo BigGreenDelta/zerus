@@ -1,6 +1,6 @@
 // Deterministic, keyless model running inside the official release for adapter
 // integration tests. This fixture is never loaded by the installed HGS host.
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -50,8 +50,10 @@ class Adapter extends LlmAdapter {
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'approval-call',name:'hgs_test_approval',arguments:'{}'}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
-    if (text.includes('SUBAGENT') && last?.role !== 'tool') {
-      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ HOLD_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
+    // One child per prompt: a continuable child's completion reaches the
+    // parent as a later message of its own, after the call's tool result.
+    if (text.includes('SUBAGENT') && !options.messages.slice(options.messages.indexOf(prompt) + 1).some(m => m.role === 'tool')) {
+      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ (?:HOLD|DISPOSING)_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'child-call',name:'subagent',argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'child-call',name:'subagent',arguments:args}};
@@ -86,6 +88,39 @@ export function apply(ctx,config) {
     const hold=request.agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
     for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
     return next();
+  });
+  // Native disposal unloads an agent's Cordis scope before the agent leaves
+  // the live registry. Keep a marked child in that window, as a slow scope
+  // teardown would, and report it with a marker file until the test releases it.
+  // Another marker reports when the child has left the registry.
+  const disposing=new WeakMap();
+  ctx.on('agent/pre-step',(request,next)=>{
+    const agent=request.agent;
+    const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/DISPOSING_CHILD_\w+/)?.[0];
+    if(hold&&config?.holds&&!disposing.has(agent)){
+      disposing.set(agent,hold);
+      agent.ctx.effect(()=>async()=>{
+        writeFileSync(join(config.holds,hold+'.disposing'),'');
+        for(let i=0;i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+      },'hgs-test.disposal-hold');
+    }
+    return next();
+  });
+  ctx.on('agent/disposed',({agent})=>{
+    const hold=disposing.get(agent);
+    if(hold)writeFileSync(join(config.holds,hold+'.disposed'),'');
+  });
+  // While ACCOUNT_HOLD exists, account reads, which bridge reads await, report
+  // ACCOUNT_HOLD.waiting and wait for its removal, so agents can change meanwhile.
+  ctx.inject(['deepseekAccount'],scope=>{
+    const account=scope.deepseekAccount,getState=account.getState;
+    account.getState=async function(...args){
+      const gate=config?.holds&&join(config.holds,'ACCOUNT_HOLD');
+      if(gate&&existsSync(gate))writeFileSync(gate+'.waiting','');
+      for(let i=0;gate&&i<300&&existsSync(gate);i++)await new Promise(resolve=>setTimeout(resolve,50));
+      return getState.apply(this,args);
+    };
+    return()=>{account.getState=getState;};
   });
   ctx.tools.register(defineTool({name:'hgs_test_job_read',description:'Verify the model output cursor',parameters:{},
     output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},

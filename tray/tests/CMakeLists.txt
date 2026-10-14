@@ -134,12 +134,16 @@ if(ZERUS_QT_RESULTS_DIR MATCHES ",")
 elseif(ZERUS_QT_RESULTS_DIR)
     file(MAKE_DIRECTORY "${ZERUS_QT_RESULTS_DIR}")
 endif()
+# Every suite runs offscreen by default, as in CI, so a local ctest never opens
+# windows on the desktop or depends on its focus. An explicit ENVIRONMENT
+# property replaces this default and must keep QT_QPA_PLATFORM=offscreen.
 function(zerus_add_test name)
     set(results)
     if(ZERUS_QT_RESULTS_DIR)
         set(results -o "${ZERUS_QT_RESULTS_DIR}/${name}.xml,junitxml" -o -,txt)
     endif()
     add_test(NAME ${name} COMMAND ${ARGN} ${results})
+    set_tests_properties(${name} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endfunction()
 
 add_executable(test_speech test_speech.cpp)
@@ -493,11 +497,12 @@ add_executable(test_accountusage test_accountusage.cpp)
 target_include_directories(test_accountusage PRIVATE ../src)
 target_link_libraries(test_accountusage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(accountusage test_accountusage)
+set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_newsessiondialog test_newsessiondialog.cpp)
 target_link_libraries(test_newsessiondialog PRIVATE Qt6::Test hgs-tray-views)
 zerus_add_test(newsessiondialog test_newsessiondialog)
-set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(newsessiondialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_attachmentviewer test_attachmentviewer.cpp)
 target_include_directories(test_attachmentviewer PRIVATE ../src)
