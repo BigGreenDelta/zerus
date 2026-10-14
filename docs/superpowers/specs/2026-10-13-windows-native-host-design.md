@@ -254,6 +254,26 @@ event (`src/state/hooks.rs:283`).
   exactly the queries tmux answers and stays silent on the rest, as tmux does. The
   bundled pair stays first: on older inbox builds mode passthrough is missing, and
   only the pair gives the host every query.
+- **Input is plain VT, but Ctrl+letter goes as win32-input-mode key records once
+  the console asks for them.** The host notes DECSET/DECRST 9001 in the session's
+  output (and still strips it from what clients see, so their terminals keep
+  their keyboard encoding); the mode is off until requested. While it is on, a
+  key send whose bytes are one C0 byte for Ctrl and a letter (`C-c`, `C-u`, `^C`;
+  not `C-h`, `C-i`, `C-j`, `C-m`, which ConPTY maps to Backspace, Tab and Enter)
+  and a C0 byte an attached client types outside every escape sequence and
+  bracketed paste are written as `CSI Vk;Sc;Uc;1;8;1 _` and `CSI Vk;Sc;Uc;0;8;1 _`
+  (key down and up): the letter's virtual key and US scan code, the lower-case
+  Latin letter as the character and `LEFT_CTRL_PRESSED`. ESC with a C0 byte
+  (Meta+Ctrl), literal text, pastes and query answers stay as they are, and
+  without the mode every byte does. The reason is the keyboard layout: ConPTY
+  turns a plain C0 byte into a key record whose character is the control
+  character, and crossterm, which Codex uses to read key records, resolves such
+  a record through the foreground window's layout, so on a Russian layout Ctrl+C
+  reached Codex as Ctrl+`с` and was ignored (zerus-c8r9, probed with Codex
+  0.162.0 and Claude Code 2.1.296 on the bundled pair). With the Latin letter
+  Codex sees Ctrl+C, and ConPTY still gives programs that read VT input (Claude
+  Code, Kimi) the C0 byte. Implemented in `src/host/keys.rs`
+  (`win32_ctrl_letter`) and `src/host/sequences.rs`.
 
 ### D7. Screen model and capture
 
@@ -396,8 +416,9 @@ Spike S2 probes support this evidence on both backends:
   attached, so the alive-and-attached check is required.
 - Bracketed paste with LF or CR arrives as one prompt in all three agents, Enter
   180 ms after a paste submits, and a lone ESC and Ctrl+S are harmless. Ctrl+C
-  clears the composer in Claude Code and Kimi but not in Codex 0.162 (compare
-  with Linux before relying on it).
+  cleared the composer in Claude Code and Kimi but not in Codex 0.162: the probe
+  PC's Russian layout turned the plain `\x03` into Ctrl+`с` for Codex, which
+  the host now avoids by writing Ctrl+letter as win32-input-mode key records (D6).
 
 The exact rule for other attached processes (agent-launched MCP servers) is settled
 with the host prototype after M3.

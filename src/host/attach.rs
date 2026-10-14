@@ -993,7 +993,7 @@ mod console_tests {
     fn squeeze(bytes: &[u8]) -> String {
         let mut text = Vec::new();
         Scanner::default().feed(bytes, &mut |piece| {
-            if let Piece::Text(bytes) = piece {
+            if let Piece::Text(bytes) | Piece::Broken(bytes) = piece {
                 text.extend_from_slice(bytes);
             }
         });

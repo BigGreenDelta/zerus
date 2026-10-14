@@ -7,7 +7,8 @@
 //! attached clients. The writer is the only thread that writes the console's
 //! input, which can block; keys, pastes, query answers and client input reach
 //! it through a channel, client input after its terminal's own answers are
-//! removed. The host's waiter thread waits for the root process (the inbox
+//! removed. While the console wants win32-input-mode (D6), Ctrl+letter keys,
+//! sent or typed, reach it as key records. The host's waiter thread waits for the root process (the inbox
 //! pseudoconsole's output does not end before it is closed, D6), then closes
 //! the console off the reader thread, lets the output drain and ends the
 //! session's job.
@@ -116,8 +117,13 @@ pub(crate) fn environment(
 enum Input {
     /// From the host: keys, pastes and query answers.
     Host(Vec<u8>),
-    /// What an attached client typed, before its terminal's answers are removed.
-    Client(u64, Vec<u8>),
+    /// What an attached client typed, before its terminal's answers are
+    /// removed, and whether the console wanted win32-input-mode then.
+    Client {
+        id: u64,
+        bytes: Vec<u8>,
+        win32_input: bool,
+    },
     /// A client left; an escape sequence it began goes out as typed.
     Gone(u64),
 }
@@ -385,16 +391,23 @@ impl Session {
         }
     }
 
+    /// The pane's modes that change what a key sends.
+    fn modes(&self) -> Modes {
+        let screen = lock(&self.screen);
+        let info = screen.model.info();
+        Modes {
+            cursor: info.application_cursor_keys,
+            keypad: info.application_keypad,
+            win32_input: screen.stripper.win32_input(),
+        }
+    }
+
     /// Write `keys` as `send-keys` does, in the pane's current modes.
     pub(crate) fn send_keys(&self, keys: &[Key]) -> Result<(), ErrorBody> {
         if self.dead() {
             return Err(exited(&self.pane_id()));
         }
-        let info = self.info();
-        let modes = Modes {
-            cursor: info.application_cursor_keys,
-            keypad: info.application_keypad,
-        };
+        let modes = self.modes();
         let bytes: Vec<u8> = keys
             .iter()
             .flat_map(|key| match key {
@@ -477,8 +490,15 @@ impl Session {
 
     /// Input typed in client `id`.
     pub(crate) fn client_input(&self, id: u64, bytes: Vec<u8>) {
-        if self.activity(&mut lock(&self.screen), id) {
-            self.send(Input::Client(id, bytes));
+        let mut screen = lock(&self.screen);
+        if self.activity(&mut screen, id) {
+            let win32_input = screen.stripper.win32_input();
+            drop(screen);
+            self.send(Input::Client {
+                id,
+                bytes,
+                win32_input,
+            });
         }
     }
 
@@ -654,8 +674,9 @@ fn read_output(session: &Session, mut output: Box<dyn Read + Send>) {
 }
 
 /// The only writer of a console's input. Each client's input passes its own
-/// `ReplyFilter`; a sequence a client began and did not finish within
-/// `ESCAPE_TIME` goes out as typed.
+/// `ReplyFilter`, which also turns typed Ctrl+letter keys into key records for
+/// a console in win32-input-mode; a sequence a client began and did not finish
+/// within `ESCAPE_TIME` goes out as typed.
 fn write_input(mut input: Box<dyn Write + Send>, inbox: Receiver<Input>) {
     let mut filters: HashMap<u64, (ReplyFilter, Instant)> = HashMap::new();
     loop {
@@ -685,12 +706,16 @@ fn write_input(mut input: Box<dyn Write + Send>, inbox: Receiver<Input>) {
                 .flat_map(|(filter, _)| filter.flush())
                 .collect(),
             Some(Input::Host(bytes)) => bytes,
-            Some(Input::Client(id, bytes)) => {
+            Some(Input::Client {
+                id,
+                bytes,
+                win32_input,
+            }) => {
                 let (filter, last) = filters
                     .entry(id)
                     .or_insert_with(|| (ReplyFilter::default(), now));
                 *last = now;
-                filter.filter(&bytes)
+                filter.filter(&bytes, win32_input)
             }
             Some(Input::Gone(id)) => filters
                 .remove(&id)

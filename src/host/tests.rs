@@ -760,6 +760,105 @@ fn queries_get_one_answer_from_the_host_and_never_reach_clients() {
 }
 
 #[test]
+fn ctrl_letters_reach_a_win32_input_console_as_key_records() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    let send = |client: &mut Connection, keys: &[&str]| {
+        let keys = keys
+            .iter()
+            .map(|key| match key.strip_prefix("literal:") {
+                Some(text) => Key::Literal(text.into()),
+                None => Key::Named(key.to_string()),
+            })
+            .collect();
+        client
+            .call::<Done>(Op::SendKeys {
+                target: pane("claude/p/a"),
+                keys,
+            })
+            .unwrap();
+    };
+    let ctrl_c: &[u8] = b"\x1b[67;46;99;1;8;1_\x1b[67;46;99;0;8;1_";
+    let ctrl_u: &[u8] = b"\x1b[85;22;117;1;8;1_\x1b[85;22;117;0;8;1_";
+    // Until the console asks for win32-input-mode, keys are plain VT input.
+    send(&mut client, &["C-c", "C-u", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\x15\r");
+    let (_attached, stream) = connect_as(&host, 9, Role::Attach)
+        .attach(Attach {
+            target: pane("claude/p/a"),
+            size: Size { cols: 80, rows: 24 },
+            run_id: None,
+        })
+        .unwrap();
+    stream.send(b"\x03a").unwrap();
+    assert_eq!(program.input_until(b"a"), b"\x03a");
+
+    // ConPTY asks for it at its start.
+    program.write(b"\x1b[?9001h\x1b[?1004hready");
+    eventually("the request", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("ready")
+    });
+    send(
+        &mut client,
+        &[
+            "C-c",
+            "C-u",
+            "C-M-a",
+            "C-h",
+            "Tab",
+            "literal:x\x03",
+            "Enter",
+        ],
+    );
+    assert_eq!(
+        program.input_until(b"\r"),
+        [ctrl_c, ctrl_u, b"\x1b\x01\x08\tx\x03\r"].concat()
+    );
+    // Pastes and query answers stay as they are.
+    client
+        .call::<Done>(Op::Paste {
+            target: pane("claude/p/a"),
+            text: "a\x03b".into(),
+            bracketed: false,
+        })
+        .unwrap();
+    assert_eq!(program.input_until(b"b"), b"a^Cb");
+    program.write(b"\x1b[6n");
+    assert_eq!(program.input_until(b"R"), b"\x1b[1;6R");
+    // A client's typed keys too, but not what it pastes.
+    stream
+        .send(b"\x03\x1b[200~\x03\x1b[201~\x1b\x15\x1b[?1;2c\x15x")
+        .unwrap();
+    assert_eq!(
+        program.input_until(b"x"),
+        [ctrl_c, b"\x1b[200~\x03\x1b[201~\x1b\x15", ctrl_u, b"x"].concat()
+    );
+
+    // Once the console resets the mode, keys are plain VT input again.
+    program.write(b"\x1b[?9001ldone");
+    eventually("the reset", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("readydone")
+    });
+    send(&mut client, &["C-c", "Enter"]);
+    assert_eq!(program.input_until(b"\r"), b"\x03\r");
+    stream.send(b"\x15y").unwrap();
+    assert_eq!(program.input_until(b"y"), b"\x15y");
+    // The client's terminal never saw the mode.
+    let mut relayed = Vec::new();
+    eventually("relayed output", || {
+        if let Ok(Some(Event::Output(bytes))) = stream.next() {
+            relayed.extend(bytes);
+        }
+        relayed.ends_with(b"done")
+    });
+    let relayed = String::from_utf8_lossy(&relayed);
+    assert!(relayed.contains("\x1b[?1004hready"), "{relayed:?}");
+    assert!(!relayed.contains("9001"), "{relayed:?}");
+}
+
+#[test]
 fn attached_clients_follow_the_latest_size_and_learn_of_the_end() {
     let (host, launcher) = new_host();
     let mut client = connect(&host);

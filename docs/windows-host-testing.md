@@ -223,7 +223,12 @@ session at the console's size.
 | `Ctrl+B`, then any other key | both reach the agent unchanged |
 
 Keys inside a bracketed paste are never bindings, and ESC with Ctrl+B in one read
-is Meta+Ctrl+B. Ctrl+C reaches the agent as a key; Ctrl+Break is ignored. At the
+is Meta+Ctrl+B. Ctrl+C reaches the agent as a key; Ctrl+Break is ignored. Once
+the session's ConPTY has asked for win32-input-mode (DECSET 9001, which both
+backends do at start), the host writes a typed Ctrl+letter outside escape
+sequences and bracketed pastes, and a `send` of a named Ctrl+letter key such as
+`C-c` or `C-u`, as key records carrying the Latin letter and Left Ctrl (spec D6),
+so Codex sees Ctrl+C under a non-Latin keyboard layout too. At the
 end the client resets what the session may have left on (mouse, paste, focus and
 keypad modes, the alternate screen, a hidden cursor), restores the console modes
 it found and moves below the last row. The session's end prints `[exited]` (exit
