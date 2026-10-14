@@ -37,5 +37,8 @@ private:
     QString m_action;
     bool m_ready = false, m_started = false, m_suspended = false, m_draftEditing = false;
     QJsonObject m_base, m_desired, m_sent, m_versions, m_snapshot;
+    // This computer's catalog ID from the latest result, whose local Windows folders
+    // requests leave out; empty until one arrives.
+    QString m_node;
     QByteArray m_persistedOrganization, m_persistedVersions;
 };
