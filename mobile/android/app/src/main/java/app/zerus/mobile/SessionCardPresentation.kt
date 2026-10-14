@@ -149,12 +149,12 @@ object SessionCardPresentation {
         val complete = flag(raw, "subagent_counts_complete")
         if (source == "hook_profiles" && !complete) return if (expanded) "Observed runs: incomplete counts" else "?"
         if (!includeCompleted) {
-            if (source == "hooks" && !complete && total > 0)
+            if (source != "hook_profiles" && !complete && total > 0)
                 return if (expanded) "$active confirmed active; some states unknown" else "$active+"
             if (active > 0) return if (expanded) "$active active" else "$active"
             return ""
         }
-        if (source == "hooks" && !complete && total > 0)
+        if (source != "hook_profiles" && !complete && total > 0)
             return if (expanded) "$active confirmed active / $total observed; some states unknown" else "$active+/$total"
         if (total > 0)
             return if (expanded) (if (source == "hook_profiles") "$active active / $total observed runs" else "$active active / $total total") else "$active/$total"

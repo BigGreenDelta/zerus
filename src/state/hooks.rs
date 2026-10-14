@@ -756,6 +756,7 @@ pub(super) fn hook() -> Result<i32> {
                 "subagent_groups",
                 "subagent_groups_complete",
                 "subagents_completed_pruned",
+                "kimi_native_roster",
                 "task_lists",
                 "pending_task_updates",
                 "shell_jobs",

@@ -373,6 +373,19 @@ class NativeHarness(unittest.TestCase):
         self.assertNotIn('PRIVATE_TEST_REASONING',json.dumps(child_data))
         with self.assertRaises(RuntimeError):
             self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
+        self.assertEqual(done['subagent_active_count'],0)
+        self.assertEqual(done['subagent_completed_count'],1)
+        self.assertTrue(done['subagent_counts_complete'])
+        # The completed child must stay idle while a new parent turn is running.
+        self.cli('send',parent,self.payload(parent,text='INTERRUPT_WAIT_FIXTURE',attachments=[]))
+        running=self.wait(lambda: d if (d:=self.cli('inspect',parent))['phase']=='working' else None)
+        child_idle=child_events()
+        self.assertEqual(child_idle['phase'],'idle')
+        self.assertEqual(child_idle['activity'],'idle')
+        self.assertEqual(child_idle['tracking_evidence']['native_id'],child)
+        self.rpc('interrupt',{'sessionId':parent['conversation_id'],
+            'generation':running['host_generation'],'turnStarted':running['turn_started']})
 
     def test_starting_child_has_no_history_until_it_records_its_descriptor(self):
         # The parent catalogs a one-shot child before its first step records the
@@ -388,6 +401,9 @@ class NativeHarness(unittest.TestCase):
             starting=child_inspect(child)
             self.assertEqual(starting['events'],[]);self.assertFalse(starting['send_supported'])
             self.assertEqual(starting['parent_conversation_id'],parent['conversation_id'])
+            working=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='working' else None)
+            self.assertEqual(working['subagent_active_count'],1)
+            self.assertEqual(working['subagent_completed_count'],0)
             with self.assertRaises(RuntimeError):
                 self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
         finally:
