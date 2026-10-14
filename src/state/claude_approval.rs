@@ -439,7 +439,7 @@ fn aside(row:&str)->bool {row.len()-row.trim_start().len()>=20}
 
 /// The rows from `start` up to the next full-width rule, Claude's composer or
 /// a later panel, all match `trailing`: nothing newer follows in the transcript.
-fn last_in_transcript(rows:&[&str],start:usize,trailing:impl Fn(&str)->bool)->bool {
+fn last_in_transcript(rows:&[&str],start:usize,mut trailing:impl FnMut(&str)->bool)->bool {
     rows[start..].iter().position(|row|rule(row.trim(),'─'))
         .is_some_and(|end|rows[start..start+end].iter().all(|row|blank(row)||trailing(row)))
 }
@@ -455,6 +455,8 @@ fn denied(screen:&str)->bool {
 /// The approved command runs: Claude follows the request's own command row
 /// with its elapsed time, such as "(3s)" or "(4s · 5 lines)", only while the
 /// command runs. Below it, only the background hint and the spinner remain.
+/// The spinner may draw indented rows under itself, such as a tip; the
+/// transcript never continues below the spinner.
 fn running(request:&Value,screen:&str)->bool {
     static ELAPSED:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
     let elapsed=ELAPSED.get_or_init(||regex::Regex::new(r"^(?:(.*) )?\((?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s(?: · [^()]*)?\)$").unwrap());
@@ -470,8 +472,13 @@ fn running(request:&Value,screen:&str)->bool {
         if rule(&row,'─') {return false;}
         if let Some(found)=elapsed.captures(&row) {
             text.push_str(found.get(1).map_or("",|part|part.as_str()));
+            let mut spinner=false;
             return compact(&text)==compact(command)
-                &&last_in_transcript(&rows,index+1,|row|row.trim()==BACKGROUND_HINT||spinning(row)||aside(row));
+                &&last_in_transcript(&rows,index+1,|row|{
+                    if spinner {return row.starts_with(char::is_whitespace);}
+                    spinner=spinning(row);
+                    spinner||row.trim()==BACKGROUND_HINT||aside(row)
+                });
         }
         text.push_str(&row);text.push('\n');
     }
@@ -740,6 +747,8 @@ pub(super) fn reconcile(record:Value)->Value {
     const ANSWERED_NO_NUDGE:&str=include_str!("../../tests/fixtures/claude-approval-denied-nudge.txt");
     const ANSWERED_YES:&str=include_str!("../../tests/fixtures/claude-approval-starting.txt");
     const RUNNING:&str=include_str!("../../tests/fixtures/claude-approval-running.txt");
+    // The same Claude Code in a later turn, after an earlier denial (100 columns).
+    const RUNNING_TIP:&str=include_str!("../../tests/fixtures/claude-approval-running-tip.txt");
     const LONG:&str="sleep 6 && printf %s fixture-output-with-a-rather-long-name-to-wrap-the-row > /work/example/projects/a-really-long-directory-name/approved.txt\necho second line";
     // The same Claude Code while the request streams, before its panel.
     const STREAMING:&str="❯ Use the tool now.\n\n\n· Sublimating…\n                                                  ● high · /effort\n────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ⏸ manual mode on · esc to interrupt · ← for agents\n";
@@ -784,6 +793,16 @@ pub(super) fn reconcile(record:Value)->Value {
         let mut fetch=bash.clone();fetch["pending_approval"]["tool_name"]=json!("WebFetch");
         assert_eq!(answered(&fetch,RUNNING),None);
         assert_eq!(answered(&bash,&RUNNING.replace("(ctrl+b to run in background)","(ctrl+b to run in background)\n● Read(file)")),None);
+        // From the second turn on, Claude draws a tip under its spinner. The
+        // earlier interruption above the newer prompt is no denial either.
+        let again=record("Bash",json!({"command":"sleep 4; printf approved >> approved.txt"}));
+        assert!(RUNNING_TIP.contains("✽ Crunching… (3s · ↓ 24 tokens)\n  ⎿ \u{a0}Tip: Start with small features"));
+        assert!(!denied(RUNNING_TIP));
+        assert_eq!(answered(&again,RUNNING_TIP),Some(true));
+        assert_eq!(answered(&again,&RUNNING_TIP.replace(" (3s)\n","\n")),None);
+        // Only indented rows belong to the spinner; a row at the margin is newer.
+        assert_eq!(answered(&again,&RUNNING_TIP.replace("  ⎿ \u{a0}Tip:","● Tip:")),None);
+        assert_eq!(answered(&again,&RUNNING_TIP.replace("     suggested edits","suggested edits")),None);
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {
