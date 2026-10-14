@@ -22,10 +22,10 @@ use std::{
     fs::File,
     io, mem,
     os::windows::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
     sync::{mpsc, OnceLock},
     thread,
@@ -45,6 +45,7 @@ use windows_sys::{
                 LOAD_LIBRARY_SEARCH_SYSTEM32,
             },
             Pipes::CreatePipe,
+            SystemInformation::GetSystemDirectoryW,
         },
     },
 };
@@ -86,6 +87,9 @@ pub(crate) enum Fallback {
     Load(i32),
     /// `conpty.dll` lacks this export.
     Export(&'static str),
+    /// `OpenConsole.exe` imports this DLL, which is neither next to it nor in
+    /// System32 (Server Core has no `D3DCOMPILER_47.dll`), so it could not start.
+    Server(&'static str),
 }
 
 impl fmt::Display for Fallback {
@@ -101,6 +105,10 @@ impl fmt::Display for Fallback {
                 io::Error::from_raw_os_error(*code)
             ),
             Self::Export(name) => write!(f, "the bundled {BUNDLED_DLL} lacks {name}"),
+            Self::Server(name) => write!(
+                f,
+                "the bundled {BUNDLED_SERVER} needs {name}, which this Windows lacks"
+            ),
         }
     }
 }
@@ -166,6 +174,10 @@ fn bundled(folder: &Path) -> Result<Api, Fallback> {
         (false, false) => return Err(Fallback::Absent),
         _ => return Err(Fallback::Incomplete),
     }
+    if let Some(name) = missing_import(folder) {
+        // Kept for the process's life like the Api itself; one per load.
+        return Err(Fallback::Server(Box::leak(name.into_boxed_str())));
+    }
     let module =
         load_library(&dll).map_err(|error| Fallback::Load(error.raw_os_error().unwrap_or(0)))?;
     let (create, resize, close) = match bundled_functions(module) {
@@ -189,6 +201,25 @@ fn bundled(folder: &Path) -> Result<Api, Fallback> {
                 .map(|release| mem::transmute::<Symbol, ReleaseFn>(release)),
         }
     })
+}
+
+/// The first DLL that the bundled `OpenConsole.exe` in `folder` imports at load
+/// time and that is neither in `folder` nor in System32. A server this cannot
+/// read is left to the loader, as before.
+fn missing_import(folder: &Path) -> Option<String> {
+    let image = std::fs::read(folder.join(BUNDLED_SERVER)).ok()?;
+    let system = system_directory()?;
+    super::pe::imports(&image)?.into_iter().find(|name| {
+        !super::pe::api_set(name) && !folder.join(name).is_file() && !system.join(name).is_file()
+    })
+}
+
+fn system_directory() -> Option<PathBuf> {
+    let mut buffer = [0u16; 512];
+    // SAFETY: the buffer is writable for its whole length.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    (length > 0 && length < buffer.len())
+        .then(|| PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])))
 }
 
 fn bundled_functions(module: HMODULE) -> Result<(Symbol, Symbol, Symbol), Fallback> {
@@ -656,6 +687,40 @@ mod tests {
         assert_eq!(
             Fallback::Export("ConptyCreatePseudoConsole").to_string(),
             "the bundled conpty.dll lacks ConptyCreatePseudoConsole"
+        );
+    }
+
+    #[test]
+    fn a_server_that_cannot_start_here_leaves_the_pair_for_inbox() {
+        // OpenConsole.exe imports a DLL this Windows lacks (Server Core has no
+        // D3DCOMPILER_47.dll): the pair is passed over before conpty.dll loads.
+        let dir = tempfile::tempdir().unwrap();
+        let system = PathBuf::from(env::var_os("SystemRoot").expect("SystemRoot is set"))
+            .join(r"System32\version.dll");
+        fs::copy(&system, dir.path().join(BUNDLED_DLL)).unwrap();
+        let server = dir.path().join(BUNDLED_SERVER);
+        let imports = [
+            "api-ms-win-core-file-l1-1-0.dll",
+            "USER32.dll",
+            "hgs-test-missing.dll",
+        ];
+        fs::write(&server, super::super::pe::image_importing(&imports)).unwrap();
+        let api = Api::load(Some(dir.path())).unwrap();
+        assert_eq!(api.source(), Source::Inbox);
+        assert_eq!(
+            api.fallback(),
+            Some(Fallback::Server("hgs-test-missing.dll"))
+        );
+        assert_eq!(
+            Fallback::Server("D3DCOMPILER_47.dll").to_string(),
+            "the bundled OpenConsole.exe needs D3DCOMPILER_47.dll, which this Windows lacks"
+        );
+        // A DLL next to the server counts, as the loader finds it there; API sets
+        // and System32 DLLs always do. The DLL then loads (and lacks the exports).
+        fs::write(dir.path().join("hgs-test-missing.dll"), b"").unwrap();
+        assert_eq!(
+            Api::load(Some(dir.path())).unwrap().fallback(),
+            Some(Fallback::Export("ConptyCreatePseudoConsole"))
         );
     }
 
