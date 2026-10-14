@@ -1754,11 +1754,20 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
     QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
     fixture.write("#!/usr/bin/env python3\nimport sys,json,pathlib\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin);target=pathlib.Path("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0])\n staged=target.with_name(target.name+'.tmp');staged.write_text(json.dumps(p));staged.replace(target)\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
-    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
-    QTest::qWait(100);auto *client=window.findChild<HgsClient *>();
-    client->inspectionReady({},"codex/hgs/dashboard",details);
+    // An inspection that read the file before the conversation changes must not be
+    // running then. On Windows a 5 ms Qt timer posts its event, so such a reply can be
+    // delivered in the same batch right after the confirmation is accepted, before
+    // exec() returns: it restores the old conversation, the pinned identity matches
+    // again and the draft starts sending. Inspect only on show and selection, then wait
+    // for an inspection of the test's own: HgsClient runs one per session, so once its
+    // reply is in, none is pending, and the next one starts with the change.
+    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());
+    window.setDetailsPollForTests(500,24*60*60*1000);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();QSignalSpy replies(client,&HgsClient::inspectionReady);qsizetype issued=-1;
+    QTRY_VERIFY(issued>=0||(client->requestInspection({},"codex/hgs/dashboard")&&(issued=replies.size(),true)));
+    QTRY_VERIFY(std::any_of(replies.cbegin()+issued,replies.cend(),[](const QList<QVariant> &reply){return reply.at(1).toString()=="codex/hgs/dashboard";}));
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
-    setComposerText(composer, "Preserve this draft");QVERIFY(send->isEnabled());
+    setComposerText(composer, "Preserve this draft");QVERIFY(send->isEnabled());const QString key=composer->sessionKey();
     // Act on the confirmation once it is actually shown; a zero timer could fire
     // in another event loop first and find no dialog at all.
     const auto onConfirm=[&](std::function<void(QMessageBox *)> act){
@@ -1770,13 +1779,15 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
         poll->start();};
     const auto accept=[](QMessageBox *dialog){for(auto *b:dialog->buttons())if(dialog->buttonRole(b)==QMessageBox::AcceptRole)b->click();};
     bool shown=false;onConfirm([&](QMessageBox *dialog){shown=true;dialog->button(QMessageBox::Cancel)->click();});
-    send->click();QVERIFY(shown);QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Preserve this draft"));
-    shown=false;onConfirm([&](QMessageBox *dialog){shown=true;details["conversation_id"]="conversation-new";writeDetails();client->inspectionReady({},"codex/hgs/dashboard",details);accept(dialog);});
-    send->click();QVERIFY(shown);QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Preserve this draft"));
-    // A poll that read the file before it changed may still be running (process
-    // start-up is slow on Windows): wait for one that reports the new conversation.
-    QSignalSpy polled(client,&HgsClient::inspectionReady);
-    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(polled.cbegin(),polled.cend(),[](const QList<QVariant> &reply){
+    send->click();QVERIFY(shown);QVERIFY(!composer->isSending(key));QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Preserve this draft"));
+    // The change starts the window's next inspection after the file was replaced. No
+    // poll follows, so count the replies after the injected one: that inspection's reply
+    // must be seen even if it arrives before the confirmation returns.
+    qsizetype injected=-1;
+    shown=false;onConfirm([&](QMessageBox *dialog){shown=true;details["conversation_id"]="conversation-new";writeDetails();client->inspectionReady({},"codex/hgs/dashboard",details);injected=replies.size();accept(dialog);});
+    send->click();QVERIFY(shown);QVERIFY(!composer->isSending(key));QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Preserve this draft"));
+    // Wait for that reply, so none is pending when the next confirmation opens.
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(replies.cbegin()+injected,replies.cend(),[](const QList<QVariant> &reply){
         return reply.at(2).toJsonObject().value("conversation_id")==QStringLiteral("conversation-new");}),10000);
     shown=false;onConfirm([&](QMessageBox *dialog){shown=true;accept(dialog);});
     send->click();QVERIFY(shown);QTRY_VERIFY(QFileInfo::exists(capture));QFile sent(capture);QVERIFY(sent.open(QIODevice::ReadOnly));
@@ -2235,7 +2246,14 @@ else:print('{}')
         QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));
         QVERIFY(!composer->editor()->isReadOnly());
     } else {QTest::qWait(100);QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));QCOMPARE(composer->editor()->toPlainText(),outcome=="draft"?QString("Edited draft"):QString("Keep until compacted"));
-        QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(!composer->isWaitingToSend(composer->sessionKey()));}
+        // Input may stay locked for a moment after the outcome: a failed inspection, for
+        // example, blocks it until the next poll (zerus-eyvo, seen once on a Windows runner).
+        // Wait for the editor and name the lock if it stays; a send holding it leaves send.json.
+        const auto lock=[&]{return QStringList{QString("waiting=%1").arg(composer->isWaitingToSend(composer->sessionKey())?"yes":"no"),
+            QString("loading=%1").arg(composer->isDraftLoading(composer->sessionKey())?"yes":"no"),"send="+composer->findChild<QPushButton *>("sendMessage")->text(),
+            "hint="+composer->editor()->toolTip(),"status="+composer->findChild<QLabel *>("messageStatus")->text()}.join("; ");};
+        QTRY_VERIFY2(!composer->editor()->isReadOnly(),qPrintable(lock()));QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
+        QCOMPARE(composer->editor()->toPlainText(),outcome=="draft"?QString("Edited draft"):QString("Keep until compacted"));QVERIFY(!composer->isWaitingToSend(composer->sessionKey()));}
 }
 
 void TestSessionsWindow::sharedRecoverySyncCatchesUpOfflinePeer()
@@ -3722,9 +3740,20 @@ void TestSessionsWindow::questionFooterHasRoomAndKeepsAnswers()
     auto state=fleet();auto box=state.local();auto &session=box.sessions[0];
     session.conversationId="conversation-one";session.runId="run-one";session.phase="input";session.activity="waiting";session.attentionId="question-one";
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
-    SessionsWindow window(program());window.resize(size);window.setFleet(state);window.show();
+    SessionsWindow window(program());window.resize(size);window.setFleet(state);
+    // The window's own inspections answer with the base fixture, which reports no
+    // pending question in the same conversation. One arriving after the injected
+    // details replaces them and hides the card, or clears it before the answers are
+    // chosen. Inspect only on show and selection, then wait for an inspection of the
+    // test's own: HgsClient runs one per session, so once its reply is in, none is
+    // pending and no poll follows.
+    window.setDetailsPollForTests(500,24*60*60*1000);window.show();
     auto *client=window.findChild<HgsClient *>();QSignalSpy inspections(client,&HgsClient::inspectionReady);
-    window.showSession({},session.name);QTRY_VERIFY(!inspections.isEmpty());
+    window.showSession({},session.name);
+    qsizetype issued=-1;
+    QTRY_VERIFY(issued>=0 || (client->requestInspection({},session.name) && (issued=inspections.size(),true)));
+    QTRY_VERIFY(std::any_of(inspections.cbegin()+issued,inspections.cend(),[&](const QList<QVariant> &reply){
+        return reply[0].toString().isEmpty() && reply[1].toString()==session.name && reply[3].toString().isEmpty();}));
     QJsonArray questions;
     for(int i=0;i<3;++i)questions<<QJsonObject{{"id",QString("q_%1").arg(i)},{"header",QString("Choice %1").arg(i+1)},
         {"question","Choose the intended behavior when the requested font weight is unavailable and the text uses the regular face."},{"allow_other",true},
