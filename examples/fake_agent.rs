@@ -70,10 +70,14 @@
 //!   for every event. `--hook-events LIST` (default `start,submit,stop,end`)
 //!   picks the events, `--hook-timeout MS` (default 10000) bounds a hook without
 //!   its own `timeout`, and `--hook-extra JSON` adds fields to every payload. On
-//!   Unix a command runs with `/bin/sh -c`; on Windows directly, its first word
-//!   (or double-quoted path) as the program and the rest as its command line,
-//!   the form hgs writes there. A hook that exits with 2 skips the rest of that
-//!   event's hooks.
+//!   Unix a command runs with `/bin/sh -c`. On Windows a configured command runs
+//!   as its agent runs it (spec D12): Codex's (its `commandWindows` when there is
+//!   one) with `%COMSPEC% /C "COMMAND"`, Kimi's with `%COMSPEC% /d /s /c
+//!   "COMMAND"` (Node.js's `shell: true`); Claude Code's and `--hook-command`
+//!   directly, the first word (or double-quoted path) as the program and the
+//!   rest as its command line. An entry with `args` (Claude Code's exec form)
+//!   runs its `command` with those arguments and no shell everywhere. A hook
+//!   that exits with 2 skips the rest of that event's hooks.
 //! - Payloads carry `session_id`, `hook_event_name`, `cwd`, `source` (`startup`,
 //!   or `resume` when the agent arguments resume a conversation), `prompt`,
 //!   `reason` (`--end-reason TEXT`, default `other`) and, with
@@ -81,6 +85,9 @@
 //!   `--session-id ID` fixes the ID; otherwise agent arguments `--resume ID`,
 //!   `-r ID`, `--session ID`, `resume ID` (resumed) or `--session-id ID` choose
 //!   it, else a random UUID.
+//! - `--probe-text TEXT`: when the agent arguments are just `--version` or
+//!   `--help`, print TEXT and exit 0 at once, recording nothing: the answer to
+//!   the capability probes hgs runs before a tracked agent starts.
 //! - `--control PATH`: while running, a file appearing there (write it elsewhere
 //!   and rename it in) is read, removed and run line by line: `write TEXT`,
 //!   `render PATH`, `steps CHUNK DELAY_MS`, `modes LIST`, `query LIST`,
@@ -104,7 +111,8 @@
 //! counts only once `dsr` was sent). A sequence cut short by the escape
 //! timeout or the exit is marked `"incomplete": true`. Other kinds:
 //! `start`, `hooks`, `modes`, `query`, `query-timeout`, `render`, `ready`,
-//! `hook` (event, command, status, ms, timeout, blocked, stdout, stderr),
+//! `hook` (event, command, `args` for an exec form, status, ms, timeout,
+//! blocked, stdout, stderr),
 //! `signal`, `resize`, `control`, `eof`, `error` and `exit` (code and cause).
 use serde_json::{json, Map, Value};
 use std::{
@@ -189,6 +197,7 @@ const OPTIONS: &[&str] = &[
     "end-reason",
     "control",
     "reset-modes",
+    "probe-text",
 ];
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -255,6 +264,7 @@ struct Config {
     end_reason: String,
     control: Option<PathBuf>,
     reset_modes: bool,
+    probe_text: Option<String>,
 }
 
 impl Config {
@@ -290,6 +300,7 @@ impl Config {
             end_reason: "other".into(),
             control: None,
             reset_modes: true,
+            probe_text: None,
         }
     }
 
@@ -369,6 +380,7 @@ impl Config {
             "end-reason" => self.end_reason = value.to_owned(),
             "control" => self.control = Some(value.into()),
             "reset-modes" => self.reset_modes = flag(value)?,
+            "probe-text" => self.probe_text = Some(value.to_owned()),
             _ => return Err(format!("unknown option --{option}")),
         }
         Ok(())
@@ -1333,10 +1345,26 @@ fn control_name(byte: u8) -> String {
     }
 }
 
+#[derive(Clone)]
 struct Hook {
     event: String,
     command: String,
+    /// Claude Code's exec form: run `command` with these, without a shell.
+    args: Option<Vec<String>>,
+    /// The agent whose way of running a command this hook follows.
+    runner: Runner,
     timeout: Option<Duration>,
+}
+
+/// How a hook's command runs (on Windows; Unix uses `/bin/sh -c`).
+#[derive(Clone, Copy)]
+enum Runner {
+    /// Directly: Claude Code's shell form and `--hook-command`.
+    Direct,
+    /// `%COMSPEC% /C "COMMAND"`, as Codex runs it.
+    Codex,
+    /// `%COMSPEC% /d /s /c "COMMAND"`, as Kimi Code (Node.js) runs it.
+    Kimi,
 }
 
 /// Hook commands from an agent's own configuration, as it would run them.
@@ -1382,6 +1410,8 @@ fn load_hooks(agent: &str) -> (Vec<Hook>, Value) {
                         hooks.push(Hook {
                             event: event.to_owned(),
                             command: command.to_owned(),
+                            args: None,
+                            runner: Runner::Kimi,
                             timeout: timeout(
                                 table
                                     .get("timeout")
@@ -1408,12 +1438,26 @@ fn load_hooks(agent: &str) -> (Vec<Hook>, Value) {
                             .get("type")
                             .and_then(Value::as_str)
                             .unwrap_or("command");
-                        if let (Some(command), "command") =
-                            (entry.get("command").and_then(Value::as_str), kind)
-                        {
+                        let text = |key: &str| entry.get(key).and_then(Value::as_str);
+                        // Codex prefers its Windows command there.
+                        let windows = (cfg!(windows) && agent == "codex")
+                            .then(|| text("commandWindows").or_else(|| text("command_windows")))
+                            .flatten();
+                        let args = entry.get("args").and_then(Value::as_array).map(|args| {
+                            args.iter()
+                                .map(|arg| arg.as_str().unwrap_or_default().to_owned())
+                                .collect()
+                        });
+                        if let (Some(command), "command") = (windows.or(text("command")), kind) {
                             hooks.push(Hook {
                                 event: event.clone(),
                                 command: command.to_owned(),
+                                args,
+                                runner: if agent == "codex" {
+                                    Runner::Codex
+                                } else {
+                                    Runner::Direct
+                                },
                                 timeout: timeout(entry.get("timeout").and_then(Value::as_f64)),
                             });
                         }
@@ -1428,16 +1472,34 @@ fn load_hooks(agent: &str) -> (Vec<Hook>, Value) {
 }
 
 #[cfg(unix)]
-fn hook_process(command: &str) -> Command {
+fn hook_process(command: &str, _runner: Runner) -> Command {
     let mut process = Command::new("/bin/sh");
     process.arg("-c").arg(command);
     process
 }
 
-/// `"C:/path/hgs.exe" __state hook`: the program, then its command line as is.
+/// `"C:/path/hgs.exe" __state hook` as `runner` starts it: directly (the
+/// program, then its command line as is) or through `cmd.exe` as Codex or Kimi
+/// Code does.
 #[cfg(windows)]
-fn hook_process(command: &str) -> Command {
+fn hook_process(command: &str, runner: Runner) -> Command {
     use std::os::windows::process::CommandExt;
+    let shell = || Command::new(env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+    match runner {
+        Runner::Direct => {}
+        Runner::Codex => {
+            let mut process = shell();
+            process.arg("/C").raw_arg(format!("\"{command}\""));
+            return process;
+        }
+        Runner::Kimi => {
+            let mut process = shell();
+            process
+                .args(["/d", "/s", "/c"])
+                .raw_arg(format!("\"{command}\""));
+            return process;
+        }
+    }
     let command = command.trim_start();
     let (program, rest) = match command.strip_prefix('"') {
         Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
@@ -1458,10 +1520,18 @@ fn clip(bytes: &[u8]) -> String {
 }
 
 /// Run one hook with the payload on stdin; its fields for the record.
-fn run_hook(command: &str, payload: &[u8], timeout: Duration) -> Map<String, Value> {
+fn run_hook(hook: &Hook, payload: &[u8], timeout: Duration) -> Map<String, Value> {
     let started = Instant::now();
     let mut fields = Map::new();
-    let spawned = hook_process(command)
+    let mut process = match &hook.args {
+        Some(args) => {
+            let mut process = Command::new(&hook.command);
+            process.args(args);
+            process
+        }
+        None => hook_process(&hook.command, hook.runner),
+    };
+    let spawned = process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1803,18 +1873,19 @@ impl Agent {
         let Some(&(_, name)) = EVENTS.iter().find(|(short, _)| *short == event) else {
             return;
         };
-        let mut commands: Vec<(String, Option<Duration>)> = self
+        let mut commands: Vec<Hook> = self
             .hooks
             .iter()
             .filter(|hook| hook.event == name)
-            .map(|hook| (hook.command.clone(), hook.timeout))
+            .cloned()
             .collect();
-        commands.extend(
-            self.config
-                .hook_command
-                .iter()
-                .map(|command| (command.clone(), None)),
-        );
+        commands.extend(self.config.hook_command.iter().map(|command| Hook {
+            event: name.into(),
+            command: command.clone(),
+            args: None,
+            runner: Runner::Direct,
+            timeout: None,
+        }));
         if commands.is_empty() {
             return;
         }
@@ -1837,16 +1908,19 @@ impl Agent {
             payload[key] = value.clone();
         }
         let payload = serde_json::to_vec(&payload).unwrap_or_default();
-        for (command, timeout) in commands {
+        for hook in commands {
             let mut fields = run_hook(
-                &command,
+                &hook,
                 &payload,
-                timeout.unwrap_or(self.config.hook_timeout),
+                hook.timeout.unwrap_or(self.config.hook_timeout),
             );
             let blocked = fields.get("status") == Some(&json!(2));
             fields.insert("kind".into(), json!("hook"));
             fields.insert("event".into(), json!(name));
-            fields.insert("command".into(), json!(command));
+            fields.insert("command".into(), json!(hook.command));
+            if let Some(args) = &hook.args {
+                fields.insert("args".into(), json!(args));
+            }
             fields.insert("blocked".into(), json!(blocked));
             record(Value::Object(fields));
             if blocked {
@@ -2057,6 +2131,12 @@ fn main() {
         eprintln!("fake_agent: {error}");
         process::exit(2);
     });
+    if let Some(text) = &config.probe_text {
+        if config.argv == ["--version"] || config.argv == ["--help"] {
+            println!("{text}");
+            process::exit(0);
+        }
+    }
     if let Some(path) = &config.record {
         match OpenOptions::new().create(true).append(true).open(path) {
             Ok(file) => {

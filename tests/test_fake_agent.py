@@ -112,6 +112,38 @@ class PipedAgent(Fixture):
         # Modes are set in order and reset in reverse order on exit.
         self.assertEqual(out, b"\x1b[?2004h\x1b[?1049h\x1b[?1049l\x1b[?2004l")
 
+    def test_exec_form_hooks_run_without_a_shell_and_probes_get_their_answer(self):
+        program = self.root / "bin" / "claude"
+        program.parent.mkdir()
+        program.symlink_to(FAKE_AGENT)
+        log = self.root / "exec.log"
+        logger = self.root / "bin" / "logger"
+        logger.write_text('#!/bin/sh\n{ printf "%s|" "$@"; cat; echo; } >> ' + shlex.quote(str(log)) + "\n")
+        logger.chmod(0o755)
+        config = self.root / "claude-config"
+        config.mkdir()
+        args = ["two words", "$HOME", "`false`"]
+        (config / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": str(logger), "args": args, "timeout": 5}]}]}}))
+        env = dict(self.env, CLAUDE_CONFIG_DIR=str(config), FAKE_AGENT_RECORD=str(self.record),
+                   FAKE_AGENT_PROBE_TEXT="2.1.296 (Claude Code)")
+        # hgs's capability probes get the answer, and nothing else happens.
+        for probe in ("--version", "--help"):
+            result = subprocess.run([str(program), probe], env=env, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual((result.returncode, result.stdout), (0, "2.1.296 (Claude Code)\n"))
+        self.assertFalse(self.record.exists())
+        # Claude Code's exec form: the command with its arguments, no shell.
+        result = subprocess.run([str(program)], env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hook, = self.events("hook")
+        self.assertEqual((hook["event"], hook["command"], hook["args"], hook["status"]),
+                         ("SessionStart", str(logger), args, 0))
+        line = log.read_text().splitlines()[0]
+        self.assertTrue(line.startswith("two words|$HOME|`false`|{"), line)
+        self.assertEqual(json.loads(line.split("|", 3)[3])["hook_event_name"], "SessionStart")
+
     def test_replies_are_matched_to_queries_and_typed_escape_stays_text(self):
         sent = b"\x1b[5;1R\x1b[?1;2c\x1b[5;1R\x1bPlease\r\x1b]11;rgb:0/0/0\x07"
         code, out, _ = self.run_agent("--query", "dsr,da1", "--query-wait", "2000", "--modes", "none", stdin=sent)
