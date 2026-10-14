@@ -8,10 +8,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A drive (`C:\`, `c:/`) or UNC (`\\server\share`, `//server/share`) path: a local
-/// Windows folder of a desktop (D15 of the Windows native host design). The catalog
-/// has no Windows path kind yet, so these stay in that desktop's organization.
-/// Matches `MachinePlatform::windowsShaped` in the GUI.
+/// A drive (`C:\`, `c:/`) or UNC (`\\server\share`, `//server/share`) path: on this
+/// machine, a local Windows folder of a desktop (D15 of the Windows native host design).
+/// The catalog has no Windows path kind yet, so these stay in that desktop's
+/// organization. A peer's `//server/share` is a POSIX path, which a Windows GUI can
+/// store (`QDir::cleanPath` keeps the leading `//` there). Matches
+/// `MachinePlatform::windowsShaped` in the GUI.
 fn windows_folder(path: &str) -> bool {
     let separator = |c: &u8| *c == b'/' || *c == b'\\';
     match path.as_bytes() {
@@ -36,6 +38,7 @@ pub struct Patch {
 impl Store {
     pub fn flatten(&mut self, organization: &Value) -> Result<BTreeMap<Key, Value>> {
         let mut fields = BTreeMap::new();
+        let local = self.catalog.machine(&self.node_id);
         let mut machines = BTreeMap::<String, String>::new();
         let mut machine_id = |alias: &str| -> Result<String> {
             if let Some(id) = machines.get(alias) {
@@ -69,20 +72,21 @@ impl Store {
             }
             if let Some(folders) = p["folders"].as_array() {
                 for f in folders {
-                    // Skipped whole: other invalid paths still fail when written.
-                    if f["path"].as_str().is_some_and(windows_folder) {
+                    let alias = f["machine_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| f["machine"].as_str())
+                        .unwrap_or_default();
+                    // A local Windows folder is skipped whole. A peer's drive path, like
+                    // other invalid paths, still fails when written.
+                    let windows = f["path"].as_str().is_some_and(windows_folder);
+                    if windows && machine_id(alias)? == local {
                         continue;
                     }
                     let folder = f["id"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("missing folder ID"))?;
-                    let machine = machine_id(
-                        f["machine_id"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| f["machine"].as_str())
-                            .unwrap_or_default(),
-                    )?;
+                    let machine = machine_id(alias)?;
                     let key = Key::Folder { id: folder.into() };
                     ensure!(!fields.contains_key(&key), "duplicate folder ID");
                     fields.insert(key,json!({"project":id,"machine":machine,"path":f["path"],"name":f.get("name").cloned().unwrap_or(json!(""))}));
@@ -458,17 +462,25 @@ mod tests {
         }
     }
     #[test]
-    fn windows_folders_stay_local_and_other_invalid_paths_still_fail() {
+    fn local_windows_folders_stay_local_and_other_invalid_paths_still_fail() {
         let mut a = store();
         a.initialize(&org("Initial")).unwrap();
         let versions = a.catalog.versions();
         let digest = a.catalog.digest();
-        let with = |path: &str| {
+        let with = |folder: Value| {
             let mut document = org("Initial");
-            // An alias the catalog has never seen: resolving it would record a machine.
-            document["projects"][0]["folders"] =
-                json!([{"id":"local-folder","machine":"windows-desktop","path":path,"name":""}]);
+            document["projects"][0]["folders"] = json!([folder]);
             document
+        };
+        // This machine by its alias, or by its ID once a snapshot named it.
+        let node = a.node_id.clone();
+        let local = |path: &str| {
+            [
+                with(json!({"id":"local-folder","machine":"local","path":path,"name":""})),
+                with(
+                    json!({"id":"local-folder","machine":"desktop","machine_id":node,"path":path,"name":""}),
+                ),
+            ]
         };
         for path in [
             "C:\\work",
@@ -476,39 +488,57 @@ mod tests {
             "\\\\server\\share\\dir",
             "//server/share",
         ] {
-            a.apply(Patch {
-                base: org("Initial"),
-                desired: with(path),
-                versions: versions.clone(),
-            })
-            .unwrap();
-            a.apply(Patch {
-                base: with(path),
-                desired: org("Initial"),
-                versions: versions.clone(),
-            })
-            .unwrap();
-            assert_eq!(a.catalog.digest(), digest, "{path}");
+            for document in local(path) {
+                a.apply(Patch {
+                    base: org("Initial"),
+                    desired: document.clone(),
+                    versions: versions.clone(),
+                })
+                .unwrap();
+                a.apply(Patch {
+                    base: document,
+                    desired: org("Initial"),
+                    versions: versions.clone(),
+                })
+                .unwrap();
+                assert_eq!(a.catalog.digest(), digest, "{path}");
+            }
         }
-        assert!(a
-            .flatten(&with("C:\\work"))
-            .unwrap()
-            .keys()
-            .all(|key| !matches!(key, Key::Folder { .. })));
-        for path in ["work", "C:work", "\\work"] {
+        for document in local("C:\\work") {
+            assert!(a
+                .flatten(&document)
+                .unwrap()
+                .keys()
+                .all(|key| !matches!(key, Key::Folder { .. })));
+        }
+        let [work, work_by_id] = local("work");
+        let [drive_relative, _] = local("C:work");
+        let [rooted, _] = local("\\work");
+        let peer = new_id();
+        for desired in [
+            work,
+            work_by_id,
+            drive_relative,
+            rooted,
+            // A peer's drive path, by alias or ID, is no folder of a POSIX machine.
+            with(json!({"id":"peer-folder","machine":"laptop","path":"C:/x","name":""})),
+            with(
+                json!({"id":"peer-folder","machine":"laptop","machine_id":peer,"path":"c:\\work","name":""}),
+            ),
+        ] {
             assert!(
                 a.apply(Patch {
                     base: org("Initial"),
-                    desired: with(path),
+                    desired: desired.clone(),
                     versions: versions.clone(),
                 })
                 .is_err(),
-                "{path}"
+                "{desired}"
             );
         }
         a.apply(Patch {
             base: org("Initial"),
-            desired: with("/work"),
+            desired: local("/work")[0].clone(),
             versions,
         })
         .unwrap();
@@ -518,6 +548,41 @@ mod tests {
             }]["path"],
             "/work"
         );
+    }
+    #[test]
+    fn a_peers_unc_shaped_folder_is_a_posix_path() {
+        // A Windows GUI can store "//server/share" for a POSIX peer.
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let peer = a.machine_id("laptop").unwrap();
+        let key = Key::Folder {
+            id: "peer-folder".into(),
+        };
+        let with = |machine: &str, name: &str| {
+            let mut document = org("Initial");
+            document["projects"][0]["folders"] = json!([{"id":"peer-folder","machine":machine,"path":"//server/share/dir","name":name}]);
+            document
+        };
+        let mut edit = |base: Value, desired: Value| {
+            let versions = a.catalog.versions();
+            a.apply(Patch {
+                base,
+                desired,
+                versions,
+            })
+            .unwrap();
+            a.catalog.values().get(&key).cloned().unwrap_or(Value::Null)
+        };
+        let written = edit(org("Initial"), with("laptop", ""));
+        assert_eq!(written["path"], "//server/share/dir");
+        assert_eq!(written["machine"], peer.as_str());
+        // A snapshot names the peer by its ID; renaming and removing it sync.
+        assert_eq!(
+            edit(with("laptop", ""), with(&peer, "Share"))["name"],
+            "Share"
+        );
+        assert!(edit(with(&peer, "Share"), org("Initial")).is_null());
+        assert_eq!(a.catalog.heads()[&key].len(), 1);
     }
     #[test]
     fn verified_connection_cannot_silently_change_machine_identity() {
