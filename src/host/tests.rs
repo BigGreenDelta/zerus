@@ -1600,6 +1600,83 @@ fn the_supervisor_end_reports_its_console_and_pauses_its_agent() {
     supervisor.join().unwrap();
 }
 
+/// Session `index`'s supervisor (pid `1000 + index`), registered: on the
+/// first stop request it ends `program` when `ends_agent`, then leaves
+/// without an answer, as a supervisor that exits with its agent does.
+fn leaving_supervisor(
+    host: &Arc<Host<FakeLauncher>>,
+    index: u32,
+    program: Arc<Program>,
+    ends_agent: bool,
+) -> thread::JoinHandle<()> {
+    let link = connect_as(host, 1000 + index, Role::Supervisor)
+        .register_supervisor(SupervisorRegistration {
+            session: format!("${index}"),
+            pane: format!("%{index}"),
+            pid: 1000 + index,
+        })
+        .unwrap();
+    thread::spawn(move || {
+        while let Ok(Some(frame)) = link.read_frame() {
+            let request = super::protocol::Request::<SupervisorOp>::decode(&frame.payload);
+            if request.is_ok_and(|request| request.op == SupervisorOp::Stop) {
+                if ends_agent {
+                    program.exit(0xC000_013A);
+                }
+                break;
+            }
+        }
+        // Dropping the only handle ends the connection, as an exit does.
+        drop(link);
+    })
+}
+
+#[test]
+fn a_pause_whose_supervisor_leaves_unanswered_counts_only_when_the_session_ends() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l1", "claude/p/a")).unwrap();
+    client.call::<Created>(create("l2", "claude/p/b")).unwrap();
+    let pause = |client: &mut Connection, name: &str| {
+        client.call::<Done>(Op::Signal {
+            target: pane(name),
+            signal: Signal::Pause,
+        })
+    };
+
+    // Ctrl+Break ended the agent and the supervisor with it before its answer
+    // went out: the pause did what it asks.
+    let ended = leaving_supervisor(&host, 0, launcher.program(0), true);
+    pause(&mut client, "claude/p/a").unwrap();
+    ended.join().unwrap();
+    eventually("the end", || {
+        client
+            .call::<Listed>(Op::List)
+            .unwrap()
+            .sessions
+            .iter()
+            .all(|session| session.name != "claude/p/a")
+    });
+
+    // A supervisor that leaves while its session runs on has paused nothing.
+    let left = leaving_supervisor(&host, 1, launcher.program(1), false);
+    let started = Instant::now();
+    let error = pause(&mut client, "claude/p/b").unwrap_err();
+    left.join().unwrap();
+    assert_eq!(error.code, ErrorCode::Refused, "{error:?}");
+    assert!(error.message.contains("no longer connected"), "{error:?}");
+    assert!(started.elapsed() < LIMIT);
+    assert!(lock(&launcher.program(1).exit).is_none(), "still running");
+    client
+        .call::<Done>(Op::Kill {
+            target: pane("claude/p/b"),
+        })
+        .unwrap();
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+}
+
 #[test]
 fn the_recovery_worker_is_supervised_once_asked_and_stops_with_the_host() {
     // A host without a worker to supervise says so.
