@@ -223,6 +223,10 @@ event (`src/state/hooks.rs:283`).
   `conpty.dll` finds the matched `OpenConsole.exe` next to itself. The pair comes from
   the pinned NuGet package `Microsoft.Windows.Console.ConPTY` (MIT), verified by
   SHA-256 in the packaging script, and ships in the portable zip with its license.
+- Before loading the pair the host reads `OpenConsole.exe`'s import table: when a DLL
+  it imports at load time (API sets aside) is neither next to it nor in System32,
+  the server could not start (1.25.260930003 imports `D3DCOMPILER_47.dll`, which
+  Server Core lacks), so the host uses the inbox API and logs why.
 - Without the pair the host falls back to the inbox `CreatePseudoConsole`, looked up
   with `GetProcAddress` like `ReleasePseudoConsole` (a static import would stop
   `hgs.exe` loading before 24H2), and reports `conpty: inbox`. Features gated on mode

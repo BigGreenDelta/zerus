@@ -40,6 +40,7 @@ pub(crate) mod job;
 pub(crate) mod keys;
 mod link;
 mod log;
+mod pe;
 #[cfg(windows)]
 pub(crate) mod pipe;
 pub(crate) mod protocol;
