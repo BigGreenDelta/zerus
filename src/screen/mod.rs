@@ -237,9 +237,11 @@ impl ScreenModel {
         self.serialize(mode == Capture::Styled, false, false)
     }
 
-    /// The visible screen as text, as `tmux capture-pane -p -J` prints it: a
-    /// row the program's output wrapped onto the next one continues there
-    /// with its trailing spaces, so a long line reads whole.
+    /// The visible screen as text with wrapped rows joined, as `tmux
+    /// capture-pane -p -J` joins them: a row the program's output wrapped
+    /// onto the next one continues there with its trailing spaces, so a long
+    /// line reads whole. Unlike `-J`, a row that ends a line is trimmed, as
+    /// the Plain capture trims it.
     pub fn joined_text(&self) -> String {
         String::from_utf8_lossy(&self.serialize(false, false, true)).into_owned()
     }

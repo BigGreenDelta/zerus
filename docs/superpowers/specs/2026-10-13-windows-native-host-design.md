@@ -138,11 +138,13 @@ readable in both directions across one version of skew.
   instance because an exiting host still holds it retries until that host's process
   is gone.
 - `create` is idempotent by launch ID, so a retried request never starts a session
-  twice. `launch_status` answers by the same ID how that session runs or ended (its
-  exit code and the last lines of its pane). A launch watches its new session for
-  3 s, the tmux launch's "ended immediately": a program that could not start ends
-  it at once, before any record exists, and the launch then fails with that exit and
-  output instead of reporting a start that the GUI would wait for (zerus-ziq3.10).
+  twice. `launch_status` (capability `launch-status`) answers by the same ID how
+  that session runs or ended (its exit code and the last lines of its pane). A
+  launch watches its new session for 3 s, the tmux launch's "ended immediately": a
+  program that could not start ends it at once, before any record exists, and the
+  launch then fails with that exit and output instead of reporting a start that the
+  GUI would wait for (zerus-ziq3.10). A supervisor that fails only after those 3 s
+  (a `--version` probe that times out) is still reported as started.
 - The host owns its sessions: a host crash ends them, exactly as a tmux server crash
   does. The host joins its own kill-on-close job before the first session and fails
   closed if it cannot, so its death never orphans agents (Orca does the same).

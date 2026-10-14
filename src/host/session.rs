@@ -358,7 +358,7 @@ impl Session {
         lock(&self.screen).model.capture(mode)
     }
 
-    /// The visible screen as text, wrapped rows joined (`capture-pane -p -J`).
+    /// The visible screen as text, wrapped rows joined (`ScreenModel::joined_text`).
     pub(crate) fn joined_text(&self) -> String {
         lock(&self.screen).model.joined_text()
     }
