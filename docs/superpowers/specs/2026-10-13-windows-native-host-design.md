@@ -86,7 +86,10 @@ exports `HGS_STATE_DIR`, so the variable alone proves nothing). There
 `HGS_HOST_ALLOW_UNSTAGED=1` lets the host serve without the marker and from any
 image, and `HGS_HOST_IMAGE` names the executable `__host call --start` starts;
 elsewhere the first is ignored and the second is an error
-([testing the host](../../windows-host-testing.md)).
+([testing the host](../../windows-host-testing.md)). The processes of such a test
+host's sessions inherit the override: their `--run` supervisors and `__state`
+tracking hooks run without the marker, while every other command, and both of these
+without the override, stay refused as on a Phase 1 control console.
 
 The compile-time `platform::LOCAL_SESSIONS` (`src/platform/mod.rs:27`) becomes a
 run-time check: always true on Unix; on Windows true when the marker exists. Its

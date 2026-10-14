@@ -9,7 +9,10 @@ is installed, and Codex's PowerShell form
 `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` the way Codex runs it, with
 `pwsh` and Windows PowerShell as `-NoProfile -Command …` in a console of their
 own. A copy of the build under test is the fake hgs, in a folder whose name has
-spaces, Cyrillic and characters that `cmd.exe` treats specially outside quotes.
+spaces, Cyrillic and characters that `cmd.exe` treats specially outside quotes; it
+runs as the hooks of an isolated test host's session do, with
+`HGS_HOST_ALLOW_UNSTAGED=1` and a state directory of its own, so local sessions
+need not be enabled.
 Each run must reach `hgs __state hook` with its payload on stdin: the payload has
 no session ID, so hgs answers with exactly that error. PowerShell reads the
 quoted program of the shell form as a string and never runs hgs, which is why
@@ -92,8 +95,12 @@ class HookForms(unittest.TestCase):
         (self.root / "state").mkdir()
         self.env = {key: value for key, value in os.environ.items()
                     if not key.upper().startswith(("HGS_", "FAKE_AGENT_", "TMUX", "XDG_"))}
+        # Local sessions may be off on this computer: the runs are the hooks of
+        # an isolated test host's session, whose override admits `__state`
+        # (src/host/gate.rs). A control console refuses it, as
+        # test_windows_client.py checks.
         self.env.update(HGS_SESSION="claude/probe/hook", HGS_RUN_ID="probe-run",
-                        HGS_STATE_DIR=str(self.root / "state"))
+                        HGS_STATE_DIR=str(self.root / "state"), HGS_HOST_ALLOW_UNSTAGED="1")
 
     def run_form(self, argv):
         return subprocess.run(argv, input="{}", env=self.env, cwd=self.root, capture_output=True, text=True,

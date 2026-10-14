@@ -18,7 +18,10 @@ directory, one that `HGS_STATE_DIR` names and that is not this user's default
 (`XDG_STATE_HOME\hgs\sessions` or `~\.local\state\hgs\sessions`):
 
 - `HGS_HOST_ALLOW_UNSTAGED=1`: the host serves without the marker and from any
-  executable, and creates sessions without the marker.
+  executable, and creates sessions without the marker. The processes of those
+  sessions inherit it, so their supervisors (`hgs --run`) and tracking hooks
+  (`hgs __state hook`) run where local sessions are off; every other command
+  stays a control console's there.
 - `HGS_HOST_IMAGE=<absolute path of an hgs.exe>`: `__host call --start` starts that
   executable. Any build works, so a test can pair one CLI with another host.
 
@@ -266,14 +269,14 @@ from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
 `HGS_TEST_FAKE_AGENT` (default `target/debug/examples/fake_agent.exe`); their fake
 agent cases skip without one. The lifecycle cases install into a temporary profile
 as `Staged` does and launch from the build under test, which plays the portable
-copy: sessions must still run the staged stable CLI. `tests/test_windows_hooks.py`
-runs the hook shell form through `CreateProcess`, `cmd.exe` as Kimi runs it, and
-Git Bash when installed, Codex's PowerShell form through `pwsh` and Windows
-PowerShell as Codex runs it, and tracked fake agents through the S6 preview in a
-profile whose folder name has spaces and Cyrillic.
 copy: sessions must still run the staged stable CLI. Their `Attach` cases run
 `hgs a` and an attached launch on a pseudoconsole of the test (`PseudoConsole`),
-and `Listings` checks `local_host` in the local box.
+and `Listings` checks `local_host` in the local box. `tests/test_windows_hooks.py`
+runs the hook shell form through `CreateProcess`, `cmd.exe` as Kimi runs it, and
+Git Bash when installed, Codex's PowerShell form through `pwsh` and Windows
+PowerShell as Codex runs it (as an isolated test host's hooks, so local sessions
+need not be enabled), and tracked fake agents through the S6 preview in a profile
+whose folder name has spaces and Cyrillic.
 
 ## Writing host tests
 

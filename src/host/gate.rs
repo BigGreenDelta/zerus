@@ -23,8 +23,11 @@
 //!
 //! - `HGS_HOST_ALLOW_UNSTAGED=1` lets `__host serve` run without the marker and
 //!   from any executable, and lets that host create sessions without the
-//!   marker. For any other state directory the variable is ignored, so one left
-//!   in an environment never opens the user's own sessions to an unstaged host.
+//!   marker. The processes of those sessions inherit it and run `--run` and
+//!   `__state` (their supervisors and tracking hooks); every other command
+//!   stays a control console's. For any other state directory the variable is
+//!   ignored, so one left in an environment never opens the user's own
+//!   sessions to an unstaged host.
 //! - `HGS_HOST_IMAGE=<absolute path of an hgs.exe>` makes every launcher (`hgs
 //!   __host call --start` and the session starts of the terminal backend) start
 //!   that executable as the host instead of the staged image; tests name the
@@ -249,7 +252,8 @@ mod windows {
 
     /// Whether this process runs under the test override that admits an
     /// unstaged host, for an existing isolated state directory: the sessions of
-    /// such a host may run `--run` on a computer without local sessions.
+    /// such a host may run `--run` and `__state` (their supervisors and
+    /// tracking hooks) on a computer without local sessions.
     pub(crate) fn test_session() -> bool {
         override_requested(env::var_os(ALLOW_UNSTAGED).as_deref())
             && crate::host::server::existing_state_dir()

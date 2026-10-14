@@ -147,6 +147,15 @@ fn local_sessions() -> Result<()> {
         Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
     }
 }
+
+/// Fails unless this process may run what the processes of a session run:
+/// `--run`, the session's supervisor, and `__state`, which its tracking hooks
+/// call. That is wherever local sessions run, and on Windows also inside a
+/// session of an isolated test host (spec D2). A control console refuses both
+/// with exit code 2, as in Phase 1.
+fn session_process() -> Result<()> {
+    state::session_operations().map_err(|error| Error::new(2, error))
+}
 #[cfg(unix)]
 fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
     crate::mobile_peers::dispatch(config, args)
@@ -275,7 +284,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     platform::prepare_environment();
     // Existing hooks call this private stable ABI, including hooks installed before migration.
     if args.first().is_some_and(|a| a == "__state") {
-        local_sessions()?;
+        session_process()?;
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     let config = Config::load()?;
@@ -297,9 +306,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         // A control console (local sessions off) still refuses it as in Phase 1;
         // an isolated test host's sessions may run it (spec D2).
         #[cfg(windows)]
-        if !platform::local_sessions() && !crate::host::gate::test_session() {
-            return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
-        }
+        session_process()?;
         return run(&args[1..]);
     }
     let mut target = String::new();
