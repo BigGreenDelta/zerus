@@ -19,6 +19,10 @@ BINARY_LIBRARIES = ("qt6-base", "qt6-multimedia", "qt6-svg", "kstatusnotifierite
 LEGACY_BINARY_LIBRARIES = ("qt6-base", "qt6-webengine", "qt6-multimedia", "qt6-svg", "kstatusnotifieritem",
                            "kwindowsystem", "kidletime", "libgcc", "libstdc++", "glibc")
 OPTIONAL_WEBENGINE = "            'qt6-webengine: embedded DeepSeek Native UI'\n"
+# The newest stable release sealed without the tested Windows portable zip. Every
+# later stable candidate must carry it: portable Windows apps announce those
+# releases as Windows updates (lastStableWithoutWindows in tray/src/UpdateController.cpp).
+LAST_STABLE_WITHOUT_WINDOWS = "0.42.2"
 MAINTAINER = "# Maintainer: Vladimir Alyamkin <ufna@ufna.dev>"
 DESCRIPTION_UPDATES = (
     ("An agent development environment for persistent local and remote tmux sessions",
@@ -112,6 +116,7 @@ def finish_candidate(directory, packages=PACKAGES):
 
 
 def validate_candidate(directory, version, commit=None):
+    import windows_portable  # It imports this module, so only once this one is loaded.
     require(re.fullmatch(r"\d+\.\d+\.\d+", version), "Use a stable semantic version without v.")
     info = json.loads((directory / "release-info.json").read_text())
     schema = info.get("schema")
@@ -135,6 +140,16 @@ def validate_candidate(directory, version, commit=None):
     required = {f"zerus-{version}-{suffix}.tar.gz" for suffix in ("source", "arch-x86_64", "aur")} | {"release-info.json"}
     if macos:
         required.add(macos["asset"])
+    # Stable candidates sealed before the Windows zip joined them (0.42.2 and
+    # earlier) have none; retrying their publication must keep working. Later ones
+    # must carry it, and a manifest that names the zip requires exactly that file.
+    windows = info.get("windows_portable")
+    later = tuple(map(int, version.split("."))) > tuple(map(int, LAST_STABLE_WITHOUT_WINDOWS.split(".")))
+    require(windows is not None or not later,
+            f"Stable candidates after {LAST_STABLE_WITHOUT_WINDOWS} must carry the tested Windows zip.")
+    if windows is not None:
+        require(windows == windows_portable.asset_name(version), "Invalid Windows stable asset.")
+        required.add(windows)
     package_files = {name for name in sums if name.endswith(".pkg.tar.zst")}
     patterns = [re.fullmatch(rf"(zerus|zerus-ade-bin)-{re.escape(version)}-\d+-x86_64\.pkg\.tar\.zst", name) for name in package_files]
     require(len(package_files) == 2 and all(patterns) and {match[1] for match in patterns if match} == {"zerus", "zerus-ade-bin"}, "Expected checked stable source and binary x86_64 pacman packages.")
@@ -142,6 +157,10 @@ def validate_candidate(directory, version, commit=None):
     directories = {"aur", "homebrew"} if macos else {"aur"}
     flat_files = {path.name for path in directory.iterdir() if path.name not in directories}
     require(flat_files == set(sums) | {"SHA256SUMS"}, "Unsealed candidate files.")
+    if windows is not None:
+        # Bounded reads of the zip directory, build-info.json and the pinned ConPTY
+        # pair; nothing is extracted or run.
+        windows_portable.require_build(directory / windows, info["source_commit"], version)
     if macos:
         casks = sorted(path.name for path in (directory / "homebrew").iterdir())
         cask = directory / "homebrew/zerus.rb"

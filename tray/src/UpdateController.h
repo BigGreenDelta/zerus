@@ -39,8 +39,10 @@ public:
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
     static InstallationGuide installationGuide(const DesktopInstallation &installation,const QString &channel);
     static bool plainStableIsNewer(const QString &installed,const QString &released);
-    // The portable Windows build (Phase 1: nightly zips only) against a catalog.
+    // The portable Windows build (Phase 1: stable and nightly zips, none in Dev) against a catalog.
     static bool portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed);
+    // Whether the stable release `version` carries the Windows zip: those after 0.42.2 do.
+    static bool stableHasWindowsBuild(const QString &version);
     static bool devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit);
     static int automaticInterval(const QString &channel);
     static bool claimNotification(const QString &token);
