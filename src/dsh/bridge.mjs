@@ -121,6 +121,15 @@ export function apply(ctx, config) {
     opening.set(sessionId, work);
     return work;
   }
+  // selectionFor installs prompt listeners on an Agent's first read, e.g. for a
+  // child. Native disposal unloads the Agent's Cordis scope before the Agent
+  // leaves the live registry, and Cordis rejects every new effect on a disposed
+  // (uid null) or unloading (state 5) fiber. Reads there use the stored selection.
+  const selectionOf = (agent, projections) => {
+    const fiber = agent.ctx.fiber;
+    if (fiber.uid !== null && fiber.state !== 5) return { ...control.selectionFor(agent).current };
+    return projections?.modelSelection?.next ?? null;
+  };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
     .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
   // A live request is the only authority for answering. Disconnecting HGS does
@@ -214,7 +223,10 @@ export function apply(ctx, config) {
     const lifecycleIdle = lifecycleRows?.items?.find(row => row.sessionId === sessionId)?.running === false;
     const parentLive = ctx.agents.get(sessionId);
     const live = agentId ? ctx.agents.get(agentId) : parentLive;
-    const selection = live ? { ...control.selectionFor(live).current } : null;
+    const selection = live ? selectionOf(live, baseline.values) : null;
+    // Read the goal before awaiting: a disposing Agent may leave the live
+    // registry meanwhile, and the goal registry rejects it once it has.
+    const goal = live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null;
     const status = await accountStatus();
     const jobs = ctx.get('jobs');
     return { generation, baseline, page,
@@ -222,7 +234,7 @@ export function apply(ctx, config) {
       jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => job.kind === 'bash' && job.owner === owner)
         .map(job => ({ ...job, callId:jobCalls.get(job.id)?.callId, controllable: owned.has(sessionId) && Boolean(ctx.agents.get(owner)) }))) : undefined,
       shellCalls:request.includeProcesses !== false ? [...shellCalls.values()].filter(call=>jobOwners.includes(call.owner)) : undefined,
-      childMode: child?.mode, childSendSupported: !starting && child?.mode === 'continuable' && Boolean(parentLive), goal: live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null,
+      childMode: child?.mode, childSendSupported: !starting && child?.mode === 'continuable' && Boolean(parentLive), goal,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
       compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId) };
@@ -237,7 +249,7 @@ export function apply(ctx, config) {
         const status = await accountStatus();
         return { ...list, generation, items: list.items.map(row => {
           const agent = ctx.agents.get(row.sessionId);
-          const selection = agent ? { ...control.selectionFor(agent).current } : null;
+          const selection = agent ? selectionOf(agent, row.projections?.values) : null;
           return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
             goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
             pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId) };

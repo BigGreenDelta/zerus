@@ -55,7 +55,10 @@ fn session_id(name: &str) -> Result<String> {
         )?
         .value()
         .to_owned();
-    if !id.starts_with('$') || !id[1..].chars().all(|c| c.is_ascii_digit()) {
+    if !id
+        .strip_prefix('$')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+    {
         return Err(backend::INVALID_SESSION_ID.text().into());
     }
     Ok(id)
@@ -403,6 +406,36 @@ mod tests {
                 session_id("claude/MyProj/work-2").unwrap_err(),
                 backend::INVALID_SESSION_ID.text()
             );
+        });
+    }
+
+    #[test]
+    fn a_session_id_needs_digits_after_its_dollar_sign() {
+        // As in `hgs a --existing` and the Terminal: `$N`, never a bare `$`.
+        // The fake answers each name with that name as its session ID.
+        struct Echo;
+        impl backend::TerminalBackend for Echo {
+            fn pane_info(
+                &self,
+                target: backend::Target,
+                _fields: &[backend::PaneField],
+            ) -> Result<backend::PaneInfo> {
+                let backend::Target::Name(id) = target else {
+                    unreachable!("{target:?}");
+                };
+                Ok(backend::PaneInfo::new(format!("{id}\n")))
+            }
+        }
+        backend::with_fake(&Echo, || {
+            assert_eq!(session_id("$0").unwrap(), "$0");
+            assert_eq!(session_id("$12").unwrap(), "$12");
+            for id in ["$", "", "12", "$1a", "$-1", "$$1", "%1"] {
+                assert_eq!(
+                    session_id(id).unwrap_err(),
+                    backend::INVALID_SESSION_ID.text(),
+                    "{id:?}"
+                );
+            }
         });
     }
 }
