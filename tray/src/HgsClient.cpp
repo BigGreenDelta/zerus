@@ -528,12 +528,17 @@ void HgsClient::requestPeer(const QString &peer)
                // "polling…" до перезапуска трея.
                m_peerInFlight.remove(peer);
                QString err;
-               const BoxState box = parseBox(out, &err);
+               BoxState box = parseBox(out, &err);
                if (!err.isEmpty()) {
                    emit stateReadFailed(peer, err);
                    emit failed(m_hgs + QStringLiteral(" ls --json"), err);
                    return;
                }
+               // The CLI forwards the peer's own listing, whose host is the name
+               // that machine gives itself (HGS_SELF or its host name). A machine
+               // saved under another alias must still be found, polled and
+               // addressed by that alias.
+               box.reportedHost = std::exchange(box.host, peer);
                emit peerReady(box);
            },
            [this, peer](const QString &what, const QString &detail) {
@@ -541,6 +546,13 @@ void HgsClient::requestPeer(const QString &peer)
                emit stateReadFailed(peer, detail);
                emit failed(what, detail);
            });
+}
+
+QSet<QString> HgsClient::pollingHosts() const
+{
+    auto hosts = m_peerInFlight;
+    if (m_localInFlight) hosts.insert(QString());
+    return hosts;
 }
 
 quint64 HgsClient::requestSearch(const QString &host, const QString &query)

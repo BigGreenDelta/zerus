@@ -85,7 +85,13 @@ struct SessionInfo {
 
 struct BoxState {
     QJsonObject metrics;
+    // A peer's box is keyed by the alias it was polled under (a name in this
+    // computer's "peers"), whatever that machine calls itself.
     QString host;
+    // The "host" a peer's answer reported: the name that machine gives itself
+    // (HGS_SELF or its host name), which may differ from the alias. For
+    // diagnostics only; empty except on peer answers.
+    QString reportedHost;
     bool ok = false;
     QString error;                     // "offline" | "bad_response" | пусто
     QHash<QString, QString> projects;  // имя -> каталог
@@ -146,7 +152,10 @@ public:
     void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
+    // peerReady() carries a box whose host is this alias (see BoxState::host).
     void requestPeer(const QString &peer);
+    // State reads in flight: "" for this computer, otherwise the polled aliases.
+    QSet<QString> pollingHosts() const;
     // Project lists and directory browsing are read on the selected machine.
     // Directory request IDs let views discard replies to superseded navigation.
     void requestProjects(const QString &host = {});

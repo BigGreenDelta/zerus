@@ -108,7 +108,6 @@ private:
     QTimer m_peerTimer;
     QString m_lastError;
     QString m_localReadError;
-    QSet<QString> m_pollingHosts;
     SessionsWindow *m_sessionsWindow = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;

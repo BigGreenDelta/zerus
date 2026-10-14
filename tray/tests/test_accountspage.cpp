@@ -61,6 +61,7 @@ private slots:
     void deepSeekKeyStaysOnSelectedMachine();
     void localWindowsOffersNoDeepSeekOrOpenCode();
     void refreshPreservesRowsAndShowsPendingUsage();
+    void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
@@ -134,6 +135,7 @@ if args[0]=='account':
  if args[1]=='restore':removed_file.unlink(missing_ok=True)
  profiles=[{'id':'native-'+p,'provider':p,'label':'Default account','home':'~/.codex' if p=='codex' else '~/.'+p,'native':True,'installed':True,'portable':p!='claude','credential_file':False} for p in ['codex','claude','kimi']]
  profiles.append({'id':'work-'+(host or 'local'),'provider':'codex','label':'Work','home':'~/.config/hgs/accounts/work','native':False,'installed':True,'portable':True,'credential_file':True})
+ if (root/'one-account').exists():profiles=profiles[:1]
  for p in profiles:
   chosen=(root/('default-'+(host or 'local')))
   p['is_default']=p['id']==(chosen.read_text() if chosen.exists() and p['provider']=='codex' else 'native-'+p['provider'])
@@ -934,6 +936,27 @@ void TestAccountsPage::refreshPreservesRowsAndShowsPendingUsage()
     QCOMPARE(QPersistentModelIndex(list->currentIndex()), selection);
     for (int i = 0; i < rows.size(); ++i) { QVERIFY(rows[i].isValid()); QCOMPARE(rows[i].row(), i); }
     QCOMPARE(page.findChild<QPushButton *>("loginAccount")->text(), QString("Sign in again on mac…"));
+}
+
+void TestAccountsPage::summaryCountsReadInSingularAndPlural()
+{
+    const auto summary = [](AccountsPage &page) {
+        for (auto *label : page.findChildren<QLabel *>("muted")) if (label->text().contains("loaded")) return label->text();
+        return QString();
+    };
+    {
+        QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
+        AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
+        QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(), 7);
+        QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
+        QCOMPARE(summary(page), QString("7 accounts, 2 machines loaded"));
+        QVERIFY(QFile::remove(shared.fileName()));
+    }
+    QFile one(m_dir.filePath("one-account")); QVERIFY(one.open(QIODevice::WriteOnly)); one.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet(false)); page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(), 1);
+    QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
+    QCOMPARE(summary(page), QString("1 account, 1 machine loaded"));
 }
 
 void TestAccountsPage::preview()
