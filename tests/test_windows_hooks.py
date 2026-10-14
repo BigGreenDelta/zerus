@@ -183,6 +183,11 @@ class TrackedHooks(LifecycleCase):
         record = read_json(ready)
         return record if record and (previous is None or record["pid"] != previous["pid"]) else None
 
+    def ended(self, name):
+        """Whether session `name` has ended: gone from the listing, or saved as stopped or paused."""
+        row = self.sessions().get(name)  # One listing: the session may go between two.
+        return row is None or row.get("state") in ("stopped", "paused")
+
     def hooks_ran(self, record, event):
         return [hook for hook in read_events(record, "hook") if hook["event"] == event]
 
@@ -220,8 +225,8 @@ class TrackedHooks(LifecycleCase):
                 self.assertEqual({hook["event"] for hook in hooks}, {"SessionStart", "UserPromptSubmit", "Stop"})
                 self.assertEqual(self.sessions()[name].get("conversation_id"), ready["session_id"])
                 self.hgs("kill", name)
-                self.wait_for("the end", lambda: name not in self.sessions() or
-                              self.sessions()[name].get("state") in ("stopped", "paused"))
+                self.wait_for_exit(ready)
+                self.wait_for("the end", lambda: self.ended(name))
 
         # The bytes hgs wrote: each agent's own form, naming the stable CLI.
         shell = f'"{self.stable}" __state hook'
