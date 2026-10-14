@@ -168,7 +168,7 @@ session that is not a live tracked pane, OpenCode and DeepSeek name no `tmux
 pane` or `tmux Terminal`. `hgs --help` leaves out the Unix-only `hgs paste`,
 `hgs clip` and `hgs notify` and the line on Ctrl+V, the tmux binding that runs `hgs
 paste`, and gives `--dry-run` as printing the `session-host/ssh` command. Those
-three commands exit with code 2 (`hgs: hgs clip is not supported on Windows`)
+three commands exit with code 2 (`hgs: clip is not supported on Windows`)
 instead of starting a program of that name.
 
 ## The supervisor channel

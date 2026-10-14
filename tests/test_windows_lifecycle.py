@@ -446,7 +446,7 @@ class Launch(LifecycleCase):
             with self.subTest(args=args):
                 result = self.hgs(*args, rc=2)
                 self.assertEqual((result.stdout, result.stderr),
-                                 ("", f"hgs: hgs {command} is not supported on Windows\n"))
+                                 ("", f"hgs: {command} is not supported on Windows\n"))
         self.assertEqual(self.sessions(), {})
         self.assertEqual(self.status(), {"running": False})
 

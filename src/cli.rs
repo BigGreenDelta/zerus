@@ -334,7 +334,7 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
     if unix || !UNIX_ONLY_COMMANDS.contains(&command) {
         return Ok(());
     }
-    Err(Error::new(2, format!("hgs {command} is not supported on Windows")))
+    Err(Error::new(2, format!("{command} is not supported on Windows")))
 }
 /// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
 /// has no tmux C-v binding, which pulls a peer's image through `hgs paste` and
@@ -2314,7 +2314,7 @@ mod tests {
             assert_eq!(error.code, 2);
             assert_eq!(
                 error.message,
-                format!("hgs {command} is not supported on Windows")
+                format!("{command} is not supported on Windows")
             );
         }
         // Any other word stays a command or a program to launch.
