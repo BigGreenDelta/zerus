@@ -240,6 +240,24 @@ class ResumedClearContext(unittest.TestCase):
   # No inspection saw the reset panel before the deferred hook arrived.
   self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
   self.assert_cleared(self.started())
+ def test_inspection_observes_a_terminal_clear_only_while_codex_owns_the_saved_conversation(self):
+  self.resumed();initial=self.record.copy()
+  self.tmux('send-keys','-t',self.pane,'-l','/clear');self.tmux('send-keys','-t',self.pane,'Enter')
+  self.wait_for(lambda:(self.root/'native-cleared').exists())
+  self.wait_for(lambda:'OpenAI Codex' in self.tmux('capture-pane','-p','-t',self.pane))
+  # The reset panel alone is no clear: a copy of the history that the exact
+  # Codex does not hold open confirms nothing.
+  other=self.root/'other.jsonl';other.write_bytes(self.rollout.read_bytes())
+  self.record=dict(initial,transcript=str(other));self.write_record()
+  self.assertFalse(self.inspect().get('session_clear'))
+  self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
+  self.record=initial;self.write_record()
+  observed=self.inspect();self.assertEqual(observed['session_clear']['type'],'SessionCleared')
+  self.assertFalse(observed['clear_context_supported'])
+  self.assertTrue(json.loads(self.record_path.read_text())['session_clear']['awaiting_session_start'])
+  # The deferred hook keeps the boundary observed in Terminal.
+  started=self.assert_cleared(self.started())
+  self.assertEqual(started['session_clear']['at'],observed['session_clear']['at'])
  def test_other_starts_still_name_a_different_conversation(self):
   self.resumed();initial=self.record.copy()
   other=self.root/'other.jsonl';other.write_bytes(self.rollout.read_bytes())
