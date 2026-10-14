@@ -4106,7 +4106,9 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
         "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     const auto path=m_dir->filePath("report's draft.pdf");QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");file.close();
-    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.resize(1100,760);window.show();window.showSession({},"codex/hgs/dashboard");
+    // The dropped file is a real one of this computer, in the form of the GUI's platform.
+    auto state=fleet();auto own=state.local();own.metrics.remove("platform");state.setLocal(own,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep Activity draft");
     auto *terminal=window.findChild<TerminalView *>();auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
     tabs->setCurrentWidget(terminal);QTRY_VERIFY(terminal->isConnected());QTest::qWait(150);
