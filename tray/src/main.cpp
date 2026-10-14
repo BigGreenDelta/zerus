@@ -35,6 +35,7 @@
 
 #ifdef Q_OS_WIN
 #include "ConsoleHost.h"
+#include "StartupNotice.h"
 #include "WindowsCommandLine.h"
 #include <QCryptographicHash>
 #include <QFile>
@@ -94,7 +95,7 @@ void attachParentConsole()
 }
 
 // `hgs session-host <action> --json`, before the tray starts; empty when it fails.
-QJsonObject sessionHost(const QString &hgs, const QString &action)
+QJsonObject sessionHost(const QString &hgs, const QString &action, StartupNotice &notice)
 {
     HgsClient client(hgs);
     QJsonObject answer;
@@ -107,6 +108,7 @@ QJsonObject sessionHost(const QString &hgs, const QString &action)
         QTextStream(stderr) << QStringLiteral("hgs-tray: hgs session-host %1: %2\n").arg(action, error);
         loop.quit();
     });
+    notice.step(action);
     client.requestSessionHost(action);
     loop.exec();
     return answer;
@@ -117,7 +119,10 @@ QJsonObject sessionHost(const QString &hgs, const QString &action)
 // build) first when that differs and is at least as new.
 QString stableHgs(const QString &hgs, const QString &configured)
 {
-    const QJsonObject status = configured.isEmpty() ? sessionHost(hgs, QStringLiteral("status")) : QJsonObject();
+    // Shown while a slow check runs, as there is no tray icon yet.
+    StartupNotice notice;
+    const QJsonObject status =
+        configured.isEmpty() ? sessionHost(hgs, QStringLiteral("status"), notice) : QJsonObject();
     QString sha256;
     // Only an enabled computer compares builds.
     QFile file(hgs);
@@ -125,7 +130,7 @@ QString stableHgs(const QString &hgs, const QString &configured)
     if (status.value(QStringLiteral("enabled")).toBool() && file.open(QIODevice::ReadOnly) && hash.addData(&file))
         sha256 = QString::fromLatin1(hash.result().toHex());
     const AppConfig::HgsChoice choice = AppConfig::chooseHgs(status, hgs, sha256, configured);
-    if (choice.refresh && sessionHost(hgs, QStringLiteral("install")).isEmpty())
+    if (choice.refresh && sessionHost(hgs, QStringLiteral("install"), notice).isEmpty())
         return choice.fallback;
     return choice.path;
 }

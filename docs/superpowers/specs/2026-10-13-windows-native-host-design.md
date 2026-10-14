@@ -112,6 +112,10 @@ staged CLI and host image with `session-host install` when the bundled build dif
 (SHA-256) and is at least as new as the staged one (a staged build of unknown version
 counts as older; the user consented to staging when enabling), then runs every `hgs`
 call through the stable CLI. An explicit `--hgs` or `hgs=` setting is used as given.
+These checks run before the tray icon exists (status for up to 15 s, the refresh for
+up to 60 s): once they have taken half a second, a small frameless note that takes
+no focus says "Starting Zerus…" (and, during a refresh, that it updates the hgs
+command line) until they end. A second start meanwhile is handled once the tray runs.
 A GUI that enables local sessions keeps its CLI until it restarts. State formats stay
 readable in both directions across one version of skew.
 
