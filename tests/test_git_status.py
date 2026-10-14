@@ -104,6 +104,9 @@ class GitStatus(unittest.TestCase):
         data = self.status()
         self.assertEqual(data['remote_state'], 'no_upstream')
         self.assertIsNone(data['ahead'])
+        self.git('-C', str(self.repo), 'branch', '-q', 'base')
+        self.git('-C', str(self.repo), 'branch', '-q', '--set-upstream-to', 'base')
+        self.assertEqual(self.status()['remote_state'], 'local_upstream')
         self.git('-C', str(self.repo), 'checkout', '--detach', '-q')
         data = self.status()
         self.assertTrue(data['detached'])
@@ -164,6 +167,26 @@ class GitStatus(unittest.TestCase):
         self.assertEqual(self.status()['state'], 'changed_during_check')
         refreshed = self.status()
         self.assertEqual((refreshed['state'], refreshed['changed_files']), ('ok', 1))
+
+    def test_failed_or_stalled_upstream_lookup_is_not_reported_as_no_upstream(self):
+        # Only the upstream lookup fails or outlives its deadline; every other
+        # call reaches the real Git, so the checkout itself is still read.
+        fake = Path(self.env['HOME']) / '.local/bin'
+        fake.mkdir(parents=True)
+        program = fake / 'git'
+        real = shutil.which('git')
+        self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
+        for lookup in ('sys.exit(128)', 'time.sleep(30)'):
+            program.write_text('#!' + sys.executable + '\nimport os,sys,time\n'
+                               'if "for-each-ref" in sys.argv and any("upstream" in arg for arg in sys.argv):\n ' + lookup + '\n'
+                               'os.execv(' + repr(real) + ', [' + repr(real) + '] + sys.argv[1:])\n')
+            program.chmod(0o755)
+            start = time.monotonic()
+            data = self.status()
+            self.assertLess(time.monotonic() - start, 4)
+            self.assertEqual((data['state'], data['remote_state']), ('ok', 'unknown'), lookup)
+            self.assertEqual((data['branch'], data['upstream'], data['changed_files']), ('main', 'origin/main', 0))
+            self.assertNotIn('remote_checked_at', data)
 
     def test_expired_remote_verification_cannot_hide_remote_changes(self):
         self.assertEqual(self.status()['remote_state'], 'verified')
