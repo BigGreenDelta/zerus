@@ -18,6 +18,11 @@ const PUBLIC: &[&str] = &[
     "Stop",
 ];
 const BUDGET: usize = 2 * 1024 * 1024;
+// Routine reads stay small, but one native JSONL row can contain an image or
+// a large private tool result. Finish that row within an explicit memory cap
+// before deciding whether it contributes a public message.
+const SOURCE_LINE_BYTES: usize = 16 * 1024 * 1024;
+const SOURCE_READER_VERSION: &str = "2";
 const ROW_BYTES: usize = 32 * 1024;
 const RECONCILE_VERSION: &str = "3";
 #[derive(Deserialize)]
@@ -444,6 +449,15 @@ fn paths(record: &Value) -> Result<Vec<PathBuf>> {
     }
     Ok(vec![path])
 }
+fn source_chunk(file: &mut File, budget: usize, extend_row: bool) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    (&mut *file).take(budget as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if extend_row && budget > 0 && bytes.len() == budget && !bytes.contains(&b'\n') {
+        BufReader::new((&mut *file).take((SOURCE_LINE_BYTES - bytes.len()) as u64))
+            .read_until(b'\n', &mut bytes).map_err(|e| e.to_string())?;
+    }
+    Ok(bytes)
+}
 fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Result<(bool, Value)> {
     let paths = paths(native)?;
     if paths.is_empty() {
@@ -492,6 +506,8 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
     }
     set(db, "sources", &descriptor)?;
+    let repair = get(db, "source_reader_version")?.as_deref() != Some(SOURCE_READER_VERSION)
+        && get(db, "gap")?.as_deref() == Some("oversized_source_line");
     let canonical = key(parent, r);
     let mut budget = BUDGET;
     let mut complete = true;
@@ -519,18 +535,26 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
             set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
             return Ok((false, json!({"provider":"source_reset"})));
         }
+        // Revalidate the old source checkpoint before replaying its rows. The
+        // old reader discarded oversized rows, including private tool noise.
+        // Stable provenance makes replay idempotent; retain message IDs,
+        // aliases and read sequences, and keep the head incomplete until EOF.
+        if repair {
+            offset = 0;
+            if number == 0 {
+                db.execute("DELETE FROM meta WHERE key='gap'", []).map_err(|e| e.to_string())?;
+            }
+        }
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| e.to_string())?;
-        let mut bytes = Vec::new();
-        file.take(budget as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        budget -= bytes.len();
+        let mut skipping = !repair && get(db, &format!("skip:{number}"))?.as_deref() == Some("1");
+        let bytes = source_chunk(&mut file, budget, !skipping)?;
+        budget = budget.saturating_sub(bytes.len());
         let mut consumed = 0;
-        let mut skipping = get(db, &format!("skip:{number}"))?.as_deref() == Some("1");
         for part in bytes.split_inclusive(|byte| *byte == b'\n').take(512) {
             if !part.ends_with(b"\n") {
-                if skipping || (consumed == 0 && part.len() == BUDGET) {
+                if skipping || (consumed == 0 && part.len() == SOURCE_LINE_BYTES
+                    && offset + (bytes.len() as u64) < len) {
                     skipping = true;
                     consumed += part.len();
                     set(db, "gap", "oversized_source_line")?;
@@ -608,6 +632,7 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         )?;
         complete &= offset == len && !skipping;
     }
+    set(db, "source_reader_version", SOURCE_READER_VERSION)?;
     Ok((
         complete,
         json!({"provider":if complete{"complete"}else if partial_final{"partial_final_line"}else{"indexing"}}),

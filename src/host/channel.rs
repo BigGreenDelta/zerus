@@ -24,9 +24,8 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -44,7 +43,9 @@ pub(crate) struct SupervisorChannel {
     next: AtomicU64,
     /// The supervisor has been told that it is registered; before that, a
     /// request of the host would reach it ahead of that answer.
-    ready: AtomicBool,
+    ready: Mutex<bool>,
+    /// Signalled when the channel opens or closes.
+    changed: Condvar,
     closed: AtomicBool,
 }
 
@@ -54,32 +55,48 @@ impl SupervisorChannel {
             link,
             waiting: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
-            ready: AtomicBool::new(false),
+            ready: Mutex::new(false),
+            changed: Condvar::new(),
             closed: AtomicBool::new(false),
         })
     }
 
     /// The registration has been answered: requests may go out now.
     pub(crate) fn open(&self) {
-        self.ready.store(true, Ordering::SeqCst);
+        *lock(&self.ready) = true;
+        self.changed.notify_all();
     }
 
     /// Whether requests may go out: registered, answered and not closed.
     pub(crate) fn is_open(&self) -> bool {
-        self.ready.load(Ordering::SeqCst) && !self.is_closed()
+        *lock(&self.ready) && !self.is_closed()
     }
 
-    /// Wait at most `timeout` while the registration's answer goes out;
-    /// whether the channel is open then.
+    /// Wait at most `timeout` for the channel to open. The supervisor may read
+    /// its registration answer, and a client act on it, a moment before the
+    /// host's connection thread opens the channel; a closed channel answers at
+    /// once.
     pub(crate) fn wait_open(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        while !self.is_open() {
-            if self.is_closed() || Instant::now() >= deadline {
-                return false;
+        let mut ready = lock(&self.ready);
+        while !*ready && !self.is_closed() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
             }
-            thread::sleep(Duration::from_millis(5));
+            ready = self
+                .changed
+                .wait_timeout(ready, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
         }
-        true
+        *ready && !self.is_closed()
+    }
+
+    fn mark_closed(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _ready = lock(&self.ready);
+        self.changed.notify_all();
     }
 
     /// Read the supervisor's answers until the connection ends; runs on the
@@ -96,7 +113,7 @@ impl SupervisorChannel {
                 let _ = waiting.send(response.result);
             }
         }
-        self.closed.store(true, Ordering::SeqCst);
+        self.mark_closed();
         lock(&self.waiting).clear();
     }
 
@@ -106,7 +123,7 @@ impl SupervisorChannel {
 
     /// End the channel: the supervisor reads the end of the connection.
     pub(crate) fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.mark_closed();
         self.link.shutdown();
     }
 

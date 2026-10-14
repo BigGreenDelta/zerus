@@ -651,6 +651,8 @@ jobs:
       # aqtinstall 3.3.0 cannot resolve the split repository layout of Qt 6.11+
       # for Windows yet. It and its dependencies come only from the hash-locked
       # wheels, in an environment of their own that later steps never use.
+      # scripts/ci/aqt-settings.ini makes it extract one archive at a time:
+      # parallel workers raced py7zr's path check on Windows.
       - name: Install Qt 6.10.3 with the hash-locked aqtinstall
         if: steps.qt-cache.outputs.cache-hit != 'true'
         run: |
@@ -658,7 +660,7 @@ jobs:
           aqt_python=$(cygpath -u "$RUNNER_TEMP/aqt/Scripts/python.exe")
           "$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes --only-binary :all: \
             -r scripts/ci/aqt-requirements.txt </dev/null
-          "$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
+          "$aqt_python" -m aqt -c scripts/ci/aqt-settings.ini install-qt windows desktop 6.10.3 win64_msvc2022_64 \
             -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null
           rm -rf "$(cygpath -u "$RUNNER_TEMP/aqt")"
       - name: Use Qt 6.10.3

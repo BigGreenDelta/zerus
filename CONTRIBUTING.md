@@ -46,12 +46,20 @@ terminal tests that need a real process rather than a script, such as those that
 will run under the Windows session host. It records every input byte with its
 framing (bracketed paste, ESC, Ctrl+C, Enter) and timing, renders fixture byte
 streams, sets and resets terminal modes, sends terminal queries and records their
-answers, runs hooks with agent-shaped JSON, writes its process ID and start time
-when ready, and follows a configured policy for signals and Windows console
+answers, runs hooks with agent-shaped JSON, writes its process ID, start time and
+folder when ready, and follows a configured policy for signals and Windows console
 events; its header lists the options and the record format. Linked or copied under
 an agent's name, it takes its options from `FAKE_AGENT_*` variables and runs the
 hooks in that agent's configuration. `tests/test_fake_agent.py` checks it under a
 private tmux socket; `HGS_TEST_FAKE_AGENT` names another build.
+
+`tests/test_backend_contract.py` uses it as `claude` for the
+[terminal backend contract](docs/ci-and-aur.md#terminal-backend-contract): every
+session operation a backend provides, driven and observed only through `hgs`
+commands, their JSON and the agent's records. `HGS_TEST_BACKEND` selects `tmux`
+(default on Linux and macOS) or `host` (Windows; skipped until the session host
+exists). A new backend adds only its setup, teardown and `running()` there; extend
+the contract rather than the backend classes when a behaviour must hold for both.
 
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
@@ -121,14 +129,15 @@ without the local session host and `hgs-tray.exe` for remote machines. You need:
 - Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
   DeepSeek Native UI is an optional Linux plugin).
   CI installs it with `scripts/ci/aqt-requirements.txt` (aqtinstall 3.3.0 cannot
-  install Qt 6.11 or later for Windows yet); the same works locally:
+  install Qt 6.11 or later for Windows yet) and one worker from
+  `scripts/ci/aqt-settings.ini`; the same works locally:
 
 ```sh
 python -m venv ~/aqt
 ~/aqt/Scripts/python -m pip install --require-hashes --only-binary :all: \
     -r scripts/ci/aqt-requirements.txt
-~/aqt/Scripts/python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \
-    -m qtmultimedia --outputdir ~/Qt
+~/aqt/Scripts/python -m aqt -c scripts/ci/aqt-settings.ini \
+    install-qt windows desktop 6.10.3 win64_msvc2022_64 -m qtmultimedia --outputdir ~/Qt
 ```
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and

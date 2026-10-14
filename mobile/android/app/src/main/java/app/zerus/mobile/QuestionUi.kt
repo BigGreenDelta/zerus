@@ -30,7 +30,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -163,13 +162,6 @@ import org.json.JSONObject
     val otherPrompts = currentPrompts.filter { it.other && !question.approval }
     val lowerActions = question.prompts.size > 1 || question.canSkip || otherPrompts.isEmpty()
     val density = LocalDensity.current
-    var cardHeightPx by remember(question.id,question.hash,pageIndex) { mutableIntStateOf(0) }
-    var bodyHeightPx by remember(question.id,question.hash,pageIndex) { mutableIntStateOf(0) }
-    val initialReserve = 24.dp + 24.dp + 12.dp + 64.dp * otherPrompts.size + if(lowerActions) 48.dp else 0.dp
-    val ordinaryReserve = if(cardHeightPx > bodyHeightPx && bodyHeightPx > 0) with(density) { (cardHeightPx-bodyHeightPx).toDp() } else initialReserve
-    val approvalReserve = if(currentPrompts.any { it.other }) 156.dp else 100.dp
-    val availableHeight = contentLimit
-    val bodyHeight = (availableHeight - if(question.approval) approvalReserve else ordinaryReserve).coerceAtLeast(120.dp)
     val readableHeightPx = with(density) { MaterialTheme.typography.bodyLarge.lineHeight.toPx() + 24.dp.toPx() }
     val disclosureVisibility = Modifier.onGloballyPositioned { coordinates ->
         val bounds = coordinates.boundsInWindow()
@@ -185,7 +177,7 @@ import org.json.JSONObject
     }
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2B2923)), modifier = Modifier.fillMaxWidth().then(if(inDialog) Modifier.fillMaxHeight() else Modifier)) {
 
-        Column(Modifier.then(if(inDialog) Modifier.fillMaxSize() else Modifier.heightIn(max = contentLimit)).onSizeChanged { if(!question.approval) cardHeightPx = it.height }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.then(if(inDialog) Modifier.fillMaxSize() else Modifier.heightIn(max = contentLimit)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (question.approval || question.trustRequest) "Needs approval" else if (question.optional) "Optional question" else "Needs input",
                     Modifier.weight(1f), color = Color(0xFFFFCB7D), style = MaterialTheme.typography.labelLarge)
@@ -195,8 +187,9 @@ import org.json.JSONObject
                     style = MaterialTheme.typography.labelSmall)
             }
             // Full disclosure scrolls; the answer field and compact controls stay visible.
-            Box(Modifier.fillMaxWidth().then(if(inDialog) Modifier.weight(1f) else Modifier).then(disclosureVisibility).onSizeChanged { if(!question.approval) bodyHeightPx = it.height }) {
-            Column(Modifier.fillMaxWidth().then(if(inDialog) Modifier.fillMaxSize() else Modifier.heightIn(max = bodyHeight)).verticalScroll(bodyScroll)
+            // The column measures them first, so the disclosure gets only the height left.
+            Box(Modifier.fillMaxWidth().weight(1f, fill = inDialog).then(disclosureVisibility)) {
+            Column(Modifier.fillMaxWidth().then(if(inDialog) Modifier.fillMaxSize() else Modifier).verticalScroll(bodyScroll)
                 .padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 currentPrompts.forEach { prompt ->
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

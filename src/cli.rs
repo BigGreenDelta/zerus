@@ -949,13 +949,18 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     nested_guard(false)?;
     // Resolve exact name to an immutable tmux session ID before checking the run.
     // If it disappears later, attach fails instead of creating or selecting a new one.
+    const ENDED: &str = "session is no longer running; resume it explicitly";
     let target = terminal()
         .probe(
             Target::Name(session),
             &[PaneField::SessionId, PaneField::RunMarker],
         )
-        .ok_or_else(|| Error::new(1, "session is no longer running; resume it explicitly"))?;
+        .ok_or_else(|| Error::new(1, ENDED))?;
     let fields = target.fields();
+    // A running tmux server expands an unknown target to empty fields instead of failing.
+    if fields.first().is_some_and(|id| id.is_empty()) {
+        return Err(Error::new(1, ENDED));
+    }
     if fields.len() != 2
         || !fields[0]
             .strip_prefix('$')

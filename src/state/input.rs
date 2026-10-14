@@ -1,6 +1,10 @@
 //! Deliberate, identity-checked input to an existing interactive agent.
 //! A receipt acknowledges terminal submission, never a model response. Once input
 //! may have reached the PTY we retain its request ID and never automatically retry.
+//! Codex's one-line status footer names its folder as `/…` or `~/…`, and with a
+//! Windows platform home also as a drive path or `~\…`. Under inbox ConPTY the
+//! hidden Claude and Kimi cursor stays at the end of the last painted row, so
+//! their empty-composer checks fail closed there (spike S3).
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
@@ -538,10 +542,13 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 // Codex 0.153 can show only its model/path footer, without
                 // shortcuts. Require the dim placeholder and exact one-line
                 // model/path shape; drafts never retain that placeholder.
+                // Windows Codex prints `~\…` or a drive path (`shown_path`).
                 let single_line_footer = placeholder
                     && lines[index + 1..].iter().all(|line| line.trim().is_empty())
                     && (exact_model || footer.trim_start().starts_with("gpt-"))
-                    && footer.split_once(" · ").is_some_and(|(_, path)| path.starts_with('/') || path.starts_with("~/"));
+                    && footer.split_once(" · ").is_some_and(|(_, path)| {
+                        shown_path::status_folder(path, crate::platform::home().as_deref())
+                    });
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
@@ -895,6 +902,27 @@ mod tests {
         assert!(!composer_empty_for_model("codex", &single.replace("/project", "arbitrary text"), 2, 2, model));
         assert!(!composer_empty_for_model("codex", &(screen.to_owned() + "\n  more input"), 2, 2, model));
         assert!(!composer_empty_for_model("codex", screen, 3, 2, model));
+    }
+    #[test]
+    fn windows_composers_under_conpty() {
+        // Spike S3 (bundled ConPTY): Codex 0.162.0 prints `~\…` in its footer;
+        // Claude 2.1.296 draws its normal-screen layout. Inbox ConPTY leaves
+        // Claude's hidden cursor at the end of the last row, which fails closed.
+        let codex = include_str!("../../tests/fixtures/codex-composer-empty-windows.txt");
+        assert!(composer_empty("codex", codex, 2, 36));
+        let single = codex.replace("\n  \x1b[1m?\x1b[0m for shortcuts", "\n");
+        assert_ne!(single, codex);
+        let windows_home = crate::platform::home().is_some_and(|home| shown_path::drive(&home));
+        assert_eq!(composer_empty("codex", &single, 2, 36), windows_home);
+        assert!(!composer_empty(
+            "codex",
+            &single.replace(r"~\zerus-dev", r"\\server\zerus-dev"),
+            2,
+            36
+        ));
+        let claude = include_str!("../../tests/fixtures/claude-composer-empty-windows.txt");
+        assert!(composer_empty("claude", claude, 2, 6));
+        assert!(!composer_empty("claude", claude, 118, 8));
     }
     #[test]
     fn codex_footer_model_tracks_native_identity_or_launch_model() {

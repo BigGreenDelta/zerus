@@ -2,6 +2,8 @@
 //! SessionStart may already have bound a conversation. Mirror only its complete
 //! startup panel; changing the account default always needs an explicit answer.
 //! The title and exact choices frame it; the explanation is shown verbatim.
+//! The banner folder is `/…` or `~/…` on Unix; on Windows it is a drive path or
+//! `~\…` below the platform home, both compared without case (`shown_path`).
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -20,9 +22,7 @@ fn parse(screen: &str) -> Option<Panel> {
     if rows.len() < 10 || !rows[0].contains("Claude Code v") {
         return None;
     }
-    let folder = rows[2]
-        .get(rows[2].find(['/', '~'])?..)?
-        .to_owned();
+    let folder = rows[2].get(shown_path::start(rows[2])?..)?.to_owned();
     let divider = rows
         .iter()
         .position(|row| row.chars().count() >= 40 && row.chars().all(|c| c == '─'))?;
@@ -87,24 +87,15 @@ fn eligible(record: &Value) -> bool {
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
+    card_below(record, panel, crate::platform::home().as_deref())
+}
+
+fn card_below(record: &Value, panel: &Panel, home: Option<&str>) -> Option<Value> {
     let launch_dir = string(record, "launch_dir");
     // Claude's startup banner abbreviates paths inside the user's home. Derive
     // that one display alias from the exact launch directory; never infer a
     // folder from the suffix after '~' or resolve arbitrary relative paths.
-    let short_folder = nonempty_env("HOME")
-        .filter(|home| Path::new(home).is_absolute())
-        .and_then(|home| {
-            if launch_dir == home {
-                Some("~".to_owned())
-            } else {
-                launch_dir
-                    .strip_prefix(&format!("{}/", home.trim_end_matches('/')))
-                    .map(|relative| format!("~/{relative}"))
-            }
-        });
-    if !eligible(record)
-        || (panel.folder != launch_dir && short_folder.as_deref() != Some(panel.folder.as_str()))
-    {
+    if !eligible(record) || !shown_path::names(&panel.folder, launch_dir, home) {
         return None;
     }
     let hash = format!(
@@ -232,7 +223,8 @@ mod tests {
             assert_ne!(question["question_hash"], original["question_hash"]);
         }
     }
-    // A POSIX home; Windows banners come with the path-aware parsers (Phase 2 M4).
+    // The platform home with a POSIX `~/` banner; the Windows forms are covered
+    // by windows_banner_names_the_launch_directory_below_the_platform_home.
     #[cfg(unix)]
     #[test]
     fn home_abbreviations_match_only_the_exact_launch_directory() {
@@ -259,6 +251,75 @@ mod tests {
         ] {
             assert!(parse(&invalid).is_none());
         }
+    }
+    #[test]
+    fn windows_banner_names_the_launch_directory_below_the_platform_home() {
+        // Claude Code 2.1.296 under bundled ConPTY (spike S3), in the
+        // normal-screen layout; the account folder is the synthetic user01.
+        const WINDOWS: &str =
+            include_str!("../../tests/fixtures/claude-auto-mode-home-windows.txt");
+        const HOME: &str = r"C:\Users\user01";
+        let launch = r"C:\Users\user01\zerus-dev\p2\s3\homes\claude-automode\work";
+        let shown = r"~\zerus-dev\p2\s3\homes\claude-automode\work";
+        let mut r = record();
+        r["launch_dir"] = json!(launch);
+        let panel = parse(WINDOWS).unwrap();
+        assert_eq!((panel.folder.as_str(), panel.selected), (shown, 0));
+        let question = card_below(&r, &panel, Some(HOME)).unwrap();
+        assert_eq!(
+            question["questions"][0]["options"][1]["label"],
+            "No, keep manual mode"
+        );
+        // Windows names ignore case, in the folder and in the home.
+        assert!(card_below(&r, &panel, Some(r"c:\users\USER01\")).is_some());
+        r["launch_dir"] = json!(launch.to_uppercase());
+        assert!(card_below(&r, &panel, Some(HOME)).is_some());
+        for home in [Some(r"C:\Users\other"), Some("/home/example"), None] {
+            assert!(card_below(&r, &panel, home).is_none(), "{home:?}");
+        }
+        r["launch_dir"] = json!(HOME);
+        assert!(card_below(
+            &r,
+            &parse(&WINDOWS.replace(shown, "~")).unwrap(),
+            Some(HOME)
+        )
+        .is_some());
+        // Outside the home Claude prints the drive path itself.
+        r["launch_dir"] = json!(r"D:\src\work");
+        let outside = parse(&WINDOWS.replace(shown, r"D:\src\work")).unwrap();
+        assert_eq!(outside.folder, r"D:\src\work");
+        assert!(card_below(&r, &outside, Some(HOME)).is_some());
+        assert!(card_below(
+            &r,
+            &parse(&WINDOWS.replace(shown, r"D:\src\work2")).unwrap(),
+            Some(HOME)
+        )
+        .is_none());
+        for folder in [
+            r"~/zerus-dev/p2/s3/homes/claude-automode/work",
+            r"~\zerus-dev\p2\s3\homes\claude-automode\work2",
+            r"~\..\user01\zerus-dev\p2\s3\homes\claude-automode\work",
+        ] {
+            r["launch_dir"] = json!(launch);
+            assert!(
+                card_below(
+                    &r,
+                    &parse(&WINDOWS.replace(shown, folder)).unwrap(),
+                    Some(HOME)
+                )
+                .is_none(),
+                "{folder}"
+            );
+        }
+        // A Unix banner keeps its exact `~/` form below a Unix home.
+        r["launch_dir"] = json!("/home/example/work/example");
+        let unix = parse(include_str!(
+            "../../tests/fixtures/claude-auto-mode-home.txt"
+        ))
+        .unwrap();
+        assert!(card_below(&r, &unix, Some("/home/example")).is_some());
+        assert!(card_below(&r, &unix, Some("/HOME/example")).is_none());
+        assert!(card_below(&r, &unix, Some(HOME)).is_none());
     }
     #[test]
     fn highlights_are_not_identity_but_modes_runs_and_conversations_are() {

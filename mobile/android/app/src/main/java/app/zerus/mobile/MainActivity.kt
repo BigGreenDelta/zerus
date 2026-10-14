@@ -733,7 +733,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val scrollMutex = remember { Mutex() }
     var viewportHeight by remember { mutableIntStateOf(0) }
     var viewportBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
-    val cardMaxHeight = with(LocalDensity.current) { (viewportHeight.toDp() * .45f).coerceIn(160.dp, 360.dp) }
+    // A pending question is what the reader acts on; leave a quarter for the history above it.
+    val cardMaxHeight = with(LocalDensity.current) { (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp) }
     val scope = rememberCoroutineScope()
     val currentHistoryTarget by rememberUpdatedState(target.key)
     val window = LocalWindowInfo.current
@@ -919,7 +920,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { viewportHeight = it.height }
             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
-            LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp),
+            // The tail item already adds one item gap above the composer.
+            LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 item(key = "history:earlier") { if (loadStatus?.initial != true) Column(Modifier.fillMaxWidth(),horizontalAlignment = Alignment.CenterHorizontally) {
                     if(model.olderError.isNotBlank()) {

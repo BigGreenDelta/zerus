@@ -547,9 +547,12 @@ private slots:
     QVERIFY(!view.isConnected());
     view.connectSession();
     QVERIFY(view.isConnected());
+    // The fixture prints its ENV line last, after every argument, so one snapshot
+    // taken once that line is on screen holds all of them.
     QTRY_VERIFY(view.terminalScreen()->screenText().contains(
-        QStringLiteral("ARG:--existing")));
+        QStringLiteral("ENV:")));
     const auto text = view.terminalScreen()->screenText();
+    QVERIFY(text.contains(QStringLiteral("ARG:--existing")));
     QVERIFY(text.contains(QStringLiteral("ARG:@mac")));
     QVERIFY(text.contains(QStringLiteral("ARG:codex/project/my name")));
     QVERIFY(text.contains(QStringLiteral("ARG:--run-id")));

@@ -341,8 +341,8 @@ started inside a test's tmux server belong to the class that uses that socket.
 Calls without an hgs ancestor, the fixtures' own tmux and `ps` calls, are listed
 apart and compared only with `--include-direct`. `summarize` warns about tmux
 calls that reach the recording user's default server (no `-S`, `-L`, `TMUX` or
-existing `TMUX_TMPDIR`); on 61d051f, `test_dsh_native` makes 32 such read-only
-calls through `hgs ls` and `hgs recovery worker`.
+existing `TMUX_TMPDIR`): a test that makes one is not isolated and must give hgs
+a private socket or an existing `TMUX_TMPDIR`.
 
 `compare` exits 1 on any difference, and 2 when the two files come from different
 tool versions. It reports operations whose call sequences differ, what differs
@@ -362,6 +362,40 @@ that change tmux state keep their exact order and count. Add a rule only after t
 recordings of one commit differ, never to absorb a difference that the refactor
 introduced. Both test runs must pass: a failing test changes the census. When the
 rules are in doubt, record main twice and compare the two recordings first.
+
+### Terminal backend contract
+
+`tests/test_backend_contract.py` states once what every terminal backend must do,
+for tmux on Unix now and for the Windows session host later. It is a black box at
+the CLI: tests drive only `hgs` commands and observe only their output and JSON
+and the records of the native fake agent (`examples/fake_agent.rs`, linked as
+`claude`), never the backend or the internal Rust `TerminalBackend` trait. It
+covers listing without starting the backend; launches (folder, arguments, launch
+ID, one session per name, untracked commands); `a --existing [--run-id]`
+resolution and attach in a pseudo-terminal (input, client size, several clients,
+`Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of `send` and
+Terminal input (one bracketed paste, then one Enter, no replay, keys in both
+cursor modes); state read from the screen (styled capture, wide glyphs, cursor,
+size, bracketed paste, an echoed draft against a dim placeholder) and raw-mode
+evidence; rename; pause and resume; terminate and kill, with what each does to the
+agent process. Signal expectations accept the Unix signal or the Windows console
+event the Phase 2 design names for each operation.
+
+`HGS_TEST_BACKEND` selects the backend: `tmux` (the default on Linux and macOS: a
+private server and state per test) or `host` (the default on Windows). hgs puts
+`$HOME/.local/bin` ahead of Homebrew and `/usr/local/bin` on its `PATH`, so the
+private `tmux` wrapper and the agent stand-ins live in the test home's
+`.local/bin`, and a private `TMUX_TMPDIR` keeps any other tmux off the user's
+server. Only the
+backend classes in the module differ: setup, teardown and `running()`. Until the
+session host exists (M3 to M5), `host` skips with that reason. It will need an
+isolated `HGS_STATE_DIR`, so the pipe name never reaches a live host, `hgs
+session-host install` into a temporary profile, a console client for attach in
+place of `pty`, and a Windows form of the `ps` check that tells whether an agent
+process still runs. The fake agent of a test has one configuration, set before its
+first launch, because a backend may keep the environment of the launch that
+started it. The module runs in the Linux and macOS CLI jobs in about 7 s, skips
+without tmux, and passed 20 runs with 8 in parallel.
 
 ### Windows client, desktop and portable zip
 
@@ -384,7 +418,15 @@ in the job: `scripts/ci/aqt-requirements.txt` locks aqtinstall, py7zr and their
 whole dependency closure to the SHA-256 of each CPython 3.13 `win_amd64` wheel.
 The job installs it with `pip install --require-hashes --only-binary :all:` into a
 virtual environment under `RUNNER_TEMP` that no later step uses; aqtinstall checks
-the Qt archives against the checksums of the Qt repository. The header of the lock
+the Qt archives against the checksums of the Qt repository. `scripts/ci/aqt-settings.ini`
+sets one aqtinstall worker, so the archives are downloaded and extracted in turn;
+the installed tree is the same, so the cache key leaves the file out. Parallel
+workers share the output tree, and on Windows py7zr 1.1.3 then rejects a valid
+member as "Specified path is bad" when another archive creates its parent
+directory during the check: CPython's `realpath` keeps the `\\?\` prefix when a
+missing parent appears between its lookups, and the prefixed path no longer lies
+under the extraction directory. py7zr 1.1.4 strips that prefix; the setting can go
+once a reviewed lock includes such a release. The header of the lock
 records how to regenerate it; review a new lock like the other pins. The Qt
 directory is cached with `actions/cache` under a key that covers the Qt release,
 its modules and the lock. Like every cache, only trusted main checks save it; PR,

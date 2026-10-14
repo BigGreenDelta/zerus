@@ -1,4 +1,5 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
+import configparser
 import datetime
 import io
 import json
@@ -284,8 +285,13 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('"$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes '
                       '--only-binary :all: \\\n            -r scripts/ci/aqt-requirements.txt </dev/null', windows)
         self.assertIn('python -m venv "$RUNNER_TEMP/aqt"', windows)
-        self.assertIn('"$aqt_python" -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 \\\n'
+        self.assertIn('"$aqt_python" -m aqt -c scripts/ci/aqt-settings.ini install-qt windows desktop 6.10.3 '
+                      'win64_msvc2022_64 \\\n'
                       '            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
+        # One worker: parallel archives raced py7zr's Windows path check.
+        settings = configparser.ConfigParser()
+        settings.read_string((ROOT / "scripts/ci/aqt-settings.ini").read_text())
+        self.assertEqual({name: dict(settings[name]) for name in settings.sections()}, {"aqt": {"concurrency": "1"}})
         # Qt WebEngine is an optional Linux plugin; the Windows bundle never ships it.
         self.assertNotIn("qtwebengine", windows)
         self.assertIn("if: steps.qt-cache.outputs.cache-hit != 'true'", windows)
