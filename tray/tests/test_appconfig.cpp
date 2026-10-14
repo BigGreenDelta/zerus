@@ -42,6 +42,7 @@ private slots:
     void homeVariableLocatesTrayConfig();
     void bundledHgsIsPreferredOnWindows();
     void enabledWindowsRunsTheStableCli();
+    void localPollingFollowsPlatformAndEnablement();
     void singleInstanceNameIsPerUserOnWindows();
     void restartKeepsSettingsButNotOneShotOptions();
 
@@ -589,6 +590,22 @@ void TestAppConfig::enabledWindowsRunsTheStableCli()
     // An explicit --hgs or hgs= is used as given.
     QCOMPARE(choose(status(true, "1.52.0", other, "1.51.0"), built, "D:/tools/hgs.exe"),
              (QStringList{"D:/tools/hgs.exe", "keep", "D:/tools/hgs.exe"}));
+}
+
+void TestAppConfig::localPollingFollowsPlatformAndEnablement()
+{
+    using MachinePlatform::Style;
+    // Unix keeps the configured interval, as before.
+    for (const int configured : {500, 2000, 4999, 5000, 60000})
+        QCOMPARE(AppConfig::localPollInterval(configured, true, Style::Posix), configured);
+    // A control console waits 15 s; an enabled Windows computer at least 5 s.
+    for (const auto style : {Style::Posix, Style::Windows}) {
+        QCOMPARE(AppConfig::localPollInterval(2000, false, style), 15000);
+        QCOMPARE(AppConfig::localPollInterval(20000, false, style), 20000);
+    }
+    QCOMPARE(AppConfig::localPollInterval(2000, true, Style::Windows), 5000);
+    QCOMPARE(AppConfig::localPollInterval(5000, true, Style::Windows), 5000);
+    QCOMPARE(AppConfig::localPollInterval(8000, true, Style::Windows), 8000);
 }
 
 void TestAppConfig::singleInstanceNameIsPerUserOnWindows()

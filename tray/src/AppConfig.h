@@ -99,6 +99,10 @@ struct AppConfig {
     };
     static HgsChoice chooseHgs(const QJsonObject &status, const QString &bundled, const QString &bundledSha256,
                                const QString &configured);
+    // The local poll interval. Every poll of a Windows computer starts hgs.exe, so
+    // a control console waits at least 15 s, and an enabled one at least 5 s
+    // until its session host can push changes; Unix keeps the configured interval.
+    static int localPollInterval(int configured, bool localSessions, MachinePlatform::Style style);
     // The options of args (as for load(), argv[0] first) that a restarted tray
     // keeps: every setting, but not argv[0] and the one-shot --sessions. Windows
     // restarts the tray with them after a crash or a watchdog abort

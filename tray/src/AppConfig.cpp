@@ -14,6 +14,10 @@
 namespace {
 QString g_configPathOverride;  // пусто -- override не установлен, см. setConfigPathOverrideForTests
 
+// Local poll intervals on Windows (see localPollInterval).
+constexpr int kControlConsolePollMs = 15000;
+constexpr int kWindowsLocalPollMs = 5000;
+
 // An hgs version ("1.52.0", "1.52.0-dev.12"); build metadata is ignored.
 struct Version {
     quint64 core[3] = {};
@@ -138,6 +142,13 @@ AppConfig::HgsChoice AppConfig::chooseHgs(const QJsonObject &status, const QStri
     // A staged build of unknown version counts as older.
     const bool newer = version && (!stagedVersion || compareVersions(*version, *stagedVersion) >= 0);
     return {stable, differs && newer, stable};
+}
+
+int AppConfig::localPollInterval(int configured, bool localSessions, MachinePlatform::Style style)
+{
+    if (!localSessions) return std::max(configured, kControlConsolePollMs);
+    if (style == MachinePlatform::Style::Windows) return std::max(configured, kWindowsLocalPollMs);
+    return configured;
 }
 
 AppConfig::Platform AppConfig::currentPlatform()
