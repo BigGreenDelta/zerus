@@ -2456,6 +2456,70 @@ async fn http_rejects_bad_content_before_mutation_and_recovers_from_disconnect()
 }
 
 #[tokio::test]
+async fn http_oversized_declared_body_is_answered_after_bounded_drain() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let f = Fixture::new().await;
+    let app = App::new(f.store.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(serve(listener, app, stop.clone()));
+    let auth = s(&f.credentials, "node_token");
+    let head = |length: usize, extra: &str| {
+        format!("POST /v1/node/heartbeat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {auth}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n{extra}\r\n")
+    };
+    let read = |mut stream: tokio::net::TcpStream| async move {
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response))
+            .await
+            .expect("the rejection is bounded in time")
+            .expect("the rejection is readable");
+        String::from_utf8(response).unwrap()
+    };
+    let rejected = |response: &str| {
+        response.starts_with("HTTP/1.1 413 ")
+            && response.ends_with(r#"{"error":"payload exceeds limit"}"#)
+    };
+    // The heartbeat cap is 1 MiB. A client still uploading when the declared
+    // length is refused must read 413 instead of losing it to a TCP reset.
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(head(protocol::MIB + 1, "").as_bytes())
+        .await
+        .unwrap();
+    let piece = [b' '; 64 * 1024];
+    let mut remaining = protocol::MIB + 1;
+    while remaining > 0 {
+        let n = remaining.min(piece.len());
+        stream.write_all(&piece[..n]).await.unwrap();
+        remaining -= n;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let response = read(stream).await;
+    assert!(rejected(&response), "{response}");
+    // A declared body that never arrives cannot hold the rejection until the
+    // request deadline: the discard ends at its own short deadline.
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(head(1 << 30, "").as_bytes())
+        .await
+        .unwrap();
+    let response = read(stream).await;
+    assert!(rejected(&response), "{response}");
+    // Expect/continue clients are refused before they send any body byte.
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(head(protocol::MIB + 1, "Expect: 100-continue\r\n").as_bytes())
+        .await
+        .unwrap();
+    let response = read(stream).await;
+    assert!(rejected(&response), "{response}");
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
 async fn mark_read_payload_is_exact_and_capability_gated() {
     let f = Fixture::new().await;
     let id = Uuid::new_v4().to_string();
