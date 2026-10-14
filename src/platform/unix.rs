@@ -22,7 +22,10 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::atomic::{AtomicI32, Ordering},
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Mutex, MutexGuard,
+    },
     time::{Duration, Instant},
 };
 
@@ -212,6 +215,24 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 /// `spawn` in a process group of its own (`own_process_group`).
 pub fn spawn_group(command: &mut Command) -> io::Result<Child> {
     own_process_group(command).spawn()
+}
+/// On macOS std creates a child's pipes with pipe() and marks them close-on-exec
+/// only afterwards, and posix_spawn passes on every descriptor without that flag.
+/// A child another thread starts in between inherits those ends and holds the
+/// first child's input or output open until it exits itself, so an exchange that
+/// waits for end of file stalls with it. Threads that spawn at the same time
+/// therefore take turns (`spawn_in_turn`), on every Unix alike.
+static SPAWN: Mutex<()> = Mutex::new(());
+/// The spawn turn: while it is held, no `spawn_in_turn` creates pipes or starts
+/// a child.
+pub fn spawn_turn() -> MutexGuard<'static, ()> {
+    SPAWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+/// `Command::spawn` in the spawn turn (`SPAWN`), for every spawn that can run
+/// while another thread of this process spawns.
+pub fn spawn_in_turn(command: &mut Command) -> io::Result<Child> {
+    let _turn = spawn_turn();
+    command.spawn()
 }
 /// `Command::status` through `spawn`.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
