@@ -1,5 +1,6 @@
 #pragma once
 
+#include "MachinePlatform.h"
 #include "WindowsCommandLine.h"
 
 #include <QRegularExpression>
@@ -106,9 +107,12 @@ inline QString open(const QString &hgsPath, const QString &host, const QString &
 inline QString folderShell(const QString &hgsPath, const QString &host, const QString &directory,
                            Shell shell = currentShell())
 {
-    if (!directory.startsWith('/') || directory.contains(QChar::Null)) return {};
-    // A computer without local sessions has no local folders to open (Windows).
-    if (host.isEmpty() && shell == Shell::PowerShell) return {};
+    // Peers are POSIX; this computer has the platform of its shell.
+    const bool windows = host.isEmpty() && shell == Shell::PowerShell;
+    const auto style = windows ? MachinePlatform::Style::Windows : MachinePlatform::Style::Posix;
+    if (!MachinePlatform::absolute(directory, style) || directory.contains(QChar::Null)) return {};
+    if (windows)
+        return QStringLiteral("Set-Location -LiteralPath ") + powerShellQuote(MachinePlatform::native(directory, style));
     const auto local = QStringLiteral("cd -- ") + shellQuote(directory)
         + QStringLiteral(" && exec \"${SHELL:-/bin/sh}\" -l");
     return host.isEmpty() ? local : command(hgsPath, {"machine", "ssh", host, "--directory", directory}, shell);

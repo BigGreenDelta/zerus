@@ -27,6 +27,7 @@ private slots:
     void folderShellQuotesPathsAndUsesMachineProfiles();
     void powerShellCommandsQuoteEveryNonPlainArgument();
     void programBackendsReceiveTheDisplayedCommand();
+    void shellBackendsReceiveTheFolderShellCommand();
     // ClipboardBackend -- только чистые части: цепочка способов, проверка команды и текст
     // уведомления. Сам буфер обмена тест не трогает (это буфер живого пользователя).
     void clipboardChainPrefersKlipperOnLinux();
@@ -72,8 +73,20 @@ void TestTerminalBackend::folderShellQuotesPathsAndUsesMachineProfiles()
     QCOMPARE(SessionCommands::folderShell({}, {}, "/work/a folder", Posix), QString("cd -- '/work/a folder' && exec \"${SHELL:-/bin/sh}\" -l"));
     QCOMPARE(SessionCommands::folderShell("/opt/hgs", "mac", "/work/it's $(literal)", Posix),
         SessionCommands::command("/opt/hgs", {"machine","ssh","mac","--directory","/work/it's $(literal)"}, Posix));
-    // A control console (Windows) has no local folders; remote ones stay POSIX paths.
+    // A drive path is no folder of a POSIX machine.
+    QVERIFY(SessionCommands::folderShell({}, {}, "C:/work", Posix).isEmpty());
+    QVERIFY(SessionCommands::folderShell("/opt/hgs", "mac", "C:/work", Posix).isEmpty());
+    // This Windows computer's folders are drive and UNC paths, given to PowerShell
+    // with native separators; remote ones stay POSIX paths.
     QVERIFY(SessionCommands::folderShell({}, {}, "/work/a folder", PowerShell).isEmpty());
+    QVERIFY(SessionCommands::folderShell({}, {}, "work", PowerShell).isEmpty());
+    QCOMPARE(SessionCommands::folderShell({}, {}, "C:/work/project", PowerShell),
+             QString("Set-Location -LiteralPath C:\\work\\project"));
+    QCOMPARE(SessionCommands::folderShell({}, {}, "c:\\Users\\user\\it's [draft] $x", PowerShell),
+             QString("Set-Location -LiteralPath 'c:\\Users\\user\\it''s [draft] $x'"));
+    QCOMPARE(SessionCommands::folderShell({}, {}, "//server/share/dir", PowerShell),
+             QString("Set-Location -LiteralPath \\\\server\\share\\dir"));
+    QVERIFY(SessionCommands::folderShell("C:/Zerus/hgs.exe", "mac", "C:/work", PowerShell).isEmpty());
     QCOMPARE(SessionCommands::folderShell("C:/Zerus/hgs.exe", "mac", "/work/a folder", PowerShell),
              QString("C:\\Zerus\\hgs.exe machine ssh mac --directory '/work/a folder'"));
 }
@@ -123,6 +136,30 @@ void TestTerminalBackend::programBackendsReceiveTheDisplayedCommand()
     QString error;
     QVERIFY(backend.openProgram("/opt/hgs", {"@mac", "a", "codex/p/a b"}, &error));
     QCOMPARE(backend.command, SessionCommands::command("/opt/hgs", {"@mac", "a", "codex/p/a b"}));
+}
+
+void TestTerminalBackend::shellBackendsReceiveTheFolderShellCommand()
+{
+    // A local folder shell is the folder shell command line, except in Windows
+    // Terminal (WindowsTerminalBackend::openShell).
+    struct Recording : TerminalBackend {
+        QString command;
+        bool open(const QString &value, QString *) override { command = value; return true; }
+    } backend;
+#ifdef Q_OS_WIN
+    const QString folder = "C:/work/a folder";
+#else
+    const QString folder = "/work/a folder";
+#endif
+    QString error;
+    QVERIFY(backend.openShell(folder, &error));
+    QCOMPARE(backend.command, SessionCommands::folderShell({}, {}, folder));
+    QVERIFY(!backend.command.isEmpty());
+    // Nothing starts for a path that is no folder of this computer.
+    backend.command.clear();
+    QVERIFY(!backend.openShell("work", &error));
+    QVERIFY(backend.command.isEmpty());
+    QVERIFY(error.contains("work"));
 }
 
 void TestTerminalBackend::substitutesCommandAsOneArgument()
