@@ -1775,13 +1775,29 @@ mod process {
     /// D11's pause: Ctrl+Break for this process's group, which a supervisor the
     /// session host started leads (CREATE_NEW_PROCESS_GROUP) and its agent
     /// shares with every tool it started, as a Unix pane's group does. The
-    /// supervisor's own handler records it and keeps running. A process that
-    /// leads no group reaches no process this way.
+    /// supervisor's own handler records it and keeps running, but the console
+    /// runs that handler on a thread of its own, which may come after the agent
+    /// has ended: the request is recorded as SIGTERM before the event goes out,
+    /// so that the `--run` fallback sees the stop however soon the agent ends
+    /// (spec D9). A process that leads no group reaches no process this way.
     pub fn break_process_group() -> io::Result<()> {
+        let recorded = SHUTDOWN_SIGNAL
+            .compare_exchange(0, SIGTERM, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
         // SAFETY: plain call; the event goes to the processes on this
         // process's console whose group ID is this process's ID.
         if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, std::process::id()) } == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            // Nothing went out, so nothing was asked to stop.
+            if recorded {
+                let _ = SHUTDOWN_SIGNAL.compare_exchange(
+                    SIGTERM,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+            }
+            return Err(error);
         }
         Ok(())
     }

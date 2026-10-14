@@ -11,8 +11,9 @@
 //!   runs and is inside the session's job.
 //! - `stop`: D11's pause, Ctrl+Break for the supervisor's process group, which
 //!   the agent shares with every tool it started (`platform::break_process_group`).
-//!   The supervisor's own handler (`platform::ShutdownGuard`) records it as
-//!   SIGTERM and keeps running, so that it can record how the agent ended.
+//!   It is recorded as SIGTERM before the event goes out, and the
+//!   supervisor's own handler (`platform::ShutdownGuard`) keeps it running, so
+//!   that it can record how the agent ended.
 //!
 //! Registration is best effort: a supervisor that cannot reach its host still
 //! runs its program, and the host then refuses input checks and pauses for the
@@ -608,6 +609,9 @@ mod windows_tests {
         until("the second agent", || judged(second.id()).is_ok());
         assert_eq!(platform::shutdown_signal(), 0);
         Live.pause().unwrap();
+        // Recorded before the event went out: the console runs this process's
+        // own handler on a thread of its own, possibly after the agent ended.
+        assert_eq!(platform::shutdown_signal(), 15);
         let deadline = Instant::now() + LIMIT;
         let status = loop {
             if let Some(status) = second.try_wait().unwrap() {
@@ -619,8 +623,6 @@ mod windows_tests {
             );
             thread::sleep(Duration::from_millis(20));
         };
-        // The supervisor's own handler runs on a thread of its own.
-        until("the recorded pause", || platform::shutdown_signal() != 0);
         note(&format!(
             "paused {} {}",
             ExitInfo::of(status).exit_code(),

@@ -420,9 +420,11 @@ ID is in the supervisor's own job (the session job). Editors and pagers are `vi`
   without a supervisor); resume after either keeps the conversation for all three.
 - Implemented in M4.2: `hgs pause` asks the backend (`request_exit`, the tmux
   backend's exact-PID SIGTERM), whose host form is the `signal` `pause` request
-  for the pane; the supervisor raises `CTRL_BREAK_EVENT` for its own group
-  (`GenerateConsoleCtrlEvent` with its PID, which reaches no process when it leads
-  no group), and also re-raises a stop that arrived before its agent started. A
+  for the pane; the supervisor records the request as SIGTERM, then raises
+  `CTRL_BREAK_EVENT` for its own group (`GenerateConsoleCtrlEvent` with its PID,
+  which reaches no process when it leads no group; its own handler runs on a
+  console thread that may come after the agent has ended), and also re-raises a
+  stop that arrived before its agent started. A
   pause whose supervisor ends with its agent before its answer arrives counts as
   done. A terminate's 10 s run from its request, so a slow pause answer is part
   of it; `hgs terminate` waits 20 s on Windows for the agent to exit (10 s on
