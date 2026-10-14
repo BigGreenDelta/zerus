@@ -1438,12 +1438,13 @@ keep that output private.
 Activity supports creation, messages/images, busy-session submission, questions,
 approvals, per-session model/effort, pause/resume, rename, goals, todos and child
 views. A new child view stays empty until the child's first step records its
-native identity. Request receipts prevent duplicate submission. Uncertain
-delivery requires inspection. Model changes do not replace profile defaults.
-Stopping one session does not terminate neighboring agents or the shared host.
-Closing Zerus leaves the host running; Forget retains native history. Linux user
-systemd runs the host in an independent scope so GUI service restart cannot kill
-the engine.
+native identity; a child cancelled before that step stays listed with an empty
+view. A child that ran without a valid identity reports native corruption.
+Request receipts prevent duplicate submission. Uncertain delivery requires
+inspection. Model changes do not replace profile defaults. Stopping one session
+does not terminate neighboring agents or the shared host. Closing Zerus leaves
+the host running; Forget retains native history. Linux user systemd runs the
+host in an independent scope so GUI service restart cannot kill the engine.
 
 Native fork, global DeepSeek history search, schedule management and account
 transfer are currently handled in Native UI. Native context reset awaits a
@@ -2077,8 +2078,10 @@ caps Git output at 1 MiB and the whole check at three seconds, and never prompts
 for credentials. Ahead/behind counts compare HEAD with its configured local
 tracking ref; `remote_state: verified` requires that ref's OID to match an exact
 read-only `ls-remote` result. `changed` and `missing` do not imply synchronization.
-`no_upstream` requires a completed lookup that finds no configured upstream; a
-failed or timed-out upstream lookup leaves `remote_state: unknown`.
+`no_upstream` requires a completed lookup that finds no configured upstream, and
+a local tracking ref counts as absent (`changed` while the remote branch exists)
+only when its lookup completes without finding it. A failed or timed-out upstream
+or tracking ref lookup leaves `remote_state: unknown`.
 
 Subagent count fields distinguish active, completed, total, completeness and
 source; unknown totals are null. Up to six active/unreviewed previews accompany

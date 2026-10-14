@@ -16,7 +16,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -32,6 +32,11 @@ const REMEMBERED: &str = "swarm/mobile-peers.json";
 const REMEMBERED_LOCK: &str = "swarm/mobile-peers.lock";
 const REMEMBERED_BYTES: u64 = 64 * 1024;
 static TRANSPORT_STOP: AtomicBool = AtomicBool::new(false);
+/// On macOS, Rust creates a child's pipes before marking them close-on-exec.
+/// A child another discovery worker spawns in between inherits those ends, so
+/// that peer's transport waits for EOF until the unrelated one ends. Spawns
+/// therefore take turns.
+static SPAWN: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -600,7 +605,10 @@ fn capture_control(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().context("mobile helper unavailable")?;
+    let mut child = {
+        let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        command.spawn().context("mobile helper unavailable")?
+    };
     let result = (|| {
         let mut stdin = child.stdin.take();
         let mut stdout = child.stdout.take();
@@ -1499,5 +1507,50 @@ mod tests {
         assert!(swarm::verified_bindings(&config, &placeholder).is_empty());
         fs::write(config.dir.join("swarm/catalog.json"), b"{damaged").unwrap();
         assert!(swarm::verified_bindings(&config, &local).is_empty());
+    }
+
+    #[test]
+    fn a_transport_never_inherits_pipes_another_worker_is_still_creating() {
+        // This thread stands in for another discovery worker that holds the
+        // spawn turn between creating its pipes and marking them close-on-exec,
+        // as Rust does on macOS. High numbers keep its pipe apart from the
+        // descriptor the listing opens.
+        let turn = SPAWN.lock().unwrap();
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let creating: Vec<i32> = fds
+            .iter()
+            .map(|fd| unsafe {
+                let high = libc::fcntl(*fd, libc::F_DUPFD, 64);
+                libc::close(*fd);
+                high
+            })
+            .collect();
+        assert!(creating.iter().all(|fd| *fd >= 64), "{creating:?}");
+        let listing = thread::spawn(|| {
+            let mut command = Command::new("ls");
+            command.arg("/dev/fd");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            capture_control(command, &[], deadline, 4096, CaptureMode::Supervisor)
+        });
+        thread::sleep(Duration::from_millis(200));
+        for fd in &creating {
+            assert_eq!(
+                unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        drop(turn);
+        let output = listing.join().unwrap().unwrap();
+        assert_eq!(output.code, 0);
+        let open: Vec<i32> = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .filter_map(|fd| fd.parse().ok())
+            .collect();
+        assert!(open.contains(&0), "{open:?}");
+        for fd in creating {
+            assert!(!open.contains(&fd), "transport inherited {fd}: {open:?}");
+            unsafe { libc::close(fd) };
+        }
     }
 }

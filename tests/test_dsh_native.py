@@ -412,6 +412,50 @@ class NativeHarness(unittest.TestCase):
         done=self.wait(lambda: next((e for e in child_inspect(child)['events'] if e['type']=='AgentMessage'),None))
         self.assertIn(hold,done['detail'])
 
+    def test_child_cancelled_before_its_first_step_stays_listed_and_empty(self):
+        # A one-shot child cancelled before its first step never records its
+        # descriptor, and the parent's catalog keeps it after it is stored.
+        parent,other=self.create(),self.create();hold='UNSTARTED_CHILD_'+uuid.uuid4().hex
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        self.wait(lambda:(self.root/'holds'/(hold+'.waiting')).exists())
+        running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') and d['subagents'] else None)
+        child=next(iter(running['subagents']))
+        self.rpc('interrupt',{'sessionId':parent['conversation_id'],
+            'generation':running['host_generation'],'turnStarted':running['turn_started']})
+        self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+        result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
+        self.assertEqual(result.returncode,0,result.stderr)
+        stored=json.loads(result.stdout)
+        self.assertEqual(stored['events'],[]);self.assertFalse(stored['send_supported']);self.assertTrue(stored['read_only'])
+        self.assertEqual(stored['parent_conversation_id'],parent['conversation_id'])
+        # A never-started child is a finished one-shot child, not an unknown one.
+        self.assertEqual(stored['phase'],'idle');self.assertEqual(stored['child_mode'],'one-shot')
+        native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+        self.assertFalse(native['live']);self.assertEqual(native['page']['records'],[])
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['phase']=='idle' else None)
+        self.assertIn(child,done['subagents']);self.assertEqual(done['subagent_active_count'],0)
+        with self.assertRaises(RuntimeError):
+            self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+
+    def test_stored_child_with_a_damaged_or_missing_descriptor_stays_corrupt(self):
+        # Only a child without its own descriptor and step counts as unstarted:
+        # a malformed descriptor, or steps without one, remain native errors.
+        for damage in ('CORRUPT','UNRECORDED'):
+            with self.subTest(damage=damage):
+                parent=self.create();marker=damage+'_CHILD_'+uuid.uuid4().hex
+                self.cli('send',parent,self.payload(parent,text='SUBAGENT '+marker,attachments=[]))
+                data=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'] else None)
+                child=next(iter(data['subagents']))
+                self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+                # The child ran its steps and returned its result to the parent.
+                records=self.rpc('inspect',{'sessionId':parent['conversation_id']})['page']['records']
+                self.assertIn('Native reply: Child result fixture '+marker,json.dumps(records))
+                result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
+                self.assertNotEqual(result.returncode,0,result.stdout)
+                self.assertIn('subagent descriptor is corrupt',result.stderr)
+                with self.assertRaisesRegex(RuntimeError,'subagent descriptor is corrupt'):
+                    self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+
     def test_reads_do_not_add_effects_while_a_child_scope_unloads(self):
         # Native disposal unloads a finished child's Cordis scope before the
         # child leaves the live registry; the fixture holds that window open.
