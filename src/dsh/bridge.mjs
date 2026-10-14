@@ -138,9 +138,10 @@ export function apply(ctx, config) {
     return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
   };
   // A child lives in its parent's Agent scope and belongs to subagent routing:
-  // upstream neither prompts nor reconfigures one directly, and HGS messages it
-  // through send-child. Send and settings refuse any other than a top-level
-  // Agent before they change it.
+  // upstream neither prompts nor reconfigures one directly, offers it no
+  // commands and interrupts it only through its parent's address. HGS messages
+  // it through send-child. Send, settings, compact and interrupt refuse any
+  // other than a top-level Agent before they change it.
   const topLevel = agent => {
     if (agent && (agent.session.header.origin === 'subagent' || !ctx.agents.roots().includes(agent)))
       throw new Error('Use the parent to manage a subagent');
@@ -292,7 +293,7 @@ export function apply(ctx, config) {
       }
       case 'compact': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed');
-        const agent = ctx.agents.get(p.sessionId);
+        const agent = topLevel(ctx.agents.get(p.sessionId));
         if (!agent || ctx.commands.find(agent,'compact')?.definitionId !== '@deepseek-ai/dsh-command-compact') throw new Error('Native compaction is unavailable');
         if (compactReceipts.has(p.requestId) || compactionPublic(p.sessionId)?.status === 'compacting') throw new Error('Compaction was already requested');
         const abort = new AbortController();
@@ -310,9 +311,11 @@ export function apply(ctx, config) {
       }
       case 'interrupt': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed');
+        topLevel(ctx.agents.get(p.sessionId));
         const fresh = await inspect({ sessionId: p.sessionId });
         const started = fresh.page.records.findLast(row => row.event?.type === 'turn/start')?.event.time / 1000;
-        const live = ctx.agents.get(p.sessionId);
+        // The registry may change while the inspection awaits.
+        const live = topLevel(ctx.agents.get(p.sessionId));
         if (!live || !(started > 0) || started !== p.turnStarted) throw new Error('DeepSeek turn changed; refresh Activity');
         ctx.goals.disarm(live);
         const compaction = compactions.get(p.sessionId);

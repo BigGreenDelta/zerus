@@ -576,6 +576,55 @@ class NativeHarness(unittest.TestCase):
             self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a'})
         self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
 
+    def test_compact_and_interrupt_refuse_a_child_without_changing_it(self):
+        # hgs compacts and interrupts only a top-level session. Upstream offers
+        # no commands for a child and interrupts one only through its parent's
+        # address. A compact or interrupt request that names a live child, here
+        # held in its first step, is refused before it runs a command on the
+        # child, records compaction state or touches goals or the parent's turn.
+        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        def goals():
+            return (self.rpc('inspect',{'sessionId':parent['conversation_id']})['goal'],
+                    self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['goal'])
+        request_id=str(uuid.uuid4())
+        try:
+            child=self.wait(child_row)['sessionId']
+            running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') else None)
+            before=goals()
+            # Each request carries the parent's host generation and current turn.
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('compact',{'sessionId':child,'generation':running['host_generation'],'requestId':request_id})
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('interrupt',{'sessionId':child,'generation':running['host_generation'],'turnStarted':running['turn_started']})
+            self.assertTrue(child_row()['running'])
+            self.assertEqual(goals(),before)
+            still=self.cli('inspect',parent)
+            self.assertTrue(still['interrupt_supported']);self.assertEqual(still['turn_started'],running['turn_started'])
+        finally:
+            (self.root/'holds'/hold).touch()
+        def replied():
+            page=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['page']
+            return page if 'Native reply: Child result fixture '+hold in json.dumps(page['records']) else None
+        self.assertNotIn('command/run',json.dumps(self.wait(replied)))
+        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle')
+        # The parent keeps both operations, and the refused request ID was not consumed.
+        compacted=subprocess.run([str(HGS),'compact-context',parent['name'],'--json'],input=json.dumps(self.payload(parent,request_id=request_id)),
+                                 env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(compacted.returncode,0,compacted.stderr)
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('compact_context_request',{}).get('status') not in ['compacting','submitted',None] else None)
+        self.assertEqual(done['compact_context_request']['request_id'],request_id)
+        self.assertIn(done['compact_context_request']['status'],['unchanged','completed'])
+        self.cli('send',parent,self.payload(parent,text='INTERRUPT_WAIT_FIXTURE',attachments=[]))
+        busy=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') else None)
+        interrupted=subprocess.run([str(HGS),'interrupt',parent['name'],'--json'],input=json.dumps(self.payload(parent,expected_turn_started=busy['turn_started'])),
+                                   env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(interrupted.returncode,0,interrupted.stderr)
+        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle')
+
     def test_send_reads_an_uncomposed_root_without_installing_a_selection(self):
         # A webhook root runs its creation route without the model selection
         # upstream installs while composing a session. The send sign-in check
