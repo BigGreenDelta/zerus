@@ -250,7 +250,8 @@ above that is a console, before its `rm -rf`:
 cargo test --locked -- host:: state::backend state::control_console_tests platform::windows::tests </dev/null
 cargo build --locked
 cargo build --locked --example fake_agent
-HGS_TEST_BIN="$(cygpath -w "$PWD/target/debug/hgs.exe")" cargo test --locked -- host::attach </dev/null
+cargo test --locked --no-run --bin hgs   # names the test binary, target/debug/deps/hgs-<hash>.exe
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/debug/hgs.exe")" target/debug/deps/hgs-<hash>.exe host::attach </dev/null
 python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
@@ -265,7 +266,9 @@ as a supervisor on a pseudoconsole of an in-process host and its raw-input agent
 cannot tell whether a build it finds is current) as `hgs a` on a pseudoconsole of
 the test against an isolated host of that build: the repaint, keys and the prefix
 bindings, a resize, `--existing --run-id`, the session's end and the host's
-death, and the console modes before, during and after each attach.
+death, and the console modes before, during and after each attach. Run it from
+the test binary itself: `cargo test` keeps its tests in a job that forbids
+breakaway, where hgs starts no host (D4), so under `cargo test` it skips.
 `tests/test_windows_host.py`, `tests/test_windows_host_survival.py` and
 `tests/test_windows_lifecycle.py` take the build from `HGS_TEST_BIN` (default
 `target/debug/hgs.exe`) and the fake agent from `HGS_TEST_FAKE_AGENT` (default

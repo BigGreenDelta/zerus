@@ -900,11 +900,15 @@ mod tests {
 /// console modes before, during and after. The build comes from
 /// `HGS_TEST_BIN` (run `cargo build --locked` first); without it the test is
 /// skipped, as a unit test cannot tell whether a `hgs.exe` it finds is current.
+/// It is also skipped in a job that forbids breakaway, where `hgs` rightly
+/// starts no host (D4): `cargo test` runs tests in such a job on Windows, so run
+/// the test binary itself (docs/windows-host-testing.md).
 #[cfg(all(test, windows))]
 mod console_tests {
     use super::super::{
         conpty::Api,
         console::ConPtyLauncher,
+        job,
         protocol::Size,
         sequences::{Piece, Scanner},
         session::{Console as SessionConsole, LaunchPlan, Launched, Launcher},
@@ -1416,6 +1420,13 @@ mod console_tests {
             eprintln!("skipped: HGS_TEST_BIN names no hgs.exe (cargo build --locked first)");
             return;
         };
+        if matches!(job::current_job_allows_breakaway(), Ok(Some(false))) {
+            eprintln!(
+                "skipped: this test runs in a job that forbids breakaway (cargo test's on \
+                 Windows), where hgs starts no host; run the test binary itself"
+            );
+            return;
+        }
         let hgs = std::path::absolute(PathBuf::from(hgs)).unwrap();
         assert!(hgs.is_file(), "{} is missing", hgs.display());
         let case = Case::new(hgs);
