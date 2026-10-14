@@ -41,6 +41,12 @@ A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare 
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
 macOS.
 
+On macOS the Rust standard library marks a child's pipes close-on-exec only after
+creating them, so a child that another thread starts in between inherits them and
+holds that exchange's input or output open until it exits. Where threads of one
+`hgs` process can spawn at the same time (mobile peer discovery, speech computer
+discovery), every such spawn goes through `platform::spawn_in_turn`.
+
 The CLI script also builds `examples/fake_agent.rs`, a native stand-in agent for
 terminal tests that need a real process rather than a script, such as those that
 will run under the Windows session host. It records every input byte with its
