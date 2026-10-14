@@ -1163,6 +1163,17 @@ The UI caches at most 64 snapshots and 8 MiB. Cleanup is described in
 
 ### Cleaning up worktrees
 
+**Worktrees…** in the Projects heading opens an overview across all visible
+projects and computers, without selecting a project folder first. Project and
+computer filters retain exact identities, even when names or paths match.
+Repositories linked from several projects or subfolders appear once per computer.
+The list shows each checkout's branch, path, related sessions and cleanup state;
+the details include the owning computer, commit and reasons that prevent removal.
+Catalog reads run two at a time. Cleanup review runs on demand for the selected
+repository; offline snapshots remain readable but cannot be cleaned up.
+**Clean up repository…** opens the existing batch review, and **Remove worktree…**
+or **Forget missing worktree…** opens it for the selected linked checkout.
+
 Removal is always explicit and is reviewed on the computer that owns the
 checkout. **Clean up…** in Projects or the session inspector lists the linked
 worktrees of the repository as **Ready** (preselected), **Review** (removable but
@@ -1229,9 +1240,9 @@ session's rows: a large colored provider logo, the agent and what adding does.
 A removed profile can be added again with its saved sign-in. Choosing another agent
 never resizes the dialog or moves its fields: **Account** and **Account name** stay
 in place and are disabled when they do not apply, and the hint keeps room for its
-longest text. OpenCode has one
-native configuration per machine: **Remove from…** takes it out of Accounts and
-New session there, keeping its configuration, credentials and sessions, and Add
+longest text. OpenCode has one native configuration per machine: **Rename…**
+changes only its name in Zerus, **Remove from…** takes it out of Accounts and New
+session there, keeping its configuration, credentials and sessions, and Add
 account brings it back. Its row is unavailable while it is listed or not
 installed. **New session**
 shows one list of **Account and agent** pairs for the chosen computer on desktop
