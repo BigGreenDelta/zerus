@@ -425,8 +425,9 @@ time.sleep(10)
         # support probe, all separate processes, each stage within its own 3 s cap.
         # A stage stalled beyond its cap leaves that peer offline and the gateway
         # then finishes: bounded discovery, not the reaping under test. Only such
-        # a finished discovery is started again.
-        stalled, receipts = [], []
+        # a finished discovery is started again, as is one that reaped its own
+        # transports before this test could kill it.
+        stalled, receipts, owned = [], [], False
         for _ in range(3):
             for path in paths:
                 path.unlink(missing_ok=True)
@@ -439,12 +440,16 @@ time.sleep(10)
                 time.sleep(.01)
             receipts += [json.loads(path.read_text()) for path in paths if path.exists()]
             if all(path.exists() for path in paths):
-                break
+                pids = [pid for path in paths for pid in json.loads(path.read_text())['pids']]
+                owned = process.poll() is None and all(self.running(pid) for pid in pids)
+                if owned:
+                    break
+                # Its own deadline already stops them; the discovery deadline bounds the rest.
+                process.wait(timeout=10)
             self.assertIsNotNone(process.poll(), 'discovery outlived its deadline')
-            stalled.append((process.communicate(timeout=5)[1].decode(errors='replace'),
+            stalled.append((process.returncode, process.communicate(timeout=5)[1].decode(errors='replace'),
                             [path.name for path in paths if not path.exists()]))
-        self.assertTrue(all(path.exists() for path in paths), stalled)
-        pids = [pid for path in paths for pid in json.loads(path.read_text())['pids']]
+        self.assertTrue(owned, stalled)
         process.kill()
         process.wait(timeout=5)
         process.stdout.close()
