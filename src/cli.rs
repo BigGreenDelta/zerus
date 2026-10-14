@@ -316,13 +316,14 @@ pub(crate) fn usage() -> &'static str {
 /// `paste`, which tmux's C-v binding runs.
 const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
 /// Whether a usage line tells of what only Unix has: a command of
-/// `UNIX_ONLY_COMMANDS`.
+/// `UNIX_ONLY_COMMANDS` or the Ctrl+V that runs `hgs paste`.
 fn unix_only_usage(line: &str) -> bool {
     let mut words = line.split_whitespace();
     match words.next() {
         Some("hgs") => words
             .next()
             .is_some_and(|word| UNIX_ONLY_COMMANDS.contains(&word)),
+        Some("Ctrl+V") => true,
         _ => false,
     }
 }
@@ -336,9 +337,9 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
     Err(Error::new(2, format!("hgs {command} is not supported on Windows")))
 }
 /// The usage text, `USAGE` byte for byte where tmux hosts the sessions. Windows
-/// has no tmux C-v binding for `hgs paste`, no `hgs clip` or `hgs notify`, and
-/// its dry runs print the session host's requests, so its text lists none of
-/// them and does not name tmux.
+/// has no tmux C-v binding, which pulls a peer's image through `hgs paste` and
+/// `hgs clip`, no `hgs notify`, and its dry runs print the session host's
+/// requests, so its text tells of none of them and does not name tmux.
 fn usage_text(tmux: bool) -> Cow<'static, str> {
     if tmux {
         return USAGE.into();
@@ -2246,10 +2247,12 @@ mod tests {
     fn usage_names_tmux_only_where_it_hosts_the_sessions() {
         // Unix keeps tmux's text byte for byte, capability markers included.
         assert_eq!(usage_text(true), USAGE);
-        // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, and its dry
-        // runs print the host's requests; every other line stays as it is.
+        // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
+        // that pulls a peer's image, and its dry runs print the host's
+        // requests; every other line stays as it is.
         let neutral = usage_text(false);
         assert!(!neutral.contains("tmux"), "{neutral}");
+        assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert_eq!(
             neutral,
             USAGE
@@ -2268,6 +2271,10 @@ mod tests {
                 .replace(
                     "  --dry-run  print the tmux/ssh command\n",
                     "  --dry-run  print the session-host/ssh command\n"
+                )
+                .replace(
+                    "Ctrl+V in a session attached from a peer pulls the image from that box's clipboard.\n",
+                    ""
                 )
         );
     }
