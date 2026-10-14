@@ -303,6 +303,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("rustup toolchain install 1.85.0 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
+                     "test_windows_host_survival test_windows_lifecycle </dev/null",
                      "bash scripts/ci/gui.sh build </dev/null", "bash scripts/ci/gui.sh test </dev/null",
                      "--output artifacts/zerus-windows-x86_64.zip </dev/null",
                      "--run --selftest \\\n            </dev/null"):
