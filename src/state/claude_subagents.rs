@@ -81,8 +81,9 @@ fn owned_row(row: &Value, session: &str, id: &str) -> bool {
 
 fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> bool {
     let Some(parent) = path.parent().filter(|p| p.parent().is_some_and(|p| p.ends_with("workflows"))) else { return false; };
+    let Ok(parent) = crate::platform::canonical(parent) else { return false; };
     let Ok(journal) = crate::platform::canonical(parent.join("journal.jsonl")) else { return false; };
-    if !journal.starts_with(parent) { return false; }
+    if !journal.starts_with(&parent) { return false; }
     let Some(results) = scan_cache::cached("claude-workflow-results-v1", &journal, session, || {
         let mut file = File::open(&journal).ok()?;
         let limit = 256 * 1024;
@@ -399,6 +400,26 @@ mod tests {
         let foreign = json!({"type":"result","agentId":"worker","key":"other-attempt","result":result});
         fs::write(&journal, format!("{started}\n{foreign}\n")).unwrap();
         assert!(!workflow_result(&path, SESSION, "worker", &hash));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workflow_journal_accepts_canonical_aliases_and_rejects_escapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workflows/wf-one");
+        fs::create_dir_all(&root).unwrap();
+        let journal = root.join("journal.jsonl");
+        let started = json!({"type":"started","agentId":"worker","key":"attempt"});
+        let result = json!({"type":"result","agentId":"worker","key":"attempt","result":"Complete"});
+        fs::write(&journal,format!("{started}\n{result}\n")).unwrap();
+        let hash = format!("{:x}",Sha256::digest("Complete"));
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(),&alias).unwrap();
+        assert!(workflow_result(&alias.join("workflows/wf-one/agent-worker.jsonl"),SESSION,"worker",&hash));
+        let outside = temp.path().join("other-journal.jsonl");
+        fs::rename(&journal,&outside).unwrap();
+        std::os::unix::fs::symlink(outside,&journal).unwrap();
+        assert!(!workflow_result(&root.join("agent-worker.jsonl"),SESSION,"worker",&hash));
     }
 
     #[test]

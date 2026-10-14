@@ -222,6 +222,9 @@ Install and start:
    files together: the app uses the `hgs.exe` next to it. The executables are not
    code-signed, so SmartScreen may show **Windows protected your PC** on the first
    start; choose **More info → Run anyway** only for a zip whose hash matched.
+   The Zerus window opens. Closing it keeps Zerus running in the notification
+   area, where Windows 11 first hides a new icon behind the **^** arrow; run
+   `hgs-tray.exe` again to bring the window back.
 4. Add your machines in **Machines**. Accept a new host key once with
    **Open SSH terminal**, then use **Test connection**. **Install / update HGS…**
    builds `hgs` on the remote machine from a Zerus source checkout on this computer;
@@ -263,7 +266,9 @@ Limitations of the control console:
   says so and reports no update. To update, quit Zerus from the tray menu and
   replace the folder with the new one; configuration and state stay in your
   profile. To start Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the
-  Startup folder (`shell:startup`).
+  Startup folder (`shell:startup`) and add a space and `--background` at the end
+  of its **Target** field, so Zerus starts in the notification area without
+  opening its window.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds.

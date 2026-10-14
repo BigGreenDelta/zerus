@@ -287,8 +287,9 @@ void TestMarkdownObjects::richRepliesPaintWithinFrameBudget()
         best = std::min(best, threadCpuMs() - start);
     }
     // The former document-wide rounded clip costs 150-225 ms per frame on
-    // this rich response. Allow ample platform margin above the ~15 ms fix.
-    QVERIFY2(best < 1000, qPrintable(QString("%1 ms CPU for 20 rich frames").arg(best)));
+    // this rich response (3000-4500 ms here). Allow ample platform margin
+    // above the ~15 ms fix: a hosted macOS runner once took 1001 ms.
+    QVERIFY2(best < 2000, qPrintable(QString("%1 ms CPU for 20 rich frames").arg(best)));
 }
 
 void TestMarkdownObjects::chipIndexFollowsLayoutAndContentChanges()
