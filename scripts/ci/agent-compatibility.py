@@ -20,29 +20,41 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).with_suffix('.json')
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
-# Official npm packages per target; each contains one native executable.
+WINDOWS = 'win32-x64'
+HOST_COVERAGE = ('tracked launch, hooks, exact input, input keys (Esc, Ctrl+C, Ctrl+S, clearing), dialog answers, '
+                 'clear, pause, resume and terminate through the session host')
+# Official npm packages per target. Only the native executable that `members` names
+# is extracted, under its own name. On Windows the agents run in the session host,
+# where the suite, timeout and coverage of `windows` replace the tmux suites'.
 AGENTS = {
     'codex': dict(
-        name='Codex', variable='HGS_CODEX_TEST_BIN', version_output='codex-cli {}', targets=['linux-x64'],
+        name='Codex', variable='HGS_CODEX_TEST_BIN', version_output='codex-cli {}',
         tarball='https://registry.npmjs.org/@openai/codex/-/codex-{version}-{target}.tgz',
         metadata='https://registry.npmjs.org/@openai/codex/{version}-{target}', published='{version}-{target}',
-        member='package/vendor/x86_64-unknown-linux-musl/bin/codex',
+        # The Windows package also holds the sandbox's setup program and command
+        # runner, the code-mode host, rg and voice libraries. The suites run Codex
+        # without its sandbox and code mode, so none of them is extracted.
+        members={'linux-x64': 'package/vendor/x86_64-unknown-linux-musl/bin/codex',
+                 WINDOWS: 'package/vendor/x86_64-pc-windows-msvc/bin/codex.exe'},
         coverage='clear, draft preservation, identity, async question panels, two terminal sizes and animation modes',
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
-                'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native']),
+                'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native'],
+        windows=dict(suites=['test_windows_native_agents.NativeWindowsCodex'], timeout=900, coverage=HOST_COVERAGE)),
     'claude': dict(
         name='Claude Code', variable='HGS_CLAUDE_TEST_BIN', version_output='{} (Claude Code)',
-        targets=['linux-x64', 'darwin-arm64'],
         tarball='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/-/claude-code-{target}-{version}.tgz',
         metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/{version}', published='{version}',
-        member='package/claude',
+        members={'linux-x64': 'package/claude', 'darwin-arm64': 'package/claude', WINDOWS: 'package/claude.exe'},
         coverage='input, questions, approvals, trust, resume, clear, compaction and session-only model settings',
         timeout=900,
         suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_clear_context_native.NativeClearContext',
-                'test_compact_context_native', 'test_claude_settings_native']),
+                'test_compact_context_native', 'test_claude_settings_native'],
+        windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200, coverage=HOST_COVERAGE)),
 }
+# Suite inputs taken from the caller; every other HGS_ variable is dropped.
+FORWARDED = ('HGS_TEST_CONPTY_DIR',)
 NATIVE_RUNNER = '''
 import json, sys, unittest
 suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
@@ -53,9 +65,43 @@ sys.exit(not result.wasSuccessful() or bool(result.skipped) or result.testsRun =
 
 
 def host_target():
-    system = {'Linux': 'linux', 'Darwin': 'darwin'}.get(platform.system())
+    system = {'Linux': 'linux', 'Darwin': 'darwin', 'Windows': 'win32'}.get(platform.system())
     machine = {'x86_64': 'x64', 'amd64': 'x64', 'arm64': 'arm64', 'aarch64': 'arm64'}.get(platform.machine().lower())
     return system + '-' + machine if system and machine else None
+
+
+def target_spec(agent, target):
+    """The agent's specification for one target: on Windows its session host suites."""
+    spec = AGENTS[agent]
+    return dict(spec, **spec['windows']) if target == WINDOWS else spec
+
+
+def check_manifest(manifest):
+    """Each reviewed version is pinned once for every target its agent supports.
+
+    Only an older version kept as a regression boundary, whose pins all name the
+    reason as `retained`, may cover fewer targets; the newest version never does.
+    """
+    for agent, spec in AGENTS.items():
+        pins = manifest[agent]
+        versions = list(dict.fromkeys(package['version'] for package in pins))
+        if not versions:
+            raise ValueError(spec['name'] + ' has no reviewed version')
+        for version in versions:
+            label = spec['name'] + ' ' + version
+            rows = [package for package in pins if package['version'] == version]
+            targets = [package['target'] for package in rows]
+            if len(set(targets)) != len(targets) or not set(targets) <= set(spec['members']):
+                raise ValueError(label + ' pins an unsupported target or one target twice')
+            reasons = {package.get('retained') for package in rows}
+            if len(reasons) != 1:
+                raise ValueError(label + ' is retained on some targets only')
+            reason = reasons.pop()
+            if reason is None:
+                if set(targets) != set(spec['members']):
+                    raise ValueError(label + ' needs a pin for every target: ' + ', '.join(sorted(spec['members'])))
+            elif not isinstance(reason, str) or not reason.strip() or version == versions[-1]:
+                raise ValueError(label + ': only an older version may be retained, with its reason')
 
 
 def fetch_json(url):
@@ -93,9 +139,10 @@ def install_native(agent, package, destination):
     """Verify published bytes, then extract exactly one regular native executable."""
     spec = AGENTS[agent]
     url = package['url']
-    if package['target'] not in spec['targets'] or url != spec['tarball'].format(
+    if package['target'] not in spec['members'] or url != spec['tarball'].format(
             version=version_text(package['version']), target=package['target']):
         raise ValueError('Expected the official ' + spec['name'] + ' package distribution')
+    name = spec['members'][package['target']]
     algorithm, encoded = package['integrity'].split('-', 1)
     if algorithm != 'sha512':
         raise ValueError('Expected a SHA-512 package pin')
@@ -117,10 +164,10 @@ def install_native(agent, package, destination):
         if digest.digest() != expected:
             raise ValueError('Native package integrity mismatch')
         with tarfile.open(archive, 'r:gz') as tar:
-            member = tar.getmember(spec['member'])
+            member = tar.getmember(name)
             if not member.isfile() or not 0 < member.size <= MAX_PACKAGE_BYTES:
                 raise ValueError('Expected one regular bounded native executable')
-            native = destination / agent
+            native = destination / name.rsplit('/', 1)[-1]
             with tar.extractfile(member) as source, native.open('wb') as output:
                 shutil.copyfileobj(source, output)
         native.chmod(0o755)
@@ -130,14 +177,55 @@ def install_native(agent, package, destination):
 
 
 def fixture_environment(home):
+    # Windows spells every inherited name in upper case, so the prefixes match there
+    # too, and SYSTEMROOT, PATHEXT, TEMP and the like pass through unchanged.
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('HGS_', 'OPENAI_', 'ANTHROPIC_', 'CODEX_', 'CLAUDE', 'DEEPSEEK_', 'KIMI_'))}
+    env.update({key: os.environ[key] for key in FORWARDED if key in os.environ})
     home.mkdir(parents=True, exist_ok=True)
     (home / '.codex').mkdir(exist_ok=True)
+    # UTF-8 mode: suites and their Python fakes log non-ASCII prompts, which a
+    # Windows code page cannot encode.
     env.update(HOME=str(home), CODEX_HOME=str(home / '.codex'),
                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1',
-               PYTHONPATH=str(ROOT / 'tests'), TERM='xterm-256color')
+               PYTHONPATH=str(ROOT / 'tests'), PYTHONUTF8='1', TERM='xterm-256color')
     return env
+
+
+def private_profile(env, home):
+    """`env` with the Windows profile in `home` as well: Windows programs find it
+    through these rather than HOME."""
+    env = dict(env)
+    for key, path in (('USERPROFILE', home), ('APPDATA', home / 'AppData' / 'Roaming'),
+                      ('LOCALAPPDATA', home / 'AppData' / 'Local')):
+        path.mkdir(parents=True, exist_ok=True)
+        env[key] = str(path)
+    return env
+
+
+def probe(native, arguments, env, timeout=60):
+    """A native executable's output. The first start of a fresh copy may wait for a
+    malware scan on Windows."""
+    return subprocess.check_output([str(native), *arguments], env=env, stdin=subprocess.DEVNULL,
+                                   encoding='utf-8', errors='replace', timeout=timeout)
+
+
+def run_suites(suites, env, timeout, scratch, log):
+    """Run unittest names in a fresh interpreter and keep its stdout, then stderr, in
+    `log`; returns the exit status and stdout. Files rather than pipes: reading a pipe
+    waits for every process that inherited it, a session host or agent a suite left
+    behind included (on Windows even past the timeout), and a run that times out
+    still leaves its log."""
+    out, err = scratch / (log.stem + '.stdout'), scratch / (log.stem + '.stderr')
+    try:
+        with out.open('wb') as stdout, err.open('wb') as stderr:
+            run = subprocess.run([sys.executable, '-c', NATIVE_RUNNER, *suites], cwd=ROOT, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
+    finally:
+        output = out.read_bytes() + err.read_bytes()
+        log.write_bytes(output)
+        print(output.decode('utf-8', 'replace').replace('\r\n', '\n'), flush=True)
+    return run.returncode, out.read_bytes().decode('utf-8', 'replace')
 
 
 def method_names(value):
@@ -159,10 +247,10 @@ def method_names(value):
 def schema_snapshot(directory):
     methods, files = set(), {}
     for path in sorted(directory.rglob('*.json')):
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding='utf-8'))
         methods.update(method_names(data))
         normalized = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
-        files[str(path.relative_to(directory))] = hashlib.sha256(normalized).hexdigest()
+        files[path.relative_to(directory).as_posix()] = hashlib.sha256(normalized).hexdigest()
     if not files or not methods:
         raise ValueError('Native protocol schema did not expose any methods')
     return {'methods': sorted(methods), 'files': files}
@@ -180,45 +268,50 @@ def schema_changes(before, after):
 
 
 def qualify(agent, package, work, results, hgs):
-    spec = AGENTS[agent]
+    target = package['target']
+    spec = target_spec(agent, target)
     version = version_text(package['version'])
     print('Checking real', spec['name'], version, flush=True)
-    row = {'agent': agent, 'version': version, 'target': package['target'],
+    row = {'agent': agent, 'version': version, 'target': target,
            'package_integrity': package['integrity'], 'status': 'failed'}
     directory = results / agent / version
     directory.mkdir(parents=True, exist_ok=True)
     try:
         native = install_native(agent, package, work / agent / version)
-        env = fixture_environment(work / agent / version / 'home')
-        actual = subprocess.check_output([str(native), '--version'], env=env, text=True, timeout=20).strip()
+        home = work / agent / version / 'home'
+        env = fixture_environment(home)
+        # The runner's own probes get a private Windows profile too. The suites keep
+        # the caller's: each case gives its hosts and agents a profile of its own, and
+        # Codex prints folders relative to the real one, which a suite reads from
+        # USERPROFILE to place its projects.
+        probes = private_profile(env, home) if target == WINDOWS else env
+        actual = probe(native, ['--version'], probes).strip()
         if actual != spec['version_output'].format(version):
             raise ValueError('Native executable version mismatch: ' + actual)
-        help_text = subprocess.check_output([str(native), '--help'], env=env, text=True, timeout=20)
-        (directory / 'cli-help.txt').write_text(help_text)
+        help_text = probe(native, ['--help'], probes)
+        (directory / 'cli-help.txt').write_text(help_text, encoding='utf-8')
         row['cli_help_sha256'] = hashlib.sha256(help_text.encode()).hexdigest()
         cases = {'default': {}}
         if agent == 'codex':
             for label, flags in [('stable', []), ('experimental', ['--experimental'])]:
                 schemas = directory / ('schemas-' + label)
-                subprocess.run([str(native), 'app-server', 'generate-json-schema', '--out', str(schemas), *flags],
-                               env=env, check=True, capture_output=True, text=True, timeout=60)
+                probe(native, ['app-server', 'generate-json-schema', '--out', str(schemas), *flags], probes)
                 row['schema_' + label] = schema_snapshot(schemas)
-            cases = {geometry + '-' + mode: dict(HGS_CODEX_TEST_SIZE=geometry, HGS_CODEX_TEST_ANIMATIONS=animations)
-                     for geometry in ('95x47', '110x35')
-                     for mode, animations in (('animated', 'true'), ('reduced', 'false'))}
+            # Only the tmux suites take a terminal size and animation mode.
+            if target != WINDOWS:
+                cases = {geometry + '-' + mode: dict(HGS_CODEX_TEST_SIZE=geometry, HGS_CODEX_TEST_ANIMATIONS=animations)
+                         for geometry in ('95x47', '110x35')
+                         for mode, animations in (('animated', 'true'), ('reduced', 'false'))}
         row['cases'] = {}
         for case, settings in cases.items():
             test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)}, **settings)
-            run = subprocess.run([sys.executable, '-c', NATIVE_RUNNER, *spec['suites']], cwd=ROOT, env=test_env,
-                                 capture_output=True, text=True, timeout=spec['timeout'])
-            output = run.stdout + run.stderr
-            (directory / (case + '.log')).write_text(output)
-            print(output, flush=True)
-            marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in run.stdout.splitlines()
+            status, stdout = run_suites(spec['suites'], test_env, spec['timeout'], work / agent / version,
+                                        directory / (case + '.log'))
+            marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
                            if line.startswith('ZERUS_NATIVE_RESULT=')), None)
             if marker is not None:
                 row['cases'][case] = json.loads(marker)
-            if run.returncode or marker is None:
+            if status or marker is None:
                 raise ValueError('Native contract failed at ' + case)
         row['status'] = 'passed'
     except Exception as error:
@@ -239,7 +332,8 @@ def write_report(report, results):
         rows = [row for row in report['contracts'] if row['agent'] == agent]
         if rows:
             lines.extend(['', '## Real ' + spec['name'] + ' contracts', ''])
-            lines.extend(f"- `{row['version']}` ({row['target']}): {row['status']}; {spec['coverage']}." for row in rows)
+            lines.extend(f"- `{row['version']}` ({row['target']}): {row['status']}; "
+                         f"{target_spec(agent, row['target'])['coverage']}." for row in rows)
     for label, changes in report.get('capability_changes', {}).items():
         lines.extend(['', '## ' + label + ' protocol changes', '', 'Experimental methods remain separate from supported APIs.'])
         for kind in ('added_methods', 'removed_methods', 'added_schemas', 'removed_schemas', 'changed_schemas'):
@@ -252,9 +346,9 @@ def write_report(report, results):
                       (f'yes; review {agent}-cli-help.diff' if changed else 'no') + '.'])
     lines.extend(['', 'Review release notes and schema diffs before changing pins or implementing new features.', ''])
     summary = '\n'.join(lines)
-    (results / 'summary.md').write_text(summary)
+    (results / 'summary.md').write_text(summary, encoding='utf-8')
     if path := os.environ.get('GITHUB_STEP_SUMMARY'):
-        with open(path, 'a') as file:
+        with open(path, 'a', encoding='utf-8') as file:
             file.write(summary)
 
 
@@ -264,14 +358,20 @@ def main():
     parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
                         help='Qualify only this agent (repeatable); default: every agent pinned for this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
-    parser.add_argument('--hgs', type=Path, default=ROOT / 'target/debug/hgs')
+    debug = ROOT / 'target/debug' / ('hgs.exe' if os.name == 'nt' else 'hgs')
+    parser.add_argument('--hgs', type=Path, default=os.environ.get('HGS_TEST_BIN') or debug,
+                        help='The hgs build under test; default: HGS_TEST_BIN, else the debug build')
     args = parser.parse_args()
-    manifest = json.loads(MANIFEST.read_text())
+    manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
+    try:
+        check_manifest(manifest)
+    except ValueError as error:
+        parser.error(str(error))
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=True)
     target = host_target()
-    agents = args.agent or [agent for agent, spec in AGENTS.items() if target in spec['targets']]
-    unsupported = [agent for agent in agents if target not in AGENTS[agent]['targets']]
+    agents = args.agent or [agent for agent, spec in AGENTS.items() if target in spec['members']]
+    unsupported = [agent for agent in agents if target not in AGENTS[agent]['members']]
     if not agents or unsupported:
         parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
     report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'target': target,
@@ -294,7 +394,8 @@ def main():
                 report['canary_versions'][agent] = latest
             except Exception as error:
                 report['errors'].append(spec['name'] + ' canary discovery: ' + str(error))
-    with tempfile.TemporaryDirectory(prefix='zerus-native-compat-') as temporary:
+    # A scanner or a leftover process may still hold a file there on Windows.
+    with tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True) as temporary:
         for agent in agents:
             for package in packages[agent]:
                 report['contracts'].append(qualify(agent, package, Path(temporary), results, args.hgs.resolve()))
@@ -311,13 +412,15 @@ def main():
                 for label in ('stable', 'experimental') if 'schema_' + label in current and 'schema_' + label in latest}
         if 'cli_help_sha256' in current and 'cli_help_sha256' in latest:
             report.setdefault('cli_help_changed', {})[agent] = current['cli_help_sha256'] != latest['cli_help_sha256']
-            before = (results / agent / current['version'] / 'cli-help.txt').read_text().splitlines(keepends=True)
-            after = (results / agent / latest['version'] / 'cli-help.txt').read_text().splitlines(keepends=True)
+            before = (results / agent / current['version'] / 'cli-help.txt').read_text(encoding='utf-8').splitlines(keepends=True)
+            after = (results / agent / latest['version'] / 'cli-help.txt').read_text(encoding='utf-8').splitlines(keepends=True)
             (results / (agent + '-cli-help.diff')).write_text(''.join(difflib.unified_diff(
-                before, after, fromfile=current['version'], tofile=latest['version'])))
+                before, after, fromfile=current['version'], tofile=latest['version'])), encoding='utf-8')
     write_report(report, results)
     return bool(report['errors'] or any(row['status'] != 'passed' for row in report['contracts']))
 
 
 if __name__ == '__main__':
+    # Native logs may hold text that a Windows code page cannot encode.
+    sys.stdout.reconfigure(errors='backslashreplace')
     sys.exit(main())

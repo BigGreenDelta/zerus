@@ -302,7 +302,40 @@ private homes in a profile whose folder name has spaces and Cyrillic. The
 `windows-desktop` CI job runs the host, ConPTY, survival, lifecycle and hooks
 modules and the backend contract against the release `hgs.exe`, with the pinned
 pair it fetched in `HGS_TEST_CONPTY_DIR`
-([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
+([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)); the `windows-host`
+job runs the [real agents](#real-agents).
+
+## Real agents
+
+`tests/test_windows_native_agents.py` runs real Claude Code (`NativeWindowsClaude`)
+and Codex (`NativeWindowsCodex`) in isolated session hosts of the build under test,
+each with a private home and only a local fake API, so no account or model request
+is involved. A class skips only off Windows or without `HGS_TEST_BIN` and its
+agent's executable (`HGS_CLAUDE_TEST_BIN`, `HGS_CODEX_TEST_BIN`), and
+`HGS_TEST_CONPTY_DIR` gives the pinned pair as for the host suites. Rather than
+setting those by hand, run `scripts/ci/agent-compatibility.py`
+([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)):
+it downloads the reviewed `win32-x64` packages, checks them against their SHA-512
+pins, extracts only `claude.exe` and `codex.exe` into a temporary folder and runs
+each class with them, and a skipped or empty class fails the run. Codex never gets
+its Windows sandbox: the suites run it without one, and its sandbox setup program
+is never extracted. In a new Git Bash window with no `HGS_*` variables:
+
+```sh
+cargo build --release --locked
+python scripts/fetch-conpty.py --output target/conpty
+export HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")"
+export HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")"
+python -X utf8 scripts/ci/agent-compatibility.py </dev/null                # both agents
+python -X utf8 scripts/ci/agent-compatibility.py --agent claude </dev/null
+```
+
+The report and each class's log land in `artifacts/test-results/agent-compatibility`.
+UTF-8 mode keeps the suites' non-ASCII prompts from failing on a Windows code page;
+the runner also sets `PYTHONUTF8` for the suites. CI runs the same command in the
+`windows-host` job, outside the step's job like the host suites
+([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)). Local sessions on
+Windows remain a preview until these suites pass there.
 
 ## The terminal backend contract
 
@@ -339,6 +372,8 @@ drops the test variables and installs into its temporary profile.
 - Start every process with `CREATE_NO_WINDOW` and give every wait a deadline.
 - Use unique session names and launch IDs (`self.unique`); a host keeps a launch ID
   for a while after its session ended.
+- Python started with `-I` ignores `PYTHONUTF8`: start a Python fake API with
+  `-X utf8` as well, or a non-ASCII prompt fails it on a Windows code page.
 - A survival test that starts the host from inside a job (as sshd does) checks
   `in_job` in the hello: the host must have broken away. A job that forbids
   breakaway makes `__host call --start` fail instead of starting a host that would

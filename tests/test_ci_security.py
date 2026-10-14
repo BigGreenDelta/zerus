@@ -1,6 +1,7 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
 import configparser
 import datetime
+import importlib.util
 import io
 import json
 from itertools import takewhile
@@ -392,27 +393,33 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, android, cli, arch, arch-package, mac-desktop, windows-desktop]", gate)
+        self.assertIn("needs: [source, quick, relay, android, cli, arch, arch-package, mac-desktop, windows-desktop, "
+                      "windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "relay": "success", "android": "success", "cli": "success",
                 "arch": "success", "arch-package": "success", "mac-desktop": "success"}
-        for selected, result, success in [("true", "success", True), ("true", "failure", False),
-                                          ("true", "skipped", False), ("true", "cancelled", False),
-                                          ("false", "skipped", True), ("false", "success", False)]:
-            results = {name: {"result": value} for name, value in {**base, "windows-desktop": result}.items()}
-            environment = {"RESULTS": json.dumps(results), "RUN_CLI": "true", "RUN_ARCH": "true",
-                           "RUN_MACOS": "true", "RUN_WINDOWS": selected}
-            with self.subTest(selected=selected, result=result), patch.dict(os.environ, environment):
-                if success:
-                    exec(code, {})
-                else:
-                    with self.assertRaises(SystemExit):
+        # Both Windows jobs are selected together, and each must pass on its own.
+        windows = ("windows-desktop", "windows-host")
+        for name in windows:
+            for selected, result, success in [("true", "success", True), ("true", "failure", False),
+                                              ("true", "skipped", False), ("true", "cancelled", False),
+                                              ("false", "skipped", True), ("false", "success", False)]:
+                other = "success" if selected == "true" else "skipped"
+                results = {key: {"result": value}
+                           for key, value in {**base, **dict.fromkeys(windows, other), name: result}.items()}
+                environment = {"RESULTS": json.dumps(results), "RUN_CLI": "true", "RUN_ARCH": "true",
+                               "RUN_MACOS": "true", "RUN_WINDOWS": selected}
+                with self.subTest(job=name, selected=selected, result=result), patch.dict(os.environ, environment):
+                    if success:
                         exec(code, {})
+                    else:
+                        with self.assertRaises(SystemExit):
+                            exec(code, {})
         # Quick checks and the Android check always run; the Arch package is
         # selected exactly with Arch desktop.
-        base["windows-desktop"] = "success"
+        base.update(dict.fromkeys(windows, "success"))
         arch_skipped = {**base, "arch": "skipped", "arch-package": "skipped"}
         for results, run_arch, success in [
             ({**base, "quick": "failure"}, "true", False), ({**base, "quick": "skipped"}, "true", False),
@@ -460,7 +467,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.85.0 test --locked"):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "android", "cli", "arch", "arch-package", "mac-desktop", "windows-desktop"):
+        for name in ("quick", "relay", "android", "cli", "arch", "arch-package", "mac-desktop", "windows-desktop",
+                     "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -528,6 +536,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"uses: (actions/cache[\w/]*)@", checks)),
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
+        # windows-host restores the Rust cache that windows-desktop saves, and
+        # never saves it: two jobs saving one key would race.
+        read_only = {"windows-host": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []
@@ -547,8 +558,14 @@ class WorkflowSecurityTests(unittest.TestCase):
                         self.assertEqual(self.step_paths(step), restores[source])
                         saved.append(source)
             with self.subTest(job=name):
-                self.assertEqual(sorted(saved), sorted(restores))
+                self.assertEqual(sorted(saved), sorted(set(restores) - read_only.get(name, set())))
         self.assertGreaterEqual(saves, 10)
+        self.assertEqual(job(checks, "windows-host").count("actions/cache/"), 1)
+        desktop, host = (self.checks_step(name, "rust-cache") for name in ("windows-desktop", "windows-host"))
+        self.assertEqual(self.step_paths(host), self.step_paths(desktop))
+        for line in ("key", "restore-keys"):
+            self.assertEqual(re.search(rf"(?m)^          {line}: (.*)$", host)[1],
+                             re.search(rf"(?m)^          {line}: (.*)$", desktop)[1])
         # Qt is saved only after the desktop build has used the installation.
         windows = job(checks, "windows-desktop")
         self.assertLess(windows.index("bash scripts/ci/gui.sh build"), windows.index("name: Save Qt 6.10.3"))
@@ -580,7 +597,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         identity = "${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-"
         rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.85.0 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
-                "windows-desktop": ("windows-cli-${{ runner.arch }}-", "rustc -Vv")}
+                "windows-desktop": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
+                "windows-host": ("windows-cli-${{ runner.arch }}-", "rustc -Vv")}
         for name, (family, rustc) in rust.items():
             with self.subTest(job=name):
                 self.assertIn(f'echo "rustc=$({rustc} | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
@@ -628,6 +646,62 @@ class WorkflowSecurityTests(unittest.TestCase):
         for step in steps:
             if "uses: actions/cache/" in step or "uses: actions/upload-artifact@" in step:
                 self.assertFalse([path for path in self.step_paths(step) if "conpty" in path.lower()], step)
+
+    def test_windows_real_agents_run_in_a_bounded_credential_free_job_of_their_own(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        host, desktop = job(checks, "windows-host"), job(checks, "windows-desktop")
+        self.assertEqual(field(host, "name"), "Windows real agents through the session host")
+        for name in ("if", "runs-on"):
+            self.assertEqual(field(host, name), field(desktop, name))
+        for text in ("secrets", "vars.", "environment", "permissions", "github.token", "continue-on-error",
+                     "save_caches", "actions/cache/save"):
+            with self.subTest(forbidden=text):
+                self.assertNotIn(text, host)
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", host),
+                         ["actions/checkout", "actions/setup-python", "actions/cache/restore", "actions/upload-artifact"])
+        # The same text-file, interpreter and checkout rules as windows-desktop.
+        self.assertLess(host.index("core.autocrlf false"), host.index("actions/checkout@"))
+        self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", host)
+        setup = next(step for step in self.checks_steps("windows-desktop") if "actions/setup-python@" in step)
+        self.assertIn(setup, self.checks_steps("windows-host"))
+        steps = self.checks_steps("windows-host")
+        build = next(step for step in steps if "cargo build" in step)
+        fetch = next(step for step in steps if "fetch-conpty.py" in step)
+        agents = next(step for step in steps if "agent-compatibility.py" in step)
+        upload = next(step for step in steps if "actions/upload-artifact@" in step)
+        self.assertEqual(build, "      - run: cargo build --release --locked\n")
+        self.assertEqual(fetch.splitlines()[:2], next(step for step in self.checks_steps("windows-desktop")
+                                                      if "fetch-conpty.py" in step).splitlines()[:2])
+        self.assertLess(steps.index(build), steps.index(agents))
+        self.assertLess(steps.index(fetch), steps.index(agents))
+        # Outside the step's job, which forbids the hosts' breakaway, with every
+        # wait bounded: the runner's own timeouts, the harness's, the step's, the job's.
+        self.assertIn('HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")\n', agents)
+        self.assertIn('HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")\n', agents)
+        self.assertIn("export HGS_TEST_BIN HGS_TEST_CONPTY_DIR\n", agents)
+        self.assertIn("          PYTHONUTF8: 1\n", agents)
+        command = re.search(r"python scripts/ci/outside-job\.py (.*?)</dev/null\n", agents, re.S)[1]
+        self.assertTrue(command.rstrip().endswith("-- \\\n            python scripts/ci/agent-compatibility.py"), command)
+        harness = int(re.search(r"--timeout (\d+) ", command)[1])
+        step = int(re.search(r"(?m)^        timeout-minutes: (\d+)$", agents)[1])
+        spec = importlib.util.spec_from_file_location("agent_compatibility", ROOT / "scripts/ci/agent-compatibility.py")
+        compat = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(compat)
+        suites = sum(compat.target_spec(agent, "win32-x64")["timeout"] for agent in compat.AGENTS)
+        self.assertLess(suites + 5 * 60, harness)
+        self.assertLess(harness + 3 * 60, step * 60)
+        self.assertLess(step + 20, int(field(host, "timeout-minutes")))
+        # Leftovers end by executable path: hosts of the release build, the hgs-host-*
+        # folders of HostCase (copies and staged images) and the extracted agents.
+        self.assertEqual(re.findall(r"--end ('[^']*'|\"[^\"]*\")", command),
+                         ['"$HGS_TEST_BIN"', "'*\\hgs-host-*\\*.exe'", "'*\\zerus-native-compat-*\\*.exe'"])
+        self.assertIn('prefix="hgs-host-"', (ROOT / "tests/test_windows_host.py").read_text())
+        self.assertIn("prefix='zerus-native-compat-'", (ROOT / "scripts/ci/agent-compatibility.py").read_text())
+        for line in ("        if: always() && (github.event_name != 'schedule' || failure())\n",
+                     "name: windows-host-results\n          path: artifacts/test-results\n",
+                     "retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}"):
+            self.assertIn(line, upload)
+        self.assertIn("'windows-host': json.loads(os.environ['RUN_WINDOWS']),", job(checks, "gate"))
 
     def test_windows_ccache_is_an_exact_release_verified_before_use(self):
         windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")
