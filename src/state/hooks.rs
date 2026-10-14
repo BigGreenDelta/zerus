@@ -735,7 +735,9 @@ pub(super) fn hook() -> Result<i32> {
             write(&mut record)?;
             return Ok(0);
         }
-        if !string(&record, "expected_id").is_empty() && sid != string(&record, "expected_id") {
+        if !string(&record, "expected_id").is_empty() && sid != string(&record, "expected_id")
+            && !clear_context::resumed_start(&record, &event)
+        {
             record["error"] = json!("agent resumed a different conversation");
             record["activity"] = json!("unknown");
             write(&mut record)?;

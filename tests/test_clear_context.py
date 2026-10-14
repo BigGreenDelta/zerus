@@ -34,6 +34,51 @@ try:
   show()
 finally:termios.tcsetattr(fd,termios.TCSANOW,old)
 '''
+# A resumed Codex before its deferred SessionStart: the native executable holds
+# the saved rollout open, echoes typed text and shows the reset panel after /clear.
+RESUMED_CODEX = r'''
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+static char text[512]; static size_t length; static int cleared;
+static void show(void) {
+    char out[2048];
+    int n = snprintf(out, sizeof out, "\033[2J%s\033[27;1H\033[48;5;234m\342\200\272 %s%80s\033[28;1H   \033[49m"
+        "\033[29;1H  GPT-6-Astra high \302\267 /fixture\033[30;1H  ? for shortcuts\033[27;%zuH",
+        cleared ? "\033[2;1H >_ OpenAI Codex (v0.162.0)\033[3;1H /fixture\033[4;1H permissions: default"
+                : "\033[2;1H\342\200\272 Previous fixture request\033[4;1H\342\200\242 Previous fixture answer",
+        text, "", 3 + length);
+    write(1, out, n);
+}
+static void append(const char *name, const char *bytes, size_t size) {
+    int fd = open(name, O_CREAT | O_APPEND | O_WRONLY, 0600); write(fd, bytes, size); close(fd);
+}
+int main(int argc, char **argv) {
+    if (argc != 3 || chdir(argv[1]) || open(argv[2], O_RDONLY) < 0) return 2;
+    struct termios t; tcgetattr(0, &t); cfmakeraw(&t); tcsetattr(0, TCSANOW, &t);
+    write(1, "\033[?2004h", 8); show();
+    FILE *f = fopen("agent-pid", "w"); fprintf(f, "%d", getpid()); fclose(f);
+    char b[4096]; ssize_t n; int escape = 0;
+    while ((n = read(0, b, sizeof b)) > 0) {
+        append("received", b, n);
+        for (ssize_t i = 0; i < n; ++i) {
+            unsigned char c = b[i];
+            /* Bracketed paste and other control sequences are not text. */
+            if (escape) { if (escape == 1 && c == '[') escape = 2; else if (escape == 1 || (c >= 0x40 && c <= 0x7e)) escape = 0; continue; }
+            if (c == 0x1b) { escape = 1; continue; }
+            if (c == '\r') {
+                if (!strcmp(text, "/clear")) { cleared = 1; close(open("native-cleared", O_CREAT | O_WRONLY, 0600)); }
+                else { append("submitted", text, length); append("submitted", "\n", 1); }
+                length = 0; text[0] = 0;
+            } else if (c >= 0x20 && length + 1 < sizeof text) { text[length++] = c; text[length] = 0; }
+        }
+        show();
+    }
+    return 0;
+}
+'''
 class ClearContext(unittest.TestCase):
  script=test_input.InputTransport.script
  write_record=test_input.InputTransport.write_record
@@ -141,4 +186,95 @@ class ClearContext(unittest.TestCase):
   (self.root/'freeze').touch();p=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id)
   self.assertIn('uncertain',self.clear(p,False));self.assertEqual(self.received(),b'/clear')
   self.clear(p,False);self.assertEqual(self.received(),b'/clear')
+class ResumedClearContext(unittest.TestCase):
+ """Codex defers SessionStart after resume until the next turn; the binding still expects the saved conversation."""
+ script=test_input.InputTransport.script
+ write_record=test_input.InputTransport.write_record
+ tmux=test_input.InputTransport.tmux
+ wait_for=test_input.InputTransport.wait_for
+ received=test_input.InputTransport.received
+ tearDown=test_input.InputTransport.tearDown
+ setUp=ClearContext.setUp
+ clear=ClearContext.clear
+ inspect=ClearContext.inspect
+ hook=ClearContext.hook
+ usage_history=ClearContext.usage_history
+ def resumed(self):
+  test_input.InputTransport.resumed_unconfirmed(self,native=RESUMED_CODEX)
+  self.wait_for(lambda:'Previous fixture answer' in self.tmux('capture-pane','-p','-t',self.pane))
+  self.record.update(cwd='/fixture',prompt='Previous fixture request',last_message='Previous fixture answer');self.write_record()
+ def started(self,source='clear'):
+  new=str(uuid.uuid4())
+  self.hook(dict(hook_event_name='SessionStart',session_id=new,source=source,cwd='/fixture',transcript_path=self.usage_history(new,32,8)))
+  return new
+ def assert_cleared(self,new):
+  current=json.loads(self.record_path.read_text())
+  self.assertEqual(current['conversation_id'],new);self.assertNotIn('expected_id',current);self.assertFalse(current.get('error'))
+  self.assertEqual((current['run_id'],current['pid']),(self.run_id,self.record['pid']))
+  fresh=self.inspect();self.assertEqual(fresh['cleared_conversations'],[self.conversation_id])
+  self.assertEqual(fresh['session_usage']['context']['used'],32)
+  self.assertEqual(sum(e['type']=='SessionCleared' for e in fresh['events']),1)
+  return fresh
+ def test_verified_resume_clears_before_its_deferred_session_start(self):
+  self.resumed();info=self.inspect()
+  self.assertTrue(info['resume_message_can_send'],info.get('resume_message_reason'))
+  self.assertTrue(info['clear_context_supported']);self.assertFalse(info['compact_context_supported'])
+  self.assertIn('pause',info['allowed_actions'])
+  self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received(),b'/clear\r')
+  current=json.loads(self.record_path.read_text())
+  self.assertEqual((current['conversation_id'],current['expected_id']),(self.conversation_id,self.conversation_id))
+  self.assertTrue(current['session_clear']['awaiting_session_start']);self.assertFalse(current.get('error'))
+  fresh=self.inspect();self.assertEqual(fresh['session_clear']['type'],'SessionCleared')
+  self.assertEqual(fresh['session_usage']['status'],'unavailable');self.assertFalse(fresh['clear_context_supported'])
+  # The next message starts the cleared conversation, whose SessionStart names it.
+  self.assertTrue(fresh['resume_message_can_send'],fresh.get('resume_message_reason'))
+  receipt=test_input.InputTransport.send(self,test_input.InputTransport.payload(self,text='Fresh request'))
+  self.assertEqual(receipt['conversation_id'],self.conversation_id)
+  self.wait_for(lambda:(self.root/'submitted').exists());self.assertEqual((self.root/'submitted').read_text(),'Fresh request\n')
+  started=self.assert_cleared(self.started())
+  self.assertEqual(started['session_clear']['at'],fresh['session_clear']['at'])
+ def test_terminal_clear_is_confirmed_by_the_process_that_owns_the_saved_conversation(self):
+  self.resumed()
+  self.tmux('send-keys','-t',self.pane,'-l','/clear');self.tmux('send-keys','-t',self.pane,'Enter')
+  self.wait_for(lambda:(self.root/'native-cleared').exists())
+  # No inspection saw the reset panel before the deferred hook arrived.
+  self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
+  self.assert_cleared(self.started())
+ def test_inspection_observes_a_terminal_clear_only_while_codex_owns_the_saved_conversation(self):
+  self.resumed();initial=self.record.copy()
+  self.tmux('send-keys','-t',self.pane,'-l','/clear');self.tmux('send-keys','-t',self.pane,'Enter')
+  self.wait_for(lambda:(self.root/'native-cleared').exists())
+  self.wait_for(lambda:'OpenAI Codex' in self.tmux('capture-pane','-p','-t',self.pane))
+  # The reset panel alone is no clear: a copy of the history that the exact
+  # Codex does not hold open confirms nothing.
+  other=self.root/'other.jsonl';other.write_bytes(self.rollout.read_bytes())
+  self.record=dict(initial,transcript=str(other));self.write_record()
+  self.assertFalse(self.inspect().get('session_clear'))
+  self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
+  self.record=initial;self.write_record()
+  observed=self.inspect();self.assertEqual(observed['session_clear']['type'],'SessionCleared')
+  self.assertFalse(observed['clear_context_supported'])
+  self.assertTrue(json.loads(self.record_path.read_text())['session_clear']['awaiting_session_start'])
+  # The deferred hook keeps the boundary observed in Terminal.
+  started=self.assert_cleared(self.started())
+  self.assertEqual(started['session_clear']['at'],observed['session_clear']['at'])
+ def test_other_starts_still_name_a_different_conversation(self):
+  self.resumed();initial=self.record.copy()
+  other=self.root/'other.jsonl';other.write_bytes(self.rollout.read_bytes())
+  for patch,source in [({},'startup'),({},'resume'),(dict(restore_archive_id=str(uuid.uuid4())),'clear'),(dict(transcript=str(other)),'clear')]:
+   with self.subTest(patch=patch,source=source):
+    self.record=dict(initial,**patch);self.write_record();self.started(source)
+    current=json.loads(self.record_path.read_text())
+    self.assertEqual(current['error'],'agent resumed a different conversation')
+    self.assertEqual((current['conversation_id'],current['expected_id']),(self.conversation_id,self.conversation_id))
+ def test_draft_and_sent_message_prevent_a_resumed_clear(self):
+  self.resumed();initial=self.record.copy()
+  self.record['input_pending_at']=time.time();self.write_record()
+  self.assertFalse(self.inspect()['clear_context_supported']);self.clear(success=False);self.assertEqual(self.received(),b'')
+  self.record=initial;self.write_record()
+  self.tmux('send-keys','-t',self.pane,'-l','Keep this draft')
+  self.wait_for(lambda:'Keep this draft' in self.tmux('capture-pane','-p','-t',self.pane))
+  info=self.inspect();self.assertFalse(info['clear_context_supported']);self.assertNotIn('pause',info['allowed_actions'])
+  self.clear(success=False);self.assertEqual(self.received(),b'Keep this draft')
+  self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
 if __name__=='__main__':unittest.main()

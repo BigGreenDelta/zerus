@@ -264,6 +264,122 @@ wire_api="responses"
         self.assertEqual(current['pid'], self.record['pid'])
         self.assertEqual(current['run_id'], self.run_id)
 
+    def settle(self, predicate, message, timeout=30):
+        deadline = time.monotonic() + timeout
+        while not (value := predicate()):
+            self.assertLess(time.monotonic(), deadline, message)
+            time.sleep(.2)
+        return value
+
+    def resumed(self):
+        """Relaunch the saved conversation as `hgs resume` leaves it: Codex defers
+        SessionStart to the next turn, so the binding still expects the saved
+        conversation. A localhost provider answers that turn and the native hooks
+        reach hgs; the inspection once Activity may send the first message."""
+        import test_clear_context, test_external_agents_native
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), test_external_agents_native.Response)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        config = self.native_home / 'config.toml'
+        config.write_text(config.read_text().replace('http://127.0.0.1:1/v1', f'http://127.0.0.1:{server.server_port}/v1')
+            + 'request_max_retries=0\nstream_max_retries=0\n')
+        env = dict(HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_STATE_DIR=str(self.state),
+                   HGS_CONFIG_DIR=str(self.root / 'config'), PATH=self.env['PATH'])
+        command = ('env ' + ' '.join(shlex.quote(k + '=' + v) for k, v in env.items()) + ' '
+                   + shlex.quote(str(test_input.HGS)) + ' __state hook')
+        (self.native_home / 'hooks.json').write_text(json.dumps(dict(hooks={kind: [dict(hooks=[
+            dict(type='command', command=command)])] for kind in ('SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop')})))
+        previous = self.record['pid']
+        self.tmux('kill-session', '-t', '=' + self.name)
+        for _ in range(250):
+            if subprocess.run(['ps', '-p', str(previous)], capture_output=True).returncode: break
+            time.sleep(.02)
+        self.launch(self.root, 'resume', self.conversation_id)
+        self.settle(lambda: 'Previous fixture answer' in self.tmux('capture-pane', '-p', '-t', self.pane),
+                    'Codex did not show the resumed conversation')
+        # The tmux server is this fixture's supervisor: the parent of the exact Codex process.
+        parent = subprocess.check_output(['ps', '-p', str(self.record['pid']), '-o', 'ppid='], text=True).strip()
+        start = subprocess.check_output(['ps', '-p', parent, '-o', 'lstart='],
+            env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip()
+        self.record.update(run_identity_version=1, startup_kind='resume', supervisor=dict(pid=int(parent), start=start),
+            expected_id=self.conversation_id, activity='unknown', phase='unknown', last_event_at=0,
+            base=['codex'], prompt='Previous fixture request')
+        self.write_record()
+        def ready():
+            info = test_clear_context.ClearContext.inspect(self)
+            return info if info.get('resume_message_can_send') else None
+        return self.settle(ready, 'Activity could not verify the resumed conversation')
+
+    def test_resumed_conversation_clears_before_its_deferred_session_start(self):
+        import test_clear_context
+        info = self.resumed()
+        self.assertEqual(info['expected_id'], self.conversation_id)
+        self.assertTrue(info['clear_context_supported'], info)
+        self.assertFalse(info['compact_context_supported'])
+        self.assertIn('pause', info['allowed_actions'])
+        receipt = test_clear_context.ClearContext.clear(self)
+        self.assert_reset_decoration()
+        self.assertEqual(receipt['status'], 'confirmed')
+        current = json.loads(self.record_path.read_text())
+        self.assertEqual((current['conversation_id'], current['expected_id']), (self.conversation_id, self.conversation_id))
+        self.assertTrue(current['session_clear']['awaiting_session_start'])
+        self.assertFalse(current.get('error'))
+        fresh = test_clear_context.ClearContext.inspect(self)
+        self.assertEqual(fresh['session_clear']['type'], 'SessionCleared')
+        self.assertTrue(fresh['resume_message_can_send'], fresh.get('resume_message_reason'))
+        # Codex reports the cleared conversation only with the next turn's SessionStart.
+        test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text='First fixture message'))
+        self.assert_new_conversation(fresh['session_clear']['at'])
+
+    def test_resumed_terminal_clear_is_confirmed_by_its_deferred_session_start(self):
+        self.resumed()
+        self.tmux('send-keys', '-t', self.pane, '-l', '/clear')
+        self.wait_for(lambda: '/clear' in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.settle(lambda: 'Previous fixture answer' not in self.tmux('capture-pane', '-p', '-t', self.pane),
+                    'Codex did not clear the resumed conversation')
+        # No inspection observes the reset panel before the message's own hook.
+        message = 'First fixture message'
+        self.tmux('send-keys', '-t', self.pane, '-l', message)
+        self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.assert_new_conversation(None)
+
+    def assert_new_conversation(self, cleared_at):
+        import test_clear_context
+        current = self.settle(lambda: (lambda record: record.get('conversation_id') != self.conversation_id and record)(
+            json.loads(self.record_path.read_text())), 'Codex did not report the cleared conversation')
+        self.settle(lambda: 'Isolated review complete.' in self.tmux('capture-pane', '-p', '-t', self.pane),
+                    'The first message after the clear was not answered')
+        self.assertFalse(current.get('error'), current)
+        self.assertNotIn('expected_id', current)
+        self.assertEqual((current['pid'], current['run_id']), (self.record['pid'], self.run_id))
+        history = Path(current['transcript'])
+        self.assertEqual(json.loads(history.read_text().splitlines()[0])['payload']['id'], current['conversation_id'])
+        self.assertEqual(current['session_clear']['previous_conversation_id'], self.conversation_id)
+        fresh = test_clear_context.ClearContext.inspect(self)
+        self.assertEqual(fresh['cleared_conversations'], [self.conversation_id])
+        if cleared_at is not None:
+            self.assertEqual(fresh['session_clear']['at'], cleared_at)
+        self.assertEqual(sum(e['type'] == 'SessionCleared' for e in fresh['events']), 1)
+
+    def test_resumed_conversation_pauses_before_its_deferred_session_start(self):
+        info = self.resumed()
+        self.assertIn('pause', info['allowed_actions'])
+        histories = sorted(self.native_home.glob('sessions/**/*.jsonl'))
+        result = subprocess.run([str(test_input.HGS), 'pause', self.name], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paused = json.loads(self.record_path.read_text())
+        self.assertTrue(paused['paused'])
+        self.assertFalse(paused.get('error'), paused)
+        # A later resume restores the same saved conversation: Codex started no other one.
+        self.assertEqual((paused['conversation_id'], paused['expected_id']), (self.conversation_id, self.conversation_id))
+        self.assertNotEqual(subprocess.run(['ps', '-p', str(self.record['pid'])], capture_output=True).returncode, 0)
+        self.assertEqual(sorted(self.native_home.glob('sessions/**/*.jsonl')), histories)
+        self.assertIn('Previous fixture answer', Path(paused['transcript']).read_text())
+
     def test_foreign_directory_does_not_confirm_a_terminal_clear(self):
         import test_clear_context
         self.record['cwd'] = str(self.root / 'other-project')
