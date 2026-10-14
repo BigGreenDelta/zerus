@@ -208,12 +208,12 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     connect(&m_client, &HgsClient::localReady, this, &TrayAgent::onLocalReady);
     connect(&m_client, &HgsClient::peerReady, this, &TrayAgent::onPeerReady);
     connect(&m_client, &HgsClient::failed, this, &TrayAgent::onFailed);
-    connect(&m_client, &HgsClient::stateReadStarted, this, [this](const QString &host) {
-        m_pollingHosts.insert(host);
-        if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_pollingHosts);
+    // Reads in flight come from the client, keyed by the alias each one polled:
+    // a peer's answer may name that machine differently.
+    connect(&m_client, &HgsClient::stateReadStarted, this, [this]() {
+        if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
     });
     connect(&m_client, &HgsClient::stateReadFailed, this, [this](const QString &host, const QString &detail) {
-        m_pollingHosts.remove(host);
         if (host.isEmpty()) {
             m_localReadError = detail;
             if (m_sessionsWindow) m_sessionsWindow->setConnectionError(detail);
@@ -222,7 +222,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
             m_state.setPeer(unavailable, QDateTime::currentMSecsSinceEpoch());
             if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
         }
-        if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_pollingHosts);
+        if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
     });
 
     // Иконка должна появиться сразу, даже без единого ответа: пустой трей выглядит как
@@ -318,12 +318,16 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
             const QList<BoxState> fleet =
                 HgsClient::parseFleet(discover->readAllStandardOutput(), &err);
             if (err.isEmpty()) {
-                // Первый элемент -- этот же бокс (его состояние приходит отдельно через
-                // onLocalReady); всё после -- пиры. Здесь регистрируем только имена:
-                // реальные сессии принесёт requestPeer() ниже.
-                if (!m_state.local().peersKnown)
-                    for (int i = 1; i < fleet.size(); ++i)
-                        m_state.registerPeer(fleet.at(i).host);
+                // The first box is this computer (onLocalReady brings its state) and
+                // its "peers" are the aliases to poll; requestPeer() below brings their
+                // sessions. A reachable peer's own entry carries the name it reports
+                // for itself, so only a CLI without that list falls back to the hosts.
+                if (!m_state.local().peersKnown) {
+                    if (!fleet.isEmpty() && fleet.first().peersKnown)
+                        for (const auto &alias : fleet.first().peers) m_state.registerPeer(alias);
+                    else
+                        for (int i = 1; i < fleet.size(); ++i) m_state.registerPeer(fleet.at(i).host);
+                }
                 if (!m_menu.isOpen())
                     rebuildMenu();
                 m_peerTimer.start();
@@ -350,7 +354,6 @@ TrayAgent::~TrayAgent()
 
 void TrayAgent::onLocalReady(const BoxState &box)
 {
-    m_pollingHosts.remove({});
     m_localReadError = box.ok ? QString() : (box.error.isEmpty() ? tr("Could not read local sessions") : box.error);
     m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
     m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
@@ -372,7 +375,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
                                                        MachinePlatform::of(box.metrics, true));
     if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
     observeAttention({}, m_state.local());
-    if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_pollingHosts); }
+    if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_client.pollingHosts()); }
     refreshIcon();
     // Тик раз в 2с не должен перестраивать меню, пока оно открыто под курсором --
     // QMenu::clear() + repopulate на видимом меню читается как мигание/сброс хайлайта.
@@ -384,8 +387,8 @@ void TrayAgent::onLocalReady(const BoxState &box)
 
 void TrayAgent::onPeerReady(const BoxState &box)
 {
-    m_pollingHosts.remove(box.host);
-    if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_pollingHosts);
+    // box.host is the alias this answer was polled under (see HgsClient::requestPeer).
+    if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
     m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
     m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
     m_state.setPendingReads(ReadMarkStore::load());
@@ -653,7 +656,7 @@ void TrayAgent::showSessions()
     }
     m_sessionsWindow->setFleet(m_state);
     m_sessionsWindow->setConnectionError(m_localReadError);
-    m_sessionsWindow->setPollingHosts(m_pollingHosts);
+    m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
     m_sessionsWindow->setClipboardMode(m_cfg.openMode == QLatin1String("clipboard"));
     m_sessionsWindow->showSessionList();
     if (m_sessionsWindow->isMinimized()) m_sessionsWindow->showNormal();

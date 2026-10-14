@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 #include "FakeCli.h"
+#include "FleetState.h"
 #include "HgsClient.h"
 #include "ProcessRunner.h"
 #include "SessionPresentation.h"
@@ -44,6 +45,7 @@ private slots:
     void tagAndProjectMayBeNull();
     void missingBinaryEmitsFailed();
     void duplicatePeerRequestIsIgnoredWhileInFlight();
+    void peerAnswerIsKeyedByThePolledAlias();
     void localPollingReportsStartAndRecoversFromFailure();
     void presenceWritesAreCoalescedAndReportFailures();
     void sessionCommands();
@@ -1256,6 +1258,45 @@ void TestHgsClient::duplicatePeerRequestIsIgnoredWhileInFlight()
         QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
         QCOMPARE(log.readAll().trimmed().split('\n').size(), 2);  // второй настоящий запуск
     }
+}
+
+// A machine saved as "winpeer" whose own HGS_SELF is "zpeer": `hgs @winpeer ls
+// --json` forwards that machine's listing, so its "host" is "zpeer". The answer
+// must still clear the alias's poll and fill the alias's box.
+void TestHgsClient::peerAnswerIsKeyedByThePolledAlias()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString scriptPath = dir.filePath(QStringLiteral("hgs"));
+    QVERIFY(FakeCli::install(scriptPath, "#!/usr/bin/env python3\nimport sys\n"
+        "if sys.argv[1:]!=['@winpeer','ls','--json']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
+        "print('{\"host\":\"zpeer\",\"ok\":true,\"projects\":{},\"peers\":[\"winpeer\"],"
+        "\"sessions\":[{\"name\":\"codex/win/build\",\"cmd\":\"codex\",\"project\":\"win\",\"tag\":\"build\"}]}')\n"));
+    HgsClient client(FakeCli::program(scriptPath));
+    QSignalSpy started(&client, &HgsClient::stateReadStarted), failed(&client, &HgsClient::stateReadFailed);
+    QList<BoxState> answers;
+    connect(&client, &HgsClient::peerReady, this, [&answers](const BoxState &box) { answers << box; });
+
+    client.requestLocal(); client.requestPeer(QStringLiteral("winpeer"));
+    QCOMPARE(client.pollingHosts(), (QSet<QString>{QString(), QStringLiteral("winpeer")}));
+    QCOMPARE(started.size(), 2); QCOMPARE(started[1][0].toString(), QStringLiteral("winpeer"));
+    QTRY_COMPARE(answers.size(), 1);
+    QTRY_COMPARE(failed.size(), 1); QVERIFY(failed[0][0].toString().isEmpty()); // The local read, not the peer.
+    QVERIFY(client.pollingHosts().isEmpty());
+    const BoxState box = answers.first();
+    QCOMPARE(box.host, QStringLiteral("winpeer"));
+    QCOMPARE(box.reportedHost, QStringLiteral("zpeer"));
+    QVERIFY(box.ok);
+
+    BoxState local; local.host = QStringLiteral("arch"); local.ok = true;
+    local.peersKnown = true; local.peers = {QStringLiteral("winpeer")};
+    FleetState fleet; const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    fleet.setLocal(local, now); fleet.setPeer(box, now);
+    QCOMPARE(fleet.peerNames(), QList<QString>{QStringLiteral("winpeer")});
+    QVERIFY(!fleet.peer(QStringLiteral("zpeer")));
+    const BoxState *peer = fleet.peer(QStringLiteral("winpeer"));
+    QVERIFY(peer); QVERIFY(peer->ok); QCOMPARE(fleet.peerPolledAt(QStringLiteral("winpeer")), now);
+    QCOMPARE(peer->sessions.size(), 1); QCOMPARE(peer->sessions.first().name, QStringLiteral("codex/win/build"));
+    QVERIFY(!fleet.isStale(now));
 }
 
 void TestHgsClient::sessionCommands()

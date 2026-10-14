@@ -306,9 +306,16 @@ class VoiceWorker(unittest.TestCase):
         self.settle(accepted["id"], {"transcribing"})
         self.record["conversation_id"] = str(uuid.uuid4())
         self.write_record()
-        time.sleep(2.5)
-        with sqlite3.connect(self.state / "voice/messages.sqlite3") as db:
-            body, audio = db.execute("SELECT body,audio FROM messages WHERE id=?", (accepted["id"],)).fetchone()
+        # The worker notices the change after the delayed transcription, which a
+        # loaded CI runner can stretch past any fixed wait. Status requests name
+        # the old conversation and are refused now, so read the store directly.
+        until = time.monotonic() + 12
+        while True:
+            with sqlite3.connect(self.state / "voice/messages.sqlite3") as db:
+                body, audio = db.execute("SELECT body,audio FROM messages WHERE id=?", (accepted["id"],)).fetchone()
+            if json.loads(body)["state"] != "transcribing" or time.monotonic() >= until:
+                break
+            time.sleep(.1)
         self.assertEqual(json.loads(body)["state"], "failed")
         self.assertEqual(json.loads(body)["error_code"], "target_changed")
         self.assertGreater(len(audio), 44)

@@ -211,6 +211,19 @@ QString hgsHelp(AppConfig::Platform p)
                          "                        /usr/local/bin\n");
 }
 
+// What a start without either option does differs (AppConfig::opensSessions).
+QString sessionsHelp(AppConfig::Platform p)
+{
+    return p == AppConfig::Platform::Windows
+        ? QStringLiteral("  --sessions            open the session dashboard, as a start without\n"
+                         "                        either option does: Windows hides a new tray\n"
+                         "                        icon in the taskbar overflow\n"
+                         "  --background          start in the tray only, without the dashboard\n"
+                         "                        (for a shortcut in the Startup folder)\n")
+        : QStringLiteral("  --sessions            open the session dashboard\n"
+                         "  --background          start in the tray only (the default)\n");
+}
+
 // Описание --open-mode для usage(): режимы у платформ разные, и печатать пользователю
 // про Konsole на маке (или про Terminal.app на Linux) значит объяснять ему то, чего у
 // него нет. Общий у обоих текстов только хвост -- clipboard и правила "флаг против меню".
@@ -291,7 +304,7 @@ QString AppConfig::usage()
                "                        one system theme -- there this flag is a matter of\n"
                "                        taste\n"
                "%3"
-               "  --sessions            open the session dashboard\n"
+               "%5"
                "  --selftest            headless check: hgs is found and answers with valid\n"
                "                        JSON, then exit (no tray, no display)\n"
                "  -h, --help            this text\n"
@@ -305,7 +318,8 @@ QString AppConfig::usage()
         .arg(d.localPollMs)
         .arg(d.peerPollMs)
         .arg(openModeHelp(currentPlatform()))
-        .arg(hgsHelp(currentPlatform()));
+        .arg(hgsHelp(currentPlatform()))
+        .arg(sessionsHelp(currentPlatform()));
 }
 
 namespace {
@@ -444,18 +458,25 @@ void applyConfigFile(AppConfig *out, bool haveHgs, bool haveLocalPoll, bool have
 
 } // namespace
 
+bool AppConfig::opensSessions(Platform p) const
+{
+    return showSessions || (p == Platform::Windows && !background);
+}
+
 QStringList AppConfig::restartArguments(const QStringList &args)
 {
     // The same walk as load(): a value is never mistaken for an option.
     static const QStringList withValue{QStringLiteral("--hgs"), QStringLiteral("--local-poll"),
                                        QStringLiteral("--peer-poll"), QStringLiteral("--terminal"),
                                        QStringLiteral("--icon-color"), QStringLiteral("--open-mode")};
-    QStringList kept;
+    // A window that opens by itself after a crash, maybe long after the start
+    // that asked for it, would be a surprise.
+    QStringList kept{QStringLiteral("--background")};
     for (int i = 1; i < args.size(); ++i) {
         if (withValue.contains(args.at(i))) {
             kept << args.mid(i, 2);
             ++i;
-        } else if (args.at(i) != QLatin1String("--sessions")) {
+        } else if (args.at(i) != QLatin1String("--sessions") && args.at(i) != QLatin1String("--background")) {
             kept << args.at(i);
         }
     }
@@ -532,6 +553,8 @@ bool AppConfig::load(const QStringList &args, AppConfig *out, QString *error)
             haveOpenMode = true;
         } else if (a == QLatin1String("--sessions")) {
             out->showSessions = true;
+        } else if (a == QLatin1String("--background")) {
+            out->background = true;
         } else if (a == QLatin1String("--selftest")) {
             out->selfTest = true;
         } else if (a == QLatin1String("-h") || a == QLatin1String("--help")) {
@@ -549,6 +572,12 @@ bool AppConfig::load(const QStringList &args, AppConfig *out, QString *error)
         }
         if (!error->isEmpty())
             return false;
+    }
+    // Accepting both would silently ignore one of them.
+    if (out->showSessions && out->background) {
+        *error = QStringLiteral("--sessions opens the session dashboard and --background starts without it; "
+                                "give only one of them");
+        return false;
     }
 
     QTextStream errOut(stderr);
