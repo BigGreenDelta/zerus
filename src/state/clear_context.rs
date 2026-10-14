@@ -86,9 +86,21 @@ fn codex_reset_panel(screen: &str, cwd: &str) -> bool {
 // where its drive path and that form compare without case (`shown_path`).
 fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
     let windows = shown_path::drive(cwd);
-    if !(windows || Path::new(cwd).is_absolute()) || !screen.lines().any(|line| line.trim_start().starts_with('›')) { return false; }
-    let mut rows: Vec<_> = screen.lines().take_while(|line| !line.trim_start().starts_with('›'))
-        .map(str::trim).filter(|line| !line.is_empty()).collect();
+    if !(windows || Path::new(cwd).is_absolute()) { return false; }
+    // Codex keeps its header above the first history prompt until the screen
+    // is cleared and draws each history prompt as a `›` row above the live
+    // composer, so the header alone is no reset. The empty state has exactly
+    // one `›` row, the composer at the left edge, with only the header block
+    // above it; the composer check then needs the cursor there and no draft.
+    let lines: Vec<_> = screen.lines().collect();
+    let mut prompts = lines.iter().enumerate().filter(|(_, line)| line.trim_start().starts_with('›'));
+    let (Some((composer, input)), None) = (prompts.next(), prompts.next()) else { return false; };
+    // Its text is the dim placeholder, one of the two that both reviewed
+    // releases draw, or nothing: a draft fails here before the composer check.
+    let placeholder = |text: &str| text.is_empty() || text.strip_prefix(' ')
+        .is_some_and(|text| ["Ask Codex to do anything", "Ask a follow-up question"].contains(&text));
+    if !input.strip_prefix('›').map(str::trim_end).is_some_and(placeholder) { return false; }
+    let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
     // The released idle screen can include its settled decorative logo. Match
     // the complete known pose; arbitrary braille, prose and partial frames do
     // not confirm a reset. A replay remains unconfirmed until it settles.
@@ -393,8 +405,53 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             panel.replace("permissions: YOLO mode","To get started, describe a task"),
             panel.replace("\n\n›","\nPrevious agent response\n›"),
             panel.replace(">_ OpenAI Codex (v0.162.0)","Quoted reset header"),
-            panel.replace("\n >_","\nSome user message\n >_"),">_ OpenAI Codex (v0.162.0)\n/fixture\n".to_owned()] {
+            panel.replace("\n >_","\nSome user message\n >_"),">_ OpenAI Codex (v0.162.0)\n/fixture\n".to_owned(),
+            // The composer is the only prompt row, at the left edge.
+            panel.replace("\n\n\n›","\n\n› Previous request\n\n›"),panel.replace("\n› Ask","\n  › Ask"),
+            panel.replace("› Ask Codex to do anything","›Ask Codex to do anything"),
+            panel.replace(" ? for shortcuts"," › 1. Selected option")] {
             assert!(!codex_reset_panel(&screen,"/fixture"),"{screen}");
+        }
+    }
+    // Real Linux captures of one session after its first answered message and
+    // after /clear: Codex 0.162.0 at 95x47 with animations, the folder outside
+    // the home printed in full, and resident 0.160.1 at 110x35 in reduced
+    // motion below the home (`~/work`). The header stays above the history
+    // until /clear; only the empty state below it is a reset.
+    #[cfg(unix)]
+    #[test] fn the_header_above_an_answered_first_message_is_not_a_reset() {
+        for (answered, cleared, cwd) in [
+            (include_str!("../../tests/fixtures/codex-first-answer.txt"),
+             include_str!("../../tests/fixtures/codex-clear-result.txt"), "/fixture/project"),
+            (include_str!("../../tests/fixtures/codex-first-answer-0.160.1.txt"),
+             include_str!("../../tests/fixtures/codex-clear-result-0.160.1.txt"), "/home/example/work")] {
+            let home = Path::new("/home/example");
+            assert!(codex_reset_panel_below(cleared, cwd, home), "{cleared}");
+            assert!(!codex_reset_panel_below(answered, cwd, home), "{answered}");
+            // Without the history it would be the reset panel: the history,
+            // not the folder or the composer, is what fails.
+            let history = ["› First fixture message", "• Fixture answer.", "Worked for <1s • 10:52 AM"];
+            let unanswered = answered.lines().filter(|line| !history.contains(&line.trim())).collect::<Vec<_>>().join("\n");
+            assert!(codex_reset_panel_below(&unanswered, cwd, home), "{unanswered}");
+            for kept in history {
+                let partial = answered.lines().filter(|line| line.trim() == kept || !history.contains(&line.trim()))
+                    .collect::<Vec<_>>().join("\n");
+                assert!(!codex_reset_panel_below(&partial, cwd, home), "{partial}");
+            }
+            // Any other prompt row, even below the composer, fails closed.
+            assert!(!codex_reset_panel_below(&format!("{cleared}› Ask Codex to do anything\n"), cwd, home));
+        }
+        // Byte-exact 0.162.0 screens at 110x35: the reset, a draft in its
+        // composer, and a draft left in the history above the composer.
+        let home = Path::new("/home/example");
+        let result = include_str!("../../tests/fixtures/codex-clear-110x35-result.txt");
+        assert!(codex_reset_panel_below(result, "/home/example/project", home), "{result}");
+        assert!(codex_reset_panel_below(&result.replacen("› Ask Codex to do anything", "› Ask a follow-up question", 1),
+            "/home/example/project", home));
+        for screen in [include_str!("../../tests/fixtures/codex-clear-110x35-draft.txt"),
+            include_str!("../../tests/fixtures/codex-clear-110x35-history.txt"),
+            &result.replacen("› Ask Codex to do anything", "› Ask Codex to do anything else", 1)] {
+            assert!(!codex_reset_panel_below(screen, "/home/example/project", home), "{screen}");
         }
     }
     // A POSIX working directory, not absolute on Windows; the Windows forms
@@ -452,6 +509,20 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!codex_reset_panel_below(&panel.replacen(shown, row, 1), cwd, home), "{row}");
         }
         assert!(!codex_reset_panel_below(&panel.replace("› Ask Codex", "Previous answer\n› Ask Codex"), cwd, home));
+        // The header stays above a first answered message in both Windows
+        // forms; a history prompt above the composer is never the reset panel.
+        for row in [shown, cwd] {
+            let screen = panel.replacen(shown, row, 1);
+            assert!(!codex_reset_panel_below(&screen.replacen("permissions: YOLO mode",
+                "permissions: YOLO mode\n\n› First fixture message\n\n• Fixture answer.", 1), cwd, home), "{row}");
+        }
+        // The Linux captures before and after /clear, with the Windows folder.
+        let answered = include_str!("../../tests/fixtures/codex-first-answer.txt");
+        let cleared = include_str!("../../tests/fixtures/codex-clear-result.txt");
+        for row in [shown, cwd, r"c:\users\USER01\zerus-dev\p2\s3\homes\codex-commands\work"] {
+            assert!(codex_reset_panel_below(&cleared.replace("/fixture/project", row), cwd, home), "{row}");
+            assert!(!codex_reset_panel_below(&answered.replace("/fixture/project", row), cwd, home), "{row}");
+        }
     }
     #[test] fn only_a_waiting_claude_chooser_can_be_dismissed_for_a_clear() {
         let waiting=json!({"agent":"claude","conversation_id":"conversation","activity":"busy","phase":"input"});

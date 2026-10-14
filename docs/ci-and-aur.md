@@ -677,9 +677,13 @@ cursor and lifecycle state. The tests resume synthetic
 history, then verify GUI-command clear, Terminal clear, the deferred native
 identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
-rejection. A separate fixture caches a newer version for the startup update
-picker and verifies its Activity identity, **Skip** and **Skip until next
-version**; it never selects **Update now**. Nested real `codex exec --ephemeral`
+rejection. A new session in a folder outside the fixture home, which Codex
+prints in full in its header, answers a first message from the localhost
+provider; idle polls must not treat that header above the history as a reset,
+and a later clear must still be confirmed. A separate fixture caches a newer
+version for the startup update picker and verifies its Activity identity,
+**Skip** and **Skip until next version**; it never selects **Update now**.
+Nested real `codex exec --ephemeral`
 reviews verify separate child Activity under Claude and Codex parents, preserved
 parent identity/model/history and the child's recorded result without a rollout.
 Codex async questions (feature `send_message_to_user_async`) come from a

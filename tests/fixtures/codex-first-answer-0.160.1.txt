@@ -1,0 +1,35 @@
+
+  >_ OpenAI Codex (v0.160.1)
+     ~/work
+  permissions: YOLO mode
+
+  Welcome to the command line, Neo.
+
+
+› First fixture message
+
+
+• Fixture answer.
+
+  Worked for <1s • 10:52 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol default · ~/work
+  ? for shortcuts                                                                   ⚠ 2 warnings · f2 to view
