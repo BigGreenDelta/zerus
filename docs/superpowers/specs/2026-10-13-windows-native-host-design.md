@@ -632,9 +632,12 @@ The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
   the local machine (by alias or ID), so a GUI of any version that sends them never
   breaks an apply; other invalid paths, a peer's drive path among them, still fail.
   A peer's `//server/share` is a POSIX path, which a Windows GUI can store
-  (`QDir::cleanPath` keeps the leading `//` there): it is shared, renamed and removed
-  like any folder. A test checks that a Unix peer's sync never drops local Windows
-  folders. A shared catalog kind for Windows paths is Phase 3.
+  (`QDir::cleanPath` keeps the leading `//` there): other computers share, rename and
+  remove it like any folder. The rules do not know a machine's platform, so the POSIX
+  computer it belongs to still treats it as its own Windows folder: its GUI and CLI
+  keep it out of requests, and when another computer removes it, that GUI keeps it
+  until it is removed there too. A test checks that a Unix peer's sync never drops
+  local Windows folders. A shared catalog kind for Windows paths is Phase 3.
 
 ### D16. GUI
 
