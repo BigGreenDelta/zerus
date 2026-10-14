@@ -755,6 +755,10 @@ and tmux socket and uses only a localhost provider. No authenticated inference
 or existing session is involved.
 Fixture shutdown waits for its owned panes to exit before deleting the private
 home, so a shell's final history write cannot race with filesystem cleanup.
+Codex fixture homes turn plugins off, and each fixture checks the effective value
+with `codex features list`: plugin sync clones the curated plugins from the
+network through a git child that can outlive Codex, `codex exec` included, and
+write into the home while it is deleted.
 
 The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
